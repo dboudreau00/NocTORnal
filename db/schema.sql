@@ -1034,6 +1034,25 @@ END $$ LANGUAGE plpgsql;
 CREATE TRIGGER document_tsv BEFORE INSERT OR UPDATE ON collect.document
   FOR EACH ROW EXECUTE FUNCTION collect.document_tsv_update();
 
+-- Evidence full-text (mirror of Alembic 0025): title (A) + description (B)
+-- + extracted_text (C, capped like the others).
+CREATE OR REPLACE FUNCTION core.evidence_tsv_update() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'INSERT'
+     OR NEW.title IS DISTINCT FROM OLD.title
+     OR NEW.description IS DISTINCT FROM OLD.description
+     OR NEW.extracted_text IS DISTINCT FROM OLD.extracted_text THEN
+    NEW.search_tsv :=
+        setweight(to_tsvector('simple', coalesce(NEW.title,'')), 'A')
+     || setweight(to_tsvector('simple', coalesce(NEW.description,'')), 'B')
+     || setweight(to_tsvector('simple', left(coalesce(NEW.extracted_text,''), 500000)), 'C');
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER evidence_tsv BEFORE INSERT OR UPDATE ON core.evidence
+  FOR EACH ROW EXECUTE FUNCTION core.evidence_tsv_update();
+
 -- =====================================================================
 -- EDGE TYPE VALIDATION
 -- Stops the graph turning to soup. An edge whose endpoints violate the
