@@ -1075,6 +1075,76 @@ CREATE TRIGGER edge_tlp     BEFORE INSERT OR UPDATE ON core.edge     FOR EACH RO
 CREATE TRIGGER evidence_tlp BEFORE INSERT OR UPDATE ON core.evidence FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
 
 -- =====================================================================
+-- INVARIANT 1 — NOTHING IS A FACT (mirror of Alembic 0022)
+-- A node or edge must trace to >=1 assertion ROW at ALL times. Symmetric
+-- deferred constraint triggers: one rejects committing an element with no
+-- assertion; one rejects deleting/repointing the LAST assertion of a
+-- still-existing element (closing the SET CONSTRAINTS timing game and the
+-- later-transaction delete). Retraction/supersede are row-preserving
+-- UPDATEs of retracted_at/superseded_at, so they never fire trigger 2 —
+-- LIVE provenance is a projection property, not write-enforced.
+-- =====================================================================
+CREATE OR REPLACE FUNCTION core.require_node_assertion() RETURNS trigger AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM core.node WHERE id = NEW.id) THEN
+    RETURN NULL;                      -- removed within this same transaction
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM core.assertion WHERE node_id = NEW.id) THEN
+    RAISE EXCEPTION
+      'invariant 1: node % committed without a supporting assertion', NEW.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql SET search_path = core, public;
+
+CREATE OR REPLACE FUNCTION core.require_edge_assertion() RETURNS trigger AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM core.edge WHERE id = NEW.id) THEN
+    RETURN NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM core.assertion WHERE edge_id = NEW.id) THEN
+    RAISE EXCEPTION
+      'invariant 1: edge % committed without a supporting assertion', NEW.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql SET search_path = core, public;
+
+CREATE CONSTRAINT TRIGGER node_requires_assertion
+  AFTER INSERT ON core.node
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION core.require_node_assertion();
+
+CREATE CONSTRAINT TRIGGER edge_requires_assertion
+  AFTER INSERT ON core.edge
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION core.require_edge_assertion();
+
+CREATE OR REPLACE FUNCTION core.assertion_protects_element() RETURNS trigger AS $$
+BEGIN
+  IF OLD.node_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM core.node WHERE id = OLD.node_id)
+     AND NOT EXISTS (SELECT 1 FROM core.assertion WHERE node_id = OLD.node_id) THEN
+    RAISE EXCEPTION
+      'invariant 1: last assertion for node % may not be removed (retract or supersede instead)',
+      OLD.node_id USING ERRCODE = 'check_violation';
+  END IF;
+  IF OLD.edge_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM core.edge WHERE id = OLD.edge_id)
+     AND NOT EXISTS (SELECT 1 FROM core.assertion WHERE edge_id = OLD.edge_id) THEN
+    RAISE EXCEPTION
+      'invariant 1: last assertion for edge % may not be removed (retract or supersede instead)',
+      OLD.edge_id USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql SET search_path = core, public;
+
+CREATE CONSTRAINT TRIGGER assertion_protects_element
+  AFTER DELETE OR UPDATE OF node_id, edge_id ON core.assertion
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION core.assertion_protects_element();
+
+-- =====================================================================
 -- AUDIT HASH CHAIN
 -- Each row commits to the previous one. Deletion or edit of history
 -- becomes detectable by replaying the chain.
