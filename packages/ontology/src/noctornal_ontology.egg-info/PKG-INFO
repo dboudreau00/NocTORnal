@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: noctornal-ontology
-Version: 0.1.0
-Summary: NocTORnal ontology: the single source of truth for node, edge and selector types, plus per-selector normalisers. Generates Python types, TypeScript types and the SQL seed from one definition.
-Requires-Python: >=3.12
-Requires-Dist: idna>=3.6
-Provides-Extra: dev
-Requires-Dist: pytest>=8; extra == "dev"
-Requires-Dist: psycopg[binary]>=3.1; extra == "dev"
