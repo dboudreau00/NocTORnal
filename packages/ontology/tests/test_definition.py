@@ -5,7 +5,7 @@ from noctornal_ontology.definition import EDGE_TYPES, NODE_TYPES, SELECTOR_TYPES
 
 def test_counts_match_seed():
     assert len(NODE_TYPES) == 26
-    assert len(EDGE_TYPES) == 46
+    assert len(EDGE_TYPES) == 49
     assert len(SELECTOR_TYPES) == 49
 
 
@@ -13,6 +13,16 @@ def test_unique_keys():
     for coll in (NODE_TYPES, EDGE_TYPES, SELECTOR_TYPES):
         keys = [x.key for x in coll]
         assert len(keys) == len(set(keys))
+
+
+def test_no_orphan_node_types():
+    """Every decided node type must be reachable by at least one edge, or
+    an analyst can create a node nothing may connect to (open question B)."""
+    used = set()
+    for e in EDGE_TYPES:
+        used |= set(e.src_node_types) | set(e.dst_node_types)
+    orphans = [n.key for n in NODE_TYPES if n.key not in used]
+    assert not orphans, f"node types no edge can touch: {orphans}"
 
 
 def test_edge_endpoints_are_real_node_types():
