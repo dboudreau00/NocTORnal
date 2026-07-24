@@ -22,9 +22,32 @@
 | 16 | Operating context: law enforcement primary, private CTI secondary (2026-07-24) | Legal-basis vocabulary and disclosure features target LE first (Canada: judicial authorisations/production orders, Stinchcombe disclosure; US: warrants/2703(d), Brady); collection defaults stay conservative. Private-CTI deployments relax configuration, never schema | Medium — vocabulary and export templates rework |
 | 17 | Alembic owns the schema; `db/schema.sql` + `db/seed_ontology.sql` are mirrored reference (2026-07-24) | One authoritative change path (`db/migrations/`, one concern per revision, all reversible) while keeping a readable end-to-end DDL; initdb loads extensions only (superuser) | Low — squash migrations, regenerate reference |
 | 18 | Telegram evidence CAPTURE in MVP; automated monitoring adapter deferred (2026-07-24) | Telegram is where current-market crime happens, so analysts must be able to file Telegram captures as first-class evidence (manual/assisted export upload with full custody). The high-risk part — persona-driven automated monitoring (MTProto, FLOOD_WAIT, overt joins) — stays deferred; monitoring can be handwork for now. RSS + XenForo still prove the pipeline | Medium — capture-format parsing is reusable by a later adapter, so little is thrown away |
+| 20 | Selector hardening pass, Alembic 0018 (2026-07-24) | Adversarial review found wrong-merge/missed-merge normalisers: Telegram IDs now keep chat/user namespaces, JIDs drop the resourcepart, Session IDs case-fold as hex, MXID localparts stay case-sensitive (spec), TLSH loses the T1 prefix, onions/IBANs/asdot-ASNs/phone extensions canonicalise, IDNA2008 replaces stdlib IDNA2003 (faß.de ≠ fass.de). `FORUM_UID` (unscoped, per-venue), `PDB_PATH` and `CODESIGN_CN` (attacker-controlled text) demoted from is_strong — FORUM_UID may return to strong once the norm form is venue-scoped | Low now; every deferred day of a wrong-merge normaliser poisons selectors |
+| 21 | Structural edges out of the social projection; SAME_AS layer-gated (2026-07-24) | `PARTICIPANT_IN`, `SAME_DEVICE_AS`, `CO_POSTED_IN`, `SHARED_INFRA` are bipartite/plumbing edges — counting them social double-counts affiliation or fabricates alliances (two rivals on one bulletproof host are not friends). The edge validator now rejects SAME_AS crossing the IDENTITY/PERSON layer: attribution is exclusively ATTRIBUTED_TO (invariant 2) | Medium — projections built on the old flags would need recomputing |
 | 19 | Stealer logs in scope but SEGREGATED — never inside the core evidence store (2026-07-24) | Stealer logs are bulk third-party PII, the most likely route to a data-protection incident. They upload to a samples-style segregated environment (separate origin/bucket/compartment, docs/11 model): metadata and extracted selectors may flow to the graph as assertions; raw dumps never enter `core.evidence`. PII masking and minimisation land before any stealer ingest code | High — once raw dumps sit in the case store, retention/disclosure obligations attach and cannot be unwound |
 
 ---
+
+## New open questions raised in session 2 (ontology)
+
+**A. Venue-scoped FORUM_UID.** A forum UID is unique per forum, not
+globally; unscoped it is a wrong-merge factory, so it is currently weak.
+To restore auto-merge we need the ingest layer to produce a venue-scoped
+norm form (e.g. `<forum-slug>:42`), which means selector matching gains a
+venue dimension. Decide when the collection layer is designed.
+
+**B. TRANSACTION / CREDENTIAL_SET / DATASET are orphan node types.** They
+are decided node types but appear in no edge type's endpoints, so a node
+of one of these kinds cannot currently be connected to anything. Decide
+which edges they belong on (e.g. TRANSACTION alongside PAID, DATASET/
+CREDENTIAL_SET as objects of SOLD_TO / CONTROLS) before graph-authoring
+UI lands — deferred to keep this pass to verified fixes only.
+
+**C. IDENTITY-target BANNED_BY in the signed projection.** A moderator
+banning a user is a negative trust signal (docs/01), but BANNED_BY also
+targets venues (FORUM/CHANNEL) which are not. The single is_social_tie
+flag cannot split by endpoint; resolving this needs the endpoint-aware
+projection rule planned for Phase 2 analytics.
 
 ## Open questions — worth answering before Phase 1
 

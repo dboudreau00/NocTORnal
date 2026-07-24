@@ -1025,6 +1025,13 @@ BEGIN
       NEW.edge_type, dst_ty, et.dst_node_types;
   END IF;
 
+  -- SAME_AS is unconfidenced identity-equivalence plumbing; letting it
+  -- cross the IDENTITY/PERSON layer hard-codes an attribution as a fact.
+  -- The cross-layer join is exclusively ATTRIBUTED_TO (invariant 2).
+  IF NEW.edge_type = 'SAME_AS' AND src_ty <> dst_ty THEN
+    RAISE EXCEPTION 'SAME_AS may not cross the IDENTITY/PERSON layer (attribution is ATTRIBUTED_TO)';
+  END IF;
+
   -- Cross-case edges are never legitimate. Cross-case *pivoting* happens
   -- through selector matching and an access request, not by drawing an
   -- edge that would leak one case's structure into another.

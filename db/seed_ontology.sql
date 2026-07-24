@@ -75,7 +75,7 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 
 -- Interaction ----------------------------------------------------------
 ('COMMUNICATES_WITH','communicates with', 'communicates with',false,  1, '{IDENTITY,PERSON}','{IDENTITY,PERSON}',true),
-('CO_POSTED_IN',   'co-posted in',        'co-posted in',     false,  1, '{IDENTITY}','{IDENTITY}',              true),
+('CO_POSTED_IN',   'co-posted in',        'co-posted in',     false,  1, '{IDENTITY}','{IDENTITY}',              false),
 ('REPLIED_TO',     'replied to',          'was replied to by',true,   1, '{IDENTITY}','{IDENTITY}',              true),
 ('MET_WITH',       'met with',            'met with',         false,  1, '{PERSON}','{PERSON}',                  true),
 ('POSTS_ON',       'posts on',            'has poster',       true,   0, '{IDENTITY}','{FORUM,CHANNEL}',         false),
@@ -94,7 +94,7 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 ('TARGETED',       'targeted',            'was targeted by',  true,   0, '{IDENTITY,GROUP,CAMPAIGN}','{VICTIM,ORGANISATION}', false),
 ('HOSTED_ON',      'is hosted on',        'hosts',            true,   0, '{SERVICE,INFRA,FORUM}','{INFRA}',      false),
 ('PART_OF',        'is part of',          'includes',         true,   0, '{INCIDENT,EVENT}','{CAMPAIGN}',        false),
-('SHARED_INFRA',   'shares infrastructure with','shares infrastructure with', false, 1, '{IDENTITY,GROUP,SERVICE}','{IDENTITY,GROUP,SERVICE}', true),
+('SHARED_INFRA',   'shares infrastructure with','shares infrastructure with', false, 0, '{IDENTITY,GROUP,SERVICE}','{IDENTITY,GROUP,SERVICE}', false),
 
 -- Context ---------------------------------------------------------------
 ('LOCATED_IN',     'is located in',       'contains',         true,   0, '{PERSON,ORGANISATION,INFRA}','{LOCATION}', false),
@@ -108,18 +108,19 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 -- ---------------------------------------------------------------------
 INSERT INTO selector_type (key, display_name, is_strong, is_pii, normaliser) VALUES
 ('HANDLE',        'Handle / nickname',      false, false, 'lower_trim'),
-('FORUM_UID',     'Forum user ID',          true,  false, 'exact'),
-('TELEGRAM_ID',   'Telegram numeric ID',    true,  false, 'digits'),
+-- NOT strong until venue-scoped: UID 42 exists on every forum (0018).
+('FORUM_UID',     'Forum user ID',          false, false, 'trim'),
+('TELEGRAM_ID',   'Telegram numeric ID',    true,  false, 'telegram_id_norm'),
 -- @usernames are recycled by Telegram after release. Treat as weak; the
 -- numeric ID is the durable identifier. Analysts get this wrong daily.
 ('TELEGRAM_USER', 'Telegram @username',     false, false, 'lower_strip_at'),
 ('DISCORD_ID',    'Discord snowflake',      true,  false, 'digits'),
-('JABBER',        'XMPP / Jabber',          true,  false, 'lower_trim'),
+('JABBER',        'XMPP / Jabber',          true,  false, 'jid_norm'),
 -- Tox lives in the wave-2 block below: TOX_PK (64-hex public key) is the
 -- strong, durable selector; TOX_ID_FULL is the weak as-observed 76-hex
 -- form (invariant 9 — the nospam is user-rotatable). A duplicate TOX_ID
 -- key was collapsed into TOX_ID_FULL pre-Phase-0 (2026-07-24).
-('SESSION_ID',    'Session ID',             true,  false, 'exact'),
+('SESSION_ID',    'Session ID',             true,  false, 'lower_hex'),
 ('ICQ',           'ICQ number',             true,  false, 'digits'),
 ('EMAIL',         'Email address',          true,  true,  'email_norm'),
 ('PHONE',         'Phone number',           true,  true,  'e164'),
@@ -127,10 +128,10 @@ INSERT INTO selector_type (key, display_name, is_strong, is_pii, normaliser) VAL
 ('SSH_KEY',       'SSH public key',         true,  false, 'ssh_norm'),
 ('BTC_ADDR',      'Bitcoin address',        true,  false, 'btc_norm'),
 ('ETH_ADDR',      'Ethereum address',       true,  false, 'eip55'),
-('XMR_ADDR',      'Monero address',         true,  false, 'exact'),
-('TRON_ADDR',     'Tron address',           true,  false, 'exact'),
+('XMR_ADDR',      'Monero address',         true,  false, 'trim'),
+('TRON_ADDR',     'Tron address',           true,  false, 'trim'),
 ('DOMAIN',        'Domain',                 false, false, 'punycode_lower'),
-('ONION',         'Onion service',          true,  false, 'lower_trim'),
+('ONION',         'Onion service',          true,  false, 'onion_norm'),
 ('IPV4',          'IPv4 address',           false, false, 'ip_norm'),
 ('IPV6',          'IPv6 address',           false, false, 'ip_norm'),
 ('ASN',           'Autonomous system',      false, false, 'asn_norm'),
@@ -139,7 +140,7 @@ INSERT INTO selector_type (key, display_name, is_strong, is_pii, normaliser) VAL
 ('HASH_SHA1',     'SHA-1',                  true,  false, 'lower_hex'),
 ('HASH_SHA256',   'SHA-256',                true,  false, 'lower_hex'),
 ('IMEI',          'IMEI',                   true,  true,  'digits'),
-('BANK_ACCT',     'Bank account',           true,  true,  'exact'),
+('BANK_ACCT',     'Bank account',           true,  true,  'upper_nospace'),
 ('LICENCE_PLATE', 'Vehicle plate',          true,  true,  'upper_nospace'),
 ('DOC_NUMBER',    'Identity document',      true,  true,  'upper_nospace'),
 ('SOCIAL_URL',    'Social profile URL',     false, true,  'url_norm');
@@ -225,8 +226,8 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 -- Comms plumbing — structural, not social.
 ('USES_ACCOUNT',      'uses account',        'account used by',   true, 0, '{IDENTITY,PERSON,GROUP}','{COMMS_ACCOUNT}', false),
 ('ON_DEVICE',         'observed on device',  'has account',       true, 0, '{COMMS_ACCOUNT}','{DEVICE}',               false),
-('SAME_DEVICE_AS',    'shares a device with','shares a device with',false,0,'{COMMS_ACCOUNT,IDENTITY}','{COMMS_ACCOUNT,IDENTITY}', true),
-('PARTICIPANT_IN',    'participates in',     'has participant',   true, 1, '{COMMS_ACCOUNT,IDENTITY}','{CONVERSATION}', true),
+('SAME_DEVICE_AS',    'shares a device with','shares a device with',false,0,'{COMMS_ACCOUNT,IDENTITY}','{COMMS_ACCOUNT,IDENTITY}', false),
+('PARTICIPANT_IN',    'participates in',     'has participant',   true, 1, '{COMMS_ACCOUNT,IDENTITY}','{CONVERSATION}', false),
 
 -- Co-declaration: the actor themselves asserts these identifiers belong
 -- together. Stronger than co-occurrence, weaker than crypto proof, and
@@ -253,23 +254,25 @@ INSERT INTO selector_type (key, display_name, is_strong, is_pii, normaliser) VAL
 -- Two JIDs publishing the same OMEMO fingerprint is the same physical
 -- device. Far stronger than a shared nickname, almost never collected.
 ('OMEMO_FPR',     'OMEMO device fingerprint',true,  false, 'lower_hex_nospace'),
-('MATRIX_MXID',   'Matrix MXID',             true,  false, 'lower_trim'),
-('MATRIX_DEVKEY', 'Matrix device key',       true,  false, 'exact'),
+('MATRIX_MXID',   'Matrix MXID',             true,  false, 'mxid_norm'),
+('MATRIX_DEVKEY', 'Matrix device key',       true,  false, 'trim'),
 ('WIRE_HANDLE',   'Wire handle',             false, false, 'lower_strip_at'),
 ('WIRE_UUID',     'Wire account UUID',       true,  false, 'lower_trim'),
 ('THREEMA_ID',    'Threema ID',              true,  false, 'upper_nospace'),
 ('SIGNAL_ACI',    'Signal ACI',              true,  true,  'lower_trim'),
-('BRIAR_LINK',    'Briar contact link',      true,  false, 'exact'),
+('BRIAR_LINK',    'Briar contact link',      true,  false, 'trim'),
 ('SKYPE_ID',      'Skype name',              true,  true,  'lower_trim'),
 -- Build-environment clustering. imphash and Rich header are strong
 -- developer-level linkage; ssdeep and TLSH are fuzzy and cluster kits.
 ('IMPHASH',       'Import hash',             false, false, 'lower_hex'),
 ('RICH_HEADER',   'Rich header hash',        false, false, 'lower_hex'),
-('SSDEEP',        'ssdeep fuzzy hash',       false, false, 'exact'),
-('TLSH',          'TLSH fuzzy hash',         false, false, 'upper_nospace'),
+('SSDEEP',        'ssdeep fuzzy hash',       false, false, 'trim'),
+('TLSH',          'TLSH fuzzy hash',         false, false, 'tlsh_norm'),
 ('MUTEX',         'Mutex name',              false, false, 'exact'),
-('PDB_PATH',      'PDB path',                true,  false, 'lower_trim'),
-('CODESIGN_CN',   'Code-signing subject',    true,  false, 'trim'),
+-- Attacker-controlled free text; clustering signal, never auto-merge (0018).
+('PDB_PATH',      'PDB path',                false, false, 'lower_trim'),
+-- Self-asserted cert text; the unique thing is the fingerprint (0018).
+('CODESIGN_CN',   'Code-signing subject',    false, false, 'trim'),
 ('USER_AGENT',    'User agent string',       false, false, 'trim');
 
 -- The comms.platform seed lives in db/concept/seed_platform_concept.sql:

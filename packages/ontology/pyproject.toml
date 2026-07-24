@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noctornal-ontology"
+version = "0.1.0"
+description = "NocTORnal ontology: the single source of truth for node, edge and selector types, plus per-selector normalisers. Generates Python types, TypeScript types and the SQL seed from one definition."
+requires-python = ">=3.12"
+dependencies = [
+    "idna>=3.6",  # IDNA2008/UTS-46 — stdlib IDNA2003 merges faß.de with fass.de
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "psycopg[binary]>=3.1",  # only for the env-gated DB parity test
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
