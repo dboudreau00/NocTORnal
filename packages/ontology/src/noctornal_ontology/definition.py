@@ -88,7 +88,8 @@ EDGE_TYPES: tuple[EdgeType, ...] = (
              ("IDENTITY",), ("PERSON",), False),
     EdgeType("CONTROLS", "controls", "controlled by", True, 0,
              ("IDENTITY", "PERSON", "GROUP"),
-             ("SELECTOR", "WALLET", "INFRA", "SERVICE", "CHANNEL"), False),
+             ("SELECTOR", "WALLET", "INFRA", "SERVICE", "CHANNEL",
+              "DATASET", "CREDENTIAL_SET"), False),
     # Membership & structure
     EdgeType("MEMBER_OF", "is a member of", "has member", True, 1,
              ("IDENTITY", "PERSON", "SUBGROUP"), ("GROUP", "SUBGROUP"), True),
@@ -141,6 +142,17 @@ EDGE_TYPES: tuple[EdgeType, ...] = (
              ("IDENTITY",), ("IDENTITY",), True),
     EdgeType("PAID", "paid", "was paid by", True, 1,
              ("IDENTITY", "WALLET"), ("IDENTITY", "WALLET"), True),
+    # Finance & data provenance. A TRANSACTION is a specific proven
+    # on-chain event (decision 22); wallets are its inputs/outputs, so the
+    # money network stays two-mode (actor -CONTROLS-> wallet -> tx ->
+    # wallet <- actor) and is projected at analysis time, never counted as
+    # a direct social tie. PAID remains the actor-level summary edge.
+    EdgeType("TX_INPUT", "is an input to", "has input", True, 0,
+             ("WALLET",), ("TRANSACTION",), False),
+    EdgeType("TX_OUTPUT", "is an output of", "has output", True, 0,
+             ("TRANSACTION",), ("WALLET",), False),
+    EdgeType("EXFILTRATED_FROM", "was exfiltrated from", "source of", True, 0,
+             ("DATASET", "CREDENTIAL_SET"), ("VICTIM", "ORGANISATION"), False),
     # Operational
     EdgeType("DEVELOPED", "developed", "developed by", True, 0,
              ("IDENTITY", "PERSON", "GROUP"), ("MALWARE", "TOOL", "SERVICE"), False),

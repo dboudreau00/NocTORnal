@@ -55,7 +55,7 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 ('SAME_AS',        'is the same as',      'is the same as',   false,  0, '{IDENTITY,PERSON}','{IDENTITY,PERSON}', false),
 ('ALIAS_OF',       'is an alias of',      'has alias',        true,   0, '{IDENTITY}','{IDENTITY}',              false),
 ('ATTRIBUTED_TO',  'attributed to',       'has persona',      true,   0, '{IDENTITY}','{PERSON}',               false),
-('CONTROLS',       'controls',            'controlled by',    true,   0, '{IDENTITY,PERSON,GROUP}','{SELECTOR,WALLET,INFRA,SERVICE,CHANNEL}', false),
+('CONTROLS',       'controls',            'controlled by',    true,   0, '{IDENTITY,PERSON,GROUP}','{SELECTOR,WALLET,INFRA,SERVICE,CHANNEL,DATASET,CREDENTIAL_SET}', false),
 
 -- Membership & structure ----------------------------------------------
 ('MEMBER_OF',      'is a member of',      'has member',       true,   1, '{IDENTITY,PERSON,SUBGROUP}','{GROUP,SUBGROUP}', true),
@@ -87,6 +87,13 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 ('RECRUITED',      'recruited',           'was recruited by', true,   1, '{IDENTITY}','{IDENTITY}',              true),
 ('MENTORED',       'mentored',            'was mentored by',  true,   1, '{IDENTITY}','{IDENTITY}',              true),
 ('PAID',           'paid',                'was paid by',      true,   1, '{IDENTITY,WALLET}','{IDENTITY,WALLET}',true),
+
+-- Finance & data provenance (0019). TRANSACTION is a proven on-chain event
+-- with wallet inputs/outputs; DATASET/CREDENTIAL_SET carry breach
+-- provenance. All structural (not social ties).
+('TX_INPUT',         'is an input to',      'has input',        true,   0, '{WALLET}','{TRANSACTION}',           false),
+('TX_OUTPUT',        'is an output of',     'has output',       true,   0, '{TRANSACTION}','{WALLET}',           false),
+('EXFILTRATED_FROM', 'was exfiltrated from','source of',        true,   0, '{DATASET,CREDENTIAL_SET}','{VICTIM,ORGANISATION}', false),
 
 -- Operational ----------------------------------------------------------
 ('DEVELOPED',      'developed',           'developed by',     true,   0, '{IDENTITY,PERSON,GROUP}','{MALWARE,TOOL,SERVICE}', false),
