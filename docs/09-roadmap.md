@@ -1,0 +1,188 @@
+# 09 — Roadmap
+
+Sequenced so that each phase is independently useful. The ordering
+constraint that matters: **the graph and assertion layer must work end to
+end before collection is switched on.** Pointing a firehose at a half-built
+model produces a landfill you then have to clean by hand.
+
+---
+
+## Phase 0 — Foundation (week 1)
+
+- [ ] Monorepo, Docker Compose (Postgres, Redis, MinIO, MailHog)
+- [ ] Alembic wired, `schema.sql` split into initial migrations
+- [ ] Ontology package: single source of truth → generated Py + TS types
+- [ ] Auth: password + TOTP, sessions, Argon2id
+- [ ] RBAC/ABAC gate as one function with full test coverage
+- [ ] Audit log with hash chaining, plus a chain verification job
+- [ ] CI: lint, typecheck, test, migration round-trip
+
+**Done when:** a user can register, enrol TOTP, log in, and every action
+appears in a verifiable audit chain.
+
+---
+
+## Phase 1 — Graph core (weeks 2–3)
+
+- [ ] Case CRUD with mandatory legal basis and retention
+- [ ] Node/edge CRUD against the ontology, with type validation on edges
+- [ ] Assertion layer — no graph write path exists without one
+- [ ] Selector storage, normalisers per type, exact-match lookup
+- [ ] Evidence upload → MinIO WORM, hashing, custody ledger
+- [ ] Evidence linking to nodes and edges
+- [ ] Tags and node sets
+- [ ] Full-text search over nodes and evidence
+
+**Done when:** an analyst can build a case entirely by hand, and every edge
+answers "why do we believe this?" in one click.
+
+This is the point to stop and actually use it on a real case for a week
+before building anything else. Everything downstream assumes this model is
+right, and a week of real use will find the places it is not.
+
+---
+
+## Phase 2 — Sociogram (weeks 4–5)
+
+- [ ] Projection model and the four presets
+- [ ] Graph API: neighbourhood, path, subgraph, as-of queries
+- [ ] sigma.js canvas with ForceAtlas2 in a worker
+- [ ] Full visual encoding per `docs/06-interface.md`
+- [ ] Layout persistence and pinning
+- [ ] Inspector panel: entity, assertions, evidence, backlinks
+- [ ] Local metrics (degree, clustering, k-core) live
+- [ ] WebSocket push for graph changes
+- [ ] Command palette
+
+**Done when:** a 2,000-node case renders at 60fps and an analyst can find a
+broker visually.
+
+---
+
+## Phase 3 — Analytics (week 6)
+
+- [ ] Analytics worker, igraph projection materialisation
+- [ ] Global centralities, batched, cached on graph hash
+- [ ] Leiden communities
+- [ ] Burt's constraint and effective size
+- [ ] Cut vertices and bridges
+- [ ] Key player (KPP-Neg) with fragmentation preview
+- [ ] Signed-network balance and unbalanced triad surfacing
+- [ ] Metric panel with rank, percentile and approximation flags
+
+**Done when:** the tool answers "who holds this network together" with
+something better than degree count.
+
+---
+
+## Phase 4 — Collection (weeks 7–9)
+
+- [ ] Adapter interface and scheduler with jitter and rate limiting
+- [ ] RSS adapter (simplest, proves the pipeline end to end)
+- [ ] Persona vault: envelope encryption, egress binding, status lifecycle
+- [ ] XenForo adapter with quote and signature stripping
+- [ ] MyBB adapter
+- [ ] Telegram MTProto adapter with FLOOD_WAIT handling
+- [ ] Document bucket: normalise, dedupe, version, index, embed
+- [ ] Selector extractors with offsets
+- [ ] Watch matching → watch hits
+- [ ] Proposal generation from extractions
+- [ ] Triage queue, keyboard driven
+- [ ] Parser health checks and drift alerting
+
+**Done when:** a watch on a real forum fills the bucket for a week without
+silent breakage, and triage is a pleasant hour rather than a grim one.
+
+---
+
+## Phase 5 — Notification and integration (week 10)
+
+- [ ] Classification egress gate, one function, called everywhere
+- [ ] SMTP with digest, suppression, quiet hours, escalation
+- [ ] In-app notification centre
+- [ ] Jira: outbound task creation, inbound status webhook, TLP ceiling
+- [ ] Outbound webhooks with HMAC
+- [ ] Admin surface for integration config and delivery logs
+
+---
+
+## Phase 6 — Tradecraft and hardening (weeks 11–12)
+
+- [ ] Timeline scrubber and temporal replay
+- [ ] Entity merge with reversal and dual control
+- [ ] ACH matrix and assumptions register
+- [ ] Report builder with TLP-aware redaction
+- [ ] Retention and purge jobs with tombstones
+- [ ] WebAuthn
+- [ ] Break-glass and dual-control flows
+- [ ] Security review: SSRF, CSP, rate limits, RLS
+- [ ] Backup and restore rehearsal
+
+---
+
+## Phase 7 — Comms channels (concept, `docs/10`)
+
+- [ ] `comms.platform` reference seeded, durable-selector mapping enforced
+- [ ] Contact-block parser with role attribution and the service stoplist
+- [ ] `CLAIMED` vs `CONFIRMED` control, PGP signature verification
+- [ ] Device fingerprint nodes from OMEMO / Matrix device keys
+- [ ] Conversation and participant model with mandatory provenance class
+- [ ] Forum PM capture where a persona is a party
+- [ ] Co-participation projection into the sociogram
+
+**Decide first:** message-level capture or metadata-only? Metadata is
+dramatically cheaper and carries most of the analytic value.
+
+## Phase 8 — Sample handling (concept, `docs/11`)
+
+- [ ] Separate-origin sample service, download-only, no rendering
+- [ ] Encrypted-at-rest storage keyed by SHA-256, EDR exclusions documented
+- [ ] Quarantine → triage → RE queue with `MALWARE_ANALYST` as a distinct role
+- [ ] Static triage: hashes, imphash, ssdeep, TLSH, YARA
+- [ ] Fuzzy-hash clustering surfaced as graph edges
+- [ ] Prohibited-content screening and the `REJECTED` path
+- [ ] Detonation as an authorised, exposure-aware action
+
+**Decide first:** the prohibited-content policy, with counsel, before the
+first ingest rather than after.
+
+## Phase 9 — Ingest API (concept, `docs/12`)
+
+- [ ] `noct_sk_` key issuance, HMAC storage, mandatory expiry, rotation overlap
+- [ ] Ingest endpoint: async 202, idempotency, raw-persist-before-parse
+- [ ] Format detection and schema mapping per key
+- [ ] Category classifier and the correction loop
+- [ ] Triage scoring with watchlist dominance
+- [ ] Simhash near-duplicate suppression
+- [ ] Dead-letter queue with repair and replay
+- [ ] Stealer-log compartment, masking and minimisation
+
+**Decide first:** stealer logs in scope? If yes, the compartment and
+minimisation policy comes before any ingest code.
+
+---
+
+## Later
+
+Link prediction and stylometry (hypotheses only) · disclosure pack
+generator · STIX/MISP export · cross-case pivoting with compartment
+respect · blockchain analytics integration · translation for
+non-English sources · mobile read-only view · CONCOR blockmodelling ·
+change-point detection on network structure
+
+---
+
+## Handing tasks to Claude Code
+
+Work one phase at a time, one checklist item per session where the item is
+substantial. Useful opening prompt shape:
+
+> Read CLAUDE.md, docs/01-domain-model.md and db/schema.sql. Implement
+> Phase 1 item "Assertion layer." Requirements: no code path writes to
+> `node` or `edge` without creating an `assertion` in the same
+> transaction. Write the failing test first, named for invariant 1 in
+> CLAUDE.md. Show me the migration before you apply it.
+
+Pinning it to the invariant by number is worth doing — it keeps the
+non-negotiables in context and gives the test a name that explains itself
+in six months.
