@@ -374,17 +374,56 @@ CREATE INDEX ON evidence USING gin (search_tsv);
 CREATE INDEX ON evidence (sha256);         -- cross-case artefact pivot
 CREATE INDEX ON evidence (case_id, acquired_at DESC);
 
--- Append-only custody ledger. Every touch, including reads.
+-- Append-only, hash-chained custody ledger. Every touch, including reads.
+-- actor_id FK to iam.app_user is added in the deferred-FK section (Alembic
+-- 0024). prev_hash/row_hash + the chain trigger make deletion/back-dating
+-- detectable (mirror of 0024).
 CREATE TABLE evidence_custody (
   id           bigserial PRIMARY KEY,
   evidence_id  uuid NOT NULL REFERENCES evidence(id),
   action       text NOT NULL,              -- ACQUIRED, VIEWED, EXPORTED, HASH_VERIFIED
   actor_id     uuid NOT NULL,
-  occurred_at  timestamptz NOT NULL DEFAULT now(),
+  occurred_at  timestamptz NOT NULL DEFAULT now(),  -- server-pinned by the trigger
   detail       jsonb NOT NULL DEFAULT '{}'::jsonb,
-  hash_verified boolean
+  hash_verified boolean,
+  prev_hash    bytea,
+  row_hash     bytea NOT NULL
 );
 CREATE INDEX ON evidence_custody (evidence_id, occurred_at);
+
+CREATE OR REPLACE FUNCTION core.custody_chain_hash() RETURNS trigger AS $$
+DECLARE prev bytea;
+BEGIN
+  NEW.occurred_at := now();  -- server-pinned; any caller value is ignored
+  PERFORM pg_advisory_xact_lock(hashtextextended('core.evidence_custody.chain', 0));
+  SELECT row_hash INTO prev FROM core.evidence_custody ORDER BY id DESC LIMIT 1;
+  NEW.prev_hash := prev;
+  NEW.row_hash := public.digest(
+    convert_to(concat_ws(chr(31),
+      coalesce(encode(prev,'hex'),'GENESIS'),
+      NEW.evidence_id::text, NEW.action, coalesce(NEW.actor_id::text,'-'),
+      to_char(NEW.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+      NEW.detail::text, coalesce(NEW.hash_verified::text,'-')
+    ), 'UTF8'), 'sha256');
+  RETURN NEW;
+END $$ LANGUAGE plpgsql SET search_path = public, pg_catalog;
+
+CREATE TRIGGER custody_chain BEFORE INSERT ON core.evidence_custody
+  FOR EACH ROW EXECUTE FUNCTION core.custody_chain_hash();
+
+-- Append-only chain of custody (mirror of Alembic 0023). No UPDATE/DELETE:
+-- a doctorable custody log fails the evidence at trial (FRE 902(13)-(14);
+-- Canada Evidence Act ss. 31.1-31.8).
+CREATE FUNCTION core.block_custody_mutation() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'evidence_custody is append-only (chain of custody)';
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER evidence_custody_append_only
+  BEFORE UPDATE OR DELETE ON core.evidence_custody
+  FOR EACH ROW EXECUTE FUNCTION core.block_custody_mutation();
+CREATE TRIGGER evidence_custody_no_truncate
+  BEFORE TRUNCATE ON core.evidence_custody
+  FOR EACH STATEMENT EXECUTE FUNCTION core.block_custody_mutation();
 
 -- Evidence attaches to any number of nodes/edges. This is the
 -- "upload evidence against the group AND the actor" requirement.
@@ -953,6 +992,9 @@ ALTER TABLE core.assertion
 
 ALTER TABLE core.evidence
   ADD CONSTRAINT evidence_acquired_by_fk FOREIGN KEY (acquired_by) REFERENCES iam.app_user(id);
+
+ALTER TABLE core.evidence_custody
+  ADD CONSTRAINT evidence_custody_actor_fk FOREIGN KEY (actor_id) REFERENCES iam.app_user(id);
 
 -- =====================================================================
 -- SEARCH VECTOR MAINTENANCE
