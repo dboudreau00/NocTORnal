@@ -206,6 +206,72 @@ INSERT INTO permission (key, description, requires_step_up, requires_dual_contro
 ('integration.manage', 'Configure SMTP, Jira, webhooks', true, false),
 ('break_glass.invoke', 'Emergency access to an unassigned case', true, false);
 
+
+-- ---------------------------------------------------------------------
+-- ROLE -> PERMISSION MATRIX (RBAC verbs). Mirror of Alembic 0021.
+-- SYS_ADMIN/SECURITY_OFFICER hold no case-content permissions.
+-- ---------------------------------------------------------------------
+INSERT INTO role_permission (role_key, permission_key) VALUES
+('SYS_ADMIN','user.manage'),
+('SYS_ADMIN','role.manage'),
+('SYS_ADMIN','integration.manage'),
+('SECURITY_OFFICER','audit.read'),
+('CASE_OWNER','case.create'),
+('CASE_OWNER','case.read'),
+('CASE_OWNER','case.update'),
+('CASE_OWNER','case.close'),
+('CASE_OWNER','case.delete'),
+('CASE_OWNER','case.grant'),
+('CASE_OWNER','graph.node.create'),
+('CASE_OWNER','graph.node.update'),
+('CASE_OWNER','graph.node.delete'),
+('CASE_OWNER','graph.edge.create'),
+('CASE_OWNER','graph.edge.update'),
+('CASE_OWNER','graph.merge'),
+('CASE_OWNER','graph.unmerge'),
+('CASE_OWNER','assertion.create'),
+('CASE_OWNER','assertion.retract'),
+('CASE_OWNER','proposal.review'),
+('CASE_OWNER','evidence.upload'),
+('CASE_OWNER','evidence.read'),
+('CASE_OWNER','evidence.export'),
+('CASE_OWNER','evidence.purge'),
+('CASE_OWNER','analytics.run'),
+('CASE_OWNER','report.generate'),
+('CASE_OWNER','report.export'),
+('ANALYST','case.read'),
+('ANALYST','graph.node.create'),
+('ANALYST','graph.node.update'),
+('ANALYST','graph.node.delete'),
+('ANALYST','graph.edge.create'),
+('ANALYST','graph.edge.update'),
+('ANALYST','graph.merge'),
+('ANALYST','graph.unmerge'),
+('ANALYST','assertion.create'),
+('ANALYST','assertion.retract'),
+('ANALYST','evidence.upload'),
+('ANALYST','evidence.read'),
+('ANALYST','analytics.run'),
+('ANALYST','report.generate'),
+('COLLECTOR','source.manage'),
+('COLLECTOR','watch.manage'),
+('COLLECTOR','collection_account.manage'),
+('COLLECTOR','collection_account.reveal'),
+('REVIEWER','case.read'),
+('REVIEWER','evidence.read'),
+('REVIEWER','proposal.review'),
+('REVIEWER','graph.merge'),
+('REVIEWER','graph.unmerge'),
+('CONTRIBUTOR','case.read'),
+('CONTRIBUTOR','evidence.read'),
+('CONTRIBUTOR','evidence.upload'),
+('READ_ONLY','case.read'),
+('READ_ONLY','evidence.read'),
+('LIAISON','case.read'),
+('LIAISON','evidence.read'),
+('SERVICE','evidence.upload')
+ON CONFLICT (role_key, permission_key) DO NOTHING;
+
 -- =====================================================================
 -- CONCEPT ADDITIONS  (docs 10, 11, 12)
 -- Draft alongside db/schema_concept.sql. Ontology rows are cheap to

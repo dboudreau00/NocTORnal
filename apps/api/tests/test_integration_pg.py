@@ -25,8 +25,11 @@ def conn():
     from noctornal_api.db import connect
     c = connect()  # autocommit
     yield c
-    c.execute("DELETE FROM iam.session WHERE user_id IN "
-              "(SELECT id FROM iam.app_user WHERE email LIKE 'it-%@noctornal.test')")
+    sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'it-%@noctornal.test')"
+    c.execute(f"DELETE FROM iam.session WHERE user_id IN {sub}")
+    # Cases (owner FK is RESTRICT) must go before their owning users;
+    # deleting a case cascades its assignments.
+    c.execute(f'DELETE FROM core."case" WHERE owner_user_id IN {sub}')
     c.execute("DELETE FROM iam.app_user WHERE email LIKE 'it-%@noctornal.test'")
     c.close()
 
@@ -74,6 +77,59 @@ def test_full_auth_and_session_roundtrip_against_pg(conn):
     assert sessions.validate(raw).ok
     assert sessions.revoke_all_for_user(uid, "test cleanup") == 1
     assert not sessions.validate(raw).ok
+
+
+def test_access_gate_resolves_allow_and_deny_against_pg(conn):
+    """The five-part gate over real seeded roles/permissions: an assigned
+    ANALYST may create edges; a READ_ONLY user on the same case may not
+    (verb fails); an unassigned user is denied (relationship fails)."""
+    from noctornal_api.security.access import (
+        CHECK_ASSIGNMENT, CHECK_ROLE, evaluate,
+    )
+    from noctornal_api.stores import PgAccessResolver, PgUserStore
+
+    users = PgUserStore(conn)
+    analyst = users.create_user(f"it-{uuid4().hex[:8]}@noctornal.test", "An", "pw")
+    reader = users.create_user(f"it-{uuid4().hex[:8]}@noctornal.test", "Re", "pw")
+    outsider = users.create_user(f"it-{uuid4().hex[:8]}@noctornal.test", "Ou", "pw")
+
+    case_id = uuid4()
+    conn.execute(
+        """INSERT INTO core."case" (id, code, title, classification,
+                owner_user_id, legal_basis, retention_until, review_due)
+           VALUES (%s, %s, 'Access IT', 'AMBER', %s, 'dev', '2027-01-01', '2026-12-01')""",
+        (case_id, f"OP-IT-{uuid4().hex[:6]}", analyst),
+    )
+    # Clearances high enough that TLP/compartments never mask the verb result.
+    for uid in (analyst, reader, outsider):
+        conn.execute("UPDATE iam.app_user SET tlp_clearance='RED' WHERE id=%s", (uid,))
+    conn.execute(
+        """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
+           VALUES (%s, %s, 'ANALYST', %s), (%s, %s, 'READ_ONLY', %s)""",
+        (case_id, analyst, analyst, case_id, reader, analyst),
+    )
+
+    resolver = PgAccessResolver(conn)
+    common = dict(case_id=case_id, permission_key="graph.edge.create",
+                  object_classification="AMBER",
+                  object_compartments=frozenset(), mfa_satisfied_at=None)
+
+    assert evaluate(resolver.resolve(user_id=analyst, **common)).allowed
+    reader_dec = evaluate(resolver.resolve(user_id=reader, **common))
+    assert reader_dec.failed_checks == (CHECK_ROLE,)  # assigned, but role lacks verb
+    outsider_dec = evaluate(resolver.resolve(user_id=outsider, **common))
+    assert CHECK_ROLE in outsider_dec.failed_checks
+    assert CHECK_ASSIGNMENT in outsider_dec.failed_checks
+
+    # Fail closed: an unknown permission is a hard resolution error (→ 403),
+    # never a 500.
+    from noctornal_api.security.access import AccessResolutionError
+    with pytest.raises(AccessResolutionError):
+        resolver.resolve(user_id=analyst, case_id=case_id,
+                         permission_key="graph.edge.teleport",
+                         object_classification="AMBER",
+                         object_compartments=frozenset(), mfa_satisfied_at=None)
+    # case + users are removed by the fixture teardown (owner-FK-aware).
 
 
 def test_concurrent_totp_advance_only_one_wins(conn):

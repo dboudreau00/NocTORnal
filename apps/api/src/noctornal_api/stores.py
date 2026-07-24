@@ -18,6 +18,11 @@ from uuid import UUID
 import psycopg
 
 from noctornal_api.security import envelope, passwords
+from noctornal_api.security.access import (
+    AccessContext,
+    AccessResolutionError,
+    tlp_from_name,
+)
 from noctornal_api.security.auth import AuthUser, UserStore
 from noctornal_api.security.sessions import SessionRecord, SessionStore
 
@@ -115,6 +120,76 @@ class PgUserStore(UserStore):
                   SET failed_logins = 0, locked_until = NULL, last_login_at = %s
                 WHERE id = %s""",
             (at, user_id),
+        )
+
+
+class PgAccessResolver:
+    """Builds the AccessContext for the five-part gate from the database.
+
+    The role is read from the case assignment even when it has expired, so
+    the verb check (does the role grant this permission?) and the
+    relationship check (is the assignment unexpired?) stay independently
+    necessary. All queries parameterised.
+    """
+    def __init__(self, conn: psycopg.Connection):
+        self._c = conn
+
+    def resolve(
+        self,
+        *,
+        user_id: UUID,
+        case_id: UUID,
+        permission_key: str,
+        object_classification: str,
+        object_compartments: frozenset[str],
+        mfa_satisfied_at: datetime | None,
+    ) -> AccessContext:
+        # Every lookup fails CLOSED: an unknown permission/user or an
+        # out-of-range TLP value raises AccessResolutionError (→ 403), never
+        # a 500 that could mask a bad caller.
+        perm_row = self._c.execute(
+            "SELECT requires_step_up FROM iam.permission WHERE key = %s",
+            (permission_key,),
+        ).fetchone()
+        if perm_row is None:
+            raise AccessResolutionError(f"unknown permission: {permission_key!r}")
+        requires_step_up = bool(perm_row[0])
+
+        user = self._c.execute(
+            "SELECT tlp_clearance, compartments FROM iam.app_user WHERE id = %s",
+            (user_id,),
+        ).fetchone()
+        if user is None:
+            raise AccessResolutionError(f"unknown user: {user_id}")
+        user_clearance = tlp_from_name(user[0])
+        user_compartments = frozenset(user[1] or [])
+
+        assignment = self._c.execute(
+            """SELECT role_key, (expires_at IS NULL OR expires_at > now()) AS unexpired
+                 FROM iam.case_assignment WHERE case_id = %s AND user_id = %s""",
+            (case_id, user_id),
+        ).fetchone()
+
+        role_permissions: frozenset[str] = frozenset()
+        has_unexpired = False
+        if assignment is not None:
+            role_key, has_unexpired = assignment[0], bool(assignment[1])
+            perms = self._c.execute(
+                "SELECT permission_key FROM iam.role_permission WHERE role_key = %s",
+                (role_key,),
+            ).fetchall()
+            role_permissions = frozenset(p[0] for p in perms)
+
+        return AccessContext(
+            permission_key=permission_key,
+            permission_requires_step_up=requires_step_up,
+            role_permissions=role_permissions,
+            has_unexpired_assignment=has_unexpired,
+            user_clearance=user_clearance,
+            object_classification=tlp_from_name(object_classification),
+            user_compartments=user_compartments,
+            object_compartments=object_compartments,
+            mfa_satisfied_at=mfa_satisfied_at,
         )
 
 
