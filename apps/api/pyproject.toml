@@ -11,6 +11,8 @@ dependencies = [
     "argon2-cffi>=23.1",   # Argon2id password + recovery-code hashing
     "cryptography>=42.0",  # AES-256-GCM envelope for TOTP secrets at rest
     "psycopg[binary]>=3.1",
+    "minio>=7.2",          # WORM object storage for evidence (object lock)
+    "blake3>=0.4",         # second independent integrity anchor for evidence
     # noctornal-ontology is a sibling package in this monorepo (the ONE
     # source of selector normalisers). Install it editable alongside:
     #   pip install -e packages/ontology -e apps/api
