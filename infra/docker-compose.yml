@@ -1,0 +1,114 @@
+# Development only. Production runs the three zones from docs/02 as
+# separate network policies — do not derive a prod deployment from this.
+name: noctornal
+
+services:
+  postgres:
+    # pgvector image; add pg_uuidv7 in a derived Dockerfile if you want
+    # time-sortable IDs generated in-database rather than app-side.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: noctornal
+      POSTGRES_USER: noctornal
+      POSTGRES_PASSWORD: dev_only_change_me
+      # Reduce the noise floor when debugging slow graph queries.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c log_min_duration_statement=250
+      -c max_connections=200
+      -c shared_buffers=512MB
+      -c work_mem=32MB
+    ports: ["5432:5432"]
+    # If init ever fails mid-run, pgdata keeps the PARTIAL cluster and the
+    # init scripts will NOT re-run on restart — postgres comes up "healthy"
+    # with a half-loaded schema. Recover with: docker compose down -v
+    # (destroys pgdata), then up again.
+    # Initdb runs ONLY db/init (extensions, which need superuser). The
+    # schema itself comes from Alembic: `alembic upgrade head` from the
+    # repo root — one owner of the schema, no drift.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../db/init:/docker-entrypoint-initdb.d:ro
+    # -h 127.0.0.1 forces the probe over TCP: during first-run init the
+    # entrypoint's temporary server answers on the unix socket only, and a
+    # socket probe reports "healthy" while the schema is still loading.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U noctornal -d noctornal"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: noctornal
+      MINIO_ROOT_PASSWORD: dev_only_change_me
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+
+  # Creates the evidence bucket WITH OBJECT LOCK. Object lock cannot be
+  # enabled after creation, so getting this right on first run matters.
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    # set -e + --ignore-existing instead of '|| true': a silently failed
+    # lock-enabled creation is unrecoverable (lock cannot be added later),
+    # so real failures must fail this container visibly.
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      until mc alias set local http://minio:9000 noctornal dev_only_change_me; do sleep 1; done;
+      mc mb --ignore-existing --with-lock local/noctornal-evidence;
+      mc mb --ignore-existing local/noctornal-raw;
+      mc retention set --default GOVERNANCE 365d local/noctornal-evidence;
+      echo 'buckets ready';
+      "
+
+  mailhog:
+    image: axllent/mailpit:latest
+    ports: ["1025:1025", "8025:8025"]
+
+  # OpenFGA refuses to `run` against an unmigrated Postgres datastore, so
+  # migrations get their own one-shot service.
+  openfga-migrate:
+    image: openfga/openfga:latest
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://noctornal:dev_only_change_me@postgres:5432/noctornal?sslmode=disable
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  openfga:
+    image: openfga/openfga:latest
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://noctornal:dev_only_change_me@postgres:5432/noctornal?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    depends_on:
+      openfga-migrate: { condition: service_completed_successfully }
+    # Playground on host 3001: 3000 belongs to the Next.js dev server.
+    ports: ["8080:8080", "3001:3000"]
+
+  nats:
+    image: nats:2-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes: [natsdata:/data]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  natsdata:

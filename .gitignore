@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node (Phase 2+)
+node_modules/
+.next/
+
+# Local environment — secrets are environment-only, never committed
+.env
+.env.*
+
+# Editor noise
+.vscode/
+.idea/
+
+# Claude Code machine-local permission grants
+.claude/settings.local.json
