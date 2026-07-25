@@ -1101,6 +1101,19 @@ def cmd_session(args: argparse.Namespace) -> None:
     print("  as the normal way in.")
     print(RULE)
 
+    if getattr(args, "open", False):
+        # webbrowser hands the URL to the OS default browser. The token is in
+        # the FRAGMENT, so it never reaches the server or an access log --
+        # but it does reach the browser's session history until the page
+        # erases it on load, which is the same trade the printed URL makes.
+        import webbrowser
+        if webbrowser.open(url):
+            print()
+            print("  Opened in your default browser.")
+        else:
+            print()
+            print("  Could not launch a browser; copy the URL above.")
+
 
 # --- CLI --------------------------------------------------------------------
 
@@ -1213,6 +1226,8 @@ def _build_parser() -> argparse.ArgumentParser:
     session.add_argument("--email", required=True)
     session.add_argument("--port", default="8000",
                          help="port the API is serving on (default 8000)")
+    session.add_argument("--open", action="store_true",
+                         help="launch the URL in your default browser")
     session.set_defaults(func=cmd_session)
 
     return parser

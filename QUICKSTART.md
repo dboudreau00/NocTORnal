@@ -44,6 +44,26 @@ Authenticator).
 
 MFA is mandatory — there is no password-only path, by design.
 
+### Just get me in
+
+Once the stack is up, this signs you in and opens the browser:
+
+```bash
+powershell -ExecutionPolicy Bypass -File "scripts\open-ui.ps1"
+```
+
+No arguments needed if there is only one account — it finds it. Otherwise
+pass `-Email you@example.com`. `-PrintOnly` prints the URL instead of
+launching a browser, and `-Port N` if you moved the API.
+
+It starts nothing: if the API is not running it tells you to run
+`launch.ps1` instead. The token rides in the URL fragment, so it never
+reaches the server or an access log, and the page strips it from the
+address bar on load — but it *is* recorded in the audit trail as an
+MFA-bypassed login, because a session that appeared from nowhere would be
+worse than no session. It is the way in when the host clock makes TOTP
+impossible (see below), not the everyday door.
+
 Optional, so the first screen is not empty:
 
 ```bash
