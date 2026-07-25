@@ -1,11 +1,16 @@
 # What is left on the roadmap
 
-Regenerated 2026-07-25, end of session. Companion to `docs/09-roadmap.md`,
-which is the plan; this is the honest delta between that plan and the build.
+Regenerated 2026-07-25, end of session. `docs/09-roadmap.md` is the plan;
+this is the honest delta between that plan and the build.
 
-**State:** `main`, 8 commits this session, Alembic head `0031`,
-**673 tests passing**, ruff clean, source hygiene clean, migrations
+**State:** `main`, 16 commits this session, Alembic head `0034`,
+**807 tests passing**, ruff clean, source hygiene clean, migrations
 round-trip. Nothing pushed (no remote configured).
+
+> **The most important file in the repo is now
+> [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).** Every
+> phase is built. Four of them cannot lawfully be operated until somebody
+> outside this codebase makes a decision, and that file is the list.
 
 ---
 
@@ -15,169 +20,127 @@ round-trip. Nothing pushed (no remote configured).
 |---|---|---|
 | 0 — Foundation | ✅ **Done** | Nothing. No typecheck, deliberately (decision 42). |
 | 1 — Graph core | ✅ **Done** | Nothing. |
-| 2 — Sociogram | ✅ **Done** | WebSocket push was never built; the UI polls. |
-| 3 — Analytics | ✅ **Done** | Bipartite→one-mode, CONCOR, charting the metric history. |
-| 4 — Collection | 🟡 **~30%** | Everything that actually collects. Proposals and triage are done. |
-| 5 — Notification | 🟢 **~75%** | Jira, the integration admin surface, escalation, a worker. |
-| 6 — Tradecraft | 🟢 **~65%** | Retention/purge, break-glass, WebAuthn, timeline replay. |
-| 7 — Comms channels | ⬜ **0%** | Decided (message-level capture, decision 35) and unbuilt. |
-| 8 — Sample handling | 🟢 **~70%** | Built (decision 47). Missing: fuzzy hashing, YARA, screening, sandbox. |
-| 9 — Ingest API | ⬜ **0%** | Concept only. Blocked on the stealer-log scope question. |
+| 2 — Sociogram | ✅ **Done** | WebSocket push; the UI polls. |
+| 3 — Analytics | ✅ **Done** | Bipartite→one-mode, CONCOR, charting metric history. |
+| 4 — Collection | 🟢 **~70%** | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. |
+| 5 — Notification | 🟢 **~75%** | Jira, integration admin surface, escalation, a worker. |
+| 6 — Tradecraft | 🟢 **~85%** | WebAuthn, timeline replay, assumptions register. |
+| 7 — Comms | 🟢 **~70%** | Contact-block parser, PGP verification, co-participation projection. |
+| 8 — Samples | 🟢 **~70%** | Fuzzy hashing, YARA, screening, sandbox integration. |
+| 9 — Ingest | 🟢 **~80%** | The HTTP 202 endpoint wiring, outbound credential vault. |
 
-### Shipped this session
+**Every phase has an implementation and a test suite.** None has a UI beyond
+Phases 1–3 and the notification centre.
 
-| | Decision | Migration |
+---
+
+## 🔴 Before anything else: the legal register
+
+`docs/16-legal-and-external.md` holds **4 BLOCKING items, 7 determinations
+and 10 things to confirm externally.** The four blockers, compressed:
+
+| | What | Why it blocks |
 |---|---|---|
-| Rate limiting, GCRA in Redis | 43, 45 | — |
-| Four-eyes approval + dual control on merge | 44 | 0028 |
-| Notification centre, SMTP, webhooks | 46 | 0029 |
-| U2 "why is this hidden" | — | 0030 |
-| Phase 8 sample handling | 47 | 0031 |
-| ACH matrix | 48 | — |
-| Report builder with TLP redaction | 49 | — |
+| **L1** | Prohibited-content policy for samples | The build refuses ingest until a policy reference and a designated person are declared — but **that is a declaration it records, not one it can verify**. Also: `REJECTED` currently *destroys* the bytes, which is wrong in a jurisdiction requiring preservation. |
+| **L2** | Stealer-log lawful basis, victim notification, real retention | Holding data about thousands of uninvolved people. 90 days is a placeholder. |
+| **L3** | Persona operation authority | The software will drive an account into a forum. Whether you may is not a software question. |
+| **L4** | Interception law and consent | Message capture. `provenance_class` records *which* kind; the authority is external. |
 
-An adversarial review of the rate limiter (31 agents, 27 findings, 15
-refuted) found **12 real defects including one critical**: the blanket
-ceiling was keyed only on the presented credential, so rotating a Bearer
-token escaped it entirely — and sending a garbage token was *cheaper* than
-sending none. All 12 are fixed with a regression test each (decision 45).
-Budget for a review pass on anything substantial; it has now found real bugs
-on every single pass in this project's history.
+The ten **CONFIRM EXTERNALLY** items include evidence-authenticity standards
+(reasoned from the rule text, not from a practitioner), MinIO COMPLIANCE
+semantics on your actual object store, and the platform durable-identifier
+mappings — which change, and where a stale mapping produces confident false
+attribution.
 
 ---
 
-## The remaining work, in the order it should be done
+## Prioritised engineering work
 
-### 1. Retention and purge with tombstones — Phase 6
+### 1. A second adversarial review pass
 
-The highest-value thing left, and the machinery is already there.
+Phases 4, 7 and 9 have had none. The first pass in this project found a
+**critical** defect under 484 green tests — the blanket rate limit was keyed
+on a value the caller controls, so rotating a token escaped it entirely, and
+sending a garbage token was *cheaper* than sending none. That pattern has
+held on every review in this project's history.
 
-- [ ] Scheduled purge on `retention_until`, with `legal_hold` overriding
-      everything.
-- [ ] Out-of-schedule purge behind four-eyes. **`evidence.purge` is already
-      registered as an unconditional dual-control operation** (decision 44),
-      so this is the first real user of that mechanism.
-- [ ] Tombstones: docs/08 requires the record of destruction to survive the
-      data — what was destroyed, under what authority, by whom.
-- [ ] Documents supporting an accepted assertion pinned past source
-      retention. Otherwise you delete the evidence and leave the conclusion,
-      which is the worst possible outcome.
+### 2. UI for the new phases
 
-**Watch out:** evidence is in COMPLIANCE-mode object lock, so MinIO will
-refuse to delete before `retain_until` *even for the API's own credentials*.
-That is correct and it means purge has to reason about the lock rather than
-assume a delete succeeds.
+ACH, reports, samples, ingest, comms and governance all have tested services
+and **no interface**. Samples last and carefully: invariant 10 says metadata
+may render and bytes may not, and no sandbox attribute may combine
+`allow-scripts` with `allow-same-origin`.
 
-### 2. Break-glass — Phase 6
+### 3. HTTP routers for Phases 4, 6, 7, 9
 
-`iam.break_glass` has existed since Phase 0 with nothing writing it. docs/05:
-available, loud and short — mandatory justification, hard expiry, immediate
-alert to the security officer, mandatory post-hoc review. **The alert now has
-somewhere to go**: `BREAK_GLASS_INVOKED` is already a registered priority-1
-notification kind that overrides quiet hours.
+Services and tests exist. `approvals`, `notifications`, `samples`, `ach` and
+`reports` have routers; retention, break-glass, collection, comms and ingest
+do not.
 
-### 3. Phase 5 remainder
+### 4. The remaining per-phase work
 
-- [ ] Jira: outbound task creation, inbound status webhook, TLP ceiling. The
-      HMAC-signed webhook transport it would specialise already exists.
-- [ ] Admin surface for integration config and delivery logs. The
-      `notify.delivery` ledger records every refusal and suppression with a
-      reason; nothing renders it.
-- [ ] Escalation of an unacknowledged priority-1 notification.
-- [ ] A worker. `POST /notifications/dispatch` is called by an operator or a
-      cron entry today (decision 46, following decision 30).
+- **Phase 4** — XenForo, MyBB, Telegram MTProto adapters (each blocked on
+  L3 as much as on code); document embeddings; a scheduler process.
+- **Phase 5** — Jira, the integration admin surface (the `notify.delivery`
+  ledger records every refusal with a reason and nothing renders it),
+  escalation of an unacknowledged priority-1, a worker.
+- **Phase 6** — WebAuthn, timeline replay, the assumptions register.
+- **Phase 7** — contact-block parser with the service stoplist, PGP
+  signature verification, co-participation projection into the sociogram.
+- **Phase 8** — imphash/ssdeep/TLSH (each a dependency; ssdeep needs a C
+  toolchain on Windows), YARA, capped archive expansion, sandbox
+  integration. Every absence is already recorded on the sample row as a gap
+  with a reason.
+- **Phase 9** — the HTTP 202 endpoint wiring, and the outbound credential
+  vault with per-provider quota and exposure levels.
 
-### 4. Phase 8 remainder
+### 5. Security items still deferred
 
-- [ ] imphash, ssdeep, TLSH — each needs a dependency, and ssdeep needs a C
-      toolchain on Windows. Every absence is already recorded on the sample
-      row as a gap with a reason.
-- [ ] YARA against a rule corpus — docs/11 calls it the highest-value single
-      component.
-- [ ] Fuzzy-hash clustering as graph edges. Blocked on the hashes above.
-- [ ] Archive expansion **with depth and expansion-ratio caps**. Uncapped is
-      a zip bomb waiting for someone to send one.
-- [ ] Automated prohibited-content screening. Needs an authorised hash set,
-      which is a legal question before it is a technical one.
-- [ ] Sandbox integration (CAPEv2 / Triage / Joe). The authorisation record
-      and its constraint exist; nothing submits.
-
-### 5. Phase 6 remainder
-
-- [ ] WebAuthn. Recovery codes landed in Phase 3; hardware keys did not.
-- [ ] Timeline scrubber and full temporal replay. The `as_of` scrubber
-      exists on the sociogram.
-- [ ] Assumptions register alongside ACH.
-- [ ] Backup and restore rehearsal.
-
-### 6. Phase 4 — collection
-
-Still deliberately last among the buildable items. `docs/09`: the graph and
-assertion layer must work end to end before collection is switched on,
-because a firehose into a half-built model produces a landfill.
-
-Adapter interface and scheduler, RSS first, persona vault with envelope
-encryption and egress binding, XenForo/MyBB/Telegram adapters, the document
-bucket, watch matching, parser health checks. `ingest.dead_letter` exists and
-is unused.
-
-### 7. Phases 7 and 9
-
-- **Phase 7** — decided as message-level capture (decision 35), zero built.
-- **Phase 9** — concept only, and has its own open question: are stealer
-  logs in scope? If yes, the compartment and minimisation policy comes
-  before any ingest code.
-
----
-
-## Security items still deferred
-
-| Item | Why it matters |
+| Item | Note |
 |---|---|
-| Session IP/UA binding | A stolen token is currently portable |
-| Non-owner DB role + RLS | The API connects as the table owner, so Postgres RLS is a no-op behind it |
+| Real SSRF protection | `collection.fetch()` has a floor; DNS rebinding is not addressed |
+| Session IP/UA binding | A stolen token is portable |
+| Non-owner DB role + RLS | The API connects as the table owner, so RLS is a no-op behind it |
 | Login timing equalisation | A missing account returns faster than a wrong password |
-| SSRF protection | Needed before watch targets exist (Phase 4) |
-| Compartment registry | Compartments are free-text; a typo creates silent no-access |
-| CI typecheck | No annotations to check against; a vacuously-passing mypy job is worse than none |
-| Redis isolation | The limiter shares an instance running `allkeys-lru`, so meters are evictable |
-| Sample origin split | `NOCTORNAL_SAMPLE_ORIGIN` is enforced at runtime, but the *deployment* has to actually provide a second origin |
+| Compartment registry | Free-text; a typo creates silent no-access |
+| CI typecheck | No annotations to check against |
+| Redis isolation | The limiter shares an instance running `allkeys-lru` |
 
 ---
 
-## Known gaps in what IS built
+## Open questions for the operator
 
-- **The metric history endpoint exists and is tested. Nothing charts it.**
-- **Two-mode presets warn rather than project** (decision 33).
-- **Per-case trust-decay default has no home.** `core."case"` now has three
-  policy columns (`dual_control_merge`, `withheld_disclosure`) so the
-  precedent exists.
-- **No WebSocket push.** Phase 2 listed it; the UI polls.
-- **The ACH matrix has no UI.** Endpoints exist and are tested.
-- **The report builder has no UI.** Same.
-- **Sample handling has no UI** — deliberately last, because invariant 10
-  says metadata may render and bytes may not, and that distinction is worth
-  building carefully rather than quickly.
+- **Ingest key holders** — internal scripts only, or external partners?
+  Changes the support and abuse model (docs/16 D6).
+- **Expected ingest volume.** Above ~1M records/day the bucket needs a
+  different storage tier.
+- **Which sandbox vendors count as "private"** for detonation exposure —
+  several "private" tiers still share hashes with partners.
+- **Who is the security officer?** Break-glass *refuses to grant* if no
+  active user holds `SECURITY_OFFICER`.
+- **Retention periods.** Six placeholder rules ship in migration 0032, and
+  purge warns loudly on every one nobody has confirmed.
 
 ---
 
 ## Traps worth carrying forward
 
-- **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart. This
-  has now cost time in four separate sessions.
-- **TOTP cannot work on this host** — the clock is unsynchronised and sits
-  in 2026. Sign in with `bootstrap.py session --email <you>`.
-- **TOTP codes are single-use.** A test that logs in twice inside one
-  30-second step fails on the replay guard, not on the code under test.
-- **The TLP floor trigger forbids an element BELOW its case**, so a test
-  fixture with a GREEN node in an AMBER case fails at the database.
-- **Test cleanup order matters and keeps growing.** Anything that calls
-  analytics leaves `analytics.projection` rows; anything that merges or
-  approves leaves notifications; both block the case delete. Assertions and
-  their elements must go in ONE transaction, because the deferred
-  invariant-1 triggers fire at commit.
-- **Running the suite while background agents are also running it** produces
-  failures that are pure interference — the e2e cleanup deletes by email
-  pattern and two runs delete each other's users.
+- **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart.
+- **TOTP cannot work on this host** — unsynchronised clock, in 2026. Use
+  `bootstrap.py session --email <you>`.
+- **TOTP codes are single-use.** Two logins in one 30-second step fail on
+  the replay guard, not on the code under test.
+- **Constraints tie fields together and fire on UPDATE.** A case cannot be
+  created already expired; a break-glass grant cannot be aged past 8h; an
+  ingest key cannot expire before it was issued. Age the *pair*.
+- **`array_length('{}', 1)` is NULL, not 0.** Any `>= 1` check on an array
+  needs `coalesce` or it silently passes on the empty case — this shipped
+  as a real bug in the stealer-log compartment check.
+- **A partial unique index needs its predicate restated in `ON CONFLICT`.**
+- **Retention rules are GLOBAL.** A test that confirms one leaks into every
+  later test.
+- **Do not run the suite while background agents run theirs.** The e2e
+  cleanup deletes by email pattern and concurrent runs delete each other's
+  fixtures. The failures look real and are not.
 - **A hidden browser tab clamps `setTimeout` to ~1s** and suspends
-  `ResizeObserver`. Count messages and repaints, not wall time.
+  `ResizeObserver`.

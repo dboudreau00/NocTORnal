@@ -105,17 +105,22 @@ Deliberately NOT built, and why:
 
 ---
 
-## Phase 4 — Collection (weeks 7–9)
+## Phase 4 — Collection — BUILT 2026-07-25 (decision 53)
 
-- [ ] Adapter interface and scheduler with jitter and rate limiting
-- [ ] RSS adapter (simplest, proves the pipeline end to end)
-- [ ] Persona vault: envelope encryption, egress binding, status lifecycle
-- [ ] XenForo adapter with quote and signature stripping
-- [ ] MyBB adapter
-- [ ] Telegram MTProto adapter with FLOOD_WAIT handling
-- [ ] Document bucket: normalise, dedupe, version, index, embed
-- [ ] Selector extractors with offsets
-- [ ] Watch matching → watch hits
+- [x] **Adapter interface and scheduler** with symmetric jitter and
+      per-source `max_rps`. **Nothing loops** — `due_sources()` reports and
+      `run_once()` acts.
+- [x] **RSS adapter**, which refuses any feed carrying a DOCTYPE.
+- [x] **Persona vault**: envelope encryption, egress-separation check,
+      status lifecycle with terminal burn. `use()` is a context manager and
+      there is deliberately **no `get_secret()`** (invariant 7).
+- [ ] XenForo, MyBB and Telegram MTProto adapters. Each needs a real target
+      and a persona to develop against, both of which are authorisation
+      questions (docs/16 L3) rather than coding ones.
+- [x] **Document bucket**: dedupe on content, version rather than overwrite.
+      No embeddings.
+- [x] **Watch matching → watch hits**, with suppression applied before the
+      row is written.
 - [x] **Proposal model and the human review gate** (`proposals.py`,
       decision 39) — invariant 3 is now enforced by the extractor-facing
       class being *unable* to write the graph, rather than by remembering
@@ -191,15 +196,21 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 
 ---
 
-## Phase 7 — Comms channels (concept, `docs/10`)
+## Phase 7 — Comms channels — BUILT 2026-07-25 (decision 54)
 
-- [ ] `comms.platform` reference seeded, durable-selector mapping enforced
-- [ ] Contact-block parser with role attribution and the service stoplist
-- [ ] `CLAIMED` vs `CONFIRMED` control, PGP signature verification
-- [ ] Device fingerprint nodes from OMEMO / Matrix device keys
-- [ ] Conversation and participant model with mandatory provenance class
-- [ ] Forum PM capture where a persona is a party
-- [ ] Co-participation projection into the sociogram
+- [x] **`comms.platform` reference seeded** (15 platforms), durable-selector
+      mapping enforced by `normalise()`. Tox → first 64 hex; Telegram →
+      numeric id, never `@username`; SimpleX → no identifier, said out loud.
+- [ ] Contact-block parser with role attribution and the service stoplist.
+- [x] **`CLAIMED` / `OBSERVED` / `CONFIRMED`**, and CONFIRMED must state its
+      method. PGP signature verification itself is NOT built.
+- [x] **Device fingerprints against DEVICE nodes**, reported as a LEAD and
+      never as a merge.
+- [x] **Conversation and participant model with mandatory provenance
+      class**, and a CHECK requiring an authority for anything not obtained
+      by being a party or from an open room.
+- [x] **Minimisation** that drops bodies and keeps the contact graph.
+- [ ] Co-participation projection into the sociogram.
 
 **DECIDED (2026-07-25): message-level capture.** See decision 35. Metadata
 would have been cheaper, but content is what a disclosure obligation and a
@@ -246,19 +257,29 @@ a designated person.** That is a declaration the software records, not one
 it can verify. Counsel must review any deployment before it is used in any
 absolute sense.
 
-## Phase 9 — Ingest API (concept, `docs/12`)
+## Phase 9 — Ingest API — BUILT 2026-07-25 (decision 52)
 
-- [ ] `noct_sk_` key issuance, HMAC storage, mandatory expiry, rotation overlap
-- [ ] Ingest endpoint: async 202, idempotency, raw-persist-before-parse
-- [ ] Format detection and schema mapping per key
-- [ ] Category classifier and the correction loop
-- [ ] Triage scoring with watchlist dominance
-- [ ] Simhash near-duplicate suppression
-- [ ] Dead-letter queue with repair and replay
-- [ ] Stealer-log compartment, masking and minimisation
+- [x] **`noct_sk_` key issuance**, HMAC-with-pepper storage (not Argon2),
+      mandatory capped expiry, rotation overlap, IP allowlist, and
+      write-only scopes enforced by a CHECK (invariant 11).
+- [x] **Raw-persist-before-parse** and idempotency dedupe. The HTTP 202
+      endpoint itself is not wired; `accept()` is.
+- [x] **Format detection by sniffing**, never by declared Content-Type.
+- [x] **Category classifier** where structure beats the declaration, with
+      the confidence kept so a correction is visible as one.
+- [x] **Triage scoring** with the watched-selector term dominant.
+- [x] **Simhash near-duplicate suppression.**
+- [x] **Dead-letter queue with repair and replay**, and the original
+      fragment survives the replay.
+- [x] **Stealer-log compartment and masking.** Free-text PII search is
+      impossible by construction; reveal needs a live two-human
+      authorisation. **Minimisation policy is a legal determination and is
+      NOT resolved — docs/16 L2.**
 
-**Decide first:** stealer logs in scope? If yes, the compartment and
-minimisation policy comes before any ingest code.
+**DECIDED 2026-07-25: stealer logs ARE in scope** (operator directive,
+decision 52). The compartment is resolved in the schema. The minimisation
+policy and the lawful basis for holding data about thousands of uninvolved
+people are NOT resolved and are BLOCKING — see docs/16 L2.
 
 ---
 
