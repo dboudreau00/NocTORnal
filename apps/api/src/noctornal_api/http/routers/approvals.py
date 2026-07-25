@@ -196,11 +196,17 @@ def withdraw(
 
 
 class PolicyBody(BaseModel):
-    dual_control_merge: bool
+    dual_control_merge: bool | None = None
+    #: docs/14 U2. NONE | PRESENCE | COUNT -- see migration 0030.
+    withheld_disclosure: str | None = None
 
 
 class PolicyOut(BaseModel):
     dual_control_merge: bool
+    withheld_disclosure: str
+
+
+_DISCLOSURE = frozenset({"NONE", "PRESENCE", "COUNT"})
 
 
 policy_router = APIRouter(prefix="/cases/{case_id}/policy", tags=["approvals"])
@@ -213,11 +219,11 @@ def get_policy(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> PolicyOut:
     row = conn.execute(
-        'SELECT dual_control_merge FROM core."case" WHERE id = %s',
-        (case_id,)).fetchone()
+        'SELECT dual_control_merge, withheld_disclosure '
+        'FROM core."case" WHERE id = %s', (case_id,)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "case does not exist")
-    return PolicyOut(dual_control_merge=bool(row[0]))
+    return PolicyOut(dual_control_merge=bool(row[0]), withheld_disclosure=row[1])
 
 
 @policy_router.put("", response_model=PolicyOut)
@@ -237,23 +243,48 @@ def set_policy(
     Audited both ways. "When did this case stop requiring two signatures"
     is a question somebody will eventually need answered.
     """
+    from psycopg.types.json import Json
+
     row = conn.execute(
-        'SELECT dual_control_merge FROM core."case" WHERE id = %s',
-        (case_id,)).fetchone()
+        'SELECT dual_control_merge, withheld_disclosure '
+        'FROM core."case" WHERE id = %s', (case_id,)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "case does not exist")
-    was = bool(row[0])
-    if was != body.dual_control_merge:
-        from psycopg.types.json import Json
-        conn.execute(
+    current = {"dual_control_merge": bool(row[0]),
+               "withheld_disclosure": row[1]}
+
+    if (body.withheld_disclosure is not None
+            and body.withheld_disclosure not in _DISCLOSURE):
+        raise Problem(400, "Invalid request",
+                      f"withheld_disclosure must be one of "
+                      f"{', '.join(sorted(_DISCLOSURE))}")
+
+    wanted = {
+        "dual_control_merge": (current["dual_control_merge"]
+                               if body.dual_control_merge is None
+                               else body.dual_control_merge),
+        "withheld_disclosure": (body.withheld_disclosure
+                                or current["withheld_disclosure"]),
+    }
+    # One literal statement per setting. docs/05: "Parameterised queries
+    # only; no string-built SQL anywhere" -- and a column name interpolated
+    # from a dict this function happens to own today is exactly the shape
+    # that stops being safe when somebody widens the dict tomorrow.
+    _UPDATES = {
+        "dual_control_merge":
             'UPDATE core."case" SET dual_control_merge = %s WHERE id = %s',
-            (body.dual_control_merge, case_id))
+        "withheld_disclosure":
+            'UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
+    }
+    for setting, value in wanted.items():
+        if value == current[setting]:
+            continue
+        conn.execute(_UPDATES[setting], (value, case_id))
         conn.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
                     case_id, detail)
                VALUES (%s, 'USER', 'CASE_POLICY_CHANGED', 'case', %s, %s, %s)""",
             (user.user_id, case_id, case_id,
-             Json({"setting": "dual_control_merge",
-                   "from": was, "to": body.dual_control_merge})))
-    return PolicyOut(dual_control_merge=body.dual_control_merge)
+             Json({"setting": setting, "from": current[setting], "to": value})))
+    return PolicyOut(**wanted)

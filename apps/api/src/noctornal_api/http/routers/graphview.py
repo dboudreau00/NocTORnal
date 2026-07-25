@@ -74,13 +74,21 @@ def projected_graph(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
+    svc = _svc(conn, user)
     try:
-        sub = _svc(conn, user).project(p, limit=limit)
+        sub = svc.project(p, limit=limit)
+        # docs/14 U2. Computed here and not inside project(), because ego,
+        # path and metrics all call project() internally and would otherwise
+        # each pay for two aggregates to answer a question nobody asked.
+        withheld = svc.withheld(p)
     except ProjectionError as exc:
         raise Problem(400, "Invalid request", str(exc)) from exc
     return {
         "projection": sub.projection,
         "truncated": sub.truncated,
+        # Absent entirely when the case discloses nothing -- "withheld:
+        # false" would itself be an answer.
+        **({"withheld": withheld.as_response()} if withheld.as_response() else {}),
         "nodes": [{**n, "id": str(n["id"])} for n in sub.nodes],
         "edges": [{**e, "id": str(e["id"]),
                    "src_node_id": str(e["src_node_id"]),
