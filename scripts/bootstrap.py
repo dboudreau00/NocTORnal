@@ -529,6 +529,182 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
     print(RULE)
 
 
+# --- demo-network -----------------------------------------------------------
+
+# Three crews, deliberately shaped so the Phase 3 metrics have something to
+# find. `demo-case` is a 7-node star: every edge touches one actor, there is
+# not a single triangle in it, and on that shape betweenness, Burt's
+# constraint, Leiden and structural balance are all degenerate. A star cannot
+# tell a correct implementation from a broken one, and it cannot show an
+# analyst what the panel is for.
+#
+#   crew A (halcyon)   crew B (meridian)   crew C (bitwright)
+#     4 actors, dense    4 actors, dense     4 actors, dense
+#
+#   A <== dvina, kolar ==> B     two REDUNDANT bridges: removing either one
+#                                changes nothing, which is the whole point of
+#                                KPP-Neg over "arrest the top 3 by centrality"
+#   B <====== oriel ======> C    the SOLE bridge: one actor holds C on
+#
+# Signs give one balanced triad, one unbalanced triad (docs/03's own example:
+# two vouches and an accusation closing the triangle) and one "enemy of my
+# enemy" triad. Ties carry valid_from dates spread over three years so trust
+# decay has something to bite on -- docs/14 U3 notes nothing else in the
+# product sets those intervals yet.
+_CREWS = {
+    "halcyon": ["hal_vector", "hal_prism", "hal_quarry", "hal_dune"],
+    "meridian": ["mer_ledger", "mer_kite", "mer_florin", "mer_ash"],
+    "bitwright": ["bit_forge", "bit_lathe", "bit_anvil", "bit_ember"],
+}
+_BRIDGES = ["dvina", "kolar", "oriel"]
+
+
+def cmd_demo_network(args: argparse.Namespace) -> None:
+    _require_database_url()
+    now = datetime.now(timezone.utc)
+
+    def ago(months: int) -> datetime:
+        return now - timedelta(days=int(months * 30.44))
+
+    with connect() as conn:
+        owner = _user_id(conn, args.owner_email)
+        if owner is None:
+            _fail(
+                f"no user with email {args.owner_email}.\nCreate one first:\n"
+                f'  python scripts/bootstrap.py create-user --email '
+                f'{args.owner_email} --name "Your Name"'
+            )
+        cases = CaseService(conn)
+        graph = GraphWriteService(conn)
+        today = date.today()
+        code = args.code or "OP-LATTICEWORK-26"
+
+        try:
+            case_id = cases.create(
+                code=code,
+                title="Operation Latticework",
+                summary=(
+                    "Three crews joined by a small number of brokers. Written "
+                    "by scripts/bootstrap.py to exercise the structural "
+                    "analysis panel - fictional entities."
+                ),
+                legal_basis=(
+                    "Demonstration data. Replace with the real lawful basis "
+                    "before any operational use."
+                ),
+                authority_ref="DEMO/2026/0002",
+                classification="AMBER",
+                retention_until=today + timedelta(days=730),
+                review_due=today + timedelta(days=180),
+                owner_user_id=owner,
+                created_by=owner,
+            )
+        except CaseError as exc:
+            _fail(f"{exc}")
+        cases.transition_status(case_id, "ACTIVE", actor_id=owner)
+
+        def assertion(months: int, conf: str = "MODERATE") -> AssertionInput:
+            return AssertionInput(
+                basis="DIRECT_OBSERVATION", created_by=owner,
+                reliability="B", credibility="2", confidence=conf,
+                observed_at=ago(months),
+                external_ref=f"latticework/obs/{months}",
+            )
+
+        ids: dict[str, UUID] = {}
+        for crew, members in _CREWS.items():
+            for handle in members:
+                ids[handle] = graph.create_node(
+                    case_id=case_id, node_type="IDENTITY", label=handle,
+                    created_by=owner, attrs={"crew": crew},
+                    assertion=assertion(30, "HIGH"),
+                )
+        for handle in _BRIDGES:
+            ids[handle] = graph.create_node(
+                case_id=case_id, node_type="IDENTITY", label=handle,
+                created_by=owner, attrs={"role": "broker"},
+                assertion=assertion(24, "HIGH"),
+            )
+
+        def tie(etype: str, src: str, dst: str, months: int,
+                sign: int | None = None) -> None:
+            graph.create_edge(
+                case_id=case_id, edge_type=etype,
+                src_node_id=ids[src], dst_node_id=ids[dst],
+                created_by=owner, sign=sign, confidence="MODERATE",
+                # World time, so the timeline scrubber and trust decay both
+                # have something real to work with.
+                valid_from=ago(months),
+                assertion=assertion(months),
+            )
+
+        # Crew A: a closed, entirely positive triangle plus a fourth member.
+        tie("VOUCHED_FOR", "hal_vector", "hal_prism", 28)
+        tie("VOUCHED_FOR", "hal_prism", "hal_quarry", 26)
+        tie("VOUCHED_FOR", "hal_vector", "hal_quarry", 25)
+        tie("GUARANTOR_FOR", "hal_quarry", "hal_dune", 20)
+        tie("VOUCHED_FOR", "hal_vector", "hal_dune", 18)
+
+        # Crew B: docs/03's unstable configuration. Two vouches and an
+        # accusation closing the triangle -- either the grading is wrong, a
+        # relationship is breaking, or someone is running two personas.
+        tie("VOUCHED_FOR", "mer_ledger", "mer_kite", 22)
+        tie("VOUCHED_FOR", "mer_kite", "mer_florin", 15)
+        tie("ACCUSED_SCAM", "mer_ledger", "mer_florin", 4)
+        tie("ESCROW_FOR", "mer_kite", "mer_ash", 11)
+        tie("VOUCHED_FOR", "mer_ledger", "mer_ash", 9)
+
+        # Crew C: the enemy of my enemy. Two hostile ties and one friendly
+        # one is classically BALANCED, which surprises people.
+        tie("VOUCHED_FOR", "bit_forge", "bit_lathe", 19)
+        tie("DISPUTED_WITH", "bit_lathe", "bit_anvil", 7)
+        tie("DISPUTED_WITH", "bit_forge", "bit_anvil", 6)
+        tie("VOUCHED_FOR", "bit_forge", "bit_ember", 13)
+        tie("VOUCHED_FOR", "bit_lathe", "bit_ember", 12)
+
+        # Two redundant bridges A <-> B. Removing either alone changes
+        # nothing; the pair is what holds the crews together.
+        tie("VOUCHED_FOR", "hal_vector", "dvina", 16)
+        tie("VOUCHED_FOR", "dvina", "mer_ledger", 16)
+        tie("VOUCHED_FOR", "hal_prism", "kolar", 14)
+        tie("VOUCHED_FOR", "kolar", "mer_kite", 14)
+
+        # One SOLE bridge B <-> C. This is the actor whose removal actually
+        # breaks the network, and it has fewer ties than the crew hubs.
+        tie("VOUCHED_FOR", "mer_florin", "oriel", 10)
+        tie("VOUCHED_FOR", "oriel", "bit_forge", 8)
+
+        # A contested pair: vouched for, then accused. That combination is a
+        # lead in its own right, not noise to average away.
+        tie("ACCUSED_SCAM", "mer_ledger", "mer_ash", 2)
+
+    print(RULE)
+    print("Demo network created")
+    print(RULE)
+    print(f"  Case id   {case_id}")
+    print(f"  Case code {code}")
+    print("  Status    ACTIVE, classification AMBER")
+    print(f"  Owner     {args.owner_email}")
+    print()
+    print("  15 IDENTITY nodes in three crews, 22 signed ties, every one with")
+    print("  its own assertion and a world-time valid_from.")
+    print()
+    print("  Shaped so the Analysis panel has something to find:")
+    print("    - oriel is the SOLE bridge to the bitwright crew: few ties,")
+    print("      high betweenness, low Burt constraint. The broker signature.")
+    print("    - dvina and kolar redundantly bridge the same two crews, so")
+    print("      the key-player set is NOT the top-n by centrality.")
+    print("    - mer_ledger / mer_kite / mer_florin is an UNBALANCED triad")
+    print("      (two vouches and an accusation); bit_* is a balanced one.")
+    print("    - mer_ledger and mer_ash are a CONTESTED pair: vouched for,")
+    print("      then accused.")
+    print("    - Ties are dated 2 to 30 months back, so the trust-decay")
+    print("      half-life visibly changes the numbers.")
+    print()
+    print("  All of it is fiction and the lawful basis is a placeholder.")
+    print(RULE)
+
+
 # --- list-users -------------------------------------------------------------
 
 def cmd_list_users(args: argparse.Namespace) -> None:
@@ -923,6 +1099,16 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="an existing user, who becomes CASE_OWNER")
     demo.add_argument("--code", help=f"case code (default {DEMO_CODE})")
     demo.set_defaults(func=cmd_demo_case)
+
+    network = sub.add_parser(
+        "demo-network",
+        help="seed a case with real network structure, so the structural "
+             "analysis panel has something to find (demo-case is a star)",
+    )
+    network.add_argument("--owner-email", required=True,
+                         help="an existing user, who becomes CASE_OWNER")
+    network.add_argument("--code", help="case code (default OP-LATTICEWORK-26)")
+    network.set_defaults(func=cmd_demo_network)
 
     listing = sub.add_parser("list-users", help="who exists, and can they log in")
     listing.set_defaults(func=cmd_list_users)

@@ -896,14 +896,22 @@ CREATE TABLE projection (
   as_of_from    timestamptz,
   as_of_to      timestamptz,
   is_directed   boolean NOT NULL DEFAULT true,
+  preset        text,                      -- trust | communication | financial | all
+  -- Remaining parameters that change the numbers, notably the trust-decay
+  -- half-life: it reweights every edge, so it must be pinned here or the
+  -- results are not reproducible.
+  params        jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_by    uuid NOT NULL,
   created_at    timestamptz NOT NULL DEFAULT now()
 );
+-- A name identifies a parameter set within a case, so a metric run upserts
+-- its projection rather than accumulating a row per request.
+CREATE UNIQUE INDEX projection_case_name_uk ON projection (case_id, name);
 
 CREATE TABLE metric_run (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   projection_id uuid NOT NULL REFERENCES projection(id) ON DELETE CASCADE,
-  algorithm     text NOT NULL,             -- betweenness, louvain, kpp_neg...
+  algorithm     text NOT NULL,             -- sna_suite, kpp_neg...
   params        jsonb NOT NULL DEFAULT '{}'::jsonb,
   -- Approximation flag: betweenness on a big graph is sampled, and the
   -- UI must say so rather than implying exactness.
@@ -915,8 +923,37 @@ CREATE TABLE metric_run (
   finished_at   timestamptz,
   duration_ms   int,
   graph_hash    bytea,                     -- cache key; skip if unchanged
-  status        text NOT NULL DEFAULT 'RUNNING'
+  status        text NOT NULL DEFAULT 'RUNNING',
+  -- Graph-level results: structural balance, unbalanced triads, cut
+  -- vertices, bridges, components, and the key-player removal set with its
+  -- fragmentation preview. These are properties of the graph, so they fit
+  -- neither node_metric nor community_assignment.
+  result        jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error         text,
+  created_by    uuid,
+  -- Cache safety. project() filters by the CALLER's clearance and
+  -- compartments, so metrics differ between analysts. graph_hash is taken
+  -- over the caller-VISIBLE edge list, so visibility already partitions the
+  -- cache; these columns record that scoping explicitly so the lookup can
+  -- filter on it too. Serving an AMBER analyst a score computed over RED
+  -- nodes would leak the structure of nodes they may not see.
+  --
+  -- NOT NULL with NO DEFAULT deliberately: '{}' is what an analyst holding
+  -- no compartments looks up with, so a default would turn a forgotten
+  -- write into a silent fail-OPEN rather than a loud insert failure.
+  visibility_clearance    core.tlp NOT NULL,
+  visibility_compartments text[] NOT NULL,
+  CONSTRAINT metric_run_status_ck
+    CHECK (status IN ('RUNNING', 'COMPLETE', 'FAILED')),
+  -- A crashed run must not sit at 'RUNNING' forever reading as "still
+  -- working" (invariant 12: nothing is silently dropped).
+  CONSTRAINT metric_run_failed_explains_itself_ck
+    CHECK ((status = 'FAILED') = (error IS NOT NULL))
 );
+CREATE INDEX metric_run_cache_idx
+    ON metric_run (projection_id, algorithm, graph_hash,
+                   visibility_clearance, started_at DESC)
+ WHERE status = 'COMPLETE';
 
 CREATE TABLE node_metric (
   metric_run_id uuid NOT NULL REFERENCES metric_run(id) ON DELETE CASCADE,

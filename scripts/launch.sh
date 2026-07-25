@@ -76,7 +76,7 @@ if [ ! -x "$PYTHON" ]; then
 fi
 
 # uvicorn and the two editable packages are what the last step actually needs.
-if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology' 2>&1)"; then
+if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg' 2>&1)"; then
   printf '%s\n' "$probe" | indent
   fail 'the virtual environment is missing packages the API needs' \
     'Install them, from the repo root:' \

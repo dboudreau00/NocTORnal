@@ -54,6 +54,21 @@ That seeds a fictional case (`OP-NIGHTJAR-26`): two personas, a group, a
 forum, a wallet, a victim, six relationships each with its own assertion,
 and three selectors. Purge it before the instance holds anything real.
 
+For the **Analysis** tab, seed the other demo case as well:
+
+```bash
+.venv\Scripts\python scripts\bootstrap.py demo-network --owner-email you@example.com
+```
+
+`OP-LATTICEWORK-26` is fifteen personas in three crews joined by a handful
+of brokers. `OP-NIGHTJAR-26` is deliberately a star — every edge touches one
+actor — which makes it a fine first case but useless for structural
+analysis: a star has no triangles, so balance and communities have nothing
+to find and betweenness is trivially maximal at the centre. The latticework
+case has a sole bridge, a redundant pair of bridges, a balanced triad, an
+unbalanced one and a contested pair, and its ties are dated across three
+years so the trust-decay control visibly changes the numbers.
+
 `bootstrap.py list-users` shows who exists, their clearance, global roles,
 and whether TOTP is enrolled.
 

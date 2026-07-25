@@ -170,6 +170,13 @@
           <span class="rail-glyph" aria-hidden="true">▤</span>
           <span class="rail-cap">Evidence</span>
         </button>
+        <button id="tab-analytics" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-analytics" aria-selected="false" tabindex="-1"
+                data-tab="analytics"
+                title="Structural analysis: brokerage, communities, key player">
+          <span class="rail-glyph" aria-hidden="true">&#x25E9;</span>
+          <span class="rail-cap">Analysis</span>
+        </button>
         <button id="tab-search" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-search" aria-selected="false" tabindex="-1"
                 data-tab="search" title="Full-text search">
@@ -341,6 +348,85 @@
             <tbody id="ent-body"></tbody>
           </table>
           <p id="ent-empty" class="empty" hidden>No entities match.</p>
+        </section>
+
+        <!-- ANALYSIS (Phase 3). Every number here is computed against the
+             SAME projection the sociogram is showing, and the parameters are
+             restated on the panel because a metric without its projection is
+             not reproducible (docs/03). -->
+        <section id="pane-analytics" class="pane" role="tabpanel"
+                 aria-labelledby="tab-analytics" tabindex="-1" hidden>
+          <div class="pane-head">
+            <button id="an-run" type="button" class="btn primary">Run analysis</button>
+            <label class="field inline">
+              <span class="label">Trust decay half-life</span>
+              <select id="an-decay" class="select">
+                <option value="">Off</option>
+                <option value="6">6 months</option>
+                <option value="12">12 months</option>
+                <option value="24">24 months</option>
+              </select>
+            </label>
+            <label class="field inline">
+              <span class="label">Removal set</span>
+              <select id="an-kpp-n" class="select">
+                <option value="1">1 actor</option>
+                <option value="2">2 actors</option>
+                <option value="3" selected>3 actors</option>
+                <option value="4">4 actors</option>
+                <option value="5">5 actors</option>
+              </select>
+            </label>
+            <span id="an-status" class="muted small"></span>
+          </div>
+
+          <p id="an-projection" class="muted small"></p>
+          <div id="an-flags"></div>
+
+          <p id="an-empty" class="empty">
+            Run the analysis to compute brokerage, structural holes,
+            communities and the key-player set over the current projection.
+          </p>
+
+          <div id="an-results" hidden>
+            <!-- The teaching panel: docs/03 asks the UI to explain the
+                 low-degree/high-betweenness pattern, not just print it. -->
+            <div id="an-leads"></div>
+
+            <h3 class="h3">Actors by brokerage</h3>
+            <p class="muted small">
+              Rank and percentile sit beside every value: a betweenness of
+              0.0341 means nothing on its own, "3rd of 214" does. Constraint
+              is ranked ascending &mdash; rank 1 is the LEAST constrained
+              actor, the one spanning a structural hole.
+            </p>
+            <div class="scroll-x">
+              <table class="table">
+                <caption class="sr-only">Structural metrics per actor</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Actor</th>
+                    <th scope="col">Deg</th>
+                    <th scope="col">Vouches in/out</th>
+                    <th scope="col">Betweenness</th>
+                    <th scope="col">Constraint</th>
+                    <th scope="col">Eff. size</th>
+                    <th scope="col">Community</th>
+                  </tr>
+                </thead>
+                <tbody id="an-body"></tbody>
+              </table>
+            </div>
+
+            <h3 class="h3">Key player &mdash; who holds this network together</h3>
+            <div id="an-kpp"></div>
+
+            <h3 class="h3">Cohesion</h3>
+            <div id="an-cohesion"></div>
+
+            <h3 class="h3">Signed balance</h3>
+            <div id="an-balance"></div>
+          </div>
         </section>
 
         <!-- EVIDENCE -->

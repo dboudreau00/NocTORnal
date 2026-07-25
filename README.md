@@ -82,9 +82,9 @@ and [docs/00-decisions.md](docs/00-decisions.md).
 
 ## State of the build
 
-Phases 0, 1 and 2 are implemented and running, not just designed:
+Phases 0, 1, 2 and 3 are implemented and running, not just designed:
 
-- Postgres schema owned by an Alembic chain (0001–0025) that round-trips
+- Postgres schema owned by an Alembic chain (0001–0026) that round-trips
   from base to head; the ontology is generated from one definition.
 - Authentication (Argon2id + replay-protected TOTP + server-side sessions),
   and the five-part access gate as a single evaluator every endpoint calls.
@@ -98,12 +98,24 @@ Phases 0, 1 and 2 are implemented and running, not just designed:
   timeline scrubber over `as_of`, local metrics (degree, weighted, signed,
   clustering, k-core), saved layouts, and the inspector that answers
   "why do we believe this" with the Admiralty grading behind every claim.
+- Structural analysis over igraph: betweenness, harmonic closeness,
+  eigenvector, **Burt's constraint and effective size**, Leiden communities,
+  cut vertices and bridges, signed structural balance with unbalanced triads
+  surfaced as leads, and **key player (KPP-Neg)** with a fragmentation
+  preview. Rank and percentile beside every value, approximation and
+  truncation flagged, and trust decay applied at projection time without
+  ever mutating a stored weight.
 
-254 tests cover it, the Postgres and MinIO legs env-gated.
+304 tests cover it, the Postgres and MinIO legs env-gated.
 
-**Not built yet:** Phase 3 analytics — betweenness, Burt's constraint,
-communities, key-player — which need igraph in a worker; and Phases 4–9,
-collection through ingest. Read
+The key-player result is the sharpest thing here, because it disagrees with
+the obvious answer. On the shipped demo network, removing the three actors
+the tool selects fragments it to F=0.727 in three equal crews; removing the
+three *most central* actors reaches only F=0.409. Two of the most central
+brokers span the same gap, so removing both is redundant — which is exactly
+why "arrest the top three by centrality" is the wrong instinct.
+
+**Not built yet:** Phases 4–9, collection through ingest. Read
 [docs/14-enhancement-map.md](docs/14-enhancement-map.md) for what a real
 session showed is most worth doing next (evidence capture in the UI leads).
 `docs/00-decisions.md` records every decision and open question, and
