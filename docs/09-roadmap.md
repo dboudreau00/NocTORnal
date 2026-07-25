@@ -171,12 +171,22 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
       (decision 44, Alembic 0028): a generic four-eyes mechanism, wired to
       merge as a per-case switch that defaults to OFF because a merge is
       reversible and docs/05 scopes dual control to the irreversible.
-- [ ] ACH matrix and assumptions register
-- [ ] Report builder with TLP-aware redaction
-- [ ] Retention and purge jobs with tombstones
-- [ ] WebAuthn
-- [ ] Break-glass and dual-control flows
-- [ ] Security review: SSRF, CSP, rate limits, RLS
+- [x] **ACH matrix** (`ach.py`, decision 48), ranked by inconsistency
+      rather than support, with diagnosticity scoring and Admiralty
+      weighting. The **assumptions register** is NOT built.
+- [x] **Report builder with TLP-aware redaction** (`reports.py`,
+      decision 49). Structural redaction through the access gate's own code
+      path; the document's mark follows its contents; release goes through
+      the egress gate and is audited both ways.
+- [ ] Retention and purge jobs with tombstones. **The four-eyes mechanism
+      they need already exists** and `evidence.purge` is registered as an
+      unconditional dual-control operation (decision 44).
+- [ ] WebAuthn. Recovery codes landed in Phase 3; hardware keys did not.
+- [~] **Dual control landed** (decision 44). **Break-glass has NOT**:
+      `iam.break_glass` exists in the schema and nothing writes it.
+- [~] Security review: **rate limits done** (decisions 43, 45, after an
+      adversarial pass found 12 defects). SSRF, RLS and a non-owner DB role
+      remain.
 - [ ] Backup and restore rehearsal
 
 ---
