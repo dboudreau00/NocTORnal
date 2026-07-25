@@ -79,9 +79,22 @@ docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d
   something different, the entry is wrong.
 - **`locked`** — five failures locks the account for 15 minutes. Clear it
   with `bootstrap.py unlock --email you@example.com`.
-- **`bad_totp` on codes you are sure of** — check your device clock. The
-  window is the current 30-second step plus one either side, so more than
-  about a minute of drift will fail every time.
+- **`bad_totp` on codes you are sure of** — ask the server which is wrong,
+  the secret or the clock. Enter the six digits your app is showing:
+  `bootstrap.py totp-diagnose --email you@example.com --code 123456`. It
+  searches two hours either side and tells you whether it found a match
+  (clock drift, with the exact offset) or none at all (the app holds a
+  different secret, so re-scan).
+- **Locked out and needing in now** — on a local dev box you can have the
+  server print a valid code:
+  `bootstrap.py totp-code --email you@example.com`. This needs the database
+  and the KEK, so it grants nothing that access did not already grant; it
+  has no place on a shared host, and it is a workaround, not a fix. Repair
+  the authenticator with `reenrol-totp`.
+
+The server's TOTP is checked against the RFC 6238 test vectors, so if a
+code is rejected the disagreement is on the authenticator's side — a
+mistyped secret or a drifting clock.
 
 ## 3. Use it
 

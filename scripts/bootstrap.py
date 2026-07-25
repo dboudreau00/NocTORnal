@@ -662,6 +662,116 @@ def cmd_reenrol_totp(args: argparse.Namespace) -> None:
     print(RULE)
 
 
+def cmd_totp_code(args: argparse.Namespace) -> None:
+    """Print a currently-valid code for an enrolled user.
+
+    This exists to unstick local development when an authenticator entry is
+    wrong, and to diagnose drift. It does NOT weaken the deployment: running
+    it requires both the database and NOCTORNAL_TOTP_KEK, and anyone holding
+    those can already mint a session directly — the second factor protects
+    against a stolen password, not against the operator of the machine.
+
+    It has no place on a shared or production host. Fix the authenticator
+    (`reenrol-totp`) rather than relying on this.
+    """
+    _require_database_url()
+    _require_kek()
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        secret = PgUserStore(conn).get_totp_secret(user_id)
+        if secret is None:
+            _fail(f"{args.email} has no TOTP secret; run reenrol-totp --new-secret")
+        last = conn.execute(
+            "SELECT totp_last_counter FROM iam.app_user WHERE id = %s", (user_id,)
+        ).fetchone()[0]
+
+    now = int(time.time())
+    step = totp.STEP_SECONDS
+    counter = now // step
+    remaining = step - now % step
+
+    print(RULE)
+    print("Current TOTP code (development convenience)")
+    print(RULE)
+    print(f"  {args.email}")
+    print()
+    print(f"  CODE   {totp.code_at(secret, now)}      valid for {remaining} s")
+    if remaining < 5:
+        print(f"  NEXT   {totp.code_at(secret, now + step)}      "
+              f"use this one if you cannot type fast enough")
+    print()
+    if last is not None and counter <= last:
+        # Replay protection rejects a counter that has already been accepted.
+        print(f"  WARNING: step {counter} has already been used "
+              f"(last accepted {last}).")
+        print("  Wait for the next code — a used code is refused even while")
+        print("  it is still on screen. That is the replay guard working.")
+        print()
+    print("  If your authenticator shows something different, its entry is")
+    print("  wrong or its clock has drifted. Compare, then fix it with:")
+    print(f"    python scripts/bootstrap.py reenrol-totp --email {args.email}")
+    print(RULE)
+
+
+def cmd_totp_diagnose(args: argparse.Namespace) -> None:
+    """Work out why a code from an authenticator was rejected.
+
+    Given the six digits the app is showing, search a wide window of time
+    steps for a match. A hit far from now means clock drift (a fixable
+    offset); no hit at all means the app holds a different secret, so the
+    entry itself must be replaced.
+    """
+    _require_database_url()
+    _require_kek()
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        secret = PgUserStore(conn).get_totp_secret(user_id)
+        if secret is None:
+            _fail(f"{args.email} has no TOTP secret")
+
+    code = args.code.strip().replace(" ", "")
+    now = int(time.time())
+    step = totp.STEP_SECONDS
+    here = now // step
+    # +/- 2 hours: enough to catch a wrong timezone applied to the clock.
+    span = (2 * 60 * 60) // step
+    hits = [d for d in range(-span, span + 1)
+            if totp.code_at(secret, (here + d) * step) == code]
+
+    print(RULE)
+    print("TOTP diagnosis")
+    print(RULE)
+    print(f"  Code offered   {code}")
+    print(f"  Accepted window is the current step +/- 1 "
+          f"({step}s each), i.e. about {step * 3}s wide.")
+    print()
+    if not hits:
+        print("  No match anywhere within +/- 2 hours.")
+        print()
+        print("  The authenticator holds a DIFFERENT SECRET. Clock drift is")
+        print("  not the cause. Delete the entry and re-add it by scanning:")
+        print(f"    python scripts/bootstrap.py reenrol-totp --email {args.email}")
+    else:
+        nearest = min(hits, key=abs)
+        drift = nearest * step
+        print(f"  Match found at step offset {nearest:+d} "
+              f"({drift:+d} seconds from this server).")
+        print()
+        if abs(nearest) <= totp.DRIFT_WINDOWS:
+            print("  That is INSIDE the accepted window, so the secret is")
+            print("  right and this code should have worked. If it was")
+            print("  refused, it had already been used — wait for the next.")
+        else:
+            print("  The secret is CORRECT; the clock is off. Enable automatic")
+            print("  time on the device generating the code (a manually set")
+            print("  clock, or the wrong timezone applied to it, does this).")
+    print(RULE)
+
+
 # --- CLI --------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -724,6 +834,24 @@ def _build_parser() -> argparse.ArgumentParser:
              "authenticator entry stops working",
     )
     reenrol.set_defaults(func=cmd_reenrol_totp)
+
+    code = sub.add_parser(
+        "totp-code",
+        help="print a valid code now (development convenience, not for a "
+             "shared host)",
+    )
+    code.add_argument("--email", required=True)
+    code.set_defaults(func=cmd_totp_code)
+
+    diagnose = sub.add_parser(
+        "totp-diagnose",
+        help="say why a code your app shows was rejected: wrong secret, or "
+             "clock drift",
+    )
+    diagnose.add_argument("--email", required=True)
+    diagnose.add_argument("--code", required=True,
+                          help="the six digits your authenticator is showing")
+    diagnose.set_defaults(func=cmd_totp_diagnose)
 
     return parser
 
