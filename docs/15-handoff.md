@@ -203,8 +203,11 @@ the Zone B worker docs/02 describes.** A queue would add a process, a
 dependency and a progress UI without changing a number at this scale
 (2,000 nodes / 6,000 edges measured at 1.15 s). The seam is deliberate — the
 compute layer is pure, so moving it later is a change of caller, not of
-algorithm. The accepted caveat is that this is a CPU-bound path behind a
-non-step-up permission with rate limiting still deferred.
+algorithm. The accepted caveat was that this is a CPU-bound path behind a
+non-step-up permission with rate limiting deferred -- **that caveat is now
+closed**: `analytics.suite` and `analytics.key_player` carry their own
+per-user limits (decision 43), and the key-player bucket is smaller than the
+suite's because KPP-Neg is combinatorial in the removal-set size.
 
 ### Three bugs found and fixed on the way in
 
@@ -333,10 +336,12 @@ destroys the spatial memory analysts build.
 - **Phases 7, 8, 9 untouched.** Phase 7 is decided (message-level capture,
   decision 35); Phase 8 is BLOCKED on the prohibited-content policy
   (decision 36, and the warning at the top of the README).
-- **Still no CI**, and the deferred security items (rate limiting, session
-  IP/UA binding, non-owner DB role, compartment registry) are unchanged.
-- **Analytics still run in-process** (decision 30). Fine at this scale,
-  and a DoS surface for an authenticated analyst until rate limiting lands.
+- **CI now runs four gates** (decision 42) and **rate limiting has landed**
+  (decision 43). The security items still deferred are session IP/UA
+  binding, a non-owner DB role, login timing equalisation and the
+  compartment registry.
+- **Analytics still run in-process** (decision 30). Fine at this scale, and
+  no longer an unmetered DoS surface.
 
 ## What to do next
 

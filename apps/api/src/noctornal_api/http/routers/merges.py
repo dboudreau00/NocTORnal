@@ -27,6 +27,7 @@ from noctornal_api.http.deps import (
     require_step_up,
 )
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import rate_limit
 from noctornal_api.merges import MergeError, MergeRecord, MergeService
 
 router = APIRouter(prefix="/cases/{case_id}/merges", tags=["merges"])
@@ -80,7 +81,8 @@ def history(
     return {"merges": [_out(m) for m in MergeService(conn).history(case_id, limit)]}
 
 
-@router.post("", response_model=MergeOut, status_code=201)
+@router.post("", response_model=MergeOut, status_code=201,
+             dependencies=[Depends(rate_limit("merge"))])
 def merge(
     case_id: UUID, body: MergeBody,
     user: CurrentUser = Depends(require("graph.merge")),
@@ -97,7 +99,8 @@ def merge(
         raise Problem(409, "Conflict", str(exc)) from exc
 
 
-@router.post("/{merge_id}/reverse", response_model=MergeOut)
+@router.post("/{merge_id}/reverse", response_model=MergeOut,
+             dependencies=[Depends(rate_limit("merge"))])
 def reverse(
     case_id: UUID, merge_id: UUID, body: ReversalBody,
     user: CurrentUser = Depends(require("graph.unmerge")),

@@ -37,7 +37,7 @@ curation.py  tags, node sets, search
 http/        app factory, deps (auth + gate), routers
 ```
 
-## The two rules a new endpoint must follow
+## The three rules a new endpoint must follow
 
 1. **Case-scoped endpoints depend on `require("<permission>")`** (or call
    `authorize_object` when the object is an element whose classification
@@ -47,6 +47,32 @@ http/        app factory, deps (auth + gate), routers
    in the same transaction. The database rejects an assertion-less node or
    edge at commit anyway (invariant 1), but going around the service means
    discovering that as a 500 instead of a clean 400.
+3. **An endpoint that costs real money gets a limit.** Add it to the
+   catalogue in `ratelimit.py` and hang `Depends(rate_limit("<name>"))` on
+   the route. "Costs real money" means CPU (analytics), storage that cannot
+   be reclaimed (WORM ingest), something leaving the boundary (export), or
+   an analyst's attention (capture floods the triage queue). Everything is
+   already under a blanket per-credential ceiling applied in middleware, so
+   this is about the specific cost, not about basic protection.
+
+## Rate limiting
+
+`ratelimit.py` holds the algorithm and the catalogue; `ratelimit_redis.py`
+holds the one Lua script; `http/limits.py` wires both into requests. The
+full reasoning is decision 43. Four things worth knowing before touching it:
+
+- **`REDIS_URL` unset ⇒ per-process metering**, with a loud warning at
+  startup. Correct for a single-process dev instance, wrong for a
+  deployment with more than one worker.
+- **A backend outage means different things to different limits.** The
+  cost-bearing ones return 503 rather than run unmetered; the blanket
+  ceiling fails open so that a Redis restart is not an outage. A test
+  asserts the blanket ceiling is the *only* fail-open entry.
+- **Login is metered twice** — a generous limit on attempts (so a NAT'd
+  organisation can sign on) and a tight one on *failures* (which only a
+  guesser produces).
+- **`NOCTORNAL_RATELIMIT=off`** disables everything. It exists for tests
+  that deliberately hammer an endpoint. It logs a warning on every start.
 
 ## Tests
 
@@ -64,8 +90,6 @@ including step-up re-challenge and the invariant-8 export refusal.
 
 - **CSRF** — cookie auth is set but there is no double-submit token yet, so
   browser clients should use the Bearer token until it lands (docs/05).
-- **Rate limiting** — per-user/per-endpoint limits (docs/05) are not here;
-  DB-level account lockout is the only brake on login guessing.
 - **Egress gate** — `export` enforces the AMBER_STRICT/RED floor, but the
   destination-aware gate is Phase 5 (docs/07).
 - Node/edge **read** endpoints, assertion listing, and the neighbourhood /
