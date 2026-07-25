@@ -152,8 +152,10 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 - [x] **Entity merge with reversal** (`merges.py`, Alembic 0027,
       decision 41), step-up gated, with an entity-resolution panel in the
       inspector that offers only same-type candidates and lists every
-      merge with a one-click reversal. **Dual control is NOT built** --
-      one cleared analyst with a fresh second factor can merge alone.
+      merge with a one-click reversal. **Dual control landed 2026-07-25**
+      (decision 44, Alembic 0028): a generic four-eyes mechanism, wired to
+      merge as a per-case switch that defaults to OFF because a merge is
+      reversible and docs/05 scopes dual control to the irreversible.
 - [ ] ACH matrix and assumptions register
 - [ ] Report builder with TLP-aware redaction
 - [ ] Retention and purge jobs with tombstones
