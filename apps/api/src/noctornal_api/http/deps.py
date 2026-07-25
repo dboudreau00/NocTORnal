@@ -236,6 +236,37 @@ def require(permission_key: str):
     return _dep
 
 
+def require_step_up(
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> None:
+    """Demand a RECENTLY re-authenticated session, independently of any
+    permission.
+
+    The five-part gate already enforces step-up for permissions flagged
+    `requires_step_up` in the seed. This is for operations whose danger is
+    not captured by their permission row -- docs/01 requires it explicitly
+    for merges, because a merge rewrites who did what across a whole case
+    and a session someone walked away from must not be enough to perform
+    one.
+
+    Deliberately separate from `require()` so the two can be composed: an
+    endpoint states its permission AND its assurance requirement, and
+    neither is implied by the other.
+    """
+    fresh = (
+        user.session_mfa_at is not None
+        and (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
+        < STEP_UP_FRESHNESS
+    )
+    if not fresh:
+        _audit(conn, "AUTHZ_DENIED", user.user_id, None,
+               {"failed_checks": ["step_up_freshness"], "scope": "step_up"})
+        raise Problem(403, "Forbidden",
+                      "re-authenticate with your second factor before "
+                      "performing this operation")
+
+
 def check_writable_labels(
     conn: psycopg.Connection,
     user: CurrentUser,
