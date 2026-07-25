@@ -350,3 +350,27 @@ def test_third_party_role_words_cover_their_common_variants(label):
     """A word list is only as good as its misses, and each of these was
     one."""
     assert parse(f"{label}: x@host.tld")[0].role == ROLE_THIRD_PARTY
+
+
+def test_a_bare_onion_url_is_not_read_as_a_line_labelled_https():
+    """The colon in a URI scheme made `_LINE` split `https://x.onion` into
+    a label and `//x.onion`, which `onion_norm` reduces to the empty
+    string. The entry then scored 0.600 as a confidently resolved STRONG
+    selector while carrying no durable value at all -- silently excluded
+    from proposals, the fingerprint and shared-service counting, because
+    '' is not None. The vendor's own shop address was lost precisely when
+    they pasted it bare, which is the common case.
+    """
+    entry = parse("https://abcdefghijklmnop.onion")[0]
+    assert entry.selector_type == "ONION"
+    assert entry.durable_value == "abcdefghijklmnop.onion"
+    assert entry.label is None
+
+
+def test_no_entry_ever_carries_an_empty_durable_value():
+    """An empty string is not "no value" to a database: every observation
+    normalising to it collides with every other one."""
+    for line in ["https://abcdefghijklmnop.onion", "Shop: http://x.onion",
+                 f"TOX: {TOX_ID}", "Jabber: v@shop.tld", "prose with no value"]:
+        for entry in parse(line):
+            assert entry.durable_value is None or entry.durable_value.strip()

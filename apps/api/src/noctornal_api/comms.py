@@ -320,16 +320,46 @@ def _normalise_telegram(value: str) -> Normalised:
     if cleaned.startswith("@"):
         return Normalised(None, _NOT_DURABLE_TELEGRAM)
     digits = cleaned[1:] if cleaned.startswith("-") else cleaned
-    if not digits.isdigit():
+    # ASCII digits ONLY. `str.isdigit()` is Unicode-aware and accepts
+    # fullwidth and Arabic-Indic forms; migration 0036's `^[0-9]+$` is
+    # not, so the two disagreed and a repaired row's stored durable would
+    # be NULL while the live code kept computing a value -- correlation
+    # then finds nothing and reads as "no match". A Telegram id is ASCII;
+    # refusing the rest costs nothing real.
+    if not digits or not all("0" <= ch <= "9" for ch in digits):
         return Normalised(None, _NOT_DURABLE_TELEGRAM)
     canonical = _canonical("TELEGRAM_ID", cleaned)
+    if cleaned.startswith("-100") and len(cleaned) > 4:
+        # KNOWN UNRESOLVED COLLISION -- see docs/16 D8.
+        #
+        # The ontology strips the Bot-API `-100` prefix so that the two
+        # encodings of one channel collapse, and its own docstring says a
+        # chat id and an unrelated user id "must never share a
+        # norm_value". Stripping the prefix produces exactly that: the
+        # channel `-1001234567890` and the USER `1234567890` both
+        # normalise to `1234567890`.
+        #
+        # It is NOT fixed here on purpose. Namespacing channels would
+        # re-key every stored TELEGRAM_ID selector, and it cannot be done
+        # correctly by the normaliser alone -- a bare positive number is
+        # a user in one encoding and a channel in another, and only the
+        # collector knows which. So the risk is REPORTED on every such
+        # observation rather than hidden behind a value that looks
+        # certain. An analyst who sees this note can check the entity
+        # type; one who sees nothing cannot.
+        return Normalised(
+            canonical,
+            "WARNING -- possible identifier collision. The Bot-API '-100' "
+            "prefix is stripped so the MTProto form of this CHANNEL "
+            "matches, but the result is indistinguishable from the USER "
+            "id of the same number. Confirm the entity type before "
+            "treating a correlation on this value as the same actor "
+            "(docs/16 D8).")
     if cleaned.startswith("-"):
         return Normalised(
             canonical,
-            "a negative id is a GROUP or CHANNEL, not a user. The Bot-API "
-            "'-100' prefix is stripped so the MTProto form of the same "
-            "channel matches; a bare minus is kept so a chat id never "
-            "collides with a user id.")
+            "a negative id is a basic GROUP, not a user. The minus is kept "
+            "so a chat id never collides with a user id.")
     return Normalised(canonical)
 
 
