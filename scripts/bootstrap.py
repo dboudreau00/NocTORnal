@@ -569,6 +569,99 @@ def cmd_list_users(args: argparse.Namespace) -> None:
     print("cases they are assigned to, and can create none.")
 
 
+def cmd_unlock(args: argparse.Namespace) -> None:
+    """Clear a lockout.
+
+    Login deliberately returns one generic failure for every cause, so a
+    locked account is indistinguishable from a wrong code at the screen —
+    good against an attacker, unhelpful when the locked-out person is you.
+    `audit.event` holds the real reason; this clears the lock.
+    """
+    _require_database_url()
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        before = conn.execute(
+            "SELECT failed_logins, locked_until FROM iam.app_user WHERE id = %s",
+            (user_id,),
+        ).fetchone()
+        conn.execute(
+            """UPDATE iam.app_user
+                  SET failed_logins = 0, locked_until = NULL
+                WHERE id = %s""",
+            (user_id,),
+        )
+
+    print(RULE)
+    print("Lockout cleared")
+    print(RULE)
+    print(f"  Email          {args.email}")
+    print(f"  Failed logins  {before[0]} -> 0")
+    print(f"  Locked until   {before[1] or '(not locked)'} -> (not locked)")
+    print()
+    print("  Why it locked is in the audit trail, not in the login response:")
+    print("    SELECT occurred_at, detail->>'reason' FROM audit.event")
+    print("     WHERE action = 'AUTH_FAILED' ORDER BY seq DESC LIMIT 10;")
+    print(RULE)
+
+
+def cmd_reenrol_totp(args: argparse.Namespace) -> None:
+    """Re-display enrolment, or issue a fresh secret.
+
+    Hand-typing a 32-character base32 string is the likeliest reason a
+    correct password still fails with a bad code, so this prints a scannable
+    QR for the EXISTING secret. --new-secret replaces it instead, which
+    invalidates whatever the old authenticator entry produces.
+    """
+    _require_database_url()
+    _require_kek()
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        store = PgUserStore(conn)
+        if args.new_secret:
+            secret = totp.generate_secret()
+            store.enroll_totp(user_id, secret)
+            # The replay counter belongs to the retired secret; leaving it in
+            # place would reject early codes from the new one.
+            conn.execute(
+                "UPDATE iam.app_user SET totp_last_counter = NULL WHERE id = %s",
+                (user_id,),
+            )
+        else:
+            secret = store.get_totp_secret(user_id)
+            if secret is None:
+                _fail(f"{args.email} has no TOTP secret; use --new-secret")
+
+    uri = _otpauth_uri(args.email, secret)
+    now = int(time.time())
+    print(RULE)
+    print("New TOTP secret issued" if args.new_secret else "TOTP enrolment")
+    print(RULE)
+    print(f"  Email   {args.email}")
+    print()
+    print("  Scan this rather than typing the secret — a single mistyped")
+    print("  character produces codes that are wrong every single time.")
+    print()
+    _print_qr(uri)
+    print("  Secret (base32), if you must enter it by hand:")
+    print(f"    {secret}")
+    print()
+    print(f"  Enrolment URI:\n    {uri}")
+    print()
+    print(f"  Code valid right now: {totp.code_at(secret, now)}  "
+          f"(for another {30 - now % 30} s)")
+    print("  Your authenticator must show exactly this. If it does not, the")
+    print("  entry is wrong — fix it here, not at the login screen.")
+    if args.new_secret:
+        print()
+        print("  The previous secret no longer works. Delete the old entry")
+        print("  from your authenticator to avoid confusion.")
+    print(RULE)
+
+
 # --- CLI --------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -612,6 +705,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     listing = sub.add_parser("list-users", help="who exists, and can they log in")
     listing.set_defaults(func=cmd_list_users)
+
+    unlock = sub.add_parser(
+        "unlock",
+        help="clear a lockout after too many failed logins",
+    )
+    unlock.add_argument("--email", required=True)
+    unlock.set_defaults(func=cmd_unlock)
+
+    reenrol = sub.add_parser(
+        "reenrol-totp",
+        help="re-show the enrolment QR, or issue a fresh secret",
+    )
+    reenrol.add_argument("--email", required=True)
+    reenrol.add_argument(
+        "--new-secret", action="store_true",
+        help="replace the secret instead of re-showing it; the old "
+             "authenticator entry stops working",
+    )
+    reenrol.set_defaults(func=cmd_reenrol_totp)
 
     return parser
 

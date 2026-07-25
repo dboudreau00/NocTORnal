@@ -57,6 +57,32 @@ and three selectors. Purge it before the instance holds anything real.
 `bootstrap.py list-users` shows who exists, their clearance, global roles,
 and whether TOTP is enrolled.
 
+## If you cannot log in
+
+Login returns one generic "invalid credentials" for every cause — wrong
+password, wrong code, locked account — deliberately, so it cannot be used
+as an oracle. That means the screen will not tell you what went wrong, but
+the audit trail will:
+
+```bash
+docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal -c "SELECT occurred_at, detail->>'reason' AS reason FROM audit.event WHERE action LIKE 'AUTH%' ORDER BY seq DESC LIMIT 10;"
+```
+
+`reason` is one of `bad_password`, `bad_totp`, `locked`, `no_totp`,
+`not_enrolled`, `unknown_user`, `replay`.
+
+- **`bad_totp` with the right password** — almost always a mistyped secret.
+  Re-show the enrolment as a scannable QR:
+  `bootstrap.py reenrol-totp --email you@example.com`. Add `--new-secret`
+  to issue a fresh one (the old authenticator entry then stops working).
+  The command prints the code that is valid right now: if your app shows
+  something different, the entry is wrong.
+- **`locked`** — five failures locks the account for 15 minutes. Clear it
+  with `bootstrap.py unlock --email you@example.com`.
+- **`bad_totp` on codes you are sure of** — check your device clock. The
+  window is the current 30-second step plus one either side, so more than
+  about a minute of drift will fail every time.
+
 ## 3. Use it
 
 Open <http://127.0.0.1:8000/ui/> and sign in.
