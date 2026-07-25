@@ -198,6 +198,8 @@ def test_metrics_degree_and_signs(conn, world):
     b = by_id[str(ids["b"])]
     assert b["negative_degree"] == 1        # accused c
     assert m["node_count"] == 4 and m["edge_count"] == 4
+    # Every pair here is joined by exactly one edge, so dyads == edges.
+    assert m["dyad_count"] == 4
     # Ordered by degree descending, so the hub leads.
     assert m["nodes"][0]["id"] == str(ids["a"])
 
@@ -270,3 +272,24 @@ def test_projection_hides_over_classified_nodes_and_their_edges(conn, world):
     # The cleared analyst does see both.
     red = GraphService(conn, clearance="RED", compartments=frozenset())
     assert secret in red.project(_proj(case_id, preset="all")).node_ids()
+
+
+def test_parallel_edges_count_once_in_metrics(conn, world):
+    """Two actors joined by BOTH a vouch and an accusation are one dyad, not
+    two: degree is defined over neighbour sets. The response reports both
+    numbers so the difference does not read as a bug."""
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    case_id, uid, ids, _ = world
+    # a already VOUCHED_FOR b; add the reverse accusation over the same pair.
+    GraphWriteService(conn).create_edge(
+        case_id=case_id, edge_type="ACCUSED_SCAM", src_node_id=ids["b"],
+        dst_node_id=ids["a"], created_by=uid,
+        assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=uid),
+    )
+    m = _svc(conn).metrics(_proj(case_id, preset="trust"))
+    by_id = {n["id"]: n for n in m["nodes"]}
+    a = by_id[str(ids["a"])]
+    assert a["degree"] == 1                  # one neighbour, b
+    assert a["positive_degree"] == 1         # the vouch
+    assert a["negative_degree"] == 1         # and the accusation
+    assert m["edge_count"] > m["dyad_count"]

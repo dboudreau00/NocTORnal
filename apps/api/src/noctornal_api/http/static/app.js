@@ -1,8 +1,11 @@
-/* NocTORnal analyst console.
+/* NocTORnal analyst console — Phase 2 sociogram.
  *
  * No framework, no build step, no CDN — the app shell is served under a strict
  * `default-src 'self'` CSP, so everything lives in these three files and there
- * is no inline script or style anywhere.
+ * is no inline script or style anywhere. Nothing is ever written to
+ * `element.style` either: hue and state travel as classes, and everything that
+ * needs pixel control (the sociogram, the timeline density strip) is drawn on a
+ * <canvas>.
  *
  * TOKEN HANDLING — read this before shipping to a browser deployment.
  * The bearer token is held in sessionStorage and sent as an Authorization
@@ -13,6 +16,12 @@
  * cross-site posting. This build uses the bearer path because it is the same
  * code path an operator's CLI and the integration tests use. The token is
  * never logged, never put in a URL, and never rendered.
+ *
+ * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
+ * everything is measured against a PROJECTION — a named, parameterised view.
+ * The projection's parameters are on screen next to the canvas at all times,
+ * because a metric without its parameters is not reproducible and therefore
+ * not evidence.
  */
 'use strict';
 
@@ -44,6 +53,18 @@ const CREDIBILITY = {
 };
 /* ICD 203 analytic confidence. */
 const CONFIDENCE = ['LOW', 'MODERATE', 'HIGH'];
+const CONF_RANK = { LOW: 0, MODERATE: 1, HIGH: 2 };
+
+/* The four metrics /graph/metrics actually returns. Nothing else is offered:
+   betweenness, Burt's constraint and key-player fragmentation are Phase 3 and
+   inventing a control for them would be inventing the number. */
+const SIZE_METRICS = [
+  ['degree', 'Degree — activity, visibility'],
+  ['weighted_degree', 'Weighted degree — total tie strength'],
+  ['k_core', 'k-core — depth in the durable core'],
+  ['clustering', 'Clustering — how closed the neighbourhood is'],
+];
+const METRIC_LABEL = new Map(SIZE_METRICS);
 
 /* The /ontology endpoint returns only ACTOR/ARTEFACT/CONTEXT categories, but
    docs/06 defines seven hues. Map the type key to the closest hue by meaning
@@ -60,6 +81,8 @@ const HUE_BY_TYPE = {
 const HUE_BY_CATEGORY = { ACTOR: 'actor-group', ARTEFACT: 'artefact-infra',
                           CONTEXT: 'context' };
 
+const NODE_PAGE = 800;      // sociogram page size; beyond this, filter first
+
 /* ── state ────────────────────────────────────────────────────────────── */
 
 const state = {
@@ -71,15 +94,60 @@ const state = {
   tab: 'graph',
   ontology: { node_types: [], edge_types: [] },
   nodeTypeMeta: new Map(),   // key -> {display_name, category}
-  nodes: [],
-  edges: [],
+  nodes: [],                 // whole case, unprojected (entity list, pickers)
+  edges: [],                 // whole case, unprojected
   evidence: [],
   selection: null,           // {kind:'node'|'edge', id}
   includeRetracted: false,
-  showInferred: true,
-  graph: null,
   inspSeq: 0,
   booting: true,
+
+  /* projection */
+  presets: [],
+  presetMap: new Map(),
+  proj: { preset: 'all', include_inferred: true, min_confidence: 'LOW',
+          as_of: null },
+  projMeta: null,            // the `projection` object the API echoed back
+  projTruncated: false,
+  gnodes: [],                // projection nodes
+  gedges: [],                // projection edges
+  nodeConf: new Map(),       // node id -> best confidence of its ties
+  nodeTies: new Map(),       // node id -> tie count in the projection
+  nodeProposed: new Map(),   // node id -> count of PROPOSED-review ties
+  graphSeq: 0,
+
+  /* metrics */
+  metrics: null,
+  metricById: new Map(),
+  ranks: null,               // metric key -> Map(node id -> rank)
+  rankTotal: 0,
+  metricsNote: '',
+  metricsWarned: false,
+  sizeMetric: 'degree',
+
+  /* focus mode */
+  focus: null,               // {kind:'ego', id, depth} | {kind:'path', ...}
+  pathAnchor: null,
+  pathIds: null,
+  hoverId: null,
+  hideInferredHold: false,
+
+  /* canvas. tx/ty start NaN so "never positioned" is distinguishable from
+     "panned to exactly the origin". */
+  graph: null,               // the simulation: {nodes, links, index, ...}
+  view: { scale: 1, tx: NaN, ty: NaN },
+  needFit: true,
+  layout: new Map(),         // node id -> {x, y, is_pinned}
+
+  /* timeline */
+  timeSpan: null,            // {min, max} in ms
+  timePoints: [],            // element arrival times, for the density strip
+
+  /* palette */
+  paletteOpen: false,
+  paletteItems: [],
+  paletteIndex: 0,
+  paletteReturn: null,
 };
 
 /* ── DOM helpers ──────────────────────────────────────────────────────── */
@@ -107,6 +175,8 @@ function opts(select, pairs, selected) {
     select.appendChild(o);
   }
 }
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
 function hueClass(nodeType) {
   const meta = state.nodeTypeMeta.get(nodeType);
   const hue = HUE_BY_TYPE[nodeType] ||
@@ -118,13 +188,18 @@ function typeName(key) {
   return meta ? meta.display_name : key;
 }
 function tlpChip(value) {
-  const c = el('span', 'chip tlp-' + value, value);
-  return c;
+  return el('span', 'chip tlp-' + value, value);
 }
 function fmtTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+}
+function fmtDay(ms) {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString(undefined,
+    { year: 'numeric', month: 'short', day: '2-digit' });
 }
 function fmtBytes(n) {
   if (!Number.isFinite(n)) return '—';
@@ -135,6 +210,16 @@ function fmtBytes(n) {
 }
 function shortHash(h) { return h ? h.slice(0, 16) + '…' : '—'; }
 function shortId(id) { return id ? id.slice(0, 8) : '—'; }
+function num(v, dp) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return dp === undefined ? String(n) : n.toFixed(dp);
+}
+function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
 
 /* ── banners: every failure surfaces here, never only in the console ──── */
 
@@ -206,6 +291,9 @@ async function api(path, options) {
   return ct.includes('json') ? res.json() : res.text();
 }
 
+/** Case-scoped path helper — every Phase 2 endpoint hangs off the case. */
+function cpath(suffix) { return '/cases/' + state.caseId + suffix; }
+
 /** Report any unexpected failure in the banner stack. */
 function fail(err) {
   if (err && err.handled) return;
@@ -231,6 +319,7 @@ function endSession(title, detail) {
   state.caseId = null;
   state.caseRec = null;
   sessionStorage.removeItem(TOKEN_KEY);
+  closePalette();
   stopGraph();
   show($('view-app'), false);
   show($('view-login'), true);
@@ -292,6 +381,7 @@ async function showCaseList() {
   show($('view-cases'), true);
   show($('btn-cases'), false);
   show($('hdr-tlp'), false);
+  show($('hdr-asof'), false);
   $('hdr-case').textContent = 'No case selected';
   try {
     state.cases = await api('/cases');
@@ -366,6 +456,19 @@ async function createCase(event) {
 async function openCase(caseId) {
   state.caseId = caseId;
   state.selection = null;
+  state.focus = null;
+  state.pathAnchor = null;
+  state.pathIds = null;
+  state.hoverId = null;
+  state.needFit = true;
+  state.metricsWarned = false;
+  state.proj.as_of = null;
+  state.layout = new Map();
+  state.gnodes = [];
+  state.gedges = [];
+  state.projMeta = null;
+  state.view = { scale: 1, tx: NaN, ty: NaN };
+  applyMetrics(null);
   try {
     const [rec, ontology] = await Promise.all([
       api('/cases/' + caseId),
@@ -373,19 +476,26 @@ async function openCase(caseId) {
     ]);
     state.caseRec = rec;
     state.ontology = ontology;
-    state.nodeTypeMeta = new Map(
-      ontology.node_types.map((t) => [t.key, t]));
+    state.nodeTypeMeta = new Map(ontology.node_types.map((t) => [t.key, t]));
     $('hdr-case').textContent = rec.code + ' — ' + rec.title;
     const tlp = $('hdr-tlp');
     tlp.className = 'chip tlp-' + rec.classification;
     tlp.textContent = 'TLP:' + rec.classification;
     show(tlp, true);
     show($('btn-cases'), true);
+    show($('hdr-asof'), true);
     show($('view-cases'), false);
     show($('view-workspace'), true);
     buildPickers();
     renderInspector();
-    await loadGraph();
+    /* Presets and the saved layout must land before the first projection
+       fetch: the layout seeds node positions, and re-seeding after the fact
+       would visibly reshuffle a picture the analyst already knows. */
+    await Promise.all([loadPresets(), loadLayout()]);
+    buildProjectionControls();
+    renderProjectionBar();     // the parameters are on screen before the data
+    await loadCaseGraph();
+    await refreshSociogram();
     await loadEvidence();
     selectTab('graph');
   } catch (err) { fail(err); }
@@ -399,7 +509,7 @@ function selectTab(name) {
     tab.tabIndex = on ? 0 : -1;
     show($('pane-' + tab.dataset.tab), on);
   }
-  if (name === 'graph') resizeGraph();
+  if (name === 'graph') { resizeGraph(); resizeDensity(); }
 }
 
 function initTabs() {
@@ -408,33 +518,661 @@ function initTabs() {
     tab.addEventListener('click', () => selectTab(tab.dataset.tab));
     tab.addEventListener('keydown', (e) => {
       let next = null;
-      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
-      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
-      else if (e.key === 'Home') next = tabs[0];
+      /* The rail is a vertical tablist, so Up/Down are the primary keys —
+         Left/Right stay wired because muscle memory from the old tab strip
+         is real and costs nothing to honour. */
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        next = tabs[(i + 1) % tabs.length];
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        next = tabs[(i - 1 + tabs.length) % tabs.length];
+      } else if (e.key === 'Home') next = tabs[0];
       else if (e.key === 'End') next = tabs[tabs.length - 1];
       if (next) { e.preventDefault(); selectTab(next.dataset.tab); next.focus(); }
     });
   });
 }
 
-/* ── graph data ───────────────────────────────────────────────────────── */
+/* ── whole-case lists (entity table, pickers, timeline span) ───────────
+ * These stay UNPROJECTED on purpose. The sociogram shows a projection; the
+ * entity list is the case file, and an analyst looking for something must not
+ * have it hidden by a filter chosen for the graph. They also give the timeline
+ * a span that does not shrink as `as_of` moves. */
 
-async function loadGraph() {
+async function loadCaseGraph() {
   try {
     const [nodes, edges] = await Promise.all([
-      api('/cases/' + state.caseId + '/nodes?limit=500'),
-      api('/cases/' + state.caseId + '/edges?limit=1000&include_inferred=true'),
+      api(cpath('/nodes?limit=1000')),
+      api(cpath('/edges?limit=1000&include_inferred=true')),
     ]);
     state.nodes = nodes;
     state.edges = edges;
     buildEntityFilter();
     renderEntities();
     buildEdgePickers();
-    buildGraph();
+    computeTimeSpan();
+    renderScrubber(true);
   } catch (err) { fail(err); }
 }
 
-/* ── sociogram: a small spring/repulsion simulation on <canvas> ───────── */
+/** Reload everything a write could have changed. */
+async function reloadAll() {
+  await loadCaseGraph();
+  await refreshSociogram();
+}
+
+/* ── projection: the only thing a metric is ever computed against ─────── */
+
+async function loadPresets() {
+  try {
+    const out = await api(cpath('/graph/presets'));
+    state.presets = out.presets || [];
+  } catch (err) {
+    /* Without presets the projection selector cannot be honest about what it
+       is filtering, so fall back to the one preset whose meaning is not in
+       doubt and say so. */
+    state.presets = [{ key: 'all', label: 'All ties',
+                       description: 'Preset list unavailable — this is the ' +
+                                    'server default.', edge_types: null }];
+    fail(err);
+  }
+  state.presetMap = new Map(state.presets.map((p) => [p.key, p]));
+  if (!state.presetMap.has(state.proj.preset)) {
+    state.proj.preset = state.presets.length ? state.presets[0].key : 'all';
+  }
+}
+
+function buildProjectionControls() {
+  opts($('sel-preset'), state.presets.map((p) => [p.key, p.label]),
+       state.proj.preset);
+  opts($('sel-minconf'), [
+    ['LOW', 'LOW — everything'],
+    ['MODERATE', 'MODERATE and above'],
+    ['HIGH', 'HIGH only'],
+  ], state.proj.min_confidence);
+  opts($('sel-metric'), SIZE_METRICS, state.sizeMetric);
+  $('chk-inferred').checked = state.proj.include_inferred;
+}
+
+function projQuery() {
+  const q = new URLSearchParams();
+  q.set('preset', state.proj.preset);
+  q.set('include_inferred', state.proj.include_inferred ? 'true' : 'false');
+  q.set('min_confidence', state.proj.min_confidence);
+  if (state.proj.as_of) q.set('as_of', state.proj.as_of);
+  return q;
+}
+
+/** One fetch path for the sociogram. Sequence-guarded, because a scrubber drag
+ *  can start three of these before the first returns and the newest must win. */
+async function refreshSociogram() {
+  if (!state.caseId) return;
+  const seq = ++state.graphSeq;
+  const q = projQuery();
+  const gq = new URLSearchParams(q);
+  gq.set('limit', String(NODE_PAGE));
+  let g;
+  try {
+    g = await api(cpath('/graph?' + gq.toString()));
+  } catch (err) { fail(err); return; }
+  if (seq !== state.graphSeq) return;
+
+  state.gnodes = g.nodes || [];
+  state.gedges = g.edges || [];
+  state.projMeta = g.projection || null;
+  state.projTruncated = !!g.truncated;
+  indexProjection();
+
+  await refreshMetrics(seq, q);
+  if (seq !== state.graphSeq) return;
+
+  await reapplyFocus(seq, q);
+  if (seq !== state.graphSeq) return;
+
+  renderProjectionBar();
+  renderInspector();
+}
+
+/** Per-node facts the projection implies but does not carry as columns. */
+function indexProjection() {
+  const conf = new Map(), ties = new Map(), proposed = new Map();
+  for (const e of state.gedges) {
+    for (const id of [e.src_node_id, e.dst_node_id]) {
+      ties.set(id, (ties.get(id) || 0) + 1);
+      const cur = conf.get(id);
+      const rank = CONF_RANK[e.confidence];
+      if (rank !== undefined &&
+          (cur === undefined || rank > CONF_RANK[cur])) conf.set(id, e.confidence);
+      /* Invariant 3: machines propose, analysts dispose. A PROPOSED review on
+         an incident tie is the analyst's cue that something is waiting. */
+      if (e.review === 'PROPOSED') proposed.set(id, (proposed.get(id) || 0) + 1);
+    }
+  }
+  state.nodeConf = conf;
+  state.nodeTies = ties;
+  state.nodeProposed = proposed;
+}
+
+async function refreshMetrics(seq, q) {
+  try {
+    const m = await api(cpath('/graph/metrics?' + q.toString()));
+    if (seq !== state.graphSeq) return;
+    applyMetrics(m);
+    state.metricsNote = 'size = ' + (METRIC_LABEL.get(state.sizeMetric) || state.sizeMetric);
+    $('sel-metric').disabled = false;
+  } catch (err) {
+    if (seq !== state.graphSeq) return;
+    applyMetrics(null);
+    $('sel-metric').disabled = true;
+    const why = err instanceof ApiError && err.status === 403
+      ? 'the analytics.run scope is not on your token'
+      : (err instanceof ApiError ? err.title : 'the request failed');
+    state.metricsNote = 'metrics unavailable (' + why + ') — nodes are sized by ' +
+      'the degree counted from the edges on screen, which is not the same ' +
+      'number as the projection metric';
+    /* Surfaced once. A scrubber drag fires this on every step and a wall of
+       identical banners would bury the rest of the stack. */
+    if (!state.metricsWarned) {
+      state.metricsWarned = true;
+      fail(err);
+    }
+  }
+}
+
+function applyMetrics(m) {
+  state.metrics = m;
+  state.metricById = new Map();
+  state.ranks = null;
+  state.rankTotal = 0;
+  if (!m || !Array.isArray(m.nodes)) return;
+  for (const row of m.nodes) state.metricById.set(row.id, row);
+  const r = computeRanks(m.nodes);
+  state.ranks = r.ranks;
+  state.rankTotal = r.total;
+}
+
+/** docs/03: "Always show rank and percentile alongside raw value." A raw
+ *  clustering of 0.4142 means nothing; "12th of 214" does. Ties share a rank. */
+function computeRanks(list) {
+  const ranks = {};
+  for (const [key] of SIZE_METRICS) {
+    const sorted = list.slice()
+      .sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0));
+    const map = new Map();
+    let rank = 0, prev = null;
+    sorted.forEach((row, i) => {
+      const v = Number(row[key]) || 0;
+      if (prev === null || v !== prev) { rank = i + 1; prev = v; }
+      map.set(row.id, rank);
+    });
+    ranks[key] = map;
+  }
+  return { ranks: ranks, total: list.length };
+}
+
+function setPreset(key) {
+  if (!state.presetMap.has(key) || key === state.proj.preset) return;
+  state.proj.preset = key;
+  $('sel-preset').value = key;
+  refreshSociogram();
+}
+function setMinConfidence(value) {
+  if (!CONF_RANK.hasOwnProperty(value) || value === state.proj.min_confidence) return;
+  state.proj.min_confidence = value;
+  $('sel-minconf').value = value;
+  refreshSociogram();
+}
+function setIncludeInferred(on) {
+  if (on === state.proj.include_inferred) return;
+  state.proj.include_inferred = on;
+  $('chk-inferred').checked = on;
+  refreshSociogram();
+}
+function setSizeMetric(key) {
+  if (!METRIC_LABEL.has(key)) return;
+  state.sizeMetric = key;
+  $('sel-metric').value = key;
+  if (state.metrics) {
+    state.metricsNote = 'size = ' + METRIC_LABEL.get(key);
+  }
+  renderProjectionBar();
+  renderInspector();
+  draw();
+}
+
+/** The always-visible projection panel. docs/03: "Show the projection
+ *  parameters next to the results, always." */
+function renderProjectionBar() {
+  const preset = state.presetMap.get(state.proj.preset);
+  const desc = $('preset-desc');
+  desc.textContent = preset
+    ? preset.label + ' — ' + preset.description
+    : 'No projection description available.';
+  $('sel-preset').title = preset ? preset.description : '';
+
+  setMsg($('metric-note'), state.metricsNote);
+  $('legend-size').textContent = 'size = ' +
+    (state.metrics ? (METRIC_LABEL.get(state.sizeMetric) || state.sizeMetric)
+                   : 'degree (local count)');
+
+  renderFocusFlag();
+  renderReadout();
+  renderAsOfHeader();
+}
+
+function renderReadout() {
+  const box = $('proj-readout');
+  clear(box);
+  const p = state.projMeta || {};
+  const types = p.edge_types;
+  const parts = [
+    'preset=' + (p.preset || state.proj.preset),
+    'edge_types=' + (Array.isArray(types)
+      ? types.length + ' listed' : 'every social tie'),
+    'include_inferred=' + String(p.include_inferred === undefined
+      ? state.proj.include_inferred : p.include_inferred),
+    'min_confidence=' + (p.min_confidence || state.proj.min_confidence),
+    'as_of=' + (p.as_of ? fmtTime(p.as_of) : 'now'),
+  ];
+  const head = el('span', null, 'projection: ' + parts.join(' · '));
+  if (Array.isArray(types)) head.title = 'edge types: ' + types.join(', ');
+  box.appendChild(head);
+
+  const drawn = state.graph
+    ? state.graph.nodes.length + ' nodes, ' + state.graph.links.length + ' edges'
+    : '0 nodes';
+  box.appendChild(el('span', null, '  │  drawn: ' + drawn));
+
+  if (state.metrics) {
+    box.appendChild(el('span', null,
+      '  │  metrics over ' + state.metrics.node_count + ' nodes, ' +
+      state.metrics.edge_count + ' edges · density ' +
+      num(state.metrics.density, 4)));
+  } else {
+    box.appendChild(el('span', 'rd-warn', '  │  metrics unavailable'));
+  }
+  if (state.projTruncated) {
+    box.appendChild(el('span', 'rd-warn',
+      '  │  TRUNCATED at ' + NODE_PAGE + ' nodes — narrow the projection ' +
+      'before reading anything off this picture'));
+  }
+  if (state.proj.include_inferred) {
+    box.appendChild(el('span', null,
+      '  │  inferred edges are IN (this projection opts in, so they count ' +
+      'toward the metrics above)'));
+  }
+}
+
+function renderAsOfHeader() {
+  const hdr = $('hdr-asof');
+  const past = !!state.proj.as_of;
+  hdr.className = 'hdr-asof mono' + (past ? ' past' : '');
+  hdr.textContent = past ? '⏱ as-of: ' + fmtTime(state.proj.as_of) : '⏱ as-of: now';
+}
+
+/* ── focus mode: ego networks and shortest paths ───────────────────────
+ * Focus is a state the analyst must be able to see and leave. A picture that
+ * silently shows a subset is a picture that gets misread. */
+
+function renderFocusFlag() {
+  const flag = $('focus-flag'), text = $('focus-text');
+  /* Only the label span is rewritten — the button also holds a <kbd>Esc</kbd>
+     hint, and setting textContent on the button would delete it. */
+  const btn = $('focus-btn-text');
+  if (!state.focus) {
+    if (state.pathAnchor) {
+      /* An anchor waiting for its second click is a mode too, and a mode the
+         analyst cannot see is a mode they will forget they are in. */
+      text.textContent = 'PATH ANCHOR · ' + labelOf(state.pathAnchor) +
+        ' · shift-click a second entity';
+      flag.title = '';
+      btn.textContent = 'Cancel';
+      show(flag, true);
+      return;
+    }
+    show(flag, false);
+    return;
+  }
+  btn.textContent = 'Full projection';
+  if (state.focus.kind === 'ego') {
+    text.textContent = 'FOCUS · ego of ' + labelOf(state.focus.id) +
+      ' at depth ' + state.focus.depth;
+    flag.title = 'Only this neighbourhood is on screen. The metrics panel still ' +
+      'reports numbers for the whole projection, not for this subgraph.';
+  } else {
+    text.textContent = 'FOCUS · path ' + labelOf(state.focus.src) + ' → ' +
+      labelOf(state.focus.dst) +
+      (state.focus.connected ? ' · ' + state.focus.hops + ' hops'
+                             : ' · NOT CONNECTED in this projection');
+    flag.title = 'Shortest path, treated as undirected. The path endpoint does ' +
+      'not take an as-of parameter, so the path is traced against the latest ' +
+      'state of the projection even when the scrubber is in the past.';
+  }
+  show(flag, true);
+}
+
+/** Double-click, or Enter on the canvas: render just the ego network. */
+async function enterEgo(nodeId, depth) {
+  if (!nodeId) return;
+  const seq = ++state.graphSeq;
+  const q = projQuery();
+  q.set('depth', String(depth || 1));
+  try {
+    const sub = await api(cpath('/graph/ego/' + nodeId + '?' + q.toString()));
+    if (seq !== state.graphSeq) return;
+    state.focus = { kind: 'ego', id: nodeId, depth: depth || 1 };
+    state.pathIds = null;
+    state.pathAnchor = null;
+    state.needFit = true;
+    setRendered(sub.nodes || [], sub.edges || []);
+    renderProjectionBar();
+  } catch (err) {
+    if (seq !== state.graphSeq) return;
+    fail(err);
+  }
+}
+
+/** Shift-click a second node: highlight the shortest path, dim the rest. */
+async function enterPath(srcId, dstId) {
+  if (!srcId || !dstId || srcId === dstId) return;
+  const seq = ++state.graphSeq;
+  const q = projQuery();
+  q.delete('as_of');           // the endpoint takes no as_of; say so, below
+  q.set('src', srcId);
+  q.set('dst', dstId);
+  try {
+    const out = await api(cpath('/graph/path?' + q.toString()));
+    if (seq !== state.graphSeq) return;
+    state.focus = { kind: 'path', src: srcId, dst: dstId,
+                    hops: out.hops, connected: !!out.connected };
+    state.pathIds = out.connected ? (out.path || []) : [];
+    state.pathAnchor = null;
+    /* The path is computed on the full projection, so the full projection is
+       what must be on screen underneath it. */
+    setRendered(state.gnodes, state.gedges, { keepView: true });
+    renderProjectionBar();
+    if (!out.connected) {
+      banner('No path in this projection',
+        labelOf(srcId) + ' and ' + labelOf(dstId) + ' are not connected under ' +
+        'the current projection. A different preset, or including inferred ' +
+        'edges, may connect them — and whether it does is itself a finding.',
+        'warn');
+    }
+  } catch (err) {
+    if (seq !== state.graphSeq) return;
+    fail(err);
+  }
+}
+
+/** What the "Full projection" / "Cancel" button and Escape both do. */
+function leaveFocusOrAnchor() {
+  if (state.focus) { exitFocus(); return; }
+  if (state.pathAnchor) {
+    state.pathAnchor = null;
+    renderFocusFlag();
+    draw();
+  }
+}
+
+function exitFocus() {
+  if (!state.focus) return;
+  state.focus = null;
+  state.pathIds = null;
+  state.pathAnchor = null;
+  state.needFit = true;
+  setRendered(state.gnodes, state.gedges);
+  renderProjectionBar();
+}
+
+/** After a projection change, a focus computed under the old parameters is
+ *  stale. Re-derive it rather than dropping it silently — the analyst asked to
+ *  look at one neighbourhood and moving the scrubber should play THAT through
+ *  history, not throw them back to the whole graph. */
+async function reapplyFocus(seq, q) {
+  if (!state.focus) { setRendered(state.gnodes, state.gedges); return; }
+  const present = new Set(state.gnodes.map((n) => n.id));
+  if (state.focus.kind === 'ego') {
+    if (!present.has(state.focus.id)) {
+      state.focus = null;
+      setRendered(state.gnodes, state.gedges);
+      banner('Focus dropped', 'The focused entity is not in the projection any ' +
+        'more, so the view is back to the whole projection.', 'warn');
+      return;
+    }
+    const eq = new URLSearchParams(q);
+    eq.set('depth', String(state.focus.depth));
+    try {
+      const sub = await api(cpath('/graph/ego/' + state.focus.id + '?' + eq.toString()));
+      if (seq !== state.graphSeq) return;
+      setRendered(sub.nodes || [], sub.edges || [], { keepView: true });
+    } catch (err) {
+      if (seq !== state.graphSeq) return;
+      state.focus = null;
+      setRendered(state.gnodes, state.gedges);
+      fail(err);
+    }
+    return;
+  }
+  /* path focus */
+  if (!present.has(state.focus.src) || !present.has(state.focus.dst)) {
+    state.focus = null;
+    state.pathIds = null;
+    setRendered(state.gnodes, state.gedges);
+    return;
+  }
+  const pq = new URLSearchParams(q);
+  pq.delete('as_of');
+  pq.set('src', state.focus.src);
+  pq.set('dst', state.focus.dst);
+  try {
+    const out = await api(cpath('/graph/path?' + pq.toString()));
+    if (seq !== state.graphSeq) return;
+    state.focus.hops = out.hops;
+    state.focus.connected = !!out.connected;
+    state.pathIds = out.connected ? (out.path || []) : [];
+  } catch (_err) {
+    if (seq !== state.graphSeq) return;
+    state.pathIds = null;
+  }
+  setRendered(state.gnodes, state.gedges, { keepView: true });
+}
+
+/* ── timeline scrubber: the signature element (docs/06) ─────────────────
+ * Drag it and the graph plays through history. `as_of` is WORLD time — "the
+ * thing existed then" — not record time, which is why an edge can vanish from
+ * the picture without anything having been deleted.
+ *
+ * The span is computed from the UNPROJECTED case lists so it cannot shrink as
+ * the scrubber moves; a control whose own range depends on its value is
+ * unusable. */
+
+const tlCanvas = $('tl-density');
+const tlCtx = tlCanvas.getContext('2d');
+let scrubTimer = 0;
+
+function pushTime(out, value) {
+  if (!value) return;
+  const t = Date.parse(value);
+  if (Number.isFinite(t)) out.push(t);
+}
+
+function computeTimeSpan() {
+  const bounds = [];
+  const arrivals = [];
+  for (const n of state.nodes) {
+    pushTime(bounds, n.first_seen);
+    pushTime(bounds, n.last_seen);
+    pushTime(bounds, n.created_at);
+    const one = [];
+    pushTime(one, n.first_seen);
+    if (!one.length) pushTime(one, n.created_at);
+    if (one.length) arrivals.push(one[0]);
+  }
+  for (const e of state.edges) {
+    pushTime(bounds, e.valid_from);
+    pushTime(bounds, e.valid_to);
+    const one = [];
+    pushTime(one, e.valid_from);
+    if (one.length) arrivals.push(one[0]);
+  }
+  state.timePoints = arrivals;
+  if (bounds.length < 2) { state.timeSpan = null; return; }
+  const min = Math.min.apply(null, bounds);
+  const max = Math.max.apply(null, bounds);
+  state.timeSpan = max > min ? { min: min, max: max } : null;
+}
+
+function scrubUsable() {
+  return !!(state.timeSpan && state.timeSpan.max > state.timeSpan.min);
+}
+
+/** @param syncValue write the slider position back from `as_of`. Skipped while
+ *  the analyst is dragging, so the control never fights its own owner. */
+function renderScrubber(syncValue) {
+  const range = $('tl-range');
+  const strip = $('scrubber');
+  const usable = scrubUsable();
+  strip.classList.toggle('dead', !usable);
+  range.disabled = !usable;
+
+  if (!usable) {
+    $('tl-min').textContent = '—';
+    $('tl-max').textContent = '—';
+    $('tl-current').textContent = 'as-of: now';
+    $('tl-note').textContent = 'No temporal data in this case yet — nothing ' +
+      'carries a valid-from, first-seen or last-seen time, so there is no ' +
+      'history to play through. The strip switches on as soon as one element ' +
+      'does.';
+    range.setAttribute('aria-valuetext', 'unavailable — no temporal data');
+    if (syncValue !== false) range.value = '1000';
+    drawDensity();
+    return;
+  }
+
+  const span = state.timeSpan;
+  $('tl-min').textContent = fmtDay(span.min);
+  $('tl-max').textContent = fmtDay(span.max);
+  if (syncValue !== false) range.value = String(posFromAsOf());
+  const label = state.proj.as_of ? fmtTime(state.proj.as_of) : 'now (latest)';
+  $('tl-current').textContent = 'as-of: ' + label;
+  range.setAttribute('aria-valuetext', 'as-of ' + label);
+  $('tl-note').textContent = 'density = ' + state.timePoints.length +
+    ' elements entering the graph over ' +
+    Math.max(1, Math.round((span.max - span.min) / 86400000)) + ' days. ' +
+    'A gap here is a gap in COVERAGE, not necessarily in activity.';
+  drawDensity();
+}
+
+function posFromAsOf() {
+  const span = state.timeSpan;
+  if (!span || !state.proj.as_of) return 1000;
+  const t = Date.parse(state.proj.as_of);
+  if (!Number.isFinite(t)) return 1000;
+  return Math.round(clamp((t - span.min) / (span.max - span.min), 0, 1) * 1000);
+}
+
+function onScrubInput() {
+  if (!scrubUsable()) return;
+  const span = state.timeSpan;
+  const v = Number($('tl-range').value);
+  if (v >= 1000) {
+    state.proj.as_of = null;
+  } else {
+    const t = span.min + (span.max - span.min) * (v / 1000);
+    state.proj.as_of = new Date(t).toISOString();
+  }
+  renderScrubber(false);       // instant label + playhead, no waiting on I/O
+  renderAsOfHeader();
+  clearTimeout(scrubTimer);
+  scrubTimer = setTimeout(() => { refreshSociogram(); }, 200);
+}
+
+function resetAsOf() {
+  if (!state.proj.as_of) return;
+  state.proj.as_of = null;
+  renderScrubber(true);
+  renderAsOfHeader();
+  refreshSociogram();
+}
+
+function resizeDensity() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = tlCanvas.clientWidth, h = tlCanvas.clientHeight;
+  if (!w || !h) return;
+  tlCanvas.width = Math.round(w * dpr);
+  tlCanvas.height = Math.round(h * dpr);
+  tlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawDensity();
+}
+
+/** Collection-volume marks plus the playhead. Drawn, not styled — the CSP
+ *  leaves no inline style to size a bar with, and pixels are more honest here
+ *  anyway. */
+function drawDensity() {
+  const w = tlCanvas.clientWidth, h = tlCanvas.clientHeight;
+  if (!w || !h) return;
+  tlCtx.clearRect(0, 0, w, h);
+  tlCtx.fillStyle = PAINT.surface2 || '#1E2432';
+  tlCtx.fillRect(0, 0, w, h);
+
+  const span = state.timeSpan;
+  if (!span || span.max <= span.min) {
+    tlCtx.strokeStyle = PAINT.hairline || '#303849';
+    tlCtx.lineWidth = 1;
+    tlCtx.beginPath();
+    tlCtx.moveTo(0, h - 0.5);
+    tlCtx.lineTo(w, h - 0.5);
+    tlCtx.stroke();
+    return;
+  }
+
+  const buckets = Math.max(24, Math.min(120, Math.floor(w / 6)));
+  const counts = new Array(buckets).fill(0);
+  for (const t of state.timePoints) {
+    const f = (t - span.min) / (span.max - span.min);
+    if (f < 0 || f > 1) continue;
+    counts[Math.min(buckets - 1, Math.floor(f * buckets))] += 1;
+  }
+  let peak = 0;
+  for (const c of counts) if (c > peak) peak = c;
+  const bw = w / buckets;
+  tlCtx.fillStyle = PAINT.accentDim || '#2F6B66';
+  for (let i = 0; i < buckets; i += 1) {
+    if (!counts[i]) continue;
+    const bh = Math.max(2, (counts[i] / peak) * (h - 4));
+    tlCtx.fillRect(i * bw + 0.5, h - bh, Math.max(1, bw - 1), bh);
+  }
+  tlCtx.strokeStyle = PAINT.hairline || '#303849';
+  tlCtx.lineWidth = 1;
+  tlCtx.beginPath();
+  tlCtx.moveTo(0, h - 0.5);
+  tlCtx.lineTo(w, h - 0.5);
+  tlCtx.stroke();
+
+  const x = (posFromAsOf() / 1000) * w;
+  tlCtx.strokeStyle = state.proj.as_of ? (PAINT.alert || '#D4A03C')
+                                      : (PAINT.accent || '#4EA8A0');
+  tlCtx.lineWidth = 2;
+  tlCtx.beginPath();
+  tlCtx.moveTo(clamp(x, 1, w - 1), 0);
+  tlCtx.lineTo(clamp(x, 1, w - 1), h);
+  tlCtx.stroke();
+}
+
+/* ── sociogram ─────────────────────────────────────────────────────────
+ * A spring/repulsion layout on <canvas>, in WORLD coordinates with a separate
+ * view transform, so pan/zoom and the saved layout are independent of the
+ * viewport size. Saved positions are world coordinates: reopening the case in a
+ * different window size puts the picture back where the analyst left it.
+ *
+ * THE ENCODING RULES (docs/06) — these do not bend:
+ *   node size    chosen centrality metric (the select says which)
+ *   node colour  node type
+ *   node opacity confidence
+ *   node ring    selected / pinned / has unreviewed proposals
+ *   edge colour  sign — green positive, red negative, grey neutral
+ *   edge width   weight, LOG-scaled
+ *   edge style   solid = asserted, DASHED = inferred. Never negotiable.
+ */
 
 const canvas = $('graph-canvas');
 const ctx = canvas.getContext('2d');
@@ -445,12 +1183,20 @@ const cssVar = (name) =>
 const PAINT = {};
 function loadPaint() {
   PAINT.void = cssVar('--void');
+  PAINT.surface2 = cssVar('--surface-2');
+  PAINT.hairline = cssVar('--hairline');
   PAINT.pos = cssVar('--sign-positive');
   PAINT.neg = cssVar('--sign-negative');
   PAINT.neu = cssVar('--sign-neutral');
   PAINT.accent = cssVar('--accent');
+  PAINT.accentDim = cssVar('--accent-dim');
+  PAINT.alert = cssVar('--alert');
   PAINT.label = cssVar('--text-secondary');
+  PAINT.dim = cssVar('--text-tertiary');
+  PAINT.bright = cssVar('--text-primary');
   PAINT.font = '11px ' + (cssVar('--ui') || 'sans-serif');
+  PAINT.monoFont = '10px ' + (cssVar('--mono') || 'monospace');
+  PAINT.signFont = '600 13px ' + (cssVar('--mono') || 'monospace');
   PAINT.hues = {};
   for (const h of ['actor-persona', 'actor-person', 'actor-group',
                    'artefact-infra', 'artefact-finance', 'artefact-malware',
@@ -459,49 +1205,103 @@ function loadPaint() {
   }
 }
 
-function buildGraph() {
-  const w = canvas.clientWidth || 800, h = canvas.clientHeight || 600;
+/** Swap what the canvas is showing. Positions survive: a node already on
+ *  screen keeps its coordinates, so entering and leaving a focus does not
+ *  rearrange the entities that were in both pictures. */
+function setRendered(nodes, edges, options) {
+  const o = options || {};
   const prev = state.graph ? state.graph.index : null;
-  const nodes = state.nodes.map((n, i) => {
+  const count = Math.max(1, nodes.length);
+  const ring = 90 + count * 4;
+  const simNodes = nodes.map((n, i) => {
     const old = prev && prev.get(n.id);
-    const a = (i / Math.max(1, state.nodes.length)) * Math.PI * 2;
-    return {
-      id: n.id, ref: n, deg: 0,
-      x: old ? old.x : w / 2 + Math.cos(a) * (60 + w / 6),
-      y: old ? old.y : h / 2 + Math.sin(a) * (60 + h / 6),
-      vx: 0, vy: 0,
-    };
+    const saved = state.layout.get(n.id);
+    const a = (i / count) * Math.PI * 2;
+    let x, y, pinned = false;
+    if (old) { x = old.x; y = old.y; pinned = old.pinned; }
+    else if (saved) { x = Number(saved.x); y = Number(saved.y);
+                      pinned = !!saved.is_pinned; }
+    else { x = Math.cos(a) * ring; y = Math.sin(a) * ring; }
+    if (!Number.isFinite(x)) x = Math.cos(a) * ring;
+    if (!Number.isFinite(y)) y = Math.sin(a) * ring;
+    return { id: n.id, ref: n, deg: 0, x: x, y: y, vx: 0, vy: 0,
+             pinned: pinned, sx: 0, sy: 0, sr: 6 };
   });
-  const index = new Map(nodes.map((n) => [n.id, n]));
+  const index = new Map(simNodes.map((n) => [n.id, n]));
   const links = [];
-  for (const e of state.edges) {
+  let maxWeight = 1;
+  for (const e of edges) {
     const a = index.get(e.src_node_id), b = index.get(e.dst_node_id);
     if (!a || !b) continue;             // endpoint above the caller's clearance
     a.deg += 1; b.deg += 1;
+    const wgt = Math.max(0, Number(e.weight) || 0);
+    if (wgt > maxWeight) maxWeight = wgt;
     links.push({ ref: e, a: a, b: b });
   }
-  state.graph = { nodes, links, index, alpha: 1, drag: null, raf: 0 };
-  show($('graph-empty'), nodes.length === 0);
+  state.graph = { nodes: simNodes, links: links, index: index,
+                  maxWeight: maxWeight, alpha: 1, drag: null, raf: 0 };
+  show($('graph-empty'), simNodes.length === 0);
+  /* keepView means "the analyst is still looking at the same thing" — a
+     scrubber step or a path highlight must not yank the viewport around. */
+  if (o.keepView) state.needFit = false;
   resizeGraph();
   settle();
+}
+
+function stopGraph() {
+  if (state.graph && state.graph.raf) cancelAnimationFrame(state.graph.raf);
+  state.graph = null;
+}
+
+/* -- layout simulation ------------------------------------------------- */
+
+function repel(a, b) {
+  let dx = a.x - b.x, dy = a.y - b.y;
+  let d2 = dx * dx + dy * dy;
+  if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
+  const d = Math.sqrt(d2);
+  const f = Math.min(4000 / d2, 4);
+  a.vx += (dx / d) * f;
+  a.vy += (dy / d) * f;
+}
+
+/** Exact O(n²) repulsion below the threshold, a uniform-grid approximation
+ *  above it. docs/03 is blunt that past a few hundred nodes you should be
+ *  filtering, not waiting — but a slow canvas is still worse than an
+ *  approximate one. */
+function gridRepel(ns) {
+  const cell = 110;
+  const buckets = new Map();
+  for (const n of ns) {
+    const k = Math.floor(n.x / cell) + ',' + Math.floor(n.y / cell);
+    let b = buckets.get(k);
+    if (!b) { b = []; buckets.set(k, b); }
+    b.push(n);
+  }
+  for (const n of ns) {
+    const cx = Math.floor(n.x / cell), cy = Math.floor(n.y / cell);
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const b = buckets.get((cx + dx) + ',' + (cy + dy));
+        if (!b) continue;
+        for (const o of b) { if (o !== n) repel(n, o); }
+      }
+    }
+  }
 }
 
 function step() {
   const g = state.graph;
   if (!g) return;
-  const w = canvas.clientWidth || 800, h = canvas.clientHeight || 600;
-  const cx = w / 2, cy = h / 2;
   const ns = g.nodes;
-  for (let i = 0; i < ns.length; i += 1) {
-    for (let j = i + 1; j < ns.length; j += 1) {
-      const a = ns[i], b = ns[j];
-      let dx = a.x - b.x, dy = a.y - b.y;
-      let d2 = dx * dx + dy * dy;
-      if (d2 < 1) { dx = (Math.random() - 0.5); dy = (Math.random() - 0.5); d2 = 1; }
-      const f = Math.min(4000 / d2, 4);
-      const d = Math.sqrt(d2);
-      a.vx += (dx / d) * f; a.vy += (dy / d) * f;
-      b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+  if (ns.length > 320) {
+    gridRepel(ns);
+  } else {
+    for (let i = 0; i < ns.length; i += 1) {
+      for (let j = i + 1; j < ns.length; j += 1) {
+        repel(ns[i], ns[j]);
+        repel(ns[j], ns[i]);
+      }
     }
   }
   for (const l of g.links) {
@@ -513,14 +1313,14 @@ function step() {
     l.b.vx -= ux; l.b.vy -= uy;
   }
   for (const n of ns) {
-    n.vx += (cx - n.x) * 0.004;
-    n.vy += (cy - n.y) * 0.004;
+    n.vx += (0 - n.x) * 0.004;
+    n.vy += (0 - n.y) * 0.004;
     n.vx *= 0.84; n.vy *= 0.84;
-    if (n === g.drag) { n.vx = 0; n.vy = 0; continue; }
-    n.x += n.vx * g.alpha;
-    n.y += n.vy * g.alpha;
-    n.x = Math.max(24, Math.min(w - 24, n.x));
-    n.y = Math.max(20, Math.min(h - 26, n.y));
+    /* A pinned node is the analyst's decision and the simulation does not get
+       to overrule it — that is the whole point of pinning. */
+    if (n.pinned || n === g.drag) { n.vx = 0; n.vy = 0; continue; }
+    n.x = clamp(n.x + n.vx * g.alpha, -8000, 8000);
+    n.y = clamp(n.y + n.vy * g.alpha, -8000, 8000);
   }
   g.alpha = Math.max(0.03, g.alpha * 0.985);
 }
@@ -532,6 +1332,7 @@ function settle() {
   g.alpha = 1;
   if (reduceMotion) {
     for (let i = 0; i < 320; i += 1) step();
+    if (state.needFit) { state.needFit = false; fitView(); }
     draw();
     return;
   }
@@ -542,14 +1343,50 @@ function frame() {
   const g = state.graph;
   if (!g) return;
   step();
+  if (state.needFit && g.alpha < 0.35) { state.needFit = false; fitView(); }
   draw();
   if (g.alpha > 0.05 || g.drag) g.raf = requestAnimationFrame(frame);
-  else g.raf = 0;
+  else { g.raf = 0; syncLayoutFromSim(); }
 }
 
-function stopGraph() {
-  if (state.graph && state.graph.raf) cancelAnimationFrame(state.graph.raf);
-  state.graph = null;
+/* -- view transform ---------------------------------------------------- */
+
+function toWorld(sx, sy) {
+  const v = state.view;
+  return { x: (sx - v.tx) / v.scale, y: (sy - v.ty) / v.scale };
+}
+
+function zoomAt(sx, sy, factor) {
+  const v = state.view;
+  const w = toWorld(sx, sy);
+  v.scale = clamp(v.scale * factor, 0.12, 6);
+  v.tx = sx - w.x * v.scale;
+  v.ty = sy - w.y * v.scale;
+  draw();
+}
+
+function fitView() {
+  const g = state.graph;
+  const w = canvas.clientWidth || 800, h = canvas.clientHeight || 600;
+  if (!g || !g.nodes.length) {
+    state.view = { scale: 1, tx: w / 2, ty: h / 2 };
+    draw();
+    return;
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of g.nodes) {
+    if (n.x < minX) minX = n.x;
+    if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.y > maxY) maxY = n.y;
+  }
+  const pad = 70;
+  const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
+  const scale = clamp(Math.min((w - pad * 2) / bw, (h - pad * 2) / bh), 0.12, 2);
+  state.view.scale = scale;
+  state.view.tx = w / 2 - ((minX + maxX) / 2) * scale;
+  state.view.ty = h / 2 - ((minY + maxY) / 2) * scale;
+  draw();
 }
 
 function resizeGraph() {
@@ -559,20 +1396,102 @@ function resizeGraph() {
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!Number.isFinite(state.view.tx) || !Number.isFinite(state.view.ty)) {
+    state.view.tx = w / 2;
+    state.view.ty = h / 2;
+  }
   draw();
 }
 
-function nodeRadius(n) { return 5 + Math.min(7, Math.log1p(n.deg) * 2.6); }
+/* -- the encodings ----------------------------------------------------- */
+
+/** Raw value behind node size, log-compressed except for clustering, which is
+ *  already a 0-1 ratio. Raw counts destroy the scale — the same reason edge
+ *  width is log-scaled. */
+function sizeRaw(n) {
+  if (!state.metrics) return Math.log1p(n.deg);
+  const row = state.metricById.get(n.id);
+  const v = row ? Number(row[state.sizeMetric]) : 0;
+  if (!Number.isFinite(v)) return 0;
+  return state.sizeMetric === 'clustering' ? v : Math.log1p(Math.max(0, v));
+}
+
+function sizeScale() {
+  const g = state.graph;
+  let lo = Infinity, hi = -Infinity;
+  for (const n of g.nodes) {
+    const v = sizeRaw(n);
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const flat = !(hi > lo);
+  return (n) => {
+    if (flat) return 8;
+    const t = clamp((sizeRaw(n) - lo) / (hi - lo), 0, 1);
+    return 5 + Math.sqrt(t) * 11;
+  };
+}
+
 function edgeColour(sign) {
   return sign > 0 ? PAINT.pos : (sign < 0 ? PAINT.neg : PAINT.neu);
 }
 function confAlpha(confidence) {
   if (confidence === 'HIGH') return 1;
   if (confidence === 'MODERATE') return 0.72;
-  return 0.45;
+  if (confidence === 'LOW') return 0.45;
+  return 1;                      // no confidence recorded: do not fake one
 }
 function nodeColour(n) {
   return PAINT.hues[hueClass(n.ref.node_type).slice(4)] || PAINT.hues.context;
+}
+function edgeWidth(e) {
+  const g = state.graph;
+  const w = Math.max(0, Number(e.weight) || 0);
+  const t = Math.log1p(w) / Math.log1p(Math.max(1, g ? g.maxWeight : 1));
+  return 1 + clamp(t, 0, 1) * 3.4;
+}
+
+function syncScreen() {
+  const g = state.graph;
+  if (!g) return;
+  const v = state.view;
+  const zf = clamp(v.scale, 0.55, 1.6);
+  const size = sizeScale();
+  for (const n of g.nodes) {
+    n.sx = n.x * v.scale + v.tx;
+    n.sy = n.y * v.scale + v.ty;
+    n.sr = size(n) * zf;
+  }
+}
+
+function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
+
+/** What is emphasised, and therefore what is dimmed. Path focus wins over
+ *  hover: an explicit question outranks the mouse happening to be somewhere. */
+function focusSets() {
+  const g = state.graph;
+  if (!g) return null;
+  if (state.pathIds && state.pathIds.length) {
+    const nodes = new Set(state.pathIds);
+    const pairs = new Set();
+    for (let i = 0; i < state.pathIds.length - 1; i += 1) {
+      pairs.add(pairKey(state.pathIds[i], state.pathIds[i + 1]));
+    }
+    return { mode: 'path', nodes: nodes, pairs: pairs };
+  }
+  if (state.hoverId && g.index.has(state.hoverId)) {
+    const nodes = new Set([state.hoverId]);
+    for (const l of g.links) {
+      if (l.ref.src_node_id === state.hoverId) nodes.add(l.ref.dst_node_id);
+      else if (l.ref.dst_node_id === state.hoverId) nodes.add(l.ref.src_node_id);
+    }
+    return { mode: 'hover', nodes: nodes, pairs: null };
+  }
+  return null;
+}
+
+function edgeHidden(e) {
+  return e.is_inferred && state.hideInferredHold;
 }
 
 function draw() {
@@ -581,155 +1500,442 @@ function draw() {
   ctx.fillStyle = PAINT.void || '#080B12';
   ctx.fillRect(0, 0, w, h);
   if (!g) return;
+  syncScreen();
   const sel = state.selection;
+  const fs = focusSets();
+  const scale = state.view.scale;
+  const showLabels = scale >= 0.7;
+  const showEdgeLabels = scale >= 1.9;
 
+  /* edges */
   for (const l of g.links) {
     const e = l.ref;
-    if (e.is_inferred && !state.showInferred) continue;
+    if (edgeHidden(e)) continue;
     const on = sel && sel.kind === 'edge' && sel.id === e.id;
-    ctx.globalAlpha = confAlpha(e.confidence);
+    let lit = true;
+    if (fs) {
+      lit = fs.mode === 'path'
+        ? fs.pairs.has(pairKey(e.src_node_id, e.dst_node_id))
+        : (e.src_node_id === state.hoverId || e.dst_node_id === state.hoverId);
+    }
+    ctx.globalAlpha = lit ? confAlpha(e.confidence) : 0.08;
     /* Invariant: solid = asserted, dashed = inferred. Never negotiable. */
     ctx.setLineDash(e.is_inferred ? [5, 4] : []);
     ctx.strokeStyle = on ? PAINT.accent : edgeColour(e.sign);
-    ctx.lineWidth = (on ? 1.5 : 0) +
-      1 + Math.min(4, Math.log1p(Math.max(0, Number(e.weight) || 0)) * 1.4);
+    ctx.lineWidth = edgeWidth(e) + (on ? 1.5 : 0) +
+                    (lit && fs && fs.mode === 'path' ? 1.5 : 0);
     ctx.beginPath();
-    ctx.moveTo(l.a.x, l.a.y);
-    ctx.lineTo(l.b.x, l.b.y);
+    ctx.moveTo(l.a.sx, l.a.sy);
+    ctx.lineTo(l.b.sx, l.b.sy);
     ctx.stroke();
+    /* Sign is a hue, and a hue alone is not an encoding — a red/green
+       confusion would invert the meaning of a vouch. A midpoint + / − gives
+       sign a second, achromatic channel. It cannot be the dash pattern:
+       solid-vs-dashed already means asserted-vs-inferred and that does not
+       bend. Held back to closer zooms so the wide view stays readable. */
+    if (lit && e.sign !== 0 && (scale >= 1.2 || on ||
+        (fs && fs.mode === 'path'))) {
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = edgeColour(e.sign);
+      ctx.font = PAINT.signFont;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.sign > 0 ? '+' : '−',
+                   (l.a.sx + l.b.sx) / 2, (l.a.sy + l.b.sy) / 2);
+      ctx.setLineDash(e.is_inferred ? [5, 4] : []);
+    }
+    if (showEdgeLabels && lit) {
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = PAINT.dim;
+      ctx.font = PAINT.monoFont;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.edge_type, (l.a.sx + l.b.sx) / 2, (l.a.sy + l.b.sy) / 2 - 9);
+    }
   }
   ctx.setLineDash([]);
   ctx.globalAlpha = 1;
 
+  /* nodes */
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.font = PAINT.font;
   for (const n of g.nodes) {
-    const r = nodeRadius(n);
+    const lit = !fs || fs.nodes.has(n.id);
+    const selected = sel && sel.kind === 'node' && sel.id === n.id;
+    const r = n.sr;
+    /* Node opacity IS confidence (docs/06). A node carries no confidence
+       column of its own, so this is the best confidence among its ties in
+       THIS projection; the inspector states that in words and gives the
+       number, so the encoding is never colour or opacity alone. */
+    ctx.globalAlpha = lit ? confAlpha(state.nodeConf.get(n.id)) : 0.1;
     ctx.beginPath();
-    ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+    ctx.arc(n.sx, n.sy, r, 0, Math.PI * 2);
     ctx.fillStyle = nodeColour(n);
     ctx.fill();
-    if (sel && sel.kind === 'node' && sel.id === n.id) {
+
+    ctx.globalAlpha = lit ? 1 : 0.14;
+    /* rings: unreviewed proposal, then pinned, then selected — drawn at
+       increasing radii so all three can be true at once and still be read. */
+    if (state.nodeProposed.get(n.id)) {
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r + 4, 0, Math.PI * 2);
+      ctx.arc(n.sx, n.sy, r + 2.5, 0, Math.PI * 2);
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = PAINT.alert;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (n.pinned) {
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, r + 6, 0, Math.PI * 2);
+      ctx.setLineDash([1, 3]);
+      ctx.strokeStyle = PAINT.label;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (selected) {
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, r + 4, 0, Math.PI * 2);
       ctx.strokeStyle = PAINT.accent;
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    /* Label sits clear of the dot so the two never overlap. */
-    const label = n.ref.label.length > 24 ? n.ref.label.slice(0, 23) + '…'
-                                          : n.ref.label;
-    ctx.fillStyle = PAINT.label;
-    ctx.fillText(label, n.x, n.y + r + 5);
+    if (state.pathAnchor === n.id) {
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, r + 9, 0, Math.PI * 2);
+      ctx.setLineDash([2, 4]);
+      ctx.strokeStyle = PAINT.accent;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (state.focus && state.focus.kind === 'ego' && state.focus.id === n.id) {
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, r + 12, 0, Math.PI * 2);
+      ctx.strokeStyle = PAINT.accentDim;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    /* Progressive disclosure: labels above a zoom threshold, plus always for
+       whatever the analyst is pointing at or has selected. */
+    if (showLabels || selected || state.hoverId === n.id) {
+      ctx.globalAlpha = lit ? 1 : 0.12;
+      const raw = n.ref.label || '';
+      const label = raw.length > 24 ? raw.slice(0, 23) + '…' : raw;
+      ctx.font = PAINT.font;
+      ctx.fillStyle = (selected || state.hoverId === n.id) ? PAINT.bright
+                                                           : PAINT.label;
+      ctx.fillText(label, n.sx, n.sy + r + 5);
+    }
   }
+  ctx.globalAlpha = 1;
 }
+
+/* ── hit testing ──────────────────────────────────────────────────────── */
 
 function canvasPoint(event) {
   const r = canvas.getBoundingClientRect();
   return { x: event.clientX - r.left, y: event.clientY - r.top };
 }
+
 function nodeAt(p) {
   const g = state.graph;
   if (!g) return null;
+  syncScreen();
   let best = null, bestD = Infinity;
   for (const n of g.nodes) {
-    const d = Math.hypot(n.x - p.x, n.y - p.y);
-    const hit = nodeRadius(n) + 6;
-    if (d < hit && d < bestD) { best = n; bestD = d; }
+    const d = Math.hypot(n.sx - p.x, n.sy - p.y);
+    if (d < n.sr + 6 && d < bestD) { best = n; bestD = d; }
   }
   return best;
 }
+
 function edgeAt(p) {
   const g = state.graph;
   if (!g) return null;
+  syncScreen();
   for (const l of g.links) {
-    if (l.ref.is_inferred && !state.showInferred) continue;
-    const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y;
+    if (edgeHidden(l.ref)) continue;
+    const dx = l.b.sx - l.a.sx, dy = l.b.sy - l.a.sy;
     const len2 = dx * dx + dy * dy;
     if (len2 === 0) continue;
-    let t = ((p.x - l.a.x) * dx + (p.y - l.a.y) * dy) / len2;
-    t = Math.max(0, Math.min(1, t));
-    const d = Math.hypot(p.x - (l.a.x + t * dx), p.y - (l.a.y + t * dy));
+    let t = ((p.x - l.a.sx) * dx + (p.y - l.a.sy) * dy) / len2;
+    t = clamp(t, 0, 1);
+    const d = Math.hypot(p.x - (l.a.sx + t * dx), p.y - (l.a.sy + t * dy));
     if (d < 6) return l.ref;
   }
   return null;
 }
 
+/* ── canvas interaction (docs/06's interaction model) ──────────────────── */
+
 function initCanvas() {
-  let moved = false, downAt = null;
+  let mode = null;              // 'pan' | 'drag'
+  let downAt = null, downView = null, moved = false;
+
   canvas.addEventListener('pointerdown', (e) => {
     const g = state.graph;
-    if (!g) return;
+    if (!g || e.button !== 0) return;
     canvas.focus();
     const p = canvasPoint(e);
     downAt = p;
     moved = false;
     const n = nodeAt(p);
     if (n) {
+      mode = 'drag';
       g.drag = n;
-      /* Capture keeps the drag alive outside the canvas. Not every pointer
-         type allows it, and losing it must not cost us the drag. */
-      try { canvas.setPointerCapture(e.pointerId); } catch (_e) { /* optional */ }
       if (!reduceMotion && !g.raf) g.raf = requestAnimationFrame(frame);
+    } else {
+      mode = 'pan';
+      downView = { tx: state.view.tx, ty: state.view.ty };
     }
+    /* Capture keeps the gesture alive outside the canvas. Not every pointer
+       type allows it, and losing it must not cost us the gesture. */
+    try { canvas.setPointerCapture(e.pointerId); } catch (_e) { /* optional */ }
   });
+
   canvas.addEventListener('pointermove', (e) => {
     const g = state.graph;
-    if (!g || !g.drag) return;
+    if (!g) return;
     const p = canvasPoint(e);
     if (downAt && Math.hypot(p.x - downAt.x, p.y - downAt.y) > 3) moved = true;
-    g.drag.x = p.x; g.drag.y = p.y;
-    g.drag.vx = 0; g.drag.vy = 0;
-    g.alpha = Math.max(g.alpha, 0.35);
-    if (reduceMotion) draw();
+
+    if (mode === 'drag' && g.drag) {
+      const w = toWorld(p.x, p.y);
+      g.drag.x = w.x; g.drag.y = w.y;
+      g.drag.vx = 0; g.drag.vy = 0;
+      /* Dragging a node IS pinning it — docs/03: pinned nodes stay pinned, and
+         an analyst who positioned something meant it. */
+      g.drag.pinned = true;
+      g.alpha = Math.max(g.alpha, 0.35);
+      if (reduceMotion) draw();
+      return;
+    }
+    if (mode === 'pan' && downView) {
+      state.view.tx = downView.tx + (p.x - downAt.x);
+      state.view.ty = downView.ty + (p.y - downAt.y);
+      draw();
+      return;
+    }
+    /* Hover: dim everything beyond the neighbourhood, no tooltip delay. */
+    const hit = nodeAt(p);
+    const id = hit ? hit.id : null;
+    if (id !== state.hoverId) {
+      state.hoverId = id;
+      draw();
+    }
   });
+
   canvas.addEventListener('pointerup', (e) => {
     const g = state.graph;
     if (!g) return;
     const p = canvasPoint(e);
-    if (g.drag) {
-      g.drag = null;
-      try { canvas.releasePointerCapture(e.pointerId); } catch (_e) { /* already gone */ }
-    }
+    const wasDrag = mode === 'drag';
+    if (g.drag) { g.drag = null; syncLayoutFromSim(); }
+    mode = null;
+    downView = null;
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_e) { /* already gone */ }
     if (moved) { draw(); return; }
+
     const n = nodeAt(p);
-    if (n) { selectNode(n.id); return; }
+    if (n) {
+      if (e.shiftKey) {
+        if (!state.pathAnchor || state.pathAnchor === n.id) {
+          state.pathAnchor = n.id;
+          selectNode(n.id);
+          renderFocusFlag();
+        } else {
+          enterPath(state.pathAnchor, n.id);
+        }
+        return;
+      }
+      selectNode(n.id);
+      return;
+    }
+    if (wasDrag) { draw(); return; }
     const edge = edgeAt(p);
     if (edge) { selectEdge(edge.id); return; }
     state.selection = null;
     renderInspector();
     draw();
   });
-  canvas.addEventListener('keydown', (e) => {
+
+  canvas.addEventListener('pointercancel', () => {
     const g = state.graph;
-    if (!g || !g.nodes.length) return;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-      e.preventDefault();
-      const ids = g.nodes.map((n) => n.id);
-      const cur = state.selection && state.selection.kind === 'node'
-        ? ids.indexOf(state.selection.id) : -1;
-      const delta = e.key === 'ArrowRight' ? 1 : -1;
-      const next = (cur + delta + ids.length) % ids.length;
-      selectNode(ids[next]);
-    } else if (e.key === ' ' || e.key === 'Spacebar') {
-      /* One key answers "what do I actually know?" */
-      e.preventDefault();
-      state.showInferred = !state.showInferred;
-      $('chk-inferred').checked = state.showInferred;
-      draw();
-    } else if (e.key === 'Escape') {
-      state.selection = null;
-      renderInspector();
+    if (g && g.drag) { g.drag = null; syncLayoutFromSim(); }
+    mode = null;
+    downView = null;
+  });
+
+  canvas.addEventListener('pointerleave', () => {
+    if (state.hoverId) { state.hoverId = null; draw(); }
+  });
+
+  canvas.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    const n = nodeAt(canvasPoint(e));
+    if (n) enterEgo(n.id, 1);
+  });
+
+  /* Scroll zoom. Not passive: the page must not scroll instead. */
+  canvas.addEventListener('wheel', (e) => {
+    if (!state.graph) return;
+    e.preventDefault();
+    const p = canvasPoint(e);
+    zoomAt(p.x, p.y, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+  }, { passive: false });
+
+  canvas.addEventListener('keydown', onCanvasKey);
+  canvas.addEventListener('keyup', (e) => {
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      state.hideInferredHold = false;
       draw();
     }
   });
+  /* Losing focus mid-hold would otherwise leave inferred edges hidden with
+     nothing on screen explaining why. */
+  window.addEventListener('blur', () => {
+    if (state.hideInferredHold) { state.hideInferredHold = false; draw(); }
+  });
+
   if ('ResizeObserver' in window) {
-    new ResizeObserver(() => { if (state.tab === 'graph') resizeGraph(); })
-      .observe(canvas.parentElement);
+    new ResizeObserver(() => {
+      if (state.tab === 'graph') { resizeGraph(); resizeDensity(); }
+    }).observe(canvas.parentElement);
   } else {
-    window.addEventListener('resize', resizeGraph);
+    window.addEventListener('resize', () => { resizeGraph(); resizeDensity(); });
   }
+}
+
+function onCanvasKey(e) {
+  const g = state.graph;
+  if (!g || !g.nodes.length) return;
+  const ids = g.nodes.map((n) => n.id);
+  const cur = state.selection && state.selection.kind === 'node'
+    ? ids.indexOf(state.selection.id) : -1;
+
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+    e.preventDefault();
+    selectNode(ids[(cur + 1 + ids.length) % ids.length]);
+  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    selectNode(ids[(cur - 1 + ids.length) % ids.length]);
+  } else if (e.key === ' ' || e.key === 'Spacebar') {
+    /* Held, not toggled: one key answers "what do I actually KNOW?" and
+       releasing it puts the inference back. */
+    e.preventDefault();
+    if (!state.hideInferredHold) { state.hideInferredHold = true; draw(); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (cur >= 0) enterEgo(ids[cur], 1);
+  } else if (e.key === 'p' || e.key === 'P') {
+    e.preventDefault();
+    if (cur < 0) return;
+    if (!state.pathAnchor || state.pathAnchor === ids[cur]) {
+      state.pathAnchor = ids[cur];
+      renderFocusFlag();
+      draw();
+    } else {
+      enterPath(state.pathAnchor, ids[cur]);
+    }
+  } else if (e.key === '+' || e.key === '=') {
+    e.preventDefault();
+    zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.2);
+  } else if (e.key === '-' || e.key === '_') {
+    e.preventDefault();
+    zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.2);
+  } else if (e.key === '0') {
+    e.preventDefault();
+    fitView();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    if (state.focus || state.pathAnchor) { leaveFocusOrAnchor(); return; }
+    state.selection = null;
+    renderInspector();
+    draw();
+  }
+}
+
+/* ── layout persistence and pinning ────────────────────────────────────
+ * docs/03: analysts build a spatial memory of their network, and reshuffling
+ * it on every load destroys real analytic value. */
+
+async function loadLayout() {
+  try {
+    const rows = await api(cpath('/graph/layout'));
+    state.layout = new Map((rows || []).map((r) => [String(r.node_id), r]));
+  } catch (err) {
+    state.layout = new Map();
+    fail(err);
+  }
+}
+
+/** Positions of nodes NOT currently rendered are left alone, so saving from
+ *  inside an ego focus cannot wipe the rest of the case's layout. */
+function syncLayoutFromSim() {
+  const g = state.graph;
+  if (!g) return;
+  for (const n of g.nodes) {
+    state.layout.set(n.id, { node_id: n.id, x: n.x, y: n.y,
+                             is_pinned: !!n.pinned });
+  }
+}
+
+async function saveLayout() {
+  if (!state.caseId) return;
+  syncLayoutFromSim();
+  const positions = Array.from(state.layout.values()).map((p) => ({
+    node_id: p.node_id,
+    x: Number(p.x) || 0,
+    y: Number(p.y) || 0,
+    is_pinned: !!p.is_pinned,
+  }));
+  if (!positions.length) {
+    banner('Nothing to save', 'There are no positions on the canvas yet.', 'warn');
+    return;
+  }
+  const btn = $('btn-save-layout');
+  btn.disabled = true;
+  try {
+    await api(cpath('/graph/layout'), { method: 'PUT',
+                                        json: { positions: positions } });
+    const pinned = positions.filter((p) => p.is_pinned).length;
+    banner('Layout saved', positions.length + ' positions stored, ' + pinned +
+      ' pinned. This is what the canvas will look like on your next visit.',
+      'warn');
+  } catch (err) {
+    fail(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function clearPins() {
+  const g = state.graph;
+  if (g) for (const n of g.nodes) n.pinned = false;
+  for (const [id, p] of state.layout) {
+    state.layout.set(id, { node_id: id, x: p.x, y: p.y, is_pinned: false });
+  }
+  settle();
+  draw();
+  /* Persist the unpinning too — a pin that comes back on reload was not
+     cleared, it was hidden. */
+  try {
+    const positions = Array.from(state.layout.values()).map((p) => ({
+      node_id: p.node_id, x: Number(p.x) || 0, y: Number(p.y) || 0,
+      is_pinned: false,
+    }));
+    if (positions.length) {
+      await api(cpath('/graph/layout'), { method: 'PUT',
+                                          json: { positions: positions } });
+    }
+    banner('Pins cleared', 'Every node is back under the simulation.', 'warn');
+  } catch (err) { fail(err); }
 }
 
 /* ── entities ─────────────────────────────────────────────────────────── */
@@ -773,15 +1979,17 @@ function renderEntities() {
     body.appendChild(tr);
   }
   show($('ent-empty'), rows.length === 0);
+  /* Case totals, not projection totals: this list is the case file, and the
+     projection's own counts live next to the canvas where they belong. */
   $('ent-count').textContent = rows.length + ' of ' + state.nodes.length +
-    ' entities · ' + state.edges.length + ' relationships';
+    ' entities · ' + state.edges.length + ' relationships in the case';
 }
 
 /* ── evidence ─────────────────────────────────────────────────────────── */
 
 async function loadEvidence() {
   try {
-    state.evidence = await api('/cases/' + state.caseId + '/evidence-list?limit=200');
+    state.evidence = await api(cpath('/evidence-list?limit=200'));
     renderEvidence();
   } catch (err) { fail(err); }
 }
@@ -834,8 +2042,8 @@ function renderEvidence() {
       verdict.className = 'ev-verdict';
       verdict.textContent = 'Verifying…';
       try {
-        const out = await api('/cases/' + state.caseId + '/evidence/' + ev.id +
-                              '/verify', { method: 'POST' });
+        const out = await api(cpath('/evidence/' + ev.id + '/verify'),
+                              { method: 'POST' });
         verdict.className = 'ev-verdict ' + (out.ok ? 'ok' : 'fail');
         verdict.textContent = out.ok
           ? 'Digest matches the record.'
@@ -853,8 +2061,7 @@ function renderEvidence() {
       custodyBox.hidden = false;
       custodyBox.appendChild(el('p', 'help', 'Loading custody log…'));
       try {
-        const log = await api('/cases/' + state.caseId + '/evidence/' + ev.id +
-                              '/custody');
+        const log = await api(cpath('/evidence/' + ev.id + '/custody'));
         clear(custodyBox);
         if (!log.length) {
           custodyBox.appendChild(el('p', 'empty', 'No custody entries recorded.'));
@@ -894,8 +2101,7 @@ async function uploadEvidence(event) {
   form.append('acquisition_method', $('ev-method').value);
   form.append('classification', $('ev-class').value);
   try {
-    const out = await api('/cases/' + state.caseId + '/evidence',
-      { method: 'POST', form: form });
+    const out = await api(cpath('/evidence'), { method: 'POST', form: form });
     setMsg(okBox, 'Lodged. sha256 ' + out.sha256 +
       (out.deduplicated ? ' — identical bytes were already held; the existing exhibit was reused.' : ''));
     $('ev-file').value = '';
@@ -919,10 +2125,10 @@ async function runSearch(event) {
   evBox.appendChild(el('p', 'help', 'Searching…'));
   try {
     const [nodeHits, evHits] = await Promise.all([
-      api('/cases/' + state.caseId + '/search/nodes?limit=50&q=' + enc),
-      api('/cases/' + state.caseId + '/search/evidence?q=' + enc),
+      api(cpath('/search/nodes?limit=50&q=' + enc)),
+      api(cpath('/search/evidence?q=' + enc)),
     ]);
-    renderHits(nodeBox, nodeHits, (hit) => selectNode(hit.id));
+    renderHits(nodeBox, nodeHits, (hit) => { selectNode(hit.id); selectTab('graph'); });
     renderHits(evBox, evHits, (hit) => focusEvidence(hit.id));
   } catch (err) {
     clear(nodeBox); clear(evBox);
@@ -962,6 +2168,25 @@ function focusEvidence(evidenceId) {
 
 /* ── inspector: "why do we believe this?" ─────────────────────────────── */
 
+function nodeById(id) {
+  return state.nodes.find((x) => x.id === id) ||
+         state.gnodes.find((x) => x.id === id) || null;
+}
+function labelOf(id) {
+  const n = nodeById(id);
+  return n ? n.label : shortId(id);
+}
+/** /graph edges carry endpoint ids, /edges carries endpoint labels. Prefer the
+ *  richer record and synthesise the labels when only the projection has it. */
+function edgeById(id) {
+  const e = state.edges.find((x) => x.id === id);
+  if (e) return e;
+  const g = state.gedges.find((x) => x.id === id);
+  if (!g) return null;
+  return Object.assign({}, g, { src_label: labelOf(g.src_node_id),
+                                dst_label: labelOf(g.dst_node_id) });
+}
+
 function selectNode(id) {
   state.selection = { kind: 'node', id: id };
   renderEntities();
@@ -984,7 +2209,7 @@ function renderInspector() {
   const sub = $('insp-sub');
 
   if (sel.kind === 'node') {
-    const n = state.nodes.find((x) => x.id === sel.id);
+    const n = nodeById(sel.id);
     if (!n) { loadMissingNode(sel.id); return; }
     typeChip.className = 'chip type-chip ' + hueClass(n.node_type);
     typeChip.textContent = typeName(n.node_type);
@@ -994,27 +2219,30 @@ function renderInspector() {
     sub.textContent = n.id + ' · first seen ' + fmtTime(n.first_seen) +
       ' · last seen ' + fmtTime(n.last_seen);
     show($('insp-sel-sec'), true);
+    show($('insp-metrics-sec'), true);
+    renderNodeMetrics(sel.id);
   } else {
-    const e = state.edges.find((x) => x.id === sel.id);
+    const e = edgeById(sel.id);
     if (!e) { state.selection = null; renderInspector(); return; }
     typeChip.className = 'chip type-chip';
     typeChip.textContent = e.edge_type;
     classChip.className = 'chip tlp-' + e.classification;
     classChip.textContent = 'TLP:' + e.classification;
-    clear($('insp-label'));
     $('insp-label').textContent = e.src_label + ' → ' + e.dst_label;
     const signWord = e.sign > 0 ? 'positive tie'
       : (e.sign < 0 ? 'negative tie' : 'neutral tie');
     sub.textContent = signWord + ' · weight ' + e.weight +
-      ' · ' + (e.is_inferred ? 'INFERRED (dashed, excluded from metrics)'
-                            : 'asserted') +
+      ' · confidence ' + e.confidence +
+      ' (opacity ' + confAlpha(e.confidence).toFixed(2) + ')' +
+      ' · ' + (e.is_inferred ? 'INFERRED (dashed, excluded from metrics unless ' +
+                              'the projection opts in)' : 'asserted') +
       ' · review ' + e.review + ' · from ' + fmtTime(e.valid_from);
     show($('insp-sel-sec'), false);
+    show($('insp-metrics-sec'), false);
   }
 
   const seq = ++state.inspSeq;
-  const base = '/cases/' + state.caseId +
-    (sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id;
+  const base = cpath((sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id);
   loadInto($('insp-assertions'), seq,
     () => api(base + '/assertions?include_retracted=' +
               (state.includeRetracted ? 'true' : 'false')),
@@ -1027,9 +2255,125 @@ function renderInspector() {
   }
 }
 
+/** The metrics panel. Every number arrives with its rank, and the projection
+ *  that produced it is named right underneath — docs/03: a metric without its
+ *  parameters is not reproducible, and "0.0341" means nothing to anyone while
+ *  "3rd of 214" means something to everyone. */
+function renderNodeMetrics(nodeId) {
+  const box = $('insp-metrics');
+  const scope = $('insp-metrics-scope');
+  const projLine = $('insp-metrics-proj');
+  clear(box);
+
+  const inProjection = state.gnodes.some((n) => n.id === nodeId);
+  const row = state.metricById.get(nodeId);
+
+  if (!state.metrics) {
+    scope.textContent = 'unavailable';
+    box.appendChild(el('p', 'empty', state.metricsNote ||
+      'Metrics could not be loaded for this projection.'));
+    projLine.textContent = '';
+    return;
+  }
+  if (!inProjection || !row) {
+    scope.textContent = 'not in projection';
+    box.appendChild(el('p', 'empty',
+      'This entity is outside the current projection, so it has no numbers ' +
+      'here. Widen the preset, lower the minimum confidence, or move the ' +
+      'as-of position forward.'));
+    projLine.textContent = projectionSentence();
+    return;
+  }
+
+  scope.textContent = state.projMeta ? state.projMeta.preset : state.proj.preset;
+  const ties = state.nodeTies.get(nodeId) || 0;
+  const conf = state.nodeConf.get(nodeId);
+  const proposed = state.nodeProposed.get(nodeId) || 0;
+
+  const rows = [
+    ['degree', 'Degree', num(row.degree), true],
+    ['weighted_degree', 'Weighted degree', num(row.weighted_degree, 4), true],
+    ['positive_degree', 'Positive degree', num(row.positive_degree), false],
+    ['negative_degree', 'Negative degree', num(row.negative_degree), false],
+    ['clustering', 'Clustering', num(row.clustering, 4), true],
+    ['k_core', 'k-core', num(row.k_core), true],
+  ];
+  for (const [key, label, value, ranked] of rows) {
+    const k = el('div', 'metric-k' + (key === state.sizeMetric ? ' on' : ''), label);
+    if (key === state.sizeMetric) k.title = 'This is the metric driving node size.';
+    box.appendChild(k);
+    box.appendChild(el('div', 'metric-v', value));
+    if (ranked && state.ranks && state.ranks[key]) {
+      const r = state.ranks[key].get(nodeId);
+      box.appendChild(el('div', 'metric-rank',
+        r ? ordinal(r) + ' of ' + state.rankTotal : '—'));
+    } else if (key === 'positive_degree') {
+      const t = el('div', 'metric-rank', 'vouches');
+      t.title = 'docs/03: received vouches are accumulated reputation; given ' +
+        'vouches are reputation staked. They mean opposite things, and this ' +
+        'count is undirected, so it is the sum of both.';
+      box.appendChild(t);
+    } else if (key === 'negative_degree') {
+      const t = el('div', 'metric-rank', 'disputes');
+      t.title = 'Rip reports, accusations and bans. A node with many negative ' +
+        'ties is not a well-connected node.';
+      box.appendChild(t);
+    } else {
+      box.appendChild(el('div', 'metric-rank', ''));
+    }
+  }
+
+  box.appendChild(el('div', 'metric-k', 'Ties in projection'));
+  box.appendChild(el('div', 'metric-v', String(ties)));
+  box.appendChild(el('div', 'metric-rank', ''));
+
+  /* Confidence is an opacity on the canvas, so it is also a number here —
+     never an encoding the analyst has to read off a colour. */
+  box.appendChild(el('div', 'metric-k', 'Tie confidence (best)'));
+  box.appendChild(el('div', 'metric-v',
+    conf ? conf + ' / ' + confAlpha(conf).toFixed(2) : 'none / 1.00'));
+  const ct = el('div', 'metric-rank', 'opacity');
+  ct.title = 'Node opacity on the canvas is this value. A node carries no ' +
+    'confidence column of its own — this is the highest confidence among its ' +
+    'ties in this projection. An isolated node draws at full opacity because ' +
+    'no confidence has been claimed either way.';
+  box.appendChild(ct);
+
+  if (proposed) {
+    box.appendChild(el('div', 'metric-k', 'Unreviewed proposals'));
+    box.appendChild(el('div', 'metric-v', String(proposed)));
+    const pt = el('div', 'metric-rank', 'ringed');
+    pt.title = 'Machines propose, analysts dispose. This node is ringed on the ' +
+      'canvas because at least one incident relationship is still PROPOSED.';
+    box.appendChild(pt);
+  }
+
+  projLine.textContent = projectionSentence();
+}
+
+function projectionSentence() {
+  const p = state.projMeta || state.proj;
+  const bits = [
+    'preset=' + (p.preset || '—'),
+    'include_inferred=' + String(!!p.include_inferred),
+    'min_confidence=' + (p.min_confidence || '—'),
+    'as_of=' + (p.as_of ? fmtTime(p.as_of) : 'now'),
+  ];
+  let line = 'computed over projection ' + bits.join(' · ');
+  if (state.metrics) {
+    line += ' · ' + state.metrics.node_count + ' nodes, ' +
+      state.metrics.edge_count + ' edges, density ' + num(state.metrics.density, 4);
+  }
+  if (state.projTruncated) {
+    line += ' · WARNING: the node page was truncated, so these numbers describe ' +
+      'a slice of the case rather than all of it';
+  }
+  return line;
+}
+
 async function loadMissingNode(id) {
   try {
-    const n = await api('/cases/' + state.caseId + '/nodes/' + id);
+    const n = await api(cpath('/nodes/' + id));
     state.nodes.push(n);
     buildEntityFilter();
     renderEntities();
@@ -1149,9 +2493,20 @@ function renderSelectors(box, list) {
 
 function buildPickers() {
   const tlpPairs = TLP.map((t) => [t, t]);
-  for (const id of ['case-class', 'node-class', 'edge-class', 'ev-class']) {
-    opts($(id), tlpPairs, 'AMBER');
+  /* An element may not be classified BELOW its case (the server enforces a
+   * floor), so defaulting to a fixed AMBER makes every entity form fail in
+   * an AMBER_STRICT or RED case — and the rejection reads as a mysterious
+   * 400 rather than "you picked something too low". Default to the case's
+   * own classification, which is always legal, and drop the options that
+   * are not: an analyst cannot choose a value the server will refuse. */
+  const caseClass = state.caseRec ? state.caseRec.classification : 'AMBER';
+  const floor = TLP.indexOf(caseClass);
+  const legal = tlpPairs.filter(([t]) => TLP.indexOf(t) >= floor);
+  for (const id of ['node-class', 'edge-class', 'ev-class']) {
+    opts($(id), legal, caseClass);
   }
+  /* The case form itself is unconstrained: a new case has no floor. */
+  opts($('case-class'), tlpPairs, 'AMBER');
   opts($('node-type'),
     state.ontology.node_types.map((t) => [t.key, t.display_name + ' (' + t.key + ')']));
   for (const id of ['node-basis', 'edge-basis']) {
@@ -1240,7 +2595,7 @@ async function createNode(event) {
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); return; }
   try {
-    const out = await api('/cases/' + state.caseId + '/nodes', {
+    const out = await api(cpath('/nodes'), {
       method: 'POST',
       json: {
         node_type: $('node-type').value,
@@ -1253,7 +2608,7 @@ async function createNode(event) {
     setMsg(okBox, 'Created with its founding assertion. Opening it in the inspector.');
     $('node-label').value = '';
     $('node-rationale').value = '';
-    await loadGraph();
+    await reloadAll();
     selectNode(out.id);
     selectTab('graph');
   } catch (err) {
@@ -1277,7 +2632,7 @@ async function createEdge(event) {
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); return; }
   try {
-    const out = await api('/cases/' + state.caseId + '/edges', {
+    const out = await api(cpath('/edges'), {
       method: 'POST',
       json: {
         edge_type: edgeType,
@@ -1289,12 +2644,217 @@ async function createEdge(event) {
     });
     setMsg(okBox, 'Relationship recorded with its assertion.');
     $('edge-rationale').value = '';
-    await loadGraph();
+    await reloadAll();
     selectEdge(out.id);
     selectTab('graph');
   } catch (err) {
     inlineProblem(errBox, err);
   }
+}
+
+/* ── command palette (⌘K / Ctrl+K) ─────────────────────────────────────
+ * docs/06: "Power users will live here." Everything reachable from a control
+ * on screen is reachable from a keystroke, and nothing here does anything the
+ * UI cannot also do — a palette that hides capabilities is a trap. */
+
+const TAB_NAMES = [
+  ['graph', 'Sociogram'],
+  ['entities', 'Entity list'],
+  ['evidence', 'Evidence'],
+  ['search', 'Search'],
+  ['add-node', 'Add entity'],
+  ['add-edge', 'Add relationship'],
+];
+
+function buildPaletteItems() {
+  const items = [];
+  const inCase = !!state.caseId;
+
+  if (!inCase) {
+    for (const c of state.cases) {
+      items.push({ kind: 'Case', label: c.code + ' — ' + c.title,
+                   hint: c.status, run: () => openCase(c.id) });
+    }
+    return items;
+  }
+
+  for (const [key, label] of TAB_NAMES) {
+    items.push({ kind: 'View', label: 'Go to ' + label, hint: 'tab',
+                 run: () => selectTab(key) });
+  }
+  for (const p of state.presets) {
+    items.push({
+      kind: 'Projection',
+      label: 'Projection: ' + p.label +
+             (p.key === state.proj.preset ? '  (current)' : ''),
+      hint: p.description,
+      run: () => setPreset(p.key),
+    });
+  }
+  for (const [key, label] of SIZE_METRICS) {
+    items.push({
+      kind: 'Node size',
+      label: 'Size by ' + label + (key === state.sizeMetric ? '  (current)' : ''),
+      hint: state.metrics ? 'from /graph/metrics' : 'metrics unavailable',
+      run: () => setSizeMetric(key),
+    });
+  }
+  items.push({
+    kind: 'Projection',
+    label: state.proj.include_inferred ? 'Exclude inferred edges'
+                                       : 'Include inferred edges',
+    hint: 'refetches the projection',
+    run: () => setIncludeInferred(!state.proj.include_inferred),
+  });
+  for (const c of CONFIDENCE) {
+    items.push({ kind: 'Projection', label: 'Minimum confidence: ' + c,
+                 hint: c === state.proj.min_confidence ? 'current' : '',
+                 run: () => setMinConfidence(c) });
+  }
+  items.push({ kind: 'Layout', label: 'Save layout', hint: 'PUT positions',
+               run: saveLayout });
+  items.push({ kind: 'Layout', label: 'Clear pins', hint: 'unpin every node',
+               run: clearPins });
+  items.push({ kind: 'Layout', label: 'Re-layout', hint: 'settle the simulation',
+               run: () => { settle(); } });
+  items.push({ kind: 'Layout', label: 'Fit view', hint: 'zoom to the graph',
+               run: fitView });
+  items.push({ kind: 'Graph', label: 'Reload graph', hint: 'refetch everything',
+               run: reloadAll });
+  if (state.proj.as_of) {
+    items.push({ kind: 'Timeline', label: 'Reset as-of to now',
+                 hint: fmtTime(state.proj.as_of), run: resetAsOf });
+  }
+  if (state.focus) {
+    items.push({ kind: 'Focus', label: 'Leave focus mode',
+                 hint: 'back to the full projection', run: exitFocus });
+  }
+  if (state.selection && state.selection.kind === 'node') {
+    const id = state.selection.id;
+    items.push({ kind: 'Focus', label: 'Ego network of ' + labelOf(id),
+                 hint: 'depth 1', run: () => enterEgo(id, 1) });
+    items.push({ kind: 'Focus', label: 'Ego network of ' + labelOf(id),
+                 hint: 'depth 2', run: () => enterEgo(id, 2) });
+  }
+  for (const n of state.nodes) {
+    items.push({
+      kind: 'Entity', label: n.label, hint: typeName(n.node_type),
+      run: () => { selectNode(n.id); selectTab('graph'); },
+    });
+  }
+  return items;
+}
+
+function openPalette() {
+  if (state.paletteOpen) return;
+  state.paletteOpen = true;
+  state.paletteReturn = document.activeElement;
+  state.paletteIndex = 0;
+  show($('palette-scrim'), true);
+  const input = $('palette-input');
+  input.value = '';
+  renderPalette();
+  input.focus();
+}
+
+function closePalette() {
+  if (!state.paletteOpen) return;
+  state.paletteOpen = false;
+  show($('palette-scrim'), false);
+  const back = state.paletteReturn;
+  state.paletteReturn = null;
+  /* Focus goes back where it came from — losing it to <body> strands a
+     keyboard user at the top of the document. */
+  if (back && typeof back.focus === 'function' && document.contains(back)) {
+    back.focus();
+  }
+}
+
+function renderPalette() {
+  const q = $('palette-input').value.trim().toLowerCase();
+  const all = buildPaletteItems();
+  const terms = q ? q.split(/\s+/) : [];
+  const matches = all.filter((it) => {
+    if (!terms.length) return true;
+    const hay = (it.kind + ' ' + it.label + ' ' + (it.hint || '')).toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  }).slice(0, 200);
+
+  state.paletteItems = matches;
+  state.paletteIndex = clamp(state.paletteIndex, 0, Math.max(0, matches.length - 1));
+
+  const list = $('palette-list');
+  clear(list);
+  matches.forEach((it, i) => {
+    const li = el('li', 'pal-opt');
+    li.id = 'pal-opt-' + i;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', i === state.paletteIndex ? 'true' : 'false');
+    li.appendChild(el('span', 'pal-kind', it.kind));
+    li.appendChild(el('span', 'pal-label', it.label));
+    if (it.hint) li.appendChild(el('span', 'pal-hint', it.hint));
+    li.addEventListener('mousedown', (e) => {
+      e.preventDefault();                 // keep focus in the input
+      runPaletteItem(i);
+    });
+    list.appendChild(li);
+  });
+  show($('palette-empty'), matches.length === 0);
+
+  const active = list.children[state.paletteIndex];
+  $('palette-input').setAttribute('aria-activedescendant',
+    active ? active.id : '');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function movePalette(delta) {
+  if (!state.paletteItems.length) return;
+  const n = state.paletteItems.length;
+  state.paletteIndex = (state.paletteIndex + delta + n) % n;
+  renderPalette();
+}
+
+function runPaletteItem(index) {
+  const it = state.paletteItems[index];
+  if (!it) return;
+  closePalette();
+  try {
+    const out = it.run();
+    if (out && typeof out.catch === 'function') out.catch(fail);
+  } catch (err) { fail(err); }
+}
+
+function initPalette() {
+  const input = $('palette-input');
+  input.addEventListener('input', () => { state.paletteIndex = 0; renderPalette(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); movePalette(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); movePalette(-1); }
+    else if (e.key === 'Home') { e.preventDefault(); state.paletteIndex = 0; renderPalette(); }
+    else if (e.key === 'End') {
+      e.preventDefault();
+      state.paletteIndex = Math.max(0, state.paletteItems.length - 1);
+      renderPalette();
+    } else if (e.key === 'Enter') { e.preventDefault(); runPaletteItem(state.paletteIndex); }
+    else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+    else if (e.key === 'Tab') { e.preventDefault(); }   // focus stays trapped
+  });
+  $('palette-scrim').addEventListener('mousedown', (e) => {
+    if (e.target === $('palette-scrim')) closePalette();
+  });
+  $('btn-palette').addEventListener('click', openPalette);
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      if (state.paletteOpen) closePalette();
+      else if (state.token) openPalette();
+    }
+  });
+
+  /* macOS reads ⌘; everywhere else that glyph is noise. */
+  const mac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
+  $('btn-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
 /* ── boot ─────────────────────────────────────────────────────────────── */
@@ -1303,8 +2863,15 @@ function wire() {
   loadPaint();
   initTabs();
   initCanvas();
+  initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
   opts($('ev-class'), TLP.map((t) => [t, t]), 'AMBER');
+  opts($('sel-metric'), SIZE_METRICS, state.sizeMetric);
+  opts($('sel-minconf'), [
+    ['LOW', 'LOW — everything'],
+    ['MODERATE', 'MODERATE and above'],
+    ['HIGH', 'HIGH only'],
+  ], state.proj.min_confidence);
 
   $('login-form').addEventListener('submit', doLogin);
   $('btn-logout').addEventListener('click', doLogout);
@@ -1319,16 +2886,31 @@ function wire() {
   $('edge-basis').addEventListener('change', () => syncRationaleHint('edge'));
   $('edge-src').addEventListener('change', refreshEdgeTypes);
   $('edge-dst').addEventListener('change', refreshEdgeTypes);
-  $('btn-relayout').addEventListener('click', settle);
-  $('btn-refresh').addEventListener('click', () => { loadGraph(); loadEvidence(); });
-  $('chk-inferred').addEventListener('change', (e) => {
-    state.showInferred = e.target.checked;
-    draw();
-  });
+
+  /* projection */
+  $('sel-preset').addEventListener('change', (e) => setPreset(e.target.value));
+  $('sel-minconf').addEventListener('change', (e) => setMinConfidence(e.target.value));
+  $('sel-metric').addEventListener('change', (e) => setSizeMetric(e.target.value));
+  $('chk-inferred').addEventListener('change', (e) => setIncludeInferred(e.target.checked));
+
+  /* canvas actions */
+  $('btn-fit').addEventListener('click', fitView);
+  $('btn-relayout').addEventListener('click', () => settle());
+  $('btn-save-layout').addEventListener('click', saveLayout);
+  $('btn-clear-pins').addEventListener('click', clearPins);
+  $('btn-refresh').addEventListener('click', () => { reloadAll(); loadEvidence(); });
+  $('btn-exit-focus').addEventListener('click', leaveFocusOrAnchor);
+
+  /* timeline */
+  $('tl-range').addEventListener('input', onScrubInput);
+  $('btn-asof-now').addEventListener('click', resetAsOf);
+
   $('chk-retracted').addEventListener('change', (e) => {
     state.includeRetracted = e.target.checked;
     renderInspector();
   });
+
+  window.addEventListener('resize', () => { resizeDensity(); });
 }
 
 /* A token handed over in the URL fragment (#token=...) is adopted and the
@@ -1367,3 +2949,4 @@ async function boot() {
 }
 
 boot();
+
