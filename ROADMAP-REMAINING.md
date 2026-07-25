@@ -1,11 +1,11 @@
 # What is left on the roadmap
 
-Generated 2026-07-25, after the rate-limiting and four-eyes commits.
-Companion to `docs/09-roadmap.md`, which is the plan; this is the honest
-delta between that plan and the build.
+Regenerated 2026-07-25, end of session. Companion to `docs/09-roadmap.md`,
+which is the plan; this is the honest delta between that plan and the build.
 
-**State:** `main`, 30 commits, Alembic head `0028`, 529 tests passing,
-ruff clean, source hygiene clean. Nothing pushed (no remote configured).
+**State:** `main`, 8 commits this session, Alembic head `0031`,
+**673 tests passing**, ruff clean, source hygiene clean, migrations
+round-trip. Nothing pushed (no remote configured).
 
 ---
 
@@ -13,169 +13,171 @@ ruff clean, source hygiene clean. Nothing pushed (no remote configured).
 
 | Phase | Status | What is actually missing |
 |---|---|---|
-| 0 — Foundation | ✅ **Done** | Nothing. CI runs four gates. No typecheck (deliberate — decision 42). |
+| 0 — Foundation | ✅ **Done** | Nothing. No typecheck, deliberately (decision 42). |
 | 1 — Graph core | ✅ **Done** | Nothing. |
-| 2 — Sociogram | ✅ **Done** | WebSocket push for graph changes was never built; the UI polls. |
-| 3 — Analytics | ✅ **Done** | Bipartite→one-mode, CONCOR/blockmodelling, charting the metric history. |
-| 4 — Collection | 🟡 **~30%** | Everything that actually collects. The proposal/triage half is done. |
-| 5 — Notification | 🟡 **~15%** | The egress gate exists. Nothing sends anything. |
-| 6 — Tradecraft | 🟡 **~35%** | Merge + dual control done. ACH, reports, retention, WebAuthn, break-glass. |
-| 7 — Comms channels | ⬜ **0%** | Decided (message-level capture) and unbuilt. |
-| 8 — Sample handling | ⬜ **0%** | Was blocked; **unblocked by operator directive 2026-07-25**, building with a counsel-review disclaimer. |
+| 2 — Sociogram | ✅ **Done** | WebSocket push was never built; the UI polls. |
+| 3 — Analytics | ✅ **Done** | Bipartite→one-mode, CONCOR, charting the metric history. |
+| 4 — Collection | 🟡 **~30%** | Everything that actually collects. Proposals and triage are done. |
+| 5 — Notification | 🟢 **~75%** | Jira, the integration admin surface, escalation, a worker. |
+| 6 — Tradecraft | 🟢 **~65%** | Retention/purge, break-glass, WebAuthn, timeline replay. |
+| 7 — Comms channels | ⬜ **0%** | Decided (message-level capture, decision 35) and unbuilt. |
+| 8 — Sample handling | 🟢 **~70%** | Built (decision 47). Missing: fuzzy hashing, YARA, screening, sandbox. |
 | 9 — Ingest API | ⬜ **0%** | Concept only. Blocked on the stealer-log scope question. |
+
+### Shipped this session
+
+| | Decision | Migration |
+|---|---|---|
+| Rate limiting, GCRA in Redis | 43, 45 | — |
+| Four-eyes approval + dual control on merge | 44 | 0028 |
+| Notification centre, SMTP, webhooks | 46 | 0029 |
+| U2 "why is this hidden" | — | 0030 |
+| Phase 8 sample handling | 47 | 0031 |
+| ACH matrix | 48 | — |
+| Report builder with TLP redaction | 49 | — |
+
+An adversarial review of the rate limiter (31 agents, 27 findings, 15
+refuted) found **12 real defects including one critical**: the blanket
+ceiling was keyed only on the presented credential, so rotating a Bearer
+token escaped it entirely — and sending a garbage token was *cheaper* than
+sending none. All 12 are fixed with a regression test each (decision 45).
+Budget for a review pass on anything substantial; it has now found real bugs
+on every single pass in this project's history.
 
 ---
 
 ## The remaining work, in the order it should be done
 
-### 1. Phase 5 — notification and integration
+### 1. Retention and purge with tombstones — Phase 6
 
-The egress gate (`egress.py`, decision 38) is built and tested. Everything
-that would call it is not.
+The highest-value thing left, and the machinery is already there.
 
-- [ ] **In-app notification centre.** The cheapest useful thing, and it
-      unblocks two named gaps: docs/01 requires a **case-owner notification
-      on merge**, and four-eyes approval currently gives an approver no way
-      to learn a request is waiting for them. Both are silently missing.
-- [ ] **SMTP** with digest, suppression, quiet hours, escalation. Mailpit is
-      already in the compose stack and unused.
-- [ ] **Outbound webhooks with HMAC.**
-- [ ] **Jira**: outbound task creation, inbound status webhook, TLP ceiling.
-- [ ] **Admin surface** for integration config and delivery logs.
+- [ ] Scheduled purge on `retention_until`, with `legal_hold` overriding
+      everything.
+- [ ] Out-of-schedule purge behind four-eyes. **`evidence.purge` is already
+      registered as an unconditional dual-control operation** (decision 44),
+      so this is the first real user of that mechanism.
+- [ ] Tombstones: docs/08 requires the record of destruction to survive the
+      data — what was destroyed, under what authority, by whom.
+- [ ] Documents supporting an accepted assertion pinned past source
+      retention. Otherwise you delete the evidence and leave the conclusion,
+      which is the worst possible outcome.
 
-Every one of these must call `can_egress()` before anything leaves. That is
-invariant 8 and the gate already exists, so the failure mode to watch for is
-an integration that grows its own copy — which is exactly what evidence
-export had done before decision 38.
+**Watch out:** evidence is in COMPLIANCE-mode object lock, so MinIO will
+refuse to delete before `retain_until` *even for the API's own credentials*.
+That is correct and it means purge has to reason about the lock rather than
+assume a delete succeeds.
 
-### 2. U2 — "why is this hidden"
+### 2. Break-glass — Phase 6
 
-An under-cleared analyst sees a smaller graph with no indication that
-anything was withheld. That is a correctness problem, not a UX one: an
-analyst who does not know a node is missing draws conclusions from a network
-they believe is complete.
+`iam.break_glass` has existed since Phase 0 with nothing writing it. docs/05:
+available, loud and short — mandatory justification, hard expiry, immediate
+alert to the security officer, mandatory post-hoc review. **The alert now has
+somewhere to go**: `BREAK_GLASS_INVOKED` is already a registered priority-1
+notification kind that overrides quiet hours.
 
-Needs care. A bare count of withheld elements is itself a weak side channel
-("there are 4 RED nodes adjacent to this person"), so it probably has to be
-a per-case setting — which now has a home, since `core."case"` gained its
-first policy column in migration 0028.
+### 3. Phase 5 remainder
 
-### 3. Phase 6 remainder — tradecraft
+- [ ] Jira: outbound task creation, inbound status webhook, TLP ceiling. The
+      HMAC-signed webhook transport it would specialise already exists.
+- [ ] Admin surface for integration config and delivery logs. The
+      `notify.delivery` ledger records every refusal and suppression with a
+      reason; nothing renders it.
+- [ ] Escalation of an unacknowledged priority-1 notification.
+- [ ] A worker. `POST /notifications/dispatch` is called by an operator or a
+      cron entry today (decision 46, following decision 30).
 
-- [ ] **ACH matrix and assumptions register.** Analysis of Competing
-      Hypotheses. `core.hypothesis` already exists in the schema and is
-      unused.
-- [ ] **Report builder with TLP-aware redaction.** High value against
-      decision 13's prosecution-grade posture, and a natural second caller
-      for the egress gate.
-- [ ] **Retention and purge with tombstones.** docs/08: the record of
-      destruction survives the data. This is the first operation that will
-      use four-eyes *unconditionally* — the mechanism from decision 44 is
-      already registered for `evidence.purge`.
-- [ ] **Break-glass.** `iam.break_glass` exists in the schema, unused.
-- [ ] **WebAuthn.** Recovery codes landed; hardware keys did not.
-- [ ] **Timeline scrubber and temporal replay.** The `as_of` scrubber
-      exists on the sociogram; full replay does not.
+### 4. Phase 8 remainder
 
-### 4. Phase 8 — sample handling
+- [ ] imphash, ssdeep, TLSH — each needs a dependency, and ssdeep needs a C
+      toolchain on Windows. Every absence is already recorded on the sample
+      row as a gap with a reason.
+- [ ] YARA against a rule corpus — docs/11 calls it the highest-value single
+      component.
+- [ ] Fuzzy-hash clustering as graph edges. Blocked on the hashes above.
+- [ ] Archive expansion **with depth and expansion-ratio caps**. Uncapped is
+      a zip bomb waiting for someone to send one.
+- [ ] Automated prohibited-content screening. Needs an authorised hash set,
+      which is a legal question before it is a technical one.
+- [ ] Sandbox integration (CAPEv2 / Triage / Joe). The authorisation record
+      and its constraint exist; nothing submits.
 
-**Was hard-blocked** on the absence of a prohibited-content policy
-(decision 36). The operator directed on 2026-07-25 to build it anyway with a
-disclaimer that counsel must review the deployment before it is used in any
-absolute sense. Building it accordingly, with invariant 10 kept hard:
+### 5. Phase 6 remainder
 
-- [ ] Separate-origin sample service, download-only, **no rendering, no
-      execution**
-- [ ] Encrypted-at-rest storage keyed by SHA-256; EDR exclusions documented
-- [ ] Quarantine → triage → RE queue, `MALWARE_ANALYST` as a distinct role
-- [ ] Static triage: hashes, imphash, ssdeep, TLSH, YARA
-- [ ] Fuzzy-hash clustering surfaced as graph edges
-- [ ] Prohibited-content screening and the `REJECTED` path
-- [ ] Detonation as an authorised, exposure-aware action
+- [ ] WebAuthn. Recovery codes landed in Phase 3; hardware keys did not.
+- [ ] Timeline scrubber and full temporal replay. The `as_of` scrubber
+      exists on the sociogram.
+- [ ] Assumptions register alongside ACH.
+- [ ] Backup and restore rehearsal.
 
-The disclaimer is not decoration. A store of attacker-supplied binaries will
-eventually receive material whose possession alone is an offence, and the
-handling rules differ between the two target jurisdictions (decision 13).
-The code can be correct and the deployment still unlawful.
+### 6. Phase 4 — collection
 
-### 5. Phase 4 remainder — collection
+Still deliberately last among the buildable items. `docs/09`: the graph and
+assertion layer must work end to end before collection is switched on,
+because a firehose into a half-built model produces a landfill.
 
-Deliberately last among the buildable items. `docs/09` is explicit:
+Adapter interface and scheduler, RSS first, persona vault with envelope
+encryption and egress binding, XenForo/MyBB/Telegram adapters, the document
+bucket, watch matching, parser health checks. `ingest.dead_letter` exists and
+is unused.
 
-> the graph and assertion layer must work end to end before collection is
-> switched on. Pointing a firehose at a half-built model produces a landfill.
+### 7. Phases 7 and 9
 
-- [ ] Adapter interface and scheduler with jitter and rate limiting (the
-      limiter from decision 43 is per-request; per-source `max_rps` is a
-      different shape)
-- [ ] RSS adapter first — simplest, proves the pipeline
-- [ ] Persona vault: envelope encryption, egress binding, status lifecycle
-      (invariant 7 — credentials never leave the collector)
-- [ ] XenForo, MyBB, Telegram MTProto adapters
-- [ ] Document bucket: normalise, dedupe, version, index, embed
-- [ ] Watch matching → watch hits
-- [ ] Parser health checks and drift alerting (invariant 12 — nothing
-      silently dropped; `ingest.dead_letter` exists and is unused)
-
-### 6. Phases 7 and 9
-
-- **Phase 7 (comms channels)** — decided as message-level capture
-  (decision 35), zero built. Storage scales with traffic, every captured
-  message is personal data inside the retention regime, and the Phase 5
-  egress gate stops being advisory.
-- **Phase 9 (ingest API)** — concept only, and **has its own open
-  question**: are stealer logs in scope? If yes, the compartment and
-  minimisation policy comes before any ingest code.
+- **Phase 7** — decided as message-level capture (decision 35), zero built.
+- **Phase 9** — concept only, and has its own open question: are stealer
+  logs in scope? If yes, the compartment and minimisation policy comes
+  before any ingest code.
 
 ---
 
 ## Security items still deferred
 
-Tracked here because they are not phase work and will otherwise be lost.
-
-| Item | Why it matters | Notes |
-|---|---|---|
-| Session IP/UA binding | docs/05 asks for it; a stolen token is currently portable | Re-auth on mismatch, not silent kill |
-| Non-owner DB role + RLS | The API connects as the table owner, so Postgres RLS is a no-op behind it | docs/05 wants RLS as a second line |
-| Login timing equalisation | A missing account returns faster than a wrong password | Enumeration oracle |
-| Compartment registry | Compartments are free-text; typos create silent no-access | |
-| CI typecheck | No annotations to check against — a vacuously-passing mypy job is worse than none | decision 42 |
-| Redis isolation | The limiter shares an instance running `allkeys-lru`, so meters are evictable under memory pressure | decision 43; deployment fix, not a code one |
+| Item | Why it matters |
+|---|---|
+| Session IP/UA binding | A stolen token is currently portable |
+| Non-owner DB role + RLS | The API connects as the table owner, so Postgres RLS is a no-op behind it |
+| Login timing equalisation | A missing account returns faster than a wrong password |
+| SSRF protection | Needed before watch targets exist (Phase 4) |
+| Compartment registry | Compartments are free-text; a typo creates silent no-access |
+| CI typecheck | No annotations to check against; a vacuously-passing mypy job is worse than none |
+| Redis isolation | The limiter shares an instance running `allkeys-lru`, so meters are evictable |
+| Sample origin split | `NOCTORNAL_SAMPLE_ORIGIN` is enforced at runtime, but the *deployment* has to actually provide a second origin |
 
 ---
 
 ## Known gaps in what IS built
 
-Not roadmap items — things that are done but incomplete, and would surprise
-someone reading the phase as "shipped".
-
 - **The metric history endpoint exists and is tested. Nothing charts it.**
-- **Two-mode presets warn rather than project.** Financial and Communication
-  include `CONTROLS`/`TX_*` and `PARTICIPANT_IN`, so wallets, transactions
-  and conversations become graph vertices. The analytics response warns
-  (decision 33) rather than silently rewriting the presets, because that
-  would change every Phase 2 number.
-- **Per-case trust-decay default has no home.** The half-life is a request
-  parameter stored on the projection. `core."case"` now has a policy column
-  precedent (0028) but no column for this.
-- **The triage queue has no notification.** An analyst finds out there is
-  work by looking.
+- **Two-mode presets warn rather than project** (decision 33).
+- **Per-case trust-decay default has no home.** `core."case"` now has three
+  policy columns (`dual_control_merge`, `withheld_disclosure`) so the
+  precedent exists.
 - **No WebSocket push.** Phase 2 listed it; the UI polls.
+- **The ACH matrix has no UI.** Endpoints exist and are tested.
+- **The report builder has no UI.** Same.
+- **Sample handling has no UI** — deliberately last, because invariant 10
+  says metadata may render and bytes may not, and that distinction is worth
+  building carefully rather than quickly.
 
 ---
 
 ## Traps worth carrying forward
 
 - **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart. This
-  has cost real time in three separate sessions.
+  has now cost time in four separate sessions.
 - **TOTP cannot work on this host** — the clock is unsynchronised and sits
   in 2026. Sign in with `bootstrap.py session --email <you>`.
 - **TOTP codes are single-use.** A test that logs in twice inside one
   30-second step fails on the replay guard, not on the code under test.
-- **Test cleanup order matters.** `core.assertion` and `collect.proposal`
-  both reference `collect.document`, and the deferred invariant-1 triggers
-  fire at commit — so assertions and their elements must be deleted in ONE
-  transaction. Anything that calls analytics also leaves
-  `analytics.projection` rows that block the case delete.
+- **The TLP floor trigger forbids an element BELOW its case**, so a test
+  fixture with a GREEN node in an AMBER case fails at the database.
+- **Test cleanup order matters and keeps growing.** Anything that calls
+  analytics leaves `analytics.projection` rows; anything that merges or
+  approves leaves notifications; both block the case delete. Assertions and
+  their elements must go in ONE transaction, because the deferred
+  invariant-1 triggers fire at commit.
+- **Running the suite while background agents are also running it** produces
+  failures that are pure interference — the e2e cleanup deletes by email
+  pattern and two runs delete each other's users.
 - **A hidden browser tab clamps `setTimeout` to ~1s** and suspends
   `ResizeObserver`. Count messages and repaints, not wall time.
