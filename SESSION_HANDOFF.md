@@ -1,247 +1,160 @@
-# Session handoff — 2026-07-25
+# Session handoff — 2026-07-25 (second session)
 
 Written so a fresh session can resume without re-deriving anything.
 
-> **Read order for a new session:** this file, then `CLAUDE.md` (the twelve
-> invariants), then `docs/15-handoff.md` (the durable project handoff — this
-> file is the *session* record; docs/15 is the *project* record and outlives
-> it). `docs/00-decisions.md` now holds 42 numbered decisions; 30–42 were
-> taken in this session.
+> **Read order for a new session:** this file, then `ROADMAP-REMAINING.md`
+> (what is left, prioritised), then `CLAUDE.md` (the twelve invariants),
+> then `docs/15-handoff.md` (the durable project record). `docs/00-decisions.md`
+> now holds **49 numbered decisions**; 43–49 were taken in this session.
 
 ---
 
-## 1. Context & Objective
+## 1. What this session did
 
-**NocTORnal** is a HUMINT / social-network-analysis platform for cybercrime
-investigation: analysts build a graph of criminal actors, personas, groups and
-the trust between them, every element traceable to graded evidence with a chain
-of custody. Comparable to Maltego, i2, SL Crimewall, with UCINET-grade SNA
-maths. Python 3.13 / FastAPI / Postgres 16, plain-HTML analyst UI under a strict
-CSP with no build step.
+Started from the previous handoff's priority list and worked down it, then
+into Phases 6 and 8. Eight commits.
 
-**This session's objective**, as given: *"We are beginning with phase 3"*, then
-*"push through phase 3 entirely"*, then *"enhancements for E-items and visuals…
-continue with the phases using your best judgement"*, then *"continue phase by
-phase until the context has run out"*.
+| Commit | What |
+|---|---|
+| `5359b52` | Rate limiting: GCRA in Redis, login metered by failures not attempts |
+| `64f577f` | Four-eyes approval, dual control on merge as a per-case switch |
+| `30ee5ed` | **Fix 12 defects an adversarial review found in the rate limiter** |
+| `3665a78` | Phase 5: a notification centre whose email cannot carry the case file |
+| `96af43c` | U2: tell an analyst their picture is incomplete |
+| `ff3c9a0` | Phase 8: sample handling, block replaced by a refusal |
+| `21e635c` | ACH: ranked by what a theory fails to explain |
+| `78019df` | Report builder: structural redaction, mark follows contents |
 
-So: Phase 3 in full, then the enhancement map's E-items, then as much of Phases
-4–6 as could be built **well** rather than broadly.
+**254 → 421 (previous session) → 673 tests.** Alembic `0027 → 0031`.
 
-**Three ideas everything follows from** (docs/01), all three of which now have
-enforcement rather than aspiration:
+### The operator directives that shaped it
 
-1. **A handle is not a person.** `IDENTITY` vs `PERSON`, joined by a reversible
-   confidence-scored `ATTRIBUTED_TO` edge.
-2. **Nothing is a fact.** Every element traces to an `assertion` with an
-   Admiralty grading.
-3. **Machines propose, analysts dispose.** Extractors write `proposal` rows,
-   never graph elements.
+Two came mid-session and both are recorded as decisions:
 
----
-
-## 2. Completed Work
-
-### Before this session
-
-Phases 0–2: Alembic-owned schema (0001–0025), Argon2id + TOTP auth, the
-five-part access gate as one `evaluate()`, the assertion layer enforced by
-deferred DB triggers, WORM evidence with a hash-chained custody ledger, cases,
-selectors, tags, node sets, full-text search, and the Phase 2 sociogram
-(four projection presets, ego networks, paths, `as_of` scrubber, local metrics,
-saved layouts, command palette, inspector). **254 tests.**
-
-### Built this session — 11 commits, 54 files, ~9,300 insertions, 254 → 421 tests
-
-**Phase 3 — analytics (commit `d2f1696`).** `analytics.py` (pure, database-free,
-so the maths is testable against hand-computed values) + `analytics_runs.py`
-(cache, `metric_run` lifecycle, audit). Betweenness with Brandes pivot sampling
-above 3k nodes, harmonic closeness (classical is undefined on disconnected
-graphs, which criminal networks routinely are), eigenvector over the *positive*
-subgraph only, Burt's constraint/effective size/efficiency/hierarchy, Leiden
-communities, cut vertices, bridges, signed structural balance with unbalanced
-triads and contested dyads, KPP-Neg key player. Rank + percentile on every
-value. Alembic **0026**. Analysis tab in the UI.
-
-**E-items + visual layer (commit `32af626`).**
-- **E1/E2** — exhibit attachable at the moment a claim is made
-  (`assertion.evidence_id` had been unused since Phase 1); projection reports
-  `has_evidence`; unevidenced entities render hollow, unevidenced ties fade;
-  case-level coverage is a headline number that reads red at zero.
-- **E3** — retraction in the inspector. Retracting the last live assertion
-  visibly dissolves the element from the live graph.
-- **E4** — recovery codes: 10, single-use, Argon2id, told apart from a TOTP
-  code by *shape* so login stays single-step; single use enforced by an atomic
-  `array_remove` guarded on the hash still being present.
-- **U1** — hand-written ForceAtlas2 + Barnes-Hut in a Web Worker.
-- **U3** — `valid_from` / `valid_to` on the entity and relationship forms.
-
-**Phase 5 egress gate + Phase 4 proposal pipeline (commit `022d9e5`).**
-`egress.py` is the one `can_egress()` docs/07 requires; evidence export now
-calls it instead of its own drifting copy. `proposals.py` enforces invariant 3
-**by class shape** — the extractor-facing `ProposalStore` holds no
-`GraphWriteService` and cannot reach the graph; a test asserts that.
-
-**Manual capture + triage (commit `519e487`).** `extraction.py` lands pasted
-text as a `collect.document` deduped on content hash, writes
-`collect.extraction` rows **with character offsets**, and raises one proposal
-per new value carrying the sentence it came from. Keyboard-driven Triage tab
-(J/K move, A/R/D dispose) with a rail badge.
-
-**Entity merge (commit `c0cf1f0`, Alembic 0027)** and its **UI (commit
-`298739f`)**. A ledger, not a flag: `core.node_merge` + `node_merge_edge` record
-every re-pointed endpoint so reversal is a *restore*, not a re-derivation.
-
-**CI (commit `27713e8`).** Four gates + `ruff.toml` + `check_source_hygiene.py`.
-
-**Fixes.** Sociogram resize (commit `3fe93ff`) and `scripts/open-ui.ps1`
-(commit `9df9bf8`).
-
-### Bugs found and fixed that were NOT in the brief
-
-1. **Retraction was cosmetic.** Decision 24 scoped live provenance as a
-   *projection* property rather than a DB constraint — and the projection never
-   implemented it. A retracted assertion showed a RETRACTED chip while its node
-   kept full degree, so Phase 3 would have named takedown targets from
-   withdrawn evidence. Fixed in `projections.py`.
-2. **`Subgraph.truncated` was computed and dropped**, making a metric over a
-   cut-off node set indistinguishable from a complete one. Key player now
-   *refuses* on a truncated projection.
-3. **A fail-open default in migration 0026**:
-   `visibility_compartments NOT NULL DEFAULT '{}'` is exactly what an analyst
-   holding no compartments looks up with. Both columns are now NOT NULL with no
-   default. A later round-trip test found a *second* defect in the same
-   migration — it only applied to an empty table.
-4. **The sociogram vanished below ~900px** (canvas row had a floor of `0`).
-5. **A `zip()` without `strict=`** in `_mode_warning` would have silently
-   mislabelled which vertices are non-actor (found by ruff).
+1. **"With phase 8, build anyway and write a disclaimer that counsel is
+   required to review the state before using in an absolute sense."**
+   Decision 47 supersedes decision 36. The block became a *refusal with a
+   named condition* rather than nothing: sample ingest is refused until an
+   operator declares `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
+   `NOCTORNAL_DESIGNATED_PERSON`. **That is a declaration the software
+   records, not one it can verify.** The README warning block was rewritten
+   to say so.
+2. **"Export a what's-left-on-the-roadmap markdown."** → `ROADMAP-REMAINING.md`,
+   regenerated at the end of the session.
 
 ---
 
-## 3. Current System State
+## 2. The thing most worth knowing
+
+**The adversarial review pass found a critical defect in code that had 484
+passing tests over it.**
+
+The blanket rate-limit ceiling was keyed only on the presented credential,
+and nothing validates that a bearer token is a live session. A caller
+rotating a random token per request minted a fresh empty meter every time.
+Reproduced against the real app with the limit shrunk to 3: a fixed token
+gave 27 refusals in 30 requests, a rotating one gave **zero**. Worse, the
+bearer branch returned early and suppressed the address fallback, so sending
+one garbage header made a caller *strictly less limited than sending none*.
+The control inverted. It was also the only limiter on ~40 of 45 routes.
+
+Eleven more followed, including: every IPv4-mapped address (`::ffff:a.b.c.d`)
+sharing one bucket because they all have the `::/64`; the audit throttle
+failing **open** during exactly the outage that makes every limit refuse; and
+the async middleware doing blocking Redis I/O on the event loop, which
+defeats the entire point of that limit failing open.
+
+**Budget a review pass on anything substantial.** It has now found real bugs
+on every single pass in this project's history, and the pattern holds:
+reviewers told to *break* the thing find what reviewers told to *check* it do
+not.
+
+---
+
+## 3. Current system state
 
 | | |
 |---|---|
-| **Branch** | `main`, working tree clean, nothing pushed (no remote configured) |
-| **Migration head** | `0027`, round-trips head → base → head |
-| **Tests** | **421 passing**, 0 failing, 0 skipped with the stack up |
-| **Lint** | `ruff check` clean; source hygiene clean (143 files) |
-| **Ontology** | generated TS + SQL match the definition |
-| **Python** | **3.13.14** — *not* the 3.12 the docs assume |
-| **Stack** | Docker Compose: postgres, redis, nats, minio, openfga, mailhog |
+| **Branch** | `main`, clean, nothing pushed (no remote) |
+| **Migration head** | `0031`; each new migration round-trips against its predecessor |
+| **Tests** | **673 passing**, 0 failing, 0 skipped with the stack up |
+| **Lint** | `ruff check` clean; source hygiene clean (170 files) |
+| **Python** | 3.13.14 |
+| **New dependency** | `redis>=5.0` (in `apps/api/pyproject.toml`) |
+| **CI** | now has a **redis service** — the Redis leg is env-gated and CI fails on skips |
 
-### Key architectural decisions (30–42 in `docs/00-decisions.md`)
+### New environment variables
 
-- **30 — Analytics run SYNCHRONOUSLY in the API**, not in the Zone B worker
-  docs/02 describes. A queue adds a process, a dependency and a progress UI
-  without changing a number at this scale (2k nodes / 6k edges = 1.15s). The
-  compute layer is pure, so moving it later is a change of *caller*, not
-  algorithm. **Accepted caveat: CPU-bound path behind a non-step-up permission
-  with rate limiting still deferred.**
-- **31 — A metric run is cached against the CALLER'S VISIBILITY.** `project()`
-  filters by clearance, so a cached betweenness computed over RED nodes served
-  to an AMBER analyst would leak structure. Two independent mechanisms.
-- **35 — Phase 7 is MESSAGE-LEVEL capture** (operator decision).
-- **36 — NO prohibited-content policy exists → Phase 8 is BLOCKED.**
-- **41 — Merge is a ledger; IDENTITY may never merge into PERSON.**
-- **42 — CI lint rule set is deliberately small** (E/W/F/B, B008 ignored:
-  FastAPI's `Depends()` idiom fired it 157 times on correct code).
+| Variable | Effect if unset |
+|---|---|
+| `REDIS_URL` | Rate limiting runs **per process** and warns loudly |
+| `NOCTORNAL_TRUSTED_PROXY_HOPS` | `X-Forwarded-For` is ignored (correct default) |
+| `NOCTORNAL_RATELIMIT=off` | Disables limiting entirely; warns on every start |
+| `NOCTORNAL_PROHIBITED_CONTENT_POLICY` + `NOCTORNAL_DESIGNATED_PERSON` | **Sample ingest is refused** |
+| `NOCTORNAL_SAMPLE_ORIGIN` | **Sample downloads are refused** (invariant 10) |
+| `NOCTORNAL_BASE_URL`, `SMTP_*`, `NOCTORNAL_WEBHOOK_*` | Notification delivery is degraded or refused |
+
+`scripts/launch.ps1` sets `REDIS_URL` to the compose default.
 
 ---
 
-## 4. Immediate Next Steps & Pending Work
-
-Prioritised. Items 1–3 close gaps this session created or named.
-
-1. **Rate limiting** (deferred security item; decision 30 names analytics as a
-   DoS surface for an authenticated analyst). Redis is in the stack and unused.
-   Decide fail-open vs fail-closed when Redis is down — that is the real
-   question, not the implementation.
-2. **Dual control on merge** (docs/01 asks for it; only step-up is built) and
-   the **case-owner notification** on merge (blocked on item 3).
-3. **Phase 5 proper**: SMTP with digest/suppression/quiet hours, in-app
-   notification centre, Jira, webhooks. The egress gate they all must call
-   already exists and is tested.
-4. **U2 — "why is this hidden"**: an under-cleared analyst sees a smaller graph
-   with no indication anything was withheld. Needs care — a bare count is itself
-   a weak signal, so it may need to be a per-case setting.
-5. **Phase 6 remainder**: ACH matrix, report builder with TLP-aware redaction
-   (high value for decision 13's prosecution-grade posture, and it would use the
-   egress gate), retention/purge with tombstones, WebAuthn, break-glass.
-6. **Phase 4 remainder**: adapter interface + scheduler, RSS adapter first,
-   persona vault, watch matching, parser health checks. **Do not start until the
-   graph layer has been used in anger on a real case** — docs/09 is explicit
-   that a firehose into a half-built model produces a landfill.
-7. **Phase 7** (message-level capture, decided) and **Phase 9** (ingest API).
-
-### Blockers and open questions
-
-- **Phase 8 is hard-blocked** on the prohibited-content policy. See the warning
-  block at the top of `README.md`. Nothing in the build stores a sample; keep it
-  that way until counsel settles the policy.
-- **Two-mode presets.** Financial includes `CONTROLS`/`TX_*` and Communication
-  includes `PARTICIPANT_IN`, so `WALLET`/`TRANSACTION`/`CONVERSATION` become
-  graph vertices. The analytics response *warns* (decision 33) rather than
-  silently rewriting the presets, which would change every Phase 2 number.
-  Proper bipartite→one-mode with Newman weighting is unbuilt.
-- **Per-case trust-decay default** has no home; the half-life is a request
-  parameter stored on the projection. `core."case"` has no column for it.
-- **Metric history endpoint exists and is tested, but nothing charts it.**
-- **Still no typecheck in CI** — there are no annotations to check against, and
-  a mypy job that passes vacuously is worse than an absent one.
-
-### Traps that cost real time this session
-
-- **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart. This bit
-  me *twice* despite being documented in docs/15.
-- **A hidden/background browser tab clamps `setTimeout` to ~1000ms and
-  suspends `ResizeObserver` callbacks.** I spent effort "fixing" main-thread lag
-  that was pure measurement artifact. Count messages and repaints, not wall time.
-- **Test cleanup order matters**: `core.assertion` and `collect.proposal` both
-  reference `collect.document`, and the deferred invariant-1 triggers fire at
-  commit — so assertions and their elements must be deleted in ONE transaction.
-
----
-
-## 5. Relevant File Paths & References
-
-### New this session
+## 4. New modules
 
 | Path | What |
 |---|---|
-| `apps/api/src/noctornal_api/analytics.py` | The SNA maths. Pure, no DB. |
-| `apps/api/src/noctornal_api/analytics_runs.py` | Cache, `metric_run` lifecycle, audit |
-| `apps/api/src/noctornal_api/egress.py` | The one `can_egress()` (invariant 8) |
-| `apps/api/src/noctornal_api/proposals.py` | Invariant 3, enforced by class shape |
-| `apps/api/src/noctornal_api/extraction.py` | Paste → document → extraction → proposal |
-| `apps/api/src/noctornal_api/merges.py` | Reversible merge |
-| `apps/api/src/noctornal_api/security/recovery.py` | Recovery codes |
-| `apps/api/src/noctornal_api/http/routers/` | `analytics.py`, `proposals.py`, `merges.py` |
-| `apps/api/src/noctornal_api/http/static/layout-worker.js` | ForceAtlas2 + Barnes-Hut |
-| `db/migrations/versions/0026_analytics_runs.py` | Analytics run storage + cache safety |
-| `db/migrations/versions/0027_node_merge.py` | Merge ledger |
-| `.github/workflows/ci.yml`, `ruff.toml` | CI and lint config |
-| `scripts/check_source_hygiene.py` | NUL bytes + Trojan Source |
-| `scripts/open-ui.ps1` | One command to sign in and open the browser |
+| `ratelimit.py` / `ratelimit_redis.py` | Pure GCRA + the one Lua script |
+| `http/limits.py` | Subject derivation, the dependency, the blanket middleware |
+| `approvals.py` | Four-eyes: request → decide → consume, bound to a payload hash |
+| `notifications.py` / `notify_events.py` / `transports.py` | The centre, the events, SMTP + webhooks |
+| `samples.py` | Phase 8. Quarantine, triage, the origin refusal, the REJECTED path |
+| `ach.py` | Analysis of Competing Hypotheses, scored |
+| `reports.py` | Structural TLP redaction and the evidence register |
+| `http/routers/` | `approvals.py`, `notifications.py`, `samples.py`, `ach.py`, `reports.py` |
+| Migrations | `0028` approvals, `0029` notifications, `0030` withheld disclosure, `0031` lab |
 
-### Modified — inspect before changing
+---
 
-- `apps/api/src/noctornal_api/projections.py` — **live-assertion filter**,
-  `has_evidence`, `truncated`, evidence coverage. Everything downstream depends
-  on `project()`.
-- `apps/api/src/noctornal_api/http/static/app.js` — ~3,700 lines; Analysis,
-  Triage and entity-resolution panels, resize handling.
-- `apps/api/src/noctornal_api/security/auth.py` — recovery-code branch.
-- `apps/api/src/noctornal_api/http/deps.py` — new composable `require_step_up`.
+## 5. Where to pick up
 
-### Tests
+`ROADMAP-REMAINING.md` has the full list. The first three:
 
-`test_analytics.py` (maths vs published definitions), `test_analytics_pg.py`
-(cache safety, clearance scoping), `test_provenance_pg.py` (E1–E3),
-`test_recovery.py`, `test_egress.py`, `test_proposals_pg.py` (invariant 3),
-`test_extraction.py` (mostly what must NOT be extracted), `test_capture_pg.py`,
-`test_merges_pg.py`.
+1. **Retention and purge with tombstones.** Highest value left, and the
+   machinery exists — `evidence.purge` is already registered as an
+   unconditional four-eyes operation (decision 44), so this is that
+   mechanism's first real user. Watch the COMPLIANCE-mode object lock: MinIO
+   will refuse to delete before `retain_until` even for the API's own
+   credentials, so purge has to reason about the lock rather than assume.
+2. **Break-glass.** `iam.break_glass` has existed since Phase 0 with nothing
+   writing it, and `BREAK_GLASS_INVOKED` is already a registered priority-1
+   notification kind that overrides quiet hours — so the alert docs/05 asks
+   for now has somewhere to go.
+3. **UI for ACH, reports and samples.** All three have tested endpoints and
+   no interface. Samples last and carefully: invariant 10 says metadata may
+   render and bytes may not.
 
-### Running it
+---
+
+## 6. Traps
+
+- **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart. Four
+  sessions running.
+- **TOTP cannot work on this host** (unsynchronised clock, in 2026). Sign in
+  with `.venv\Scripts\python scripts\bootstrap.py session --email <you>`.
+- **TOTP codes are single-use** — a test that logs in twice inside one
+  30-second step fails on the replay guard, not on the code under test.
+- **The TLP floor trigger forbids an element BELOW its case.** A fixture with
+  a GREEN node in an AMBER case fails at the database.
+- **Test cleanup order keeps growing.** Anything calling analytics leaves
+  `analytics.projection` rows; anything merging or approving leaves
+  notifications; both block the case delete. Assertions and their elements
+  must be deleted in ONE transaction (deferred invariant-1 triggers).
+- **Do not run the suite while background agents are running it.** The e2e
+  cleanup deletes by email pattern and two runs delete each other's users;
+  the failures look real and are not.
+- **A hidden browser tab clamps `setTimeout` to ~1s** and suspends
+  `ResizeObserver`.
+
+## 7. Running it
 
 ```bash
 powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
@@ -251,15 +164,9 @@ powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
 powershell -ExecutionPolicy Bypass -File "scripts\open-ui.ps1"
 ```
 
-Demo cases: **`OP-LATTICEWORK-26`** (15 actors, three crews, a sole bridge, a
-redundant bridge pair, balanced + unbalanced triads — use this for the Analysis
-tab) and `OP-NIGHTJAR-26` (a 7-node star; every Phase 3 metric is degenerate on
-it). `OP-SCALE-*` is 400 synthetic nodes for the layout worker — delete freely.
-
 ```bash
 .venv\Scripts\python -m pytest apps/api/tests packages/ontology/tests -q
 ```
 
-Postgres legs gate on `DATABASE_URL`, evidence legs additionally on
-`MINIO_ENDPOINT`, so the suite silently degrades to unit-only without the stack.
-CI fails the run if anything skipped, for exactly that reason.
+Postgres legs gate on `DATABASE_URL`, evidence on `MINIO_ENDPOINT`, the
+limiter's Lua on `REDIS_URL`. CI fails the run if anything skipped.
