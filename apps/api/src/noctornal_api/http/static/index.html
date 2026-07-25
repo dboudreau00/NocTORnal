@@ -56,6 +56,10 @@
     <span id="hdr-case" class="hdr-case">No case selected</span>
     <span id="hdr-tlp" class="chip" hidden></span>
     <span class="spacer"></span>
+    <span id="hdr-asof" class="hdr-asof mono" hidden>as-of: now</span>
+    <button id="btn-palette" type="button" class="btn ghost small"
+            aria-keyshortcuts="Control+K Meta+K"
+            aria-label="Open the command palette">⌘K</button>
     <button id="btn-cases" type="button" class="btn ghost" hidden>All cases</button>
     <span class="hdr-user">
       <span class="muted small">analyst</span>
@@ -142,319 +146,459 @@
     </section>
 
     <!-- ─────────────────────── WORKSPACE ─────────────────────── -->
+    <!-- docs/06 layout: 56px icon rail | canvas edge-to-edge | 360px inspector,
+         with the timeline scrubber under the canvas. -->
     <section id="view-workspace" class="workspace" hidden>
-      <div class="tabs" role="tablist" aria-label="Case views">
-        <button id="tab-graph" type="button" class="tab" role="tab"
-                aria-controls="pane-graph" aria-selected="true" data-tab="graph">Graph</button>
-        <button id="tab-entities" type="button" class="tab" role="tab"
+
+      <nav class="rail" role="tablist" aria-orientation="vertical"
+           aria-label="Case views">
+        <button id="tab-graph" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-graph" aria-selected="true" data-tab="graph"
+                title="Sociogram">
+          <span class="rail-glyph" aria-hidden="true">◈</span>
+          <span class="rail-cap">Graph</span>
+        </button>
+        <button id="tab-entities" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-entities" aria-selected="false" tabindex="-1"
-                data-tab="entities">Entities</button>
-        <button id="tab-evidence" type="button" class="tab" role="tab"
+                data-tab="entities" title="Entity list">
+          <span class="rail-glyph" aria-hidden="true">⬡</span>
+          <span class="rail-cap">Entities</span>
+        </button>
+        <button id="tab-evidence" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-evidence" aria-selected="false" tabindex="-1"
-                data-tab="evidence">Evidence</button>
-        <button id="tab-search" type="button" class="tab" role="tab"
+                data-tab="evidence" title="Evidence and chain of custody">
+          <span class="rail-glyph" aria-hidden="true">▤</span>
+          <span class="rail-cap">Evidence</span>
+        </button>
+        <button id="tab-search" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-search" aria-selected="false" tabindex="-1"
-                data-tab="search">Search</button>
-        <span class="tabs-gap"></span>
-        <button id="tab-add-node" type="button" class="tab" role="tab"
+                data-tab="search" title="Full-text search">
+          <span class="rail-glyph" aria-hidden="true">⌕</span>
+          <span class="rail-cap">Search</span>
+        </button>
+        <span class="rail-gap"></span>
+        <button id="tab-add-node" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
-                data-tab="add-node">Add entity</button>
-        <button id="tab-add-edge" type="button" class="tab" role="tab"
+                data-tab="add-node" title="Add entity">
+          <span class="rail-glyph" aria-hidden="true">＋</span>
+          <span class="rail-cap">Entity</span>
+        </button>
+        <button id="tab-add-edge" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-edge" aria-selected="false" tabindex="-1"
-                data-tab="add-edge">Add relationship</button>
-      </div>
+                data-tab="add-edge" title="Add relationship">
+          <span class="rail-glyph" aria-hidden="true">⇄</span>
+          <span class="rail-cap">Link</span>
+        </button>
+      </nav>
 
-      <div class="work-body">
-        <div class="work-main">
+      <div class="work-main">
 
-          <!-- GRAPH -->
-          <section id="pane-graph" class="pane pane-graph" role="tabpanel"
-                   aria-labelledby="tab-graph" tabindex="-1">
-            <div class="canvas-wrap">
-              <canvas id="graph-canvas" tabindex="0" role="application"
-                      aria-label="Sociogram. Left and right arrow keys move the
-                      selection between entities, space hides inferred edges,
-                      escape clears the selection."></canvas>
-              <p id="graph-empty" class="canvas-empty" hidden>
-                Nothing in this case yet. Add an entity to begin.
-              </p>
-            </div>
-            <div class="graph-bar">
-              <div class="legend" aria-label="Legend">
-                <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
-                <span class="lg"><i class="swatch hue-actor-person"></i>Person</span>
-                <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
-                <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
-                <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
-                <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
-                <span class="lg"><i class="swatch hue-context"></i>Context</span>
-                <span class="legend-sep" aria-hidden="true"></span>
-                <span class="lg"><i class="line pos"></i>vouch / positive</span>
-                <span class="lg"><i class="line neg"></i>dispute / negative</span>
-                <span class="lg"><i class="line neu"></i>neutral</span>
-                <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
-                <span class="legend-sep" aria-hidden="true"></span>
-                <span class="lg muted">size = degree centrality</span>
-              </div>
-              <div class="graph-controls">
-                <label class="check">
-                  <input id="chk-inferred" type="checkbox" checked>
-                  <span>Show inferred edges</span>
-                </label>
-                <button id="btn-relayout" type="button" class="btn ghost small">Re-layout</button>
-                <button id="btn-refresh" type="button" class="btn ghost small">Reload graph</button>
-              </div>
-            </div>
-          </section>
+        <!-- GRAPH -->
+        <section id="pane-graph" class="pane pane-graph" role="tabpanel"
+                 aria-labelledby="tab-graph" tabindex="-1">
 
-          <!-- ENTITIES -->
-          <section id="pane-entities" class="pane" role="tabpanel"
-                   aria-labelledby="tab-entities" tabindex="-1" hidden>
-            <div class="pane-head">
+          <!-- Projection controls. docs/03: no metric is ever computed against
+               "the graph" — only against a named, parameterised projection. -->
+          <div class="proj-bar">
+            <div class="proj-grp">
               <label class="field inline">
-                <span class="label">Type filter</span>
-                <select id="ent-filter" class="select"></select>
+                <span class="label">Projection</span>
+                <select id="sel-preset" class="select"
+                        aria-describedby="preset-desc"></select>
               </label>
-              <span id="ent-count" class="muted small"></span>
+              <label class="field inline">
+                <span class="label">Min confidence</span>
+                <select id="sel-minconf" class="select"></select>
+              </label>
+              <label class="check">
+                <input id="chk-inferred" type="checkbox" checked>
+                <span>Include inferred</span>
+              </label>
             </div>
-            <table class="table">
-              <caption class="sr-only">Entities in this case</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Type</th>
-                  <th scope="col">Label</th>
-                  <th scope="col">Classification</th>
-                  <th scope="col">First seen</th>
-                </tr>
-              </thead>
-              <tbody id="ent-body"></tbody>
-            </table>
-            <p id="ent-empty" class="empty" hidden>No entities match.</p>
-          </section>
 
-          <!-- EVIDENCE -->
-          <section id="pane-evidence" class="pane" role="tabpanel"
-                   aria-labelledby="tab-evidence" tabindex="-1" hidden>
-            <form id="ev-form" class="card row-form" novalidate>
-              <label class="field">
-                <span class="label">Exhibit file</span>
-                <input id="ev-file" type="file" required>
+            <div class="proj-grp">
+              <label class="field inline">
+                <span class="label">Node size</span>
+                <select id="sel-metric" class="select"
+                        aria-describedby="metric-note"></select>
               </label>
-              <label class="field">
-                <span class="label">Title</span>
-                <input id="ev-title" required>
-              </label>
-              <label class="field">
-                <span class="label">Acquisition</span>
-                <select id="ev-method" class="select">
-                  <option value="MANUAL_UPLOAD">Manual upload</option>
-                  <option value="COLLECTOR">Collector</option>
-                  <option value="LEGAL">Legal process</option>
-                </select>
-              </label>
-              <label class="field">
-                <span class="label">Classification</span>
-                <select id="ev-class" class="select"></select>
-              </label>
-              <button type="submit" class="btn primary">Upload exhibit</button>
-              <p id="ev-error" class="form-error" role="alert" hidden></p>
-              <p id="ev-result" class="form-ok" role="status" hidden></p>
-            </form>
-            <p class="help">Uploads are write-once. The digest below is computed by
-              the server on receipt and is what a later verification is checked
-              against.</p>
-            <div id="ev-list" class="ev-list"></div>
-            <p id="ev-empty" class="empty" hidden>No exhibits held for this case.</p>
-          </section>
-
-          <!-- SEARCH -->
-          <section id="pane-search" class="pane" role="tabpanel"
-                   aria-labelledby="tab-search" tabindex="-1" hidden>
-            <form id="search-form" class="card row-form" novalidate>
-              <label class="field grow">
-                <span class="label">Query</span>
-                <input id="search-q" type="search" required spellcheck="false">
-              </label>
-              <button type="submit" class="btn primary">Search</button>
-            </form>
-            <div class="search-cols">
-              <div>
-                <h3 class="h-sm">Entities</h3>
-                <div id="search-nodes" class="hit-list"></div>
-              </div>
-              <div>
-                <h3 class="h-sm">Evidence</h3>
-                <div id="search-evidence" class="hit-list"></div>
-              </div>
+              <span id="metric-note" class="help" role="status"></span>
             </div>
-          </section>
 
-          <!-- ADD ENTITY -->
-          <section id="pane-add-node" class="pane" role="tabpanel"
-                   aria-labelledby="tab-add-node" tabindex="-1" hidden>
-            <form id="node-form" class="card stack narrow" novalidate>
-              <h2 class="h-sm">Add entity</h2>
-              <p class="help assertion-note">Nothing is a fact. Every element needs a
-                source — it is recorded as an assertion and stays attached to this
-                entity for the life of the case.</p>
-              <label class="field">
-                <span class="label">Entity type</span>
-                <select id="node-type" class="select" required></select>
-              </label>
-              <label class="field">
-                <span class="label">Label</span>
-                <input id="node-label" required spellcheck="false">
-              </label>
-              <label class="field">
-                <span class="label">Classification</span>
-                <select id="node-class" class="select"></select>
-              </label>
+            <div class="proj-grp push">
+              <span id="focus-flag" class="focus-flag" role="status" hidden>
+                <span id="focus-text" class="focus-text"></span>
+                <button id="btn-exit-focus" type="button" class="btn small">
+                  <span id="focus-btn-text">Full projection</span>
+                  <span class="kbd">Esc</span>
+                </button>
+              </span>
+              <button id="btn-fit" type="button" class="btn ghost small">Fit</button>
+              <button id="btn-relayout" type="button" class="btn ghost small">Re-layout</button>
+              <button id="btn-save-layout" type="button" class="btn ghost small">Save layout</button>
+              <button id="btn-clear-pins" type="button" class="btn ghost small">Clear pins</button>
+              <button id="btn-refresh" type="button" class="btn ghost small">Reload graph</button>
+            </div>
 
-              <fieldset class="assertion">
-                <legend>Assertion</legend>
-                <div class="row">
-                  <label class="field">
-                    <span class="label">Basis</span>
-                    <select id="node-basis" class="select"></select>
-                  </label>
-                  <label class="field">
-                    <span class="label">Confidence (ICD 203)</span>
-                    <select id="node-conf" class="select"></select>
-                  </label>
-                </div>
-                <div class="row">
-                  <label class="field">
-                    <span class="label">Source reliability</span>
-                    <select id="node-rel" class="select"></select>
-                  </label>
-                  <label class="field">
-                    <span class="label">Info credibility</span>
-                    <select id="node-cred" class="select"></select>
-                  </label>
-                </div>
-                <div class="field">
-                  <label class="label" for="node-rationale">Rationale
-                    <span id="node-rat-req" class="req" hidden>required for inference</span></label>
-                  <textarea id="node-rationale" rows="3"
-                            aria-describedby="node-rat-help"></textarea>
-                  <span id="node-rat-help" class="help">An inference must state its
-                    reasoning. The server rejects one that does not.</span>
-                </div>
-              </fieldset>
+            <p id="preset-desc" class="proj-desc"></p>
+          </div>
 
-              <p id="node-error" class="form-error" role="alert" hidden></p>
-              <p id="node-ok" class="form-ok" role="status" hidden></p>
-              <button type="submit" class="btn primary">Create entity</button>
-            </form>
-          </section>
+          <div class="canvas-wrap">
+            <canvas id="graph-canvas" tabindex="0" role="application"
+                    aria-label="Sociogram. Left and right arrow keys move the
+                    selection between entities. Enter focuses the selected
+                    entity's ego network. P marks a path anchor and then traces
+                    the shortest path to the selection. Space held hides inferred
+                    edges. Plus and minus zoom, zero fits, escape leaves focus
+                    mode or clears the selection."></canvas>
+            <p id="graph-empty" class="canvas-empty" hidden>
+              Nothing in this projection. Widen it, or add an entity to begin.
+            </p>
+          </div>
 
-          <!-- ADD RELATIONSHIP -->
-          <section id="pane-add-edge" class="pane" role="tabpanel"
-                   aria-labelledby="tab-add-edge" tabindex="-1" hidden>
-            <form id="edge-form" class="card stack narrow" novalidate>
-              <h2 class="h-sm">Add relationship</h2>
-              <p class="help assertion-note">Nothing is a fact. Every element needs a
-                source — it is recorded as an assertion. Relationship types are
-                offered only where the ontology permits that pair.</p>
+          <!-- THE SIGNATURE ELEMENT (docs/06): drag it and the graph plays
+               through history. Density marks show collection volume, so a gap
+               in coverage is not mistaken for a gap in activity. -->
+          <div id="scrubber" class="scrubber">
+            <div class="tl-head">
+              <span class="label">Timeline — world time</span>
+              <span id="tl-current" class="tl-current mono">as-of: now</span>
+              <button id="btn-asof-now" type="button" class="btn small">as-of: now</button>
+            </div>
+            <canvas id="tl-density" class="tl-density" aria-hidden="true"></canvas>
+            <input id="tl-range" type="range" min="0" max="1000" step="1" value="1000"
+                   aria-label="As-of position in world time"
+                   aria-describedby="tl-note">
+            <div class="tl-labels">
+              <span id="tl-min" class="mono small muted"></span>
+              <span id="tl-note" class="help"></span>
+              <span id="tl-max" class="mono small muted"></span>
+            </div>
+          </div>
+
+          <div class="graph-bar">
+            <div class="legend" aria-label="Legend">
+              <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
+              <span class="lg"><i class="swatch hue-actor-person"></i>Person</span>
+              <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
+              <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
+              <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
+              <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
+              <span class="lg"><i class="swatch hue-context"></i>Context</span>
+              <span class="legend-sep" aria-hidden="true"></span>
+              <span class="lg"><i class="line pos"></i>vouch / positive</span>
+              <span class="lg"><i class="line neg"></i>dispute / negative</span>
+              <span class="lg"><i class="line neu"></i>neutral</span>
+              <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
+              <span class="lg" title="Sign is never carried by hue alone: from 120%
+                    zoom a positive tie is marked + at its midpoint and a negative
+                    tie −. The dash pattern cannot carry sign, because solid
+                    versus dashed already means asserted versus inferred.">
+                <code class="mono">+ / −</code>&nbsp;sign mark (zoomed in)</span>
+              <span class="legend-sep" aria-hidden="true"></span>
+              <span class="lg"><i class="ring sel"></i>selected</span>
+              <span class="lg"><i class="ring pin"></i>pinned</span>
+              <span class="lg"><i class="ring prop"></i>unreviewed proposal</span>
+              <span class="legend-sep" aria-hidden="true"></span>
+              <span id="legend-size" class="lg muted">size = degree</span>
+              <span class="lg muted" title="Confidence encodes as opacity — hue is
+                    already spent on node type. The numeric value is in the
+                    inspector, so it is never colour alone.">opacity = confidence</span>
+            </div>
+            <p id="proj-readout" class="proj-readout mono" role="status"></p>
+            <p class="canvas-keys">
+              <span class="kbd">drag</span> pan ·
+              <span class="kbd">scroll</span> zoom ·
+              <span class="kbd">click</span> inspect ·
+              <span class="kbd">dbl-click</span> ego ·
+              <span class="kbd">shift-click</span> path ·
+              <span class="kbd">space</span> hide inferred ·
+              <span class="kbd">⌘K</span> palette
+            </p>
+          </div>
+        </section>
+
+        <!-- ENTITIES -->
+        <section id="pane-entities" class="pane" role="tabpanel"
+                 aria-labelledby="tab-entities" tabindex="-1" hidden>
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Type filter</span>
+              <select id="ent-filter" class="select"></select>
+            </label>
+            <span id="ent-count" class="muted small"></span>
+          </div>
+          <table class="table">
+            <caption class="sr-only">Entities in this case</caption>
+            <thead>
+              <tr>
+                <th scope="col">Type</th>
+                <th scope="col">Label</th>
+                <th scope="col">Classification</th>
+                <th scope="col">First seen</th>
+              </tr>
+            </thead>
+            <tbody id="ent-body"></tbody>
+          </table>
+          <p id="ent-empty" class="empty" hidden>No entities match.</p>
+        </section>
+
+        <!-- EVIDENCE -->
+        <section id="pane-evidence" class="pane" role="tabpanel"
+                 aria-labelledby="tab-evidence" tabindex="-1" hidden>
+          <form id="ev-form" class="card row-form" novalidate>
+            <label class="field">
+              <span class="label">Exhibit file</span>
+              <input id="ev-file" type="file" required>
+            </label>
+            <label class="field">
+              <span class="label">Title</span>
+              <input id="ev-title" required>
+            </label>
+            <label class="field">
+              <span class="label">Acquisition</span>
+              <select id="ev-method" class="select">
+                <option value="MANUAL_UPLOAD">Manual upload</option>
+                <option value="COLLECTOR">Collector</option>
+                <option value="LEGAL">Legal process</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Classification</span>
+              <select id="ev-class" class="select"></select>
+            </label>
+            <button type="submit" class="btn primary">Upload exhibit</button>
+            <p id="ev-error" class="form-error" role="alert" hidden></p>
+            <p id="ev-result" class="form-ok" role="status" hidden></p>
+          </form>
+          <p class="help">Uploads are write-once. The digest below is computed by
+            the server on receipt and is what a later verification is checked
+            against.</p>
+          <div id="ev-list" class="ev-list"></div>
+          <p id="ev-empty" class="empty" hidden>No exhibits held for this case.</p>
+        </section>
+
+        <!-- SEARCH -->
+        <section id="pane-search" class="pane" role="tabpanel"
+                 aria-labelledby="tab-search" tabindex="-1" hidden>
+          <form id="search-form" class="card row-form" novalidate>
+            <label class="field grow">
+              <span class="label">Query</span>
+              <input id="search-q" type="search" required spellcheck="false">
+            </label>
+            <button type="submit" class="btn primary">Search</button>
+          </form>
+          <div class="search-cols">
+            <div>
+              <h3 class="h-sm">Entities</h3>
+              <div id="search-nodes" class="hit-list"></div>
+            </div>
+            <div>
+              <h3 class="h-sm">Evidence</h3>
+              <div id="search-evidence" class="hit-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ADD ENTITY -->
+        <section id="pane-add-node" class="pane" role="tabpanel"
+                 aria-labelledby="tab-add-node" tabindex="-1" hidden>
+          <form id="node-form" class="card stack narrow" novalidate>
+            <h2 class="h-sm">Add entity</h2>
+            <p class="help assertion-note">Nothing is a fact. Every element needs a
+              source — it is recorded as an assertion and stays attached to this
+              entity for the life of the case.</p>
+            <label class="field">
+              <span class="label">Entity type</span>
+              <select id="node-type" class="select" required></select>
+            </label>
+            <label class="field">
+              <span class="label">Label</span>
+              <input id="node-label" required spellcheck="false">
+            </label>
+            <label class="field">
+              <span class="label">Classification</span>
+              <select id="node-class" class="select"></select>
+            </label>
+
+            <fieldset class="assertion">
+              <legend>Assertion</legend>
               <div class="row">
                 <label class="field">
-                  <span class="label">Source entity</span>
-                  <select id="edge-src" class="select" required></select>
+                  <span class="label">Basis</span>
+                  <select id="node-basis" class="select"></select>
                 </label>
                 <label class="field">
-                  <span class="label">Target entity</span>
-                  <select id="edge-dst" class="select" required></select>
+                  <span class="label">Confidence (ICD 203)</span>
+                  <select id="node-conf" class="select"></select>
+                </label>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Source reliability</span>
+                  <select id="node-rel" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Info credibility</span>
+                  <select id="node-cred" class="select"></select>
                 </label>
               </div>
               <div class="field">
-                <label class="label" for="edge-type">Relationship type</label>
-                <select id="edge-type" class="select" required
-                        aria-describedby="edge-type-note"></select>
-                <span id="edge-type-note" class="help" role="status"></span>
+                <label class="label" for="node-rationale">Rationale
+                  <span id="node-rat-req" class="req" hidden>required for inference</span></label>
+                <textarea id="node-rationale" rows="3"
+                          aria-describedby="node-rat-help"></textarea>
+                <span id="node-rat-help" class="help">An inference must state its
+                  reasoning. The server rejects one that does not.</span>
               </div>
+            </fieldset>
+
+            <p id="node-error" class="form-error" role="alert" hidden></p>
+            <p id="node-ok" class="form-ok" role="status" hidden></p>
+            <button type="submit" class="btn primary">Create entity</button>
+          </form>
+        </section>
+
+        <!-- ADD RELATIONSHIP -->
+        <section id="pane-add-edge" class="pane" role="tabpanel"
+                 aria-labelledby="tab-add-edge" tabindex="-1" hidden>
+          <form id="edge-form" class="card stack narrow" novalidate>
+            <h2 class="h-sm">Add relationship</h2>
+            <p class="help assertion-note">Nothing is a fact. Every element needs a
+              source — it is recorded as an assertion. Relationship types are
+              offered only where the ontology permits that pair.</p>
+            <div class="row">
               <label class="field">
-                <span class="label">Classification</span>
-                <select id="edge-class" class="select"></select>
+                <span class="label">Source entity</span>
+                <select id="edge-src" class="select" required></select>
               </label>
-
-              <fieldset class="assertion">
-                <legend>Assertion</legend>
-                <div class="row">
-                  <label class="field">
-                    <span class="label">Basis</span>
-                    <select id="edge-basis" class="select"></select>
-                  </label>
-                  <label class="field">
-                    <span class="label">Confidence (ICD 203)</span>
-                    <select id="edge-conf" class="select"></select>
-                  </label>
-                </div>
-                <div class="row">
-                  <label class="field">
-                    <span class="label">Source reliability</span>
-                    <select id="edge-rel" class="select"></select>
-                  </label>
-                  <label class="field">
-                    <span class="label">Info credibility</span>
-                    <select id="edge-cred" class="select"></select>
-                  </label>
-                </div>
-                <div class="field">
-                  <label class="label" for="edge-rationale">Rationale
-                    <span id="edge-rat-req" class="req" hidden>required for inference</span></label>
-                  <textarea id="edge-rationale" rows="3"
-                            aria-describedby="edge-rat-help"></textarea>
-                  <span id="edge-rat-help" class="help">An inference must state its
-                    reasoning. The server rejects one that does not.</span>
-                </div>
-              </fieldset>
-
-              <p id="edge-error" class="form-error" role="alert" hidden></p>
-              <p id="edge-ok" class="form-ok" role="status" hidden></p>
-              <button type="submit" class="btn primary">Create relationship</button>
-            </form>
-          </section>
-        </div>
-
-        <!-- INSPECTOR -->
-        <aside id="inspector" class="inspector" aria-labelledby="insp-heading">
-          <h2 id="insp-heading" class="insp-heading">Inspector</h2>
-          <div id="insp-empty" class="insp-empty">
-            Select an entity or a relationship to see why it is believed.
-          </div>
-          <div id="insp-body" hidden>
-            <div class="insp-id">
-              <span id="insp-type" class="chip type-chip"></span>
-              <span id="insp-class" class="chip"></span>
+              <label class="field">
+                <span class="label">Target entity</span>
+                <select id="edge-dst" class="select" required></select>
+              </label>
             </div>
-            <p id="insp-label" class="insp-label"></p>
-            <p id="insp-sub" class="mono small muted"></p>
+            <div class="field">
+              <label class="label" for="edge-type">Relationship type</label>
+              <select id="edge-type" class="select" required
+                      aria-describedby="edge-type-note"></select>
+              <span id="edge-type-note" class="help" role="status"></span>
+            </div>
+            <label class="field">
+              <span class="label">Classification</span>
+              <select id="edge-class" class="select"></select>
+            </label>
 
-            <section class="insp-sec">
-              <div class="insp-sec-head">
-                <h3 class="h-sm">Assertions</h3>
-                <label class="check">
-                  <input id="chk-retracted" type="checkbox">
-                  <span>Include retracted</span>
+            <fieldset class="assertion">
+              <legend>Assertion</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Basis</span>
+                  <select id="edge-basis" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Confidence (ICD 203)</span>
+                  <select id="edge-conf" class="select"></select>
                 </label>
               </div>
-              <div id="insp-assertions" class="insp-list"></div>
-            </section>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Source reliability</span>
+                  <select id="edge-rel" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Info credibility</span>
+                  <select id="edge-cred" class="select"></select>
+                </label>
+              </div>
+              <div class="field">
+                <label class="label" for="edge-rationale">Rationale
+                  <span id="edge-rat-req" class="req" hidden>required for inference</span></label>
+                <textarea id="edge-rationale" rows="3"
+                          aria-describedby="edge-rat-help"></textarea>
+                <span id="edge-rat-help" class="help">An inference must state its
+                  reasoning. The server rejects one that does not.</span>
+              </div>
+            </fieldset>
 
-            <section class="insp-sec">
-              <h3 class="h-sm">Linked evidence</h3>
-              <div id="insp-evidence" class="insp-list"></div>
-            </section>
-
-            <section id="insp-sel-sec" class="insp-sec">
-              <h3 class="h-sm">Selectors</h3>
-              <div id="insp-selectors" class="insp-list"></div>
-            </section>
-          </div>
-        </aside>
+            <p id="edge-error" class="form-error" role="alert" hidden></p>
+            <p id="edge-ok" class="form-ok" role="status" hidden></p>
+            <button type="submit" class="btn primary">Create relationship</button>
+          </form>
+        </section>
       </div>
+
+      <!-- INSPECTOR -->
+      <aside id="inspector" class="inspector" aria-labelledby="insp-heading">
+        <h2 id="insp-heading" class="insp-heading">Inspector</h2>
+        <div id="insp-empty" class="insp-empty">
+          Select an entity or a relationship to see why it is believed.
+        </div>
+        <div id="insp-body" hidden>
+          <div class="insp-id">
+            <span id="insp-type" class="chip type-chip"></span>
+            <span id="insp-class" class="chip"></span>
+          </div>
+          <p id="insp-label" class="insp-label"></p>
+          <p id="insp-sub" class="mono small muted"></p>
+
+          <section id="insp-metrics-sec" class="insp-sec">
+            <div class="insp-sec-head">
+              <h3 class="h-sm">Metrics</h3>
+              <span id="insp-metrics-scope" class="chip stale"></span>
+            </div>
+            <div id="insp-metrics" class="metric-grid"></div>
+            <p id="insp-metrics-proj" class="assert-meta"></p>
+            <p class="help">These are <strong>local</strong> measures: each one
+              describes the entity's own neighbourhood. Brokerage — betweenness,
+              Burt's constraint, key-player fragmentation — is Phase 3 and is not
+              computed here, so nothing on this panel tells you who bridges two
+              clusters.</p>
+          </section>
+
+          <section class="insp-sec">
+            <div class="insp-sec-head">
+              <h3 class="h-sm">Assertions</h3>
+              <label class="check">
+                <input id="chk-retracted" type="checkbox">
+                <span>Include retracted</span>
+              </label>
+            </div>
+            <div id="insp-assertions" class="insp-list"></div>
+          </section>
+
+          <section class="insp-sec">
+            <h3 class="h-sm">Linked evidence</h3>
+            <div id="insp-evidence" class="insp-list"></div>
+          </section>
+
+          <section id="insp-sel-sec" class="insp-sec">
+            <h3 class="h-sm">Selectors</h3>
+            <div id="insp-selectors" class="insp-list"></div>
+          </section>
+        </div>
+      </aside>
     </section>
   </main>
+</div>
+
+<!-- ─────────────────── COMMAND PALETTE (⌘K / Ctrl+K) ─────────────────── -->
+<div id="palette-scrim" class="palette-scrim" hidden>
+  <div id="palette" class="palette" role="dialog" aria-modal="true"
+       aria-labelledby="palette-heading">
+    <h2 id="palette-heading" class="sr-only">Command palette</h2>
+    <input id="palette-input" class="pal-input" type="text" role="combobox"
+           autocomplete="off" spellcheck="false" aria-expanded="true"
+           aria-controls="palette-list" aria-autocomplete="list"
+           placeholder="Jump to an entity, switch projection, run a command…">
+    <ul id="palette-list" class="pal-list" role="listbox"
+        aria-label="Commands and entities"></ul>
+    <p id="palette-empty" class="empty" hidden>Nothing matches.</p>
+    <p class="pal-foot">
+      <span class="kbd">↑</span><span class="kbd">↓</span> move ·
+      <span class="kbd">Enter</span> run ·
+      <span class="kbd">Esc</span> close
+    </p>
+  </div>
 </div>
 
 <script src="app.js"></script>

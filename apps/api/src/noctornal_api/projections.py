@@ -290,12 +290,20 @@ class GraphService:
 
         core = _k_core(neighbours)
         n = len(ids)
-        edges_seen = sum(len(v) for v in neighbours.values()) // 2
+        # Metrics treat the graph as SIMPLE: two actors joined by both a vouch
+        # and an accusation are one dyad, not two, because degree and
+        # clustering are defined over neighbour sets. That makes dyad_count
+        # legitimately smaller than the projection's edge count, so both are
+        # reported — a silent discrepancy would read as a bug.
+        dyads = sum(len(v) for v in neighbours.values()) // 2
         return {
             "projection": sub.projection,
             "node_count": n,
-            "edge_count": edges_seen,
-            "density": (2 * edges_seen) / (n * (n - 1)) if n > 1 else 0.0,
+            "edge_count": len(sub.edges),
+            "dyad_count": dyads,
+            "dyad_note": "metrics treat the graph as simple: parallel edges "
+                         "between the same pair count once",
+            "density": (2 * dyads) / (n * (n - 1)) if n > 1 else 0.0,
             "nodes": [
                 {
                     "id": str(i), "label": labels[i],
