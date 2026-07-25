@@ -817,6 +817,72 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
     print(RULE)
 
 
+def cmd_session(args: argparse.Namespace) -> None:
+    """Mint a session and print a URL that opens the UI already signed in.
+
+    TOTP compares two clocks. When the host's clock does not match the one
+    in the analyst's pocket — an offline or sandboxed machine that has never
+    reached a time server — no code can ever match, and the second factor
+    stops being a security control and becomes a locked door with no key.
+    This issues the session directly.
+
+    It is a development affordance, not a bypass: it requires the database
+    and NOCTORNAL_TOTP_KEK, and anyone holding those could write this row by
+    hand. The session it creates is an ordinary one — same 12 hour absolute
+    and 30 minute idle expiry, same revocation — so nothing downstream is
+    weakened. The proper fix on a real deployment is recovery codes (see
+    docs/05), which are not built yet.
+    """
+    _require_database_url()
+    from uuid import uuid4
+
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        active = conn.execute(
+            "SELECT is_active FROM iam.app_user WHERE id = %s", (user_id,)
+        ).fetchone()[0]
+        if not active:
+            _fail(f"{args.email} is deactivated")
+        record, token = SessionService(PgSessionStore(conn)).create(
+            uuid4(), user_id, mfa_satisfied=True
+        )
+        # The same event a password+TOTP login writes, with the route noted:
+        # a session that appears from nowhere would be worse than none.
+        conn.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, detail)
+               VALUES (%s, 'USER', 'AUTH_SUCCEEDED', 'auth', %s)""",
+            (user_id, Json({"route": "bootstrap session", "mfa": "bypassed",
+                            "session_id": str(record.id)})),
+        )
+
+    url = f"http://127.0.0.1:{args.port}/ui/#token={token}"
+    print(RULE)
+    print("Session issued")
+    print(RULE)
+    print(f"  {args.email}")
+    print(f"  Expires   {record.expires_at:%Y-%m-%d %H:%M} UTC "
+          f"(or after 30 min idle)")
+    print()
+    print("  Open this to land in the UI already signed in:")
+    print()
+    print(f"    {url}")
+    print()
+    print("  The token travels in the fragment, so it is not sent to the")
+    print("  server and does not appear in any access log; the page erases")
+    print("  it from the address bar on load.")
+    print()
+    print("  Recorded in the audit trail as an MFA-bypassed login. Use it to")
+    print("  get working on a machine whose clock TOTP cannot live with, not")
+    print("  as the normal way in.")
+    print(RULE)
+
+
 # --- CLI --------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -901,6 +967,16 @@ def _build_parser() -> argparse.ArgumentParser:
                                "makes a far-off offset trustworthy rather "
                                "than a possible coincidence")
     diagnose.set_defaults(func=cmd_totp_diagnose)
+
+    session = sub.add_parser(
+        "session",
+        help="print a URL that opens the UI already signed in (use when the "
+             "host clock makes TOTP impossible)",
+    )
+    session.add_argument("--email", required=True)
+    session.add_argument("--port", default="8000",
+                         help="port the API is serving on (default 8000)")
+    session.set_defaults(func=cmd_session)
 
     return parser
 

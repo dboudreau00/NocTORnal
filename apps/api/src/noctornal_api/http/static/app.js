@@ -1331,8 +1331,24 @@ function wire() {
   });
 }
 
+/* A token handed over in the URL fragment (#token=...) is adopted and the
+ * fragment immediately erased, so it never reaches a bookmark, the history
+ * entry, or a Referer header. Written for `bootstrap.py session`, which is
+ * the way in when TOTP cannot work — a host whose clock disagrees with the
+ * phone's can never produce a matching code. A fragment is not sent to the
+ * server, so the token does not appear in the access log either. */
+function adoptTokenFromFragment() {
+  const match = /(?:^|[#&])token=([^&]+)/.exec(window.location.hash || '');
+  if (!match) return;
+  const token = decodeURIComponent(match[1]);
+  history.replaceState(null, '', window.location.pathname);
+  state.token = token;
+  sessionStorage.setItem(TOKEN_KEY, token);
+}
+
 async function boot() {
   wire();
+  adoptTokenFromFragment();
   if (state.token) {
     try {
       await startApp();
