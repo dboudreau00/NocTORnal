@@ -529,6 +529,49 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
     print(RULE)
 
 
+# --- recovery-codes ---------------------------------------------------------
+
+def cmd_recovery_codes(args: argparse.Namespace) -> None:
+    """Issue a fresh set of recovery codes out of band.
+
+    The API path for this is step-up protected, which is correct and also
+    useless to someone who cannot complete their second factor -- exactly
+    the person who needs a recovery code. This is the out-of-band issuance
+    that assumes control of the environment, like create-user.
+    """
+    _require_database_url()
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        store = PgUserStore(conn)
+        had = store.count_recovery_codes(user_id)
+        codes = store.issue_recovery_codes(user_id)
+        conn.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, detail)
+               VALUES (%s, 'SYSTEM', 'RECOVERY_CODES_ISSUED', 'auth', %s)""",
+            (user_id, Json({"count": len(codes), "replaced": had,
+                            "via": "bootstrap"})),
+        )
+
+    print(RULE)
+    print(f"Recovery codes for {args.email}")
+    print(RULE)
+    if had:
+        print(f"  {had} previous code(s) invalidated -- a set is replaced,")
+        print("  never topped up, so nothing older stays valid.")
+        print()
+    for code in codes:
+        print(f"    {code}")
+    print()
+    print("  Each works ONCE, in the authenticator-code field at sign-in.")
+    print("  They are stored only as Argon2id hashes, so this is the only")
+    print("  time they can be displayed. Print them or put them in a")
+    print("  password manager now.")
+    print(RULE)
+
+
 # --- demo-network -----------------------------------------------------------
 
 # Three crews, deliberately shaped so the Phase 3 metrics have something to
@@ -1099,6 +1142,14 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="an existing user, who becomes CASE_OWNER")
     demo.add_argument("--code", help=f"case code (default {DEMO_CODE})")
     demo.set_defaults(func=cmd_demo_case)
+
+    codes = sub.add_parser(
+        "recovery-codes",
+        help="issue a fresh set of single-use recovery codes (replaces any "
+             "existing set) -- the way back in when TOTP cannot work",
+    )
+    codes.add_argument("--email", required=True)
+    codes.set_defaults(func=cmd_recovery_codes)
 
     network = sub.add_parser(
         "demo-network",

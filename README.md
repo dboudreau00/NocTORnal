@@ -7,6 +7,47 @@ forums and channels.
 
 *(Named 2026-07-24; previously scaffolded under the codename "lattice".)*
 
+---
+
+> ## ⚠ Before any malware sample is ingested: read this
+>
+> **There is no prohibited-content policy for this deployment, and until
+> there is one, Phase 8 (sample handling) must not accept a single file.**
+>
+> A sample store takes arbitrary binaries chosen by the people under
+> investigation. Given enough of them, one will eventually contain material
+> whose *possession alone* is a criminal offence — child sexual abuse
+> material above all, but also classified or export-controlled content.
+> That is not a hypothetical risk in this problem domain; it is the normal
+> failure mode of any system that ingests attacker-supplied files at scale.
+>
+> Discovering it after the first ingest is a legal problem, not a technical
+> one, and it lands on whoever is running the instance. `docs/09` puts the
+> decision *before* the code for exactly this reason:
+>
+> > **Decide first:** the prohibited-content policy, with counsel, before
+> > the first ingest rather than after.
+>
+> What the policy has to settle, at minimum:
+>
+> - who is notified, how fast, and through what channel when screening trips;
+> - what the `REJECTED` path does with the bytes — quarantine, secure
+>   destruction, or preservation under legal instruction (these conflict, and
+>   the right answer is jurisdictional);
+> - the reporting obligations in **both** operating jurisdictions, since this
+>   build targets Canada *and* the US (decision 13);
+> - who may see a quarantined item, and under what authority;
+> - how an analyst's exposure is limited, logged and supported.
+>
+> Everything through Phase 7 is unaffected: **no part of the current build
+> stores a sample.** Invariant 10 ("samples never render, never execute")
+> is written and waiting, and the `MALWARE_ANALYST` role is specified in
+> `docs/11`, but none of it is implemented — deliberately.
+>
+> Recorded as decision 36 in `docs/00-decisions.md`.
+
+---
+
 ## Read in this order
 
 | | | |

@@ -116,6 +116,13 @@ const state = {
   nodeProposed: new Map(),   // node id -> count of PROPOSED-review ties
   graphSeq: 0,
 
+  layoutWorker: null,        // ForceAtlas2 off the main thread (U1)
+  layoutPaint: 0,            // pending rAF, so repaints coalesce
+
+  /* E2: mark the elements that rest on no exhibit. On by default -- an
+     unevidenced case SHOULD look unfinished until it is evidenced. */
+  showProvenance: true,
+
   /* analysis (Phase 3): global structural metrics, computed on demand
      because they are a batch operation, not a live one. Held per case AND
      per projection -- changing either invalidates them. */
@@ -478,6 +485,7 @@ async function openCase(caseId) {
      numbers into this one would be worse than showing none. */
   state.analytics = null;
   state.analyticsKpp = null;
+  stopWorkerLayout();
   applyMetrics(null);
   try {
     const [rec, ontology] = await Promise.all([
@@ -767,6 +775,28 @@ function setSizeMetric(key) {
   draw();
 }
 
+/** E2. How much of what is on screen rests on an exhibit. This is a
+ *  headline number, not a detail: the difference between a graph of
+ *  evidence and a graph of opinions is exactly this ratio, and the first
+ *  real session of using this tool scored zero without anyone noticing. */
+function renderEvidenceCoverage() {
+  const box = $('evidence-coverage');
+  if (!box) return;
+  const cov = state.metrics && state.metrics.evidence_coverage;
+  if (!cov || !cov.elements) {
+    setMsg(box, '');
+    return;
+  }
+  const pct = Math.round((cov.ratio || 0) * 100);
+  const backed = cov.nodes + cov.edges;
+  setMsg(box, 'evidence: ' + backed + ' of ' + cov.elements +
+              ' elements (' + pct + '%) rest on an exhibit');
+  box.className = 'muted small' + (pct === 0 ? ' coverage-none'
+                                  : (pct < 50 ? ' coverage-low' : ''));
+  box.title = cov.note + '. Unevidenced entities are drawn hollow and ' +
+    'unevidenced ties are faded while "Mark unevidenced" is on.';
+}
+
 /** The always-visible projection panel. docs/03: "Show the projection
  *  parameters next to the results, always." */
 function renderProjectionBar() {
@@ -778,6 +808,7 @@ function renderProjectionBar() {
   $('sel-preset').title = preset ? preset.description : '';
 
   setMsg($('metric-note'), state.metricsNote);
+  renderEvidenceCoverage();
   $('legend-size').textContent = 'size = ' +
     (state.metrics ? (METRIC_LABEL.get(state.sizeMetric) || state.sizeMetric)
                    : 'degree (local count)');
@@ -1353,11 +1384,123 @@ function step() {
   g.alpha = Math.max(0.03, g.alpha * 0.985);
 }
 
+/* ── layout worker (U1, docs/02) ───────────────────────────────────────
+ * ForceAtlas2 with Barnes-Hut runs OFF the main thread, so a large case
+ * settles without freezing the interface. The main-thread spring
+ * simulation below is kept for interactive drag: dragging perturbs a
+ * couple of nodes locally and wants an immediate response, which is the
+ * one job round-tripping to a worker would make worse.
+ *
+ * The worker is a same-origin script file, so it satisfies
+ * `script-src 'self'` without a bundler — which is why this is hand-written
+ * rather than graphology's implementation. Adopting a build step is a real
+ * decision (docs/14 U1) and should not arrive as a side effect. */
+
+const LAYOUT_WORKER_MIN_NODES = 60;   // below this the main loop is fine
+
+function startWorkerLayout() {
+  const g = state.graph;
+  if (!g || !window.Worker) return false;
+  if (g.nodes.length < LAYOUT_WORKER_MIN_NODES) return false;
+  try {
+    stopWorkerLayout();
+    state.layoutWorker = new Worker('layout-worker.js');
+  } catch (_e) {
+    // A blocked or unavailable worker must degrade to the old path, not
+    // leave the analyst with a graph that never lays out.
+    state.layoutWorker = null;
+    return false;
+  }
+  const index = new Map(g.nodes.map((n, i) => [n.id, i]));
+  const links = [];
+  for (const l of g.links) {
+    const a = index.get(l.a.id), b = index.get(l.b.id);
+    if (a === undefined || b === undefined || a === b) continue;
+    links.push({ a: a, b: b, w: 1 });
+  }
+  const degree = new Array(g.nodes.length).fill(0);
+  for (const l of links) { degree[l.a] += 1; degree[l.b] += 1; }
+
+  /* Moving the maths off the main thread is only half the win. The worker
+     posts progress dozens of times per run, and redrawing on every message
+     puts the cost straight back where it was: 400 nodes laid out in under a
+     second still froze the interface for most of it, because that second
+     contained ~67 full canvas repaints. Positions are applied immediately
+     (they are cheap) and the REPAINT is coalesced onto an animation frame,
+     so the browser draws at most once per frame no matter how chatty the
+     worker is. */
+  state.layoutWorker.onerror = (err) => {
+    // A worker that dies silently leaves the graph in its scattered initial
+    // positions with no explanation. Fall back to the main-thread loop.
+    stopWorkerLayout();
+    setMsg($('layout-status'), '');
+    banner('Layout worker failed',
+           'Falling back to the in-page layout, which is slower on large '
+           + 'graphs. ' + ((err && err.message) || ''), 'warn');
+    if (!reduceMotion && !g.raf) g.raf = requestAnimationFrame(frame);
+  };
+  state.layoutWorker.onmessage = (e) => {
+    const msg = e.data;
+    const pos = new Float32Array(msg.positions);
+    const cur = state.graph;
+    if (!cur || cur !== g) return;      // the case changed under us
+    for (let i = 0; i < cur.nodes.length; i += 1) {
+      const n = cur.nodes[i];
+      if (n.pinned || n === cur.drag) continue;
+      n.x = pos[i * 2];
+      n.y = pos[i * 2 + 1];
+      n.vx = 0; n.vy = 0;
+    }
+    if (state.needFit) { state.needFit = false; fitView(); }
+    if (!state.layoutPaint) {
+      state.layoutPaint = requestAnimationFrame(() => {
+        state.layoutPaint = 0;
+        draw();
+      });
+    }
+    /* Reaching the iteration cap is a normal outcome on a big graph, not a
+       failure: the picture is usable, it simply had not stopped moving. Say
+       that plainly rather than in the language of an error. */
+    setMsg($('layout-status'), msg.type === 'done'
+      ? (msg.settled ? '' : 'layout good enough; still drifting slightly when it stopped')
+      : 'laying out ' + Math.round(100 * msg.iteration / msg.maxIterations) + '%');
+    if (msg.type === 'done') {
+      stopWorkerLayout();
+      syncLayoutFromSim();
+      draw();                    // one guaranteed repaint at the final state
+    }
+  };
+  state.layoutWorker.postMessage({
+    type: 'start',
+    nodes: g.nodes.map((n, i) => ({
+      x: n.x, y: n.y, degree: degree[i], pinned: !!n.pinned,
+    })),
+    links: links,
+    // 800 is where a mid-size graph actually converges rather than
+    // stopping mid-expansion; big graphs trade some of that for time.
+    iterations: g.nodes.length > 1500 ? 300 : 800,
+  });
+  return true;
+}
+
+function stopWorkerLayout() {
+  if (state.layoutWorker) {
+    state.layoutWorker.terminate();
+    state.layoutWorker = null;
+  }
+  if (state.layoutPaint) {
+    cancelAnimationFrame(state.layoutPaint);
+    state.layoutPaint = 0;
+  }
+}
+
 /** Run the layout. With prefers-reduced-motion the graph settles instantly. */
 function settle() {
   const g = state.graph;
   if (!g) return;
   g.alpha = 1;
+  // Big graph: hand it to the worker and let the interface stay responsive.
+  if (!reduceMotion && startWorkerLayout()) return;
   if (reduceMotion) {
     for (let i = 0; i < 320; i += 1) step();
     if (state.needFit) { state.needFit = false; fitView(); }
@@ -1552,6 +1695,12 @@ function draw() {
     ctx.strokeStyle = on ? PAINT.accent : edgeColour(e.sign);
     ctx.lineWidth = edgeWidth(e) + (on ? 1.5 : 0) +
                     (lit && fs && fs.mode === 'path' ? 1.5 : 0);
+    /* E2. An unevidenced tie is drawn FAINTER, never dashed: dashed already
+       means inferred, and overloading it would make an unevidenced observed
+       tie indistinguishable from a machine-suggested one. */
+    if (state.showProvenance && e.has_evidence === false && lit) {
+      ctx.globalAlpha = confAlpha(e.confidence) * 0.45;
+    }
     ctx.beginPath();
     ctx.moveTo(l.a.sx, l.a.sy);
     ctx.lineTo(l.b.sx, l.b.sy);
@@ -1605,6 +1754,21 @@ function draw() {
     ctx.fill();
 
     ctx.globalAlpha = lit ? 1 : 0.14;
+    /* E2. An UNEVIDENCED entity gets a hollow core: a ring cut out of its
+       centre, so the eye reads "something missing here" without a legend.
+       Confidence is already opacity and the node type is already hue, so
+       this had to be a shape, not another colour ramp.
+
+       Deliberately marks the ABSENCE rather than the presence of evidence.
+       An unevidenced case should look conspicuously unfinished; if the mark
+       meant "evidenced", a case with no exhibits at all would look calm and
+       complete, which is the exact impression to avoid. */
+    if (state.showProvenance && n.has_evidence === false) {
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, Math.max(1.5, r * 0.42), 0, Math.PI * 2);
+      ctx.fillStyle = PAINT.void;
+      ctx.fill();
+    }
     /* rings: unreviewed proposal, then pinned, then selected — drawn at
        increasing radii so all three can be true at once and still be read. */
     if (state.nodeProposed.get(n.id)) {
@@ -1717,6 +1881,7 @@ function initCanvas() {
     if (n) {
       mode = 'drag';
       g.drag = n;
+      yieldLayoutToDrag();
       if (!reduceMotion && !g.raf) g.raf = requestAnimationFrame(frame);
     } else {
       mode = 'pan';
@@ -1905,6 +2070,15 @@ async function loadLayout() {
 
 /** Positions of nodes NOT currently rendered are left alone, so saving from
  *  inside an ego focus cannot wipe the rest of the case's layout. */
+/** A drag means the analyst is placing something by hand, and a worker
+ *  still writing positions would fight them for it. The hand wins. */
+function yieldLayoutToDrag() {
+  if (state.layoutWorker) {
+    stopWorkerLayout();
+    setMsg($('layout-status'), '');
+  }
+}
+
 function syncLayoutFromSim() {
   const g = state.graph;
   if (!g) return;
@@ -2019,6 +2193,9 @@ async function loadEvidence() {
   try {
     state.evidence = await api(cpath('/evidence-list?limit=200'));
     renderEvidence();
+    // E1: keep the entity/relationship exhibit pickers in step, so an
+    // exhibit uploaded a moment ago is immediately attachable.
+    refreshEvidencePickers();
   } catch (err) { fail(err); }
 }
 
@@ -2470,8 +2647,68 @@ function renderAssertions(box, list) {
     if (a.retracted_at) bits.push('retracted ' + fmtTime(a.retracted_at));
     if (a.superseded_at) bits.push('superseded ' + fmtTime(a.superseded_at));
     card.appendChild(el('div', 'assert-meta', bits.join(' · ')));
+
+    if (a.retraction_reason) {
+      card.appendChild(el('div', 'assert-retraction',
+        'Retracted: ' + a.retraction_reason));
+    }
+
+    /* E3. Retraction is the operation that makes the assertion model mean
+       something: withdraw the last live claim behind an element and the
+       element leaves the live graph, taking its degree and its edges with
+       it, while the row survives for temporal replay. */
+    if (!dead) {
+      const actions = el('div', 'assert-actions');
+      const btn = el('button', 'btn small danger', 'Retract');
+      btn.type = 'button';
+      btn.title = 'Withdraw this claim. Nothing is deleted -- the row is ' +
+        'stamped and kept -- but if this is the last live assertion behind ' +
+        'the element, the element leaves the live graph.';
+      btn.addEventListener('click', () => retractAssertion(a.id, list.length));
+      actions.appendChild(btn);
+      card.appendChild(actions);
+    }
     box.appendChild(card);
   }
+}
+
+/** E3. The confirmation says what will actually happen, which depends on
+ *  whether this is the last live claim holding the element up. An analyst
+ *  should never be surprised by an entity vanishing. */
+async function retractAssertion(assertionId, liveCount) {
+  const last = liveCount <= 1;
+  const warning = last
+    ? '\n\nThis is the LAST live assertion behind this element. Retracting ' +
+      'it will remove the element from the live graph, along with every ' +
+      'edge that depends on it. History is kept: an earlier as-of position ' +
+      'will still show it.'
+    : '\n\nOther live assertions remain, so the element stays in the graph.';
+  const reason = window.prompt(
+    'Why is this claim being withdrawn? The reason is recorded permanently ' +
+    'and cannot be edited.' + warning);
+  if (reason === null) return;
+  if (!reason.trim()) {
+    banner('Retraction needs a reason',
+           'A withdrawn source without a recorded reason is not auditable.',
+           'warn');
+    return;
+  }
+  try {
+    await api(cpath('/assertions/' + assertionId + '/retract'), {
+      method: 'POST', json: { reason: reason.trim() },
+    });
+    /* The graph itself may have changed shape, so reload rather than
+       patching the inspector: an element that just dissolved must not stay
+       drawn on the canvas. */
+    invalidateAnalytics();
+    await reloadAll();
+    banner('Assertion retracted',
+           last ? 'It was the last live claim, so the element has left the '
+                + 'live graph. Move the as-of scrubber back to see it as it '
+                + 'stood.'
+                : 'The element remains: other live assertions still support it.',
+           'info');
+  } catch (err) { fail(err); }
 }
 
 function renderLinkedEvidence(box, list) {
@@ -2591,13 +2828,59 @@ function refreshEdgeTypes() {
 function assertionFrom(prefix) {
   const basis = $(prefix + '-basis').value;
   const rationale = $(prefix + '-rationale').value.trim();
+  const evidence = $(prefix + '-evidence').value;
+  const observed = $(prefix + '-observed').value;
+  const ref = $(prefix + '-ref').value.trim();
   return {
     basis: basis,
     reliability: $(prefix + '-rel').value,
     credibility: $(prefix + '-cred').value,
     confidence: $(prefix + '-conf').value,
     rationale: rationale || null,
+    // E1: the exhibit travels with the claim.
+    evidence_id: evidence || null,
+    external_ref: ref || null,
+    observed_at: observed ? new Date(observed).toISOString() : null,
   };
+}
+
+/** U3. A bare `<input type="date">` gives a local calendar day; the API
+ *  wants an instant. Midnight UTC is the honest reading of "this was true
+ *  from the 3rd of March" — the graph records world time to the day, and
+ *  pretending to know the hour would be false precision. */
+function intervalFrom(prefix) {
+  const from = $(prefix + '-valid-from').value;
+  const to = $(prefix + '-valid-to').value;
+  return {
+    valid_from: from ? new Date(from + 'T00:00:00Z').toISOString() : null,
+    // Inclusive end: "until 30 June" means the tie held through that day.
+    valid_to: to ? new Date(to + 'T23:59:59Z').toISOString() : null,
+  };
+}
+
+function intervalProblem(interval) {
+  if (interval.valid_from && interval.valid_to &&
+      interval.valid_to < interval.valid_from) {
+    return 'The interval ends before it starts.';
+  }
+  return null;
+}
+
+/** E1. The exhibit picker is only useful if it is populated, so it is
+ *  refreshed whenever the case's evidence list is. An empty list says so
+ *  rather than showing a silently empty dropdown. */
+function refreshEvidencePickers() {
+  const list = state.evidence || [];
+  for (const prefix of ['node', 'edge']) {
+    const select = $(prefix + '-evidence');
+    if (!select) continue;
+    const keep = select.value;
+    const pairs = [['', list.length ? 'None' : 'No exhibits uploaded yet']];
+    for (const ev of list) {
+      pairs.push([ev.id, ev.title + '  (' + ev.media_type + ')']);
+    }
+    opts(select, pairs, keep);
+  }
 }
 
 function rationaleProblem(assertion) {
@@ -2622,6 +2905,9 @@ async function createNode(event) {
   const assertion = assertionFrom('node');
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); return; }
+  const interval = intervalFrom('node');
+  const badInterval = intervalProblem(interval);
+  if (badInterval) { setMsg(errBox, badInterval); return; }
   try {
     const out = await api(cpath('/nodes'), {
       method: 'POST',
@@ -2631,11 +2917,16 @@ async function createNode(event) {
         classification: $('node-class').value,
         attrs: {},
         assertion: assertion,
+        valid_from: interval.valid_from,
+        valid_to: interval.valid_to,
       },
     });
-    setMsg(okBox, 'Created with its founding assertion. Opening it in the inspector.');
+    setMsg(okBox, assertion.evidence_id
+      ? 'Created with its founding assertion and exhibit. Opening it in the inspector.'
+      : 'Created with its founding assertion. It has NO exhibit behind it yet.');
     $('node-label').value = '';
     $('node-rationale').value = '';
+    $('node-ref').value = '';
     await reloadAll();
     selectNode(out.id);
     selectTab('graph');
@@ -2659,6 +2950,9 @@ async function createEdge(event) {
   const assertion = assertionFrom('edge');
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); return; }
+  const interval = intervalFrom('edge');
+  const badInterval = intervalProblem(interval);
+  if (badInterval) { setMsg(errBox, badInterval); return; }
   try {
     const out = await api(cpath('/edges'), {
       method: 'POST',
@@ -2668,10 +2962,15 @@ async function createEdge(event) {
         dst_node_id: dst,
         classification: $('edge-class').value,
         assertion: assertion,
+        valid_from: interval.valid_from,
+        valid_to: interval.valid_to,
       },
     });
-    setMsg(okBox, 'Relationship recorded with its assertion.');
+    setMsg(okBox, assertion.evidence_id
+      ? 'Relationship recorded with its assertion and exhibit.'
+      : 'Relationship recorded. It has NO exhibit behind it yet.');
     $('edge-rationale').value = '';
+    $('edge-ref').value = '';
     await reloadAll();
     selectEdge(out.id);
     selectTab('graph');
@@ -2906,6 +3205,11 @@ function wire() {
   $('btn-cases').addEventListener('click', showCaseList);
   $('case-form').addEventListener('submit', createCase);
   $('ent-filter').addEventListener('change', renderEntities);
+  $('chk-provenance').addEventListener('change', (e) => {
+    state.showProvenance = e.target.checked;
+    renderProjectionBar();
+    draw();
+  });
   $('an-run').addEventListener('click', runAnalysis);
   /* Changing a parameter invalidates what is on screen. Blank it rather
      than leave numbers that no longer match the controls above them. */

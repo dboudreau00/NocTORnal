@@ -129,7 +129,16 @@ class GraphService:
 
         nodes = self._c.execute(
             """SELECT id, node_type, label, classification, attrs,
-                      valid_from, valid_to, first_seen, last_seen
+                      valid_from, valid_to, first_seen, last_seen,
+                      -- E2: is any LIVE assertion behind this element backed
+                      -- by an exhibit? A case is defensible in proportion to
+                      -- how much of it is evidenced, and that should be
+                      -- visible on the canvas rather than only in the
+                      -- inspector one element at a time.
+                      EXISTS (SELECT 1 FROM core.assertion ev
+                               WHERE ev.node_id = n.id
+                                 AND ev.retracted_at IS NULL
+                                 AND ev.evidence_id IS NOT NULL) AS has_evidence
                  FROM core.node n
                 WHERE case_id = %s AND deleted_at IS NULL AND merged_into_id IS NULL
                   AND classification <= %s::core.tlp AND compartments <@ %s
@@ -156,7 +165,7 @@ class GraphService:
         node_out = [
             {"id": r[0], "node_type": r[1], "label": r[2], "classification": r[3],
              "attrs": r[4] or {}, "valid_from": r[5], "valid_to": r[6],
-             "first_seen": r[7], "last_seen": r[8]}
+             "first_seen": r[7], "last_seen": r[8], "has_evidence": r[9]}
             for r in nodes
         ]
         ids = [n["id"] for n in node_out]
@@ -167,7 +176,12 @@ class GraphService:
             rows = self._c.execute(
                 """SELECT e.id, e.edge_type, e.src_node_id, e.dst_node_id, e.sign,
                           e.weight, e.confidence, e.is_inferred, e.review,
-                          e.classification, e.valid_from, e.valid_to, et.is_social_tie
+                          e.classification, e.valid_from, e.valid_to,
+                          et.is_social_tie,
+                          EXISTS (SELECT 1 FROM core.assertion ev
+                                   WHERE ev.edge_id = e.id
+                                     AND ev.retracted_at IS NULL
+                                     AND ev.evidence_id IS NOT NULL) AS has_evidence
                      FROM core.edge e
                      JOIN core.edge_type et ON et.key = e.edge_type
                     WHERE e.case_id = %s AND e.deleted_at IS NULL
@@ -195,7 +209,8 @@ class GraphService:
                 {"id": r[0], "edge_type": r[1], "src_node_id": r[2],
                  "dst_node_id": r[3], "sign": r[4], "weight": float(r[5]),
                  "confidence": r[6], "is_inferred": r[7], "review": r[8],
-                 "classification": r[9], "valid_from": r[10], "valid_to": r[11]}
+                 "classification": r[9], "valid_from": r[10], "valid_to": r[11],
+                 "has_evidence": r[13]}
                 for r in rows if r[6] in keep
             ]
         return Subgraph(node_out, edge_out, p.describe(), truncated)
@@ -316,12 +331,27 @@ class GraphService:
         # legitimately smaller than the projection's edge count, so both are
         # reported — a silent discrepancy would read as a bug.
         dyads = sum(len(v) for v in neighbours.values()) // 2
+        # E2: how much of what is on screen rests on an exhibit. A case is
+        # defensible in proportion to how much of it is evidenced, so this
+        # is a headline number, not a detail buried in the inspector.
+        evidenced_nodes = sum(1 for x in sub.nodes if x.get("has_evidence"))
+        evidenced_edges = sum(1 for x in sub.edges if x.get("has_evidence"))
+        total_elements = n + len(sub.edges)
         return {
             "projection": sub.projection,
             "truncated": sub.truncated,
             "node_count": n,
             "edge_count": len(sub.edges),
             "dyad_count": dyads,
+            "evidence_coverage": {
+                "nodes": evidenced_nodes,
+                "edges": evidenced_edges,
+                "elements": total_elements,
+                "ratio": round((evidenced_nodes + evidenced_edges) / total_elements, 4)
+                if total_elements else None,
+                "note": "share of visible elements with at least one live "
+                        "assertion carrying an exhibit",
+            },
             "dyad_note": "metrics treat the graph as simple: parallel edges "
                          "between the same pair count once",
             "density": (2 * dyads) / (n * (n - 1)) if n > 1 else 0.0,

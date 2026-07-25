@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from datetime import datetime
 from uuid import uuid4
 
 import psycopg
@@ -25,7 +26,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem
 from noctornal_api.security.auth import AuthService
-from noctornal_api.security.sessions import SessionService
+from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
 from noctornal_api.stores import PgSessionStore, PgUserStore
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -104,8 +105,58 @@ def logout(request: Request,
 
 class Me(BaseModel):
     user_id: str
+    recovery_codes_remaining: int
 
 
 @router.get("/me", response_model=Me)
-def me(user: CurrentUser = Depends(current_user)) -> Me:
-    return Me(user_id=str(user.user_id))
+def me(user: CurrentUser = Depends(current_user),
+       conn: psycopg.Connection = Depends(get_conn)) -> Me:
+    return Me(
+        user_id=str(user.user_id),
+        # The COUNT only. Knowing you are down to your last code is
+        # actionable; the codes themselves exist in plaintext exactly once,
+        # at the moment they are issued.
+        recovery_codes_remaining=PgUserStore(conn).count_recovery_codes(user.user_id),
+    )
+
+
+class RecoveryCodesOut(BaseModel):
+    codes: list[str]
+    note: str
+
+
+@router.post("/recovery-codes", response_model=RecoveryCodesOut)
+def issue_recovery_codes(
+    request: Request,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> RecoveryCodesOut:
+    """Issue a fresh SET of recovery codes, invalidating any previous set
+    (docs/05: "10, single-use, Argon2id-hashed, regenerated as a set").
+
+    Step-up protected. Anyone who can reach a live session can otherwise
+    mint themselves a permanent MFA bypass, which would make the second
+    factor decorative: a stolen session cookie would become ten reusable
+    keys that survive the session's own expiry.
+
+    The plaintexts are returned here and are never retrievable again.
+    """
+    fresh = (
+        user.session_mfa_at is not None
+        and (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
+        < STEP_UP_FRESHNESS
+    )
+    if not fresh:
+        _audit(conn, "RECOVERY_CODES_DENIED", user.user_id,
+               {"reason": "step_up_required"}, request)
+        raise Problem(403, "Forbidden",
+                      "re-authenticate with your second factor before "
+                      "issuing recovery codes")
+    codes = PgUserStore(conn).issue_recovery_codes(user.user_id)
+    _audit(conn, "RECOVERY_CODES_ISSUED", user.user_id,
+           {"count": len(codes)}, request)
+    return RecoveryCodesOut(
+        codes=codes,
+        note="Store these somewhere safe and offline. Each works once, they "
+             "replace any previous set, and they cannot be shown again.",
+    )
