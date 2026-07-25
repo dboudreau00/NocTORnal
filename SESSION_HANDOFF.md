@@ -1,11 +1,11 @@
-# Session handoff — 2026-07-25
+# Session handoff — 2026-07-25 (Phase 7 completion)
 
 Written so a fresh session can resume without re-deriving anything.
 
 > **Read order:** this file → `docs/16-legal-and-external.md` (**every
 > external/legal dependency, and the only file that can stop a deployment**)
 > → `ROADMAP-REMAINING.md` → `CLAUDE.md` (the twelve invariants) →
-> `docs/00-decisions.md` (54 numbered decisions).
+> `docs/00-decisions.md` (58 numbered decisions).
 
 ---
 
@@ -18,238 +18,200 @@ a chain of custody. Comparable to Maltego, i2 and SL Crimewall, with
 UCINET-grade SNA maths. Python 3.13 / FastAPI / Postgres 16, plain-HTML
 analyst UI under a strict CSP with no build step.
 
-**This session's objective**, as given across several messages:
-
-1. Resume from the previous handoff and work its priority list.
-2. *"With phase 8, build anyway and write a disclaimer to note counsel is
-   required to review the state before using in an absolute sense."*
-3. *"Export a what's-left-on-the-roadmap markdown."*
-4. *"Continue with the phases until each of them are built with nuances
-   recorded like 'remove X without legal counsel, and determination'
-   recorded in notes. Be explicit about what needs to be confirmed with
-   external sources. Complete all phases to the best of your ability,
-   including the collection, comms channels, sample handling — and yes,
-   stealer logs are in scope for 9."*
-
-**All nine phases now have an implementation.** The nuance-recording ask is
-answered by `docs/16-legal-and-external.md`, which is the deliverable most
-worth reading first.
+The previous session brought all nine phases to a first implementation.
+**This session was asked to continue from Phase 7 onward**, and Phase 7 is
+now complete except for its UI.
 
 ---
 
-## 2. Completed Work
+## 2. What was built this session
 
-### Before this session
+Four commits on `main`, **807 → 953 tests**, Alembic **0034 → 0036**.
 
-Phases 0–3 complete: Alembic-owned schema (0001–0027), Argon2id + TOTP auth,
-the five-part access gate as one `evaluate()`, the assertion layer enforced
-by deferred DB triggers, WORM evidence with a hash-chained custody ledger,
-the Phase 2 sociogram, Phase 3 analytics (betweenness, Burt, Leiden, key
-player), manual capture + triage, reversible entity merge, CI. **421 tests.**
+| Commit | What |
+|---|---|
+| `74a055d` | Contact-block parser + the normaliser divergence it exposed (0035, 0036) |
+| `ea4fbfa` | PGP signature verification, delegated to gpg |
+| `25cc698` | Co-participation projection + the Phase 7 HTTP router |
+| `565ea7f` | Decisions 55–58, legal register C11–C13, roadmap |
 
-### Built this session — 16 commits, 421 → 807 tests, Alembic 0027 → 0034
+### The contact-block parser (docs/10's "highest-value extraction target")
 
-| Commit | What | Migration |
-|---|---|---|
-| `5359b52` | Rate limiting: GCRA in Redis, login metered by failures | — |
-| `64f577f` | Four-eyes approval + dual control on merge | 0028 |
-| `30ee5ed` | **Fix 12 defects an adversarial review found** | — |
-| `3665a78` | Phase 5: notification centre, SMTP, HMAC webhooks | 0029 |
-| `96af43c` | U2: tell an analyst their picture is incomplete | 0030 |
-| `ff3c9a0` | Phase 8: sample handling | 0031 |
-| `21e635c` | ACH matrix | — |
-| `78019df` | Report builder with TLP redaction | — |
-| `4cc0b52` | docs: roadmap + handoff | — |
-| `27724cf` | Phase 6: retention tombstones + break-glass | 0032 |
-| `1e34396` | Phase 9: ingest + stealer logs | 0033 |
-| `e56221e` | Phase 4: collection, adapters, persona vault | — |
-| `f9109e6` | Phase 7: comms channels | 0034 |
+The design brief is one sentence of docs/10: *"Attributing the escrow's
+Jabber to the vendor is a serious, and easy, error."* So the parser
+**refuses more than it resolves**. A labelled line resolves by its label; an
+unlabelled one only on an unambiguous shape. Bare 40-hex does not resolve
+(SHA-1 is identical), 64-hex does not (Tox pubkey, SHA-256 and OMEMO all
+match), `local@domain` does not (a JID and an email are the same shape).
+Refusals are kept as `UNPARSED` **with the reason** — invariant 12.
 
-### Bugs found that were NOT in the brief
+Four defences against the escrow error, deliberately independent: the role
+label, the inline disclaimer, the GLOBAL stoplist, and shared-service
+detection over **distinct publishers**.
 
-1. **CRITICAL — the blanket rate limit was not a limit.** Keyed only on the
-   presented credential with no liveness check, so rotating a Bearer token
-   escaped it entirely: with the limit at 3, a fixed token gave 27 refusals
-   in 30 requests and a rotating one gave **zero**. Worse, a garbage token
-   suppressed the address fallback, so sending one extra header made a
-   caller *strictly less limited than sending none*. It was the only limiter
-   on ~40 of 45 routes.
-2. **Every IPv4-mapped address shared one bucket** (`::ffff:a.b.c.d` all
-   have the `::/64`). On a dual-stack listener the first person to mistype a
-   password would have locked out the internet.
-3. **The audit throttle failed open** during exactly the outage that makes
-   every limit refuse — the outage would have authored the flood.
-4. **`legal_hold` was on nothing.** docs/08 says it "overrides all deletion,
-   everywhere"; `core."case"` never had the column and evidence had no
-   reason field, so the rule could not be expressed at all.
-5. **A stealer-log compartment CHECK never fired** on the empty array it
-   existed to catch: `array_length('{}',1)` is NULL, and `NULL >= 1` is NULL
-   rather than false.
-6. **A never-polled collection source waited a full interval** before its
-   first poll — a newly-added source would sit idle and look broken.
-7. The e2e cleanup fixture never deleted analytics projections, so any test
-   calling analytics blocked its own case delete.
+Nothing it produces is a binding. It writes `collect.proposal` rows, always
+CLAIMED, and holds no `GraphWriteService` (invariant 3, enforced by absence
+rather than by discipline).
+
+### PGP verification — the only path to CONFIRMED
+
+No cryptography is implemented; `gpg` is driven as a subprocess and only its
+`--status-fd` output is parsed. Two traps are closed in code **and** as
+CHECK constraints:
+
+- **The wrong key.** A signature proves control of whatever key signed it.
+  `VALIDSIG`'s fingerprint must equal the claimed one.
+- **The replayed message.** Everything after `END PGP SIGNATURE` is
+  unsigned, so any message a vendor published can be reposted with an
+  attacker's Tox ID beneath it — and `value in message` passes. The
+  comparison is against gpg's own `--output` of the verified region.
+
+`NO_VERIFIER` is a distinct outcome from every failure, so "nobody checked"
+and "checked and failed" cannot be confused.
+
+### Co-participation
+
+The bipartite projection docs/03 asked for and `analytics._mode_warning`
+recorded as an open item. Newman weighting, a reported room-size cap, and
+`is_inferred` on every edge. Nothing is written to `core.edge`.
+
+### The HTTP router
+
+20 endpoints, Phase 7's first interface. Three things the router enforces
+that the services cannot: the stoplist's two scopes cannot write each
+other's rows; cross-case counts are bounded by assignments read from the
+database rather than from a parameter; and a conversation id from another
+case cannot be minimised under an authorisation that never covered it.
 
 ---
 
-## 3. Current System State
+## 3. Bugs found that were not in the brief
+
+1. **`comms.normalise` had grown a second set of canonical forms** and they
+   had drifted from the ontology's in three places, each silently:
+   - **Matrix** folded the whole MXID. Localparts are case-SENSITIVE, so
+     `@Alice:x` and `@alice:x` collapsed to one durable value and
+     `correlate()` returned two accounts as one actor. The module written
+     to prevent confident false attribution was manufacturing it.
+   - **Tox** disagreed on case only — invisible until something joined a
+     binding to `core.selector`, which is entity resolution. It would have
+     matched nothing and read as "no correlation".
+   - **Telegram** refused a numeric channel id as though it were a
+     `@username`: a refusal *and* a wrong explanation.
+
+   Every unit test passed on both sides because each was internally
+   consistent. **Only comparing the two implementations finds this**, and
+   that comparison is now a parametrised test.
+
+2. **The stoplist was silently disabled for the lines that need it most.**
+   It only matched on a resolved durable value, so `Contact:
+   escrow@forum.biz` — no third-party label, ambiguous shape — never
+   reached it. Defence 3 was switched off by defence 1 failing, when the
+   two are supposed to be independent.
+
+3. **A CHECK made a real state unrepresentable.** `Escrow: @forum_escrow`
+   has a known owner and a genuinely ambiguous type. `role` answers WHOSE
+   and the kind columns answer WHAT; they are independent questions.
+
+4. **`_visible_cases()` filtered on a column that does not exist**
+   (`case_assignment.valid_to`; the real one is `expires_at`). Caught by an
+   e2e test.
+
+5. **gpg was handed absolute paths.** The Windows gpg on PATH is the MSYS
+   build shipped with Git and expects POSIX paths — it resolved `C:\...`
+   against its own cwd and reported a good key as unreadable.
+
+---
+
+## 4. Current system state
 
 | | |
 |---|---|
 | **Branch** | `main`, clean, **nothing pushed** (no remote configured) |
-| **Migration head** | `0034`; each new migration round-trips against its predecessor |
-| **Tests** | **807 passing**, 0 failing, 0 skipped with the stack up |
-| **Lint** | `ruff check` clean; source hygiene clean (186 files) |
-| **Python** | 3.13.14 |
+| **Migration head** | `0036`; round-trips against its predecessor |
+| **Tests** | **953 passing**, 0 failing, 0 skipped with the stack up |
+| **Lint** | `ruff check` clean; source hygiene clean (198 files) |
 | **Stack** | Docker Compose: postgres, redis, nats, minio, openfga, mailhog |
-
-### Key architectural decisions (43–54 in `docs/00-decisions.md`)
-
-- **43/45 — Rate limiting is GCRA in Redis, and fail-open vs fail-closed is
-  answered PER LIMIT.** Cost-bearing limits fail closed (503); only the
-  blanket ceiling fails open, so a Redis restart degrades features instead
-  of bricking an investigation tool. Login is metered **twice**: a generous
-  attempt limit (a NAT'd unit signs on from one address) and a tight
-  *failure* limit that only a guesser moves.
-- **44 — Four-eyes approval binds to a payload hash.** Under dual control
-  the merge endpoint reads only `approval_request_id` and executes the
-  parameters recorded on it — there is nothing to substitute. Merge defaults
-  to OFF because a merge here is a reversible ledger.
-- **46 — Notification content is split into three fields by where each may
-  appear.** `Outgoing` does not carry the body at all, so the email renderer
-  *cannot* leak it.
-- **47 — Phase 8 built; the block became a refusal with a named condition.**
-  Nothing ingests until an operator declares a policy reference and a
-  designated person. **That is a declaration the software records, not one
-  it can verify.**
-- **49 — Report redaction is structural, and the document's mark follows its
-  contents.** `target_tlp` is a ceiling on inclusion, not the mark.
-- **50 — Purge writes a tombstone that outlives the data**, and records
-  `storage_outcome` because COMPLIANCE-mode object lock can refuse a delete
-  *even to satisfy a deletion order*.
-- **52 — Stealer logs: free-text PII search is impossible, not forbidden.**
-  No tsvector, no trigram index, ciphertext values — there is nothing to run
-  a LIKE against.
-- **54 — Comms: the durable-selector mapping is the product.** Tox → first
-  64 hex; Telegram → numeric ID, never `@username`; SimpleX → no identifier,
-  said out loud.
-
----
-
-## 4. Immediate Next Steps & Pending Work
-
-### 🔴 Blockers — these are legal, not technical
-
-**Read `docs/16-legal-and-external.md`.** Four BLOCKING items; the build runs
-without them and **should not be operated** until they are settled:
-
-- **L1** — prohibited-content policy for the sample store. In particular:
-  the `REJECTED` path currently **destroys** the bytes, which is the wrong
-  answer in a jurisdiction requiring preservation. `reject(purge_bytes=False)`
-  exists and nothing selects it automatically.
-- **L2** — the lawful basis for holding stealer-log data about thousands of
-  uninvolved people, victim-notification obligations, and the real retention
-  period (90 days is a placeholder).
-- **L3** — authority to operate a covert persona per jurisdiction, and
-  whether passive and active collection are separately authorised.
-- **L4** — interception law and consent for message capture.
-
-Plus **10 items to confirm against an external source** (C1–C10), including
-evidence-authenticity standards, MinIO COMPLIANCE semantics on your actual
-object store, and the platform durable-identifier mappings, which change.
-
-### Prioritised engineering work
-
-1. **UI for the new phases.** ACH, reports, samples, ingest, comms and
-   governance all have tested services and **no interface**. Samples last
-   and carefully — invariant 10 says metadata may render and bytes may not.
-2. **HTTP routers for Phases 4, 6, 7, 9.** Services and tests exist;
-   `approvals`, `notifications`, `samples`, `ach`, `reports` have routers,
-   the rest do not.
-3. **A second adversarial review pass**, over Phases 4/7/9. The first one
-   found a critical defect under 484 green tests; these phases have had none.
-4. **WebAuthn**, and the deferred security items (session IP/UA binding,
-   non-owner DB role + RLS, login timing equalisation).
-5. **Real SSRF protection.** `collection.fetch()` has a floor — non-HTTP
-   schemes and private literals — and DNS rebinding is not addressed.
-6. **Fuzzy hashing for Phase 8** (ssdeep/TLSH/imphash) and YARA. Each
-   absence is already recorded on the sample row as a gap with a reason.
-
-### Open questions
-
-- **Ingest key holders** — internal only or external partners? Changes the
-  support and abuse model (docs/16 D6).
-- **Expected ingest volume.** Above ~1M records/day the bucket needs a
-  different storage tier.
-- **Which sandbox vendors count as "private"** for detonation exposure.
-- **Who is the security officer?** Break-glass *refuses to grant* if no
-  active user holds `SECURITY_OFFICER` — deliberately.
-
----
-
-## 5. Relevant File Paths & References
-
-### New this session
-
-| Path | What |
-|---|---|
-| `docs/16-legal-and-external.md` | **The register. Read first.** |
-| `apps/api/src/noctornal_api/ratelimit.py`, `ratelimit_redis.py` | Pure GCRA + one Lua script |
-| `apps/api/src/noctornal_api/http/limits.py` | Subject derivation, dependency, middleware |
-| `apps/api/src/noctornal_api/approvals.py` | Four-eyes, bound to a payload hash |
-| `apps/api/src/noctornal_api/notifications.py`, `notify_events.py`, `transports.py` | Phase 5 |
-| `apps/api/src/noctornal_api/samples.py` | Phase 8 |
-| `apps/api/src/noctornal_api/ach.py` | ACH, ranked by inconsistency |
-| `apps/api/src/noctornal_api/reports.py` | Structural TLP redaction |
-| `apps/api/src/noctornal_api/retention.py`, `break_glass.py` | Phase 6 |
-| `apps/api/src/noctornal_api/ingest.py` | Phase 9 + stealer logs |
-| `apps/api/src/noctornal_api/collection.py` | Phase 4 |
-| `apps/api/src/noctornal_api/comms.py` | Phase 7 |
-| `db/migrations/versions/0028`–`0034` | approvals, notify, withheld, lab, retention, ingest, comms |
-
-### Modified — inspect before changing
-
-- `apps/api/src/noctornal_api/projections.py` — `withheld()` was added; every
-  metric depends on `project()`.
-- `apps/api/src/noctornal_api/merges.py`, `approvals.py` — both now raise
-  notifications inside their transactions.
-- `apps/api/src/noctornal_api/http/app.py` — routers and middleware ORDER
-  (the limiter must register *before* the security headers).
 
 ### New environment variables
 
 | Variable | Effect if unset |
 |---|---|
-| `REDIS_URL` | Rate limiting runs **per process** and warns |
-| `NOCTORNAL_INGEST_PEPPER` | **Ingest keys cannot be issued or verified** |
-| `NOCTORNAL_PROHIBITED_CONTENT_POLICY` + `NOCTORNAL_DESIGNATED_PERSON` | **Sample ingest is refused (451)** |
-| `NOCTORNAL_SAMPLE_ORIGIN` | **Sample downloads are refused** (invariant 10) |
-| `NOCTORNAL_TRUSTED_PROXY_HOPS` | `X-Forwarded-For` ignored (correct default) |
-| `NOCTORNAL_RATELIMIT=off` | Disables limiting; warns every start |
-| `SMTP_*`, `NOCTORNAL_BASE_URL`, `NOCTORNAL_WEBHOOK_*` | Notification delivery degraded |
+| `NOCTORNAL_GPG` | gpg is discovered on PATH. Point it at a missing file and verification returns `NO_VERIFIER` — never a confirmation |
 
-### Traps that cost real time
+### New permissions (migration 0035)
 
-- **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart. Five
-  sessions running.
-- **TOTP cannot work on this host** (unsynchronised clock, in 2026). Sign in
-  with `.venv\Scripts\python scripts\bootstrap.py session --email <you>`.
-- **TOTP codes are single-use** — two logins inside one 30-second step fail
-  on the replay guard, not on the code under test.
-- **Constraints tie fields together and fire on UPDATE.** A case cannot be
-  created already expired (`case_retention_sane` ties retention to
-  `created_at`), a break-glass grant cannot be aged without staying ≤8h, and
-  an ingest key cannot expire before it was issued. Age the *pair*.
-- **`array_length('{}', 1)` is NULL, not 0.** Any `>= 1` check on an array
-  needs `coalesce`, or it silently passes on the empty case.
-- **A partial unique index needs its predicate restated in `ON CONFLICT`.**
-- **Retention rules are GLOBAL**, so a test that confirms one leaks into
-  every later test.
-- **Do not run the suite while background agents run theirs** — the e2e
-  cleanup deletes by email pattern and concurrent runs delete each other's
-  fixtures. The failures look real and are not.
+`comms.read`, `comms.bind`, `comms.minimise` (**step-up** — minimisation
+destroys message bodies irreversibly), `comms.stoplist.manage`.
 
-### Running it
+---
+
+## 5. Immediate next steps
+
+### 🔴 Blockers — still legal, not technical
+
+`docs/16-legal-and-external.md` now holds **4 BLOCKING items, 7
+determinations and 13 external confirmations**. Three are new this session:
+
+- **C11** — a CONFIRMED binding asserts a narrow thing (this key signed
+  text containing this identifier). A filing must not widen it silently.
+  The gpg version is stored per verification so rows made with a defective
+  build can be found; the provenance of the vendor's public key is a human
+  step the software deliberately does not automate.
+- **C12** — the GLOBAL stoplist is a cross-case store of identifiers
+  belonging to people who are **not subjects of any investigation**, and it
+  outlives the case that added it, on purpose.
+- **C13** — co-participation manufactures ties. `include_incidental`
+  defaults off, but it is switchable, and the egress gate checks
+  classification rather than that flag.
+
+### Prioritised engineering work
+
+1. **UI.** ACH, reports, samples, ingest, comms and governance all have
+   tested services and no interface. Samples last and carefully —
+   invariant 10 says metadata may render and bytes may not.
+2. **HTTP routers for Phases 4, 6 and 9** — retention, break-glass,
+   collection and ingest still have none.
+3. **An adversarial pass over Phases 4 and 9**, which have had none.
+4. **WebAuthn** and the deferred security items (session IP/UA binding,
+   non-owner DB role + RLS, login timing equalisation).
+5. **Real SSRF protection.** `collection.fetch()` has a floor; DNS
+   rebinding is not addressed.
+6. **Fuzzy hashing for Phase 8** (ssdeep/TLSH/imphash) and YARA.
+
+---
+
+## 6. Traps that cost real time
+
+Everything in the previous handoff still applies (uvicorn without
+`--reload`; TOTP unusable on this host — use `bootstrap.py session`; TOTP
+codes single-use; constraints that tie fields together; `array_length('{}',
+1)` being NULL; a partial unique index needing its predicate restated in
+`ON CONFLICT`; retention rules being global; not running the suite while
+background agents run theirs).
+
+New this session:
+
+- **The comms service stoplist is GLOBAL**, exactly like retention rules.
+  Tests use a reserved `*.cbstop.test` domain so teardown can find the
+  rows; a leaked entry surfaces as a unique violation in an unrelated test.
+- **Teardown order follows the foreign keys.**
+  `contact_block_entry.stoplist_id` references `service_selector`, so
+  deleting the stoplist first fails on an FK — and a failed teardown leaks
+  the global row above.
+- **`iam.case_assignment.granted_by` is NOT NULL.**
+- **gpg-agent does not autostart here** — `gpgconf --launch gpg-agent`.
+  Only SECRET-key operations need it; verification is public-key only,
+  which is why the PGP tests use vendored fixtures and never generate a key.
+- **The `gpg` on PATH is the MSYS build and expects POSIX paths.** `pgp.py`
+  passes RELATIVE paths with an explicit `cwd`; do not "tidy" them into
+  absolutes.
+- **A unique index over nullable columns needs `coalesce`** — two NULLs
+  never conflict, so the duplicate you were preventing gets inserted twice.
+
+---
+
+## 7. Running it
 
 ```bash
 powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
@@ -260,4 +222,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
 ```
 
 Postgres legs gate on `DATABASE_URL`, evidence on `MINIO_ENDPOINT`, the
-limiter's Lua on `REDIS_URL`. **CI fails the run if anything skipped.**
+limiter's Lua on `REDIS_URL`. The PGP tests are deliberately **not** gated:
+if gpg vanishes, the only cryptographic-evidence path in the system going
+untested should break the build rather than quietly leave it. **CI fails
+the run if anything skipped.**
