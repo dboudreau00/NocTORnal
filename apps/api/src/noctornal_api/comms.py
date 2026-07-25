@@ -51,6 +51,36 @@ observation. One verified by a signature over it is confirmed. Treating a
 claim as a confirmation is how a rival's Jabber ID ends up attributed to
 the person who posted it as an insult -- which is a real pattern in these
 forums, not a hypothetical.
+
+## Canonical form comes from the ontology, not from here
+
+This module decides WHETHER an observed string has a durable part and what
+to say when it does not. It does NOT decide what the durable part looks
+like -- `noctornal_ontology.normalise` does, exactly as it does for
+`core.selector` (see `selectors.py`: "the ONE source of truth for canonical
+form").
+
+That split was not the original shape, and the drift it allowed is worth
+recording because all three divergences were silent:
+
+- **Matrix.** This module lowercased the whole MXID. The ontology folds
+  only the server part, because an MXID localpart is case-SENSITIVE and
+  two accounts on a historical homeserver may differ only by case.
+  Lowercasing merged them into one durable value -- the module written to
+  prevent confident false attribution was manufacturing it.
+- **Tox.** This module lowercased; the ontology uppercases. Self-
+  consistent within comms, so correlation worked -- right up until
+  anything joined a binding to `core.selector`, which is entity
+  resolution, i.e. the product. It would have returned nothing and read
+  as "no match".
+- **Telegram.** A numeric supergroup/channel id (`-100…`) was rejected as
+  though it were a username, with an error saying so. The ontology strips
+  the Bot-API `-100` prefix so the two forms of one channel collapse, and
+  keeps a bare minus so a chat id never collides with a user id.
+
+The lesson is the one `selectors.py` already stated and this file quietly
+broke: a second normaliser for the same thing is a correlation bug with a
+delay fuse.
 """
 from __future__ import annotations
 
@@ -62,6 +92,30 @@ from uuid import UUID
 
 import psycopg
 from psycopg.types.json import Json
+
+from noctornal_ontology import normalise as _canonical
+
+#: Which ontology selector type carries the canonical form for a platform's
+#: durable identifier. A platform absent from this map has no canonical
+#: form beyond a trim, which is itself a statement worth being explicit
+#: about rather than a default that happens to apply.
+PLATFORM_SELECTOR_TYPE: dict[str, str] = {
+    "TOX": "TOX_PK",
+    "TELEGRAM": "TELEGRAM_ID",
+    "XMPP": "JABBER",
+    "MATRIX": "MATRIX_MXID",
+    "SESSION": "SESSION_ID",
+    "DISCORD": "DISCORD_ID",
+    "ICQ": "ICQ",
+    "THREEMA": "THREEMA_ID",
+    "SIGNAL": "SIGNAL_ACI",
+    "WIRE": "WIRE_UUID",
+    "BRIAR": "BRIAR_LINK",
+    "SKYPE": "SKYPE_ID",
+    "FORUM_PM": "FORUM_UID",
+    # SIMPLEX is deliberately absent: it has no durable identifier at all,
+    # and a mapping here would imply one exists.
+}
 
 CLAIMED, OBSERVED, CONFIRMED = "CLAIMED", "OBSERVED", "CONFIRMED"
 
@@ -122,14 +176,39 @@ def normalise(platform_key: str, observed: str) -> Normalised:
             "inherently poor, and an absence of data here is NOT an absence "
             "of activity.")
     if platform_key == "MATRIX":
-        return Normalised(value.lower() if value.startswith("@") else value)
+        return _normalise_mxid(value)
     if platform_key == "SESSION":
         # The Session ID IS an X25519 public key; it is already durable.
-        cleaned = value.lower()
-        if len(cleaned) == 66 and _HEX.match(cleaned):
-            return Normalised(cleaned)
+        if len(value) == 66 and _HEX.match(value):
+            return Normalised(_canonical("SESSION_ID", value))
         return Normalised(None, "not a 66-hex Session ID as observed")
+    selector_type = PLATFORM_SELECTOR_TYPE.get(platform_key)
+    if selector_type:
+        return Normalised(_canonical(selector_type, value))
     return Normalised(value)
+
+
+def _normalise_mxid(value: str) -> Normalised:
+    """Fold the SERVER part only. The localpart is case-sensitive.
+
+    RFC-wise an MXID is `@localpart:server`, and while most homeservers
+    lowercase localparts on registration, historical ones did not -- so
+    `@Alice:example.org` and `@alice:example.org` can be two accounts.
+    Folding them produces one durable value for two people, which is a
+    merge nobody performed and nobody can see: `correlate` simply returns
+    both as the same actor.
+    """
+    cleaned = value.strip()
+    if not (cleaned.startswith("@") and ":" in cleaned):
+        return Normalised(
+            None,
+            "not an MXID: expected @localpart:server.tld. A bare Matrix "
+            "display name is not durable -- it is changeable per room.")
+    return Normalised(
+        _canonical("MATRIX_MXID", cleaned),
+        "the server part is case-folded and the localpart is NOT: MXID "
+        "localparts are case-sensitive on historical homeservers, and "
+        "folding one merges two accounts that differ only by case")
 
 
 def _normalise_tox(value: str) -> Normalised:
@@ -142,35 +221,55 @@ def _normalise_tox(value: str) -> Normalised:
     docs/10: "This one detail is worth more than most of the extraction
     pipeline."
     """
-    cleaned = re.sub(r"[^0-9a-fA-F]", "", value).lower()
+    cleaned = re.sub(r"[^0-9a-fA-F]", "", value)
     if len(cleaned) == 76 and _HEX.match(cleaned):
         return Normalised(
-            cleaned[:64],
+            _canonical("TOX_PK", cleaned),
             "normalised to the 64-hex public key; the trailing nospam and "
             "checksum are user-rotatable and are NOT part of the identity")
     if len(cleaned) == 64 and _HEX.match(cleaned):
-        return Normalised(cleaned, "already the public key")
+        return Normalised(_canonical("TOX_PK", cleaned), "already the public key")
     return Normalised(
         None,
         "not a Tox ID: expected 76 hex (public key + nospam + checksum) or "
         "64 hex (the public key alone)")
 
 
+_NOT_DURABLE_TELEGRAM = (
+    "a Telegram @username is NOT durable -- usernames are recycled, and "
+    "matching on one can attribute a new person's traffic to an old "
+    "case. Record the numeric user ID to correlate.")
+
+
 def _normalise_telegram(value: str) -> Normalised:
-    """The numeric user ID, never @username.
+    """The numeric ID, never @username.
 
     Usernames are recycled. Matching on one can attribute a new person's
     traffic to an old investigation, and the graph shows no sign of it.
     So a username alone yields NO durable value rather than a guess.
+
+    Negative ids are numeric ids too, and rejecting them as "a username"
+    was both a refusal and a wrong explanation. The ontology handles the
+    two shapes: a Bot-API supergroup/channel id carries a `-100` prefix
+    that its MTProto form does not (strip it, or one channel is two), and
+    a basic-group chat id carries a bare minus that must SURVIVE, or a
+    chat id collides with an unrelated user id.
     """
-    cleaned = value.strip().lstrip("@")
-    if cleaned.isdigit():
-        return Normalised(cleaned)
-    return Normalised(
-        None,
-        "a Telegram @username is NOT durable -- usernames are recycled, and "
-        "matching on one can attribute a new person's traffic to an old "
-        "case. Record the numeric user ID to correlate.")
+    cleaned = value.strip()
+    if cleaned.startswith("@"):
+        return Normalised(None, _NOT_DURABLE_TELEGRAM)
+    digits = cleaned[1:] if cleaned.startswith("-") else cleaned
+    if not digits.isdigit():
+        return Normalised(None, _NOT_DURABLE_TELEGRAM)
+    canonical = _canonical("TELEGRAM_ID", cleaned)
+    if cleaned.startswith("-"):
+        return Normalised(
+            canonical,
+            "a negative id is a GROUP or CHANNEL, not a user. The Bot-API "
+            "'-100' prefix is stripped so the MTProto form of the same "
+            "channel matches; a bare minus is kept so a chat id never "
+            "collides with a user id.")
+    return Normalised(canonical)
 
 
 def _normalise_jid(value: str) -> Normalised:
@@ -180,14 +279,16 @@ def _normalise_jid(value: str) -> Normalised:
     which is weak but useful corroboration -- so it is reported in the note
     rather than discarded silently.
     """
-    bare, _, resource = value.strip().partition("/")
-    bare = bare.lower()
-    if "@" not in bare:
+    cleaned = value.strip()
+    at = cleaned.find("@")
+    if at < 0:
         return Normalised(None, "not a JID: no domain part")
+    slash = cleaned.find("/", at + 1)
+    resource = cleaned[slash + 1:] if slash != -1 else ""
     note = "resourcepart dropped (it is per-connection)"
     if resource:
         note += f"; observed resource {resource!r} may corroborate client software"
-    return Normalised(bare, note)
+    return Normalised(_canonical("JABBER", cleaned), note)
 
 
 def coverage_note(platform_key: str) -> str:
@@ -334,7 +435,13 @@ class CommsService:
         two identities because they share a device would destroy exactly
         the gap the model exists to preserve.
         """
-        cleaned = re.sub(r"\s+", "", fingerprint).lower()
+        # OMEMO fingerprints are conventionally printed in spaced groups of
+        # eight. Canonical form comes from the ontology for the same reason
+        # the durable selectors do: a second normaliser is a correlation
+        # bug with a delay fuse.
+        if not fingerprint or not fingerprint.strip():
+            raise CommsError("an empty fingerprint is not one")
+        cleaned = _canonical("OMEMO_FPR", fingerprint)
         if not cleaned:
             raise CommsError("an empty fingerprint is not one")
         row = self._c.execute(
