@@ -2485,6 +2485,8 @@ function renderInspector() {
       ' · last seen ' + fmtTime(n.last_seen);
     show($('insp-sel-sec'), true);
     show($('insp-metrics-sec'), true);
+    show($('insp-merge-sec'), true);
+    renderMergePanel(n);
     renderNodeMetrics(sel.id);
   } else {
     const e = edgeById(sel.id);
@@ -2504,6 +2506,7 @@ function renderInspector() {
       ' · review ' + e.review + ' · from ' + fmtTime(e.valid_from);
     show($('insp-sel-sec'), false);
     show($('insp-metrics-sec'), false);
+    show($('insp-merge-sec'), false);
   }
 
   const seq = ++state.inspSeq;
@@ -3271,6 +3274,7 @@ function wire() {
     renderProjectionBar();
     draw();
   });
+  $('merge-run').addEventListener('click', runMerge);
   $('cap-run').addEventListener('click', runCapture);
   $('triage-state').addEventListener('change', () => {
     state.triageIndex = 0;
@@ -3339,6 +3343,142 @@ function adoptTokenFromFragment() {
   history.replaceState(null, '', window.location.pathname);
   state.token = token;
   sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+
+/* =====================================================================
+ * ENTITY RESOLUTION (Phase 6)
+ *
+ * docs/01: "Merging is the operation most likely to quietly corrupt a
+ * case." So the control says what it will do BEFORE it does it, names
+ * which record loses, and every merge stays listed with a one-click
+ * reversal beside it.
+ *
+ * Only same-type entities are offered. Merging a persona into a person is
+ * an ATTRIBUTION carrying a confidence (invariant 2) and the server
+ * refuses it -- but an interface that offers a choice the server will
+ * reject is worse than one that never offered it.
+ * ===================================================================== */
+
+function labelOf(nodeId) {
+  const n = state.nodes.find((x) => x.id === nodeId);
+  return n ? n.label : null;
+}
+
+function renderMergePanel(node) {
+  const select = $('merge-target');
+  const candidates = state.nodes
+    .filter((n) => n.id !== node.id && n.node_type === node.node_type)
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const head = candidates.length
+    ? 'Choose the surviving entity'
+    : 'No other ' + typeName(node.node_type) + ' in this case';
+  opts(select, [['', head]].concat(candidates.map((n) => [n.id, n.label])), '');
+  select.disabled = candidates.length === 0;
+  $('merge-run').disabled = candidates.length === 0;
+  setMsg($('merge-error'), '');
+  loadMergeHistory(node.id);
+}
+
+async function loadMergeHistory(nodeId) {
+  const box = $('merge-history');
+  clear(box);
+  try {
+    const data = await api(cpath('/merges'));
+    const mine = (data.merges || []).filter(
+      (m) => m.source_node_id === nodeId || m.target_node_id === nodeId);
+    if (!mine.length) return;
+    box.appendChild(el('h4', 'h-sm', 'Merge history'));
+    for (const m of mine) {
+      const item = el('div', 'sel-item');
+      const isSource = m.source_node_id === nodeId;
+      const other = isSource ? m.target_node_id : m.source_node_id;
+      const top = el('div');
+      top.appendChild(el('span', 'chip' + (m.is_live ? '' : ' stale'),
+                         m.is_live ? 'LIVE' : 'REVERSED'));
+      top.appendChild(document.createTextNode(
+        (isSource ? ' merged INTO ' : ' absorbed ') +
+        (labelOf(other) || shortId(other))));
+      item.appendChild(top);
+      item.appendChild(el('div', 'muted small',
+        m.reason + ' \u00b7 ' + m.edges_repointed + ' tie(s) moved \u00b7 ' +
+        fmtTime(m.merged_at)));
+      if (m.reversal_reason) {
+        item.appendChild(el('div', 'muted small',
+                            'reversed: ' + m.reversal_reason));
+      }
+      if (m.is_live) {
+        const undo = el('button', 'btn small', 'Reverse');
+        undo.type = 'button';
+        undo.title = 'Restore every tie to its original endpoints and bring ' +
+                     'the losing entity back into the graph.';
+        undo.addEventListener('click', () => reverseMerge(m));
+        item.appendChild(undo);
+      }
+      box.appendChild(item);
+    }
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 403)) fail(err);
+  }
+}
+
+async function runMerge() {
+  const sel = state.selection;
+  if (!sel || sel.kind !== 'node') return;
+  const targetId = $('merge-target').value;
+  if (!targetId) {
+    setMsg($('merge-error'), 'Choose the surviving entity.');
+    return;
+  }
+  const losing = labelOf(sel.id), surviving = labelOf(targetId);
+  /* Naming BOTH records and the direction, because the commonest merge
+     mistake is doing it backwards and noticing weeks later. */
+  const reason = window.prompt(
+    'Merge "' + losing + '" INTO "' + surviving + '".\n\n' +
+    '"' + losing + '" leaves the live graph and its ties move to "' +
+    surviving + '". This is reversible, and the reason is recorded ' +
+    'permanently.\n\nWhy are these the same entity?');
+  if (reason === null) return;
+  if (!reason.trim()) {
+    setMsg($('merge-error'), 'A merge must say why: docs/01 calls this the ' +
+           'operation most likely to quietly corrupt a case.');
+    return;
+  }
+  try {
+    await api(cpath('/merges'), {
+      method: 'POST',
+      json: { source_node_id: sel.id, target_node_id: targetId,
+              reason: reason.trim() },
+    });
+    invalidateAnalytics();
+    await reloadAll();
+    selectNode(targetId);
+    banner('Merged', '"' + losing + '" now redirects to "' + surviving +
+           '". Reverse it from the entity resolution panel if this was wrong.',
+           'info');
+  } catch (err) {
+    if (err instanceof ApiError) inlineProblem($('merge-error'), err);
+    else fail(err);
+  }
+}
+
+async function reverseMerge(m) {
+  const reason = window.prompt('Why is this merge being reversed?');
+  if (reason === null) return;
+  if (!reason.trim()) {
+    banner('A reversal needs a reason', 'It is recorded permanently.', 'warn');
+    return;
+  }
+  try {
+    await api(cpath('/merges/' + m.id + '/reverse'), {
+      method: 'POST', json: { reason: reason.trim() },
+    });
+    invalidateAnalytics();
+    await reloadAll();
+    banner('Merge reversed',
+           'Every tie is back at its original endpoints and the entity has ' +
+           'returned to the graph.', 'info');
+  } catch (err) { fail(err); }
 }
 
 /* =====================================================================

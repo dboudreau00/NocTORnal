@@ -830,6 +830,26 @@
             <h3 class="h-sm">Selectors</h3>
             <div id="insp-selectors" class="insp-list"></div>
           </section>
+
+          <!-- Entity resolution. docs/01: "merging is the operation most
+               likely to quietly corrupt a case", so the control states what
+               it will do before it does it, and every merge is reversible
+               from the history below. -->
+          <section id="insp-merge-sec" class="insp-sec" hidden>
+            <h3 class="h-sm">Entity resolution</h3>
+            <label class="field">
+              <span class="label">Merge this entity into</span>
+              <select id="merge-target" class="select"></select>
+            </label>
+            <p class="help">The entity you are looking at becomes the
+              <strong>losing</strong> record: it keeps its history, its ties
+              move to the one you choose, and it leaves the live graph. Only
+              entities of the same type are listed &mdash; saying a persona
+              IS a person is an attribution, not a merge.</p>
+            <button id="merge-run" type="button" class="btn small">Merge</button>
+            <p id="merge-error" class="form-error" role="alert" hidden></p>
+            <div id="merge-history" class="insp-list"></div>
+          </section>
         </div>
       </aside>
     </section>
