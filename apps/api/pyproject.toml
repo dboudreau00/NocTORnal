@@ -15,6 +15,11 @@ dependencies = [
     "blake3>=0.4",         # second independent integrity anchor for evidence
     "fastapi>=0.110",      # REST API
     "uvicorn>=0.29",       # ASGI server
+    # Rate limiting. Redis is the only shared state the limiter needs, and
+    # it needs it to be atomic -- the GCRA meter is read, decided and
+    # written by one Lua script (ratelimit_redis.py). Without this package
+    # the limiter still runs, per process, and says so loudly at startup.
+    "redis>=5.0",
     # SNA maths (docs/02: "igraph, not NetworkX" -- NetworkX is pure Python
     # and falls over around 50k edges when you ask for betweenness). Both
     # ship abi3 wheels, so they install on any CPython >= 3.9 without a

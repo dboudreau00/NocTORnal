@@ -18,6 +18,11 @@ env:
   # Mirrors infra/docker-compose.yml. These only ever address services
   # inside the runner, and are the same literals the compose file uses.
   DATABASE_URL: postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal
+  # The rate limiter's Lua runs in Redis, not in Python, so the only way to
+  # know the two implementations still agree is to run both. Without this
+  # the Redis leg would skip -- and the "No tests were skipped" gate below
+  # would then fail the build, which is the intended behaviour.
+  REDIS_URL: redis://localhost:6379/0
   MINIO_ENDPOINT: localhost:9000
   MINIO_ACCESS_KEY: noctornal
   MINIO_SECRET_KEY: dev_only_change_me
@@ -85,6 +90,12 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U noctornal"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 20
       minio:
         image: bitnami/minio:latest
