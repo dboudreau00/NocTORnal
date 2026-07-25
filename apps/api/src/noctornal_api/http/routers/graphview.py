@@ -176,17 +176,17 @@ def _layout_projection_id(conn: psycopg.Connection, case_id: UUID,
     '__layout__' backs the saved canvas, so an analyst's spatial memory
     survives a reload without needing the full projection-management UI
     (docs/06: people navigate these graphs spatially)."""
-    row = conn.execute(
-        """SELECT id FROM analytics.projection
-            WHERE case_id = %s AND name = '__layout__'""",
-        (case_id,),
-    ).fetchone()
-    if row is not None:
-        return row[0]
+    # One atomic statement, not SELECT-then-INSERT. Migration 0026 added
+    # UNIQUE (case_id, name), which turned this read-modify-write's race
+    # from a duplicate row into a unique violation: two concurrent layout
+    # saves for a case with no layout row would leave the loser with an
+    # unhandled integrity error.
     return conn.execute(
         """INSERT INTO analytics.projection
                (id, case_id, name, edge_types, created_by)
-           VALUES (%s, %s, '__layout__', '{}', %s) RETURNING id""",
+           VALUES (%s, %s, '__layout__', '{}', %s)
+           ON CONFLICT (case_id, name) DO UPDATE SET name = EXCLUDED.name
+           RETURNING id""",
         (uuid4(), case_id, user_id),
     ).fetchone()[0]
 

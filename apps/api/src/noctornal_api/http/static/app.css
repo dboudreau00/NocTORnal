@@ -548,6 +548,49 @@ select.select { appearance: none; padding-right: 24px; }
 /* ── responsive / zoom tolerance ───────────────────────────────────── */
 /* Dense information design still has to be operable at 200% zoom: the
    inspector narrows, then drops under the canvas, before anything clips. */
+/* -- analysis panel (Phase 3) ---------------------------------------- */
+#pane-analytics { overflow-y: auto; padding-bottom: 24px; }
+#pane-analytics .h3 {
+  font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+  margin: 22px 0 6px; color: var(--text-primary);
+}
+#pane-analytics .h4 {
+  font-size: 12px; font-weight: 600; margin: 0 0 8px;
+  color: var(--text-primary);
+}
+#pane-analytics .card { margin-bottom: 4px; }
+#pane-analytics .card p { margin: 0 0 8px; }
+#pane-analytics .card p:last-child { margin-bottom: 0; }
+
+/* A wide metric table must scroll inside its own box rather than push the
+   whole pane sideways. */
+.scroll-x { overflow-x: auto; max-width: 100%; }
+
+/* Caveats. docs/03: flag approximation explicitly, and never present a
+   number as more certain than it is. A warning changes what the number is
+   allowed to mean, so it reads louder than a note. */
+.an-flag {
+  font-size: 12px; line-height: 1.5; margin: 6px 0;
+  padding: 8px 10px; border-radius: 4px;
+  border-left: 3px solid var(--hairline); background: var(--surface-1);
+  color: var(--text-secondary);
+}
+.an-flag-warn { border-left-color: var(--alert); color: var(--text-primary); }
+.an-flag-note { border-left-color: var(--accent-dim); }
+
+.an-leads-card { margin: 12px 0 4px; }
+.an-lead { padding: 8px 0; border-top: 1px solid var(--hairline); }
+.an-lead:first-of-type { border-top: 0; padding-top: 0; }
+.an-lead-head { margin: 0 0 3px; font-size: 12px; }
+#pane-analytics .an-lead .muted { line-height: 1.5; }
+
+#an-projection {
+  font-family: var(--mono); font-size: 11px; line-height: 1.6;
+  margin: 10px 0 4px; word-break: break-word;
+}
+#an-body tr { cursor: pointer; }
+#pane-analytics .chip.small { font-size: 10px; margin-left: 6px; }
+
 @media (max-width: 1180px) {
   .workspace { grid-template-columns: 56px minmax(0, 1fr) 300px; }
   .cases-view { grid-template-columns: minmax(0, 1fr); }

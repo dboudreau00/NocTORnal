@@ -1,8 +1,18 @@
 # 15 — Handoff
 
-Everything a fresh session needs to continue this build, written 2026-07-25
-after Phases 0–2 shipped. Read this, then `CLAUDE.md`, then
-`docs/14-enhancement-map.md`. Phase 3 starts at the bottom.
+Everything a fresh session needs to continue this build. Written 2026-07-25
+after Phases 0–2 shipped; **updated 2026-07-25 after Phase 3 shipped**. Read
+this, then `CLAUDE.md`, then `docs/14-enhancement-map.md`. What to do next is
+at the bottom.
+
+> **Phase 3 is done.** `apps/api/src/noctornal_api/analytics.py` (the maths,
+> database-free) and `analytics_runs.py` (cache, persistence, audit), exposed
+> at `/api/v1/cases/{id}/analytics`, with an Analysis tab in the UI. 304 tests
+> pass. Run `bootstrap.py demo-network` for a case with structure worth
+> analysing — `demo-case` is a 7-node star and every Phase 3 metric is
+> degenerate on it. Decisions 30–33 in `docs/00-decisions.md` record the four
+> judgement calls, including the one that matters most: analytics run
+> **synchronously in the API**, not in a separate worker.
 
 ## What this is
 
@@ -158,42 +168,97 @@ the cost of reversal. The ones a new session most needs:
 Still open (docs/00): venue-scoped `FORUM_UID`, endpoint-aware `BANNED_BY`,
 two-step MFA ticket, expected case scale.
 
-## Phase 3 — start here
+## Phase 3 — what was built (2026-07-25)
 
 Goal (docs/09): *the tool answers "who holds this network together" with
-something better than degree count.*
+something better than degree count.* Met.
 
-Build in `apps/api/src/noctornal_api/` alongside `projections.py`, which
-already provides the projected subgraph, the four presets, and the
-clearance/compartment filtering every query must respect. **Reuse
-`GraphService.project()`** — do not re-query the graph.
+`analytics.py` holds the maths and **never touches the database**: it takes a
+`Subgraph` from `GraphService.project()` — already clearance-filtered — and
+returns numbers. That is what makes it testable against hand-computed values,
+and what makes it impossible for a metric to widen what a caller can see.
+`analytics_runs.py` owns everything stateful: the cache, the `metric_run`
+lifecycle, `node_metric` / `community_assignment`, and the audit event.
 
-1. **Analytics worker with igraph.** docs/02 specifies igraph over NetworkX
-   ("NetworkX dies around 50k edges"). Local metrics stay synchronous;
-   betweenness, communities and key-player go to a queue (Redis and NATS are
-   both already in the stack), writing to `analytics.metric_run` /
-   `node_metric` / `community_assignment`, which exist unused since 0015.
-   `metric_run` has `graph_hash` for cache-skip and `is_approximate` +
-   `sample_size` because docs/03 insists the UI say when a number is sampled.
-2. **Burt's constraint and effective size** — docs/03 calls it arguably the
-   most useful metric here and docs/13 says almost nobody surfaces it. The
-   data already shows a broker (`spectre_lynx`: degree 3, clustering 0.0).
-3. **Betweenness**, with the UI teaching the low-degree/high-betweenness
-   pattern rather than only printing a value.
-4. **Leiden communities**, tinting the selected node's community.
-5. **Signed structural balance** — unbalanced triads as leads. The signs are
-   already stored and `spectre_lynx` is both vouched for and accused, which
-   is exactly the shape.
-6. **Key player (KPP-Neg)** with a fragmentation preview.
-7. **Trust decay** at projection time (docs/03: half-life, default 12
-   months) — never mutate the stored weight.
+What it computes, all from one materialisation: betweenness, harmonic
+closeness (not classical — undefined on a disconnected graph, and criminal
+networks are routinely disconnected), eigenvector over the **positive
+subgraph only** (being accused by a big name does not confer standing),
+Burt's constraint / effective size / efficiency / hierarchy, Leiden
+communities, cut vertices, bridges, signed structural balance with unbalanced
+triads and contested dyads, and KPP-Neg key player. Rank and percentile sit
+beside every value; the graph is treated as **simple and undirected** for
+structure, with directed signed degree reported separately because vouches
+received and vouches given mean opposite things.
 
-Non-negotiables while building it: metrics are computed **against a named
-projection** and the parameters travel with every answer; inferred edges stay
-out unless the projection opts in; every query filters by the caller's
-clearance and compartments, and an edge appears only when **both** endpoints
-are visible.
+Four judgement calls are recorded as decisions 30–33 in `docs/00-decisions.md`.
+The load-bearing one: **analytics run synchronously in the API process, not in
+the Zone B worker docs/02 describes.** A queue would add a process, a
+dependency and a progress UI without changing a number at this scale
+(2,000 nodes / 6,000 edges measured at 1.15 s). The seam is deliberate — the
+compute layer is pure, so moving it later is a change of caller, not of
+algorithm. The accepted caveat is that this is a CPU-bound path behind a
+non-step-up permission with rate limiting still deferred.
 
-Before Phase 3, consider the enhancement map's E-items — evidence capture in
-the UI and retraction — which are small and close the biggest gap between the
-product as built and as pitched.
+### Three bugs found and fixed on the way in
+
+These were pre-existing and none was in the Phase 3 brief.
+
+- **Retraction was cosmetic.** Decision 24 deliberately scoped live
+  provenance as a projection property rather than a database constraint —
+  and the projection never implemented it. A retracted assertion showed a
+  RETRACTED chip while its node kept full degree, and Phase 3 would have
+  named takedown targets from withdrawn evidence. `project()` now requires a
+  non-retracted assertion on both nodes and edges. Zero assertions were
+  retracted when this landed, so no existing number moved.
+- **`truncated` was computed and dropped.** `project()` sets it; `metrics()`
+  returned `p.describe()`, which has no such key. A metric over a cut-off
+  node set was indistinguishable from a complete one. It is now surfaced,
+  and key player **refuses outright** on a truncated projection rather than
+  naming people for removal from a graph that is not the case.
+- **A fail-open default in my own migration**, caught by an adversarial
+  review before it shipped. `visibility_compartments text[] NOT NULL DEFAULT
+  '{}'` would have made a forgotten write match exactly what an analyst
+  holding no compartments looks up with. Both visibility columns are now NOT
+  NULL with no default, so a forgotten write is a loud failure.
+
+### Gotchas specific to this layer
+
+- **`igraph` has no `estimate_betweenness` in 1.0.** Pivot sampling goes
+  through `betweenness(sources=...)` scaled by `n/k`.
+- **`eigenvector_centrality` accepts negative weights and returns nonsense**
+  with only a warning. It is computed over positive ties, and flagged when
+  the positive graph is disconnected, because the values are then comparable
+  only within a component.
+- **`constraint()` returns NaN for isolates.** NaN is not valid JSON and 0.0
+  is a lie — it would rank an isolate as the best broker in the case. Both
+  the API and the UI carry `null` through as an em dash.
+- **`demo-case` cannot test any of this.** It is a 7-node star: no triangles,
+  so balance, clustering and Leiden are all degenerate, and betweenness is
+  trivially maximal at the centre. Use `bootstrap.py demo-network`.
+- **igraph and leidenalg ship abi3 wheels**, so they install on this box's
+  CPython 3.13 with no build toolchain, despite the docs assuming 3.12.
+
+## What to do next
+
+The enhancement map's **E-items are now the clear top of the list**, and E3
+in particular has become cheap: retraction genuinely dissolves elements from
+the graph as of this phase, so "retract a source and watch the network
+fall apart" is one endpoint away from being the demo that sells the
+assertion model.
+
+1. **E1 — evidence at the point of claim.** Still the largest gap between
+   the product as built and as pitched: the first real session produced
+   fourteen assertions and zero exhibits.
+2. **E3 — retraction in the UI.** `retract_assertion` exists in the service,
+   is exercised by two Phase 3 tests, and is exposed nowhere.
+3. **E4 — recovery codes.** A correctness gap against docs/05.
+4. **U3 — `valid_from` / `valid_to` in the entity and relationship forms.**
+   The scrubber and trust decay both work and both currently have almost
+   nothing to chew on; `demo-network` sets these, the UI does not.
+5. **U1 — sigma.js and ForceAtlas2.** The hand-rolled canvas will not hold
+   at thousands of nodes, and Phase 3 makes larger graphs worth loading.
+
+Then Phase 4 (collection) per docs/09 — but note its own warning: do not
+switch on a firehose until the graph and assertion layer have been used in
+anger on a real case for a week.

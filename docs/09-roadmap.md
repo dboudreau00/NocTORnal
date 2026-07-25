@@ -59,19 +59,47 @@ broker visually.
 
 ---
 
-## Phase 3 — Analytics (week 6)
+## Phase 3 — Analytics (week 6) — SHIPPED 2026-07-25
 
-- [ ] Analytics worker, igraph projection materialisation
-- [ ] Global centralities, batched, cached on graph hash
-- [ ] Leiden communities
-- [ ] Burt's constraint and effective size
-- [ ] Cut vertices and bridges
-- [ ] Key player (KPP-Neg) with fragmentation preview
-- [ ] Signed-network balance and unbalanced triad surfacing
-- [ ] Metric panel with rank, percentile and approximation flags
+- [x] igraph projection materialisation — `analytics.py`, pure and
+      database-free, fed by `GraphService.project()`. Run **synchronously in
+      the API**, not in a separate worker: see decision 30 for the reasoning
+      and the accepted caveat.
+- [x] Global centralities, cached on graph hash — betweenness (exact under
+      3k nodes, Brandes pivot sampling above), harmonic closeness,
+      eigenvector over the positive subgraph. Cache is scoped to the
+      caller's visibility (decision 31).
+- [x] Leiden communities
+- [x] Burt's constraint, effective size, efficiency and hierarchy
+- [x] Cut vertices and bridges
+- [x] Key player (KPP-Neg) with fragmentation preview, reported against the
+      top-n by betweenness so the difference is visible rather than claimed
+- [x] Signed-network balance and unbalanced triad surfacing, plus contested
+      dyads (a pair carrying both a vouch and an accusation)
+- [x] Metric panel with rank, percentile and approximation flags
+- [x] Trust decay at projection time (docs/03), never mutating stored weight
+- [x] Per-node metric history, so a rising betweenness trend is visible
 
 **Done when:** the tool answers "who holds this network together" with
-something better than degree count.
+something better than degree count. — **Met.** On `OP-LATTICEWORK-26`
+(`bootstrap.py demo-network`), the optimal 3-actor removal set fragments the
+network to F=0.727 in three equal crews, where the top 3 by betweenness
+reach only F=0.409 — a different, better answer, which is exactly the claim
+in docs/03.
+
+Deliberately NOT built, and why:
+
+- **A separate analytics worker process.** Decision 30.
+- **Bipartite projection to one-mode with Newman weighting.** The Financial
+  and Communication presets are two-mode; the response warns rather than
+  silently rewriting them (decision 33).
+- **Cohesive blocking, CONCOR, regular equivalence, correspondence
+  analysis.** docs/03 lists them; none is needed to answer the phase's
+  question, and each is a large piece of work.
+- **Change-point detection and metric time series in the UI.** The history
+  endpoint exists and is tested; nothing charts it yet.
+- **Per-case trust-decay default.** The half-life is a request parameter
+  stored on the projection; `core."case"` has no column for a default.
 
 ---
 
