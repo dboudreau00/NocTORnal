@@ -130,9 +130,19 @@ class GraphService:
         nodes = self._c.execute(
             """SELECT id, node_type, label, classification, attrs,
                       valid_from, valid_to, first_seen, last_seen
-                 FROM core.node
+                 FROM core.node n
                 WHERE case_id = %s AND deleted_at IS NULL AND merged_into_id IS NULL
                   AND classification <= %s::core.tlp AND compartments <@ %s
+                  -- LIVE provenance. Decision 24 makes this the PROJECTION's
+                  -- job on purpose: the database guarantees >=1 assertion row
+                  -- per element at all times, but retraction must let an
+                  -- element lose all live support and DISSOLVE from the live
+                  -- graph while its row and history survive for temporal
+                  -- replay. Without this leg retraction is cosmetic -- the
+                  -- assertion shows RETRACTED while the node keeps its full
+                  -- degree, and every metric counts withdrawn evidence.
+                  AND EXISTS (SELECT 1 FROM core.assertion a
+                               WHERE a.node_id = n.id AND a.retracted_at IS NULL)
                   -- as-of is WORLD time: the thing existed then.
                   AND (%s::timestamptz IS NULL
                        OR (valid_from IS NULL OR valid_from <= %s)
@@ -164,6 +174,12 @@ class GraphService:
                       AND e.src_node_id = ANY(%s) AND e.dst_node_id = ANY(%s)
                       AND e.classification <= %s::core.tlp AND e.compartments <@ %s
                       AND (%s OR NOT e.is_inferred)
+                      -- LIVE provenance, as for nodes above (decision 24).
+                      -- Retracting the only assertion behind a tie must
+                      -- dissolve the tie from the live graph.
+                      AND EXISTS (SELECT 1 FROM core.assertion a
+                                   WHERE a.edge_id = e.id
+                                     AND a.retracted_at IS NULL)
                       -- NULL types means "the preset is everything social".
                       AND (%s::text[] IS NULL AND et.is_social_tie
                            OR e.edge_type = ANY(%s))
@@ -257,6 +273,10 @@ class GraphService:
         sub = self.project(p, limit=5000)
         ids = [n["id"] for n in sub.nodes]
         labels = {n["id"]: n["label"] for n in sub.nodes}
+        # A metric over a node set that was CUT OFF is not a metric over the
+        # case, and until now the flag was computed and then dropped on the
+        # floor. Degree degrades gracefully under truncation; betweenness and
+        # community structure do not.
         neighbours: dict[UUID, set[UUID]] = {i: set() for i in ids}
         weighted: dict[UUID, float] = dict.fromkeys(ids, 0.0)
         pos: dict[UUID, int] = dict.fromkeys(ids, 0)
@@ -298,6 +318,7 @@ class GraphService:
         dyads = sum(len(v) for v in neighbours.values()) // 2
         return {
             "projection": sub.projection,
+            "truncated": sub.truncated,
             "node_count": n,
             "edge_count": len(sub.edges),
             "dyad_count": dyads,

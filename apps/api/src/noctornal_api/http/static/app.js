@@ -116,6 +116,12 @@ const state = {
   nodeProposed: new Map(),   // node id -> count of PROPOSED-review ties
   graphSeq: 0,
 
+  /* analysis (Phase 3): global structural metrics, computed on demand
+     because they are a batch operation, not a live one. Held per case AND
+     per projection -- changing either invalidates them. */
+  analytics: null,
+  analyticsKpp: null,
+
   /* metrics */
   metrics: null,
   metricById: new Map(),
@@ -468,6 +474,10 @@ async function openCase(caseId) {
   state.gedges = [];
   state.projMeta = null;
   state.view = { scale: 1, tx: NaN, ty: NaN };
+  /* Analysis is per-case and per-projection; carrying another case's
+     numbers into this one would be worse than showing none. */
+  state.analytics = null;
+  state.analyticsKpp = null;
   applyMetrics(null);
   try {
     const [rec, ontology] = await Promise.all([
@@ -709,22 +719,40 @@ function computeRanks(list) {
   return { ranks: ranks, total: list.length };
 }
 
+/** The analysis panel restates the projection it was computed under, so
+ *  leaving its numbers on screen after the projection moves would caption
+ *  one graph's metrics with another graph's parameters. Blank them and say
+ *  why (docs/03: the projection parameters travel with the result). */
+function invalidateAnalytics() {
+  if (!state.analytics) return;
+  state.analytics = null;
+  state.analyticsKpp = null;
+  show($('an-results'), false);
+  show($('an-empty'), true);
+  $('an-empty').textContent =
+    'The projection changed. Run the analysis again to recompute against it.';
+  setMsg($('an-status'), '');
+}
+
 function setPreset(key) {
   if (!state.presetMap.has(key) || key === state.proj.preset) return;
   state.proj.preset = key;
   $('sel-preset').value = key;
+  invalidateAnalytics();
   refreshSociogram();
 }
 function setMinConfidence(value) {
   if (!CONF_RANK.hasOwnProperty(value) || value === state.proj.min_confidence) return;
   state.proj.min_confidence = value;
   $('sel-minconf').value = value;
+  invalidateAnalytics();
   refreshSociogram();
 }
 function setIncludeInferred(on) {
   if (on === state.proj.include_inferred) return;
   state.proj.include_inferred = on;
   $('chk-inferred').checked = on;
+  invalidateAnalytics();
   refreshSociogram();
 }
 function setSizeMetric(key) {
@@ -2878,6 +2906,20 @@ function wire() {
   $('btn-cases').addEventListener('click', showCaseList);
   $('case-form').addEventListener('submit', createCase);
   $('ent-filter').addEventListener('change', renderEntities);
+  $('an-run').addEventListener('click', runAnalysis);
+  /* Changing a parameter invalidates what is on screen. Blank it rather
+     than leave numbers that no longer match the controls above them. */
+  for (const id of ['an-decay', 'an-kpp-n']) {
+    $(id).addEventListener('change', () => {
+      state.analytics = null;
+      state.analyticsKpp = null;
+      show($('an-results'), false);
+      show($('an-empty'), true);
+      $('an-empty').textContent =
+        'Parameters changed. Run the analysis again.';
+      setMsg($('an-status'), '');
+    });
+  }
   $('ev-form').addEventListener('submit', uploadEvidence);
   $('search-form').addEventListener('submit', runSearch);
   $('node-form').addEventListener('submit', createNode);
@@ -2926,6 +2968,319 @@ function adoptTokenFromFragment() {
   history.replaceState(null, '', window.location.pathname);
   state.token = token;
   sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+/* =====================================================================
+ * ANALYSIS PANEL (Phase 3)
+ *
+ * Global structural metrics: brokerage, structural holes, communities,
+ * cut vertices, signed balance and the key-player set.
+ *
+ * Two rules from docs/03 shape everything below. The projection
+ * parameters are restated on the panel, because the same actor has
+ * different centrality under a different filter and a number without its
+ * projection is not reproducible. And every caveat the API returns is
+ * rendered rather than dropped: an approximation flag, a truncated node
+ * set, a two-mode graph or a disconnected eigenvector basis all change
+ * what a number is allowed to mean, and an analyst deciding who to arrest
+ * is entitled to know.
+ * ===================================================================== */
+
+/** num() coerces null to 0, which for a structural metric is a lie: an
+ *  isolate has no effective size, and printing 0.00 ranks it as the worst
+ *  broker in the case rather than as undefined. The API returns null for
+ *  exactly these cases, so preserve the distinction. */
+function metricNum(v, dp) {
+  return (v === null || v === undefined) ? '—' : num(v, dp);
+}
+
+function anQuery() {
+  const q = projQuery();
+  const decay = $('an-decay').value;
+  if (decay) q.set('decay_half_life_months', decay);
+  return q;
+}
+
+async function runAnalysis() {
+  if (!state.caseId) return;
+  const btn = $('an-run');
+  btn.disabled = true;
+  setMsg($('an-status'), 'computing...');
+  try {
+    const q = anQuery();
+    const kq = new URLSearchParams(q);
+    kq.set('n', $('an-kpp-n').value);
+    /* The suite and the key player are separate runs: the suite is one
+       pass over one materialised graph, while key player is combinatorial
+       and is cached against its own removal-set size. A failure of the
+       expensive one must not blank the cheap one. */
+    const suite = await api(cpath('/analytics?' + q.toString()));
+    state.analytics = suite;
+    let kpp = null;
+    try {
+      kpp = await api(cpath('/analytics/key-player?' + kq.toString()));
+    } catch (err) {
+      kpp = { error: err instanceof ApiError ? err.detail || err.title
+                                             : 'the request failed' };
+    }
+    state.analyticsKpp = kpp;
+    renderAnalytics();
+    /* computed_at_ms is how long the ORIGINAL run took, so on a cache hit
+       it describes that run, not this response. Saying "served from cache
+       in 24 ms" would claim the cache took 24 ms. */
+    setMsg($('an-status'), suite.cached
+      ? 'unchanged since the last run, served from cache (computed in '
+        + (suite.computed_at_ms || 0) + ' ms)'
+      : 'computed in ' + (suite.computed_at_ms || 0) + ' ms');
+  } catch (err) {
+    show($('an-results'), false);
+    show($('an-empty'), true);
+    $('an-empty').textContent = err instanceof ApiError
+      ? (err.detail || err.title)
+      : 'The analysis request failed.';
+    setMsg($('an-status'), '');
+    if (!(err instanceof ApiError) || err.status !== 422) fail(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderAnalytics() {
+  const a = state.analytics;
+  if (!a) return;
+  show($('an-empty'), false);
+  show($('an-results'), true);
+
+  const p = a.projection || {};
+  $('an-projection').textContent =
+    'Projection: ' + (p.label || p.preset) + ' | confidence >= ' +
+    p.min_confidence + ' | inferred ' + (p.include_inferred ? 'in' : 'out') +
+    (p.as_of ? ' | as of ' + p.as_of : '') +
+    ' | ' + a.node_count + ' actors, ' + a.dyad_count + ' dyads' +
+    ' | decay: ' + (a.decay ? a.decay.note : 'off');
+
+  renderAnalyticsFlags(a);
+  renderAnalyticsLeads(a);
+  renderAnalyticsTable(a);
+  renderKeyPlayer();
+  renderCohesion(a);
+  renderBalance(a);
+}
+
+/** Every caveat the API returned, rendered as a visible warning. Dropping
+ *  one would let a number read as more certain than it is. */
+function renderAnalyticsFlags(a) {
+  const box = $('an-flags');
+  clear(box);
+  const flags = [];
+  if (a.truncated) flags.push(['warn', a.truncation_note]);
+  if (a.is_approximate) flags.push(['warn', a.approximation_note]);
+  if (a.mode_warning) flags.push(['warn', a.mode_warning]);
+  if (a.eigenvector_meaningful === false) flags.push(['note', a.eigenvector_note]);
+  if (a.decay && a.decay.half_life_months && a.decay.undated_edges) {
+    flags.push(['note', 'Trust decay: ' + a.decay.note]);
+  }
+  for (const [kind, text] of flags) {
+    const row = el('p', 'an-flag an-flag-' + kind, text);
+    box.appendChild(row);
+  }
+}
+
+/** docs/03 wants the interface to TEACH the broker pattern rather than
+ *  print a number: "high betweenness with low degree is the classic broker
+ *  signature ... that person is usually far more consequential than the
+ *  loudest poster." */
+function renderAnalyticsLeads(a) {
+  const box = $('an-leads');
+  clear(box);
+  const brokers = (a.nodes || []).filter((n) => n.broker_signature);
+  if (!brokers.length) return;
+  const card = el('div', 'card an-leads-card');
+  card.appendChild(el('h4', 'h4', 'Brokers worth a look'));
+  for (const n of brokers.slice(0, 5)) {
+    const item = el('div', 'an-lead');
+    const head = el('p', 'an-lead-head');
+    head.appendChild(el('strong', null, n.label));
+    head.appendChild(document.createTextNode(
+      ' — degree ' + n.degree + ', brokerage ' +
+      ordinal(n.betweenness_rank) + ' of ' + a.node_count +
+      ', constraint ' + ordinal(n.constraint_rank) + ' lowest'));
+    item.appendChild(head);
+    item.appendChild(el('p', 'muted small', n.broker_signature));
+    card.appendChild(item);
+  }
+  box.appendChild(card);
+}
+
+function renderAnalyticsTable(a) {
+  const body = $('an-body');
+  clear(body);
+  for (const n of a.nodes || []) {
+    const tr = el('tr');
+    const name = el('td', hueClass(n.node_type));
+    name.appendChild(el('i', 'swatch'));
+    name.appendChild(document.createTextNode(n.label));
+    if (n.is_cut_vertex) {
+      name.appendChild(document.createTextNode(' '));
+      const chip = el('span', 'chip small', 'cut');
+      chip.title = 'Articulation point: removing this actor disconnects the '
+                 + 'network. A single point of failure in the structure.';
+      name.appendChild(chip);
+    }
+    tr.appendChild(name);
+    tr.appendChild(el('td', null, String(n.degree)));
+    /* docs/03: vouches RECEIVED (accumulated reputation) and vouches GIVEN
+       (reputation staked) mean opposite things, so they never collapse into
+       one number. Accusations are shown alongside only when there are any. */
+    const vouch = el('td', null,
+      n.positive_in_degree + ' / ' + n.positive_out_degree);
+    if (n.negative_in_degree || n.negative_out_degree) {
+      const bad = el('span', 'muted small',
+        '  accused ' + n.negative_in_degree + ' / accuser ' +
+        n.negative_out_degree);
+      vouch.appendChild(bad);
+    }
+    tr.appendChild(vouch);
+    tr.appendChild(rankCell(n.betweenness, n.betweenness_rank,
+                            n.betweenness_percentile, a.node_count));
+    tr.appendChild(rankCell(n.constraint, n.constraint_rank,
+                            n.constraint_percentile, a.node_count));
+    tr.appendChild(el('td', null, metricNum(n.effective_size, 2)));
+    tr.appendChild(el('td', null,
+      n.community === null || n.community === undefined
+        ? '—' : String(n.community)));
+    tr.addEventListener('click', () => {
+      selectTab('graph');
+      selectNode(n.id);
+    });
+    body.appendChild(tr);
+  }
+}
+
+/** Raw value with its rank and percentile, because "3rd of 214" is the
+ *  part an analyst can actually act on (docs/03). */
+function rankCell(value, rank, percentile, total) {
+  const td = el('td');
+  if (value === null || value === undefined) {
+    td.appendChild(el('span', 'muted', '—'));
+    td.title = 'Undefined for this actor (an isolate has no structural '
+             + 'position to measure).';
+    return td;
+  }
+  td.appendChild(document.createTextNode(metricNum(value, 3)));
+  const meta = el('span', 'muted small',
+    '  ' + ordinal(rank) + ' of ' + total +
+    (percentile === null || percentile === undefined
+      ? '' : ' · p' + num(percentile, 0)));
+  td.appendChild(meta);
+  return td;
+}
+
+function renderKeyPlayer() {
+  const box = $('an-kpp');
+  clear(box);
+  const k = state.analyticsKpp;
+  if (!k) return;
+  if (k.error) {
+    box.appendChild(el('p', 'muted small', k.error));
+    return;
+  }
+  const r = k.key_player;
+  const card = el('div', 'card');
+  card.appendChild(el('p', null,
+    'Removing these ' + r.n_remove + ' actors fragments the network from F=' +
+    num(r.fragmentation_before, 3) + ' to F=' + num(r.fragmentation_after, 3) +
+    ', leaving components of ' + r.fragments_after.join(', ') + '.'));
+  const set = el('p');
+  set.appendChild(el('strong', null, 'Removal set: '));
+  set.appendChild(document.createTextNode(
+    r.removal_set.map((x) => x.label).join(', ')));
+  card.appendChild(set);
+
+  /* The whole point of KPP-Neg, per docs/03: the optimal set is usually
+     NOT the top-n most central actors, because two brokers often span the
+     same gap and removing both is redundant. Showing the comparison is
+     what makes that surprise legible instead of asking for trust. */
+  const cmp = el('p', 'muted small');
+  cmp.textContent = 'Top ' + r.n_remove + ' by betweenness (' +
+    r.top_betweenness_set.map((x) => x.label).join(', ') + ') would reach only F=' +
+    num(r.top_betweenness_fragmentation, 3) + '. ' +
+    (r.beats_top_betweenness
+      ? 'The optimised set is a genuinely different and better answer: '
+        + 'removing the most central actors individually is not the same as '
+        + 'removing the set that breaks the network.'
+      : 'On this graph the two coincide.');
+  card.appendChild(cmp);
+  card.appendChild(el('p', 'muted small', 'Method: ' + r.method + '.'));
+  box.appendChild(card);
+}
+
+function renderCohesion(a) {
+  const box = $('an-cohesion');
+  clear(box);
+  const c = a.cohesion || {};
+  const card = el('div', 'card');
+  card.appendChild(el('p', null,
+    c.community_count + ' communities (Leiden, modularity ' +
+    metricNum(c.modularity, 3) + ') across ' + c.components +
+    ' connected component(s) of size ' + (c.component_sizes || []).join(', ') + '.'));
+  if ((c.cut_vertices || []).length) {
+    card.appendChild(el('p', null, 'Cut vertices: ' +
+      c.cut_vertices.map((v) => v.label).join(', ')));
+    card.appendChild(el('p', 'muted small',
+      'Removing any one of these disconnects the network. They are single '
+      + 'points of failure in the structure, and the cheap exact companion '
+      + 'to the key-player search.'));
+  }
+  if ((c.bridges || []).length) {
+    card.appendChild(el('p', null, 'Bridges: ' + c.bridges.map(
+      (b) => b.source_label + ' — ' + b.target_label).join(', ')));
+  }
+  box.appendChild(card);
+}
+
+function renderBalance(a) {
+  const box = $('an-balance');
+  clear(box);
+  const b = a.balance || {};
+  const card = el('div', 'card');
+  if (b.unavailable) {
+    card.appendChild(el('p', 'muted small', b.unavailable));
+    box.appendChild(card);
+    return;
+  }
+  if (!b.signed_triads) {
+    card.appendChild(el('p', 'muted small',
+      'No triad in this projection has a signed tie on all three sides, so '
+      + 'there is nothing to balance. ' + (b.skipped_unsigned_triads
+        ? b.skipped_unsigned_triads + ' triad(s) were skipped because at '
+          + 'least one tie carries no valence.'
+        : 'That is thin data, not a balanced network.')));
+  } else {
+    card.appendChild(el('p', null,
+      b.balanced + ' of ' + b.signed_triads + ' signed triads are balanced ('
+      + num((b.balance_ratio || 0) * 100, 0) + '%).'));
+    for (const t of (b.unbalanced_triads || []).slice(0, 10)) {
+      const item = el('div', 'an-lead');
+      item.appendChild(el('p', 'an-lead-head',
+        t.nodes.map((n) => n.label).join(' · ')));
+      item.appendChild(el('p', 'muted small', t.reading));
+      card.appendChild(item);
+    }
+    if (b.unbalanced_truncated) {
+      card.appendChild(el('p', 'muted small',
+        'More unbalanced triads exist than are listed here.'));
+    }
+  }
+  if ((b.contested_dyads || []).length) {
+    card.appendChild(el('p', null, 'Contested pairs: ' + b.contested_dyads.map(
+      (d) => d.source_label + ' — ' + d.target_label).join(', ')));
+    card.appendChild(el('p', 'muted small',
+      'These pairs carry BOTH a positive and a negative tie. That combination '
+      + 'is a lead in its own right: a vouch and an accusation between the '
+      + 'same two actors usually means a relationship that changed.'));
+  }
+  box.appendChild(card);
 }
 
 async function boot() {

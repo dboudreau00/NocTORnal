@@ -125,7 +125,7 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 
 # uvicorn and the two editable packages are what the last step actually needs.
-$probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology')
+$probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg')
 if ($probe.Code -ne 0) {
     Write-Indented $probe.Text
     Stop-With 'the virtual environment is missing packages the API needs' @(
