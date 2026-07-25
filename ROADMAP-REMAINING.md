@@ -3,9 +3,16 @@
 Regenerated 2026-07-25, end of session. `docs/09-roadmap.md` is the plan;
 this is the honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0036`, **953 tests passing**, ruff clean,
-source hygiene clean, migrations round-trip. Nothing pushed (no remote
-configured).
+**State:** `main`, Alembic head `0037`, **988 tests passing**, ruff clean,
+source hygiene clean, migrations round-trip base→head→base→head on a clean
+database. Nothing pushed (no remote configured).
+
+> **Phase 7 has had its adversarial pass** (three lenses: access control,
+> false attribution, cryptographic evidence), and every finding was put
+> through a refutation round before being acted on. It produced **three
+> CRITICAL/HIGH defects that a fully green 953-test suite did not see** —
+> a forged PGP verdict, a 499× overstated tie weight, and a label defence
+> that was absent on Russian-language forums. See decisions 59–60.
 
 > **The most important file in the repo is now
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).** Every
@@ -56,13 +63,30 @@ attribution.
 
 ## Prioritised engineering work
 
-### 1. A second adversarial review pass
+### 1. An adversarial review pass over Phases 4 and 9
 
-Phases 4, 7 and 9 have had none. The first pass in this project found a
-**critical** defect under 484 green tests — the blanket rate limit was keyed
-on a value the caller controls, so rotating a token escaped it entirely, and
-sending a garbage token was *cheaper* than sending none. That pattern has
-held on every review in this project's history.
+**Phase 7's is done** (2026-07-25) and the pattern held again, harder than
+before. Three reviewers with distinct lenses, every finding then put
+through an independent refutation round, produced:
+
+- a **forged PGP verdict** — a crafted OpenPGP user ID smuggled a
+  `[GNUPG:] VALIDSIG <victim>` line into the status stream through
+  characters `str.splitlines()` treats as line breaks and gpg does not
+  escape, minting a CONFIRMED binding for a key the attacker never held;
+- **Newman weighting divided by the filtered participant count**, so two
+  people in a 500-member channel scored exactly as high as a private DM;
+- a **label defence that was structurally ASCII-only**, so `Гарант:` —
+  the standard guarantor label on the Russian forums that are this
+  domain's primary venue — was attributed to the vendor while the
+  transliterated `Garant:` was caught.
+
+All three sat under a fully green 953-test suite. The first was invisible
+on the Windows dev host and live on the Linux deployment target.
+
+Phases 4 and 9 have still had none. The cheapest lens, and the one worth
+running first: **diff two implementations of the same rule against each
+other.** It found the normaliser divergence in seconds, where every unit
+test passed on both sides because each was internally consistent.
 
 ### 2. UI for the new phases
 
@@ -165,3 +189,21 @@ and ingest do not.
   fixtures. The failures look real and are not.
 - **A hidden browser tab clamps `setTimeout` to ~1s** and suspends
   `ResizeObserver`.
+- **A unique index over NULLABLE columns needs `coalesce`.** Two NULLs
+  never conflict, so the duplicate the index exists to prevent is
+  inserted twice and the list looks like protection while providing it
+  twice over.
+- **`alembic downgrade base` succeeds on a CLEAN database and stalls
+  around 0017 on the dev one**, which has accumulated test data. CI runs
+  the round-trip before the tests on an empty database, so it passes
+  there — but running it against your working database will leave it
+  half-migrated and every test failing until you `upgrade head` again.
+  To check the chain, use a scratch database and install the extensions
+  first: `vector`, `pg_trgm`, `pgcrypto`, `btree_gist`, `citext`,
+  `uuid-ossp`. Without them the chain dies at 0004 with "type vector does
+  not exist", which reads as a migration bug and is not one.
+- **A locale can hide a security defect.** The PGP status-injection flaw
+  was live under UTF-8 and inert under this host's cp1252, so the dev
+  machine and CI would have disagreed about whether the system was
+  exploitable. Where a defence depends on how bytes decode, assert on the
+  BYTES.
