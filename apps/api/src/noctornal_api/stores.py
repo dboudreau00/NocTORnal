@@ -71,6 +71,53 @@ class PgUserStore(UserStore):
             failed_logins=row[5], locked_until=row[6],
         )
 
+    # --- recovery codes (docs/05) ---------------------------------------
+    def issue_recovery_codes(self, user_id: UUID, count: int | None = None) -> list[str]:
+        """Generate a fresh SET, replacing any existing one, and return the
+        plaintexts. They are never recoverable again — only Argon2id hashes
+        are stored, so there is no "show me my codes" path to abuse.
+
+        Replacing rather than topping up is deliberate: an analyst told they
+        have ten fresh codes must not still be carrying a valid one they
+        printed last year.
+        """
+        from noctornal_api.security import recovery
+        codes = recovery.generate_set(count or recovery.CODE_COUNT)
+        hashes = [passwords.hash_recovery_code(c) for c in codes]
+        self._c.execute(
+            "UPDATE iam.app_user SET recovery_codes_hash = %s WHERE id = %s",
+            (hashes, user_id),
+        )
+        return codes
+
+    def get_recovery_hashes(self, user_id: UUID) -> list[str]:
+        row = self._c.execute(
+            "SELECT recovery_codes_hash FROM iam.app_user WHERE id = %s",
+            (user_id,),
+        ).fetchone()
+        return list(row[0]) if row and row[0] else []
+
+    def consume_recovery_hash(self, user_id: UUID, code_hash: str) -> bool:
+        """Spend one code, atomically. The guard is `@>` (the array still
+        contains this hash), so two concurrent logins presenting the same
+        code cannot both succeed — the loser updates 0 rows.
+
+        `array_remove` drops every copy, but a duplicate hash would mean two
+        identical codes, which generation makes vanishingly unlikely and
+        which would be a bug worth failing closed on anyway.
+        """
+        cur = self._c.execute(
+            """UPDATE iam.app_user
+                  SET recovery_codes_hash = array_remove(recovery_codes_hash, %s)
+                WHERE id = %s AND recovery_codes_hash @> ARRAY[%s]
+              RETURNING id""",
+            (code_hash, user_id, code_hash),
+        )
+        return cur.fetchone() is not None
+
+    def count_recovery_codes(self, user_id: UUID) -> int:
+        return len(self.get_recovery_hashes(user_id))
+
     def get_totp_secret(self, user_id: UUID) -> str | None:
         row = self._c.execute(
             "SELECT totp_secret_ciphertext, totp_key_id FROM iam.app_user WHERE id = %s",

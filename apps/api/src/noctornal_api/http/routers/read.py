@@ -75,6 +75,9 @@ class AssertionOut(BaseModel):
     recorded_at: datetime
     retracted_at: datetime | None
     superseded_at: datetime | None
+    # Why a source was withdrawn is part of the audit story, so it travels
+    # with the assertion rather than living only in audit.event.
+    retraction_reason: str | None = None
     created_by: str
 
     @property
@@ -366,7 +369,7 @@ def _assertions(conn, column: str, element_id: UUID,
     assert column in ("node_id", "edge_id")
     sql = f"""SELECT id, basis, reliability, credibility, confidence, rationale,
                      external_ref, evidence_id, observed_at, recorded_at,
-                     retracted_at, superseded_at, created_by
+                     retracted_at, superseded_at, created_by, retraction_reason
                 FROM core.assertion WHERE {column} = %s"""
     if not include_retracted:
         sql += " AND retracted_at IS NULL AND superseded_at IS NULL"
@@ -378,7 +381,7 @@ def _assertions(conn, column: str, element_id: UUID,
             confidence=r[4], rationale=r[5], external_ref=r[6],
             evidence_id=str(r[7]) if r[7] else None, observed_at=r[8],
             recorded_at=r[9], retracted_at=r[10], superseded_at=r[11],
-            created_by=str(r[12]),
+            created_by=str(r[12]), retraction_reason=r[13],
         )
         for r in rows
     ]

@@ -548,6 +548,20 @@ select.select { appearance: none; padding-right: 24px; }
 /* ── responsive / zoom tolerance ───────────────────────────────────── */
 /* Dense information design still has to be operable at 200% zoom: the
    inspector narrows, then drops under the canvas, before anything clips. */
+/* -- evidence coverage + retraction (E2, E3) -------------------------- */
+/* Zero coverage is not a neutral fact in a system whose thesis is chain of
+   custody, so it does not read like one. */
+.coverage-none { color: var(--danger); }
+.coverage-low { color: var(--alert); }
+
+.assert-actions { margin-top: 8px; }
+.assert-retraction {
+  margin-top: 6px; font-size: 11px; line-height: 1.5;
+  color: var(--danger); font-style: italic;
+}
+.btn.small.danger { color: var(--danger); border-color: var(--hairline); }
+.btn.small.danger:hover { border-color: var(--danger); }
+
 /* -- analysis panel (Phase 3) ---------------------------------------- */
 #pane-analytics { overflow-y: auto; padding-bottom: 24px; }
 #pane-analytics .h3 {

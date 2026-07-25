@@ -221,6 +221,14 @@
                 <input id="chk-inferred" type="checkbox" checked>
                 <span>Include inferred</span>
               </label>
+              <!-- E2: a case is defensible in proportion to how much of it
+                   is evidenced, so make the gaps visible on the canvas
+                   rather than one inspector panel at a time. -->
+              <label class="check" title="Hollow out entities and fade ties
+                                          that rest on no exhibit">
+                <input id="chk-provenance" type="checkbox" checked>
+                <span>Mark unevidenced</span>
+              </label>
             </div>
 
             <div class="proj-grp">
@@ -230,6 +238,11 @@
                         aria-describedby="metric-note"></select>
               </label>
               <span id="metric-note" class="help" role="status"></span>
+              <span id="evidence-coverage" class="muted small" role="status"></span>
+              <!-- U1: the layout runs off the main thread, so its progress
+                   has to be visible somewhere or a big graph just looks
+                   like it is doing nothing. -->
+              <span id="layout-status" class="muted small" role="status"></span>
             </div>
 
             <div class="proj-grp push">
@@ -537,6 +550,48 @@
                 <span id="node-rat-help" class="help">An inference must state its
                   reasoning. The server rejects one that does not.</span>
               </div>
+              <!-- E1: the exhibit belongs HERE, at the moment the claim is
+                   made. Making an analyst navigate elsewhere to attach one is
+                   how a case ends up with fourteen assertions and no
+                   evidence. -->
+              <div class="field">
+                <label class="label" for="node-evidence">Supporting exhibit</label>
+                <select id="node-evidence" class="select"></select>
+                <span class="help">Optional, but a claim with an exhibit behind it
+                  is defensible and one without it is an opinion. Upload on the
+                  Evidence tab first to see it listed here.</span>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Observed at</span>
+                  <input id="node-observed" type="datetime-local">
+                </label>
+                <label class="field">
+                  <span class="label">Source reference</span>
+                  <input id="node-ref" spellcheck="false"
+                         placeholder="forum/thread/8841">
+                </label>
+              </div>
+            </fieldset>
+
+            <!-- U3: the interval this was true in WORLD time. "Was in
+                 LockBit until March" is the normal case, and without it the
+                 timeline scrubber and trust decay have nothing to replay. -->
+            <fieldset class="assertion">
+              <legend>Valid interval (world time)</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">From</span>
+                  <input id="node-valid-from" type="date">
+                </label>
+                <label class="field">
+                  <span class="label">Until</span>
+                  <input id="node-valid-to" type="date">
+                </label>
+              </div>
+              <span class="help">Leave blank if the claim has no known start or is
+                still current. This drives the timeline scrubber and the
+                trust-decay half-life; it is not when you recorded it.</span>
             </fieldset>
 
             <p id="node-error" class="form-error" role="alert" hidden></p>
@@ -604,6 +659,48 @@
                 <span id="edge-rat-help" class="help">An inference must state its
                   reasoning. The server rejects one that does not.</span>
               </div>
+              <!-- E1: the exhibit belongs HERE, at the moment the claim is
+                   made. Making an analyst navigate elsewhere to attach one is
+                   how a case ends up with fourteen assertions and no
+                   evidence. -->
+              <div class="field">
+                <label class="label" for="edge-evidence">Supporting exhibit</label>
+                <select id="edge-evidence" class="select"></select>
+                <span class="help">Optional, but a relationship with an exhibit behind it
+                  is defensible and one without it is an opinion. Upload on the
+                  Evidence tab first to see it listed here.</span>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Observed at</span>
+                  <input id="edge-observed" type="datetime-local">
+                </label>
+                <label class="field">
+                  <span class="label">Source reference</span>
+                  <input id="edge-ref" spellcheck="false"
+                         placeholder="forum/thread/8841">
+                </label>
+              </div>
+            </fieldset>
+
+            <!-- U3: the interval this was true in WORLD time. "Was in
+                 LockBit until March" is the normal case, and without it the
+                 timeline scrubber and trust decay have nothing to replay. -->
+            <fieldset class="assertion">
+              <legend>Valid interval (world time)</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">From</span>
+                  <input id="edge-valid-from" type="date">
+                </label>
+                <label class="field">
+                  <span class="label">Until</span>
+                  <input id="edge-valid-to" type="date">
+                </label>
+              </div>
+              <span class="help">Leave blank if the relationship has no known start or is
+                still current. This drives the timeline scrubber and the
+                trust-decay half-life; it is not when you recorded it.</span>
             </fieldset>
 
             <p id="edge-error" class="form-error" role="alert" hidden></p>
