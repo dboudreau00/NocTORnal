@@ -397,9 +397,22 @@ def _durable_for(platform_key: str | None, selector_type: str | None,
         return result.durable, result.note
     if selector_type and selector_type in _KNOWN_TYPES:
         try:
-            return _canonical(selector_type, value), ""
+            canonical = _canonical(selector_type, value)
         except Exception as exc:            # a normaliser rejecting its input
             return None, f"could not normalise as {selector_type}: {exc}"
+        # An EMPTY canonical form is not a value, and treating it as one
+        # is how unrelated observations collide. It also skipped the
+        # "no durable form" scoring penalty, because '' is not None -- so
+        # a bare `https://x.onion` (where `_LINE` reads "https" as the
+        # label, leaving `//x.onion`, which `onion_norm` reduces to '')
+        # scored 0.600 as a confidently resolved STRONG selector while
+        # being silently excluded from proposals, the block fingerprint
+        # and shared-service counting.
+        if not canonical or not canonical.strip():
+            return None, (
+                f"nothing durable survives normalisation as {selector_type}; "
+                f"the value as written is not usable for correlation")
+        return canonical, ""
     return None, ""
 
 
@@ -428,6 +441,14 @@ def parse(text: str) -> list[ParsedEntry]:
         match = _LINE.match(line)
         label = match.group("label").strip() if match else None
         value = (match.group("value") if match else line).strip()
+
+        # `https://x.onion` is not a line labelled "https". The colon in a
+        # URI scheme made `_LINE` split it that way, leaving `//x.onion`
+        # as the value -- which `onion_norm` reduces to the empty string,
+        # so the vendor's own shop address was lost precisely when they
+        # pasted it bare, which is the common case.
+        if match and value.startswith("//"):
+            label, value = None, line
 
         # Trailing prose in parentheses or after an arrow is a comment, not
         # part of the identifier: "vendor@host (OTR only)" must not

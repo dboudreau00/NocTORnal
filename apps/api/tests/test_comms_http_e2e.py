@@ -640,3 +640,66 @@ def test_the_global_retire_route_cannot_retire_a_case_entry(conn, client):
     assert conn.execute(
         "SELECT retired_at FROM comms.service_selector WHERE id = %s",
         (entry_id,)).fetchone()[0] is None
+
+
+# ---------------------------------------------------------------------------
+# CONFIRMED is earned, not declared
+# ---------------------------------------------------------------------------
+
+def test_confirmed_cannot_be_asserted_on_a_binding_directly(client, analyst):
+    """`POST /bindings` accepted `verification: "CONFIRMED"` from the
+    request body with only a free-text note required, which made every
+    defence in pgp.py optional -- an analyst who typed the word reached
+    the grade docs/10 says may carry weight in automatic identity
+    resolution without any signature existing.
+    """
+    token, case_id = analyst
+    r = client.post(f"/api/v1/cases/{case_id}/comms/bindings",
+                    headers=_auth(token),
+                    json={"platform_key": "TOX", "observed": TOX_ID,
+                          "verification": "CONFIRMED",
+                          "verification_note": "I am certain"})
+    assert r.status_code == 400
+    assert "/pgp/verify" in r.text
+    # CLAIMED and OBSERVED are still fine.
+    for grade in ("CLAIMED", "OBSERVED"):
+        assert client.post(
+            f"/api/v1/cases/{case_id}/comms/bindings", headers=_auth(token),
+            json={"platform_key": "XMPP", "observed": f"{grade}@shop.tld",
+                  "verification": grade}).status_code == 201
+
+
+def test_a_verification_citing_a_red_binding_is_not_listed_to_an_amber_reader(
+        conn, client):
+    """`comms.pgp_verification` carries no labels of its own, so a listing
+    filtered by case alone looked safe -- but it returns `confirms_value`,
+    which IS the identifier held by the binding it cites, and a binding
+    can be classified above its case.
+    """
+    _, owner_email, owner_secret = _make_user(
+        conn, clearance="RED", global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+
+    binding = client.post(
+        f"/api/v1/cases/{case_id}/comms/bindings", headers=_auth(owner),
+        json={"platform_key": "TOX",
+              "observed": TOX_PUBKEY + "11111111" + "2222",
+              "classification": "RED"}).json()["id"]
+    assert client.post(
+        f"/api/v1/cases/{case_id}/comms/pgp/verify", headers=_auth(owner),
+        json={"signed_message": SIGNED_WITH_TOX, "public_key": VENDOR_PUB,
+              "claimed_fingerprint": VENDOR_FPR,
+              "channel_binding_id": binding}).status_code == 201
+
+    reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
+    _assign(conn, case_id, reader_id)
+    reader = _login(client, reader_email, reader_secret)
+
+    r = client.get(f"/api/v1/cases/{case_id}/comms/pgp", headers=_auth(reader))
+    assert r.status_code == 200
+    assert r.json()["verifications"] == []
+    assert TOX_PUBKEY not in r.text
+    # The RED-cleared owner still sees it.
+    r = client.get(f"/api/v1/cases/{case_id}/comms/pgp", headers=_auth(owner))
+    assert len(r.json()["verifications"]) == 1

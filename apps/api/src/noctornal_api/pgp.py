@@ -695,15 +695,39 @@ class PgpService:
             "verified_at": verified_at.isoformat(),
         }
 
-    def verifications(self, case_id: UUID) -> list[dict]:
+    def verifications(self, case_id: UUID, *, clearance: str,
+                      compartments: frozenset[str] = frozenset()
+                      ) -> list[dict]:
+        """The verification ledger for a case.
+
+        `comms.pgp_verification` carries no labels of its own -- but it
+        carries `confirms_value`, which IS the identifier held by the
+        binding it cites, and a binding can be classified above its case.
+        So a listing filtered only by case handed an under-cleared reader
+        the durable value of a RED binding through a table that looked
+        label-free. The row is shown when its binding is visible, or when
+        it cites no binding at all (a case-level record).
+        """
         rows = self._c.execute(
-            """SELECT id, channel_binding_id, contact_block_id,
-                      claimed_fingerprint, signing_fingerprint, confirms_value,
-                      value_in_payload, outcome, verifier, verifier_version,
-                      note, verified_at
-                 FROM comms.pgp_verification
-                WHERE case_id = %s ORDER BY verified_at DESC""",
-            (case_id,)).fetchall()
+            """SELECT v.id, v.channel_binding_id, v.contact_block_id,
+                      v.claimed_fingerprint, v.signing_fingerprint,
+                      v.confirms_value, v.value_in_payload, v.outcome,
+                      v.verifier, v.verifier_version, v.note, v.verified_at
+                 FROM comms.pgp_verification v
+                WHERE v.case_id = %s
+                  AND (v.channel_binding_id IS NULL
+                       OR EXISTS (SELECT 1 FROM comms.channel_binding cb
+                                   WHERE cb.id = v.channel_binding_id
+                                     AND cb.classification <= %s::core.tlp
+                                     AND cb.compartments <@ %s))
+                  AND (v.contact_block_id IS NULL
+                       OR EXISTS (SELECT 1 FROM comms.contact_block b
+                                   WHERE b.id = v.contact_block_id
+                                     AND b.classification <= %s::core.tlp
+                                     AND b.compartments <@ %s))
+                ORDER BY v.verified_at DESC""",
+            (case_id, clearance, list(compartments),
+             clearance, list(compartments))).fetchall()
         return [{"id": str(r[0]),
                  "channel_binding_id": str(r[1]) if r[1] else None,
                  "contact_block_id": str(r[2]) if r[2] else None,

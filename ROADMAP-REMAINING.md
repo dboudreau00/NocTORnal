@@ -23,21 +23,53 @@ database. Nothing pushed (no remote configured).
 
 ## Scoreboard
 
-| Phase | Status | What is actually missing |
-|---|---|---|
-| 0 — Foundation | ✅ **Done** | Nothing. No typecheck, deliberately (decision 42). |
-| 1 — Graph core | ✅ **Done** | Nothing. |
-| 2 — Sociogram | ✅ **Done** | WebSocket push; the UI polls. |
-| 3 — Analytics | ✅ **Done** | CONCOR, charting metric history. Bipartite→one-mode landed for conversations (see Phase 7); actor×forum and actor×wallet still use the two-mode presets, and `_mode_warning` still says so. |
-| 4 — Collection | 🟢 **~70%** | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. |
-| 5 — Notification | 🟢 **~75%** | Jira, integration admin surface, escalation, a worker. |
-| 6 — Tradecraft | 🟢 **~85%** | WebAuthn, timeline replay, assumptions register. |
-| 7 — Comms | 🟢 **~90%** | UI. The contact-block parser, PGP verification, co-participation and the HTTP router all landed 2026-07-25. |
-| 8 — Samples | 🟢 **~70%** | Fuzzy hashing, YARA, screening, sandbox integration. |
-| 9 — Ingest | 🟢 **~80%** | The HTTP 202 endpoint wiring, outbound credential vault. |
+### How these numbers are calculated
 
-**Every phase has an implementation and a test suite.** None has a UI beyond
-Phases 1–3 and the notification centre.
+Earlier versions of this file scored a phase on whether its **service code
+and tests** existed, which is why several read 70–90% while an analyst
+could not reach the feature at all. A phase is only finished when somebody
+can *use* it and *trust* it, so completion is now weighted across four
+dimensions:
+
+| Dimension | Weight | Done means |
+|---|---|---|
+| **Model, service and tests** | 45% | Schema, service logic, migrations that round-trip, tests named for the invariants they protect |
+| **HTTP API** | 15% | Routed, gated by the five-part access check, rate-limited |
+| **Analyst UI** | 25% | Reachable and usable in the browser, not only by `curl` |
+| **Adversarial review** | 15% | A hostile pass with findings reproduced before being acted on |
+
+**The numbers below are lower than the previous version's. Nothing
+regressed — the measure got honest.**
+
+### Per phase
+
+| Phase | Complete | Model+tests | API | UI | Reviewed | The gap |
+|---|---|---|---|---|---|---|
+| 0 — Foundation | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. No typecheck, deliberately (decision 42). |
+| 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
+| 2 — Sociogram | **95%** | ✅ | ✅ | ◐ | ✅ | WebSocket push; the UI polls. |
+| 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
+| 4 — Collection | **30%** | ◐ | ❌ | ❌ | ❌ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **No router, no UI, never reviewed.** |
+| 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. |
+| 6 — Tradecraft | **40%** | ◐ | ❌ | ❌ | ❌ | WebAuthn, timeline replay, the assumptions register. Retention and break-glass have services and tests and **no router at all**. |
+| 7 — Comms | **75%** | ✅ | ✅ | ❌ | ✅ | **UI only.** Parser, PGP verification, co-participation, 20-endpoint router and a full adversarial pass all landed 2026-07-25. |
+| 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. |
+| 9 — Ingest | **40%** | ◐ | ❌ | ❌ | ❌ | The HTTP 202 endpoint wiring, the outbound credential vault. **No router, no UI, never reviewed.** |
+
+### Overall: **~68%**
+
+Unweighted mean across the ten phases. Three things that number hides:
+
+1. **UI is the single largest gap.** Six phases have tested services that
+   an analyst cannot reach. It is 25% of every phase's score and the most
+   commonly missing dimension.
+2. **Four phases have never had a hostile review** (4, 5, 8, 9). On the
+   two phases that have, a review found a *critical* defect each time,
+   both under fully green suites. Treat unreviewed phases as unknown
+   rather than fine.
+3. **Completion is not lawfulness.** A phase at 100% may still be
+   unlawful to operate — see the four BLOCKING items. Phase 8 could reach
+   100% here and still must not be switched on.
 
 ---
 
@@ -100,6 +132,26 @@ may render and bytes may not, and no sandbox attribute may combine
 Services and tests exist. `approvals`, `notifications`, `samples`, `ach`,
 `reports` and now `comms` have routers; retention, break-glass, collection
 and ingest do not.
+
+### The sequence I would actually follow
+
+Ordered so each step makes the next one cheaper, with the completion
+gain each buys.
+
+| # | Work | Buys | Why here |
+|---|---|---|---|
+| 1 | **Routers for 4, 6 and 9** — collection, retention, break-glass, ingest | +15% each on three phases (~**+5%** overall) | Cheapest points on the board. The services and tests exist; this is wiring, and the UI cannot be built without it. |
+| 2 | **Adversarial pass over 4 and 9** | +15% each (~**+3%**) | Do it *before* the UI, not after. Both phases touch credentials and third-party PII, both have never been reviewed, and the two reviews run so far each found a critical defect. Fixing a model defect after a UI is built costs the UI too. |
+| 3 | **UI for 7, then 6, then 9, then 4** | +25% each (~**+10%**) | Comms first because it is the only phase where everything else is finished, so it is a clean test of the UI patterns. Samples **last** and carefully — invariant 10 says metadata may render and bytes may not, and no sandbox attribute may combine `allow-scripts` with `allow-same-origin`. |
+| 4 | **Close the per-phase feature gaps** below | ~**+8%** | Adapters, WebAuthn, Jira, fuzzy hashing. Genuine feature work, and the part most exposed to the legal blockers. |
+| 5 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, real SSRF protection, login timing. |
+
+That reaches roughly **95%** with no phase below 85%. The last 5% is
+WebSocket push, CONCOR, and the two-mode presets for actor×forum and
+actor×wallet.
+
+**None of it changes the four BLOCKING legal items.** A 95% build is still
+one that must not be operated until L1–L4 are settled.
 
 ### 4. The remaining per-phase work
 

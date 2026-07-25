@@ -9,6 +9,76 @@ forums and channels.
 
 ---
 
+> # ⚠ READ THIS FIRST — capability is not authorisation
+>
+> **This software is unaudited, has never been operated against real
+> targets, and is not certified for evidential use. Nothing in it grants
+> permission to do what it makes possible.**
+>
+> Every capability here was built to a specification, not to a legal
+> authority. The build refuses several operations until an operator
+> *declares* a policy — and **a declaration is a string this software
+> stores, not a fact it verifies.** A false or absent declaration produces
+> a working system and an unlawful deployment, and the difference is
+> invisible from inside the code.
+>
+> **Four items in
+> [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) are
+> BLOCKING and none of them is a software problem:**
+>
+> | | What is built | What is assumed, and is not true until somebody makes it true |
+> |---|---|---|
+> | **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, has been written with counsel, and covers preservation-vs-destruction. **`REJECTED` currently DESTROYS the bytes**, which is the wrong answer in a jurisdiction requiring preservation. `reject(purge_bytes=False)` exists and nothing selects it automatically. |
+> | **L2** | Stealer-log ingest holding data on thousands of uninvolved people | That there is a lawful basis for holding it, that victim-notification duties are understood, and that the retention period is real. **90 days is a placeholder somebody typed.** |
+> | **L3** | A persona vault that will drive a covert account into a forum | That operating that persona is authorised in each jurisdiction, and that passive and active collection are separately covered. Accessing a system with credentials registered under a false identity engages computer-misuse law in several jurisdictions regardless of intent. |
+> | **L4** | Message-level capture, including group channels | That interception law, one-party vs two-party consent, and the retention of uninvolved third parties' content have all been settled. `provenance_class` records *which kind* of capture it was; it cannot confer the authority for any of them. |
+>
+> Plus **eight operator determinations** and **thirteen factual claims
+> that came from documentation or reasoning rather than an authoritative
+> source** — including the platform identifier mappings, which change, and
+> where a stale mapping produces *confident false attribution* rather than
+> a visible error.
+>
+> ## Findings that carry forward into anything built on this
+>
+> An adversarial review of Phase 7 (2026-07-25) found three critical
+> defects sitting under a fully green 953-test suite. They are fixed, and
+> each leaves a rule worth applying to the rest of the system:
+>
+> - **A forged verdict, from a parser trusting a stream it did not
+>   control.** A crafted OpenPGP user ID smuggled a fake `VALIDSIG` line
+>   into gpg's status output through characters `str.splitlines()` treats
+>   as line breaks and gpg does not escape — minting a CONFIRMED identity
+>   binding for a key the attacker never held. **The CHECK constraints
+>   could not catch it**, because both values compared came from the same
+>   lied-to parse. A constraint defends against the application *forgetting*
+>   to check, never against it checking a forged input.
+>   *→ Any `CONFIRMED` binding recorded before commit `12ff904` should be
+>   re-derived, not trusted.*
+> - **It was inert on the Windows dev host and live on Linux.** The defect
+>   depended on how bytes decode, so the development machine and the
+>   deployment target disagreed about whether the system was exploitable.
+>   *→ Where a defence depends on decoding, test the bytes.*
+> - **A metric overstated by 499×.** Newman weighting divided by the
+>   participant count remaining *after* filtering, so two people who merely
+>   shared a 500-member channel scored exactly as high as a private
+>   two-party conversation.
+>   *→ Any co-participation figure produced before commit `8595602` is
+>   wrong, not approximate.*
+>
+> **One correctness defect is knowingly unfixed** and is recorded as
+> determination **D8**: a Telegram channel id and an unrelated user id can
+> normalise to the same durable value. Fixing it re-keys stored selectors
+> and needs a model change, so the build **warns on every affected
+> observation** instead of hiding the collision behind a value that looks
+> certain. That decision is yours to confirm or overturn.
+>
+> **Nothing here is legal advice.** It is an inventory of the places where
+> legal advice is required, written by the people who built the code so
+> that the assumptions do not live only in their heads.
+
+---
+
 > ## ⚠ Phase 8 is BUILT. Counsel must review this deployment before it is used.
 >
 > **Sample handling now exists in code (Alembic 0031, `samples.py`), on an
@@ -87,6 +157,7 @@ forums and channels.
 |---|---|---|
 | **[QUICKSTART.md](QUICKSTART.md)** | Start it and log in — one command, then create your account | **Run it** |
 | **[GETTING-STARTED.md](GETTING-STARTED.md)** | Blocking decisions, day-one setup, first four Claude Code sessions | **Read first** |
+| **[docs/17-flagged-for-review.md](docs/17-flagged-for-review.md)** | Everything built on a judgement somebody else should confirm, and the data already recorded that should not be trusted | **Read with 16** |
 | **[CLAUDE.md](CLAUDE.md)** | Working agreement and the twelve non-negotiable invariants | Read second |
 | [docs/00-decisions.md](docs/00-decisions.md) | Decisions taken, and **ten open questions for you** | |
 | [docs/01-domain-model.md](docs/01-domain-model.md) | Identity vs person, assertions, signed edges, temporality | The core |

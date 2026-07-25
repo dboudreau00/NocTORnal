@@ -3,9 +3,11 @@
 Written so a fresh session can resume without re-deriving anything.
 
 > **Read order:** this file → `docs/16-legal-and-external.md` (**every
-> external/legal dependency, and the only file that can stop a deployment**)
-> → `ROADMAP-REMAINING.md` → `CLAUDE.md` (the twelve invariants) →
-> `docs/00-decisions.md` (60 numbered decisions).
+> external/legal dependency, and the only file that can stop a
+> deployment**) → `docs/17-flagged-for-review.md` (**everything built on a
+> judgement somebody should confirm, and the rows already recorded that
+> should not be trusted**) → `ROADMAP-REMAINING.md` → `CLAUDE.md` (the
+> twelve invariants) → `docs/00-decisions.md` (60 numbered decisions).
 
 ---
 

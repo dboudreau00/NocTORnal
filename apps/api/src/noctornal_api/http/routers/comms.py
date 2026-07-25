@@ -181,10 +181,28 @@ def bind(
     """Record an observed identifier, normalised to its durable part.
 
     `verification` defaults to CLAIMED because that is what an identifier
-    in a signature block IS. Upgrading to CONFIRMED by hand is possible
-    and requires a stated method; the only automatic route to CONFIRMED is
-    a verified PGP signature.
+    in a signature block IS. OBSERVED means somebody saw it in use.
+
+    **CONFIRMED cannot be set here.** It was accepted from the request
+    body with only a free-text `verification_note` required, which made
+    every defence in `pgp.py` optional: an analyst who typed "CONFIRMED"
+    reached the grade docs/10 says may carry weight in automatic identity
+    resolution without a signature existing at all. The one route to
+    CONFIRMED is now `/pgp/verify`, where the fingerprint must match the
+    claimed key and the identifier must appear inside the signed bytes.
     """
+    if body.verification == "CONFIRMED":
+        raise Problem(
+            400, "Invalid request",
+            "CONFIRMED cannot be asserted directly. docs/10: only CONFIRMED "
+            "carries weight in automatic identity resolution, so it is "
+            "earned by a verified signature over the identifier, not "
+            "declared. POST to /pgp/verify with the signed message and the "
+            "public key. If the confirmation rests on something other than "
+            "a signature -- an observed login, an admin-confirmed vendor "
+            "list -- record the binding as OBSERVED and state the basis in "
+            "an assertion, which is reviewable in a way a free-text note "
+            "is not.")
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=compartments)
@@ -485,7 +503,9 @@ def verifications(
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    return {"verifications": PgpService(conn).verifications(case_id),
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    return {"verifications": PgpService(conn).verifications(
+                case_id, clearance=clearance.name, compartments=compartments),
             # Cached per process. This called gpg --version on EVERY
             # request, so a read endpoint any comms.read holder can reach
             # forked a subprocess per call -- bounded only by the blanket

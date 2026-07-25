@@ -207,7 +207,7 @@ def test_failed_verifications_are_recorded_too(conn, svc):
         case_id=case_id, signed_message=SIGNED_BY_IMPOSTOR,
         public_key=IMPOSTOR_PUB, claimed_fingerprint=VENDOR_FPR,
         created_by=uid, confirms_value=TOX_PUBKEY)
-    rows = svc.verifications(case_id)
+    rows = svc.verifications(case_id, clearance="RED")
     assert len(rows) == 1
     assert rows[0]["outcome"] == "KEY_MISMATCH"
     assert rows[0]["signing_fingerprint"] == IMPOSTOR_FPR
