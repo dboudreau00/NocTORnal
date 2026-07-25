@@ -94,7 +94,24 @@ docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d
 
 The server's TOTP is checked against the RFC 6238 test vectors, so if a
 code is rejected the disagreement is on the authenticator's side — a
-mistyped secret or a drifting clock.
+mistyped secret, or the two clocks disagreeing.
+
+### The host clock
+
+TOTP is a function of **absolute Unix time**, so a phone and a server whose
+clocks differ by more than about a minute can never agree, and no
+re-enrolment fixes it. Check the host before suspecting the phone:
+
+```bash
+w32tm /query /status
+```
+
+`Leap Indicator: 3(not synchronized)` with `Stratum: 0` means this machine
+has never reached a time server — normal on an offline or sandboxed box, and
+fatal for TOTP against a phone that *is* on real time. Either correct the
+host clock (`w32tm /resync`, having enabled automatic time), or use
+`totp-code`, which reads the same clock the server checks against and so
+always agrees.
 
 ## 3. Use it
 
