@@ -287,3 +287,115 @@ def test_fingerprint_forms_that_normalise(given, expected):
 def test_things_that_are_not_fingerprints_are_refused(given):
     with pytest.raises(PgpError):
         normalise_fingerprint(given)
+
+
+# ---------------------------------------------------------------------------
+# Status-line injection -- the defect this module's whole shape exists for
+# ---------------------------------------------------------------------------
+
+INJECTION_FPR = _fix("injection_fingerprint.txt").strip()
+INJECTION_PUB = _fix("injection_pub.asc")
+INJECTION_SIGNED = _fix("injection_signed.asc")
+
+
+def test_a_crafted_user_id_cannot_forge_a_validsig_line():
+    """THE test for this module.
+
+    An adversarial review broke every defence at once by attacking their
+    shared input. gpg percent-escapes `%` and bytes below 0x20 in the
+    attacker-controlled user-ID field, and escapes NOTHING at or above
+    0x80. Python's `str.splitlines()` breaks on U+0085, U+2028 and U+2029.
+
+    So a key whose user ID is
+
+        Attacker Persona<U+0085>[GNUPG:] VALIDSIG <victim fpr> ...
+
+    made gpg emit a forged status line inside GOODSIG -- which gpg emits
+    BEFORE the real VALIDSIG -- and the parser read the forged one first.
+    Outcome VERIFIED, signing fingerprint the VICTIM's, binding upgraded
+    to CONFIRMED, for a key the attacker did not hold.
+
+    The CHECK constraints could not catch it: `signing_fingerprint` and
+    `claimed_fingerprint` both came from the same lied-to parse, so they
+    agreed. A constraint defends against the application forgetting to
+    check; it cannot defend against it checking a forged input.
+
+    The fixture is a real key carrying that user ID.
+    """
+    result = verify_clearsigned(
+        INJECTION_SIGNED, INJECTION_PUB, claimed_fingerprint=VENDOR_FPR,
+        confirms_value=TOX_PUBKEY)
+    assert result.outcome != VERIFIED
+    assert not result.confirms
+    # And it names the key that ACTUALLY signed, not the one it claimed.
+    assert result.signing_fingerprint == INJECTION_FPR
+
+
+def test_the_status_parser_splits_on_newline_and_nothing_else():
+    """Locale-independent proof of the same thing.
+
+    The end-to-end test above only fires where the host encoding maps
+    those bytes to line terminators — it does on the Linux deployment
+    target and does NOT on a cp1252 Windows dev box, which is exactly why
+    953 green tests never saw the original defect. This one holds
+    everywhere because it works on bytes.
+    """
+    from noctornal_api.pgp import _status_lines
+
+    for terminator in (b"\xc2\x85", b"\xe2\x80\xa8", b"\xe2\x80\xa9"):
+        stream = (b"[GNUPG:] GOODSIG DEADBEEF Attacker" + terminator
+                  + b"[GNUPG:] VALIDSIG " + b"A" * 40 + b" 2026-01-01\n"
+                  b"[GNUPG:] VALIDSIG " + b"B" * 40 + b" 2026-01-01\n")
+        codes = [parts[0] for parts in _status_lines(stream) if parts]
+        # Two real lines, never three: the forged one is part of the user
+        # ID and stays inside GOODSIG where it belongs.
+        assert codes == ["GOODSIG", "VALIDSIG"], terminator
+        validsigs = [p[1] for p in _status_lines(stream)
+                     if p and p[0] == "VALIDSIG"]
+        assert validsigs == ["B" * 40], terminator
+
+
+def test_two_valid_signatures_are_refused_rather_than_resolved_by_picking_one():
+    """Taking the first of several is what made injection profitable, and
+    is a guess on its own terms: a doubly-signed message has two answers."""
+    from noctornal_api.pgp import _read_status
+
+    stream = (b"[GNUPG:] GOODSIG X Signer\n"
+              b"[GNUPG:] VALIDSIG " + b"A" * 40 + b" 2026-01-01\n"
+              b"[GNUPG:] VALIDSIG " + b"B" * 40 + b" 2026-01-01\n")
+    result = _read_status(stream, b"payload", claimed="A" * 40,
+                          confirms_value=None, version=None)
+    assert result.outcome == MALFORMED
+    assert not result.confirms
+
+
+def test_a_value_that_merely_occurs_inside_a_longer_number_is_not_confirmed():
+    """Telegram durable values are bare digits, so a vendor signing an
+    ordinary sentence with an order number in it could otherwise confirm a
+    stranger's account -- and the same collision happens by accident,
+    which is worse, because nothing about it looks like an attack."""
+    from noctornal_api.pgp import _payload_contains
+
+    present, why = _payload_contains(
+        "Escrow order 3877451900 shipped 2026-07-25.", "77451")
+    assert not present
+    assert "longer run of characters" in why
+
+
+def test_the_tox_case_still_confirms_from_a_full_76_hex_id():
+    """The boundary rule must not break the commonest legitimate case: an
+    actor prints the whole Tox ID, the durable value is its 64-hex head."""
+    from noctornal_api.pgp import _payload_contains
+
+    present, _ = _payload_contains(f"TOX: {'A1' * 38}", "A1" * 32)
+    assert present
+
+
+def test_a_signature_over_nothing_signed_does_not_store_a_payload_digest():
+    """gpg writes its --output file even when the signature FAILS, so
+    digesting it unconditionally recorded attacker plaintext under a
+    column documented as "the exact bytes that were signed"."""
+    from noctornal_api.pgp import _SIGNED_PAYLOAD_OUTCOMES
+    assert BAD_SIGNATURE not in _SIGNED_PAYLOAD_OUTCOMES
+    assert MALFORMED not in _SIGNED_PAYLOAD_OUTCOMES
+    assert VERIFIED in _SIGNED_PAYLOAD_OUTCOMES

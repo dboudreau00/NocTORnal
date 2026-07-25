@@ -84,8 +84,18 @@ VALUE_NOT_IN_PAYLOAD = "VALUE_NOT_IN_PAYLOAD"
 KEY_UNAVAILABLE = "KEY_UNAVAILABLE"
 EXPIRED_KEY = "EXPIRED_KEY"
 REVOKED_KEY = "REVOKED_KEY"
+EXPIRED_SIGNATURE = "EXPIRED_SIGNATURE"
 MALFORMED = "MALFORMED"
 NO_VERIFIER = "NO_VERIFIER"
+
+#: Outcomes for which gpg reported a good signature over the payload, so
+#: the payload really is "the exact bytes that were signed". For anything
+#: else the file gpg produced is attacker plaintext nobody signed, and
+#: digesting it under that column's name would be a false record.
+_SIGNED_PAYLOAD_OUTCOMES = frozenset({
+    "VERIFIED", "KEY_MISMATCH", "VALUE_NOT_IN_PAYLOAD",
+    "EXPIRED_KEY", "REVOKED_KEY", EXPIRED_SIGNATURE,
+})
 
 _FPR = re.compile(r"^[0-9A-F]{40}$|^[0-9A-F]{64}$")
 _WS = re.compile(r"\s+")
@@ -95,6 +105,28 @@ GPG_TIMEOUT_SECONDS = 20
 #: Refuse absurd input before handing it to a subprocess.
 MAX_MESSAGE_BYTES = 1_000_000
 MAX_KEY_BYTES = 1_000_000
+#: Cap on what gpg may PRODUCE, not just what it is given. An armored
+#: compressed message a few hundred KB long expands to hundreds of MB --
+#: measured at 760x from a naive zeros bomb at half the input limit -- and
+#: the result was previously read into memory whole. Bounded in two places
+#: because either alone is insufficient: `--max-output` stops gpg writing
+#: it, and the capped read stops US reading a file some other path created.
+MAX_PAYLOAD_BYTES = 4_000_000
+#: How much of the status stream to retain on the row. Kept from the FRONT:
+#: the verdict is decided by the first VALIDSIG, and keeping the tail would
+#: let a long user ID push the line that produced the verdict out of the
+#: record that exists to justify it.
+MAX_STATUS_CHARS = 8_000
+
+#: A value shorter than this is never confirmed by containment. Short
+#: strings appear inside longer numbers by coincidence, and a coincidence
+#: that reads as cryptographic proof is worse than no answer.
+MIN_CONFIRMABLE_LENGTH = 4
+#: A value at least this long may match as a PREFIX of a longer token --
+#: which is the normal Tox case, where the actor prints the full 76-hex ID
+#: and the durable value is its 64-hex head. Below it, both ends must be
+#: delimited.
+PREFIX_MATCH_LENGTH = 32
 
 
 class PgpError(Exception):
@@ -243,22 +275,31 @@ def verify_clearsigned(signed_message: str, public_key: str, *,
                 # attacker chose, and an outbound connection from an
                 # evidence check is an operational leak.
                 "--keyserver-options", "no-auto-key-retrieve",
-                "--no-auto-key-locate", "--auto-key-locate", "nodefault"]
+                "--no-auto-key-locate", "--auto-key-locate", "nodefault",
+                # Bound what gpg may PRODUCE. An armored compressed message
+                # well inside MAX_MESSAGE_BYTES expands to hundreds of
+                # megabytes; the input cap says nothing about the output.
+                "--max-output", str(MAX_PAYLOAD_BYTES)]
         try:
+            # text=False everywhere: the status stream carries
+            # attacker-controlled user-ID bytes, and decoding it to str
+            # both enables the line-injection in `_status_lines` and can
+            # raise UnicodeDecodeError from inside subprocess (see
+            # `_show`). Bytes in, decisions on ASCII tokens only.
             imported = subprocess.run(
                 [*base, "--import", "key.asc"], cwd=work,
-                capture_output=True, text=True,
+                capture_output=True, text=False,
                 timeout=GPG_TIMEOUT_SECONDS, check=False)
             if imported.returncode != 0:
                 return VerificationResult(
-                    MALFORMED, status_output=_tail(imported.stderr),
+                    MALFORMED, status_output=_show(imported.stderr),
                     verifier_version=verifier_version(),
                     detail="the supplied public key could not be read")
 
             proc = subprocess.run(
                 [*base, "--status-fd", "1", "--output", "verified.txt",
                  "--decrypt", "message.asc"], cwd=work,
-                capture_output=True, text=True,
+                capture_output=True, text=False,
                 timeout=GPG_TIMEOUT_SECONDS, check=False)
         except subprocess.TimeoutExpired:
             return _unavailable(
@@ -266,28 +307,137 @@ def verify_clearsigned(signed_message: str, public_key: str, *,
         except OSError as exc:
             return _unavailable(f"gpg could not be run ({exc}).")
 
-        status = proc.stdout or ""
+        status = proc.stdout or b""
         payload = b""
         if os.path.isfile(out_file):
             with open(out_file, "rb") as fh:
-                payload = fh.read()
+                # Capped independently of --max-output: this read must be
+                # bounded by OUR limit, not by whatever produced the file.
+                payload = fh.read(MAX_PAYLOAD_BYTES + 1)
+            if len(payload) > MAX_PAYLOAD_BYTES:
+                return VerificationResult(
+                    MALFORMED, status_output=_show(status),
+                    verifier_version=verifier_version(),
+                    detail=(f"the signed payload exceeds "
+                            f"{MAX_PAYLOAD_BYTES} bytes, which a "
+                            f"contact block never does"))
 
     return _read_status(status, payload, claimed=claimed,
                         confirms_value=confirms_value,
                         version=verifier_version())
 
 
-def _tail(text: str | None, limit: int = 4000) -> str:
-    text = text or ""
-    return text[-limit:]
+def _show(raw: bytes | None, limit: int = MAX_STATUS_CHARS) -> str:
+    """Attacker bytes, rendered for the record and never for a decision.
+
+    `errors="replace"` because an OpenPGP user ID is arbitrary bytes and
+    gpg re-emits it unvalidated. Decoding it strictly threw
+    `UnicodeDecodeError` from inside `subprocess`, which on Windows killed
+    the reader thread and silently produced an empty stream -- reported as
+    BAD_SIGNATURE for a signature that verified perfectly -- and on POSIX
+    propagated out uncaught, so no row was recorded at all.
+    """
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    if len(text) > limit:
+        return text[:limit] + f"\n... [truncated at {limit} characters]"
+    return text
 
 
-def _status_lines(status: str) -> list[list[str]]:
-    return [line[9:].split() for line in status.splitlines()
-            if line.startswith("[GNUPG:] ")]
+def _status_lines(status: bytes) -> list[list[str]]:
+    """Parse gpg's --status-fd stream. BYTES, split on b"\\n" ONLY.
+
+    This is the whole defence against a forged verdict, so it is worth
+    stating what goes wrong otherwise.
+
+    gpg delimits status lines with `\\n` and percent-escapes `%` and every
+    byte below 0x20 in the attacker-controlled user-ID field. It does NOT
+    escape bytes at or above 0x80. Python's `str.splitlines()` splits on
+    far more than `\\n`: it also breaks on U+0085, U+2028 and U+2029, none
+    of which gpg escapes.
+
+    So an attacker generated a key whose user ID was:
+
+        Attacker Persona<U+0085>[GNUPG:] VALIDSIG <victim fingerprint> ...
+
+    gpg emitted that verbatim inside GOODSIG -- which it emits BEFORE the
+    real VALIDSIG -- `splitlines()` cut it into two lines, and the parser
+    read the forged one first. Outcome VERIFIED, `signing_fingerprint` the
+    victim's, binding upgraded to CONFIRMED, for a key the attacker did
+    not hold. Reproduced end to end.
+
+    The CHECK constraints could not catch it: they compare
+    `signing_fingerprint` to `claimed_fingerprint`, and both came from the
+    same lied-to parse, so they agreed. A constraint defends against the
+    application forgetting to check; it cannot defend against the
+    application checking a forged input.
+
+    It was invisible on the Windows dev host because cp1252 does not map
+    those bytes to line terminators. The deployment target is Linux under
+    UTF-8, where it works.
+    """
+    out: list[list[str]] = []
+    for line in (status or b"").split(b"\n"):
+        if not line.startswith(b"[GNUPG:] "):
+            continue
+        # Fields are ASCII tokens; anything else in them is not something
+        # a decision may rest on.
+        out.append(line[9:].decode("ascii", errors="replace").split())
+    return out
 
 
-def _read_status(status: str, payload: bytes, *, claimed: str,
+_TOKEN_CHAR = re.compile(r"[0-9A-Za-z]")
+
+
+def _payload_contains(payload_text: str, value: str) -> tuple[bool, str]:
+    """Is `value` genuinely NAMED in the signed text? (present, reason)
+
+    A bare substring test is not enough, and the failure is not
+    hypothetical. Telegram durable values are bare digits, so a vendor who
+    signed an ordinary sentence containing an order number could confirm a
+    stranger's account:
+
+        signed: "Escrow order 3877451900 shipped 2026-07-25."
+        value : "77451"      -> substring: True
+
+    That drove a binding to CONFIRMED and recorded it as "cryptographic
+    evidence ... of the key's holder publishing that identifier", which is
+    false. The same collision happens by accident, which is worse, because
+    nothing about it looks like an attack.
+
+    The rule: the match must START at a token boundary, and must also END
+    at one unless the value is long enough to be unambiguous on its own.
+    The exception is load-bearing rather than a loophole -- an actor
+    normally prints the full 76-hex Tox ID while the durable value is its
+    64-hex head, so demanding a boundary at both ends would refuse the
+    commonest legitimate case.
+    """
+    needle = (value or "").strip()
+    if len(needle) < MIN_CONFIRMABLE_LENGTH:
+        return False, (
+            f"{needle!r} is too short ({len(needle)} characters) to be "
+            f"confirmed by appearing in a text. Short strings occur inside "
+            f"longer numbers by coincidence, and a coincidence that reads "
+            f"as cryptographic proof is worse than no answer.")
+
+    hay, low = payload_text.lower(), needle.lower()
+    start = hay.find(low)
+    while start != -1:
+        left_ok = start == 0 or not _TOKEN_CHAR.match(hay[start - 1])
+        end = start + len(low)
+        right_ok = end == len(hay) or not _TOKEN_CHAR.match(hay[end])
+        if left_ok and (right_ok or len(needle) >= PREFIX_MATCH_LENGTH):
+            return True, ""
+        start = hay.find(low, start + 1)
+    return False, (
+        f"{needle!r} does not appear in the signed text as an identifier. "
+        f"It may occur inside a longer run of characters -- an order "
+        f"number, another account -- which is not the same as the signer "
+        f"naming it.")
+
+
+def _read_status(status: bytes, payload: bytes, *, claimed: str,
                  confirms_value: str | None,
                  version: str | None) -> VerificationResult:
     """Decide the outcome from the machine-readable lines ONLY.
@@ -296,16 +446,30 @@ def _read_status(status: str, payload: bytes, *, claimed: str,
     well as a good one, so checking VALIDSIG first would report a revoked
     key as a clean confirmation.
     """
-    codes = {parts[0] for parts in _status_lines(status) if parts}
-    signing = None
-    for parts in _status_lines(status):
-        if parts and parts[0] == "VALIDSIG" and len(parts) > 1:
-            # VALIDSIG <fingerprint> <date> <sig-timestamp> ...
-            signing = parts[1].upper()
-            break
+    lines = _status_lines(status)
+    codes = {parts[0] for parts in lines if parts}
+    # VALIDSIG <fingerprint> <date> <sig-timestamp> ...
+    validsigs = [parts[1].upper() for parts in lines
+                 if len(parts) > 1 and parts[0] == "VALIDSIG"]
+    signing = validsigs[0] if validsigs else None
 
-    common = {"status_output": _tail(status), "verifier_version": version,
+    common = {"status_output": _show(status), "verifier_version": version,
               "signing_fingerprint": signing, "signed_payload": payload}
+
+    # Taking the FIRST of several is what made line injection profitable,
+    # and it is also wrong on its own terms: a message carrying two
+    # signatures has two answers, and picking one silently is a guess
+    # about which the analyst meant. Both fixed by refusing.
+    if len(validsigs) > 1 or len({parts[0] for parts in lines
+                                  if parts and parts[0] == "GOODSIG"}) > 1:
+        return VerificationResult(
+            MALFORMED, **common,
+            detail=(f"the status stream reported {len(validsigs)} valid "
+                    f"signatures. This system verifies ONE signature over "
+                    f"ONE message; several means either a multiply-signed "
+                    f"message or an attempt to smuggle a status line "
+                    f"through a crafted user ID, and neither is something "
+                    f"to resolve by picking the first."))
 
     if "NODATA" in codes and not signing:
         return VerificationResult(
@@ -326,6 +490,18 @@ def _read_status(status: str, payload: bytes, *, claimed: str,
                    "proves the key signed the text; it does not confirm a "
                    "binding without a person deciding the expiry is "
                    "immaterial.")
+    if "EXPSIG" in codes:
+        # The SIGNATURE expired, which is not the same as the KEY expiring.
+        # gpg emits EXPSIG in place of GOODSIG, so without this branch it
+        # fell through to "gpg did not report a good signature" -- failing
+        # closed, but mislabelling the evidence as forged when it is
+        # merely stale. The module gives expired KEYS their own outcome
+        # for exactly this reason.
+        return VerificationResult(
+            EXPIRED_SIGNATURE, **common,
+            detail="the signature is good but has EXPIRED. It still shows "
+                   "the key signed the text; whether an expired signature "
+                   "confirms anything now is a judgement for a person.")
     if "BADSIG" in codes:
         return VerificationResult(
             BAD_SIGNATURE, **common,
@@ -366,26 +542,21 @@ def _read_status(status: str, payload: bytes, *, claimed: str,
     # against the text we were handed: everything after the signature
     # block in a clearsigned message is unsigned, and a naive substring
     # check over the raw input passes for an identifier pasted there.
-    try:
-        text = payload.decode("utf-8", errors="replace")
-    except Exception:                                    # pragma: no cover
-        text = ""
-    present = confirms_value.strip().lower() in text.lower()
+    text = payload.decode("utf-8", errors="replace")
+    present, why_not = _payload_contains(text, confirms_value)
     if not present:
         return VerificationResult(
             VALUE_NOT_IN_PAYLOAD, **common, value_in_payload=False,
             detail=(f"the signature is valid and by the claimed key, but "
-                    f"{confirms_value!r} does not appear in the SIGNED text. "
-                    f"Any message this vendor ever signed can be reposted "
-                    f"with somebody else's identifier appended below the "
-                    f"signature block, and that is what this refuses. "
-                    f"The comparison is literal, so a genuine signature can "
-                    f"land here when the actor printed the identifier in a "
-                    f"different form -- spaced hex, a full 76-char Tox ID "
-                    f"where the binding holds the 64-char key. Check the "
-                    f"signed text before reading this as an attack. Matching "
-                    f"loosely is deliberately not done: a false confirmation "
-                    f"is far more expensive than a second look."))
+                    f"{why_not} Any message this vendor ever signed can be "
+                    f"reposted with somebody else's identifier appended "
+                    f"below the signature block, and that is what this "
+                    f"refuses. The match is deliberately strict, so a "
+                    f"genuine signature can land here when the actor "
+                    f"printed the identifier in a different form -- spaced "
+                    f"hex, for instance. Check the signed text before "
+                    f"reading this as an attack: a false confirmation is "
+                    f"far more expensive than a second look."))
 
     return VerificationResult(
         VERIFIED, **common, value_in_payload=True,
@@ -442,12 +613,30 @@ class PgpService:
                     f"the binding holds {binding_value!r}; a signature over "
                     f"one identifier cannot confirm another")
 
+        if contact_block_id is not None:
+            # The same check its sibling gets, three lines up. Without it a
+            # verification in one case could cite a block in another, and
+            # the citation is returned to every `comms.read` holder here.
+            row = self._c.execute(
+                "SELECT case_id FROM comms.contact_block WHERE id = %s",
+                (contact_block_id,)).fetchone()
+            if row is None or row[0] != case_id:
+                raise PgpError(
+                    "no such contact block in this case: a verification "
+                    "citing another case's artefact is a disclosure as "
+                    "well as an error")
+
         result = verify_clearsigned(
             signed_message, public_key, claimed_fingerprint=claimed,
             confirms_value=confirms_value)
 
+        # Only digest bytes a signature actually covered. The column is
+        # documented as "the exact bytes that were signed", and gpg writes
+        # its --output file even when the signature FAILS -- so digesting
+        # it unconditionally recorded attacker plaintext under that name.
         digest = (hashlib.sha256(result.signed_payload).digest()
-                  if result.signed_payload else None)
+                  if result.signed_payload
+                  and result.outcome in _SIGNED_PAYLOAD_OUTCOMES else None)
         with self._c.transaction():
             row = self._c.execute(
                 """INSERT INTO comms.pgp_verification
