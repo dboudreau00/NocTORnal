@@ -53,7 +53,9 @@ def test_full_auth_and_session_roundtrip_against_pg(conn):
     assert bytes(ct) != secret.encode()
 
     ts = 1_784_899_200
-    clock = lambda: datetime.fromtimestamp(ts, tz=timezone.utc)
+    def clock():
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+
     auth = AuthService(users, now=clock)
     code = totp.code_at(secret, ts)
 

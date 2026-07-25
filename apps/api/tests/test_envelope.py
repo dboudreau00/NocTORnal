@@ -1,5 +1,4 @@
 """AES-256-GCM envelope for TOTP secrets at rest (docs/05)."""
-import os
 
 import pytest
 

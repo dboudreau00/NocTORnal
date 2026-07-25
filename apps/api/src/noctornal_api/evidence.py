@@ -34,17 +34,17 @@ from minio import Minio
 from minio.commonconfig import COMPLIANCE
 from minio.retention import Retention
 
+from noctornal_api.egress import NEVER_EGRESS
+
 DEFAULT_RETENTION = timedelta(
     days=int(os.environ.get("EVIDENCE_RETENTION_DAYS", "365"))
 )
 
-# Classifications that must never cross the boundary via export (invariant 8).
-# Invariant 8 now lives in ONE place: noctornal_api.egress.NEVER_EGRESS,
-# which every outbound path shares (docs/07). Kept here only as a
-# re-export so existing importers do not silently get a second,
-# drifting copy of the rule.
-from noctornal_api.egress import NEVER_EGRESS as _NEVER
-_NO_EGRESS = frozenset(t.name for t in _NEVER)
+# Classifications that must never cross the boundary via export (invariant
+# 8). Derived from egress.NEVER_EGRESS rather than restated: a second copy
+# of the rule is how the copies drift, and the one that drifts is the leak.
+# Kept as a name here only so existing importers keep working.
+_NO_EGRESS = frozenset(t.name for t in NEVER_EGRESS)
 
 
 def _sha256(data: bytes) -> bytes:

@@ -249,7 +249,7 @@ def test_retracting_an_already_retracted_assertion_is_refused(conn, world):
 def test_history_survives_retraction_for_temporal_replay(conn, world):
     """`as_of` before the retraction must still show the element: the row
     and its history persist, only the LIVE graph loses it."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     from noctornal_api.graph import GraphWriteService
     case_id, uid, _n1, _n2, edge = world
     aid = conn.execute(
