@@ -538,6 +538,17 @@ LIMITS: dict[str, Limit] = {
         "graph.view", quota=240, per_seconds=60, scope=Scope.USER, burst=80,
         on_backend_failure=OnBackendFailure.DENY,
     ),
+    # PGP verification SPAWNS A SUBPROCESS, twice, with a 20-second timeout
+    # each. It is the only route in this system that forks, which makes an
+    # unmetered loop of it a trivial way to exhaust process slots and file
+    # handles -- far cheaper for the caller than for the server, which is
+    # the definition of the thing a limit is for. The quota is deliberately
+    # low: verifying a signature is a deliberate analyst action on a
+    # specific claim, not something anything iterates over.
+    "comms.verify": Limit(
+        "comms.verify", quota=60, per_seconds=3600, scope=Scope.USER, burst=10,
+        on_backend_failure=OnBackendFailure.DENY,
+    ),
 }
 
 
