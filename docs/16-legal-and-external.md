@@ -290,6 +290,81 @@ report that leaves the building through the egress gate.
 
 ---
 
+### C11 — PGP verification as evidence, and the verifier it depended on
+
+Added 2026-07-25 with `apps/api/src/noctornal_api/pgp.py`.
+
+A `CONFIRMED` channel binding is the only grade this system says may carry
+weight in automatic identity resolution, and a verified PGP signature is
+the only thing that produces one. The build implements no cryptography: it
+drives the `gpg` binary and parses only its `--status-fd` output. Every
+verification row stores the verifier's version string and gpg's raw status
+lines, so a disputed verification can be re-read rather than re-argued.
+
+**Confirm** three things before a verification is offered as evidence:
+
+1. **That the conclusion means what a court will take it to mean.** The
+   build asserts a narrow thing — this key signed text containing this
+   identifier — and refuses to assert control of the identifier by its
+   holder, which is an inference on top. A filing should not widen it
+   silently.
+2. **Which gpg build was used, and whether it was current.** The version is
+   recorded per verification for exactly this reason. A verification made
+   with a build carrying a known signature-validation defect is not
+   evidence of anything, and the recorded version is what lets you find
+   those rows later.
+3. **How the vendor's public key was obtained.** The build never fetches
+   keys (`--no-auto-key-locate`, no keyserver) precisely because a key
+   fetched mid-verification is a key somebody else chose, and an outbound
+   connection from an evidence check is an operational leak. The
+   provenance of the key is therefore a HUMAN step, and an unrecorded one
+   weakens the whole chain.
+
+The build deliberately has **no `TRUSTED` outcome**: GnuPG's web of trust
+answers "do I trust this key's owner", which is a different question from
+"did this key sign this text", and an investigator's own keyring trust has
+no bearing on whether a vendor controls a key.
+
+### C12 — The GLOBAL service stoplist holds identifiers of people who are
+not subjects
+
+Added 2026-07-25 with `comms.service_selector`.
+
+The stoplist is how the build avoids attributing a forum's escrow agent to
+a vendor (docs/10's "serious, and easy, error"). It is **GLOBAL by
+default** and deliberately so: a forum's escrow belongs to the forum, and a
+per-case list would mean every case rediscovers it by getting the
+attribution wrong first.
+
+The consequence is that it is a cross-case store of identifiers belonging
+to people who are, by construction, **not the subject of any
+investigation** — escrow agents, guarantors, forum administrators. Entries
+are retired rather than deleted, so they persist beyond the case that
+added them.
+
+**Confirm** the lawful basis and retention position for that store
+specifically. It is not covered by a case's own retention rule, because it
+outlives the case on purpose, and the argument for holding it (it prevents
+misattribution) is a good one that still has to be made rather than
+assumed.
+
+### C13 — Co-participation manufactures ties, including for third parties
+
+Added 2026-07-25 with `apps/api/src/noctornal_api/coparticipation.py`.
+
+The projection draws a tie between two people because they were in the
+same conversation. `include_incidental` defaults to **off** so participants
+flagged as third parties get no ties, and `include_unresolved` defaults to
+**off** so a member list does not become a set of actors — but both are
+switchable, and switching them draws relationship inferences about people
+who are not subjects.
+
+**Determine** whether an analyst may switch them, and whether a network
+including incidental participants may leave the boundary at all. The
+egress gate checks classification, not this flag, so a report built from a
+projection with `include_incidental=true` carries third-party
+relationship inferences under whatever TLP the conversations had.
+
 ## Things this build deliberately does NOT do
 
 Recorded so their absence is not mistaken for an oversight.
