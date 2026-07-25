@@ -11,6 +11,7 @@ change ships as a NEW data migration, never by editing 0017.
 """
 from __future__ import annotations
 
+import re as _re
 import sys
 from pathlib import Path
 
@@ -32,7 +33,6 @@ _HEADER_SQL = (
     "-- new Alembic revisions; drift is caught by tests/test_db_parity.py.\n"
 )
 
-import re as _re
 
 # Keys travel unquoted inside Postgres text[] literals; anything outside
 # this alphabet would corrupt the generated seed, so fail generation loud.

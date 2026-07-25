@@ -10,7 +10,6 @@ from running the code and recording what it printed.
 """
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -21,7 +20,6 @@ from noctornal_api.analytics import (
     AnalyticsParams,
     balance,
     burt,
-    centrality,
     cohesion,
     fragmentation,
     graph_hash,

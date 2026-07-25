@@ -7,7 +7,6 @@ must NOT be extracted.
 """
 from __future__ import annotations
 
-import pytest
 
 from noctornal_api.extraction import _context, find_selectors
 

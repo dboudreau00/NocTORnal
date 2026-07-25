@@ -3,7 +3,6 @@ idle 30 min expiry, revocation, step-up freshness (docs/05)."""
 from datetime import timedelta
 from uuid import uuid4
 
-from noctornal_api.security import sessions
 from noctornal_api.security.sessions import SessionService
 from noctornal_api.security.tokens import hash_token
 

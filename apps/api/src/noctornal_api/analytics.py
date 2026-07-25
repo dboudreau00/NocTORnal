@@ -44,7 +44,7 @@ import hashlib
 import math
 import random
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -971,9 +971,9 @@ def _mode_warning(node_types: list[str], degrees: list[int]) -> str | None:
     from noctornal_ontology.definition import NODE_TYPES
 
     category = {n.key: n.category for n in NODE_TYPES}
-    tied = sorted({t for t, d in zip(node_types, degrees)
+    tied = sorted({t for t, d in zip(node_types, degrees, strict=False)
                    if category.get(t) != "ACTOR" and d > 0})
-    isolated = sorted({t for t, d in zip(node_types, degrees)
+    isolated = sorted({t for t, d in zip(node_types, degrees, strict=False)
                        if category.get(t) != "ACTOR" and d == 0})
     if tied:
         return (

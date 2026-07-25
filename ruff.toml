@@ -1,0 +1,52 @@
+# Lint config, pinned at the repo root so CI and a developer's machine
+# cannot disagree about what "clean" means.
+#
+# Deliberately a SMALL rule set. A linter that reports two hundred style
+# opinions on a first run gets disabled, and then it catches nothing at
+# all. These are the rules that find actual defects:
+#
+#   E, W  pycodestyle    - real syntax-adjacent problems, not layout taste
+#   F     pyflakes       - undefined names, unused imports, shadowed builtins
+#   B     bugbear        - the things that are legal and wrong
+#
+# isort (I) and pyupgrade (UP) were tried and dropped. Between them they
+# wanted 48 changes across the tree -- import reordering and swapping
+# `timezone.utc` for the `datetime.UTC` alias -- none of which would have
+# caught a defect, all of which would have churned files whose comments
+# carry most of the reasoning in this codebase. Formatting opinions (quote
+# style, trailing commas, hard line-length) are left alone for the same
+# reason.
+
+line-length = 100
+target-version = "py312"
+
+exclude = [
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "*.egg-info",
+]
+
+[lint]
+select = ["E", "W", "F", "B"]
+ignore = [
+    # FastAPI's whole dependency system is `Depends()` in a default
+    # argument, so B008 fires 157 times on correct, idiomatic code. A rule
+    # that is wrong about the framework in use trains people to ignore the
+    # linter.
+    "B008",
+    # Long lines are permitted where they carry a URL, a hash or a SQL
+    # fragment that would be less readable wrapped. line-length still
+    # applies as a guide; E501 as a hard failure is not worth the churn.
+    "E501",
+]
+
+[lint.per-file-ignores]
+# Migrations are executed by Alembic in revision order and share a module
+# shape (revision / down_revision / upgrade / downgrade). The unused
+# `branch_labels` and `depends_on` are part of that contract, not dead code.
+"db/migrations/versions/*.py" = ["F401"]
+# Tests import fixtures and services inside functions on purpose, so a
+# missing optional dependency skips the module rather than breaking
+# collection for the whole suite.
+"apps/api/tests/*.py" = ["E402"]

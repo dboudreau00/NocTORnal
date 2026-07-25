@@ -1004,7 +1004,7 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
 
     drift = nearest * step
     print(f"  MATCH at step offset {nearest:+d} ({drift:+d} s).")
-    print(f"  The secret is CORRECT — the code was generated for")
+    print("  The secret is CORRECT — the code was generated for")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now + drift))}.")
     print()
     if abs(nearest) <= totp.DRIFT_WINDOWS:

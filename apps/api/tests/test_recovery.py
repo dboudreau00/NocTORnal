@@ -11,9 +11,8 @@ oracle for anything.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
-import pytest
 
 from noctornal_api.security import recovery
 from noctornal_api.security.auth import AuthOutcome, AuthService, AuthUser
@@ -117,7 +116,6 @@ def test_a_wrong_password_is_never_rescued_by_a_valid_code(user_store, clock):
 def test_a_locked_account_cannot_be_opened_with_a_recovery_code(user_store, clock):
     """Lockout is about the account, not the factor. A recovery code that
     skipped it would make brute-forcing the password free again."""
-    from dataclasses import replace
     from uuid import uuid4
     password = "correct horse battery"
     codes = recovery.generate_set()
