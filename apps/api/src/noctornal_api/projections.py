@@ -111,6 +111,47 @@ class Subgraph:
         return {n["id"] for n in self.nodes}
 
 
+#: What a case is willing to say about material the reader cannot see.
+#: Migration 0030 has the reasoning; the short version is that an analyst
+#: who cannot tell a sparse network from a censored one draws confident
+#: conclusions from an incomplete picture, and that is a worse failure than
+#: the one bit of disclosure this costs.
+DISCLOSURE_NONE = "NONE"
+DISCLOSURE_PRESENCE = "PRESENCE"
+DISCLOSURE_COUNT = "COUNT"
+
+
+@dataclass(frozen=True)
+class Withheld:
+    """How much of this projection the caller is not being shown.
+
+    Never carries WHICH classification, WHICH compartment, or WHERE. The
+    counts are per case; "a hidden tie adjacent to this person" would
+    localise the withheld material, which is the disclosure that actually
+    matters.
+    """
+
+    mode: str
+    #: True when anything at all was filtered out by clearance. Always
+    #: computed; only REPORTED when the mode allows.
+    any_withheld: bool = False
+    nodes: int | None = None
+    edges: int | None = None
+
+    def as_response(self) -> dict:
+        if self.mode == DISCLOSURE_NONE:
+            # Not "withheld: false" -- that would itself be an answer. The
+            # key is absent, exactly as it was before this existed.
+            return {}
+        if not self.any_withheld:
+            return {"incomplete": False, "mode": self.mode}
+        body = {"incomplete": True, "mode": self.mode}
+        if self.mode == DISCLOSURE_COUNT:
+            body["nodes"] = self.nodes
+            body["edges"] = self.edges
+        return body
+
+
 class GraphService:
     def __init__(self, conn: psycopg.Connection, *, clearance: str,
                  compartments: frozenset[str]):
@@ -214,6 +255,91 @@ class GraphService:
                 for r in rows if r[6] in keep
             ]
         return Subgraph(node_out, edge_out, p.describe(), truncated)
+
+    # -- what the caller is not being shown (docs/14 U2) -------------------
+    def withheld(self, p: Projection) -> Withheld:
+        """Count the elements this projection WOULD contain for a fully
+        cleared reader and does not contain for this one.
+
+        Deliberately a separate call rather than part of `project()`. The
+        graph endpoint wants it once per page; `ego`, `path` and `metrics`
+        all call `project()` internally and would otherwise pay for two
+        extra aggregates each time, to answer a question nobody asked.
+
+        The counts apply every OTHER filter the projection applies -- preset,
+        inferred, confidence, as-of, live provenance, soft deletion. Without
+        that they would be meaningless: "1,990 elements withheld" when 1,988
+        of them were excluded by the preset is not information, it is alarm.
+        """
+        mode = self._disclosure_mode(p.case_id)
+        if mode == DISCLOSURE_NONE:
+            return Withheld(mode)
+
+        hidden_nodes = self._c.execute(
+            """SELECT count(*) FROM core.node n
+                WHERE case_id = %s AND deleted_at IS NULL
+                  AND merged_into_id IS NULL
+                  AND NOT (classification <= %s::core.tlp AND compartments <@ %s)
+                  AND EXISTS (SELECT 1 FROM core.assertion a
+                               WHERE a.node_id = n.id AND a.retracted_at IS NULL)
+                  AND (%s::timestamptz IS NULL
+                       OR (valid_from IS NULL OR valid_from <= %s)
+                       AND (valid_to IS NULL OR valid_to >= %s))""",
+            (p.case_id, self._clearance, self._comp,
+             p.as_of, p.as_of, p.as_of)).fetchone()[0]
+
+        types = p.resolved_edge_types()
+        min_rank = _CONFIDENCE_ORDER[p.min_confidence]
+        keep = sorted(c for c in ("LOW", "MODERATE", "HIGH")
+                      if _CONFIDENCE_ORDER[c] >= min_rank)
+        # An edge is missing from the caller's projection either because of
+        # its OWN labels or because an endpoint is invisible -- and the
+        # second is the commoner one, since a tie is only ever returned when
+        # both ends are. Both count.
+        hidden_edges = self._c.execute(
+            """SELECT count(*) FROM core.edge e
+                 JOIN core.edge_type et ON et.key = e.edge_type
+                WHERE e.case_id = %s AND e.deleted_at IS NULL
+                  AND (%s OR NOT e.is_inferred)
+                  AND (%s::text[] IS NULL AND et.is_social_tie
+                       OR e.edge_type = ANY(%s))
+                  AND e.confidence::text = ANY(%s)
+                  AND EXISTS (SELECT 1 FROM core.assertion a
+                               WHERE a.edge_id = e.id AND a.retracted_at IS NULL)
+                  AND (%s::timestamptz IS NULL
+                       OR (e.valid_from IS NULL OR e.valid_from <= %s)
+                       AND (e.valid_to IS NULL OR e.valid_to >= %s))
+                  AND NOT (
+                        e.classification <= %s::core.tlp
+                    AND e.compartments <@ %s
+                    AND EXISTS (SELECT 1 FROM core.node sn
+                                 WHERE sn.id = e.src_node_id
+                                   AND sn.deleted_at IS NULL
+                                   AND sn.merged_into_id IS NULL
+                                   AND sn.classification <= %s::core.tlp
+                                   AND sn.compartments <@ %s)
+                    AND EXISTS (SELECT 1 FROM core.node dn
+                                 WHERE dn.id = e.dst_node_id
+                                   AND dn.deleted_at IS NULL
+                                   AND dn.merged_into_id IS NULL
+                                   AND dn.classification <= %s::core.tlp
+                                   AND dn.compartments <@ %s))""",
+            (p.case_id, p.include_inferred, types, types, keep,
+             p.as_of, p.as_of, p.as_of,
+             self._clearance, self._comp,
+             self._clearance, self._comp,
+             self._clearance, self._comp)).fetchone()[0]
+
+        return Withheld(mode, any_withheld=bool(hidden_nodes or hidden_edges),
+                        nodes=hidden_nodes, edges=hidden_edges)
+
+    def _disclosure_mode(self, case_id: UUID) -> str:
+        row = self._c.execute(
+            'SELECT withheld_disclosure FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        # A case that has vanished discloses nothing. Failing closed here
+        # costs an analyst a banner; failing open costs a disclosure.
+        return row[0] if row else DISCLOSURE_NONE
 
     # -- neighbourhood -----------------------------------------------------
     def ego(self, p: Projection, centre: UUID, depth: int = 1) -> Subgraph:

@@ -109,6 +109,7 @@ const state = {
           as_of: null },
   projMeta: null,            // the `projection` object the API echoed back
   projTruncated: false,
+  withheld: null,
   gnodes: [],                // projection nodes
   gedges: [],                // projection edges
   nodeConf: new Map(),       // node id -> best confidence of its ties
@@ -657,6 +658,7 @@ async function refreshSociogram() {
   state.gedges = g.edges || [];
   state.projMeta = g.projection || null;
   state.projTruncated = !!g.truncated;
+  state.withheld = g.withheld || null;
   indexProjection();
 
   await refreshMetrics(seq, q);
@@ -872,6 +874,24 @@ function renderReadout() {
     box.appendChild(el('span', 'rd-warn',
       '  │  TRUNCATED at ' + NODE_PAGE + ' nodes — narrow the projection ' +
       'before reading anything off this picture'));
+  }
+  /* docs/14 U2. Without this an analyst cannot tell a sparse network from a
+     censored one, and reads structure off a picture they believe is
+     complete — a broker who looks peripheral because the two ties that make
+     them central are above their clearance is a wrong answer delivered
+     confidently. Never says WHICH classification, WHICH compartment, or
+     WHERE: the count is per case, because "a hidden tie next to this
+     person" would localise the withheld material. */
+  const w = state.withheld;
+  if (w && w.incomplete) {
+    const detail = (w.nodes === undefined)
+      ? 'some of it is above your clearance'
+      : w.nodes + ' entit' + (w.nodes === 1 ? 'y' : 'ies') + ' and ' +
+        w.edges + ' tie' + (w.edges === 1 ? '' : 's') + ' are above your ' +
+        'clearance';
+    box.appendChild(el('span', 'rd-warn',
+      '  │  INCOMPLETE — ' + detail + ' and are not on this canvas. ' +
+      'Structural readings from it are lower bounds.'));
   }
   if (state.proj.include_inferred) {
     box.appendChild(el('span', null,
