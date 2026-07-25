@@ -15,7 +15,7 @@ import os
 os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -301,3 +301,177 @@ def test_the_middleware_is_installed_on_a_default_app():
     client = TestClient(app)
     assert client.get("/x").status_code == 200
     assert client.get("/x").status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the adversarial review pass (2026-07-25)
+#
+# Each is a defect that shipped, was found by a reviewer trying to break the
+# limiter rather than to confirm it, and was reproduced against the running
+# app before being fixed.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def app_with_tiny_blanket_limits():
+    """Both blanket meters shrunk. The credential one alone was what shipped,
+    and what the review broke."""
+    from noctornal_api.http.app import create_app
+    app = create_app()
+    app.state.limiter = _tiny_limiter(
+        request=Limit("request", quota=3, per_seconds=60,
+                      scope=Scope.CREDENTIAL, burst=3),
+        **{"request.source": Limit("request.source", quota=6, per_seconds=60,
+                                   scope=Scope.IP, burst=6)})
+    return app
+
+
+def test_rotating_the_bearer_token_does_not_escape_the_blanket_limit(
+        app_with_tiny_blanket_limits):
+    """THE critical regression.
+
+    The blanket ceiling was keyed only on the presented credential, and
+    nothing validates that a bearer token is a live session, so a fresh
+    random token per request minted a fresh empty bucket per request. The
+    reviewer reproduced it against the real app: with the limit at 3, a
+    fixed token gave 27 refusals in 30 requests and a rotating one gave
+    zero. Worse, because the bearer branch returned early it suppressed the
+    address fallback, so sending one garbage header made a caller strictly
+    LESS limited than sending no credential at all. The control inverted.
+
+    `request.source` is keyed on the peer address, which a caller cannot
+    mint, so a rotating token now only subdivides a budget it cannot leave.
+    """
+    import secrets
+
+    client = TestClient(app_with_tiny_blanket_limits)
+    codes = []
+    for _ in range(30):
+        codes.append(client.get(
+            "/api/v1/no-such-route",
+            headers={"authorization": "Bearer " + secrets.token_hex(16)},
+        ).status_code)
+    assert 429 in codes, "a rotating token must not escape the ceiling"
+    assert codes.count(429) >= 20
+
+
+def test_rotating_the_session_cookie_does_not_escape_it_either(
+        app_with_tiny_blanket_limits):
+    """The cookie branch has the same shape and had the same hole. The
+    review found the bearer path; this one was a line below it."""
+    client = TestClient(app_with_tiny_blanket_limits)
+    codes = []
+    for i in range(30):
+        client.cookies.set("__Host-session", "rotating-" + str(i))
+        codes.append(client.get("/api/v1/no-such-route").status_code)
+    assert 429 in codes
+
+
+def test_x_forwarded_for_is_read_across_repeated_header_lines():
+    """RFC 9110 makes repeated field lines equivalent to one comma-joined
+    value, and HAProxy's `option forwardfor` emits a SEPARATE line by
+    default. Reading only the first line meant `parts[-hops]` indexed a list
+    the client authored in full, with the proxy's own entry sitting unread
+    in the second line -- the whole count-from-the-right defence reading the
+    attacker's value."""
+    os.environ["NOCTORNAL_TRUSTED_PROXY_HOPS"] = "1"
+    try:
+        request = Request({
+            "type": "http", "http_version": "1.1", "method": "GET", "path": "/",
+            # Two separate header lines, as a real proxy emits them.
+            "headers": [(b"x-forwarded-for", b"1.2.3.4"),
+                        (b"x-forwarded-for", b"198.51.100.2")],
+            "query_string": b"", "scheme": "http",
+            "client": ("203.0.113.9", 1234), "server": ("testserver", 80),
+        })
+        assert client_ip(request) == "198.51.100.2", (
+            "the proxy's entry is in the SECOND line; reading only the first "
+            "reads the client's own value")
+    finally:
+        os.environ.pop("NOCTORNAL_TRUSTED_PROXY_HOPS", None)
+
+
+def test_the_middleware_does_not_block_the_event_loop():
+    """`RedisBackend` drives the SYNCHRONOUS redis-py client. Called from an
+    `async def` middleware it would do blocking socket I/O on the loop
+    thread, serialising every request in the process behind one Redis round
+    trip -- and the 250ms socket timeout would cost 250ms of loop time per
+    request before it even raised. That defeats the fail-OPEN policy this
+    limit exists to have: a sick Redis must not become a sick API.
+
+    Asserted by having the backend record which thread it ran on.
+    """
+    import threading
+
+    from noctornal_api.http.app import create_app
+
+    ran_on: list = []
+
+    class ThreadRecordingBackend(InProcessBackend):
+        def measure(self, key, emission_us, tolerance_us):
+            ran_on.append(threading.current_thread().name)
+            return super().measure(key, emission_us, tolerance_us)
+
+    app = create_app()
+    app.state.limiter = RateLimiter(ThreadRecordingBackend(), limits=dict(LIMITS))
+
+    main = threading.current_thread().name
+    TestClient(app).get("/api/v1/no-such-route")
+    assert ran_on, "the blanket limiter did not run at all"
+    assert all(name != main for name in ran_on), (
+        "the blanket limit ran on the event-loop thread; a slow Redis would "
+        "stall every request in the process")
+
+
+def test_a_response_returning_handler_still_advertises_its_own_limit():
+    """FastAPI discards `sub_response` entirely when a handler returns a
+    Response object directly -- which evidence export and download both do.
+    The endpoint's headers vanished, and the blanket middleware then filled
+    the gap with its own ceiling, so the client was not merely told nothing,
+    it was told the wrong number.
+
+    `enforce` now also stashes the decision on `request.state`, and the
+    middleware writes that onto the outgoing response. Reproduced here by
+    calling `enforce` from inside a Response-returning handler, which is
+    exactly the shape FastAPI throws the headers away for.
+    """
+    from fastapi.responses import PlainTextResponse
+
+    from noctornal_api.http.limits import enforce
+
+    app = FastAPI()
+    install_error_handlers(app)
+    install_rate_limit_middleware(app)
+    app.state.limiter = _tiny_limiter(
+        request=Limit("request", quota=500, per_seconds=60,
+                      scope=Scope.CREDENTIAL, burst=500),
+        search=Limit("search", quota=7, per_seconds=60, scope=Scope.CREDENTIAL,
+                     burst=7))
+
+    @app.get("/raw")
+    def raw(request: Request, response: Response) -> PlainTextResponse:
+        enforce(request, response, "search", "u:test")
+        # Returning a Response object: `response` above is now discarded.
+        return PlainTextResponse("bytes")
+
+    result = TestClient(app).get("/raw")
+    assert result.status_code == 200
+    assert result.headers["RateLimit-Limit"] == "7", (
+        "the endpoint's own limit, not the blanket ceiling's 500")
+
+
+def test_a_peek_guard_does_not_advertise_a_meter_the_caller_did_not_spend():
+    """Both login dependencies wrote the same header names, so the peek
+    guard overwrote the attempt limit's numbers and a 200 described a meter
+    the caller never touched."""
+    app = FastAPI()
+    install_error_handlers(app)
+    app.state.limiter = _tiny_limiter(
+        request=Limit("request", quota=11, per_seconds=60,
+                      scope=Scope.CREDENTIAL, burst=11))
+
+    @app.get("/thing", dependencies=[Depends(rate_limit("request"))])
+    def thing() -> dict:
+        return {}
+
+    response = TestClient(app).get("/thing")
+    assert response.headers["RateLimit-Limit"] == "11"

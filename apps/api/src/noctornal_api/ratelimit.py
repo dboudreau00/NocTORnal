@@ -367,6 +367,14 @@ def ip_subject(address: str | None) -> str:
     An address that will not parse is bucketed under a single fixed key
     rather than trusted as distinct, so a malformed value cannot mint
     unlimited subjects.
+
+    **IPv4-mapped addresses are unmapped FIRST**, and getting this wrong is
+    not theoretical: a dual-stack listener reports every IPv4 peer as
+    `::ffff:a.b.c.d`, every one of which has the same /64 (`::/64`). Without
+    the unmapping below, every IPv4 client on such a deployment -- which is
+    the default for uvicorn bound to `::` -- would share ONE login bucket,
+    and the first person to mistype their password would lock out the
+    internet. Found by adversarial review, not by a test.
     """
     if not address:
         return "ip:unknown"
@@ -374,6 +382,10 @@ def ip_subject(address: str | None) -> str:
         parsed = ipaddress.ip_address(address)
     except ValueError:
         return "ip:unparseable"
+    if parsed.version == 6:
+        mapped = parsed.ipv4_mapped
+        if mapped is not None:
+            parsed = mapped
     if parsed.version == 6:
         network = ipaddress.ip_network(f"{parsed}/64", strict=False)
         return "ip6:" + hashed(str(network))
@@ -420,8 +432,15 @@ LIMITS: dict[str, Limit] = {
     # Honest about the gap: both are per-source, so a botnet spreading one
     # guess per address per hour moves neither meter. Nothing here fixes
     # that; the account lockout and password strength do.
+    # The burst is deliberately much smaller than the quota, and that is
+    # the mitigation for a race adversarial review found: the failure meter
+    # is PEEKED before the Argon2id verify and consumed after it, so a
+    # simultaneous burst all read an un-advanced meter and all proceed. The
+    # number of guesses one burst buys is therefore bounded by THIS burst,
+    # not by the failure meter's. 20 concurrent verifies is comfortable for
+    # a shift starting at 09:00 and is not a useful guessing window.
     "auth.login": Limit(
-        "auth.login", quota=120, per_seconds=60, scope=Scope.IP, burst=60,
+        "auth.login", quota=120, per_seconds=60, scope=Scope.IP, burst=20,
         on_backend_failure=OnBackendFailure.DENY, audit_every_seconds=60,
     ),
     "auth.login_failed": Limit(
@@ -479,14 +498,45 @@ LIMITS: dict[str, Limit] = {
         "merge", quota=30, per_seconds=3600, scope=Scope.USER, burst=10,
         on_backend_failure=OnBackendFailure.DENY,
     ),
-    # The blanket ceiling the middleware applies to everything. Keyed on
-    # the presented credential so it needs no database lookup and so an
-    # unauthenticated flood is limited too. ALLOW on backend failure: see
-    # the module docstring -- denying this one turns a Redis restart into
-    # a total outage.
+    # The blanket ceiling is TWO limits, and it has to be.
+    #
+    # `request` is keyed on the presented credential, which needs no
+    # database lookup and fairly subdivides a shared address between the
+    # analysts behind it. On its own it is not a ceiling at all: adversarial
+    # review demonstrated that a caller sending a fresh random
+    # `Authorization: Bearer <hex>` on every request mints a fresh meter
+    # every time and is never limited -- and, worse, that presenting a
+    # garbage token was CHEAPER than presenting none, because the bearer
+    # branch suppressed the address fallback. Sending one extra header made
+    # a caller strictly less limited. The control inverted.
+    #
+    # `request.source` is the fix. It is keyed on the peer address, which a
+    # caller cannot mint, so a rotating token can only SUBDIVIDE a source's
+    # budget and never escape it. Both are checked; the tighter one binds.
+    # Its quota is generous because the customer is a whole unit behind one
+    # egress address -- it exists to bound an unauthenticated flood, not to
+    # ration normal work.
+    #
+    # Both ALLOW on backend failure: see the module docstring. Denying the
+    # blanket ceiling would turn a Redis restart into a total outage.
     "request": Limit(
         "request", quota=600, per_seconds=60, scope=Scope.CREDENTIAL, burst=200,
         on_backend_failure=OnBackendFailure.ALLOW, audit_every_seconds=600,
+    ),
+    "request.source": Limit(
+        "request.source", quota=3000, per_seconds=60, scope=Scope.IP, burst=600,
+        on_backend_failure=OnBackendFailure.ALLOW, audit_every_seconds=600,
+    ),
+    # The sociogram's read paths. `/graph/metrics` computes degree,
+    # clustering and k-core over a materialised projection behind the SAME
+    # `analytics.run` permission the metered suite uses, with no result
+    # cache -- so leaving it unmetered left the analytics door locked and
+    # the window open. It shares `analytics.suite`'s budget deliberately:
+    # two doors onto the same cost with two separate budgets is one budget
+    # that means nothing.
+    "graph.view": Limit(
+        "graph.view", quota=240, per_seconds=60, scope=Scope.USER, burst=80,
+        on_backend_failure=OnBackendFailure.DENY,
     ),
 }
 
@@ -560,6 +610,18 @@ class RateLimiter:
         undeletable writes -- a rate limiter that hands an attacker a
         better denial of service than the one it blocks. One row per
         window records the campaign; the count is in the access log.
+
+        An unreachable backend means DO NOT audit, not "audit everything".
+
+        That looks backwards for a moment and is not. The backend being
+        unreachable is the SAME condition that makes every DENY-policy limit
+        refuse every request -- so a throttle that failed open would, during
+        an outage, turn each of those refusals into a serialised,
+        undeletable append-only write. The outage would author the exact
+        flood the throttle exists to prevent. The outage itself is already
+        logged loudly by `check()`, so nothing goes unrecorded; what is lost
+        is one audit row per subject, during a window in which the audit log
+        is the thing under threat.
         """
         limit = self.limit(name)
         try:
@@ -567,5 +629,9 @@ class RateLimiter:
                 f"{self._prefix}:audit:{name}:{subject}", limit.audit_every_seconds
             )
         except Exception:  # noqa: BLE001 - never fail a request over an audit throttle
-            log.warning("audit throttle unavailable for %s; auditing", name, exc_info=True)
-            return True
+            log.error(
+                "audit throttle unavailable for %s; NOT auditing this denial, "
+                "because an unthrottled audit during a backend outage is a "
+                "worse denial of service than the one being refused",
+                name, exc_info=True)
+            return False

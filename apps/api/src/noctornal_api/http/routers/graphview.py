@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
 from noctornal_api.http.errors import Problem
@@ -22,6 +22,8 @@ from noctornal_api.projections import (
     Projection,
     ProjectionError,
 )
+
+from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}/graph", tags=["graph-view"])
 
@@ -59,7 +61,8 @@ def presets(
     }
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
 def projected_graph(
     case_id: UUID,
     preset: str = Query("all"),
@@ -85,7 +88,8 @@ def projected_graph(
     }
 
 
-@router.get("/ego/{node_id}", response_model=dict)
+@router.get("/ego/{node_id}", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
 def ego(
     case_id: UUID, node_id: UUID,
     depth: int = Query(1, ge=1, le=4),
@@ -112,7 +116,8 @@ def ego(
     }
 
 
-@router.get("/path", response_model=dict)
+@router.get("/path", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
 def path(
     case_id: UUID,
     src: UUID = Query(...),
@@ -137,7 +142,12 @@ def path(
             "connected": bool(found)}
 
 
-@router.get("/metrics", response_model=dict)
+# Adversarial review found this unmetered while `analytics.suite` was
+# metered: same `analytics.run` permission, comparable work, and no
+# result cache -- the analytics door was locked and this window was open.
+# It shares the suite's budget deliberately.
+@router.get("/metrics", response_model=dict,
+            dependencies=[Depends(rate_limit("analytics.suite"))])
 def metrics(
     case_id: UUID,
     preset: str = Query("all"),
@@ -167,7 +177,12 @@ class LayoutPosition(BaseModel):
 
 
 class LayoutBody(BaseModel):
-    positions: list[LayoutPosition]
+    # Bounded. An unbounded list meant one request could pin megabytes of
+    # JSON in memory and drive an unbounded loop of INSERTs, all behind a
+    # permission an ordinary analyst holds. 20k is far above the largest
+    # case this tool is built for (docs/03 bands stop at 5k nodes) and far
+    # below anything that hurts.
+    positions: list[LayoutPosition] = Field(max_length=20_000)
 
 
 def _layout_projection_id(conn: psycopg.Connection, case_id: UUID,
@@ -213,7 +228,8 @@ def get_layout(
             for r in rows]
 
 
-@router.put("/layout", status_code=204)
+@router.put("/layout", status_code=204,
+            dependencies=[Depends(rate_limit("graph.view"))])
 def save_layout(
     case_id: UUID, body: LayoutBody,
     user: CurrentUser = Depends(require("graph.node.update")),
