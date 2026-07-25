@@ -25,6 +25,7 @@ from noctornal_api.http.deps import (
     get_conn,
 )
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import consume_on_failure, rate_limit, rate_limit_peek
 from noctornal_api.security.auth import AuthService
 from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
 from noctornal_api.stores import PgSessionStore, PgUserStore
@@ -59,13 +60,35 @@ def _audit(conn, action: str, actor_id, detail: dict, request: Request) -> None:
     )
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse,
+             dependencies=[Depends(rate_limit("auth.login")),
+                           Depends(rate_limit_peek("auth.login_failed"))])
 def login(body: LoginBody, request: Request, response: Response,
           conn: psycopg.Connection = Depends(get_conn)) -> LoginResponse:
+    """Metered twice, both IP-scoped, and both checked before the Argon2id
+    verify.
+
+    The order is the point: password hashing is deliberately expensive, so
+    an unlimited login endpoint is a CPU amplifier — one cheap HTTP request
+    buys ~100ms of server work. `auth.login` caps that draw per source.
+
+    `auth.login_failed` is the anti-guessing control, and it is PEEKED
+    here and consumed below only when authentication actually fails. That
+    asymmetry is what lets an IP-scoped control coexist with the customer
+    for this product: two hundred analysts behind one corporate egress
+    address, all signing on within ten minutes of 09:00, never move the
+    failure meter at all. A password sprayer moves nothing else.
+
+    Neither is email-scoped: anyone can send a given address, so an
+    email-keyed limit would be a remotely triggerable lockout of a named
+    analyst. Targeted guessing against one account is the (decaying)
+    account lockout's job.
+    """
     result = AuthService(PgUserStore(conn)).authenticate(
         body.email, body.password, body.totp_code
     )
     if not result.ok:
+        consume_on_failure(request, "auth.login_failed")
         # The specific cause is audited server-side and NEVER returned —
         # a distinct response would confirm which factor was right.
         _audit(conn, "AUTH_FAILED", result.user_id,
@@ -125,7 +148,8 @@ class RecoveryCodesOut(BaseModel):
     note: str
 
 
-@router.post("/recovery-codes", response_model=RecoveryCodesOut)
+@router.post("/recovery-codes", response_model=RecoveryCodesOut,
+             dependencies=[Depends(rate_limit("auth.recovery_codes"))])
 def issue_recovery_codes(
     request: Request,
     user: CurrentUser = Depends(current_user),

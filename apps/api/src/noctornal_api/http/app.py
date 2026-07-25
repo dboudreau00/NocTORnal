@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from noctornal_api import __version__
 from noctornal_api.http.errors import install_error_handlers, problem_response
+from noctornal_api.http.limits import build_limiter, install_rate_limit_middleware
 from noctornal_api.http.routers import (
     analytics,
     auth,
@@ -98,6 +99,19 @@ def create_app() -> FastAPI:
             for e in exc.errors()
         ]
         return problem_response(422, "Validation failed", "; ".join(parts))
+
+    # The limiter belongs to THIS app, not to the module: two apps in one
+    # test process must not share meters, or one test's burst fails the
+    # next test's first request.
+    app.state.limiter = build_limiter()
+
+    # Registered BEFORE _headers, which makes _headers the outer wrapper.
+    # Order matters for a reason that is easy to get backwards: the last
+    # middleware registered runs first, so registering the limiter last
+    # would let a 429 return without ever passing through the security
+    # headers. A refusal is exactly the response an attacker sees most of,
+    # and it should not be the one served without nosniff and a CSP.
+    install_rate_limit_middleware(app)
 
     @app.middleware("http")
     async def _headers(request: Request, call_next):

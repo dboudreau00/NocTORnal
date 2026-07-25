@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from noctornal_api.curation import SearchService
 from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
+from noctornal_api.http.limits import rate_limit
 from noctornal_api.selectors import SelectorStore
 
 router = APIRouter(prefix="/cases/{case_id}", tags=["search"])
@@ -22,7 +23,11 @@ class HitOut(BaseModel):
     rank: float
 
 
-@router.get("/search/nodes", response_model=list[HitOut])
+# docs/05: "hard limits on export and search". Search is the shape a
+# bulk-read of a case file takes, so the limit is about what leaves as much
+# as about what the server spends.
+@router.get("/search/nodes", response_model=list[HitOut],
+            dependencies=[Depends(rate_limit("search"))])
 def search_nodes(
     case_id: UUID,
     q: str = Query(..., min_length=1),
@@ -38,7 +43,8 @@ def search_nodes(
     return [HitOut(id=str(h.id), label=h.label, rank=h.rank) for h in hits]
 
 
-@router.get("/search/evidence", response_model=list[HitOut])
+@router.get("/search/evidence", response_model=list[HitOut],
+            dependencies=[Depends(rate_limit("search"))])
 def search_evidence(
     case_id: UUID,
     q: str = Query(..., min_length=1),

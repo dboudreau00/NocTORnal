@@ -31,12 +31,23 @@ def conn():
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'e2e-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
+    psub = f"(SELECT id FROM analytics.projection WHERE case_id IN {csub})"
+    rsub = f"(SELECT id FROM analytics.metric_run WHERE projection_id IN {psub})"
     with c.transaction():
         c.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
         c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.selector WHERE case_id IN {csub}")
+        # An analytics run materialises a projection and its metrics, both of
+        # which reference the case. They are cleaned up here rather than by a
+        # cascade because a cascading delete on `case` is exactly what
+        # invariant 6 and the retention design forbid in production.
+        c.execute(f"DELETE FROM analytics.node_metric WHERE metric_run_id IN {rsub}")
+        c.execute(f"DELETE FROM analytics.community_assignment WHERE metric_run_id IN {rsub}")
+        c.execute(f"DELETE FROM analytics.metric_run WHERE projection_id IN {psub}")
+        c.execute(f"DELETE FROM analytics.layout_position WHERE projection_id IN {psub}")
+        c.execute(f"DELETE FROM analytics.projection WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
@@ -49,11 +60,32 @@ def conn():
     c.close()
 
 
+def _isolated_limiter(**overrides):
+    """A rate limiter this test alone owns.
+
+    The default limiter is backed by Redis when REDIS_URL is set, and Redis
+    is shared, persistent and blind to test boundaries -- so one test's
+    logins would spend the next test's budget and the suite would pass or
+    fail depending on the order it ran in. A flaky security test is a
+    deleted security test. The Redis path has its own proof in
+    test_ratelimit_redis.py; what the e2e suite proves is the wiring.
+
+    Pass overrides to shrink a limit so a test can reach it in three
+    requests rather than a hundred.
+    """
+    from noctornal_api.ratelimit import LIMITS, InProcessBackend, RateLimiter
+    catalogue = dict(LIMITS)
+    catalogue.update(overrides)
+    return RateLimiter(InProcessBackend(), limits=catalogue)
+
+
 @pytest.fixture
 def client():
     from fastapi.testclient import TestClient
     from noctornal_api.http.app import create_app
-    return TestClient(create_app())
+    app = create_app()
+    app.state.limiter = _isolated_limiter()
+    return TestClient(app)
 
 
 def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
@@ -607,3 +639,180 @@ def test_red_evidence_export_refused(conn, client):
                           headers=_auth(token))
     assert refused.status_code == 400
     assert "invariant 8" in refused.text
+
+
+# --- rate limiting ------------------------------------------------------
+
+def _limited(app, **overrides):
+    """Point a live app at a shrunk catalogue."""
+    app.state.limiter = _isolated_limiter(**overrides)
+    return app
+
+
+def _tiny(name, **kwargs):
+    from noctornal_api.ratelimit import LIMITS, Limit
+    base = LIMITS[name]
+    fields = {"name": name, "quota": base.quota, "per_seconds": base.per_seconds,
+              "scope": base.scope, "burst": base.effective_burst,
+              "on_backend_failure": base.on_backend_failure}
+    fields.update(kwargs)
+    return Limit(**fields)
+
+
+def test_login_failures_are_rate_limited_by_source(conn, client):
+    """The anti-spraying brake. IP-scoped and cheap to trip on failures, so
+    it survives the attacker cycling the email — and deliberately NOT
+    email-scoped, which would let anyone lock a named analyst out just by
+    sending their address.
+
+    The refusal must carry Retry-After: a 429 that does not say when to
+    come back makes a compliant client indistinguishable from a hammering
+    one.
+    """
+    _limited(client.app, **{
+        "auth.login_failed": _tiny("auth.login_failed", quota=3, per_seconds=300,
+                                   burst=3)})
+    codes = []
+    for i in range(8):
+        r = client.post("/api/v1/auth/login", json={
+            # A different email every time: the meter is on the SOURCE.
+            "email": f"spray-{i}@noctornal.test", "password": "wrong",
+            "totp_code": "000000",
+        })
+        codes.append(r.status_code)
+        if r.status_code == 429:
+            assert int(r.headers["Retry-After"]) >= 1
+            assert r.headers["content-type"].startswith("application/problem+json")
+    assert codes[0] == 401, "the first attempts must reach the authenticator"
+    assert 429 in codes, "an unlimited login endpoint is a CPU amplifier"
+
+
+def _seed_small_graph(client, token, case_id) -> None:
+    """Three actors and two ties. Analytics over an EMPTY case is a 422
+    ("cannot compute"), which is correct behaviour and useless as a
+    baseline for a rate-limit test."""
+    ids = []
+    for label in ("alpha", "bravo", "charlie"):
+        r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
+            "node_type": "IDENTITY", "label": label,
+            "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "B",
+                          "credibility": "2"},
+        })
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+    for src, dst in ((0, 1), (1, 2)):
+        r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token), json={
+            "edge_type": "VOUCHED_FOR", "src_node_id": ids[src],
+            "dst_node_id": ids[dst],
+            "assertion": {"basis": "DIRECT_OBSERVATION", "rationale": "vouched"},
+        })
+        assert r.status_code == 201, r.text
+
+
+def test_a_successful_login_does_not_move_the_failure_meter(conn, client):
+    """The property that makes an IP-scoped login control usable at all.
+
+    The customer is an organisation behind ONE egress address: two hundred
+    analysts signing on within ten minutes of 09:00 look, to any per-IP
+    counter, exactly like an attack. Metering failures instead of attempts
+    is what separates them — a building full of correct passwords moves
+    nothing, and a sprayer produces nothing else.
+
+    The failure budget here is exactly ONE. A success is spent first; if it
+    consumed the failure meter, the very next bad password would already be
+    429 instead of reaching the authenticator.
+
+    (One success, not several: TOTP codes are single-use by design — the
+    counter advance is a compare-and-set that rejects a replay — so a loop
+    of logins inside one 30-second step is not a thing this system permits.)
+    """
+    _limited(client.app, **{
+        "auth.login_failed": _tiny("auth.login_failed", quota=1, per_seconds=300,
+                                   burst=1)})
+    _, email, secret = _make_user(conn)
+    _login(client, email, secret)  # asserts 200 internally
+
+    bad = {"email": email, "password": "wrong", "totp_code": "000000"}
+    assert client.post("/api/v1/auth/login", json=bad).status_code == 401,         "the success must not have spent the failure budget"
+    assert client.post("/api/v1/auth/login", json=bad).status_code == 429,         "but the failure must have"
+
+
+def test_the_rate_limit_denial_is_audited_once_not_once_per_request(conn, client):
+    """audit.event is append-only and hash-chained, and the chain trigger
+    takes an advisory lock so rows serialise. Auditing every denial would
+    let a caller who is ALREADY being throttled convert rejected requests
+    into unbounded, undeletable, serialised writes — handing an attacker a
+    better denial of service than the one being blocked. One row per window
+    records the campaign; the count lives in the access log.
+    """
+    _limited(client.app, **{
+        "auth.login_failed": _tiny("auth.login_failed", quota=2, per_seconds=300,
+                                   burst=2)})
+    before = conn.execute(
+        "SELECT count(*) FROM audit.event WHERE action = 'RATE_LIMIT_EXCEEDED'"
+    ).fetchone()[0]
+    for i in range(25):
+        client.post("/api/v1/auth/login", json={
+            "email": f"flood-{i}@noctornal.test", "password": "wrong",
+            "totp_code": "000000"})
+    after = conn.execute(
+        "SELECT count(*) FROM audit.event WHERE action = 'RATE_LIMIT_EXCEEDED'"
+    ).fetchone()[0]
+    assert after > before, "a spraying campaign must leave a trace"
+    assert after - before == 1, "and exactly one, not one per rejected request"
+
+
+def test_analytics_is_rate_limited_per_user(conn, client):
+    """decision 30 accepted a CPU-bound path behind a non-step-up
+    permission as a known DoS surface, pending exactly this."""
+    _limited(client.app, **{
+        "analytics.suite": _tiny("analytics.suite", quota=3, per_seconds=300,
+                                 burst=3)})
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    _seed_small_graph(client, token, case_id)
+    codes = [client.get(f"/api/v1/cases/{case_id}/analytics",
+                        headers=_auth(token)).status_code for _ in range(5)]
+    assert codes[:3] == [200, 200, 200]
+    assert codes[3:] == [429, 429]
+
+
+def test_one_analysts_flood_does_not_lock_out_another(conn, client):
+    """Per-USER metering, asserted rather than assumed. Address-scoping this
+    would meter a whole police force behind one NAT as a single caller, so
+    one analyst's scripted loop would take the team offline."""
+    _limited(client.app, **{
+        "analytics.suite": _tiny("analytics.suite", quota=2, per_seconds=300,
+                                 burst=2)})
+    _, email_a, secret_a = _make_user(conn, clearance="RED",
+                                      global_roles=("CASE_OWNER",))
+    _, email_b, secret_b = _make_user(conn, clearance="RED",
+                                      global_roles=("CASE_OWNER",))
+    token_a = _login(client, email_a, secret_a)
+    case_a = _create_case(client, token_a)
+    _seed_small_graph(client, token_a, case_a)
+    for _ in range(4):
+        client.get(f"/api/v1/cases/{case_a}/analytics", headers=_auth(token_a))
+    assert client.get(f"/api/v1/cases/{case_a}/analytics",
+                      headers=_auth(token_a)).status_code == 429
+
+    token_b = _login(client, email_b, secret_b)
+    case_b = _create_case(client, token_b)
+    _seed_small_graph(client, token_b, case_b)
+    assert client.get(f"/api/v1/cases/{case_b}/analytics",
+                      headers=_auth(token_b)).status_code == 200
+
+
+def test_successful_responses_carry_the_limit_headers(conn, client):
+    """A client that can only discover the limit by hitting it will hit
+    it."""
+    from noctornal_api.ratelimit import LIMITS
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    _seed_small_graph(client, token, case_id)
+    r = client.get(f"/api/v1/cases/{case_id}/analytics", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert r.headers["RateLimit-Limit"] == str(LIMITS["analytics.suite"].quota)
+    assert int(r.headers["RateLimit-Remaining"]) < LIMITS["analytics.suite"].quota

@@ -364,6 +364,10 @@ Write-Step 'Setting the service connection details'
 # or Vault instead.
 $defaults = [ordered]@{
     DATABASE_URL     = 'postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal'
+    # Rate limiting. Unset, the limiter falls back to per-process metering
+    # and warns; set, the meter is shared and a second uvicorn worker does
+    # not double every limit.
+    REDIS_URL        = 'redis://localhost:6379/0'
     MINIO_ENDPOINT   = 'localhost:9000'
     MINIO_ACCESS_KEY = 'noctornal'
     MINIO_SECRET_KEY = 'dev_only_change_me'

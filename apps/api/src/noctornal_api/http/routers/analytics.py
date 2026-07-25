@@ -22,6 +22,7 @@ from noctornal_api.analytics import (
 from noctornal_api.analytics_runs import AnalyticsRunService
 from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import rate_limit
 from noctornal_api.projections import PRESETS, Projection, ProjectionError
 
 router = APIRouter(prefix="/cases/{case_id}/analytics", tags=["analytics"])
@@ -61,7 +62,8 @@ def _params(decay_half_life_months: float | None,
                            leiden_resolution=leiden_resolution)
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=dict,
+            dependencies=[Depends(rate_limit("analytics.suite"))])
 def suite(
     case_id: UUID,
     preset: str = Query("all"),
@@ -93,7 +95,8 @@ def suite(
         raise Problem(422, "Cannot compute", str(exc)) from exc
 
 
-@router.get("/key-player", response_model=dict)
+@router.get("/key-player", response_model=dict,
+            dependencies=[Depends(rate_limit("analytics.key_player"))])
 def key_player(
     case_id: UUID,
     n: int = Query(3, ge=1, le=KPP_MAX_REMOVE,

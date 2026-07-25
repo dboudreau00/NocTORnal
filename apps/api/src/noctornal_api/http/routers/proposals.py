@@ -31,6 +31,7 @@ from noctornal_api.http.deps import (
     require,
 )
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import rate_limit
 from noctornal_api.proposals import (
     STATE_PROPOSED,
     ProposalError,
@@ -97,7 +98,12 @@ class CaptureBody(BaseModel):
     classification: str = "AMBER"
 
 
-@router.post("/capture", response_model=dict, status_code=201)
+# A capture loop floods the triage queue. That is an attack on the
+# analyst's attention rather than on the server, and it is the more
+# effective of the two: a queue with ten thousand junk proposals in it is a
+# queue nobody works.
+@router.post("/capture", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("capture"))])
 def capture(
     case_id: UUID, body: CaptureBody,
     user: CurrentUser = Depends(require("evidence.upload")),

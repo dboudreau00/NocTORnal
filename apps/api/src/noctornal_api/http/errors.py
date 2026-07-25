@@ -32,21 +32,27 @@ log = logging.getLogger("noctornal.api")
 
 class Problem(Exception):
     def __init__(self, status: int, title: str, detail: str | None = None,
-                 type_: str = "about:blank"):
+                 type_: str = "about:blank", headers: dict[str, str] | None = None):
         self.status = status
         self.title = title
         self.detail = detail
         self.type = type_
+        # Some refusals are only actionable with a header: a 429 without
+        # Retry-After tells a client it is limited but not for how long, so
+        # a well-behaved client and a hammering one behave identically.
+        self.headers = headers or {}
         super().__init__(detail or title)
 
 
 def problem_response(status: int, title: str, detail: str | None = None,
-                     type_: str = "about:blank") -> JSONResponse:
+                     type_: str = "about:blank",
+                     headers: dict[str, str] | None = None) -> JSONResponse:
     body = {"type": type_, "title": title, "status": status}
     if detail:
         body["detail"] = detail
     return JSONResponse(status_code=status, content=body,
-                        media_type="application/problem+json")
+                        media_type="application/problem+json",
+                        headers=headers or None)
 
 
 # SQLSTATE / constraint → analyst-facing text. Anything unmatched becomes a
@@ -104,7 +110,8 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(Problem)
     async def _problem(_: Request, exc: Problem):
-        return problem_response(exc.status, exc.title, exc.detail, exc.type)
+        return problem_response(exc.status, exc.title, exc.detail, exc.type,
+                                exc.headers)
 
     @app.exception_handler(SelectorOwnerConflict)
     async def _conflict(_: Request, exc: Exception):

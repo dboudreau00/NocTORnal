@@ -25,6 +25,7 @@ from noctornal_api.http.deps import (
     require,
 )
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"])
 
@@ -64,7 +65,12 @@ class IngestOut(BaseModel):
     deduplicated: bool
 
 
-@router.post("", response_model=IngestOut, status_code=201)
+# Every ingest writes to object-locked WORM storage. Those bytes cannot be
+# deleted before their retention expires, so an upload loop is a permanent
+# storage commitment nobody can undo — a limit here is about cost that
+# cannot be reclaimed, not about CPU.
+@router.post("", response_model=IngestOut, status_code=201,
+             dependencies=[Depends(rate_limit("evidence.ingest"))])
 async def upload(
     case_id: UUID,
     file: UploadFile = File(...),
@@ -110,7 +116,8 @@ def download(
     )
 
 
-@router.post("/{evidence_id}/export")
+@router.post("/{evidence_id}/export",
+             dependencies=[Depends(rate_limit("evidence.export"))])
 def export(
     case_id: UUID, evidence_id: UUID,
     user: CurrentUser = Depends(current_user),
