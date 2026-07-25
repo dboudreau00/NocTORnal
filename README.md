@@ -25,6 +25,7 @@ forums and channels.
 | [docs/08-governance.md](docs/08-governance.md) | TLP, retention, tradecraft, defensibility | |
 | [docs/09-roadmap.md](docs/09-roadmap.md) | Twelve weeks, phased, with Claude Code prompt shapes | |
 | **[docs/13-differentiators.md](docs/13-differentiators.md)** | **Every edge over the market, tiered by payoff vs cost** | **Start here if you want the pitch** |
+| **[docs/14-enhancement-map.md](docs/14-enhancement-map.md)** | **What the first real session revealed, and what to build next, by payoff** | **Read after using it** |
 | [db/schema.sql](db/schema.sql) | Full DDL — the densest artefact here | |
 | [db/seed_ontology.sql](db/seed_ontology.sql) | Node, edge and selector vocabularies | |
 
