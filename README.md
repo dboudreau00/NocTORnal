@@ -123,7 +123,8 @@ and [docs/00-decisions.md](docs/00-decisions.md).
 
 ## State of the build
 
-Phases 0, 1, 2 and 3 are implemented and running, not just designed:
+Phases 0-3 are complete; Phases 4, 5 and 6 are partially built. All of it
+runs, not just designed:
 
 - Postgres schema owned by an Alembic chain (0001–0026) that round-trips
   from base to head; the ontology is generated from one definition.
@@ -147,15 +148,21 @@ Phases 0, 1, 2 and 3 are implemented and running, not just designed:
   truncation flagged, and trust decay applied at projection time without
   ever mutating a stored weight.
 
-Plus, from the enhancement map and the first slices of Phases 4 and 5:
+The loop an analyst can run today: **paste text -> selectors extracted
+with offsets -> proposals -> keyboard triage -> graph -> structural
+analysis -> retract a source and watch the network dissolve.**
+
+Plus, from the enhancement map and the first slices of Phases 4, 5 and 6:
 evidence attachable at the moment a claim is made with unevidenced elements
 drawn hollow, retraction that visibly dissolves an element from the live
 graph, single-use recovery codes, ForceAtlas2 with Barnes-Hut in a worker,
 the one destination-aware TLP egress gate every outbound path shares, and
 the proposal pipeline that makes "machines propose, analysts dispose"
-structural rather than aspirational.
+structural rather than aspirational, manual capture with a keyboard-driven
+triage queue, and reversible entity merge backed by a ledger of every
+re-pointed edge.
 
-376 tests cover it, the Postgres and MinIO legs env-gated.
+421 tests cover it, the Postgres and MinIO legs env-gated.
 
 The key-player result is the sharpest thing here, because it disagrees with
 the obvious answer. On the shipped demo network, removing the three actors

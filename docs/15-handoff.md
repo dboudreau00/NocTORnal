@@ -5,8 +5,10 @@ after Phases 0–2 shipped; **updated 2026-07-25 after Phase 3 shipped**. Read
 this, then `CLAUDE.md`, then `docs/14-enhancement-map.md`. What to do next is
 at the bottom.
 
-> **Phase 3 is done, plus the E-items, the layout worker, the Phase 5
-> egress gate and the Phase 4 proposal pipeline.** 376 tests pass. See the
+> **Phases 0-3 complete; Phases 4, 5 and 6 partially built.** 421 tests
+> pass. The loop an analyst can now actually run: paste text -> selectors
+> extracted with offsets -> proposals -> keyboard triage -> graph ->
+> structural analysis -> retract a source and watch it dissolve. See the
 > "What was built after Phase 3" section below for the second batch.
 >
 > **Phase 3 proper.** `apps/api/src/noctornal_api/analytics.py` (the maths,
@@ -282,19 +284,59 @@ shape: the extractor-facing class holds no `GraphWriteService` and cannot
 reach the graph. Accepting goes through `GraphWriteService`, so the
 assertion is atomic and an accepted edge is born inferred.
 
-### Honest gaps in that batch
+### Third batch (same day): capture, triage, merge
 
-- **Nothing extracts yet**, so nothing writes proposals outside tests. The
-  pipeline is real; the thing that would feed it is not.
-- **The triage queue has endpoints but no interface.** Four routes, tested,
-  rendered nowhere.
-- **No adapters, no persona vault, no document bucket** -- the rest of
-  Phase 4 is untouched.
-- **Phase 5 has only the gate.** No SMTP, no Jira, no webhooks, no
-  notification centre.
-- **Phases 6, 7, 8, 9 are untouched.** Phase 7 is decided
-  (message-level capture, decision 35); Phase 8 is BLOCKED on the
-  prohibited-content policy (decision 36, and the README warning).
+**Manual capture and triage (Phase 4, decision 40).** The proposal
+pipeline had no producer and no interface, so invariant 3 was still a
+claim about the schema. `extraction.py` lands pasted text as a
+`collect.document` deduped on content hash, runs regexes that write
+`collect.extraction` rows WITH character offsets, and raises one proposal
+per new value carrying the matched span and the sentence around it. The
+Triage tab is keyboard driven (J/K to move, A/R/D to dispose) because
+docs/09 wants triage to be "a pleasant hour rather than a grim one".
+
+The extractor earns its keep by what it REFUSES: `build 10.2.14.3` is not
+an IPv4, a 64-hex string is not also a SHA-1 and an MD5, an email is not
+also a bare domain, an invalid-length `.onion` is not an onion, and
+ordinary English yields nothing. Those are most of its tests, because a
+bad extractor does not fail loudly -- it fills the queue with plausible
+junk until an analyst stops reading it. It proposes SELECTOR nodes only,
+never PERSON: attribution is an assessment a human makes (invariant 2).
+
+**Entity merge (Phase 6, decision 41, Alembic 0027).** A ledger, not a
+flag. Re-pointing an edge destroys the original fact, so `core.node_merge`
++ `node_merge_edge` record every moved endpoint and reversal is a restore
+rather than a re-derivation. IDENTITY may never merge into PERSON --
+that is an ATTRIBUTED_TO edge carrying a confidence, and collapsing the
+gap destroys what the model exists to preserve. Step-up gated.
+
+**Sociogram resize.** Two real defects found from use: the view never
+recentred on resize (so maximising just added margin), and below ~900px
+the canvas collapsed to ZERO height and the graph vanished while its
+controls stayed on screen. Both fixed; the view holds whatever world point
+was centred rather than re-fitting, because docs/03 says reshuffling
+destroys the spatial memory analysts build.
+
+### Honest gaps across all of it
+
+- **No adapters, no scheduler, no persona vault.** Capture is manual, which
+  is deliberate (docs/14 C2) and means none of the persona-management risk
+  exists yet -- but it also means nothing collects on its own.
+- **The document bucket is normalise + dedupe only.** No versioning, no
+  indexing, no embeddings, no watch matching, no parser health checks.
+- **Phase 5 has only the egress gate.** No SMTP, no Jira, no webhooks, no
+  notification centre, no digest or quiet hours.
+- **Phase 6 has only merge.** No ACH matrix, no report builder, no
+  retention/purge jobs, no WebAuthn, no break-glass. Merge itself lacks
+  DUAL CONTROL -- one cleared analyst with a fresh second factor can merge
+  alone -- and the case-owner notification docs/01 asks for is Phase 5.
+- **Phases 7, 8, 9 untouched.** Phase 7 is decided (message-level capture,
+  decision 35); Phase 8 is BLOCKED on the prohibited-content policy
+  (decision 36, and the warning at the top of the README).
+- **Still no CI**, and the deferred security items (rate limiting, session
+  IP/UA binding, non-owner DB role, compartment registry) are unchanged.
+- **Analytics still run in-process** (decision 30). Fine at this scale,
+  and a DoS surface for an authenticated analyst until rate limiting lands.
 
 ## What to do next
 
