@@ -23,6 +23,7 @@ from noctornal_api.http.errors import install_error_handlers, problem_response
 from noctornal_api.http.limits import build_limiter, install_rate_limit_middleware
 from noctornal_api.http.routers import (
     analytics,
+    approvals,
     auth,
     cases,
     evidence,
@@ -133,7 +134,8 @@ def create_app() -> FastAPI:
     for router in (auth.router, cases.router, graph.router,
                    evidence.router, search.router, read.router,
                    graphview.router, analytics.router,
-                   proposals.router, merges.router):
+                   proposals.router, merges.router,
+                   approvals.router, approvals.policy_router):
         app.include_router(router, prefix=API_PREFIX)
 
     # The analyst UI: plain HTML/CSS/JS, no build step, same origin as the

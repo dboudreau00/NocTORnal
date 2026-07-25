@@ -39,6 +39,10 @@ def conn():
         c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.selector WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.approval_request WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.node_merge_edge WHERE merge_id IN "
+                  f"(SELECT id FROM core.node_merge WHERE case_id IN {csub})")
+        c.execute(f"DELETE FROM core.node_merge WHERE case_id IN {csub}")
         # An analytics run materialises a projection and its metrics, both of
         # which reference the case. They are cleaned up here rather than by a
         # cascade because a cascading delete on `case` is exactly what
@@ -816,3 +820,294 @@ def test_successful_responses_carry_the_limit_headers(conn, client):
     assert r.status_code == 200, r.text
     assert r.headers["RateLimit-Limit"] == str(LIMITS["analytics.suite"].quota)
     assert int(r.headers["RateLimit-Remaining"]) < LIMITS["analytics.suite"].quota
+
+
+# --- dual control on merge ----------------------------------------------
+
+def _two_identities(client, token, case_id) -> tuple[str, str]:
+    ids = []
+    for label in (f"shadowbroker-{uuid4().hex[:6]}", f"shadow_broker-{uuid4().hex[:6]}"):
+        r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
+            "node_type": "IDENTITY", "label": label,
+            "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "B",
+                          "credibility": "2"},
+        })
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+    return ids[0], ids[1]
+
+
+def _set_dual_control(client, token, case_id, on: bool) -> None:
+    r = client.put(f"/api/v1/cases/{case_id}/policy", headers=_auth(token),
+                   json={"dual_control_merge": on})
+    assert r.status_code == 200, r.text
+    assert r.json()["dual_control_merge"] is on
+
+
+def _assign(conn, case_id, user_id, granted_by) -> None:
+    conn.execute(
+        """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
+           VALUES (%s, %s, 'ANALYST', %s)""", (case_id, user_id, granted_by))
+
+
+def test_dual_control_is_off_by_default_so_a_merge_still_works(conn, client):
+    """docs/05 scopes dual control to "the genuinely irreversible", and a
+    merge here is a ledger with an exact restore. Entity resolution is the
+    daily work of this tool; a second signature on every merge is a control
+    that gets switched off in week two."""
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    src, dst = _two_identities(client, token, case_id)
+
+    assert client.get(f"/api/v1/cases/{case_id}/policy",
+                      headers=_auth(token)).json()["dual_control_merge"] is False
+    r = client.post(f"/api/v1/cases/{case_id}/merges", headers=_auth(token), json={
+        "source_node_id": src, "target_node_id": dst,
+        "reason": "same PGP fingerprint"})
+    assert r.status_code == 201, r.text
+
+
+def test_with_dual_control_on_a_lone_analyst_cannot_merge(conn, client):
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    src, dst = _two_identities(client, token, case_id)
+    _set_dual_control(client, token, case_id, True)
+
+    lone = client.post(f"/api/v1/cases/{case_id}/merges", headers=_auth(token), json={
+        "source_node_id": src, "target_node_id": dst, "reason": "a hunch"})
+    assert lone.status_code == 409
+    assert "approval" in lone.text.lower()
+
+
+def test_you_cannot_approve_your_own_request(conn, client):
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    src, dst = _two_identities(client, token, case_id)
+    _set_dual_control(client, token, case_id, True)
+
+    req = client.post(f"/api/v1/cases/{case_id}/approvals", headers=_auth(token), json={
+        "operation": "node.merge",
+        "payload": {"source_node_id": src, "target_node_id": dst,
+                    "reason": "same PGP fingerprint", "basis_selector_id": None},
+        "justification": "identical fingerprints on both profiles"})
+    assert req.status_code == 201, req.text
+
+    mine = client.post(
+        f"/api/v1/cases/{case_id}/approvals/{req.json()['id']}/decide",
+        headers=_auth(token), json={"approve": True})
+    assert mine.status_code == 409
+    assert "two distinct humans" in mine.text
+
+
+def test_the_full_two_analyst_merge(conn, client):
+    """The whole point, end to end: A raises, B approves, A merges."""
+    uid_a, email_a, secret_a = _make_user(conn, clearance="RED",
+                                          global_roles=("CASE_OWNER",))
+    uid_b, email_b, secret_b = _make_user(conn, clearance="RED")
+    token_a = _login(client, email_a, secret_a)
+    case_id = _create_case(client, token_a)
+    src, dst = _two_identities(client, token_a, case_id)
+    _set_dual_control(client, token_a, case_id, True)
+
+    _assign(conn, case_id, uid_b, uid_a)
+    token_b = _login(client, email_b, secret_b)
+
+    payload = {"source_node_id": src, "target_node_id": dst,
+               "reason": "same PGP fingerprint", "basis_selector_id": None}
+    req = client.post(f"/api/v1/cases/{case_id}/approvals", headers=_auth(token_a),
+                      json={"operation": "node.merge", "payload": payload,
+                            "justification": "identical fingerprints"})
+    assert req.status_code == 201, req.text
+    request_id = req.json()["id"]
+
+    decided = client.post(f"/api/v1/cases/{case_id}/approvals/{request_id}/decide",
+                          headers=_auth(token_b),
+                          json={"approve": True, "note": "checked both"})
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["state"] == "APPROVED"
+
+    merged = client.post(f"/api/v1/cases/{case_id}/merges", headers=_auth(token_a),
+                         json={"approval_request_id": request_id})
+    assert merged.status_code == 201, merged.text
+    assert merged.json()["source_node_id"] == src
+
+    # Single use: the same approval cannot merge a second time.
+    again = client.post(f"/api/v1/cases/{case_id}/merges", headers=_auth(token_a),
+                        json={"approval_request_id": request_id})
+    assert again.status_code == 409
+
+
+def test_the_merge_executes_the_approved_parameters_not_the_posted_ones(conn, client):
+    """The substitution attack, closed. An analyst gets a nod for merging
+    two obviously-identical spam bots, then posts the ids of the two nodes
+    the case actually turns on - and gets the bots merged, because the body
+    is not read under dual control."""
+    uid_a, email_a, secret_a = _make_user(conn, clearance="RED",
+                                          global_roles=("CASE_OWNER",))
+    uid_b, email_b, secret_b = _make_user(conn, clearance="RED")
+    token_a = _login(client, email_a, secret_a)
+    case_id = _create_case(client, token_a)
+    approved_src, approved_dst = _two_identities(client, token_a, case_id)
+    other_src, other_dst = _two_identities(client, token_a, case_id)
+    _set_dual_control(client, token_a, case_id, True)
+
+    _assign(conn, case_id, uid_b, uid_a)
+    token_b = _login(client, email_b, secret_b)
+
+    req = client.post(f"/api/v1/cases/{case_id}/approvals", headers=_auth(token_a),
+                      json={"operation": "node.merge",
+                            "payload": {"source_node_id": approved_src,
+                                        "target_node_id": approved_dst,
+                                        "reason": "duplicate spam accounts",
+                                        "basis_selector_id": None},
+                            "justification": "obvious duplicates"})
+    request_id = req.json()["id"]
+    client.post(f"/api/v1/cases/{case_id}/approvals/{request_id}/decide",
+                headers=_auth(token_b), json={"approve": True})
+
+    substituted = client.post(
+        f"/api/v1/cases/{case_id}/merges", headers=_auth(token_a),
+        json={"approval_request_id": request_id,
+              "source_node_id": other_src, "target_node_id": other_dst,
+              "reason": "not what was approved"})
+    assert substituted.status_code == 201, substituted.text
+    body = substituted.json()
+    assert body["source_node_id"] == approved_src, \
+        "the merge must run what was approved, not what was posted"
+    assert body["target_node_id"] == approved_dst
+    assert body["reason"] == "duplicate spam accounts"
+
+
+def test_turning_dual_control_off_is_audited(conn, client):
+    """When did this case stop requiring two signatures, is a question
+    somebody eventually needs answered."""
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    _set_dual_control(client, token, case_id, True)
+    _set_dual_control(client, token, case_id, False)
+    rows = conn.execute(
+        """SELECT detail->>'from', detail->>'to' FROM audit.event
+            WHERE case_id = %s AND action = 'CASE_POLICY_CHANGED' ORDER BY seq""",
+        (case_id,)).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [("false", "true"), ("true", "false")]
+
+
+def test_an_approval_from_another_case_is_refused(conn, client):
+    """The case is in the payload hash: an approval granted in a training
+    case must not consume in a live one."""
+    uid_a, email_a, secret_a = _make_user(conn, clearance="RED",
+                                          global_roles=("CASE_OWNER",))
+    uid_b, email_b, secret_b = _make_user(conn, clearance="RED")
+    token_a = _login(client, email_a, secret_a)
+    case_one = _create_case(client, token_a)
+    case_two = _create_case(client, token_a)
+    src, dst = _two_identities(client, token_a, case_one)
+    _set_dual_control(client, token_a, case_two, True)
+
+    _assign(conn, case_one, uid_b, uid_a)
+    token_b = _login(client, email_b, secret_b)
+
+    req = client.post(f"/api/v1/cases/{case_one}/approvals", headers=_auth(token_a),
+                      json={"operation": "node.merge",
+                            "payload": {"source_node_id": src, "target_node_id": dst,
+                                        "reason": "r", "basis_selector_id": None},
+                            "justification": "j"})
+    request_id = req.json()["id"]
+    client.post(f"/api/v1/cases/{case_one}/approvals/{request_id}/decide",
+                headers=_auth(token_b), json={"approve": True})
+
+    wrong_case = client.post(f"/api/v1/cases/{case_two}/merges",
+                             headers=_auth(token_a),
+                             json={"approval_request_id": request_id})
+    assert wrong_case.status_code == 404
+
+
+def test_reversal_is_not_dual_controlled(conn, client):
+    """Undoing a merge restores the pre-merge state. Requiring two humans to
+    correct a mistake is how mistakes stay in a case file."""
+    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    src, dst = _two_identities(client, token, case_id)
+    merged = client.post(f"/api/v1/cases/{case_id}/merges", headers=_auth(token),
+                         json={"source_node_id": src, "target_node_id": dst,
+                               "reason": "same fingerprint"})
+    assert merged.status_code == 201, merged.text
+    _set_dual_control(client, token, case_id, True)
+    reversed_ = client.post(
+        f"/api/v1/cases/{case_id}/merges/{merged.json()['id']}/reverse",
+        headers=_auth(token), json={"reason": "nickname coincidence after all"})
+    assert reversed_.status_code == 200, reversed_.text
+    assert reversed_.json()["is_live"] is False
+
+
+# --- TEMPORARY PROBE (remove) -------------------------------------------
+
+@pytest.mark.skipif(not MINIO, reason="MINIO_ENDPOINT required")
+def test_zz_probe_response_returning_handler_headers(conn, client):
+    """A/B: a rate-limited handler returning a pydantic model (upload,
+    evidence.ingest=120/h) vs a rate-limited handler returning a Response
+    object (export, evidence.export=30/h)."""
+    from noctornal_api.ratelimit import LIMITS
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+
+    up = client.post(
+        f"/api/v1/cases/{case_id}/evidence", headers=_auth(token),
+        files={"file": ("a.txt", b"probe-" + uuid4().hex.encode(), "text/plain")},
+        data={"title": "probe"},
+    )
+    assert up.status_code == 201, up.text
+    ev_id = up.json()["evidence_id"]
+    up_h = {k.lower(): v for k, v in up.headers.items() if k.lower().startswith("ratelimit")}
+
+    ex = client.post(f"/api/v1/cases/{case_id}/evidence/{ev_id}/export",
+                     headers=_auth(token))
+    assert ex.status_code == 200, ex.text
+    ex_h = {k.lower(): v for k, v in ex.headers.items() if k.lower().startswith("ratelimit")}
+
+    print("\n--- quotas: ingest=%s export=%s blanket-request=%s" % (
+        LIMITS["evidence.ingest"].quota, LIMITS["evidence.export"].quota,
+        LIMITS["request"].quota))
+    print("--- upload (returns IngestOut model) ->", up_h)
+    print("--- export (returns Response object) ->", ex_h)
+
+    assert up_h.get("ratelimit-limit") == str(LIMITS["evidence.ingest"].quota), \
+        f"CONTROL BROKEN: upload advertised {up_h.get('ratelimit-limit')}"
+    assert ex_h.get("ratelimit-limit") == str(LIMITS["evidence.export"].quota), \
+        (f"export advertised RateLimit-Limit={ex_h.get('ratelimit-limit')} "
+         f"(policy={ex_h.get('ratelimit-policy')}), expected "
+         f"{LIMITS['evidence.export'].quota}")
+
+
+@pytest.mark.skipif(not MINIO, reason="MINIO_ENDPOINT required")
+def test_zz_probe_export_is_still_enforced(conn, client):
+    """Is export ONLY mis-advertised, or actually unmetered?"""
+    _limited(client.app, **{
+        "evidence.export": _tiny("evidence.export", quota=1, per_seconds=3600,
+                                 burst=1)})
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    up = client.post(
+        f"/api/v1/cases/{case_id}/evidence", headers=_auth(token),
+        files={"file": ("a.txt", b"probe2-" + uuid4().hex.encode(), "text/plain")},
+        data={"title": "probe2"},
+    )
+    ev_id = up.json()["evidence_id"]
+    codes = []
+    for _ in range(3):
+        r = client.post(f"/api/v1/cases/{case_id}/evidence/{ev_id}/export",
+                        headers=_auth(token))
+        codes.append(r.status_code)
+        if r.status_code == 429:
+            print("\n--- 429 headers ->",
+                  {k.lower(): v for k, v in r.headers.items()
+                   if k.lower().startswith(("ratelimit", "retry"))})
+    print("--- export status codes ->", codes)
+    assert codes[0] == 200 and 429 in codes
