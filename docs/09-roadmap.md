@@ -199,24 +199,42 @@ with the number of parties, every captured message is personal data inside
 the retention and minimisation regime, and the Phase 5 TLP egress gate
 stops being advisory.
 
-## Phase 8 — Sample handling (concept, `docs/11`)
+## Phase 8 — Sample handling — BUILT 2026-07-25 (decision 47)
 
-- [ ] Separate-origin sample service, download-only, no rendering
-- [ ] Encrypted-at-rest storage keyed by SHA-256, EDR exclusions documented
-- [ ] Quarantine → triage → RE queue with `MALWARE_ANALYST` as a distinct role
-- [ ] Static triage: hashes, imphash, ssdeep, TLSH, YARA
-- [ ] Fuzzy-hash clustering surfaced as graph edges
-- [ ] Prohibited-content screening and the `REJECTED` path
-- [ ] Detonation as an authorised, exposure-aware action
+- [x] **Separate-origin sample service, download-only, no rendering.** The
+      origin split is a RUNTIME refusal, not a deployment note: `download()`
+      refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is set and the request
+      arrived at it.
+- [x] **Encrypted-at-rest storage keyed by SHA-256.** Never the
+      attacker-controlled filename. Bytes re-verified on every read, failing
+      closed. EDR exclusions documented in `samples.py`.
+- [x] **Quarantine → triage → RE queue with `MALWARE_ANALYST` as a distinct
+      role** that grants no case access, and case roles that cannot download.
+- [~] **Static triage:** sha256/sha1/md5, structural file typing and Shannon
+      entropy. **imphash, ssdeep, TLSH and YARA are NOT computed** — each
+      absence is recorded on the row as a gap with a reason.
+- [ ] Fuzzy-hash clustering surfaced as graph edges. Blocked on the fuzzy
+      hashes above.
+- [~] **The `REJECTED` path is built** — it destroys the bytes and the data
+      key and keeps the row saying that something was rejected and why.
+      **Automated prohibited-content screening is NOT**: there is no
+      authorised hash set, so rejection is a human act.
+- [~] **Detonation is an authorised, exposure-aware RECORD.** A non-private
+      target needs a named authoriser and a note, in a DB constraint.
+      **Nothing is submitted to any sandbox** — docs/11 says integrate
+      rather than build, and no integration exists.
 
-**BLOCKED — NOT DECIDED (2026-07-25).** There is no prohibited-content
-policy, so no part of this phase may be built past the point where it could
-accept a file. See decision 36 and the warning at the top of the README:
-a store of attacker-supplied binaries will eventually receive material whose
-possession alone is an offence, the handling rules differ between the two
-target jurisdictions, and finding that out after the first ingest is a legal
-problem rather than a technical one. Everything through Phase 7 is
-unaffected; nothing in the current build stores a sample.
+**UNBLOCKED BY OPERATOR DIRECTIVE (2026-07-25), NOT BY A POLICY.**
+Decision 47 supersedes decision 36. The reasoning behind the block has not
+changed — a store of attacker-supplied binaries will eventually receive
+material whose possession alone is an offence, the handling rules differ
+between the two target jurisdictions, and finding that out after the first
+ingest is a legal problem rather than a technical one. What changed is that
+the block became a refusal with a named condition: **the build accepts
+nothing until an operator declares a prohibited-content policy reference and
+a designated person.** That is a declaration the software records, not one
+it can verify. Counsel must review any deployment before it is used in any
+absolute sense.
 
 ## Phase 9 — Ingest API (concept, `docs/12`)
 

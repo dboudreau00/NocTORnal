@@ -9,10 +9,19 @@ forums and channels.
 
 ---
 
-> ## ⚠ Before any malware sample is ingested: read this
+> ## ⚠ Phase 8 is BUILT. Counsel must review this deployment before it is used.
 >
-> **There is no prohibited-content policy for this deployment, and until
-> there is one, Phase 8 (sample handling) must not accept a single file.**
+> **Sample handling now exists in code (Alembic 0031, `samples.py`), on an
+> operator directive of 2026-07-25 that lifted decision 36's block. The code
+> being correct does not make a deployment lawful, and nothing about the
+> reasoning below has changed — only who is now carrying it.**
+>
+> The build refuses to accept a single file until an operator sets
+> `NOCTORNAL_PROHIBITED_CONTENT_POLICY` to a reference an auditor can follow
+> and `NOCTORNAL_DESIGNATED_PERSON` to whoever material is escalated to.
+> **That is a declaration, not a verification.** The software cannot check
+> that the referenced policy exists, is correct, or has been read by anyone.
+> A false declaration produces a working system and an unlawful deployment.
 >
 > A sample store takes arbitrary binaries chosen by the people under
 > investigation. Given enough of them, one will eventually contain material
@@ -39,12 +48,36 @@ forums and channels.
 > - who may see a quarantined item, and under what authority;
 > - how an analyst's exposure is limited, logged and supported.
 >
-> Everything through Phase 7 is unaffected: **no part of the current build
-> stores a sample.** Invariant 10 ("samples never render, never execute")
-> is written and waiting, and the `MALWARE_ANALYST` role is specified in
-> `docs/11`, but none of it is implemented — deliberately.
+> ### What the build enforces, and what it cannot
 >
-> Recorded as decision 36 in `docs/00-decisions.md`.
+> **Enforced in code** (invariant 10, decision 47):
+>
+> - ingest refused until the policy declaration above is present;
+> - the object key is the SHA-256, **never** the original filename — which
+>   is attacker-controlled and is itself a payload vector;
+> - every sample encrypted at rest under a per-sample key, so nothing in the
+>   pipeline is a runnable file and your own EDR does not eat the evidence;
+> - `QUARANTINED` is the landing state; nothing reaches the RE queue first;
+> - **downloads refuse unless a separate sample origin is configured and the
+>   request arrived at it** — the origin split is a runtime check, not a
+>   deployment note;
+> - the bytes are re-verified against the recorded hash on every read, and
+>   fail closed;
+> - `REJECTED` destroys the bytes and the data key, and keeps the row saying
+>   *that* something was rejected and why;
+> - a public detonation needs a named authoriser and a note, in a DB
+>   constraint — and nothing is submitted to any sandbox, because no
+>   integration exists;
+> - `MALWARE_ANALYST` grants **no case access**, and case roles cannot
+>   download a binary.
+>
+> **Not enforced, and not pretended:** there is no prohibited-content hash
+> screening (the hook and the `REJECTED` path exist; the authorised hash sets
+> do not), no YARA, no ssdeep/imphash clustering, and no archive expansion.
+> Each absence is recorded on the sample row as a triage GAP with a reason,
+> because a NULL that reads as a finding is worse than a stated gap.
+>
+> Recorded as decision 47 in `docs/00-decisions.md`, superseding decision 36.
 
 ---
 
