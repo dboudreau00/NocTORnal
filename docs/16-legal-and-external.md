@@ -174,6 +174,36 @@ will refuse to grant break-glass if no user holds
 `SECURITY_OFFICER` — deliberately, because unreviewed emergency access is
 just access.
 
+### D8 — Telegram channel and user ids can share one durable value
+
+Added 2026-07-25. **This is a known, unresolved correctness defect that is
+reported rather than fixed, and it needs a decision.**
+
+`noctornal_ontology.telegram_id_norm` strips the Bot-API `-100` prefix so
+that the two encodings of one supergroup collapse onto each other. Its own
+docstring says a chat id and an unrelated user id "must never share a
+norm_value" — and stripping the prefix produces exactly that: the channel
+`-1001234567890` and the **user** `1234567890` both normalise to
+`1234567890`. Correlating on that value reports two unrelated entities as
+one actor.
+
+**It was not fixed unilaterally, for two reasons.** Namespacing channels
+would re-key every stored `TELEGRAM_ID` selector, which is a data
+migration across `core.selector` and `comms.channel_binding`. And it
+cannot be done correctly by the normaliser alone: a bare positive number
+is a user id in one encoding and a channel id in another, and only the
+collector that observed it knows which. Fixing it properly means carrying
+the entity type alongside the identifier, which is a model change.
+
+The interim control is that `comms.normalise` now returns a **WARNING on
+every `-100…` observation** naming the collision, so an analyst sees it at
+the point of use rather than discovering it in a conclusion.
+
+**Determine:** whether to (a) accept the collision with the warning, (b)
+namespace channel ids and re-key the stored selectors, or (c) carry the
+entity type on the observation so the normaliser can disambiguate. (c) is
+correct and the most work.
+
 ---
 
 ## 🔵 CONFIRM EXTERNALLY
