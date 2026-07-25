@@ -5,7 +5,11 @@ after Phases 0–2 shipped; **updated 2026-07-25 after Phase 3 shipped**. Read
 this, then `CLAUDE.md`, then `docs/14-enhancement-map.md`. What to do next is
 at the bottom.
 
-> **Phase 3 is done.** `apps/api/src/noctornal_api/analytics.py` (the maths,
+> **Phase 3 is done, plus the E-items, the layout worker, the Phase 5
+> egress gate and the Phase 4 proposal pipeline.** 376 tests pass. See the
+> "What was built after Phase 3" section below for the second batch.
+>
+> **Phase 3 proper.** `apps/api/src/noctornal_api/analytics.py` (the maths,
 > database-free) and `analytics_runs.py` (cache, persistence, audit), exposed
 > at `/api/v1/cases/{id}/analytics`, with an Analysis tab in the UI. 304 tests
 > pass. Run `bootstrap.py demo-network` for a case with structure worth
@@ -238,6 +242,59 @@ These were pre-existing and none was in the Phase 3 brief.
   trivially maximal at the centre. Use `bootstrap.py demo-network`.
 - **igraph and leidenalg ship abi3 wheels**, so they install on this box's
   CPython 3.13 with no build toolchain, despite the docs assuming 3.12.
+
+## What was built after Phase 3 (2026-07-25)
+
+The enhancement map's E-items, the Phase 2 layout debt, and the first
+slices of Phases 4 and 5. Decisions 34-39 carry the reasoning.
+
+**Evidence and retraction (E1-E3, decision 34).** An assertion can now
+carry its exhibit at the moment the claim is made -- `evidence_id` had
+existed unused since Phase 1, which is how the first real session produced
+fourteen assertions and zero exhibits. The projection reports
+`has_evidence` per element, unevidenced entities render with a hollow core,
+unevidenced ties render faded, and case-level coverage is a headline number
+that reads red at zero. Retraction is exposed in the inspector and, because
+Phase 3 added the live-provenance filter, retracting the last live
+assertion visibly dissolves the element from the live graph. Verified: one
+retraction split the demo network from one component into two.
+
+**Recovery codes (E4).** docs/05 specified them and they were never built.
+Told apart from a TOTP code by SHAPE so login stays single-step and gains
+no oracle; single use enforced by an atomic `array_remove` guarded on the
+hash still being present. `bootstrap.py recovery-codes` is the out-of-band
+path for the person who by definition cannot complete step-up.
+
+**Layout worker (U1, decision 37).** Hand-written ForceAtlas2 with
+Barnes-Hut in a Web Worker, because the CSP is `script-src 'self'` with no
+bundler and adopting a build step is a decision that should not arrive as a
+side effect. 400 nodes settle in ~1s off-thread. Note for whoever measures
+it next: **a hidden browser tab clamps `setTimeout` to ~1000ms**, so
+"main-thread lag" readings taken in a background pane are measuring Chrome,
+not your code. Count messages and repaints instead.
+
+**Egress gate (Phase 5, decision 38).** The one function docs/07 requires.
+Pure, fails closed, destination-aware. Evidence export now calls it instead
+of its own drifting copy.
+
+**Proposals (Phase 4 core, decision 39).** Invariant 3 enforced by class
+shape: the extractor-facing class holds no `GraphWriteService` and cannot
+reach the graph. Accepting goes through `GraphWriteService`, so the
+assertion is atomic and an accepted edge is born inferred.
+
+### Honest gaps in that batch
+
+- **Nothing extracts yet**, so nothing writes proposals outside tests. The
+  pipeline is real; the thing that would feed it is not.
+- **The triage queue has endpoints but no interface.** Four routes, tested,
+  rendered nowhere.
+- **No adapters, no persona vault, no document bucket** -- the rest of
+  Phase 4 is untouched.
+- **Phase 5 has only the gate.** No SMTP, no Jira, no webhooks, no
+  notification centre.
+- **Phases 6, 7, 8, 9 are untouched.** Phase 7 is decided
+  (message-level capture, decision 35); Phase 8 is BLOCKED on the
+  prohibited-content policy (decision 36, and the README warning).
 
 ## What to do next
 
