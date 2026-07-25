@@ -116,6 +116,11 @@ const state = {
   nodeProposed: new Map(),   // node id -> count of PROPOSED-review ties
   graphSeq: 0,
 
+  /* triage (Phase 4): machine suggestions awaiting a human. */
+  triage: [],
+  triageCounts: {},
+  triageIndex: 0,
+
   layoutWorker: null,        // ForceAtlas2 off the main thread (U1)
   layoutPaint: 0,            // pending rAF, so repaints coalesce
 
@@ -490,6 +495,9 @@ async function openCase(caseId) {
      numbers into this one would be worse than showing none. */
   state.analytics = null;
   state.analyticsKpp = null;
+  state.triage = [];
+  state.triageCounts = {};
+  state.triageIndex = 0;
   stopWorkerLayout();
   applyMetrics(null);
   try {
@@ -520,6 +528,9 @@ async function openCase(caseId) {
     await loadCaseGraph();
     await refreshSociogram();
     await loadEvidence();
+    // The badge is the only signal that work is waiting, so the
+    // queue is counted on open rather than on first visit.
+    await loadTriage();
     selectTab('graph');
   } catch (err) { fail(err); }
 }
@@ -533,6 +544,7 @@ function selectTab(name) {
     show($('pane-' + tab.dataset.tab), on);
   }
   if (name === 'graph') { resizeGraph(); resizeDensity(); }
+  if (name === 'triage') loadTriage();
 }
 
 function initTabs() {
@@ -3241,6 +3253,7 @@ function wire() {
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
   opts($('ev-class'), TLP.map((t) => [t, t]), 'AMBER');
+  opts($('cap-class'), TLP.map((t) => [t, t]), 'AMBER');
   opts($('sel-metric'), SIZE_METRICS, state.sizeMetric);
   opts($('sel-minconf'), [
     ['LOW', 'LOW — everything'],
@@ -3258,6 +3271,12 @@ function wire() {
     renderProjectionBar();
     draw();
   });
+  $('cap-run').addEventListener('click', runCapture);
+  $('triage-state').addEventListener('change', () => {
+    state.triageIndex = 0;
+    loadTriage();
+  });
+  document.addEventListener('keydown', onTriageKey);
   $('an-run').addEventListener('click', runAnalysis);
   /* Changing a parameter invalidates what is on screen. Blank it rather
      than leave numbers that no longer match the controls above them. */
@@ -3320,6 +3339,218 @@ function adoptTokenFromFragment() {
   history.replaceState(null, '', window.location.pathname);
   state.token = token;
   sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+/* =====================================================================
+ * TRIAGE (Phase 4)
+ *
+ * The human half of "machines propose, analysts dispose". Every row here
+ * is a suggestion that has NOT touched the graph, and the only ways out
+ * are accept, reject and defer.
+ *
+ * Two things shape the design. Every suggestion shows the text it came
+ * from, because a handle lifted out of a quoted signature block looks
+ * identical to a real one until you see the sentence around it. And it is
+ * keyboard driven, because docs/09 wants triage to be "a pleasant hour
+ * rather than a grim one" and reaching for a mouse a hundred times is what
+ * makes it grim.
+ * ===================================================================== */
+
+async function loadTriage() {
+  if (!state.caseId) return;
+  const wanted = $('triage-state').value;
+  try {
+    const data = await api(cpath('/proposals?state=' + wanted + '&limit=200'));
+    state.triage = data.proposals;
+    state.triageCounts = data.counts || {};
+    renderTriage();
+  } catch (err) {
+    state.triage = [];
+    renderTriage();
+    if (!(err instanceof ApiError && err.status === 403)) fail(err);
+  }
+}
+
+/** The rail badge is the only thing that tells an analyst work is waiting,
+ *  so it is refreshed with the case rather than only when the tab is open. */
+function renderTriageBadge() {
+  const badge = $('triage-badge');
+  const waiting = (state.triageCounts || {}).PROPOSED || 0;
+  badge.textContent = waiting > 99 ? '99+' : String(waiting);
+  show(badge, waiting > 0);
+  badge.title = waiting + ' suggestion(s) awaiting review';
+}
+
+function renderTriage() {
+  const box = $('triage-list');
+  clear(box);
+  const rows = state.triage || [];
+  show($('triage-empty'), rows.length === 0);
+  const c = state.triageCounts || {};
+  setMsg($('triage-counts'),
+    ['PROPOSED', 'DISPUTED', 'ACCEPTED', 'REJECTED']
+      .filter((k) => c[k]).map((k) => c[k] + ' ' + k.toLowerCase()).join(' · '));
+  renderTriageBadge();
+
+  rows.forEach((p, i) => {
+    const card = el('div', 'triage-card' + (i === state.triageIndex ? ' on' : ''));
+    card.tabIndex = -1;
+    card.dataset.id = p.id;
+
+    const head = el('div', 'triage-head');
+    head.appendChild(el('span', 'chip', p.kind));
+    const label = p.payload && p.payload.label ? p.payload.label : '(no label)';
+    head.appendChild(el('strong', 'triage-label', label));
+    if (p.payload && p.payload.attrs && p.payload.attrs.selector_type) {
+      head.appendChild(el('span', 'chip small', p.payload.attrs.selector_type));
+    }
+    /* The score says how often the PATTERN is wrong in prose, not how
+       important the finding is. Labelling it "pattern confidence" stops it
+       being read as "probability this matters". */
+    if (p.score !== null && p.score !== undefined) {
+      const s = el('span', 'muted small', 'pattern confidence ' + num(p.score, 2));
+      s.title = 'How reliable this KIND of match is in running text, not how '
+              + 'significant the finding is. It only orders the queue.';
+      head.appendChild(s);
+    }
+    card.appendChild(head);
+
+    card.appendChild(el('p', 'triage-why', p.rationale));
+    card.appendChild(el('p', 'muted small', 'from ' + p.origin));
+
+    if (p.state === 'PROPOSED') {
+      const actions = el('div', 'triage-actions');
+      const mk = (text, cls, fn, title) => {
+        const b = el('button', 'btn small' + (cls ? ' ' + cls : ''), text);
+        b.type = 'button';
+        if (title) b.title = title;
+        b.addEventListener('click', () => fn(p));
+        return b;
+      };
+      actions.appendChild(mk('Accept', 'primary', acceptProposal,
+        'Create the element, attributed to you, with an AUTOMATED_INFERENCE '
+        + 'assertion recording that a machine suggested it.'));
+      actions.appendChild(mk('Reject', 'danger', rejectProposal,
+        'Dispose of it. A reason is required -- parser drift is found by '
+        + 'reading rejections.'));
+      actions.appendChild(mk('Defer', '', deferProposal,
+        'Park it as unresolved rather than forcing a decision now.'));
+      card.appendChild(actions);
+    } else {
+      const meta = el('p', 'muted small',
+        p.state + (p.review_note ? ' — ' + p.review_note : ''));
+      card.appendChild(meta);
+    }
+    card.addEventListener('click', () => { state.triageIndex = i; renderTriage(); });
+    box.appendChild(card);
+  });
+}
+
+async function disposition(p, path, body, verb) {
+  try {
+    await api(cpath('/proposals/' + p.id + '/' + path), {
+      method: 'POST', json: body,
+    });
+    await loadTriage();
+    if (path === 'accept') {
+      // The graph just gained an element, so anything derived from it is
+      // stale: the sociogram, the metrics and any computed analysis.
+      invalidateAnalytics();
+      await reloadAll();
+    }
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      banner('Already dispositioned', err.detail || '', 'warn');
+      await loadTriage();
+    } else { fail(err); }
+  }
+}
+
+function acceptProposal(p) {
+  return disposition(p, 'accept', { note: null }, 'accepted');
+}
+
+function rejectProposal(p) {
+  const note = window.prompt(
+    'Why is this being rejected? Rejections are how parser drift gets '
+    + 'found, so the reason matters.');
+  if (note === null) return;
+  if (!note.trim()) {
+    banner('A rejection needs a reason', 'Say what was wrong with it.', 'warn');
+    return;
+  }
+  return disposition(p, 'reject', { note: note.trim() }, 'rejected');
+}
+
+function deferProposal(p) {
+  const note = window.prompt('What is unresolved about this one?');
+  if (note === null) return;
+  if (!note.trim()) {
+    banner('A deferral needs a note', 'Say what would settle it.', 'warn');
+    return;
+  }
+  return disposition(p, 'defer', { note: note.trim() }, 'deferred');
+}
+
+/** docs/09: "triage is a pleasant hour rather than a grim one". */
+function onTriageKey(e) {
+  if (state.tab !== 'triage') return;
+  const target = e.target;
+  // Never steal a key from someone typing into the capture box.
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  const rows = state.triage || [];
+  if (!rows.length) return;
+  const key = e.key.toLowerCase();
+  if (key === 'j' || e.key === 'ArrowDown') {
+    state.triageIndex = Math.min(rows.length - 1, state.triageIndex + 1);
+  } else if (key === 'k' || e.key === 'ArrowUp') {
+    state.triageIndex = Math.max(0, state.triageIndex - 1);
+  } else if (key === 'a') {
+    acceptProposal(rows[state.triageIndex]); e.preventDefault(); return;
+  } else if (key === 'r') {
+    rejectProposal(rows[state.triageIndex]); e.preventDefault(); return;
+  } else if (key === 'd') {
+    deferProposal(rows[state.triageIndex]); e.preventDefault(); return;
+  } else { return; }
+  e.preventDefault();
+  renderTriage();
+  const card = $('triage-list').children[state.triageIndex];
+  if (card) card.scrollIntoView({ block: 'nearest' });
+}
+
+async function runCapture() {
+  const btn = $('cap-run');
+  const errBox = $('cap-error'), okBox = $('cap-result');
+  setMsg(errBox, ''); setMsg(okBox, '');
+  const text = $('cap-text').value;
+  if (!text.trim()) { setMsg(errBox, 'Paste something first.'); return; }
+  btn.disabled = true;
+  try {
+    const out = await api(cpath('/proposals/capture'), {
+      method: 'POST',
+      json: {
+        text: text,
+        title: $('cap-title').value.trim() || null,
+        external_url: $('cap-url').value.trim() || null,
+        classification: $('cap-class').value,
+      },
+    });
+    const found = Object.entries(out.by_type || {})
+      .map(([k, v]) => v + ' ' + k).join(', ');
+    setMsg(okBox,
+      (out.deduplicated ? 'Already captured; ' : '') +
+      out.selectors_found + ' selector(s) found' +
+      (found ? ' (' + found + ')' : '') + '. ' +
+      out.proposals_created + ' proposal(s) raised' +
+      (out.already_known ? ', ' + out.already_known + ' already known' : '') +
+      '. ' + out.note);
+    $('cap-text').value = '';
+    await loadTriage();
+  } catch (err) {
+    inlineProblem(errBox, err);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* =====================================================================

@@ -170,6 +170,14 @@
           <span class="rail-glyph" aria-hidden="true">▤</span>
           <span class="rail-cap">Evidence</span>
         </button>
+        <button id="tab-triage" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-triage" aria-selected="false" tabindex="-1"
+                data-tab="triage"
+                title="Capture and triage: machine suggestions awaiting review">
+          <span class="rail-glyph" aria-hidden="true">&#x2751;</span>
+          <span class="rail-cap">Triage</span>
+          <span id="triage-badge" class="rail-badge" hidden></span>
+        </button>
         <button id="tab-analytics" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-analytics" aria-selected="false" tabindex="-1"
                 data-tab="analytics"
@@ -361,6 +369,70 @@
             <tbody id="ent-body"></tbody>
           </table>
           <p id="ent-empty" class="empty" hidden>No entities match.</p>
+        </section>
+
+        <!-- TRIAGE (Phase 4). The human half of "machines propose,
+             analysts dispose". Nothing reaches the graph from here without
+             a click, and every suggestion shows the text it came from. -->
+        <section id="pane-triage" class="pane" role="tabpanel"
+                 aria-labelledby="tab-triage" tabindex="-1" hidden>
+
+          <details id="capture-box" class="card capture">
+            <summary>Capture text</summary>
+            <p class="help">Paste a thread, a chat export or a listing.
+              Selectors are extracted with their offsets and raised as
+              proposals &mdash; <strong>nothing enters the graph here</strong>.
+              The document is stored as the record of what was looked at,
+              even if nothing is found.</p>
+            <label class="field">
+              <span class="label">Title</span>
+              <input id="cap-title" spellcheck="false"
+                     placeholder="nightmarket thread 8841">
+            </label>
+            <label class="field">
+              <span class="label">Source URL</span>
+              <input id="cap-url" spellcheck="false"
+                     placeholder="http://... (optional)">
+            </label>
+            <label class="field">
+              <span class="label">Text</span>
+              <textarea id="cap-text" rows="8"
+                        placeholder="Paste the captured material here."></textarea>
+            </label>
+            <div class="row-form">
+              <label class="field inline">
+                <span class="label">Classification</span>
+                <select id="cap-class" class="select"></select>
+              </label>
+              <button id="cap-run" type="button" class="btn primary">
+                Extract and propose</button>
+            </div>
+            <p id="cap-result" class="form-ok" role="status" hidden></p>
+            <p id="cap-error" class="form-error" role="alert" hidden></p>
+          </details>
+
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Queue</span>
+              <select id="triage-state" class="select">
+                <option value="PROPOSED" selected>Awaiting review</option>
+                <option value="DISPUTED">Deferred</option>
+                <option value="ACCEPTED">Accepted</option>
+                <option value="REJECTED">Rejected</option>
+              </select>
+            </label>
+            <span id="triage-counts" class="muted small"></span>
+          </div>
+
+          <p class="help">
+            <kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept
+            &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer.
+            docs/09 asks for this to be keyboard driven, because triage is an
+            hour of work and a mouse makes it a grim one.
+          </p>
+
+          <div id="triage-list"></div>
+          <p id="triage-empty" class="empty">Nothing awaiting review.</p>
         </section>
 
         <!-- ANALYSIS (Phase 3). Every number here is computed against the

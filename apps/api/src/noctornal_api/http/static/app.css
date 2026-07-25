@@ -636,3 +636,33 @@ select.select { appearance: none; padding-right: 24px; }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001s !important; transition-duration: 0.001s !important; }
 }
+
+/* -- triage (Phase 4) ------------------------------------------------- */
+#pane-triage { overflow-y: auto; padding-bottom: 24px; }
+.capture { margin-bottom: 14px; }
+.capture summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.capture > *:not(summary) { margin-top: 10px; }
+.capture textarea { font-family: var(--mono); font-size: 12px; }
+
+.triage-card {
+  border: 1px solid var(--hairline); border-left: 3px solid var(--hairline);
+  border-radius: 4px; padding: 10px 12px; margin-bottom: 8px;
+  background: var(--surface-1); cursor: pointer;
+}
+/* The keyboard cursor has to be obvious: J/K navigation is useless if you
+   cannot see where you are. */
+.triage-card.on { border-left-color: var(--accent); background: var(--surface-2); }
+.triage-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.triage-label { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.triage-why { margin: 6px 0 2px; font-size: 12px; line-height: 1.55;
+              color: var(--text-secondary); }
+.triage-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* Work waiting, visible from any tab. */
+.rail-badge {
+  position: absolute; top: 4px; right: 6px; min-width: 15px;
+  padding: 0 4px; border-radius: 8px; background: var(--accent);
+  color: var(--void); font-size: 10px; font-weight: 700;
+  line-height: 15px; text-align: center;
+}
+.rail-btn { position: relative; }
