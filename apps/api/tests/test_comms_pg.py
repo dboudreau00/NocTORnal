@@ -32,6 +32,11 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 # 76 hex: 64 public key + 8 nospam + 4 checksum.
 TOX_PUBKEY = "a" * 64
+#: The CANONICAL form is uppercase, and it is the ontology that says so.
+#: These tests used to pin the lowercase form, which is how the two
+#: normalisers were able to drift apart unnoticed -- see
+#: `test_comms_and_the_ontology_agree_on_canonical_form` below.
+TOX_PUBKEY_CANONICAL = "A" * 64
 TOX_ID_1 = TOX_PUBKEY + "11111111" + "2222"
 TOX_ID_2 = TOX_PUBKEY + "99999999" + "8888"   # same actor, rotated nospam
 
@@ -97,7 +102,7 @@ def test_a_tox_id_normalises_to_its_public_key():
     the first 64 are the identity."""
     from noctornal_api.comms import normalise
     result = normalise("TOX", TOX_ID_1)
-    assert result.durable == TOX_PUBKEY
+    assert result.durable == TOX_PUBKEY_CANONICAL
     assert "nospam" in result.note
 
 
@@ -124,7 +129,69 @@ def test_a_rotated_tox_nospam_still_correlates(conn, svc):
 
 def test_a_bare_public_key_is_accepted_as_already_durable():
     from noctornal_api.comms import normalise
-    assert normalise("TOX", TOX_PUBKEY).durable == TOX_PUBKEY
+    assert normalise("TOX", TOX_PUBKEY).durable == TOX_PUBKEY_CANONICAL
+
+
+@pytest.mark.parametrize("platform_key,selector_type,observed", [
+    ("TOX", "TOX_PK", TOX_ID_1),
+    ("TOX", "TOX_PK", "aB" * 32),
+    ("XMPP", "JABBER", "Vendor@TheSecure.biz/Conversations.A1b2"),
+    ("SESSION", "SESSION_ID", "05" + "Ab" * 32),
+    ("MATRIX", "MATRIX_MXID", "@Alice:Example.ORG"),
+    ("TELEGRAM", "TELEGRAM_ID", "123456789"),
+    ("TELEGRAM", "TELEGRAM_ID", "-1001234567890"),
+    ("DISCORD", "DISCORD_ID", "123456789012345678"),
+    ("THREEMA", "THREEMA_ID", "ABCD1234"),
+])
+def test_comms_and_the_ontology_agree_on_canonical_form(
+        platform_key, selector_type, observed):
+    """The invariant that was silently false.
+
+    `comms.channel_binding.durable_value` and `core.selector.norm_value`
+    are the two indexes entity resolution joins across. `comms` hand-rolled
+    its own canonical forms and they drifted from the ontology's in three
+    places, each failing silently and differently:
+
+    - **Matrix** lowercased the whole MXID, merging two accounts that
+      differ only in localpart case -- confident false attribution from
+      the module written to prevent it.
+    - **Tox** disagreed on case, so a join between the two indexes matched
+      nothing and read as "no correlation".
+    - **Telegram** refused negative ids as though they were usernames.
+
+    Testing each normaliser against its own expected output would never
+    have caught any of it: both sides were internally consistent. Only
+    comparing them does.
+    """
+    from noctornal_ontology import normalise as ontology_normalise
+
+    from noctornal_api.comms import normalise
+    assert normalise(platform_key, observed).durable == \
+        ontology_normalise(selector_type, observed)
+
+
+def test_an_mxid_localpart_keeps_its_case():
+    """Localparts are case-SENSITIVE on historical homeservers. Folding
+    one gives two accounts a single durable value, and `correlate` then
+    reports two people as one."""
+    from noctornal_api.comms import normalise
+    upper = normalise("MATRIX", "@Alice:example.org")
+    lower = normalise("MATRIX", "@alice:example.org")
+    assert upper.durable != lower.durable
+    assert normalise("MATRIX", "@Alice:EXAMPLE.ORG").durable == upper.durable
+
+
+def test_a_telegram_channel_id_is_durable_and_is_not_called_a_username():
+    """A numeric supergroup id was refused with an error saying it was a
+    @username -- both a refusal and a wrong explanation."""
+    from noctornal_api.comms import normalise
+    # Bot-API and MTProto forms of ONE channel collapse together.
+    assert normalise("TELEGRAM", "-1001234567890").durable == "1234567890"
+    assert normalise("TELEGRAM", "1234567890").durable == "1234567890"
+    # A basic-group chat id keeps its minus, or it collides with a user id.
+    assert normalise("TELEGRAM", "-4881234").durable == "-4881234"
+    assert normalise("TELEGRAM", "4881234").durable != \
+        normalise("TELEGRAM", "-4881234").durable
 
 
 def test_something_that_is_not_a_tox_id_yields_nothing_and_says_why():
