@@ -147,7 +147,15 @@ Phases 0, 1, 2 and 3 are implemented and running, not just designed:
   truncation flagged, and trust decay applied at projection time without
   ever mutating a stored weight.
 
-304 tests cover it, the Postgres and MinIO legs env-gated.
+Plus, from the enhancement map and the first slices of Phases 4 and 5:
+evidence attachable at the moment a claim is made with unevidenced elements
+drawn hollow, retraction that visibly dissolves an element from the live
+graph, single-use recovery codes, ForceAtlas2 with Barnes-Hut in a worker,
+the one destination-aware TLP egress gate every outbound path shares, and
+the proposal pipeline that makes "machines propose, analysts dispose"
+structural rather than aspirational.
+
+376 tests cover it, the Postgres and MinIO legs env-gated.
 
 The key-player result is the sharpest thing here, because it disagrees with
 the obvious answer. On the shipped demo network, removing the three actors

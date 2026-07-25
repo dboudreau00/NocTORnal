@@ -14,9 +14,10 @@ Prosecution-grade (decision 13, US + Canada). The load-bearing properties:
   (docs/05: reads matter as much as writes).
 
 Object-store and DB config come from the environment (no default
-secrets). The TLP egress gate that must wrap export() before anything
-leaves the boundary is Phase 5; export() records the intent and returns
-the bytes to the caller inside the boundary.
+secrets). `export()` goes through the shared TLP egress gate
+(`noctornal_api.egress`, Phase 5) — the same one function SMTP, Jira and
+webhooks call, so invariant 8 has exactly one implementation to keep
+right.
 """
 from __future__ import annotations
 
@@ -38,7 +39,12 @@ DEFAULT_RETENTION = timedelta(
 )
 
 # Classifications that must never cross the boundary via export (invariant 8).
-_NO_EGRESS = frozenset({"AMBER_STRICT", "RED"})
+# Invariant 8 now lives in ONE place: noctornal_api.egress.NEVER_EGRESS,
+# which every outbound path shares (docs/07). Kept here only as a
+# re-export so existing importers do not silently get a second,
+# drifting copy of the rule.
+from noctornal_api.egress import NEVER_EGRESS as _NEVER
+_NO_EGRESS = frozenset(t.name for t in _NEVER)
 
 
 def _sha256(data: bytes) -> bytes:
@@ -232,23 +238,39 @@ class EvidenceService:
                         {"ok": ok})
         return ok
 
-    def export(self, evidence_id: UUID, actor_id: UUID) -> bytes:
-        # Invariant 8: AMBER_STRICT and RED never leave the boundary. This
-        # is the fail-closed floor; the full destination-aware egress gate
-        # (per-integration TLP ceilings) is Phase 5 (docs/07). Bytes are
-        # re-verified before release so a swapped version cannot be exported.
+    def export(self, evidence_id: UUID, actor_id: UUID,
+               destination: str = "export",
+               destination_ceiling: str | None = None) -> bytes:
+        """Release bytes across the boundary, through the ONE egress gate.
+
+        Invariant 8 used to be enforced by a local frozenset here. It now
+        goes through `egress.can_egress`, which is the single function
+        docs/07 requires every outbound path to share — export, SMTP, Jira
+        and webhooks alike. A second copy of this rule is how the copies
+        drift apart, and the one that drifts is the leak.
+
+        Bytes are re-verified before release, so a swapped object can never
+        be exported with a clean log.
+        """
+        from noctornal_api.egress import can_egress
+
         row = self._c.execute(
-            "SELECT classification, case_id FROM core.evidence WHERE id = %s",
+            """SELECT classification, case_id, compartments
+                 FROM core.evidence WHERE id = %s""",
             (evidence_id,),
         ).fetchone()
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
-        classification, case_id = row
-        if classification in _NO_EGRESS:
-            raise EvidenceError(
-                f"export refused: {classification} classified evidence may not "
-                "cross the boundary (invariant 8)"
-            )
+        classification, case_id, compartments = row
+        decision = can_egress(
+            classification, destination,
+            compartments=frozenset(compartments or []),
+            destination_ceiling=destination_ceiling,
+        )
+        if decision.denied:
+            self._audit("EVIDENCE_EGRESS_REFUSED", actor_id, evidence_id, case_id,
+                        {"reason": decision.reason, "destination": destination})
+            raise EvidenceError(f"export refused: {decision.explain()}")
         data, _ = self._fetch_verified(evidence_id, actor_id)
         with self._c.transaction():
             self._custody(evidence_id, "EXPORTED", actor_id)
