@@ -27,6 +27,9 @@ def conn():
         c.execute(f"DELETE FROM core.tag_assignment WHERE evidence_id IN {esub} "
                   f"OR node_id IN (SELECT id FROM core.node WHERE case_id IN {csub})")
         c.execute(f"DELETE FROM core.tag WHERE case_id IN {csub}")
+        # Global tags (case_id IS NULL) are outside the case-scoped sweep,
+        # so remove the ones this suite creates by their test namespace.
+        c.execute("DELETE FROM core.tag WHERE case_id IS NULL AND namespace LIKE 'test-%'")
         c.execute(f"DELETE FROM core.node_set_member WHERE set_id IN "
                   f"(SELECT id FROM core.node_set WHERE case_id IN {csub})")
         c.execute(f"DELETE FROM core.node_set WHERE case_id IN {csub}")
@@ -89,12 +92,17 @@ def test_duplicate_tag_rejected(conn, case):
 
 
 def test_global_and_case_tag_coexist(conn, case):
+    """A global taxonomy entry and a case entry with the same name coexist
+    (two separate partial unique indexes)."""
     from noctornal_api.curation import TagService
     case_id, _ = case
     svc = TagService(conn)
-    # A global taxonomy entry and a case entry with the same name coexist.
-    g = svc.create_tag(namespace="mitre", name="T1566", case_id=None)
-    c = svc.create_tag(namespace="mitre", name="T1566", case_id=case_id)
+    # Unique per run: a GLOBAL tag has no case_id, so the fixture's
+    # case-scoped cleanup cannot remove it — the name must not collide with
+    # a previous run, and the teardown deletes the 'test-%' namespace.
+    ns = f"test-{uuid4().hex[:8]}"
+    g = svc.create_tag(namespace=ns, name="T1566", case_id=None)
+    c = svc.create_tag(namespace=ns, name="T1566", case_id=case_id)
     assert g != c
 
 
@@ -130,7 +138,8 @@ def test_node_full_text_search(conn, case):
     case_id, uid = case
     _node(conn, case_id, uid, "bassterlord the broker")
     _node(conn, case_id, uid, "unrelated persona")
-    hits = SearchService(conn).search_nodes(case_id=case_id, query="broker")
+    hits = SearchService(conn).search_nodes(
+        case_id=case_id, query="broker", clearance="RED", compartments=frozenset())
     labels = [h.label for h in hits]
     assert "bassterlord the broker" in labels
     assert "unrelated persona" not in labels
@@ -141,7 +150,8 @@ def test_soft_deleted_nodes_excluded_from_search(conn, case):
     case_id, uid = case
     n = _node(conn, case_id, uid, "ghost broker")
     conn.execute("UPDATE core.node SET deleted_at = now() WHERE id = %s", (n,))
-    hits = SearchService(conn).search_nodes(case_id=case_id, query="ghost")
+    hits = SearchService(conn).search_nodes(
+        case_id=case_id, query="ghost", clearance="RED", compartments=frozenset())
     assert n not in [h.id for h in hits]
 
 
@@ -154,5 +164,6 @@ def test_evidence_full_text_search(conn, case):
     ev.ingest(case_id=case_id, title="ransom note transcript", media_type="text/plain",
               data=b"content-" + uuid4().hex.encode(), acquired_by=uid,
               acquisition_method="MANUAL_UPLOAD", description="LockBit negotiation")
-    hits = SearchService(conn).search_evidence(case_id=case_id, query="ransom")
+    hits = SearchService(conn).search_evidence(
+        case_id=case_id, query="ransom", clearance="RED", compartments=frozenset())
     assert any("ransom" in h.label for h in hits)

@@ -119,27 +119,48 @@ class SearchService:
     def __init__(self, conn: psycopg.Connection):
         self._c = conn
 
-    def search_nodes(self, *, case_id: UUID, query: str, limit: int = 50) -> list[SearchHit]:
+    def search_nodes(
+        self, *, case_id: UUID, query: str, limit: int = 50,
+        clearance: str, compartments: frozenset[str],
+    ) -> list[SearchHit]:
         """Full-text over node label + attrs (trigger-maintained tsvector).
-        Scoped to a case; excludes soft-deleted and merged-away nodes."""
+
+        Elements may be classified ABOVE their case (the TLP floor trigger
+        only forbids going below), so results are filtered by the CALLER's
+        own clearance and compartments — not the case's. Otherwise a label
+        like a real name on a RED node leaks to an AMBER analyst who is
+        correctly refused the node itself. The predicates are in SQL so
+        LIMIT applies after filtering and cannot truncate visible hits in
+        favour of invisible ones.
+        """
         rows = self._c.execute(
             """SELECT id, label, ts_rank(search_tsv, plainto_tsquery('simple', %s)) AS rank
                  FROM core.node
                 WHERE case_id = %s
                   AND deleted_at IS NULL AND merged_into_id IS NULL
+                  AND classification <= %s::core.tlp
+                  AND compartments <@ %s
                   AND search_tsv @@ plainto_tsquery('simple', %s)
                 ORDER BY rank DESC LIMIT %s""",
-            (query, case_id, query, limit),
+            (query, case_id, clearance, list(compartments), query, limit),
         ).fetchall()
         return [SearchHit(r[0], r[1], r[2]) for r in rows]
 
-    def search_evidence(self, *, case_id: UUID, query: str, limit: int = 50) -> list[SearchHit]:
+    def search_evidence(
+        self, *, case_id: UUID, query: str, limit: int = 50,
+        clearance: str, compartments: frozenset[str],
+    ) -> list[SearchHit]:
+        """As search_nodes: an exhibit title is filtered by the caller's own
+        ceiling, so an over-classified exhibit is invisible rather than
+        discoverable-then-403."""
         rows = self._c.execute(
             """SELECT id, title, ts_rank(search_tsv, plainto_tsquery('simple', %s)) AS rank
                  FROM core.evidence
                 WHERE case_id = %s
+                  AND classification <= %s::core.tlp
+                  AND compartments <@ %s
                   AND search_tsv @@ plainto_tsquery('simple', %s)
                 ORDER BY rank DESC LIMIT %s""",
-            (query, case_id, query, limit),
+            (query, case_id, clearance, list(compartments), query, limit),
         ).fetchall()
         return [SearchHit(r[0], r[1], r[2]) for r in rows]

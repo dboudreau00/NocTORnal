@@ -87,6 +87,13 @@ class CaseService:
         self._require_clearance(owner_user_id, classification, "owner")
         if deputy_user_id is not None:
             self._require_clearance(deputy_user_id, classification, "deputy")
+        # Compartments are need-to-know locks, so a creator cannot put a case
+        # into a compartment they are not read into — they would be locked out
+        # of the case they just made (and a typo'd compartment would do the
+        # same silently).
+        self._require_compartments(owner_user_id, compartments or [], "owner")
+        if deputy_user_id is not None:
+            self._require_compartments(deputy_user_id, compartments or [], "deputy")
         try:
             with self._c.transaction():
                 case_id = self._c.execute(
@@ -198,7 +205,13 @@ class CaseService:
                         {"user_id": str(user_id)})
 
     def list_for_user(self, user_id: UUID) -> list[CaseRow]:
-        """Cases a user currently has an unexpired assignment to."""
+        """Cases the user may actually READ — the listing must return exactly
+        the set for which the five-part gate would allow case.read, or the
+        list becomes a disclosure channel for cases the detail endpoint
+        denies. All four applicable checks are in the SQL: the verb (via the
+        assignment's role), the unexpired assignment, clearance dominance,
+        and compartment subset. (Step-up does not apply: case.read is not a
+        step-up permission.)"""
         rows = self._c.execute(
             """SELECT c.id, c.code, c.title, c.summary, c.status, c.classification,
                       c.compartments, c.owner_user_id, c.deputy_user_id, c.legal_basis,
@@ -206,7 +219,15 @@ class CaseService:
                       c.closed_at
                  FROM core."case" c
                  JOIN iam.case_assignment a ON a.case_id = c.id
-                WHERE a.user_id = %s AND (a.expires_at IS NULL OR a.expires_at > now())
+                 JOIN iam.app_user u ON u.id = a.user_id
+                WHERE a.user_id = %s
+                  AND (a.expires_at IS NULL OR a.expires_at > now())
+                  AND u.is_active
+                  AND c.classification <= u.tlp_clearance
+                  AND c.compartments <@ u.compartments
+                  AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                               WHERE rp.role_key = a.role_key
+                                 AND rp.permission_key = 'case.read')
                 ORDER BY c.created_at DESC""",
             (user_id,),
         ).fetchall()
@@ -237,6 +258,36 @@ class CaseService:
                 f"{who} clearance {row[0]} is below the case classification "
                 f"{classification} — they could not see the case"
             )
+
+    def _require_compartments(
+        self, user_id: UUID, compartments: list[str], who: str
+    ) -> None:
+        row = self._c.execute(
+            "SELECT compartments FROM iam.app_user WHERE id = %s", (user_id,)
+        ).fetchone()
+        if row is None:
+            raise CaseError(f"{who} user {user_id} not found")
+        missing = set(compartments) - set(row[0] or [])
+        if missing:
+            raise CaseError(
+                f"{who} is not read into compartment(s) {sorted(missing)} — "
+                "they could not see the case"
+            )
+
+    def assign_user_checked(
+        self, case_id: UUID, user_id: UUID, role_key: str, *,
+        granted_by: UUID, expires_at: datetime | None = None,
+    ) -> None:
+        """assign_user, but refusing an assignee who could never read the
+        case. An under-cleared or non-compartmented assignee is otherwise a
+        reachable state that the listing/search filters then silently hide."""
+        case = self.get(case_id)
+        if case is None:
+            raise CaseError(f"case {case_id} not found")
+        self._require_clearance(user_id, case.classification, "assignee")
+        self._require_compartments(user_id, case.compartments, "assignee")
+        self.assign_user(case_id, user_id, role_key, granted_by=granted_by,
+                         expires_at=expires_at)
 
     def _owner(self, case_id: UUID) -> UUID | None:
         row = self._c.execute(

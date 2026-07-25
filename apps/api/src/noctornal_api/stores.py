@@ -98,14 +98,26 @@ class PgUserStore(UserStore):
     def record_failed_login(
         self, user_id: UUID, threshold: int, lock_until: datetime
     ) -> None:
-        # Increment and lock in one statement, deciding lockout from the
-        # POST-increment value (failed_logins + 1) so parallel failures
-        # cannot each read a stale count and skip the lock; and never
-        # overwrite an existing lock with a shorter/null one.
+        """Increment and lock in one statement, deciding lockout from the
+        POST-increment value so parallel failures cannot each read a stale
+        count and skip the lock, and never shortening an existing lock.
+
+        The counter DECAYS: once a previous lock has elapsed the window
+        restarts at 1. Without that reset the count stayed at the threshold
+        forever, so a single bad login every 15 minutes re-locked the account
+        indefinitely — a one-request-per-quarter-hour denial of service
+        against any analyst whose email address is known.
+        """
         self._c.execute(
             """UPDATE iam.app_user
-                  SET failed_logins = failed_logins + 1,
+                  SET failed_logins = CASE
+                          WHEN locked_until IS NOT NULL AND locked_until <= now()
+                          THEN 1                      -- expired lock: new window
+                          ELSE failed_logins + 1
+                      END,
                       locked_until = CASE
+                          WHEN locked_until IS NOT NULL AND locked_until <= now()
+                          THEN NULL                   -- 1 < threshold, so unlocked
                           WHEN failed_logins + 1 >= %s
                           THEN GREATEST(COALESCE(locked_until, %s), %s)
                           ELSE locked_until
@@ -231,6 +243,14 @@ class PgSessionStore(SessionStore):
             (record.last_seen_at, record.mfa_satisfied_at, record.revoked_at,
              record.revoke_reason, record.id),
         )
+
+    def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool:
+        cur = self._c.execute(
+            """UPDATE iam.session SET revoked_at = %s, revoke_reason = %s
+                WHERE id = %s AND revoked_at IS NULL""",
+            (at, reason, session_id),
+        )
+        return cur.rowcount > 0
 
     def revoke_all_for_user(self, user_id: UUID, reason: str, at: datetime) -> int:
         cur = self._c.execute(
