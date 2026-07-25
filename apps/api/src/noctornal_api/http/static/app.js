@@ -149,6 +149,8 @@ const state = {
      "panned to exactly the origin". */
   graph: null,               // the simulation: {nodes, links, index, ...}
   view: { scale: 1, tx: NaN, ty: NaN },
+  viewport: null,            // last canvas size + dpr, to recentre on resize
+  canvasObserver: null,      // retained: an anonymous one can be collected
   needFit: true,
   layout: new Map(),         // node id -> {x, y, is_pinned}
 
@@ -481,6 +483,9 @@ async function openCase(caseId) {
   state.gedges = [];
   state.projMeta = null;
   state.view = { scale: 1, tx: NaN, ty: NaN };
+  // A new case re-centres from scratch, so the previous case's
+  // canvas size must not contribute a resize delta.
+  state.viewport = null;
   /* Analysis is per-case and per-projection; carrying another case's
      numbers into this one would be worse than showing none. */
   state.analytics = null;
@@ -1564,13 +1569,39 @@ function resizeGraph() {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (!w || !h) return;
+  const prev = state.viewport;
+  // Nothing changed: bail before touching canvas.width, which CLEARS the
+  // canvas and forces a full repaint even when assigned an identical value.
+  // This is what makes it safe to call from both the observer and the
+  // window listener, and on every tab switch.
+  if (prev && prev.w === w && prev.h === h && prev.dpr === dpr) return;
+
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
   if (!Number.isFinite(state.view.tx) || !Number.isFinite(state.view.ty)) {
     state.view.tx = w / 2;
     state.view.ty = h / 2;
+  } else if (prev && (prev.w !== w || prev.h !== h)) {
+    /* Keep whatever the analyst was looking at in the middle.
+     *
+     * The canvas backing store was already being resized here, but the
+     * translation was left alone, so growing the window pinned the graph to
+     * the old top-left and opened empty space on the right and bottom —
+     * maximising appeared to do nothing but add margin.
+     *
+     * Since screen = world * scale + t, holding the centred world point
+     * still means shifting t by half the size change. Deliberately NOT a
+     * re-fit: docs/03 is explicit that "analysts build a spatial memory of
+     * their network — reshuffling it on every load destroys real analytic
+     * value", and a window resize is not a request to rearrange the case.
+     * Zoom is untouched for the same reason: a node keeps the size it had.
+     */
+    state.view.tx += (w - prev.w) / 2;
+    state.view.ty += (h - prev.h) / 2;
   }
+  state.viewport = { w: w, h: h, dpr: dpr };
   draw();
 }
 
@@ -1996,13 +2027,30 @@ function initCanvas() {
     if (state.hideInferredHold) { state.hideInferredHold = false; draw(); }
   });
 
+  /* Two paths, both installed, on purpose.
+   *
+   * The observer is RETAINED on state rather than left anonymous:
+   * `new ResizeObserver(cb).observe(el)` keeps no reference to the
+   * observer, and an observer that gets collected stops delivering
+   * silently — the canvas would simply stop tracking its container with
+   * nothing on screen to say why.
+   *
+   * The window listener is no longer an either/or fallback. It costs one
+   * event handler and covers the cases the observer misses: a callback
+   * that never arrives because the page was in a background tab when the
+   * window changed, and a device-pixel-ratio change from dragging the
+   * window to a monitor with different scaling, which alters what the
+   * backing store should be without changing the element's CSS size at
+   * all. resizeGraph() no-ops when nothing actually changed, so running
+   * both is free. */
+  const onResize = () => {
+    if (state.tab === 'graph') { resizeGraph(); resizeDensity(); }
+  };
   if ('ResizeObserver' in window) {
-    new ResizeObserver(() => {
-      if (state.tab === 'graph') { resizeGraph(); resizeDensity(); }
-    }).observe(canvas.parentElement);
-  } else {
-    window.addEventListener('resize', () => { resizeGraph(); resizeDensity(); });
+    state.canvasObserver = new ResizeObserver(onResize);
+    state.canvasObserver.observe(canvas.parentElement);
   }
+  window.addEventListener('resize', onResize);
 }
 
 function onCanvasKey(e) {
