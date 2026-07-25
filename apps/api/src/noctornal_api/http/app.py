@@ -20,7 +20,15 @@ from fastapi.staticfiles import StaticFiles
 
 from noctornal_api import __version__
 from noctornal_api.http.errors import install_error_handlers, problem_response
-from noctornal_api.http.routers import auth, cases, evidence, graph, read, search
+from noctornal_api.http.routers import (
+    auth,
+    cases,
+    evidence,
+    graph,
+    graphview,
+    read,
+    search,
+)
 
 API_PREFIX = "/api/v1"
 
@@ -106,7 +114,8 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     for router in (auth.router, cases.router, graph.router,
-                   evidence.router, search.router, read.router):
+                   evidence.router, search.router, read.router,
+                   graphview.router):
         app.include_router(router, prefix=API_PREFIX)
 
     # The analyst UI: plain HTML/CSS/JS, no build step, same origin as the
