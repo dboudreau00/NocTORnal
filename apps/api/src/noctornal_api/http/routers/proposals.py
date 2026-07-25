@@ -1,11 +1,18 @@
-"""Triage: the human half of "machines propose, analysts dispose".
+"""Capture and triage: the human half of "machines propose, analysts
+dispose".
 
-Reading the queue needs `case.read`; disposing of anything needs
-`proposal.review`. There is deliberately NO endpoint that creates a
-proposal over HTTP — proposals come from extractors running inside the
-platform, and an externally-writable proposal queue would be a way to push
-suggestions at an analyst from outside the boundary (docs/12 gives ingest
-its own key model precisely so that path is separate and write-only).
+Three permissions, deliberately distinct. Reading the queue needs
+`case.read`; disposing of anything needs `proposal.review`; pasting
+material needs `evidence.upload`. Capture and review are kept apart so
+that being able to feed the extractor is not the same as being able to
+accept what it produces.
+
+No endpoint lets a client DICTATE a proposal. `/capture` accepts text and
+the in-process extractor derives the proposals from it — the caller
+supplies material, never the finding. A queue that accepted
+caller-authored proposals would be a way to push arbitrary suggestions at
+an analyst from outside the boundary, which is why docs/12 gives bulk
+ingest its own separate, write-only key model instead.
 """
 from __future__ import annotations
 
@@ -15,7 +22,14 @@ import psycopg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from noctornal_api.http.deps import CurrentUser, get_conn, require
+from psycopg.types.json import Json
+
+from noctornal_api.http.deps import (
+    CurrentUser,
+    check_writable_labels,
+    get_conn,
+    require,
+)
 from noctornal_api.http.errors import Problem
 from noctornal_api.proposals import (
     STATE_PROPOSED,
@@ -73,6 +87,58 @@ def _owned(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> Propos
     if row is None or row.case_id != case_id:
         raise Problem(404, "Not found", "no such proposal in this case")
     return row
+
+
+class CaptureBody(BaseModel):
+    text: str = Field(min_length=1, max_length=1_000_000)
+    title: str | None = None
+    external_url: str | None = None
+    author_handle: str | None = None
+    classification: str = "AMBER"
+
+
+@router.post("/capture", response_model=dict, status_code=201)
+def capture(
+    case_id: UUID, body: CaptureBody,
+    user: CurrentUser = Depends(require("evidence.upload")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Paste text, land it as a document, extract selectors, raise proposals.
+
+    Gated on `evidence.upload` rather than `proposal.review`: pasting
+    material is a collection act, and the analyst doing it is not thereby
+    entitled to accept what comes out of it. Keeping the two permissions
+    apart is what stops capture becoming a way to write the graph without
+    review.
+
+    Deliberately capped at 1MB. This is a paste box, not an ingest API --
+    docs/12 gives bulk ingest its own write-only key model precisely so
+    that path never runs through an analyst's session.
+    """
+    from noctornal_api.extraction import CaptureService, ExtractionError
+
+    check_writable_labels(conn, user, classification=body.classification)
+    try:
+        result = CaptureService(conn).capture(
+            case_id=case_id, text=body.text, title=body.title,
+            external_url=body.external_url, author_handle=body.author_handle,
+            classification=body.classification,
+        )
+    except ExtractionError as exc:
+        raise Problem(400, "Invalid request", str(exc)) from exc
+
+    conn.execute(
+        """INSERT INTO audit.event
+               (actor_id, actor_kind, action, object_type, object_id,
+                case_id, detail)
+           VALUES (%s, 'USER', 'DOCUMENT_CAPTURED', 'document', %s, %s, %s)""",
+        (user.user_id, result.document_id, case_id, Json(result.summary())),
+    )
+    return {
+        **result.summary(),
+        "note": ("Nothing has entered the graph. Each finding is a proposal "
+                 "waiting in the triage queue."),
+    }
 
 
 @router.get("", response_model=dict)
