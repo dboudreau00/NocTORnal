@@ -32,6 +32,8 @@ dev = [
     "pytest>=8",
     "httpx>=0.27",         # FastAPI TestClient
     "qrcode>=7.4",         # scannable TOTP enrolment in scripts/bootstrap.py
+    "ruff==0.6.9",         # lint; PINNED so CI and a laptop cannot
+                           # disagree about what "clean" means
 ]
 
 [tool.setuptools.packages.find]

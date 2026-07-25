@@ -15,7 +15,9 @@ model produces a landfill you then have to clean by hand.
 - [ ] Auth: password + TOTP, sessions, Argon2id
 - [ ] RBAC/ABAC gate as one function with full test coverage
 - [ ] Audit log with hash chaining, plus a chain verification job
-- [ ] CI: lint, typecheck, test, migration round-trip
+- [x] CI: lint, test, migration round-trip, ontology drift and source
+      hygiene (decision 42). **No typecheck** -- there are no type
+      annotations to check against yet.
 
 **Done when:** a user can register, enrol TOTP, log in, and every action
 appears in a verifiable audit chain.

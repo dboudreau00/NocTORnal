@@ -99,7 +99,7 @@ def test_capture_lands_a_document_and_extracts_with_offsets(conn, case):
              FROM collect.extraction WHERE document_id = %s""",
         (result.document_id,)).fetchall()
     assert rows
-    for sel_type, raw, start, end, extractor in rows:
+    for _sel_type, raw, start, end, extractor in rows:
         # The offsets must actually point at the value in the stored body,
         # or "show me this in context" is a lie.
         assert SAMPLE[start:end] == raw
