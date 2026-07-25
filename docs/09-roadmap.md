@@ -114,8 +114,16 @@ Deliberately NOT built, and why:
 - [ ] Document bucket: normalise, dedupe, version, index, embed
 - [ ] Selector extractors with offsets
 - [ ] Watch matching → watch hits
-- [ ] Proposal generation from extractions
-- [ ] Triage queue, keyboard driven
+- [x] **Proposal model and the human review gate** (`proposals.py`,
+      decision 39) — invariant 3 is now enforced by the extractor-facing
+      class being *unable* to write the graph, rather than by remembering
+      not to. Accepting applies through GraphWriteService, so the assertion
+      is atomic and the resulting edge is born inferred.
+- [x] Triage queue (API: `GET/POST /cases/{id}/proposals/...`). **Not yet
+      keyboard driven, and not yet in the UI** — the endpoints exist and are
+      tested; nothing renders them.
+- [ ] Proposal generation *from real extractions* — nothing extracts yet,
+      so nothing writes proposals outside tests
 - [ ] Parser health checks and drift alerting
 
 **Done when:** a watch on a real forum fills the bucket for a week without
@@ -125,7 +133,9 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 
 ## Phase 5 — Notification and integration (week 10)
 
-- [ ] Classification egress gate, one function, called everywhere
+- [x] **Classification egress gate, one function, called everywhere**
+      (`egress.py`, decision 38). Destination-aware, fails closed, and
+      evidence export now goes through it instead of its own copy.
 - [ ] SMTP with digest, suppression, quiet hours, escalation
 - [ ] In-app notification centre
 - [ ] Jira: outbound task creation, inbound status webhook, TLP ceiling
