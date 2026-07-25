@@ -11,6 +11,7 @@ forums and channels.
 
 | | | |
 |---|---|---|
+| **[QUICKSTART.md](QUICKSTART.md)** | Start it and log in — one command, then create your account | **Run it** |
 | **[GETTING-STARTED.md](GETTING-STARTED.md)** | Blocking decisions, day-one setup, first four Claude Code sessions | **Read first** |
 | **[CLAUDE.md](CLAUDE.md)** | Working agreement and the twelve non-negotiable invariants | Read second |
 | [docs/00-decisions.md](docs/00-decisions.md) | Decisions taken, and **ten open questions for you** | |
@@ -71,10 +72,30 @@ is worse than no graph, because it looks authoritative.
 
 ## Where to start
 
-[GETTING-STARTED.md](GETTING-STARTED.md). It has the four decisions that
-block week one, the day-one setup, and copy-pasteable prompts for the
-first four Claude Code sessions.
+To **run it**: [QUICKSTART.md](QUICKSTART.md) — one command to start the
+stack and the UI, one more to create your account.
 
-Note that nothing here has been executed — the schema is structurally
-checked but has never touched a real Postgres. Making it load cleanly is
-session one.
+To **understand the decisions**: [GETTING-STARTED.md](GETTING-STARTED.md)
+and [docs/00-decisions.md](docs/00-decisions.md).
+
+## State of the build
+
+Phase 0 and Phase 1 are implemented and running, not just designed:
+
+- Postgres schema owned by an Alembic chain (0001–0025) that round-trips
+  from base to head; the ontology is generated from one definition.
+- Authentication (Argon2id + replay-protected TOTP + server-side sessions),
+  and the five-part access gate as a single evaluator every endpoint calls.
+- The assertion layer, enforced **in the database**: no node or edge can be
+  committed without a supporting assertion (invariant 1).
+- Evidence with WORM object-lock storage, dual hashing, and an append-only,
+  hash-chained chain of custody.
+- Cases, selectors with per-type normalisers, tags, node sets, full-text
+  search, a REST API and an analyst UI with the sociogram and the
+  "why do we believe this" inspector.
+
+The test suite covers all of it (242 tests, the Postgres and MinIO legs
+env-gated). Phases 2–9 — analytics, collection, integrations — are still
+documents. `docs/00-decisions.md` records every decision taken and the
+questions still open, and `QUICKSTART.md` ends with an honest list of what
+this deployment is *not* yet hardened for.

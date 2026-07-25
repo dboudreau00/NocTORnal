@@ -11,19 +11,21 @@ MINIO_* variables. Nothing has a default secret.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from noctornal_api import __version__
 from noctornal_api.http.errors import install_error_handlers, problem_response
-from noctornal_api.http.routers import auth, cases, evidence, graph, search
+from noctornal_api.http.routers import auth, cases, evidence, graph, read, search
 
 API_PREFIX = "/api/v1"
 
-# Sent on every response (docs/05 "Transport and headers"). CSP is set here
-# for API responses; the app shell's per-request nonce CSP belongs to the
-# front end. HSTS is deliberately left to the TLS terminator.
+# Sent on every response (docs/05 "Transport and headers"). HSTS is
+# deliberately left to the TLS terminator.
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -31,6 +33,23 @@ _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Permissions-Policy": "geolocation=(), camera=(), microphone=()",
 }
+
+# The UI needs to load its own stylesheet, script and canvas images, so the
+# API's "default-src 'none'" cannot apply to it. Everything is same-origin
+# and there is deliberately NO 'unsafe-inline': the UI ships separate .css
+# and .js files precisely so inline script stays forbidden (docs/05).
+_UI_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "form-action 'none'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'none'"
+)
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def create_app() -> FastAPI:
@@ -74,6 +93,11 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
+        if request.url.path.startswith("/ui"):
+            # Overwrite, not setdefault: the UI must not inherit the API's
+            # default-src 'none'.
+            response.headers["Content-Security-Policy"] = _UI_CSP
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
     @app.get("/healthz", tags=["meta"], include_in_schema=False)
@@ -82,8 +106,18 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     for router in (auth.router, cases.router, graph.router,
-                   evidence.router, search.router):
+                   evidence.router, search.router, read.router):
         app.include_router(router, prefix=API_PREFIX)
+
+    # The analyst UI: plain HTML/CSS/JS, no build step, same origin as the
+    # API so no CORS surface is opened. Mounted last so it cannot shadow an
+    # API route. html=True serves index.html for /ui/.
+    if STATIC_DIR.is_dir():
+        app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        def _root() -> RedirectResponse:
+            return RedirectResponse("/ui/")
 
     return app
 
