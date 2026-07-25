@@ -92,7 +92,10 @@ def _identity(conn, case_id, actor, label):
 @pytest.fixture
 def svc(conn):
     from noctornal_api.comms import CommsService
-    return CommsService(conn)
+    # Clearance is REQUIRED for every read that returns case content: a
+    # comms row can be classified above its case, so the case gate alone
+    # let an under-cleared reader see it.
+    return CommsService(conn, clearance="RED")
 
 
 # --- the Tox trap -------------------------------------------------------

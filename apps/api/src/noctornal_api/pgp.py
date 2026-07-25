@@ -713,7 +713,9 @@ class PgpService:
                  "note": r[10], "verified_at": r[11].isoformat()}
                 for r in rows]
 
-    def unverified_claims(self, case_id: UUID) -> list[dict]:
+    def unverified_claims(self, case_id: UUID, *, clearance: str,
+                          compartments: frozenset[str] = frozenset()
+                          ) -> list[dict]:
         """CLAIMED bindings that nobody has tried to confirm.
 
         The queue that exists because `NO_VERIFIER` is a distinct outcome:
@@ -727,7 +729,13 @@ class PgpService:
                                WHERE v.channel_binding_id = cb.id) AS attempted
                  FROM comms.channel_binding cb
                 WHERE cb.case_id = %s AND cb.verification = 'CLAIMED'
-                ORDER BY cb.created_at DESC""", (case_id,)).fetchall()
+                  -- This returns observed AND durable values, so it is a
+                  -- read of the binding's content and not merely of its
+                  -- existence: the binding's own labels apply.
+                  AND cb.classification <= %s::core.tlp
+                  AND cb.compartments <@ %s
+                ORDER BY cb.created_at DESC""",
+            (case_id, clearance, list(compartments))).fetchall()
         return [{"channel_binding_id": str(r[0]), "platform_key": r[1],
                  "observed_value": r[2], "durable_value": r[3],
                  "verification": r[4], "verification_attempted": r[5],

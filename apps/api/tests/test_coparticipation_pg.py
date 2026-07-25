@@ -366,3 +366,75 @@ def test_nonsense_parameters_are_refused(conn, kwargs):
     case_id = _case(conn, uid)
     with pytest.raises(CoParticipationError):
         _svc(conn).project(_params(case_id, **kwargs))
+
+
+# ---------------------------------------------------------------------------
+# The denominator is a property of the ROOM, not of our coverage of it
+# ---------------------------------------------------------------------------
+
+def test_a_big_room_full_of_unresolved_handles_does_not_score_like_a_dm(conn):
+    """THE regression for this module.
+
+    Newman weighting divided by the count remaining AFTER incidental,
+    unresolved and invisible participants were dropped. With the shipped
+    defaults that is the catastrophic case, not an edge case: a
+    500-member channel where only two members are resolved gave a
+    denominator of 2, so 1/(2-1) = 1.0 and two people who merely sat in
+    the same open channel scored EXACTLY as high as a two-party DM.
+
+    Every earlier test in this file had all participants resolved, so
+    raw_size == size and they passed either way. That is why the defect
+    survived them.
+    """
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    a, b = (_identity(conn, case_id, uid, "alpha"),
+            _identity(conn, case_id, uid, "bravo"))
+    members = [("alpha", a, False), ("bravo", b, False)]
+    members += [(f"lurker{n}", None, False) for n in range(38)]
+    _room(conn, case_id, members)          # 40 in the room, 2 resolved
+
+    out = _svc(conn).project(_params(case_id, max_room_size=50))
+    assert len(out["edges"]) == 1
+    # 1/(40-1), not 1/(2-1).
+    assert out["edges"][0]["weight"] == round(1 / 39, 6)
+    assert out["coverage"]["participants_excluded_unresolved"] == 38
+
+
+def test_the_oversize_cap_counts_the_room_not_the_survivors(conn):
+    """Same root cause, second symptom: a 500-member room with two
+    resolved members escaped the cap entirely and never appeared in
+    `oversized`, so the "no silent caps" guarantee reported nothing."""
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    a, b = (_identity(conn, case_id, uid, "alpha"),
+            _identity(conn, case_id, uid, "bravo"))
+    members = [("alpha", a, False), ("bravo", b, False)]
+    members += [(f"lurker{n}", None, False) for n in range(60)]
+    _room(conn, case_id, members)          # 62 in the room, 2 resolved
+
+    out = _svc(conn).project(_params(case_id, max_room_size=50))
+    assert out["edges"] == []
+    assert out["coverage"]["conversations_oversized"] == 1
+    entry = out["coverage"]["oversized"][0]
+    assert entry["participants"] == 62
+    # Both numbers, so "why was this dropped" is answerable.
+    assert entry["projectable_participants"] == 2
+
+
+def test_flagging_third_parties_incidental_does_not_promote_the_remainder(conn):
+    """docs/16 L4 actively ENCOURAGES flagging uninvolved participants, so
+    doing the right thing must not inflate the ties between whoever is
+    left."""
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    a, b = (_identity(conn, case_id, uid, "alpha"),
+            _identity(conn, case_id, uid, "bravo"))
+    bystanders = [_identity(conn, case_id, uid, f"by{n}") for n in range(18)]
+    members = [("alpha", a, False), ("bravo", b, False)]
+    members += [(f"by{n}", bystanders[n], True) for n in range(18)]
+    _room(conn, case_id, members)          # 20 in the room, 18 incidental
+
+    out = _svc(conn).project(_params(case_id))
+    assert len(out["edges"]) == 1
+    assert out["edges"][0]["weight"] == round(1 / 19, 6)

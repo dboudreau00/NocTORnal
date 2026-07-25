@@ -182,10 +182,71 @@ def normalise(platform_key: str, observed: str) -> Normalised:
         if len(value) == 66 and _HEX.match(value):
             return Normalised(_canonical("SESSION_ID", value))
         return Normalised(None, "not a 66-hex Session ID as observed")
+    if platform_key == "SIGNAL":
+        return _normalise_uuid_platform(
+            value, "SIGNAL_ACI",
+            "The Signal ACI (an account-identifier UUID) is durable; a PHONE "
+            "NUMBER is not. Numbers are recycled by carriers exactly as "
+            "Telegram usernames are, and matching on one can attribute a new "
+            "person's traffic to an old case.")
+    if platform_key == "WIRE":
+        return _normalise_uuid_platform(
+            value, "WIRE_UUID",
+            "The Wire account UUID is durable; the @handle is not.")
     selector_type = PLATFORM_SELECTOR_TYPE.get(platform_key)
     if selector_type:
-        return Normalised(_canonical(selector_type, value))
-    return Normalised(value)
+        return _durable_or_none(
+            _canonical(selector_type, value),
+            f"nothing durable survives normalisation of {observed!r} as "
+            f"{selector_type}. Recording it as an empty value would make "
+            f"every other empty value correlate with it.")
+    # A platform with no ontology type has no canonical form to appeal to.
+    # Case-folded so two sightings of one identifier still meet -- the raw
+    # passthrough meant `VendorX` and `vendorx` were two people -- and the
+    # caveat is carried on EVERY result, not only the empty one, because a
+    # silent best-effort is indistinguishable from a defined form.
+    caveat = (f"{platform_key} has no canonical form defined in the "
+              f"ontology; this is a case-folded trim and nothing stronger. "
+              f"Correlation on it is weaker than on a platform with a "
+              f"defined selector type.")
+    cleaned = value.strip().lower()
+    return Normalised(cleaned, caveat) if cleaned else Normalised(None, caveat)
+
+
+def _durable_or_none(candidate: str | None, note: str) -> Normalised:
+    """Refuse to store an EMPTY durable value.
+
+    An empty string is not "no value" to a database -- it is a value, and
+    every observation that normalises to it collides with every other one.
+    `correlate()` short-circuits on None and not on '', so
+    `normalise('DISCORD', 'coolvendor')` returning '' made a query for
+    `durable_value = ''` return every Discord binding whose handle had no
+    digits: an unbounded set of unrelated actors reported as one person.
+
+    Discord dropped the #0000 discriminator in 2023, so current handles
+    contain no digits at all and EVERY one of them hit this.
+    """
+    if candidate is None or not candidate.strip():
+        return Normalised(None, note)
+    return Normalised(candidate)
+
+
+def _normalise_uuid_platform(value: str, selector_type: str,
+                             why: str) -> Normalised:
+    """Platforms whose durable selector is a UUID and whose displayed
+    identifier is something else entirely.
+
+    `comms.platform` says so in the seeded note for both SIGNAL and WIRE,
+    and the normaliser promoted the displayed form anyway -- a phone
+    number came back as a durable value in three different shapes
+    depending on spacing, which is a false split AND a false merge in one.
+    """
+    cleaned = value.strip()
+    try:
+        UUID(cleaned)
+    except (ValueError, AttributeError, TypeError):
+        return Normalised(None, why)
+    return Normalised(_canonical(selector_type, cleaned))
 
 
 def _normalise_mxid(value: str) -> Normalised:
@@ -312,8 +373,46 @@ def coverage_note(platform_key: str) -> str:
 
 
 class CommsService:
-    def __init__(self, conn: psycopg.Connection):
+    """Reads are filtered by the CALLER's own labels, not just the case's.
+
+    Every table in `comms` carries its own `classification` and
+    `compartments`, and `check_writable_labels` caps a writer at their OWN
+    clearance rather than the case's -- so a RED-cleared analyst can write
+    a RED binding into an AMBER case, and nothing in the schema stops a
+    row sitting above its case. `require("comms.read")` authorises against
+    the CASE only (`deps.effective_labels` returns the case's labels when
+    no element labels are supplied), so an AMBER-cleared reader on that
+    case received the RED row in full.
+
+    `read.py`, `evidence.py`, `samples.py` and `coparticipation.py` all
+    filter on element labels. This service did not, and the omission was
+    invisible because the case gate passed.
+
+    Clearance is optional so the write paths and the platform catalogue --
+    which carry no case-scoped data -- can construct the service without
+    it. Every method that returns case content REQUIRES it and says so.
+    """
+
+    def __init__(self, conn: psycopg.Connection, *,
+                 clearance: str | None = None,
+                 compartments: frozenset[str] = frozenset()):
         self._c = conn
+        self._clearance = clearance
+        self._comp = list(compartments)
+
+    def _ceiling(self, what: str) -> tuple[str, list[str]]:
+        """The caller's labels, or a refusal to guess at them.
+
+        Defaulting to RED here would make every future caller that forgets
+        to pass a clearance silently maximally privileged, which is how
+        this defect arrived in the first place.
+        """
+        if self._clearance is None:
+            raise CommsError(
+                f"{what} returns case content and needs the caller's "
+                f"clearance: construct CommsService(conn, clearance=..., "
+                f"compartments=...)")
+        return self._clearance, self._comp
 
     def platforms(self) -> list[dict]:
         rows = self._c.execute(
@@ -382,24 +481,23 @@ class CommsService:
         same public key. Correlating on the observed value would show two
         people.
         """
+        clearance, comp = self._ceiling("correlate")
         result = normalise(platform_key, observed)
         if result.durable is None:
             return []
-        if case_id is None:
-            rows = self._c.execute(
-                """SELECT id, case_id, observed_value, verification,
-                          identity_node_id
-                     FROM comms.channel_binding
-                    WHERE platform_key = %s AND durable_value = %s""",
-                (platform_key, result.durable)).fetchall()
-        else:
-            rows = self._c.execute(
-                """SELECT id, case_id, observed_value, verification,
-                          identity_node_id
-                     FROM comms.channel_binding
-                    WHERE platform_key = %s AND durable_value = %s
-                      AND case_id = %s""",
-                (platform_key, result.durable, case_id)).fetchall()
+        rows = self._c.execute(
+            """SELECT id, case_id, observed_value, verification,
+                      identity_node_id
+                 FROM comms.channel_binding
+                WHERE platform_key = %s AND durable_value = %s
+                  AND (%s::uuid IS NULL OR case_id = %s)
+                  -- A binding can be classified above its case, so the
+                  -- case gate alone would return one the caller may not
+                  -- see -- and this endpoint returns the observed value,
+                  -- which IS the sensitive part.
+                  AND classification <= %s::core.tlp AND compartments <@ %s""",
+            (platform_key, result.durable, case_id, case_id,
+             clearance, comp)).fetchall()
         return [{"id": str(r[0]), "case_id": str(r[1]), "observed": r[2],
                  "verification": r[3],
                  "identity_node_id": str(r[4]) if r[4] else None}
@@ -413,11 +511,14 @@ class CommsService:
         differently from one running a Telegram bot and nothing else, and
         the SET is the finding rather than any member of it.
         """
+        clearance, comp = self._ceiling("co_declared")
         rows = self._c.execute(
             """SELECT platform_key, observed_value, durable_value, verification
                  FROM comms.channel_binding
                 WHERE case_id = %s AND co_declaration_ref = %s
-                ORDER BY platform_key""", (case_id, reference)).fetchall()
+                  AND classification <= %s::core.tlp AND compartments <@ %s
+                ORDER BY platform_key""",
+            (case_id, reference, clearance, comp)).fetchall()
         return [{"platform": r[0], "observed": r[1], "durable": r[2],
                  "verification": r[3]} for r in rows]
 
@@ -468,6 +569,7 @@ class CommsService:
         an attribution and belongs in an ATTRIBUTED_TO edge with a
         confidence.
         """
+        clearance, comp = self._ceiling("shared_devices")
         rows = self._c.execute(
             """SELECT df.fingerprint, df.platform_key,
                       count(DISTINCT cb.identity_node_id) AS identities,
@@ -477,9 +579,21 @@ class CommsService:
                    ON cb.case_id = df.case_id
                   AND cb.platform_key = df.platform_key
                 WHERE df.case_id = %s AND cb.identity_node_id IS NOT NULL
+                  -- The bindings this lead is built FROM, and the
+                  -- identities it names, both have to be visible: the
+                  -- result quotes observed values and counts identities,
+                  -- so an unfiltered join leaks both.
+                  AND cb.classification <= %s::core.tlp
+                  AND cb.compartments <@ %s
+                  AND EXISTS (SELECT 1 FROM core.node n
+                               WHERE n.id = cb.identity_node_id
+                                 AND n.deleted_at IS NULL
+                                 AND n.merged_into_id IS NULL
+                                 AND n.classification <= %s::core.tlp
+                                 AND n.compartments <@ %s)
                 GROUP BY df.fingerprint, df.platform_key
                HAVING count(DISTINCT cb.identity_node_id) > 1""",
-            (case_id,)).fetchall()
+            (case_id, clearance, comp, clearance, comp)).fetchall()
         return [{"fingerprint": r[0], "platform": r[1], "identity_count": r[2],
                  "observed_values": list(r[3]),
                  "lead": "the same physical device published under more than "
@@ -642,14 +756,19 @@ class CommsService:
         content" -- which is exactly what survives minimisation, and why
         the graph is built from participants rather than from bodies.
         """
+        clearance, comp = self._ceiling("contact_graph")
         rows = self._c.execute(
             """SELECT c.id, c.platform_key, c.is_group, c.message_count,
                       array_agg(p.observed_handle ORDER BY p.message_count DESC)
                  FROM comms.conversation c
                  JOIN comms.participant p ON p.conversation_id = c.id
                 WHERE c.case_id = %s
+                  -- A conversation can be classified above its case, and
+                  -- this returns its participant handles.
+                  AND c.classification <= %s::core.tlp
+                  AND c.compartments <@ %s
                 GROUP BY c.id, c.platform_key, c.is_group, c.message_count""",
-            (case_id,)).fetchall()
+            (case_id, clearance, comp)).fetchall()
         return [{"conversation_id": str(r[0]), "platform": r[1],
                  "is_group": r[2], "message_count": r[3],
                  "participants": list(r[4])} for r in rows]

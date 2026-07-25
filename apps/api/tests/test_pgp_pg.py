@@ -229,7 +229,8 @@ def test_not_checked_is_distinguishable_from_checked_and_failed(conn, svc):
         public_key=VENDOR_PUB, claimed_fingerprint=VENDOR_FPR,
         created_by=uid, channel_binding_id=checked)
 
-    by_id = {r["channel_binding_id"]: r for r in svc.unverified_claims(case_id)}
+    by_id = {r["channel_binding_id"]: r
+             for r in svc.unverified_claims(case_id, clearance="RED")}
     assert by_id[str(unchecked)]["verification_attempted"] is False
     assert by_id[str(checked)]["verification_attempted"] is True
 

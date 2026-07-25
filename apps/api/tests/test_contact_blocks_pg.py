@@ -220,8 +220,15 @@ def test_a_stoplist_entry_is_retired_not_deleted(conn, svc):
         durable_or_observed=f"old@{STOP_DOMAIN}", role="ADMIN", added_by=uid,
         platform_key="XMPP")
     with pytest.raises(ContactBlockError):
-        svc.retire_stoplist_entry(entry_id, retired_by=uid, reason="  ")
-    svc.retire_stoplist_entry(entry_id, retired_by=uid,
+        svc.retire_stoplist_entry(entry_id, retired_by=uid, reason="  ",
+                                  scope="GLOBAL")
+    # A GLOBAL entry cannot be retired through the CASE scope, and vice
+    # versa: retiring by id alone let the globally-gated route take a
+    # case's stoplist entries off the list.
+    with pytest.raises(ContactBlockError):
+        svc.retire_stoplist_entry(entry_id, retired_by=uid, reason="wrong scope",
+                                  scope="CASE", case_id=uuid4())
+    svc.retire_stoplist_entry(entry_id, retired_by=uid, scope="GLOBAL",
                               reason="was the vendor's own after all")
     assert conn.execute(
         "SELECT retired_reason FROM comms.service_selector WHERE id = %s",
@@ -411,3 +418,96 @@ def test_the_parse_is_audited(conn, svc):
     assert row[0]["parser_version"]
     assert row[0]["entries"] == 1
     assert block["parser_version"] == row[0]["parser_version"]
+
+
+# ---------------------------------------------------------------------------
+# Ordering: the fingerprint must see the stoplist's verdict
+# ---------------------------------------------------------------------------
+
+def test_two_vendors_quoting_a_stoplisted_escrow_are_not_impersonation(
+        conn, svc):
+    """`block_fingerprint` excludes THIRD_PARTY entries so that two
+    unrelated vendors quoting the forum escrow do not look like one
+    copying the other -- but it was computed from the raw text parse,
+    BEFORE the stoplist pass had a chance to mark the escrow as somebody
+    else's. So defences 3 and 4 turned into a false accusation.
+
+    The escrow line here carries no third-party LABEL, so only the
+    stoplist can catch it.
+    """
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    svc.add_stoplist_entry(durable_or_observed=f"escrow@{STOP_DOMAIN}",
+                           role="ESCROW", added_by=uid, platform_key="XMPP")
+    for handle, tail in (("vendor_a", "Stock updated daily"),
+                         ("vendor_b", "Bulk only, min order 5")):
+        svc.parse_and_store(
+            case_id=case_id,
+            raw_text=f"Jabber: escrow@{STOP_DOMAIN}\n{tail}",
+            source_ref=f"https://forum/{handle}", created_by=uid,
+            publisher_handle=handle)
+    assert svc.impersonation_candidates(case_id) == []
+
+
+def test_a_real_copy_is_still_caught_after_the_reordering(conn, svc):
+    """The fix must not blunt the detector it was protecting."""
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    # Reformatted and reordered, which is what a copier actually does --
+    # and identical raw text would dedupe on (case_id, raw_sha256) into a
+    # single block, so this also keeps the test honest about what is
+    # being compared.
+    for handle, text in (
+        ("the_real_one", f"Jabber: real@{STOP_DOMAIN}\nTOX: {TOX_ID}"),
+        ("the_copy",
+         f"=====\nTOX:   {TOX_ID}\nJABBER:  Real@{STOP_DOMAIN.upper()}\n====="),
+    ):
+        svc.parse_and_store(case_id=case_id, raw_text=text,
+                            source_ref=f"https://forum/{handle}",
+                            created_by=uid, publisher_handle=handle)
+    hits = svc.impersonation_candidates(case_id)
+    assert len(hits) == 1
+    assert sorted(hits[0]["publishers"]) == ["the_copy", "the_real_one"]
+
+
+def test_one_vendor_reposting_many_times_never_demotes_their_own_selector(
+        conn, svc):
+    """The count excluded only the CURRENT block, so a publisher's own
+    earlier blocks were already inside it and the `+1` added them again.
+    Three blocks by two publishers reported "3 distinct publishers", and a
+    vendor who reposted their contact block eventually demoted their own
+    strongest selector to THIRD_PARTY."""
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    block = None
+    for n in range(6):
+        block = svc.parse_and_store(
+            case_id=case_id,
+            raw_text=f"Jabber: solo@{STOP_DOMAIN}\nthread {n}",
+            source_ref=f"https://forum/{n}", created_by=uid,
+            publisher_handle="one_vendor")
+    entry = block["entries"][0]
+    assert entry["role"] == "SELF"
+    assert entry["shared_service_publishers"] == 0
+
+
+def test_the_shared_service_count_is_reported_without_the_caller(conn, svc):
+    """Two OTHER publishers plus this one reaches the threshold of 3, and
+    the stored number is the count of others -- so the reason string and
+    the column cannot disagree about who was counted."""
+    uid = _user(conn)
+    case_id = _case(conn, uid)
+    for handle in ("vendor_a", "vendor_b"):
+        svc.parse_and_store(
+            case_id=case_id,
+            raw_text=f"Jabber: support@{STOP_DOMAIN}\nnote {handle}",
+            source_ref=f"https://forum/{handle}", created_by=uid,
+            publisher_handle=handle)
+    block = svc.parse_and_store(
+        case_id=case_id, raw_text=f"Jabber: support@{STOP_DOMAIN}\nnote c",
+        source_ref="https://forum/vendor_c", created_by=uid,
+        publisher_handle="vendor_c")
+    entry = block["entries"][0]
+    assert entry["role"] == "THIRD_PARTY"
+    assert entry["shared_service_publishers"] == 2
+    assert "advertised by 3 distinct publishers" in entry["role_reason"]
