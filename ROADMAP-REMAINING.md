@@ -3,9 +3,9 @@
 Regenerated 2026-07-25, end of session. `docs/09-roadmap.md` is the plan;
 this is the honest delta between that plan and the build.
 
-**State:** `main`, 16 commits this session, Alembic head `0034`,
-**807 tests passing**, ruff clean, source hygiene clean, migrations
-round-trip. Nothing pushed (no remote configured).
+**State:** `main`, Alembic head `0036`, **953 tests passing**, ruff clean,
+source hygiene clean, migrations round-trip. Nothing pushed (no remote
+configured).
 
 > **The most important file in the repo is now
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).** Every
@@ -21,11 +21,11 @@ round-trip. Nothing pushed (no remote configured).
 | 0 — Foundation | ✅ **Done** | Nothing. No typecheck, deliberately (decision 42). |
 | 1 — Graph core | ✅ **Done** | Nothing. |
 | 2 — Sociogram | ✅ **Done** | WebSocket push; the UI polls. |
-| 3 — Analytics | ✅ **Done** | Bipartite→one-mode, CONCOR, charting metric history. |
+| 3 — Analytics | ✅ **Done** | CONCOR, charting metric history. Bipartite→one-mode landed for conversations (see Phase 7); actor×forum and actor×wallet still use the two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | 🟢 **~70%** | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. |
 | 5 — Notification | 🟢 **~75%** | Jira, integration admin surface, escalation, a worker. |
 | 6 — Tradecraft | 🟢 **~85%** | WebAuthn, timeline replay, assumptions register. |
-| 7 — Comms | 🟢 **~70%** | Contact-block parser, PGP verification, co-participation projection. |
+| 7 — Comms | 🟢 **~90%** | UI. The contact-block parser, PGP verification, co-participation and the HTTP router all landed 2026-07-25. |
 | 8 — Samples | 🟢 **~70%** | Fuzzy hashing, YARA, screening, sandbox integration. |
 | 9 — Ingest | 🟢 **~80%** | The HTTP 202 endpoint wiring, outbound credential vault. |
 
@@ -71,11 +71,11 @@ and **no interface**. Samples last and carefully: invariant 10 says metadata
 may render and bytes may not, and no sandbox attribute may combine
 `allow-scripts` with `allow-same-origin`.
 
-### 3. HTTP routers for Phases 4, 6, 7, 9
+### 3. HTTP routers for Phases 4, 6 and 9
 
-Services and tests exist. `approvals`, `notifications`, `samples`, `ach` and
-`reports` have routers; retention, break-glass, collection, comms and ingest
-do not.
+Services and tests exist. `approvals`, `notifications`, `samples`, `ach`,
+`reports` and now `comms` have routers; retention, break-glass, collection
+and ingest do not.
 
 ### 4. The remaining per-phase work
 
@@ -85,8 +85,11 @@ do not.
   ledger records every refusal with a reason and nothing renders it),
   escalation of an unacknowledged priority-1, a worker.
 - **Phase 6** — WebAuthn, timeline replay, the assumptions register.
-- **Phase 7** — contact-block parser with the service stoplist, PGP
-  signature verification, co-participation projection into the sociogram.
+- **Phase 7** — done except the UI. What remains is genuinely optional:
+  loose matching of a differently-formatted identifier inside a signed
+  payload (deliberately not done — a false confirmation costs far more
+  than a second look), detached-signature support alongside clearsigned,
+  and a keyserver-free way to obtain a vendor's public key.
 - **Phase 8** — imphash/ssdeep/TLSH (each a dependency; ssdeep needs a C
   toolchain on Windows), YARA, capped archive expansion, sandbox
   integration. Every absence is already recorded on the sample row as a gap
@@ -138,7 +141,25 @@ do not.
   as a real bug in the stealer-log compartment check.
 - **A partial unique index needs its predicate restated in `ON CONFLICT`.**
 - **Retention rules are GLOBAL.** A test that confirms one leaks into every
-  later test.
+  later test. **The comms service stoplist is global in exactly the same
+  way** — tests use a reserved `*.cbstop.test` domain so teardown can find
+  the rows, because a leaked entry surfaces as a unique violation in an
+  unrelated test.
+- **Teardown order follows the foreign keys, not the reading order.**
+  `comms.contact_block_entry.stoplist_id` references `service_selector`,
+  so deleting the stoplist first leaves teardown failing on an FK — and a
+  failed teardown leaks the global row the next trap is about.
+- **`iam.case_assignment.granted_by` is NOT NULL.** A test that inserts an
+  assignment by hand has to supply one.
+- **gpg-agent does not autostart on this host.** `gpgconf --launch
+  gpg-agent` fixes it. Only SECRET-key operations need it: verification is
+  public-key only, which is why the PGP tests run against vendored
+  fixtures and never generate a key.
+- **The Windows `gpg` on PATH is the MSYS build shipped with Git and it
+  expects POSIX paths.** Handed `C:\...` it resolves the path against its
+  own cwd and reports a perfectly good key as unreadable. `pgp.py` passes
+  RELATIVE paths with an explicit `cwd` for this reason; do not "tidy" them
+  into absolutes.
 - **Do not run the suite while background agents run theirs.** The e2e
   cleanup deletes by email pattern and concurrent runs delete each other's
   fixtures. The failures look real and are not.
