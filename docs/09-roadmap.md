@@ -158,8 +158,13 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 - [ ] Forum PM capture where a persona is a party
 - [ ] Co-participation projection into the sociogram
 
-**Decide first:** message-level capture or metadata-only? Metadata is
-dramatically cheaper and carries most of the analytic value.
+**DECIDED (2026-07-25): message-level capture.** See decision 35. Metadata
+would have been cheaper, but content is what a disclosure obligation and a
+prosecution turn on, and a channel that has since been deleted cannot be
+re-captured. The accepted costs: storage scales with traffic rather than
+with the number of parties, every captured message is personal data inside
+the retention and minimisation regime, and the Phase 5 TLP egress gate
+stops being advisory.
 
 ## Phase 8 — Sample handling (concept, `docs/11`)
 
@@ -171,8 +176,14 @@ dramatically cheaper and carries most of the analytic value.
 - [ ] Prohibited-content screening and the `REJECTED` path
 - [ ] Detonation as an authorised, exposure-aware action
 
-**Decide first:** the prohibited-content policy, with counsel, before the
-first ingest rather than after.
+**BLOCKED — NOT DECIDED (2026-07-25).** There is no prohibited-content
+policy, so no part of this phase may be built past the point where it could
+accept a file. See decision 36 and the warning at the top of the README:
+a store of attacker-supplied binaries will eventually receive material whose
+possession alone is an offence, the handling rules differ between the two
+target jurisdictions, and finding that out after the first ingest is a legal
+problem rather than a technical one. Everything through Phase 7 is
+unaffected; nothing in the current build stores a sample.
 
 ## Phase 9 — Ingest API (concept, `docs/12`)
 

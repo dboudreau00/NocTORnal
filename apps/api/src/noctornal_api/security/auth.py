@@ -34,7 +34,7 @@ from enum import Enum
 from typing import Protocol
 from uuid import UUID
 
-from noctornal_api.security import passwords, totp
+from noctornal_api.security import passwords, recovery, totp
 
 MAX_FAILED_LOGINS = 5
 LOCKOUT_DURATION = timedelta(minutes=15)
@@ -73,6 +73,12 @@ class UserStore(Protocol):
         self, user_id: UUID, threshold: int, lock_until: datetime
     ) -> None: ...
     def clear_failed_logins(self, user_id: UUID, at: datetime) -> None: ...
+    # Recovery codes (docs/05). The stored Argon2id hashes, and an ATOMIC
+    # single-use consume: remove exactly this hash and report whether the
+    # row was still there. Verifying then deleting would let two concurrent
+    # logins spend the same code.
+    def get_recovery_hashes(self, user_id: UUID) -> list[str]: ...
+    def consume_recovery_hash(self, user_id: UUID, code_hash: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,17 @@ class AuthService:
             reason = "not_enrolled"
         elif not totp_code:
             reason = "no_totp"
+        elif recovery.looks_like_code(totp_code):
+            # A recovery code, told apart from a TOTP code by SHAPE. This
+            # branch is only reachable once the password has already been
+            # verified on a real, active, unlocked account, so the extra
+            # Argon2id work it does is not an enumeration oracle -- a caller
+            # who reaches it already knows the password.
+            if self._consume_recovery(user.id, totp_code):
+                success = True
+                reason = "ok_recovery_code"
+            else:
+                reason = "bad_recovery_code"
         else:
             secret = self._users.get_totp_secret(user.id)  # decrypt only when needed
             result = (
@@ -137,7 +154,11 @@ class AuthService:
 
         if success:
             self._users.clear_failed_logins(user.id, now)
-            return AuthResult(AuthOutcome.OK, user.id, "ok")
+            # Carry the reason rather than a flat "ok": a login that spent a
+            # RECOVERY CODE is a notable event -- it means someone could not
+            # complete their normal second factor -- and the audit trail is
+            # the only place that distinction survives.
+            return AuthResult(AuthOutcome.OK, user.id, reason)
 
         # 3. Burn a lockout attempt for a real, active, not-already-locked
         #    account — this is what stops a correct-password/no-code probe
@@ -146,6 +167,30 @@ class AuthService:
         if user is not None and active and not locked:
             self._users.record_failed_login(user.id, MAX_FAILED_LOGINS, now + LOCKOUT_DURATION)
         return AuthResult(AuthOutcome.INVALID_CREDENTIALS, None, reason)
+
+    def _consume_recovery(self, user_id: UUID, submitted: str) -> bool:
+        """Verify a recovery code and spend it, atomically.
+
+        Every stored hash is checked rather than stopping at the first
+        match, so the work done does not depend on WHICH code was
+        submitted -- the position of a code in the set is not something a
+        caller should be able to time.
+
+        The consume is what actually decides the outcome: if the atomic
+        removal reports the hash was already gone, a concurrent login spent
+        it first and this attempt fails. Single-use is enforced by the
+        database, not by the order of statements here.
+        """
+        normalised = recovery.normalise(submitted)
+        if not normalised:
+            return False
+        matched: str | None = None
+        for stored in self._users.get_recovery_hashes(user_id):
+            if passwords.verify_recovery_code(stored, normalised) and matched is None:
+                matched = stored
+        if matched is None:
+            return False
+        return self._users.consume_recovery_hash(user_id, matched)
 
 
 # A fixed valid Argon2id hash so unknown-user verification does real work

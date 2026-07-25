@@ -51,6 +51,7 @@ class InMemoryUserStore(UserStore):
         self.secrets: dict[UUID, str] = {}
         self.counters: dict[UUID, int] = {}
         self.cleared: list[UUID] = []
+        self.recovery: dict[UUID, list[str]] = {}
 
     def add(self, email: str, user: AuthUser, secret: str | None = None) -> None:
         self.users[email.lower()] = user
@@ -93,6 +94,21 @@ class InMemoryUserStore(UserStore):
         if new_count >= threshold:
             locked_until = max(locked_until, lock_until) if locked_until else lock_until
         self.users[email] = replace(u, failed_logins=new_count, locked_until=locked_until)
+
+    def set_recovery_codes(self, user_id: UUID, codes: list[str]) -> None:
+        from noctornal_api.security import passwords
+        self.recovery[user_id] = [passwords.hash_recovery_code(c) for c in codes]
+
+    def get_recovery_hashes(self, user_id: UUID) -> list[str]:
+        return list(self.recovery.get(user_id, []))
+
+    def consume_recovery_hash(self, user_id: UUID, code_hash: str) -> bool:
+        """Mirrors the Postgres store's atomic remove-if-present."""
+        held = self.recovery.get(user_id, [])
+        if code_hash not in held:
+            return False
+        self.recovery[user_id] = [h for h in held if h != code_hash]
+        return True
 
     def clear_failed_logins(self, user_id: UUID, at: datetime) -> None:
         from dataclasses import replace
