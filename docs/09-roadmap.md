@@ -150,8 +150,10 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 
 - [ ] Timeline scrubber and temporal replay
 - [x] **Entity merge with reversal** (`merges.py`, Alembic 0027,
-      decision 41), step-up gated. **Dual control is NOT built** -- one
-      cleared analyst with a fresh second factor can merge alone.
+      decision 41), step-up gated, with an entity-resolution panel in the
+      inspector that offers only same-type candidates and lists every
+      merge with a one-click reversal. **Dual control is NOT built** --
+      one cleared analyst with a fresh second factor can merge alone.
 - [ ] ACH matrix and assumptions register
 - [ ] Report builder with TLP-aware redaction
 - [ ] Retention and purge jobs with tombstones
