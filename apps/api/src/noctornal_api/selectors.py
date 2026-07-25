@@ -104,6 +104,17 @@ class SelectorStore:
         overwrites an existing one (re-attribution is a deliberate, audited
         act, not a silent side effect of re-observation)."""
         norm = self._norm(selector_type, raw_value)
+        # A node_id must belong to THIS case: an unchecked value either
+        # violates the FK (a 500 to the caller) or, if it names a node in
+        # another case, silently attributes an observable across a case
+        # boundary.
+        if node_id is not None:
+            owned = self._c.execute(
+                "SELECT 1 FROM core.node WHERE id = %s AND case_id = %s",
+                (node_id, case_id),
+            ).fetchone()
+            if owned is None:
+                raise SelectorError("node_id does not belong to this case")
         row = self._c.execute(
             """INSERT INTO core.selector
                    (case_id, selector_type, raw_value, norm_value, node_id,

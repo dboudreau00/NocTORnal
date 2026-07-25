@@ -40,6 +40,7 @@ class SessionStore(Protocol):
     def insert(self, record: SessionRecord) -> None: ...
     def get_by_token_hash(self, token_hash: bytes) -> SessionRecord | None: ...
     def update(self, record: SessionRecord) -> None: ...
+    def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool: ...
     def revoke_all_for_user(self, user_id: UUID, reason: str, at: datetime) -> int: ...
 
 
@@ -112,5 +113,13 @@ class SessionService:
         self._store.update(updated)
         return updated
 
+    def revoke(self, session_id: UUID, reason: str) -> bool:
+        """Revoke ONE session — an ordinary logout. Killing every session
+        for the user would evict their other devices (docs/05 lists global
+        revocation as a separate, deliberate capability)."""
+        return self._store.revoke(session_id, reason, self._now())
+
     def revoke_all_for_user(self, user_id: UUID, reason: str) -> int:
+        """Global revocation: password change, admin kill-all, security
+        officer action, or account deactivation."""
         return self._store.revoke_all_for_user(user_id, reason, self._now())

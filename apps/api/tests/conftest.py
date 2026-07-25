@@ -116,6 +116,14 @@ class InMemorySessionStore(SessionStore):
     def update(self, record: SessionRecord) -> None:
         self.by_hash[record.token_hash] = record
 
+    def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool:
+        from dataclasses import replace
+        for h, rec in list(self.by_hash.items()):
+            if rec.id == session_id and rec.revoked_at is None:
+                self.by_hash[h] = replace(rec, revoked_at=at, revoke_reason=reason)
+                return True
+        return False
+
     def revoke_all_for_user(self, user_id: UUID, reason: str, at: datetime) -> int:
         from dataclasses import replace
         n = 0
