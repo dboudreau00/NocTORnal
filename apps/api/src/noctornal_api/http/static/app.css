@@ -325,7 +325,13 @@ select.select { appearance: none; padding-right: 24px; }
 .pane { height: 100%; overflow: auto; padding: 16px; }
 .pane.pane-graph {
   padding: 0; overflow: hidden;
-  display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto;
+  /* The canvas row has a FLOOR, not `minmax(0, 1fr)`.
+     The projection bar wraps onto more lines as the window narrows, and
+     with a zero minimum the canvas row was the one that gave way -- at
+     around 900px wide the sociogram collapsed to zero height and vanished
+     entirely, while the controls for it stayed on screen. A graph pane
+     with no graph in it is the worst possible outcome of a resize. */
+  display: grid; grid-template-rows: auto minmax(200px, 1fr) auto auto;
 }
 .pane-head { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
 
@@ -620,6 +626,11 @@ select.select { appearance: none; padding-right: 24px; }
   .inspector { border-left: 0; border-top: 1px solid var(--hairline); }
   .rail-cap { display: none; }
   .proj-grp.push { margin-left: 0; }
+  /* The other half of the same problem: once the controls wrap onto four
+     or five lines they can claim most of a short pane. Cap them and let
+     them scroll, so the space they take stops growing and the canvas keeps
+     the room its floor asks for. */
+  .proj-bar { max-height: 38%; overflow-y: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
