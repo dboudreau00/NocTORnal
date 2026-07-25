@@ -67,10 +67,22 @@ def _trusted_proxy_hops() -> int:
 
 
 def client_ip(request: Request) -> str | None:
-    """The peer address, or the address the outermost trusted proxy saw."""
+    """The peer address, or the address the outermost trusted proxy saw.
+
+    EVERY `X-Forwarded-For` field line is joined before splitting, not just
+    the first. RFC 9110 makes repeated field lines semantically identical to
+    one comma-joined value, and real proxies differ about which they emit --
+    HAProxy's `option forwardfor` appends a SEPARATE header line by default.
+    Reading only the first line would mean `parts[-hops]` indexes a list the
+    client authored in full, with the proxy's own entry sitting unread in a
+    second line: the entire "count from the right" defence this module is
+    built around, silently reading the attacker's value. Found by
+    adversarial review.
+    """
     hops = _trusted_proxy_hops()
     if hops:
-        forwarded = request.headers.get("x-forwarded-for")
+        lines = request.headers.getlist("x-forwarded-for")
+        forwarded = ", ".join(line for line in lines if line)
         if forwarded:
             parts = [p.strip() for p in forwarded.split(",") if p.strip()]
             if len(parts) >= hops:
@@ -90,10 +102,23 @@ def credential_subject(request: Request) -> str:
     store, and `KEYS *` on a shared instance would hand over live session
     tokens. The hash is enough to be stable and useless to a reader.
 
-    An anonymous caller falls back to their address, so the blanket limit
-    still applies to a login flood rather than lumping every unauthenticated
-    request into one shared bucket (which would let one attacker deny
-    service to every other anonymous caller).
+    **This key SUBDIVIDES; it does not bound.** It is derived from a value
+    the caller sends and nothing here verifies that the token is a live
+    session, so a caller rotating a random token per request mints a fresh
+    meter every time. Adversarial review demonstrated exactly that: with the
+    blanket limit shrunk to 3, a fixed token gave 27 refusals out of 30 and
+    a rotating one gave zero. Worse, the early return meant a garbage token
+    also suppressed the address fallback, so sending one extra header made a
+    caller strictly LESS limited than sending no credential at all.
+
+    The fix is not here -- a subject derived from client input cannot be
+    made trustworthy. It is in the middleware, which checks an
+    address-scoped ceiling (`request.source`) as well, so a rotating token
+    can only carve up a source's budget and never escape it.
+
+    An anonymous caller still falls back to their address, so one attacker
+    cannot deny service to every other anonymous caller by sharing a bucket
+    with them.
     """
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
@@ -210,8 +235,22 @@ def enforce(request: Request, response: Response, name: str, subject: str, *,
     limiter = limiter_of(request)
     decision = limiter.check(name, subject) if consume \
         else limiter.peek(name, subject)
-    for key, value in decision.headers.items():
-        response.headers[key] = value
+
+    # Headers describe the meter the caller SPENT. A peek guard reports on a
+    # meter the caller did not touch, and since both write the same header
+    # names the peek would overwrite the real one -- a successful login
+    # would advertise the failure meter's numbers.
+    if consume:
+        for key, value in decision.headers.items():
+            response.headers[key] = value
+        # ...and stash it, because FastAPI discards `sub_response` entirely
+        # when a handler returns a Response object directly (evidence export
+        # and download both do). The blanket middleware reads this back and
+        # writes the endpoint's headers onto the real response. Without it a
+        # client is not merely told nothing, it is told the 600/min blanket
+        # ceiling, which is actively the wrong number.
+        request.state.rate_limit_decision = decision
+
     if decision.allowed:
         return decision
 
@@ -323,14 +362,48 @@ def rate_limit(name: str):
     return _credential_dep
 
 
-def install_rate_limit_middleware(app) -> None:
-    """The blanket per-credential ceiling.
+def _blanket_check(limiter: RateLimiter, credential: str, source: str):
+    """Both blanket meters, in one call so the middleware crosses the
+    thread boundary once.
 
-    Registered as middleware rather than a global dependency because it
-    must cover every path -- including the static UI mount and any route
-    added later without remembering to opt in. A limit you have to remember
-    to apply is a limit that is missing from the endpoint added in a hurry.
+    Returns the first refusal, else the credential decision -- whose headers
+    are the more useful of the two, because the source ceiling is a flood
+    guard rather than a number an honest client should pace itself against.
     """
+    by_credential = limiter.check("request", credential)
+    if not by_credential.allowed:
+        return by_credential
+    by_source = limiter.check("request.source", source)
+    if not by_source.allowed:
+        return by_source
+    return by_credential
+
+
+def install_rate_limit_middleware(app) -> None:
+    """The blanket ceiling: two meters, and it takes both.
+
+    Registered as middleware rather than a global dependency because it must
+    cover every path -- including the static UI mount and any route added
+    later without remembering to opt in. A limit you have to remember to
+    apply is a limit that is missing from the endpoint added in a hurry.
+
+    **Why two.** The credential-scoped meter subdivides fairly between the
+    analysts behind one address; the address-scoped one is the actual
+    ceiling. On its own the credential meter is no ceiling at all, because
+    its subject is client-supplied: rotate the Bearer token and every
+    request gets a fresh, empty bucket. Adversarial review reproduced that
+    against the real app.
+
+    **Why off the event loop.** `RedisBackend` drives the SYNCHRONOUS
+    redis-py client. Calling it from an `async def` middleware would do
+    blocking socket I/O on the loop thread, so one slow Redis would
+    serialise every request in the process -- and the whole point of this
+    limit failing OPEN is that a sick Redis must not become a sick API. The
+    250ms socket timeout would then cost 250ms of loop time per request
+    before it even raised. `run_in_threadpool` is what keeps the fail-open
+    policy meaningful rather than nominal.
+    """
+    from starlette.concurrency import run_in_threadpool
 
     @app.middleware("http")
     async def _blanket(request: Request, call_next):
@@ -340,17 +413,26 @@ def install_rate_limit_middleware(app) -> None:
         # out of rotation, turning a rate limit into an outage.
         if request.url.path == "/healthz":
             return await call_next(request)
-        decision = limiter.check("request", credential_subject(request))
+
+        decision = await run_in_threadpool(
+            _blanket_check, limiter, credential_subject(request),
+            ip_subject(client_ip(request)))
         if not decision.allowed:
-            log.warning("blanket request limit hit for %s", request.url.path)
+            log.warning("blanket %s limit hit for %s", decision.limit.name,
+                        request.url.path)
             problem = refuse(decision)
             from noctornal_api.http.errors import problem_response
             return problem_response(problem.status, problem.title, problem.detail,
                                     problem.type, problem.headers)
+
         response = await call_next(request)
-        # setdefault, so a specific endpoint limit's headers win: telling a
-        # caller about the 600/min ceiling when they just hit the 10/5min
-        # analytics limit would point them at the wrong number.
-        for key, value in decision.headers.items():
-            response.headers.setdefault(key, value)
+        # A specific endpoint limit's numbers beat the blanket ceiling's:
+        # telling a caller about 600/min when they just hit the 10-per-5-min
+        # analytics limit points them at the wrong number. The endpoint's
+        # decision arrives via request.state because FastAPI throws away
+        # `sub_response` for any handler that returns a Response directly.
+        endpoint = getattr(request.state, "rate_limit_decision", None)
+        source = endpoint or decision
+        for key, value in source.headers.items():
+            response.headers[key] = value
         return response

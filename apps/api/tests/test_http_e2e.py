@@ -749,9 +749,14 @@ def test_the_rate_limit_denial_is_audited_once_not_once_per_request(conn, client
     better denial of service than the one being blocked. One row per window
     records the campaign; the count lives in the access log.
     """
+    # ONLY the failure meter is shrunk, and the attempt meter is widened out
+    # of the way. Both limits audit once per window, so leaving the attempt
+    # meter at its real burst of 20 would put a second (correct) row in the
+    # count and make this assert 2 for a reason that is not what it tests.
     _limited(client.app, **{
         "auth.login_failed": _tiny("auth.login_failed", quota=2, per_seconds=300,
-                                   burst=2)})
+                                   burst=2),
+        "auth.login": _tiny("auth.login", quota=1000, per_seconds=60, burst=1000)})
     before = conn.execute(
         "SELECT count(*) FROM audit.event WHERE action = 'RATE_LIMIT_EXCEEDED'"
     ).fetchone()[0]
@@ -1043,71 +1048,3 @@ def test_reversal_is_not_dual_controlled(conn, client):
         headers=_auth(token), json={"reason": "nickname coincidence after all"})
     assert reversed_.status_code == 200, reversed_.text
     assert reversed_.json()["is_live"] is False
-
-
-# --- TEMPORARY PROBE (remove) -------------------------------------------
-
-@pytest.mark.skipif(not MINIO, reason="MINIO_ENDPOINT required")
-def test_zz_probe_response_returning_handler_headers(conn, client):
-    """A/B: a rate-limited handler returning a pydantic model (upload,
-    evidence.ingest=120/h) vs a rate-limited handler returning a Response
-    object (export, evidence.export=30/h)."""
-    from noctornal_api.ratelimit import LIMITS
-    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
-    case_id = _create_case(client, token)
-
-    up = client.post(
-        f"/api/v1/cases/{case_id}/evidence", headers=_auth(token),
-        files={"file": ("a.txt", b"probe-" + uuid4().hex.encode(), "text/plain")},
-        data={"title": "probe"},
-    )
-    assert up.status_code == 201, up.text
-    ev_id = up.json()["evidence_id"]
-    up_h = {k.lower(): v for k, v in up.headers.items() if k.lower().startswith("ratelimit")}
-
-    ex = client.post(f"/api/v1/cases/{case_id}/evidence/{ev_id}/export",
-                     headers=_auth(token))
-    assert ex.status_code == 200, ex.text
-    ex_h = {k.lower(): v for k, v in ex.headers.items() if k.lower().startswith("ratelimit")}
-
-    print("\n--- quotas: ingest=%s export=%s blanket-request=%s" % (
-        LIMITS["evidence.ingest"].quota, LIMITS["evidence.export"].quota,
-        LIMITS["request"].quota))
-    print("--- upload (returns IngestOut model) ->", up_h)
-    print("--- export (returns Response object) ->", ex_h)
-
-    assert up_h.get("ratelimit-limit") == str(LIMITS["evidence.ingest"].quota), \
-        f"CONTROL BROKEN: upload advertised {up_h.get('ratelimit-limit')}"
-    assert ex_h.get("ratelimit-limit") == str(LIMITS["evidence.export"].quota), \
-        (f"export advertised RateLimit-Limit={ex_h.get('ratelimit-limit')} "
-         f"(policy={ex_h.get('ratelimit-policy')}), expected "
-         f"{LIMITS['evidence.export'].quota}")
-
-
-@pytest.mark.skipif(not MINIO, reason="MINIO_ENDPOINT required")
-def test_zz_probe_export_is_still_enforced(conn, client):
-    """Is export ONLY mis-advertised, or actually unmetered?"""
-    _limited(client.app, **{
-        "evidence.export": _tiny("evidence.export", quota=1, per_seconds=3600,
-                                 burst=1)})
-    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
-    case_id = _create_case(client, token)
-    up = client.post(
-        f"/api/v1/cases/{case_id}/evidence", headers=_auth(token),
-        files={"file": ("a.txt", b"probe2-" + uuid4().hex.encode(), "text/plain")},
-        data={"title": "probe2"},
-    )
-    ev_id = up.json()["evidence_id"]
-    codes = []
-    for _ in range(3):
-        r = client.post(f"/api/v1/cases/{case_id}/evidence/{ev_id}/export",
-                        headers=_auth(token))
-        codes.append(r.status_code)
-        if r.status_code == 429:
-            print("\n--- 429 headers ->",
-                  {k.lower(): v for k, v in r.headers.items()
-                   if k.lower().startswith(("ratelimit", "retry"))})
-    print("--- export status codes ->", codes)
-    assert codes[0] == 200 and 429 in codes

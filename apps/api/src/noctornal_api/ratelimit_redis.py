@@ -152,12 +152,20 @@ class RedisBackend:
 
     def claim_once(self, key: str, window_seconds: int) -> bool:
         """First caller in the window wins. SET NX EX is atomic, so two
-        concurrent denials cannot both decide they are the first."""
+        concurrent denials cannot both decide they are the first.
+
+        Returns False when Redis is unreachable -- deliberately, and see
+        `RateLimiter.should_audit` for the reasoning. Returning True there
+        would mean that during a Redis outage, when every DENY-policy limit
+        is refusing every request, each refusal writes a row to a
+        hash-chained append-only table whose trigger serialises writes. The
+        outage would author the flood.
+        """
         try:
             return bool(self._redis.set(key, b"1", nx=True, ex=max(1, window_seconds)))
         except Exception:  # noqa: BLE001 - an audit throttle must never fail a request
-            log.warning("audit-throttle claim failed", exc_info=True)
-            return True
+            log.error("audit-throttle claim failed; not auditing", exc_info=True)
+            return False
 
     def ping(self) -> bool:
         try:
