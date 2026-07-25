@@ -81,7 +81,7 @@ and [docs/00-decisions.md](docs/00-decisions.md).
 
 ## State of the build
 
-Phase 0 and Phase 1 are implemented and running, not just designed:
+Phases 0, 1 and 2 are implemented and running, not just designed:
 
 - Postgres schema owned by an Alembic chain (0001–0025) that round-trips
   from base to head; the ontology is generated from one definition.
@@ -92,11 +92,19 @@ Phase 0 and Phase 1 are implemented and running, not just designed:
 - Evidence with WORM object-lock storage, dual hashing, and an append-only,
   hash-chained chain of custody.
 - Cases, selectors with per-type normalisers, tags, node sets, full-text
-  search, a REST API and an analyst UI with the sociogram and the
-  "why do we believe this" inspector.
+  search, and a REST API.
+- The sociogram: four projection presets, ego networks, shortest paths, a
+  timeline scrubber over `as_of`, local metrics (degree, weighted, signed,
+  clustering, k-core), saved layouts, and the inspector that answers
+  "why do we believe this" with the Admiralty grading behind every claim.
 
-The test suite covers all of it (242 tests, the Postgres and MinIO legs
-env-gated). Phases 2–9 — analytics, collection, integrations — are still
-documents. `docs/00-decisions.md` records every decision taken and the
-questions still open, and `QUICKSTART.md` ends with an honest list of what
-this deployment is *not* yet hardened for.
+254 tests cover it, the Postgres and MinIO legs env-gated.
+
+**Not built yet:** Phase 3 analytics — betweenness, Burt's constraint,
+communities, key-player — which need igraph in a worker; and Phases 4–9,
+collection through ingest. Read
+[docs/14-enhancement-map.md](docs/14-enhancement-map.md) for what a real
+session showed is most worth doing next (evidence capture in the UI leads).
+`docs/00-decisions.md` records every decision and open question, and
+`QUICKSTART.md` ends with an honest list of what this deployment is *not*
+hardened for.
