@@ -108,10 +108,24 @@ w32tm /query /status
 
 `Leap Indicator: 3(not synchronized)` with `Stratum: 0` means this machine
 has never reached a time server — normal on an offline or sandboxed box, and
-fatal for TOTP against a phone that *is* on real time. Either correct the
-host clock (`w32tm /resync`, having enabled automatic time), or use
-`totp-code`, which reads the same clock the server checks against and so
-always agrees.
+fatal for TOTP against a phone that *is* on real time.
+
+**On such a host, stop fighting TOTP and issue a session directly:**
+
+```bash
+.venv\Scripts\python scripts\bootstrap.py session --email you@example.com
+```
+
+It prints a URL that opens the UI already signed in. The token rides in the
+URL *fragment*, so it is never sent to the server and appears in no access
+log, and the page erases it from the address bar on load. The session is an
+ordinary one — same 12 hour absolute and 30 minute idle expiry, same
+revocation — and it is recorded in the audit trail as an MFA-bypassed login.
+
+The alternatives are to correct the host clock (`w32tm /resync`, having
+enabled automatic time) or to use `totp-code`, which reads the same clock the
+server checks against and so always agrees. On a real deployment the right
+answer is recovery codes (docs/05), which are **not built yet**.
 
 ## 3. Use it
 
