@@ -39,6 +39,9 @@ def conn():
         c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.selector WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
+                  f"(SELECT id FROM notify.notification WHERE case_id IN {csub})")
+        c.execute(f"DELETE FROM notify.notification WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.approval_request WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.node_merge_edge WHERE merge_id IN "
                   f"(SELECT id FROM core.node_merge WHERE case_id IN {csub})")

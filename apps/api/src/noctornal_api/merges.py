@@ -33,6 +33,8 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api import notify_events
+
 # The identity layer, per the ontology's ACTOR category. A merge within a
 # layer is a claim that two records describe one thing; a merge ACROSS this
 # particular boundary is an attribution wearing a merge's clothes.
@@ -172,6 +174,16 @@ class MergeService:
                 "basis_selector_id": str(basis_selector_id)
                 if basis_selector_id else None,
             })
+            # docs/01: "Merges ... generate an audit event AND a case-owner
+            # notification." The audit event has existed since decision 41;
+            # this is the other half, and it is inside the transaction on
+            # purpose -- a merge that succeeded with no notification is a
+            # case owner who never finds out.
+            notify_events.merge_performed(
+                self._c, case_id=case_id, merge_id=merge_id,
+                source_label=src["label"], target_label=dst["label"],
+                edges_repointed=moved, reason=reason.strip(),
+                actor_id=merged_by)
         return self.get(merge_id)
 
     def unmerge(self, merge_id: UUID, *, reversed_by: UUID,
@@ -226,6 +238,10 @@ class MergeService:
                 "edges_restored": len(rows),
                 "reason": reason.strip(),
             })
+            notify_events.merge_reversed(
+                self._c, case_id=record.case_id, merge_id=merge_id,
+                edges_restored=len(rows), reason=reason.strip(),
+                actor_id=reversed_by)
         return self.get(merge_id)
 
     def history(self, case_id: UUID, limit: int = 100) -> list[MergeRecord]:

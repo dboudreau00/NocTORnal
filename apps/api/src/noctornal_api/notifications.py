@@ -259,7 +259,7 @@ class NotificationService:
                        AND n.compartments <@ u.compartments)""")
         params.append(limit)
         rows = self._c.execute(
-            f"""SELECT {_COLUMNS} FROM notify.notification n
+            f"""SELECT {_N_COLUMNS} FROM notify.notification n
                  WHERE {' AND '.join(clauses)}
                  ORDER BY n.created_at DESC LIMIT %s""",
             params).fetchall()
@@ -501,10 +501,13 @@ def effective_labels_for_notification(
     return strictest, case_compartments | element_compartments
 
 
-_COLUMNS = ("n.id, n.recipient_id, n.case_id, n.kind, n.priority, n.subject, "
-            "n.summary, n.body, n.classification, n.compartments, "
-            "n.object_type, n.object_id, n.actor_id, n.created_at, n.read_at, "
-            "n.acknowledged_at")
+# Bare for INSERT ... RETURNING; table-qualified for the reads, which join
+# iam.app_user to re-check clearance. Derived from one list so the two
+# cannot fall out of step and unpack into the wrong fields.
+_COLUMNS = ("id, recipient_id, case_id, kind, priority, subject, summary, "
+            "body, classification, compartments, object_type, object_id, "
+            "actor_id, created_at, read_at, acknowledged_at")
+_N_COLUMNS = ", ".join("n." + c.strip() for c in _COLUMNS.split(","))
 
 
 def _record(r) -> Notification:

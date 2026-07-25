@@ -178,6 +178,13 @@
           <span class="rail-cap">Triage</span>
           <span id="triage-badge" class="rail-badge" hidden></span>
         </button>
+        <button id="tab-inbox" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-inbox" aria-selected="false" tabindex="-1"
+                data-tab="inbox" title="Notifications">
+          <span class="rail-glyph" aria-hidden="true">&#x25C9;</span>
+          <span class="rail-cap">Inbox</span>
+          <span id="inbox-badge" class="rail-badge" hidden></span>
+        </button>
         <button id="tab-analytics" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-analytics" aria-selected="false" tabindex="-1"
                 data-tab="analytics"
@@ -374,6 +381,42 @@
         <!-- TRIAGE (Phase 4). The human half of "machines propose,
              analysts dispose". Nothing reaches the graph from here without
              a click, and every suggestion shows the text it came from. -->
+        <!-- INBOX -->
+        <section id="pane-inbox" class="pane" role="tabpanel"
+                 aria-labelledby="tab-inbox" tabindex="-1" hidden>
+
+          <div class="card">
+            <div class="row space-between">
+              <h2 class="pane-title">Notifications</h2>
+              <button id="inbox-read-all" type="button" class="ghost">
+                Mark all read</button>
+            </div>
+            <p class="help">Everything here is filtered by your CURRENT
+              clearance, not the clearance you held when it was written &mdash;
+              so a notification about material you can no longer read
+              disappears rather than lingering. <strong>Email carries a
+              summary and a link, never the detail below</strong>; anything
+              above TLP:AMBER does not leave the platform at all
+              (invariant&nbsp;8).</p>
+            <label class="field inline">
+              <input id="inbox-unread-only" type="checkbox" />
+              <span class="label">Unread only</span>
+            </label>
+          </div>
+
+          <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
+          <div id="inbox-list" class="stack"></div>
+
+          <details class="card">
+            <summary>Delivery preferences</summary>
+            <p class="help">Quiet hours defer, they never drop &mdash; a
+              deferred notification is still queued with a due time. Priority&nbsp;1
+              (an evidence integrity alarm, a break-glass) ignores them, which
+              is the only reason silencing a channel overnight is safe.</p>
+            <div id="inbox-prefs" class="stack"></div>
+          </details>
+        </section>
+
         <section id="pane-triage" class="pane" role="tabpanel"
                  aria-labelledby="tab-triage" tabindex="-1" hidden>
 
