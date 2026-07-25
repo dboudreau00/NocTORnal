@@ -531,6 +531,7 @@ async function openCase(caseId) {
     // The badge is the only signal that work is waiting, so the
     // queue is counted on open rather than on first visit.
     await loadTriage();
+    await refreshInboxBadge();
     selectTab('graph');
   } catch (err) { fail(err); }
 }
@@ -545,6 +546,7 @@ function selectTab(name) {
   }
   if (name === 'graph') { resizeGraph(); resizeDensity(); }
   if (name === 'triage') loadTriage();
+  if (name === 'inbox') { loadInbox(); loadInboxPreferences(); }
 }
 
 function initTabs() {
@@ -3247,11 +3249,212 @@ function initPalette() {
   $('btn-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
+
+/* ── notifications ────────────────────────────────────────────────────
+ *
+ * Phase 5. Two things about this panel are load-bearing rather than
+ * cosmetic.
+ *
+ * The BADGE is the only thing that tells an analyst a second signature is
+ * waiting for them, so it is polled with the case rather than refreshed
+ * only when the tab is open — the same reasoning as the triage badge. An
+ * approval nobody is told about is an approval nobody gives, and then dual
+ * control is just a merge button that does not work.
+ *
+ * The BODY of a notification renders here and only here. docs/07: email
+ * carries a summary and a link, never the content, and anything above
+ * TLP:AMBER does not leave the platform at all. The server enforces that
+ * (the email renderer cannot even reach the body — see transports.py); this
+ * panel is the other end of that arrangement, the place where the detail is
+ * safe to show because the reader has already passed the access gate.
+ */
+
+async function loadInbox() {
+  const unreadOnly = $('inbox-unread-only').checked;
+  try {
+    const data = await api('/notifications?limit=100'
+      + (unreadOnly ? '&unread_only=true' : ''));
+    state.inbox = data.notifications || [];
+    state.inboxUnread = data.unread || 0;
+  } catch (err) {
+    state.inbox = [];
+    if (!(err instanceof ApiError && err.status === 403)) fail(err);
+  }
+  renderInbox();
+}
+
+/** Polled with the case. Cheap: one indexed COUNT. */
+async function refreshInboxBadge() {
+  try {
+    const data = await api('/notifications/unread-count');
+    state.inboxUnread = data.unread || 0;
+  } catch (_e) {
+    /* A badge that cannot be counted is not worth an error banner. */
+    return;
+  }
+  renderInboxBadge();
+}
+
+function renderInboxBadge() {
+  const badge = $('inbox-badge');
+  const n = state.inboxUnread || 0;
+  badge.textContent = n > 99 ? '99+' : String(n);
+  show(badge, n > 0);
+  badge.title = n + ' unread notification(s)';
+}
+
+const PRIORITY_LABEL = { 1: 'urgent', 2: 'normal', 3: 'low' };
+
+function renderInbox() {
+  const box = $('inbox-list');
+  clear(box);
+  const rows = state.inbox || [];
+  show($('inbox-empty'), rows.length === 0);
+  renderInboxBadge();
+
+  rows.forEach((n) => {
+    const card = el('article', 'card notification' + (n.read_at ? '' : ' unread'));
+
+    const head = el('div', 'row space-between');
+    head.appendChild(el('strong', null, n.subject));
+    const tags = el('span', 'tags');
+    /* The TLP marking travels with the text, always (docs/07). An analyst
+       reading a notification has to know what they are allowed to do with
+       what it says. */
+    tags.appendChild(el('span', 'chip tlp-' + n.classification, 'TLP:' + n.classification));
+    if (n.priority === 1) tags.appendChild(el('span', 'chip bad', 'urgent'));
+    else tags.appendChild(el('span', 'chip stale', PRIORITY_LABEL[n.priority]));
+    head.appendChild(tags);
+    card.appendChild(head);
+
+    const body = el('p', 'notification-body');
+    /* textContent, never innerHTML: a notification body carries a case
+       label, and a case label is analyst-supplied text. */
+    body.textContent = n.body;
+    card.appendChild(body);
+
+    const foot = el('div', 'row space-between');
+    foot.appendChild(el('span', 'muted small', fmtTime(n.created_at)));
+
+    const actions = el('span', 'row');
+    if (!n.read_at) {
+      const read = el('button', 'btn ghost small', 'Mark read');
+      read.type = 'button';
+      read.addEventListener('click', async () => {
+        await api('/notifications/' + n.id + '/read', { method: 'POST' });
+        await loadInbox();
+      });
+      actions.appendChild(read);
+    }
+    if (!n.acknowledged_at) {
+      const ack = el('button', 'btn ghost small', 'Acknowledge');
+      ack.type = 'button';
+      /* Acknowledgement is distinct from reading (docs/07): it is the
+         signal that stops a thing nagging, and glancing at a list is not
+         that. */
+      ack.title = 'Stops this nagging. Distinct from reading it.';
+      ack.addEventListener('click', async () => {
+        await api('/notifications/' + n.id + '/acknowledge', { method: 'POST' });
+        await loadInbox();
+      });
+      actions.appendChild(ack);
+    }
+    if (n.object_type === 'approval_request' && n.case_id) {
+      const go = el('button', 'btn ghost small', 'Open approvals');
+      go.type = 'button';
+      go.addEventListener('click', () => selectTab('triage'));
+      actions.appendChild(go);
+    }
+    foot.appendChild(actions);
+    card.appendChild(foot);
+    box.appendChild(card);
+  });
+}
+
+async function loadInboxPreferences() {
+  const box = $('inbox-prefs');
+  clear(box);
+  let data;
+  try {
+    data = await api('/notifications/preferences');
+  } catch (_e) { return; }
+
+  (data.preferences || []).forEach((p) => {
+    if (p.channel === 'IN_APP') return;    // always on; there is nothing to set
+    const row = el('div', 'row pref-row');
+    row.appendChild(el('span', 'label', p.channel));
+
+    const enabled = el('input');
+    enabled.type = 'checkbox';
+    enabled.checked = p.enabled;
+    enabled.title = 'Deliver on this channel at all';
+    row.appendChild(enabled);
+
+    const priority = el('select');
+    opts(priority, [['1', 'urgent only'], ['2', 'normal and up'],
+                    ['3', 'everything']], String(p.min_priority));
+    row.appendChild(priority);
+
+    const digest = el('input');
+    digest.type = 'checkbox';
+    digest.checked = p.digest;
+    digest.title = 'Roll up to the next hour instead of sending immediately';
+    row.appendChild(digest);
+    row.appendChild(el('span', 'muted small', 'digest'));
+
+    const from = el('input');
+    from.type = 'time';
+    from.value = p.quiet_from || '';
+    from.title = 'Quiet hours start (your local time)';
+    const to = el('input');
+    to.type = 'time';
+    to.value = p.quiet_to || '';
+    to.title = 'Quiet hours end';
+    row.appendChild(el('span', 'muted small', 'quiet'));
+    row.appendChild(from);
+    row.appendChild(to);
+
+    const save = el('button', 'btn ghost small', 'Save');
+    save.type = 'button';
+    save.addEventListener('click', async () => {
+      try {
+        await api('/notifications/preferences/' + p.channel, {
+          method: 'PUT',
+          json: {
+            enabled: enabled.checked,
+            min_priority: Number(priority.value),
+            digest: digest.checked,
+            /* Both halves or neither: half a quiet window is a bug that
+               reads as a working one, and the server refuses it. */
+            quiet_from: (from.value && to.value) ? from.value : null,
+            quiet_to: (from.value && to.value) ? to.value : null,
+          },
+        });
+        setMsg($('inbox-prefs-msg'), 'Saved.');
+      } catch (err) { fail(err); }
+    });
+    row.appendChild(save);
+    box.appendChild(row);
+  });
+  const msg = el('p', 'muted small');
+  msg.id = 'inbox-prefs-msg';
+  box.appendChild(msg);
+}
+
+function initInbox() {
+  $('inbox-unread-only').addEventListener('change', loadInbox);
+  $('inbox-read-all').addEventListener('click', async () => {
+    await api('/notifications/read-all', { method: 'POST' });
+    await loadInbox();
+  });
+}
+
 /* ── boot ─────────────────────────────────────────────────────────────── */
 
 function wire() {
   loadPaint();
   initTabs();
+  initInbox();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');

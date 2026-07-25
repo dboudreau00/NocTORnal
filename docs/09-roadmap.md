@@ -138,11 +138,26 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 - [x] **Classification egress gate, one function, called everywhere**
       (`egress.py`, decision 38). Destination-aware, fails closed, and
       evidence export now goes through it instead of its own copy.
-- [ ] SMTP with digest, suppression, quiet hours, escalation
-- [ ] In-app notification centre
-- [ ] Jira: outbound task creation, inbound status webhook, TLP ceiling
-- [ ] Outbound webhooks with HMAC
-- [ ] Admin surface for integration config and delivery logs
+- [x] **In-app notification centre** (`notifications.py`, Alembic 0029,
+      decision 46) with an Inbox rail tab, unread badge, read/acknowledge
+      and per-channel preferences. Wired to the two events the docs name:
+      the **case-owner notification on merge** docs/01 requires by name,
+      and approval request/decision, without which dual control is a merge
+      button that does not work.
+- [x] **SMTP with digest, suppression and quiet hours** (`transports.py`).
+      Quiet hours defer rather than drop; priority 1 overrides them.
+      Escalation of an unacknowledged priority-1 hit is NOT built.
+- [x] **Outbound webhooks with HMAC** (`transports.py`), same redaction
+      split as email.
+- [ ] Jira: outbound task creation, inbound status webhook, TLP ceiling.
+      The webhook transport it would specialise exists and is signed; what
+      is missing is the Jira API mapping and a Jira to verify against.
+- [ ] Admin surface for integration config and delivery logs. The
+      `notify.delivery` ledger exists and records every refusal and
+      suppression with a reason; nothing renders it.
+- [ ] **No worker process.** `POST /notifications/dispatch` drains the
+      outbox and is called by an operator, a cron entry or a test
+      (decision 46, following decision 30).
 
 ---
 

@@ -666,3 +666,24 @@ select.select { appearance: none; padding-right: 24px; }
   line-height: 15px; text-align: center;
 }
 .rail-btn { position: relative; }
+
+
+/* ── notifications ─────────────────────────────────────────────────────
+   The unread marker is a left border rather than a background wash: the
+   panel is a stack of cards on a dark surface, and a wash on some of them
+   reads as a different KIND of card rather than as an unread one. */
+.row.space-between { justify-content: space-between; align-items: baseline; }
+.notification { border-left: 2px solid transparent; }
+.notification.unread { border-left-color: var(--accent); }
+.notification-body {
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  /* Notification bodies carry an authored reason, and a reason is a
+     paragraph. Preserve the line breaks the author wrote. */
+  white-space: pre-wrap;
+}
+.notification .tags { display: flex; gap: 6px; }
+.pref-row { align-items: center; flex-wrap: wrap; gap: 8px; }
+.pref-row .label { min-width: 64px; }
+.pref-row input[type="time"] { width: 92px; }

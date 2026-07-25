@@ -46,6 +46,8 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api import notify_events
+
 PENDING = "PENDING"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
@@ -196,6 +198,13 @@ class ApprovalService:
             "operation": operation, "justification": record.justification,
             "expires_at": record.expires_at.isoformat(),
         })
+        # An approval nobody is told about is an approval nobody gives, and
+        # then dual control is just a merge button that does not work.
+        if case_id is not None:
+            notify_events.approval_requested(
+                self._c, case_id=case_id, request_id=record.id,
+                operation=operation, permission=op.permission,
+                justification=record.justification, actor_id=requested_by)
         return record
 
     def decide(self, request_id: UUID, *, decided_by: UUID, approve: bool,
@@ -244,6 +253,12 @@ class ApprovalService:
                         "requested_by": str(record.requested_by),
                         "note": record.decision_note,
                     })
+        if record.case_id is not None:
+            notify_events.approval_decided(
+                self._c, case_id=record.case_id, request_id=record.id,
+                operation=record.operation, requested_by=record.requested_by,
+                approved=approve, note=record.decision_note,
+                actor_id=decided_by)
         return record
 
     def withdraw(self, request_id: UUID, *, actor_id: UUID) -> ApprovalRequest:
