@@ -737,38 +737,83 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
     now = int(time.time())
     step = totp.STEP_SECONDS
     here = now // step
-    # +/- 2 hours: enough to catch a wrong timezone applied to the clock.
-    span = (2 * 60 * 60) // step
-    hits = [d for d in range(-span, span + 1)
-            if totp.code_at(secret, (here + d) * step) == code]
 
     print(RULE)
     print("TOTP diagnosis")
     print(RULE)
     print(f"  Code offered   {code}")
-    print(f"  Accepted window is the current step +/- 1 "
-          f"({step}s each), i.e. about {step * 3}s wide.")
+    print(f"  This server    {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now))}")
+    print(f"  Accepted window is the current step +/- {totp.DRIFT_WINDOWS} "
+          f"({step}s each), about {step * 3}s wide.")
     print()
-    if not hits:
-        print("  No match anywhere within +/- 2 hours.")
+
+    # Search progressively wider. A code that matches only a long way out is
+    # not "drift" in the usual sense — it means the two clocks disagree about
+    # what day it is, which an unsynchronised host clock will do.
+    #
+    # A single 6-digit code has only 10^6 values, so across a multi-year
+    # search collisions are CERTAIN and the nearest match is quite likely
+    # coincidental. Supplying the next code as well (--next-code) requires
+    # both to line up at the same offset, which makes a false positive
+    # ~10^-12 and turns the reported figure into something trustworthy.
+    nxt = args.next_code.strip().replace(" ", "") if args.next_code else None
+    bands = [("2 hours", 2 * 60 * 60), ("2 days", 2 * 86400),
+             ("60 days", 60 * 86400), ("2 years", 730 * 86400)]
+    nearest = None
+    searched = ""
+    for label, seconds in bands:
+        span = seconds // step
+        for d in range(-span, span + 1):
+            if totp.code_at(secret, (here + d) * step) != code:
+                continue
+            if nxt is not None and totp.code_at(secret, (here + d + 1) * step) != nxt:
+                continue          # a lone match here is a collision, not the offset
+            if nearest is None or abs(d) < abs(nearest):
+                nearest = d
+        searched = label
+        if nearest is not None:
+            break
+
+    if nearest is None:
+        print(f"  No match anywhere within +/- {searched}.")
         print()
-        print("  The authenticator holds a DIFFERENT SECRET. Clock drift is")
-        print("  not the cause. Delete the entry and re-add it by scanning:")
+        print("  The authenticator holds a DIFFERENT SECRET — no clock setting")
+        print("  explains this. Delete the entry and re-add it by scanning:")
         print(f"    python scripts/bootstrap.py reenrol-totp --email {args.email}")
+        print(RULE)
+        return
+
+    drift = nearest * step
+    print(f"  MATCH at step offset {nearest:+d} ({drift:+d} s).")
+    print(f"  The secret is CORRECT — the code was generated for")
+    print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now + drift))}.")
+    print()
+    if abs(nearest) <= totp.DRIFT_WINDOWS:
+        print("  That is inside the accepted window, so this code should have")
+        print("  worked. If it was refused, the step had already been used —")
+        print("  wait for the next code.")
+    elif abs(drift) < 600:
+        print("  Small drift. Enable automatic time on both devices.")
     else:
-        nearest = min(hits, key=abs)
-        drift = nearest * step
-        print(f"  Match found at step offset {nearest:+d} "
-              f"({drift:+d} seconds from this server).")
+        days = abs(drift) / 86400
+        direction = "BEHIND" if drift < 0 else "AHEAD OF"
+        magnitude = f"{days:.1f} days" if days >= 1 else f"{abs(drift) / 3600:.1f} hours"
+        print(f"  Your authenticator is {magnitude} {direction} this server.")
+        if nxt is None:
+            print("  (Approximate: a single 6-digit code repeats often enough")
+            print("   that a distant match can be coincidence. Re-run with")
+            print("   --next-code <the following code> to pin it down.)")
         print()
-        if abs(nearest) <= totp.DRIFT_WINDOWS:
-            print("  That is INSIDE the accepted window, so the secret is")
-            print("  right and this code should have worked. If it was")
-            print("  refused, it had already been used — wait for the next.")
-        else:
-            print("  The secret is CORRECT; the clock is off. Enable automatic")
-            print("  time on the device generating the code (a manually set")
-            print("  clock, or the wrong timezone applied to it, does this).")
+        print("  This is not drift, it is two machines disagreeing about the")
+        print("  date. TOTP is a function of absolute Unix time, so no")
+        print("  re-enrolment can fix it: whichever clock is wrong must be")
+        print("  corrected. Check this host first —")
+        print("    w32tm /query /status      (Windows)")
+        print("  reports 'not synchronized' when the host has never reached a")
+        print("  time server, which is the usual culprit on an offline or")
+        print("  sandboxed machine. Until it is fixed, use")
+        print(f"    python scripts/bootstrap.py totp-code --email {args.email}")
+        print("  which reads this server's clock and therefore always agrees.")
     print(RULE)
 
 
@@ -851,6 +896,10 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--email", required=True)
     diagnose.add_argument("--code", required=True,
                           help="the six digits your authenticator is showing")
+    diagnose.add_argument("--next-code", default=None,
+                          help="the code that appears immediately after it; "
+                               "makes a far-off offset trustworthy rather "
+                               "than a possible coincidence")
     diagnose.set_defaults(func=cmd_totp_diagnose)
 
     return parser
