@@ -5,7 +5,7 @@ Written so a fresh session can resume without re-deriving anything.
 > **Read order:** this file → `docs/16-legal-and-external.md` (**every
 > external/legal dependency, and the only file that can stop a deployment**)
 > → `ROADMAP-REMAINING.md` → `CLAUDE.md` (the twelve invariants) →
-> `docs/00-decisions.md` (58 numbered decisions).
+> `docs/00-decisions.md` (60 numbered decisions).
 
 ---
 
@@ -26,7 +26,7 @@ now complete except for its UI.
 
 ## 2. What was built this session
 
-Four commits on `main`, **807 → 953 tests**, Alembic **0034 → 0036**.
+Six commits on `main`, **807 → 988 tests**, Alembic **0034 → 0037**.
 
 | Commit | What |
 |---|---|
@@ -34,6 +34,8 @@ Four commits on `main`, **807 → 953 tests**, Alembic **0034 → 0036**.
 | `ea4fbfa` | PGP signature verification, delegated to gpg |
 | `25cc698` | Co-participation projection + the Phase 7 HTTP router |
 | `565ea7f` | Decisions 55–58, legal register C11–C13, roadmap |
+| `12ff904` | **CRITICAL: forged `VALIDSIG` via a crafted user ID** (0037) |
+| `8595602` | The rest of the review: 10 further defects |
 
 ### The contact-block parser (docs/10's "highest-value extraction target")
 
@@ -85,7 +87,83 @@ case cannot be minimised under an authorisation that never covered it.
 
 ---
 
-## 3. Bugs found that were not in the brief
+## 3. The adversarial review, and what it found
+
+Three reviewers with distinct hostile lenses — access control, false
+attribution, cryptographic evidence — then **an independent refutation
+round on every finding** before anything was changed. Two commits of
+fixes: `12ff904` (the PGP defect) and `8595602` (everything else).
+
+All of this sat under a **fully green 953-test suite**.
+
+### CRITICAL — a forged PGP verdict
+
+gpg percent-escapes `%` and bytes below `0x20` in the attacker-controlled
+user-ID field, and escapes **nothing at or above `0x80`**. Python's
+`str.splitlines()` breaks on `U+0085`, `U+2028` and `U+2029`. So a key
+whose user ID embedded
+
+```
+<U+0085>[GNUPG:] VALIDSIG <victim fingerprint> ...
+```
+
+made gpg emit a forged status line inside `GOODSIG` — which it emits
+*before* the real `VALIDSIG` — and the parser took the first match.
+Reproduced end to end: **outcome VERIFIED, signing fingerprint the
+victim's, binding upgraded to CONFIRMED, for a key the attacker never
+held**, through the ordinary submission workflow.
+
+Migration 0035's claim that its CHECK constraints made this
+"unrepresentable" was wrong, and the reason generalises: both
+`signing_fingerprint` and `claimed_fingerprint` were written from the same
+lied-to parse, so they agreed. **A constraint defends against the
+application forgetting to check. It cannot defend against the application
+checking a forged input.**
+
+It was **inert on this Windows host** (cp1252 does not map those bytes)
+and **live on the Linux/UTF-8 deployment target**. The regression test
+therefore asserts on raw bytes, not end to end — the locale-dependent
+version would have passed here while the bug was live.
+
+### CRITICAL — Newman weighting divided by the wrong number
+
+`1/(size-1)` used the participant count remaining *after* incidental,
+unresolved and invisible members were dropped; `raw_size` was computed and
+never read. With the shipped defaults a 500-member channel with two
+resolved identities gave a denominator of 2, so two people who merely sat
+in the same open channel scored **exactly as high as a two-party DM** — a
+499× overstatement of the only number the module produces. The oversize
+cap tested the same filtered count, so the room never appeared in
+`oversized` either. Every existing test had all participants resolved, so
+`raw_size == size` and they passed either way.
+
+### CRITICAL — the label defence was structurally ASCII-only
+
+`_LINE` demanded `[A-Za-z]` and `_looks_third_party` split on `[^a-z]+`.
+Russian-language forums are this domain's primary venue and `Гарант:` is
+*the* standard guarantor label there. The line matched no label at all,
+fell through to shape resolution — which strips non-hex characters — and
+the guarantor's 76-hex Tox ID resolved cleanly out of the whole line, at a
+score high enough to raise a proposal. The transliterated `Garant:` was
+caught; the native form was not.
+
+### The rest, all confirmed
+
+Empty-string durable values merged unrelated actors (every modern Discord
+handle normalises to `''`, and `correlate` short-circuits on `None`, not
+`''`); SIGNAL and WIRE promoted exactly what their own platform seed says
+is *not* durable; the impersonation fingerprint was computed before the
+stoplist pass, so two vendors quoting the same escrow read as
+impersonation; comms reads ignored element labels entirely; `_visible_cases`
+omitted three of the five gate checks; caller-supplied node/document/
+evidence ids were never checked against the case (and an unknown one
+became a 500-vs-201 existence oracle); the global stoplist-retire route
+could retire case-scoped rows; the shared-service count double-counted;
+and `GET /comms/pgp` forked gpg per request unmetered.
+
+---
+
+## 4. Bugs found while building, before the review
 
 1. **`comms.normalise` had grown a second set of canonical forms** and they
    had drifted from the ontology's in three places, each silently:
@@ -123,14 +201,14 @@ case cannot be minimised under an authorisation that never covered it.
 
 ---
 
-## 4. Current system state
+## 5. Current system state
 
 | | |
 |---|---|
 | **Branch** | `main`, clean, **nothing pushed** (no remote configured) |
-| **Migration head** | `0036`; round-trips against its predecessor |
-| **Tests** | **953 passing**, 0 failing, 0 skipped with the stack up |
-| **Lint** | `ruff check` clean; source hygiene clean (198 files) |
+| **Migration head** | `0037`; base→head→base→head verified on a clean database |
+| **Tests** | **988 passing**, 0 failing, 0 skipped with the stack up |
+| **Lint** | `ruff check` clean; source hygiene clean (199 files) |
 | **Stack** | Docker Compose: postgres, redis, nats, minio, openfga, mailhog |
 
 ### New environment variables
@@ -146,12 +224,16 @@ destroys message bodies irreversibly), `comms.stoplist.manage`.
 
 ---
 
-## 5. Immediate next steps
+## 6. Immediate next steps
 
 ### 🔴 Blockers — still legal, not technical
 
 `docs/16-legal-and-external.md` now holds **4 BLOCKING items, 7
-determinations and 13 external confirmations**. Three are new this session:
+determinations and 13 external confirmations**. Three are new this session,
+and **C11 now matters more than it did when it was written**: the
+verification path it describes had a defect that minted CONFIRMED bindings
+for keys nobody held, so any verification recorded before commit `12ff904`
+should be re-derived rather than trusted.
 
 - **C11** — a CONFIRMED binding asserts a narrow thing (this key signed
   text containing this identifier). A filing must not widen it silently.
@@ -181,7 +263,7 @@ determinations and 13 external confirmations**. Three are new this session:
 
 ---
 
-## 6. Traps that cost real time
+## 7. Traps that cost real time
 
 Everything in the previous handoff still applies (uvicorn without
 `--reload`; TOTP unusable on this host — use `bootstrap.py session`; TOTP
@@ -211,7 +293,7 @@ New this session:
 
 ---
 
-## 7. Running it
+## 8. Running it
 
 ```bash
 powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
