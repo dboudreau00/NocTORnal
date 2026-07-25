@@ -233,21 +233,45 @@ class CoParticipationService:
             # tie.
             eligible = sorted(set(eligible))
             size = len(eligible)
+            # THE denominator, and the cap, are properties of the ROOM --
+            # not of how much of it this caller can see.
+            #
+            # Both were computed from `size`, the count remaining after
+            # incidental, unresolved and invisible participants had been
+            # dropped, and `raw_size` was computed and never read. With
+            # the shipped defaults that is catastrophic rather than
+            # approximate: a 500-member channel with two resolved
+            # identities and 498 unresolved handles gave size == 2, so
+            # 1/(size-1) == 1.0 and two people who merely sat in the same
+            # open channel scored EXACTLY as high as a two-party DM -- a
+            # 499x overstatement of the only number this module produces.
+            # The room also escaped the oversize cap for the same reason,
+            # so it never appeared in `oversized` either, and the "a cap
+            # that silently drops data is worse than no cap" guarantee
+            # reported nothing.
+            #
+            # Newman 2001 divides by the size of the GROUP. How many of
+            # its members we resolved is a fact about our coverage, and
+            # coverage must not inflate a tie.
+            room_size = room["raw_size"]
             if size < 2:
                 singleton_rooms += 1
                 continue
-            if size > p.max_room_size:
+            if room_size > p.max_room_size:
                 oversized.append({
                     "conversation_id": str(conv_id),
                     "platform": room["platform"],
-                    "participants": size,
+                    "participants": room_size,
+                    "projectable_participants": size,
                     "provenance_class": room["provenance"]})
                 continue
 
             considered_rooms += 1
-            # Newman: 1/(n-1) per pair, so a big room's pairs are
-            # individually negligible rather than equal to a DM.
-            contribution = 1.0 / (size - 1) if p.weighting == WEIGHT_NEWMAN else 1.0
+            # Newman: 1/(n-1) per pair over the ROOM's size, so a big
+            # room's pairs are individually negligible rather than equal
+            # to a DM.
+            contribution = (1.0 / max(1, room_size - 1)
+                            if p.weighting == WEIGHT_NEWMAN else 1.0)
             for a, b in combinations(eligible, 2):
                 pair = (a, b)
                 pair_weight[pair] = pair_weight.get(pair, 0.0) + contribution

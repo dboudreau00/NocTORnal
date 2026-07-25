@@ -404,3 +404,239 @@ def test_an_unassigned_case_is_404_not_403(conn, client):
     stranger = _login(client, stranger_email, stranger_secret)
     assert client.get(f"/api/v1/cases/{case_id}/comms/contact-graph",
                       headers=_auth(stranger)).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Element labels, not just the case's (invariant 8)
+# ---------------------------------------------------------------------------
+
+def _assign(conn, case_id, user_id, role="ANALYST"):
+    owner = conn.execute('SELECT owner_user_id FROM core."case" WHERE id = %s',
+                         (case_id,)).fetchone()[0]
+    conn.execute(
+        """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
+           VALUES (%s, %s, %s, %s)""", (case_id, user_id, role, owner))
+
+
+def test_an_amber_reader_cannot_read_a_red_contact_block(conn, client):
+    """The comms tables carry their OWN classification, and
+    `check_writable_labels` caps a writer at their own clearance rather
+    than the case's -- so a RED-cleared analyst can put a RED block in an
+    AMBER case. `require("comms.read")` authorises against the CASE only,
+    so the under-cleared reader got the whole forum post back.
+
+    `read.py`, `evidence.py`, `samples.py` and `coparticipation.py` all
+    filter on element labels. The comms read paths did not.
+    """
+    _, owner_email, owner_secret = _make_user(
+        conn, clearance="RED", global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+
+    block = client.post(
+        f"/api/v1/cases/{case_id}/comms/contact-blocks", headers=_auth(owner),
+        json={"raw_text": f"Jabber: supersecret@{STOP_DOMAIN}\nTOX: {TOX_ID}",
+              "source_ref": "https://forum/1", "classification": "RED"})
+    assert block.status_code == 201, block.text
+    block_id = block.json()["id"]
+    assert conn.execute(
+        "SELECT classification FROM comms.contact_block WHERE id = %s",
+        (block_id,)).fetchone()[0] == "RED"
+
+    reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
+    _assign(conn, case_id, reader_id)
+    reader = _login(client, reader_email, reader_secret)
+
+    # Same 404 a nonexistent block gives: a status code must not be an
+    # existence oracle.
+    assert client.get(f"/api/v1/cases/{case_id}/comms/contact-blocks/{block_id}",
+                      headers=_auth(reader)).status_code == 404
+    # ...and the RED-cleared owner still sees it.
+    assert client.get(f"/api/v1/cases/{case_id}/comms/contact-blocks/{block_id}",
+                      headers=_auth(owner)).status_code == 200
+
+
+def test_an_amber_reader_does_not_correlate_a_red_binding(conn, client):
+    _, owner_email, owner_secret = _make_user(
+        conn, clearance="RED", global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+    assert client.post(
+        f"/api/v1/cases/{case_id}/comms/bindings", headers=_auth(owner),
+        json={"platform_key": "TOX", "observed": TOX_ID,
+              "classification": "RED"}).status_code == 201
+
+    reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
+    _assign(conn, case_id, reader_id)
+    reader = _login(client, reader_email, reader_secret)
+
+    r = client.get(f"/api/v1/cases/{case_id}/comms/correlate",
+                   headers=_auth(reader),
+                   params={"platform_key": "TOX", "observed": TOX_ID})
+    assert r.status_code == 200
+    assert r.json()["matches"] == []
+    # The RED-cleared owner still correlates it.
+    r = client.get(f"/api/v1/cases/{case_id}/comms/correlate",
+                   headers=_auth(owner),
+                   params={"platform_key": "TOX", "observed": TOX_ID})
+    assert len(r.json()["matches"]) == 1
+
+
+def test_an_amber_reader_does_not_see_a_red_conversation_in_the_contact_graph(
+        conn, client):
+    _, owner_email, owner_secret = _make_user(
+        conn, clearance="RED", global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+    conv = client.post(f"/api/v1/cases/{case_id}/comms/conversations",
+                       headers=_auth(owner),
+                       json={"platform_key": "MATRIX",
+                             "provenance_class": "OPEN_GROUP",
+                             "classification": "RED"}).json()["id"]
+    conn.execute(
+        """INSERT INTO comms.participant
+               (conversation_id, observed_handle, message_count)
+           VALUES (%s, 'secret_handle', 1)""", (conv,))
+
+    reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
+    _assign(conn, case_id, reader_id)
+    reader = _login(client, reader_email, reader_secret)
+
+    r = client.get(f"/api/v1/cases/{case_id}/comms/contact-graph",
+                   headers=_auth(reader))
+    assert r.status_code == 200 and r.json()["conversations"] == []
+    r = client.get(f"/api/v1/cases/{case_id}/comms/contact-graph",
+                   headers=_auth(owner))
+    assert len(r.json()["conversations"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cross-case counts are bounded by the FULL gate, not just by assignment
+# ---------------------------------------------------------------------------
+
+def test_impersonation_does_not_reach_a_case_the_gate_would_refuse(conn, client):
+    """`_visible_cases` tested assignment and expiry only, omitting the
+    verb, clearance and compartments. `assign_user` performs no clearance
+    check and a case's classification can be raised afterwards, so an
+    assignment to a case the five-part gate REFUSES is a reachable state
+    -- `assign_user_checked` exists because of it.
+
+    The impersonation query has no label filter of its own, so it returned
+    publisher handles and source URLs out of a case the caller cannot open.
+    """
+    _, owner_email, owner_secret = _make_user(
+        conn, clearance="RED", global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    mine, secret_case = _create_case(client, owner), _create_case(client, owner)
+
+    # Two copies of one block in the case that will be raised to RED --
+    # which is what impersonation detection keys on.
+    for handle, text in (
+        ("real_vendor", f"Jabber: v@{STOP_DOMAIN}\nTOX: {TOX_ID}"),
+        ("the_copy",
+         f"====\nTOX:  {TOX_ID}\nJABBER: V@{STOP_DOMAIN.upper()}\n===="),
+    ):
+        assert client.post(
+            f"/api/v1/cases/{secret_case}/comms/contact-blocks",
+            headers=_auth(owner),
+            json={"raw_text": text, "source_ref": f"https://forum/{handle}",
+                  "publisher_handle": handle}).status_code == 201
+    conn.execute('UPDATE core."case" SET classification = %s WHERE id = %s',
+                 ("RED", secret_case))
+
+    # An AMBER analyst assigned to BOTH cases. The gate refuses the RED one.
+    analyst_id, analyst_email, analyst_secret = _make_user(conn, clearance="AMBER")
+    _assign(conn, mine, analyst_id)
+    _assign(conn, secret_case, analyst_id)
+    analyst = _login(client, analyst_email, analyst_secret)
+    assert client.get(f"/api/v1/cases/{secret_case}/comms/contact-graph",
+                      headers=_auth(analyst)).status_code in (403, 404)
+
+    r = client.get(f"/api/v1/cases/{mine}/comms/impersonation",
+                   headers=_auth(analyst))
+    assert r.status_code == 200
+    assert r.json()["candidates"] == []
+    assert "real_vendor" not in r.text
+    assert "the_copy" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied ids must belong to this case
+# ---------------------------------------------------------------------------
+
+def test_a_publisher_identity_from_another_case_is_refused(conn, client):
+    """The chain this closes: the node id goes into a proposal payload, an
+    accepted ATTRIBUTE proposal calls add_assertion on it, and
+    core.assertion has no constraint tying its node's case to its own --
+    so an attacker-authored attribute claim surfaced in ANOTHER case's
+    provenance, audited only under this one. evidence.py fixed the same
+    class once already.
+    """
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    mine, theirs = _create_case(client, token), _create_case(client, token)
+
+    foreign_node = client.post(
+        f"/api/v1/cases/{theirs}/nodes", headers=_auth(token),
+        json={"node_type": "IDENTITY", "label": "their_vendor",
+              "assertion": {"basis": "DIRECT_OBSERVATION"}})
+    assert foreign_node.status_code == 201, foreign_node.text
+
+    r = client.post(f"/api/v1/cases/{mine}/comms/contact-blocks",
+                    headers=_auth(token),
+                    json={"raw_text": f"TOX: {TOX_ID}",
+                          "source_ref": "https://forum/1",
+                          "publisher_identity_node_id": foreign_node.json()["id"]})
+    assert r.status_code == 400
+    assert "this case" in r.text
+
+
+def test_an_unknown_object_id_is_a_400_not_a_500(conn, client):
+    """An unknown id used to raise ForeignKeyViolation, which is not a
+    ContactBlockError and so escaped as a 500 -- making 201-vs-500 an
+    existence oracle for any id a caller can name."""
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    r = client.post(f"/api/v1/cases/{case_id}/comms/contact-blocks",
+                    headers=_auth(token),
+                    json={"raw_text": f"TOX: {TOX_ID}",
+                          "source_ref": "https://forum/1",
+                          "publisher_identity_node_id": str(uuid4())})
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# The stoplist's two scopes, on the retire path too
+# ---------------------------------------------------------------------------
+
+def test_the_global_retire_route_cannot_retire_a_case_entry(conn, client):
+    """The retire UPDATE was keyed on id alone, so the globally-gated
+    route -- which has no case gate at all -- could retire a CASE entry
+    belonging to a case the caller cannot even read. That is not
+    cosmetic: `_stoplist_hit` filters retired_at IS NULL, so every later
+    parse in that case silently stops flagging that escrow.
+    """
+    _, owner_email, owner_secret = _make_user(
+        conn, global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+    entry = client.post(f"/api/v1/cases/{case_id}/comms/stoplist",
+                        headers=_auth(owner),
+                        json={"value": f"caseescrow@{STOP_DOMAIN}",
+                              "role": "ESCROW", "platform_key": "XMPP"})
+    assert entry.status_code == 201
+    assert entry.json()["scope"] == "CASE"
+    entry_id = entry.json()["id"]
+
+    # A user with a global REVIEWER role and NO assignment to that case.
+    _, outsider_email, outsider_secret = _make_user(
+        conn, global_roles=("REVIEWER",))
+    outsider = _login(client, outsider_email, outsider_secret)
+    r = client.post(f"/api/v1/comms/stoplist/{entry_id}/retire",
+                    headers=_auth(outsider),
+                    json={"reason": "not mine to retire"})
+    assert r.status_code == 404
+    assert conn.execute(
+        "SELECT retired_at FROM comms.service_selector WHERE id = %s",
+        (entry_id,)).fetchone()[0] is None

@@ -170,13 +170,33 @@ _GENERIC_LABELS = frozenset({
 #: that reads as a finding.
 _THIRD_PARTY_LABEL_WORDS = frozenset({
     "escrow", "escrows", "garant", "garantor", "guarantor", "guarant",
-    "arbiter", "arbitr", "arbitrage", "arbitration",
+    "garantiya", "garantia",
+    "arbiter", "arbitr", "arbitrage", "arbitration", "arbitraj",
     "admin", "admins", "administrator", "administration",
     "moderator", "mod", "mods", "staff", "support", "helpdesk",
     "partner", "partners", "reseller", "resellers", "affiliate",
-    "exchanger", "exchange", "mixer", "tumbler",
-    "referral", "referrals", "ref", "vouched by", "vouch",
-    "middleman", "mm", "deposit",
+    "exchanger", "exchange", "obmen", "obmennik", "mixer", "tumbler",
+    "referral", "referrals", "ref", "vouch", "vouches", "vouched",
+    "middleman", "mm", "deposit", "dispute", "disputes",
+    "owner", "cashier", "treasurer", "operator", "manager",
+    # --- Cyrillic ------------------------------------------------------
+    # Russian-language forums are the primary venue in this domain, and
+    # `Гарант:` is THE standard guarantor label on them. Omitting these
+    # meant defence 1 was silently absent on exactly the forums that
+    # matter most: the transliterated `Garant:` was caught and the native
+    # `Гарант:` was attributed to the vendor.
+    "гарант", "гаранта", "гаранту", "гарантия", "гарантии",
+    "эскроу", "экскроу",
+    "арбитр", "арбитраж", "арбитра",
+    "админ", "админа", "администратор", "администрация",
+    "модератор", "модер", "модеры",
+    "поддержка", "саппорт", "支持",
+    "обмен", "обменник", "обменка",
+    "партнёр", "партнер", "партнёры", "партнеры",
+    "реселлер", "перекуп",
+    "казначей", "кассир", "оператор", "владелец",
+    "спор", "споры", "диспут",
+    "посредник", "депозит", "реферал", "рефка",
 })
 
 #: Vendors annotate third-party lines in prose. Read the whole line.
@@ -185,6 +205,10 @@ _THIRD_PARTY_MARKERS = (
     "not ours", "not our", "isn't mine", "is not mine",
     "official escrow", "forum escrow", "market escrow", "site escrow",
     "escrow only", "use escrow", "third party", "third-party",
+    # Russian equivalents, for the same reason as the labels above.
+    "не мой", "не моё", "не мое", "не наш", "не наше",
+    "только через гарант", "через гаранта", "форумный гарант",
+    "официальный гарант",
 )
 
 #: Impersonation warning: the same selector set under two publishers.
@@ -194,8 +218,17 @@ _HEX = re.compile(r"^[0-9a-fA-F]+$")
 _WS = re.compile(r"\s+")
 #: A label is short and wordy. The length cap is what stops a sentence
 #: containing a colon from being read as a label.
+#:
+#: `\w` with re.UNICODE (the default for str patterns), NOT [A-Za-z]. The
+#: ASCII-only form meant a Cyrillic label did not match at all, so the
+#: line fell through to shape resolution -- where `_resolve_by_shape`
+#: strips every non-hex character and a 76-hex Tox ID resolves cleanly out
+#: of `Гарант: <tox id>`. The guarantor's key was then attributed to the
+#: vendor, at a score high enough to raise a proposal. Excluding digits
+#: from the FIRST character still keeps "76A1F3B2..." from reading as a
+#: label.
 _LINE = re.compile(
-    r"^\s*(?P<label>[A-Za-z][A-Za-z0-9 /_.+\-]{0,28}?)\s*[:=]\s*(?P<value>\S.*?)\s*$")
+    r"^\s*(?P<label>[^\W\d_][\w /_.+\-]{0,28}?)\s*[:=]\s*(?P<value>\S.*?)\s*$")
 #: Box drawing, rules and bullets that fence a block.
 _DECORATION = re.compile(r"^[\s\-=_*~#|>•·+★☆▪▫—–─━═╔╗╚╝║╠╣╦╩╬┌┐└┘│├┤┬┴┼█▄▀]*$")
 _TRIM_DECORATION = re.compile(r"^[\s\-=_*~#|>•·★☆▪▫\[\(]+|[\s\-=_*~#|<\]\)]+$")
@@ -260,7 +293,10 @@ class ParsedEntry:
 def _looks_third_party(label: str | None, whole_line: str) -> str | None:
     """Return the reason this line names somebody else, or None."""
     if label:
-        words = set(re.split(r"[^a-z]+", label.lower())) - {""}
+        # Split on non-WORD characters, not on non-[a-z]. The ASCII split
+        # reduced any Cyrillic label to {""}, so the whole word list was
+        # unreachable for it -- see `_LINE`.
+        words = {w for w in re.split(r"[\W_]+", label.lower()) if w}
         hit = words & _THIRD_PARTY_LABEL_WORDS
         if hit or label.lower().strip() in _THIRD_PARTY_LABEL_WORDS:
             named = sorted(hit) or [label.lower().strip()]
@@ -586,24 +622,46 @@ class ContactBlockService:
         return row[0]
 
     def retire_stoplist_entry(self, entry_id: UUID, *, retired_by: UUID,
-                              reason: str) -> None:
+                              reason: str, scope: str,
+                              case_id: UUID | None = None) -> None:
         """Take an entry off the list without deleting it.
 
         Parses already cite this row. Deleting it would leave them citing
         nothing, and a stoplist decision that turns out to be wrong is
         exactly the one somebody will want to reconstruct.
+
+        `scope` is REQUIRED and the UPDATE is predicated on it. Retiring by
+        id alone meant the globally-gated route -- which has no case gate
+        at all -- could retire a CASE-scoped entry: a holder of a global
+        REVIEWER role with no assignment to that case, who gets a 404
+        reading its stoplist, could still take entries off it. That is not
+        cosmetic. `_stoplist_hit` filters `retired_at IS NULL`, so every
+        later parse in that case silently stops flagging that escrow, and
+        the escrow's identifier starts being attributed to vendors --
+        docs/10's "serious, and easy, error", reintroduced quietly.
         """
         if not (reason or "").strip():
             raise ContactBlockError(
                 "retiring a stoplist entry has to say why: the entry has "
                 "already shaped attributions that cite it")
+        if scope not in {"GLOBAL", "CASE"}:
+            raise ContactBlockError(f"unknown scope {scope!r}")
+        if (scope == "CASE") != (case_id is not None):
+            raise ContactBlockError(
+                "a CASE retirement names its case and a GLOBAL one does not")
         updated = self._c.execute(
             """UPDATE comms.service_selector
                   SET retired_at = now(), retired_by = %s, retired_reason = %s
-                WHERE id = %s AND retired_at IS NULL""",
-            (retired_by, reason.strip(), entry_id)).rowcount
+                WHERE id = %s AND retired_at IS NULL
+                  AND scope = %s
+                  AND (%s::uuid IS NULL OR case_id = %s)""",
+            (retired_by, reason.strip(), entry_id, scope, case_id, case_id)
+        ).rowcount
         if not updated:
-            raise ContactBlockError("no such active stoplist entry")
+            # Deliberately the same message whether the entry is absent,
+            # already retired, or out of scope: a distinct "wrong scope"
+            # would confirm that an id the caller cannot touch exists.
+            raise ContactBlockError("no such active stoplist entry in scope")
 
     def stoplist(self, *, case_id: UUID | None = None,
                  include_retired: bool = False) -> list[dict]:
@@ -687,7 +745,8 @@ class ContactBlockService:
 
     def _shared_service_publishers(self, entry: ParsedEntry, *,
                                    case_ids: list[UUID],
-                                   exclude_block: UUID) -> tuple[int, int]:
+                                   exclude_block: UUID,
+                                   this_publisher: str | None) -> tuple[int, int]:
         """(distinct publishers, blocks) advertising this identifier.
 
         docs/10: "Flag when a selector appears in many unrelated vendors'
@@ -706,6 +765,16 @@ class ContactBlockService:
         """
         if not entry.durable_value or not case_ids:
             return 0, 0
+        # The publisher of the block being parsed is EXCLUDED from the
+        # query and added back once by the caller.
+        #
+        # Excluding only `exclude_block` was not enough: a publisher who
+        # advertised the same identifier in an earlier block was already
+        # inside the count, and the caller's `+ 1` then added them a
+        # second time. Three blocks by two publishers reported "3 distinct
+        # publishers", so a vendor reposting their own contact block
+        # eventually demoted their own strongest selector to THIRD_PARTY
+        # -- the exact outcome the docstring says this prevents.
         row = self._c.execute(
             """SELECT count(DISTINCT coalesce(
                           b.publisher_identity_node_id::text,
@@ -717,9 +786,14 @@ class ContactBlockService:
                   AND (e.platform_key IS NOT DISTINCT FROM %s
                        OR e.selector_type IS NOT DISTINCT FROM %s)
                   AND b.case_id = ANY(%s)
-                  AND b.id <> %s""",
+                  AND b.id <> %s
+                  AND (%s::text IS NULL
+                       OR coalesce(b.publisher_identity_node_id::text,
+                                   lower(b.publisher_handle))
+                           IS DISTINCT FROM %s)""",
             (entry.durable_value, entry.platform_key, entry.selector_type,
-             case_ids, exclude_block)).fetchone()
+             case_ids, exclude_block, this_publisher, this_publisher)
+        ).fetchone()
         return int(row[0] or 0), int(row[1] or 0)
 
     # -- parse and persist -------------------------------------------------
@@ -748,9 +822,29 @@ class ContactBlockService:
             raise ContactBlockError(
                 "a contact block needs a source: where it was published is "
                 "what makes it attributable at all")
+        # Every caller-supplied id must belong to THIS case.
+        #
+        # `evidence.py` fixed this exact class once already and left the
+        # reason: these columns have no same-case constraint, so an
+        # unchecked id attaches a claim to something in a case the caller
+        # has no rights over, audited only under this one. Here the chain
+        # ran further than that: `_maybe_propose` puts the node id into a
+        # proposal payload, an accepted ATTRIBUTE proposal calls
+        # `add_assertion` on it, and `core.assertion` has no constraint
+        # tying its node's case to its own -- so an attacker-authored
+        # attribute claim surfaced in ANOTHER case's provenance.
+        #
+        # It also removes an oracle: an unknown id raised a
+        # ForeignKeyViolation, which is not a ContactBlockError and so
+        # became a 500 where a valid one gives 201.
+        self._require_same_case(case_id, "core.node", "publisher identity",
+                                publisher_identity_node_id)
+        self._require_same_case(case_id, "collect.document", "document",
+                                document_id)
+        self._require_same_case(case_id, "core.evidence", "exhibit",
+                                evidence_id)
         entries = parse(raw_text)
         digest = hashlib.sha256(raw_text.encode()).digest()
-        fingerprint = block_fingerprint(entries, raw_text)
         counted_at = datetime.now(timezone.utc)
         # The caller's own case is always visible to the caller.
         scope_cases = list({case_id, *visible_case_ids})
@@ -762,12 +856,15 @@ class ContactBlockService:
                         source_ref, document_id, evidence_id, raw_text,
                         raw_sha256, block_fingerprint, parser_version,
                         classification, compartments, created_by)
+                   -- The fingerprint is written as a placeholder and
+                   -- UPDATEd below, once the stoplist and shared-service
+                   -- passes have had their say. See the loop.
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (case_id, raw_sha256) DO NOTHING
                    RETURNING id""",
                 (case_id, publisher_identity_node_id, publisher_handle,
                  source_ref.strip(), document_id, evidence_id, raw_text,
-                 digest, fingerprint, PARSER_VERSION, classification,
+                 digest, "pending", PARSER_VERSION, classification,
                  sorted(compartments), created_by)).fetchone()
             if row is None:
                 existing = self._c.execute(
@@ -777,10 +874,15 @@ class ContactBlockService:
                 return {**self.get(existing[0]), "already_parsed": True}
             block_id = row[0]
 
+            this_publisher = (str(publisher_identity_node_id)
+                              if publisher_identity_node_id
+                              else (publisher_handle or "").strip().lower()
+                              or None)
             for entry in entries:
                 self._apply_stoplist(case_id, entry)
                 self._apply_shared_service(entry, case_ids=scope_cases,
-                                           exclude_block=block_id)
+                                           exclude_block=block_id,
+                                           this_publisher=this_publisher)
                 proposal_id = self._maybe_propose(
                     entry, case_id=case_id, source_ref=source_ref,
                     publisher_identity_node_id=publisher_identity_node_id,
@@ -808,6 +910,24 @@ class ContactBlockService:
                      else None,
                      entry_proposal))
 
+            # Fingerprinted AFTER the stoplist and shared-service passes,
+            # not before.
+            #
+            # `block_fingerprint` excludes THIRD_PARTY entries so that two
+            # unrelated vendors both quoting the forum's escrow do not look
+            # like one copying the other -- its docstring says exactly
+            # that. Computing it from the raw parse defeated its own
+            # purpose: an entry only becomes THIRD_PARTY when the stoplist
+            # or the shared-service count says so, and both run afterwards.
+            # The result was that any two vendors quoting the same
+            # stoplisted escrow shared a fingerprint and were reported as
+            # impersonating each other -- defences 3 and 4 turned into a
+            # false accusation.
+            fingerprint = block_fingerprint(entries, raw_text)
+            self._c.execute(
+                "UPDATE comms.contact_block SET block_fingerprint = %s "
+                " WHERE id = %s", (fingerprint, block_id))
+
             self._audit(case_id, created_by, "CONTACT_BLOCK_PARSED", block_id, {
                 "source_ref": source_ref.strip(),
                 "entries": len(entries),
@@ -818,6 +938,24 @@ class ContactBlockService:
                 "parser_version": PARSER_VERSION,
             })
         return self.get(block_id)
+
+    def _require_same_case(self, case_id: UUID, table: str, what: str,
+                           object_id: UUID | None) -> None:
+        """Refuse an id that does not belong to this case.
+
+        The table name is interpolated and is never caller-supplied -- the
+        three call sites pass literals.
+        """
+        if object_id is None:
+            return
+        row = self._c.execute(
+            f"SELECT case_id FROM {table} WHERE id = %s",   # noqa: S608
+            (object_id,)).fetchone()
+        if row is None or row[0] != case_id:
+            raise ContactBlockError(
+                f"no such {what} in this case. A contact block may only "
+                f"cite material from the case it belongs to; citing "
+                f"another case's is a disclosure as well as an error.")
 
     def _apply_stoplist(self, case_id: UUID, entry: ParsedEntry) -> None:
         hit = self._stoplist_hit(case_id, entry)
@@ -839,21 +977,23 @@ class ContactBlockService:
                                    "publisher's own")
 
     def _apply_shared_service(self, entry: ParsedEntry, *,
-                              case_ids: list[UUID],
-                              exclude_block: UUID) -> None:
-        publishers, blocks = self._shared_service_publishers(
-            entry, case_ids=case_ids, exclude_block=exclude_block)
+                              case_ids: list[UUID], exclude_block: UUID,
+                              this_publisher: str | None) -> None:
         if not entry.durable_value:
             return
-        entry.shared_service_publishers = publishers
-        if publishers + 1 < SHARED_SERVICE_THRESHOLD:
+        others, blocks = self._shared_service_publishers(
+            entry, case_ids=case_ids, exclude_block=exclude_block,
+            this_publisher=this_publisher)
+        # `others` excludes this block's publisher entirely, however many
+        # blocks they have posted, so adding them back is exactly once.
+        # An unattributed block has no publisher to add.
+        publishers = others + (1 if this_publisher else 0)
+        entry.shared_service_publishers = others
+        if publishers < SHARED_SERVICE_THRESHOLD:
             return
-        # +1: this block's own publisher counts too, and the query excludes
-        # this block. Without it the threshold is off by one and a genuine
-        # shared service takes one more sighting to flag than intended.
         entry.role = ROLE_THIRD_PARTY
         entry.role_reasons.append(
-            f"advertised by {publishers + 1} distinct publishers across "
+            f"advertised by {publishers} distinct publishers across "
             f"{blocks + 1} blocks. docs/10: a selector appearing in many "
             f"unrelated vendors' blocks is a SHARED SERVICE, not a shared "
             f"identity -- attributing it to any one of them is the escrow "
@@ -912,14 +1052,28 @@ class ContactBlockService:
 
     # -- reading back ------------------------------------------------------
 
-    def get(self, block_id: UUID) -> dict | None:
+    def get(self, block_id: UUID, *, clearance: str | None = None,
+            compartments: frozenset[str] = frozenset()) -> dict | None:
+        """The block and its parsed entries.
+
+        `clearance` is optional ONLY so `parse_and_store` can read back
+        what it just wrote on behalf of the caller who wrote it. Every
+        other caller must pass it: this returns `raw_text` -- the whole
+        forum post -- and a contact block can be classified above its
+        case, so the case gate alone let an AMBER-cleared reader retrieve
+        a RED block in full.
+        """
         row = self._c.execute(
             """SELECT id, case_id, publisher_identity_node_id, publisher_handle,
                       source_ref, raw_text, block_fingerprint, parser_version,
                       classification, compartments, created_at, document_id,
                       evidence_id
-                 FROM comms.contact_block WHERE id = %s""",
-            (block_id,)).fetchone()
+                 FROM comms.contact_block
+                WHERE id = %s
+                  AND (%s::core.tlp IS NULL
+                       OR (classification <= %s::core.tlp
+                           AND compartments <@ %s))""",
+            (block_id, clearance, clearance, list(compartments))).fetchone()
         if row is None:
             return None
         entries = self._c.execute(

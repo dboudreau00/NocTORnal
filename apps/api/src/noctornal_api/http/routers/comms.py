@@ -36,6 +36,7 @@ applied through the existing review path with a human `reviewed_by`. A
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from uuid import UUID
 
 import psycopg
@@ -62,6 +63,18 @@ from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.pgp import PgpError, PgpService, verifier_version
 
+
+@lru_cache(maxsize=1)
+def _verifier_version_cached() -> str | None:
+    """The gpg version string, resolved once per process.
+
+    `verifier_version()` shells out. It is called to LABEL a listing, not
+    to make a decision, and the binary does not change under a running
+    process -- so calling it per request bought nothing and handed any
+    holder of `comms.read` an unmetered fork.
+    """
+    return verifier_version()
+
 router = APIRouter(prefix="/cases/{case_id}/comms", tags=["comms"])
 #: Not case-scoped: platform reference data and the GLOBAL stoplist.
 global_router = APIRouter(prefix="/comms", tags=["comms"])
@@ -78,12 +91,26 @@ def _visible_cases(conn: psycopg.Connection, user: CurrentUser,
     rows = conn.execute(
         """SELECT ca.case_id
              FROM iam.case_assignment ca
+             JOIN core."case" c ON c.id = ca.case_id
+             JOIN iam.app_user u ON u.id = ca.user_id
             WHERE ca.user_id = %s AND ca.case_id <> %s
-              -- The same expiry test the access resolver applies. An
-              -- expired assignment stops granting access, so it must stop
-              -- contributing to a cross-case count too, or the count
-              -- outlives the authorisation behind it.
-              AND (ca.expires_at IS NULL OR ca.expires_at > now())""",
+              AND (ca.expires_at IS NULL OR ca.expires_at > now())
+              AND u.is_active
+              -- The verb. An assignment under a role that does not hold
+              -- comms.read is not "visible" for this purpose.
+              AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                           WHERE rp.role_key = ca.role_key
+                             AND rp.permission_key = 'comms.read')
+              -- Clearance and compartments. `assign_user` performs no
+              -- clearance check, a case's classification can be raised
+              -- after assignment, and a user's clearance can be lowered --
+              -- so an assignment to a case the five-part gate would REFUSE
+              -- is a reachable state, and `assign_user_checked` exists
+              -- because of it. Without these two lines the impersonation
+              -- query returned publisher handles and source URLs out of a
+              -- case the caller cannot open.
+              AND c.classification <= u.tlp_clearance
+              AND c.compartments <@ u.compartments""",
         (user.user_id, exclude)).fetchall()
     return tuple(r[0] for r in rows)
 
@@ -189,8 +216,10 @@ def correlate(
     disclosure policy (open question 5), and this endpoint is not the
     place to decide it.
     """
+    clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        hits = CommsService(conn).correlate(
+        hits = CommsService(conn, clearance=clearance.name,
+                            compartments=compartments).correlate(
             platform_key=platform_key, observed=observed, case_id=case_id)
     except CommsError as exc:
         raise Problem(400, "Invalid request", str(exc)) from exc
@@ -213,8 +242,11 @@ def co_declared(
     running Jabber + Tox + Session with a PGP key operates differently
     from one running a Telegram bot and nothing else.
     """
+    clearance, compartments = user_ceiling(conn, user.user_id)
     return {"reference": reference,
-            "identifiers": CommsService(conn).co_declared(case_id, reference)}
+            "identifiers": CommsService(
+                conn, clearance=clearance.name, compartments=compartments
+            ).co_declared(case_id, reference)}
 
 
 @router.get("/shared-devices", response_model=dict)
@@ -229,7 +261,10 @@ def shared_devices(
     and a device, and concluding the identities are one person is an
     attribution that belongs in an ATTRIBUTED_TO edge with a confidence.
     """
-    return {"leads": CommsService(conn).shared_devices(case_id)}
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    return {"leads": CommsService(
+        conn, clearance=clearance.name, compartments=compartments
+    ).shared_devices(case_id)}
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +321,13 @@ def contact_block(
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    block = ContactBlockService(conn).get(block_id)
-    # Checked AFTER fetching and answered as 404 either way: a status code
-    # must not be an existence oracle (deps.py rule 2).
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    # The BLOCK's own labels, not just its case's: a contact block can be
+    # classified above its case, and this returns raw_text -- the whole
+    # forum post. Answered as 404 either way, because a status code must
+    # not be an existence oracle (deps.py rule 2).
+    block = ContactBlockService(conn).get(
+        block_id, clearance=clearance.name, compartments=compartments)
     if block is None or block["case_id"] != str(case_id):
         raise Problem(404, "Not found", "no such contact block")
     return block
@@ -360,7 +399,12 @@ def retire_global_stoplist_entry(
     """Retire, never delete. Parses already cite this row."""
     try:
         ContactBlockService(conn).retire_stoplist_entry(
-            entry_id, retired_by=user.user_id, reason=body.reason)
+            entry_id, retired_by=user.user_id, reason=body.reason,
+            # GLOBAL only. This route has no case gate, so without the
+            # scope predicate a holder of a global role could retire a
+            # CASE entry belonging to a case they cannot even read -- and
+            # a retired stoplist entry silently stops flagging its escrow.
+            scope="GLOBAL")
     except ContactBlockError as exc:
         raise Problem(404, "Not found", str(exc)) from exc
     return {"id": str(entry_id), "retired": True}
@@ -442,7 +486,12 @@ def verifications(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     return {"verifications": PgpService(conn).verifications(case_id),
-            "verifier": verifier_version(),
+            # Cached per process. This called gpg --version on EVERY
+            # request, so a read endpoint any comms.read holder can reach
+            # forked a subprocess per call -- bounded only by the blanket
+            # ceiling, which fails OPEN, while the POST that forks for a
+            # real reason is capped at 60/hour.
+            "verifier": _verifier_version_cached(),
             "notice": (
                 "A CONFIRMED binding means a signature by the CLAIMED key "
                 "was made over text CONTAINING the identifier. Anything "
@@ -461,7 +510,9 @@ def unverified(
     Without the split, "not confirmed" and "not checked" look identical,
     and an analyst reads an unchecked claim as a checked-and-failed one.
     """
-    return {"claims": PgpService(conn).unverified_claims(case_id)}
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    return {"claims": PgpService(conn).unverified_claims(
+        case_id, clearance=clearance.name, compartments=compartments)}
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +579,10 @@ def contact_graph(
 ) -> dict:
     """Who talks to whom, from metadata alone -- which is what survives
     minimisation."""
-    return {"conversations": CommsService(conn).contact_graph(case_id)}
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    return {"conversations": CommsService(
+        conn, clearance=clearance.name, compartments=compartments
+    ).contact_graph(case_id)}
 
 
 class IncidentalBody(BaseModel):

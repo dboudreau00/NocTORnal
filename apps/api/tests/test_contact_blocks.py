@@ -290,3 +290,63 @@ def test_line_numbers_are_the_ones_in_the_artefact():
     would quietly move every entry up."""
     entries = parse(DOCS_BLOCK)
     assert entries[0].line_no == 2      # line 1 is the top rule
+
+
+# ---------------------------------------------------------------------------
+# The label defence must not be ASCII-only
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("label", [
+    "\u0413\u0430\u0440\u0430\u043d\u0442",          # Garant
+    "\u042d\u0441\u043a\u0440\u043e\u0443",          # Escrow
+    "\u0410\u0440\u0431\u0438\u0442\u0440",          # Arbitr
+    "\u041e\u0431\u043c\u0435\u043d\u043d\u0438\u043a",   # Obmennik
+    "\u0410\u0434\u043c\u0438\u043d",                # Admin
+    "\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a",  # Posrednik
+])
+def test_a_cyrillic_third_party_label_is_not_the_vendors(label):
+    """Russian-language forums are the primary venue in this domain, and
+    the label defence was structurally ASCII-only in two places.
+
+    `_LINE` demanded `[A-Za-z]`, so a Cyrillic label did not match AT ALL
+    and the line fell through to shape resolution -- where non-hex
+    characters are stripped and a 76-hex Tox ID resolves cleanly out of
+    the whole line. `_looks_third_party` then split on `[^a-z]+`, reducing
+    any Cyrillic label to the empty set.
+
+    Net effect: the transliterated `Garant:` was caught and the native
+    `Гарант:` was attributed to the vendor at a score high enough to raise
+    a proposal binding the forum guarantor's key to the vendor's identity.
+    """
+    entry = parse(f"{label}: {TOX_ID}")[0]
+    assert entry.role == ROLE_THIRD_PARTY
+    assert entry.score <= 0.1
+
+
+@pytest.mark.parametrize("label", [
+    "\u0414\u0436\u0430\u0431\u0431\u0435\u0440",    # Dzhabber
+    "\u041a\u043e\u043d\u0442\u0430\u043a\u0442",    # Kontakt
+    "\u0421\u0432\u044f\u0437\u044c",                # Svyaz
+])
+def test_a_cyrillic_label_that_is_not_a_third_party_role_stays_the_vendors(label):
+    """The fix must not over-flag: a vendor's own Russian label is still
+    the vendor's."""
+    assert parse(f"{label}: {TOX_ID}")[0].role == ROLE_SELF
+
+
+def test_a_russian_inline_disclaimer_is_read():
+    entry = parse(
+        "Jabber: me@host.tld (\u043d\u0435 \u043c\u043e\u0439, "
+        "\u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0435\u0440\u0435\u0437 "
+        "\u0433\u0430\u0440\u0430\u043d\u0442\u0430)")[0]
+    assert entry.role == ROLE_THIRD_PARTY
+
+
+@pytest.mark.parametrize("label", [
+    "Dispute Jabber", "Owner Jabber", "Cashier Jabber", "Vouches Jabber",
+    "Garantiya Jabber",
+])
+def test_third_party_role_words_cover_their_common_variants(label):
+    """A word list is only as good as its misses, and each of these was
+    one."""
+    assert parse(f"{label}: x@host.tld")[0].role == ROLE_THIRD_PARTY
