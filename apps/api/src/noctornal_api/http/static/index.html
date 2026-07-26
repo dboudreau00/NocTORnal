@@ -226,6 +226,13 @@
                the title, and ACH is what an analyst calls it anyway. -->
           <span class="rail-cap">ACH</span>
         </button>
+        <button id="tab-report" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-report" aria-selected="false" tabindex="-1"
+                data-tab="report"
+                title="Build a redacted report, then check whether it may leave">
+          <span class="rail-glyph" aria-hidden="true">&#x25A4;</span>
+          <span class="rail-cap">Report</span>
+        </button>
         <button id="tab-governance" type="button" class="tab rail-btn"
                 role="tab" aria-controls="pane-governance" aria-selected="false"
                 tabindex="-1" data-tab="governance"
@@ -957,6 +964,109 @@
             <p id="ach-msg" class="msg" hidden></p>
             <button id="ach-add" type="button" class="btn primary">
               Add hypothesis</button>
+          </details>
+        </section>
+
+        <!-- REPORT (Phase 6, docs/08). Build at a classification, see
+             exactly what was withheld, and only then ask whether it may
+             leave.
+
+             The two steps are separate because an analyst should be able
+             to see what would go before anything does — a single control
+             that builds and sends is one click between a case file and
+             somebody's inbox. The redaction statement is therefore the
+             most important thing on this pane, not a footnote to it. -->
+        <section id="pane-report" class="pane" role="tabpanel"
+                 aria-labelledby="tab-report" tabindex="-1" hidden>
+
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Prepare at</span>
+              <select id="rep-tlp" class="select">
+                <option value="CLEAR">CLEAR</option>
+                <option value="GREEN">GREEN</option>
+                <option value="AMBER" selected>AMBER</option>
+                <option value="AMBER_STRICT">AMBER_STRICT</option>
+                <option value="RED">RED</option>
+              </select>
+            </label>
+            <label class="field inline check">
+              <input id="rep-hypotheses" type="checkbox" checked>
+              <span class="label">Include hypotheses</span>
+            </label>
+            <button id="rep-build" type="button" class="btn primary">
+              Prepare</button>
+            <!-- The markdown carries its classification in an X-TLP header
+                 and in the filename, because a file saved out of a browser
+                 loses everything that was only on the page. -->
+            <button id="rep-download" type="button" class="btn" hidden>
+              Download markdown</button>
+          </div>
+
+          <p class="help">
+            Nothing above the target classification is read at any point —
+            the redaction is <strong>structural</strong>, so it cannot be
+            defeated by a name in a rationale field. A case at
+            AMBER_STRICT can produce a GREEN report, and the GREEN report
+            may leave where the case never could.
+          </p>
+
+          <p id="rep-msg" class="msg" hidden></p>
+          <div id="rep-redaction"></div>
+          <div id="rep-body"></div>
+
+          <details id="rep-release-box" class="card" hidden>
+            <summary>Ask whether it may leave</summary>
+            <p class="help warn">
+              This decides; it does not send. The platform will tell you
+              whether the document may go at this classification —
+              <strong>sending it, and to whom, is still a human act with a
+              human's name on it.</strong> A refusal is audited as loudly
+              as a permission.
+            </p>
+            <!-- These are `egress.Destination`, verbatim. An earlier
+                 version of this control invented plausible-looking values
+                 (INTERNAL / PARTNER_AGENCY / EXTERNAL / PUBLIC) and every
+                 release attempt 400'd on "unknown destination" — the same
+                 class of defect as a UI reading a field the server never
+                 sends. Each entry is a different audience with a different
+                 access model, which is why the ceiling is per-destination
+                 rather than global. -->
+            <label class="field">
+              <span class="label">Destination</span>
+              <select id="rep-destination" class="select">
+                <option value="in_app">in_app — stays inside the platform</option>
+                <option value="export">export — an analyst downloads it</option>
+                <option value="smtp">smtp — email</option>
+                <option value="jira">jira</option>
+                <option value="webhook">webhook</option>
+              </select>
+            </label>
+            <p class="help">
+              Everything except <code>in_app</code> crosses the boundary
+              into a system with its own access model, which this platform
+              does not control and cannot audit.
+            </p>
+            <label class="field">
+              <span class="label">Destination ceiling (optional)</span>
+              <select id="rep-ceiling" class="select">
+                <option value="">Not stated</option>
+                <option value="CLEAR">CLEAR</option>
+                <option value="GREEN">GREEN</option>
+                <option value="AMBER">AMBER</option>
+                <option value="AMBER_STRICT">AMBER_STRICT</option>
+                <option value="RED">RED</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Who it is for, and why</span>
+              <input id="rep-note" type="text" spellcheck="false"
+                     placeholder="the recipient and the reason — this is what a later review reads">
+            </label>
+            <p id="rep-release-msg" class="msg" hidden></p>
+            <button id="rep-release" type="button" class="btn">
+              Check egress</button>
+            <div id="rep-release-out"></div>
           </details>
         </section>
 

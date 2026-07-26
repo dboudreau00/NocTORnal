@@ -5554,6 +5554,204 @@ async function addHypothesis() {
   } catch (err) { inlineProblem(msg, err); }
 }
 
+/* --- Report (Phase 6, docs/08) -----------------------------------------
+ *
+ * Build and release are two controls because they are two decisions, and
+ * one control that did both would be a single click between a case file
+ * and somebody's inbox.
+ *
+ * The redaction statement is rendered FIRST and prominently, above the
+ * document. A report that quietly omitted eleven nodes and said so in a
+ * footer is a report somebody quotes as complete.
+ */
+
+async function buildReport() {
+  if (!state.caseId) return;
+  const msg = $('rep-msg');
+  setMsg(msg, '');
+  clear($('rep-redaction'));
+  clear($('rep-body'));
+  show($('rep-release-box'), false);
+  const params = new URLSearchParams({
+    target_tlp: $('rep-tlp').value,
+    include_hypotheses: $('rep-hypotheses').checked ? 'true' : 'false',
+  });
+  try {
+    const body = await api(cpath('/report') + '?' + params.toString(),
+      { method: 'POST' });
+    state.report = body;
+    renderRedaction(body);
+    renderReportBody(body);
+    show($('rep-release-box'), true);
+    show($('rep-download'), true);
+  } catch (err) { inlineProblem(msg, err); }
+}
+
+/** The markdown, saved to disk.
+ *
+ *  Fetched with the token rather than linked, because a plain `<a href>`
+ *  cannot carry the Authorization header and the alternative is a token in
+ *  a URL. The server sets `X-TLP` and puts the classification in the
+ *  filename; the filename is honoured here so the classification survives
+ *  the file leaving the browser, which is the moment everything that was
+ *  only on the page is lost.
+ */
+async function downloadReport() {
+  const msg = $('rep-msg');
+  setMsg(msg, '');
+  const params = new URLSearchParams({
+    target_tlp: $('rep-tlp').value, fmt: 'markdown',
+    include_hypotheses: $('rep-hypotheses').checked ? 'true' : 'false',
+  });
+  try {
+    const res = await fetch(API + cpath('/report') + '?' + params.toString(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + state.token },
+    });
+    if (!res.ok) {
+      const p = await problemOf(res);
+      setMsg(msg, p.detail || p.title);
+      return;
+    }
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const named = /filename="([^"]+)"/.exec(disposition);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = el('a');
+    link.href = url;
+    link.download = named ? named[1]
+      : 'report-TLP-' + $('rep-tlp').value + '.md';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) { fail(err); }
+}
+
+/** What was left OUT. The most important thing on the pane. */
+function renderRedaction(body) {
+  const box = $('rep-redaction');
+  clear(box);
+  const r = body.redaction || {};
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', 'Prepared at'));
+  head.appendChild(el('span', 'chip tlp-' + (r.built_at_tlp || ''),
+    r.built_at_tlp || '?'));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  const withheld = (r.nodes_withheld || 0) + (r.edges_withheld || 0)
+    + (r.evidence_withheld || 0);
+  facts.appendChild(fact('entities withheld', r.nodes_withheld || 0,
+    r.nodes_withheld ? 'warn' : ''));
+  facts.appendChild(fact('relationships withheld', r.edges_withheld || 0,
+    r.edges_withheld ? 'warn' : ''));
+  facts.appendChild(fact('exhibits withheld', r.evidence_withheld || 0,
+    r.evidence_withheld ? 'warn' : ''));
+  card.appendChild(facts);
+
+  card.appendChild(el('p', withheld ? 'why' : 'help',
+    r.statement || (withheld
+      ? withheld + ' element(s) were withheld from this document.'
+      : 'Nothing was withheld at this classification.')));
+  box.appendChild(card);
+}
+
+function renderReportBody(body) {
+  const box = $('rep-body');
+  clear(box);
+  const summary = body.summary || {};
+  const counts = el('div', 'facts');
+  for (const [label, value] of [
+    ['entities', summary.entities],
+    ['relationships', summary.relationships],
+    ['exhibits', summary.exhibits],
+    ['hypotheses', (body.hypotheses || {}).hypotheses
+      ? body.hypotheses.hypotheses.length : null],
+  ]) {
+    if (value !== undefined && value !== null) {
+      counts.appendChild(fact(label, value));
+    }
+  }
+  if (summary.truncated) {
+    const f = fact('', 'TRUNCATED', 'warn');
+    f.title = 'The projection hit its size cap. This document does not '
+      + 'describe the whole case.';
+    counts.appendChild(f);
+  }
+  if (counts.childNodes.length) box.appendChild(counts);
+
+  if (summary.computed_over) {
+    /* A metric without its projection is not reproducible (docs/03), so
+       the projection travels with the numbers rather than being implied
+       by them. */
+    box.appendChild(el('p', 'help', 'Computed over ' + summary.computed_over));
+  }
+
+  /* Named lists, so an analyst can see WHAT survived the redaction rather
+     than only how much was removed. `textContent` throughout — these are
+     labels that came from a forum. */
+  for (const [title, rows, render] of [
+    ['Entities', body.actors || [], (a) =>
+      (a.label || a.id) + (a.node_type ? ' — ' + a.node_type : '')],
+    ['Relationships', body.relationships || [], (r) =>
+      (r.source_label || r.source_id) + ' → ' + (r.target_label || r.target_id)
+      + (r.edge_type ? ' (' + r.edge_type + ')' : '')],
+    ['Exhibits', body.evidence || [], (e) =>
+      (e.title || e.id) + (e.sha256 ? ' · ' + String(e.sha256).slice(0, 12) : '')],
+  ]) {
+    if (!rows.length) continue;
+    box.appendChild(el('h2', 'h-sm', title + ' (' + rows.length + ')'));
+    const list = el('div', 'hit-list');
+    for (const row of rows.slice(0, 100)) {
+      list.appendChild(el('div', 'entry-row', render(row)));
+    }
+    if (rows.length > 100) {
+      list.appendChild(el('p', 'help',
+        (rows.length - 100) + ' more not listed here — download the '
+        + 'markdown for the full document.'));
+    }
+    box.appendChild(list);
+  }
+}
+
+async function releaseReport() {
+  const msg = $('rep-release-msg');
+  const out = $('rep-release-out');
+  setMsg(msg, '');
+  clear(out);
+  try {
+    const body = await api(cpath('/report/release'), {
+      method: 'POST',
+      json: {
+        target_tlp: $('rep-tlp').value,
+        destination: $('rep-destination').value,
+        destination_ceiling: $('rep-ceiling').value || null,
+        recipient_note: $('rep-note').value.trim() || null,
+      },
+    });
+    out.appendChild(el('p', 'form-ok',
+      'May leave at ' + body.classification + ' to '
+      + body.destination + '.'));
+    out.appendChild(el('p', 'help', body.notice || ''));
+    if (body.redaction) out.appendChild(el('p', 'why', body.redaction));
+  } catch (err) {
+    /* A refusal is the system working, so it is reported where the
+       control is rather than as a banner — and the server's explanation
+       is shown verbatim, because it names which rule stopped it. */
+    if (err instanceof ApiError && err.status === 403) {
+      out.appendChild(el('p', 'form-error', err.detail || err.title));
+      out.appendChild(el('p', 'help',
+        'Refused, and audited as loudly as a permission would be. An '
+        + 'unrecorded refusal is indistinguishable from nobody having '
+        + 'tried.'));
+      return;
+    }
+    inlineProblem(msg, err);
+  }
+}
+
 /* --- wiring ------------------------------------------------------------ */
 
 let selectFeedsSub = null;
@@ -5588,6 +5786,19 @@ function initOpsPanes() {
   $('ach-refresh').addEventListener('click', loadAch);
   $('ach-rejected').addEventListener('change', loadAch);
   $('ach-add').addEventListener('click', addHypothesis);
+
+  $('rep-build').addEventListener('click', buildReport);
+  $('rep-download').addEventListener('click', downloadReport);
+  $('rep-release').addEventListener('click', releaseReport);
+  /* Changing the target invalidates what is on screen: a redaction
+     statement for AMBER next to a control set to GREEN is the shape of a
+     mistake somebody makes once. */
+  $('rep-tlp').addEventListener('change', () => {
+    clear($('rep-redaction'));
+    clear($('rep-body'));
+    show($('rep-release-box'), false);
+    show($('rep-download'), false);
+  });
 }
 
 async function boot() {
