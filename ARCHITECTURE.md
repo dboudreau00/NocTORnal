@@ -29,7 +29,7 @@ load-bearing decisions and the legal gates enforced in code.
 > than describing the aspiration as if it were built. Companion documents:
 > `docs/00-decisions.md` (the numbered decisions), `docs/09-roadmap.md` (the
 > phase plan), `docs/16-legal-and-external.md` (the blocking legal items),
-> `CLAUDE.md` (the working agreement and the twelve invariants), and
+> `CONVENTIONS.md` (the working agreement and the twelve invariants), and
 > `db/schema.sql` (the readable schema mirror).
 
 ## The three ideas everything follows from
@@ -115,7 +115,7 @@ through one TLP egress gate.
 
 ## The twelve invariants and how each is enforced
 
-The invariants in `CLAUDE.md` are not aspirations — each has an enforcement
+The invariants in `CONVENTIONS.md` are not aspirations — each has an enforcement
 point in code or in the database, and a test named after it. Where enforcement
 is in the database it holds against any write path, including a mistaken one.
 
@@ -632,7 +632,7 @@ Verified from `apps/api/pyproject.toml`, `infra/docker-compose.yml`, `docs/02-ar
 ### Conventions
 
 - **Migrations:** Alembic. `alembic.ini` sets `script_location = db/migrations`, `file_template = %%(rev)s_%%(slug)s`, `prepend_sys_path = .`; the URL is read from `DATABASE_URL`, never defaulted in the ini. One concern per migration, reversible (CI runs a head to base to head round-trip — `docs/00` #42).
-- **IDs:** `CLAUDE.md`/conventions state UUIDv7 app-side. **In practice** `db/schema.sql` PKs default to `gen_random_uuid()` (v4) and `pg_uuidv7` is commented out (`db/init/00-extensions.sql`); app-side generation uses `uuid4()` (e.g. `analytics_runs.py`). Time-sortable v7 is aspirational, not shipped.
+- **IDs:** `CONVENTIONS.md`/conventions state UUIDv7 app-side. **In practice** `db/schema.sql` PKs default to `gen_random_uuid()` (v4) and `pg_uuidv7` is commented out (`db/init/00-extensions.sql`); app-side generation uses `uuid4()` (e.g. `analytics_runs.py`). Time-sortable v7 is aspirational, not shipped.
 - **Times:** `timestamptz`, `DEFAULT now()`, UTC in DB (`db/schema.sql`).
 - **Money/weights:** `numeric`, never float — e.g. `edge.weight numeric(14,4)`.
 - **API:** REST under `/api/v1` (`API_PREFIX`); errors are `application/problem+json` (RFC 9457, `http/errors.py`). **Pagination is `limit`-capped**, not cursor-based (`http/routers/read.py`: `limit: int = Query(200, le=1000)` etc.); documented cursor pagination is not implemented in the routers read.

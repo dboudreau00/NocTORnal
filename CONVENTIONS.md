@@ -1,4 +1,4 @@
-# CLAUDE.md — working agreement for this repo
+# CONVENTIONS.md — working agreement for this repo
 
 Read this before writing code. Read `docs/00-decisions.md` before proposing
 architecture changes.

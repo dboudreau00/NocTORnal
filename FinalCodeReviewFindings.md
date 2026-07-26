@@ -117,6 +117,113 @@ project of a defence that is written and not connected.
 
 ---
 
+# Part IV — the tenth pass (2026-07-26, independent verification of Parts I–III)
+
+**Scope:** verify that the remediation and the ninth pass's own fixes are
+*real and connected* — this project's signature failure is "a defence that
+is written, present, and not connected", so a fix is not trusted here until
+its code is read and, where possible, executed. Plus a fresh look at the
+newest code (the deception subsystem) for anything missed.
+**Method:** read the three critical ninth-pass fixes against their code;
+compared migration 0051 to the runtime normaliser line by line; ran the
+full suite, `ruff`, `alembic current`, and `docker compose config` on this
+host; traced the DKIM/A-R selector path end to end.
+
+## The headline: the remediation holds up
+
+Everything I could verify, verified. This is the first pass in the project's
+history whose main result is *confirmation* rather than new criticals.
+
+| Claimed fix | Independently confirmed |
+|---|---|
+| **Migration 0051** (Telegram re-key) | Its `_NEW_NORM` SQL matches runtime `telegram_id_norm` **exactly** — same four branches, same `u:`/`c:`/`g:` output, both drop leading zeros. Arithmetic decode is correct for the 9-, 10- and 11-digit channel cases the old string-strip got wrong. Both pre-flights (collision-refusal, already-merged report) are sound and it is idempotent (`norm_value !~ '^[ucg]:'`). |
+| **Migration 0052** (TRUNCATE guards) | Statement-level `BEFORE TRUNCATE` triggers + `REVOKE` on both `core.purge_tombstone` and `lab.sample_access`. Correct — a row-level trigger genuinely does not fire on TRUNCATE. |
+| **Ninth-pass #3** (email `Authentication-Results` trust) | Only `auth_headers[0]` (the prepended, receiving-MTA header) is believed; per method, any PASS wins and carries its own domain; multi-header is flagged as a gap and stored in `auth_results_raw`. The `email_dkim_domain_needs_pass` constraint is now satisfiable by construction. |
+| **Ninth-pass #8** (Received → INFRA) | `selector_candidates_for_email` refuses to propose any infrastructure when no trusted MTA is configured (all hops `boundary_is_assumed`), with an explicit "hop 0 is the victim's own relay" explanation. |
+| **Ninth-pass #1** (capture screenshot auth) | Code matches the docstring guard-for-guard: create-time verification of every caller-supplied evidence id (404 on nonexistent **or** cross-case — no oracle), then on read a double gate (capture case + the exhibit's **own** labels via `authorize_object`), hostile-markup 409 *after* the auth checks, magic-byte type re-derivation, and `CSP: default-src 'none'; sandbox` + `nosniff` + CORP. |
+| **Release R1–R5, R10, R13, R21** | Present in the files, not just asserted: `alembic`/`SQLAlchemy` are now `apps/api` runtime deps; `package_release.ps1` uses `git archive`; `minio-init` creates `noctornal-samples`; `install.sh` calls `create-user`; `install.ps1` uses `Invoke-Capture` (6×); compose is down to 5 services; `mailhog`→`mailpit`. |
+
+**Numbers, by execution on this host:** `1257 passed, 12 skipped` with the
+full `.env.local` loaded; `ruff` clean; Alembic head **0052**; `docker
+compose config` valid, and all three `mc mb` lines survive the YAML folding
+(the ninth-pass folded-scalar bug has not regressed).
+
+## Two new findings
+
+### TR1 — MEDIUM — DKIM→durable-DOMAIN selector is not gated on a trust anchor, while its sibling Received→INFRA path is
+
+- **Subsystem:** deception (Phase 9) · **Files:** `deception.py:462-508`
+  (`parse_eml` A-R handling), `deception.py:744-748`
+  (`selector_candidates_for_email`)
+
+The ninth pass fixed two halves of one idea and left them asymmetric.
+`selector_candidates_for_email` **refuses** to mint an infrastructure (IP)
+selector when no trusted MTA boundary is configured — "unconfigured means
+unknown, and the honest output for unknown is nothing" (`deception.py:775`).
+But three lines up, it mints a **durable** `DOMAIN` selector whenever
+`dkim_result == "PASS"`, with no equivalent trust anchor, labelled to the
+analyst as *"the only cryptographically authenticated field in the mail."*
+
+The believed verdict comes from `auth_headers[0]`. That is the receiving
+MTA's header **only if the receiving side authenticated inbound mail** (its
+MTA prepends, so its header lands at index 0). If it did **not** — an SMB
+with no inbound DKIM/DMARC checking, or a message that arrived by
+`VICTIM_SUPPLIED` / `ANALYST_UPLOAD` / had its `Authentication-Results`
+stripped — then the only A-R header present is the one the **attacker wrote
+into their own message**, it sits at index 0, and it is believed. A crafted
+`dkim=pass header.d=trusted-bank.com` then becomes a durable DOMAIN selector
+wearing the "cryptographically authenticated" label — attacker-controlled
+bytes presented as the one field the analyst is told to trust (docs/19 §1.2).
+
+**Reachability / severity:** this is narrower than the pre-ninth-pass bug
+(which fired even *with* a genuine header, via append-last-wins — that half
+is correctly closed). It requires the capture to lack a genuine index-0
+A-R header, which is realistic for BEC against SMB targets and for
+victim-supplied `.eml`. It is **not** an auto-merge: `DOMAIN` is
+`is_strong=False` (`definition.py:256`), so this is a *proposal* an analyst
+disposes (invariant 3), not a silent graph write. The harm is a misleading
+high-confidence provenance label, not node fusion — hence MEDIUM, not HIGH.
+It is the same *class* the ninth pass fixed for IPs, applied inconsistently.
+
+**Fix (mirror the Received treatment):** gate belief in an
+`Authentication-Results` header — and the durable DOMAIN selector /
+"authenticated" label — on a configured trusted authserv-id (a new
+`NOCTORNAL_TRUSTED_AUTHSERV_ID`, sibling to `NOCTORNAL_TRUSTED_MTA_HOSTS`).
+With none configured, record `dkim_result` for display but do **not** emit a
+durable selector or call it authenticated — downgrade it to a claim, exactly
+as the IP path already downgrades to "nothing proposed."
+
+### TR2 — LOW — Seven DB-backed tests fail (not skip) when `DATABASE_URL` is set without `MINIO_*`
+
+- **Files:** `apps/api/tests/test_deception_pg.py` (5 tests),
+  `apps/api/tests/test_governance_http_e2e.py` (2 tests)
+
+These tests call `EvidenceService.ingest`, which constructs
+`EvidenceStorage()` and raises `EvidenceError` when `MINIO_ENDPOINT`/
+`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY` are absent — but they are gated only on
+`pytest.mark.skipif(not DATABASE_URL)`. So on a machine with Postgres up but
+the MinIO vars not exported, they **fail rather than skip** (reproduced: 7
+failed → 7 passed once `.env.local` was loaded). This refines **R7**: a
+recipient who exports just `DATABASE_URL` to reach the documented
+"1257 passed" sees seven hard failures and concludes the build is broken.
+
+**Fix:** gate these on storage availability too (skip when `MINIO_ENDPOINT`
+is unset), or have INSTALL.md's verify step say the DB-backed run needs the
+full `.env.local` sourced, not `DATABASE_URL` alone.
+
+## Bottom line
+
+Ten passes in, the deception subsystem and both fix-the-fix migrations
+survive independent scrutiny with their code matching their prose — the
+recurring "written but not connected" defect does **not** recur in the
+ninth-pass repairs. The two items above are a genuine residual (TR1, same
+class as a fix already made, one-sided) and a test-hygiene gap (TR2). Neither
+blocks the POC; TR1 is worth closing before the email subsystem is pointed at
+real BEC. As ever, this is a code-quality assessment and says nothing about
+the four BLOCKING legal items (L1–L4), which gate operation regardless.
+
+---
+
 **Date:** 2026-07-26
 **Scope:** the Alpha release delivery — `release/` (installers, INSTALL, README,
 MANUAL, CHANGELOG), `scripts/launch.ps1` / `launch.sh` / `bootstrap.py` /

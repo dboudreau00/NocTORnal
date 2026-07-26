@@ -1,7 +1,7 @@
 """Invariant 1 enforcement: no graph element without an assertion — at all
 times, not just at creation.
 
-CLAUDE.md invariant 1 / docs/01: "Nothing is a fact. Every node and edge
+CONVENTIONS.md invariant 1 / docs/01: "Nothing is a fact. Every node and edge
 traces to at least one row in core.assertion." Enforced as a symmetric
 pair of DEFERRABLE INITIALLY DEFERRED constraint triggers:
 

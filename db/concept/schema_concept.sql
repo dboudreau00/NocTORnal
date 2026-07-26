@@ -6,7 +6,7 @@
 --   of each of docs/10, 11 and 12 — several columns here encode
 --   assumptions that need a human answer first.
 --
--- Kept in a separate file so Claude Code can tell the difference between
+-- Kept in a separate file so a reader can tell the difference between
 -- "this is decided" and "this is a sketch".
 -- =====================================================================
 

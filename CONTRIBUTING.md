@@ -1,6 +1,6 @@
 # Contributing
 
-Read [`CLAUDE.md`](CLAUDE.md) first — it is the working agreement, and it
+Read [`CONVENTIONS.md`](CONVENTIONS.md) first — it is the working agreement, and it
 is short. Read [`docs/00-decisions.md`](docs/00-decisions.md) before
 proposing an architecture change.
 
@@ -8,7 +8,7 @@ proposing an architecture change.
 
 **A violation of one of the [twelve
 invariants](README.md#the-twelve-invariants) is a bug even if every test
-passes.** They are listed in `CLAUDE.md` and each has a test named after
+passes.** They are listed in `CONVENTIONS.md` and each has a test named after
 it. If your change makes one of them conditionally true, the change is
 wrong even when CI is green — eight adversarial reviews have each found a
 real defect under a fully passing suite, and three of those defects were

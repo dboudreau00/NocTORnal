@@ -154,7 +154,7 @@ jobs:
       - name: Migrate to head
         run: alembic upgrade head
 
-      # Every migration is required to be reversible (CLAUDE.md
+      # Every migration is required to be reversible (CONVENTIONS.md
       # conventions). Round-tripping the WHOLE chain is the only way to
       # find the one that silently is not -- and it has caught a real
       # defect already: 0026 originally only applied to an empty table.

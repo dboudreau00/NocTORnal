@@ -92,23 +92,31 @@ printf '  %sthose are settled.%s\n' "$C_YELLOW" "$C_OFF"
 # clear message instead of a confusing failure four steps later.
 # ---------------------------------------------------------------------------
 
+# THE PROJECT ROOT IS THE PARENT OF THIS DIRECTORY. Nothing else.
+#
+# This used to probe four candidates, the last a HARDCODED sibling folder
+# name (release finding R1) that resolved on exactly one machine and
+# produced "the application source could not be found" everywhere else.
+# The package is self-contained now: release/ lives inside the project
+# tree, so its parent IS the project. One rule, no search, no dependence
+# on what any adjacent directory is called or whether it exists.
 REPO_ROOT=""
-for candidate in \
-    "$RELEASE_DIR" \
-    "$RELEASE_DIR/app" \
-    "$(dirname "$RELEASE_DIR")" \
-    "$(dirname "$RELEASE_DIR")/NocTORnal - Social Network Analysis software"; do
-  if [[ -f "$candidate/alembic.ini" ]]; then
-    REPO_ROOT="$(cd "$candidate" && pwd)"
-    break
-  fi
-done
+candidate="$(dirname "$RELEASE_DIR")"
+if [[ -f "$candidate/alembic.ini" ]]; then
+  REPO_ROOT="$(cd "$candidate" && pwd)"
+fi
 [[ -n "$REPO_ROOT" ]] || stop_with \
-  "the application source could not be found." \
-  "This installer looks for alembic.ini in, and beside, its own directory.
+  "this does not look like a complete NocTORnal package." \
+  "install.sh expects to live in the release/ directory of the project, so
+that its parent contains alembic.ini. That parent has no alembic.ini.
 
-If you have the release folder on its own, put it next to the application
-source directory, or move it inside it."
+The usual cause is copying release/ out on its own. It is documentation and
+installers only -- there is no application source in it. Clone or download
+the whole repository and run:
+
+    ./release/install.sh
+
+from the project root."
 
 step 'Locating the application'
 good "found at $REPO_ROOT"

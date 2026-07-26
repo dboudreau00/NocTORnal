@@ -66,7 +66,7 @@ CLEAR before adding any image there.**
 > **Read order:** this file → **`docs/18-legal-review-pack.md`** (the
 > register as a *decision document* — hand this to a reviewer) →
 > `docs/17-flagged-for-review.md` (engineering judgement; **F19** is this
-> session) → `ROADMAP-REMAINING.md` → `CLAUDE.md` (the twelve invariants)
+> session) → `ROADMAP-REMAINING.md` → `CONVENTIONS.md` (the twelve invariants)
 > → `docs/00-decisions.md`.
 
 ---

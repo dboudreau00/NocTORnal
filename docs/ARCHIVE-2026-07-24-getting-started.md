@@ -20,7 +20,7 @@
 
 # Getting started
 
-Practical handoff. Read this at your desk, before you open Claude Code.
+Practical handoff. Read this at your desk before starting.
 
 ---
 
@@ -108,13 +108,13 @@ MinIO console at `:9001`, Mailpit at `:8025`, OpenFGA playground at
 
 ---
 
-## First four Claude Code sessions
+## First four work sessions
 
 Work one at a time. Do not batch them.
 
 ### Session 1 — make the schema real
 
-> Read `CLAUDE.md` and `db/schema.sql`. Load the schema against the
+> Read `CONVENTIONS.md` and `db/schema.sql`. Load the schema against the
 > Postgres in `infra/docker-compose.yml` and fix every error until it
 > applies cleanly from an empty database. Then load `db/seed_ontology.sql`.
 >
@@ -137,7 +137,7 @@ Work one at a time. Do not batch them.
 >
 > Include the per-selector normalisers referenced in the `normaliser`
 > column. `tox_pubkey` truncates a 76-hex Tox ID to the first 64 — see
-> invariant 9 in `CLAUDE.md`. Write tests for every normaliser, and
+> invariant 9 in `CONVENTIONS.md`. Write tests for every normaliser, and
 > specifically test that a rotated nospam produces the same normalised
 > value.
 
@@ -208,10 +208,10 @@ where changing it in week 10 costs weeks.
 
 ---
 
-## Working with Claude Code on this
+## Working on this
 
 - **Reference invariants by number.** "This must not violate invariant 3
-  in CLAUDE.md" keeps the non-negotiables in context and gives tests names
+  in CONVENTIONS.md" keeps the non-negotiables in context and gives tests names
   that still explain themselves in six months.
 - **Ask for the failing test first.** Especially for the invariants.
 - **Review migrations before they apply.** Always.

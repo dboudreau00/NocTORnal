@@ -1,4 +1,4 @@
-"""Invariant 1 — nothing is a fact (CLAUDE.md / docs/01).
+"""Invariant 1 — nothing is a fact (CONVENTIONS.md / docs/01).
 
 The load-bearing tests are the two named test_invariant_1_*: a graph
 element committed WITHOUT a supporting assertion must be rejected by the
