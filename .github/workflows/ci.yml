@@ -98,15 +98,23 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 20
-      minio:
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: noctornal
-          MINIO_ROOT_PASSWORD: dev_only_change_me
-        ports: ["9000:9000"]
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 5s --health-timeout 5s --health-retries 20
+      # MinIO is NOT a service container. It is started as a step below.
+      #
+      # It used to be `bitnami/minio:latest`, and on 2026-07-26 that stopped
+      # resolving: "manifest for bitnami/minio:latest not found". Bitnami
+      # moved their public catalogue and the tag went away, which failed CI
+      # on a repository whose own code had not changed.
+      #
+      # The obvious fix -- switch to `minio/minio:latest`, which is what
+      # infra/docker-compose.yml has always used -- does not work as a
+      # service container: that image needs the argument `server /data`, and
+      # GitHub Actions service containers cannot specify a command. Bitnami
+      # was chosen originally precisely because its entrypoint needs none.
+      #
+      # So it runs as an explicit `docker run` instead. That gets the SAME
+      # image the compose file uses (CI and local should not disagree about
+      # what they are testing), full control of the command, and no
+      # dependence on a third party continuing to publish a repackage.
 
     steps:
       - uses: actions/checkout@v4
@@ -121,10 +129,29 @@ jobs:
           pip install -e packages/ontology -e apps/api
           pip install pytest httpx
 
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=noctornal \
+            -e MINIO_ROOT_PASSWORD=dev_only_change_me \
+            minio/minio:latest server /data
+          # Wait for readiness rather than sleeping: a fixed sleep is either
+          # too short on a slow runner or wasted on a fast one.
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO ready after ${i} attempt(s)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "MinIO did not become ready; logs follow:" >&2
+          docker logs minio >&2
+          exit 1
+
       # CREATE EXTENSION needs superuser, which the migration role must
       # never be -- so extensions are loaded out of band exactly as
-      # db/init does on a real deployment, and Alembic owns everything else
-      # (decision 17).
+      # db/init does on a real deployment, and Alembic owns everything
+      # else (decision 17).
       - name: Load extensions
         run: |
           PGPASSWORD=dev_only_change_me psql -h localhost -U noctornal \
