@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noctornal-api"
+version = "0.1.0"
+description = "NocTORnal API: FastAPI service. Session 3 lands authentication (Argon2id + TOTP + server-side sessions)."
+requires-python = ">=3.12"
+dependencies = [
+    "argon2-cffi>=23.1",   # Argon2id password + recovery-code hashing
+    "cryptography>=42.0",  # AES-256-GCM envelope for TOTP secrets at rest
+    "psycopg[binary]>=3.1",
+    "minio>=7.2",          # WORM object storage for evidence (object lock)
+    "blake3>=0.4",         # second independent integrity anchor for evidence
+    "fastapi>=0.110",      # REST API
+    "uvicorn>=0.29",       # ASGI server
+    # FastAPI needs this for EVERY `Form(...)` and `UploadFile` parameter,
+    # and it does not depend on it — it raises at REQUEST time with
+    # "Form data requires python-multipart to be installed".
+    #
+    # Found 2026-07-26 by installing the packaged release into a clean
+    # venv and running the suite there: 117 errors that do not occur on
+    # the development machine, whose venv acquired the package by hand
+    # long ago (`pip show` reports an empty `Required-by`).
+    #
+    # This is R3's shape and worse. R3 (alembic) failed loudly at install
+    # time. This one installs cleanly, passes every test that does not
+    # touch a multipart route, and then fails the first time an analyst
+    # uploads an exhibit, a sample or a `.eml` — the three routes that
+    # matter most. Nothing in 1257 passing tests on this machine could
+    # have caught it, because this machine had the package.
+    "python-multipart>=0.0.9",
+    # WebSocket transport for /api/v1/live. uvicorn will not serve a
+    # WebSocket route without one of these installed -- it declines the
+    # upgrade and the client falls back to manual refresh, silently. A
+    # feature that degrades invisibly when a dependency is missing is one
+    # that will be missing in production, so it is a hard dependency
+    # rather than an extra.
+    "websockets>=12.0",
+    # Rate limiting. Redis is the only shared state the limiter needs, and
+    # it needs it to be atomic -- the GCRA meter is read, decided and
+    # written by one Lua script (ratelimit_redis.py). Without this package
+    # the limiter still runs, per process, and says so loudly at startup.
+    "redis>=5.0",
+    # SNA maths (docs/02: "igraph, not NetworkX" -- NetworkX is pure Python
+    # and falls over around 50k edges when you ask for betweenness). Both
+    # ship abi3 wheels, so they install on any CPython >= 3.9 without a
+    # build toolchain.
+    "igraph>=0.11",
+    "leidenalg>=0.10",     # Leiden, not Louvain: Louvain can produce
+                           # internally disconnected communities (docs/03)
+    # R3 (2026-07-26): alembic and SQLAlchemy are RUNTIME dependencies of
+    # this application, not a separate database-tooling concern.
+    #
+    # They lived only in `db/requirements.txt`, which nothing installed.
+    # `pip show alembic` reported an empty `Required-by:`, and both
+    # installers ran `pip install -e packages/ontology -e apps/api` and
+    # then invoked alembic -- so every clean machine died at the migration
+    # step (`.venv/bin/alembic: No such file or directory` on Linux; a
+    # correct-but-fatal remedy message on Windows). The dev machine never
+    # felt it because its venv predates the installers.
+    #
+    # The schema is not optional: this product does not start without its
+    # migrations, so the thing that applies them is a dependency.
+    "alembic>=1.13",
+    "SQLAlchemy>=2.0",     # alembic's own requirement, pinned explicitly
+    # noctornal-ontology is a sibling package in this monorepo (the ONE
+    # source of selector normalisers). Install it editable alongside:
+    #   pip install -e packages/ontology -e apps/api
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",         # FastAPI TestClient
+    "qrcode>=7.4",         # scannable TOTP enrolment in scripts/bootstrap.py
+    "ruff==0.6.9",         # lint; PINNED so CI and a laptop cannot
+                           # disagree about what "clean" means
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

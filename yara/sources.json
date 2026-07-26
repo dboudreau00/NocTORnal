@@ -1,0 +1,87 @@
+{
+  "_comment": "Public YARA rule sources for the NocTORnal Phase 8 detection corpus. This manifest is committed; the pulled rules under vendor/ are NOT redistributed in this repo (gitignored). LICENSES VARY and every 'review' entry MUST be cleared with counsel before any redistribution or commercial use - a detection-rule corpus for a prosecution-grade tool inherits the licence of every rule it carries. RULE REPOS ONLY: threat-intel/IOC dumps that ship live malware samples (StrangerealIntel/DailyIOC, telekom-security/malware_analysis) were removed 2026-07-26 after ESET quarantined FIN7 and Babuk samples they carried; fetch now prunes every non-.yar/.yara file after clone. Do NOT add sample-bearing repos. scripts/yara_db.py reads this file.",
+  "schema": 1,
+  "sources": [
+    {
+      "name": "bartblaze-yara",
+      "repo": "https://github.com/bartblaze/Yara-rules.git",
+      "rules_subdir": "rules",
+      "license": "MIT",
+      "review": false,
+      "category": "malware/general",
+      "homepage": "https://github.com/bartblaze/Yara-rules"
+    },
+    {
+      "name": "reversinglabs",
+      "repo": "https://github.com/reversinglabs/reversinglabs-yara-rules.git",
+      "rules_subdir": "yara",
+      "license": "MIT",
+      "review": false,
+      "category": "malware-family",
+      "homepage": "https://github.com/reversinglabs/reversinglabs-yara-rules"
+    },
+    {
+      "name": "signature-base",
+      "repo": "https://github.com/Neo23x0/signature-base.git",
+      "rules_subdir": "yara",
+      "license": "DRL-1.1 (Detection Rule License) + some CC-BY-NC",
+      "review": true,
+      "category": "apt/malware/hacktools/webshells",
+      "homepage": "https://github.com/Neo23x0/signature-base"
+    },
+    {
+      "name": "yara-rules-community",
+      "repo": "https://github.com/Yara-Rules/rules.git",
+      "rules_subdir": null,
+      "license": "mixed (GPL-2.0 and per-file); review",
+      "review": true,
+      "category": "community",
+      "homepage": "https://github.com/Yara-Rules/rules"
+    },
+    {
+      "name": "elastic-protections",
+      "repo": "https://github.com/elastic/protections-artifacts.git",
+      "rules_subdir": "yara/rules",
+      "license": "Elastic-License-2.0",
+      "review": true,
+      "category": "edr/malware",
+      "homepage": "https://github.com/elastic/protections-artifacts"
+    },
+    {
+      "name": "inquest-yara",
+      "repo": "https://github.com/InQuest/yara-rules.git",
+      "rules_subdir": null,
+      "license": "review upstream LICENSE",
+      "review": true,
+      "category": "general/documents",
+      "homepage": "https://github.com/InQuest/yara-rules"
+    },
+    {
+      "name": "deadbits-yara",
+      "repo": "https://github.com/deadbits/yara-rules.git",
+      "rules_subdir": null,
+      "license": "review upstream LICENSE",
+      "review": true,
+      "category": "misc",
+      "homepage": "https://github.com/deadbits/yara-rules"
+    },
+    {
+      "name": "jeff0falltrades",
+      "repo": "https://github.com/jeFF0Falltrades/YARA-Signatures.git",
+      "rules_subdir": null,
+      "license": "GPL-3.0; review",
+      "review": true,
+      "category": "malware-family",
+      "homepage": "https://github.com/jeFF0Falltrades/YARA-Signatures"
+    },
+    {
+      "name": "fboldewin",
+      "repo": "https://github.com/fboldewin/YARA-rules.git",
+      "rules_subdir": null,
+      "license": "review upstream LICENSE",
+      "review": true,
+      "category": "malware/financial",
+      "homepage": "https://github.com/fboldewin/YARA-rules"
+    }
+  ]
+}
