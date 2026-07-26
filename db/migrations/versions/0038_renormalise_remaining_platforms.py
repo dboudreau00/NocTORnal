@@ -112,10 +112,19 @@ def upgrade() -> None:
         # nothing is how an analyst finds a different answer next week
         # with no reason for it in any log.
         summary = ", ".join(f"{k}={v}" for k, v in sorted(changed.items()))
-        conn.execute(
-            "DO $$ BEGIN RAISE NOTICE 'renormalised durable values: %% "
-            "(correlation results for these platforms may change)', %s; END $$",
-            (summary,))
+        # A plain print, NOT a RAISE NOTICE with a bind parameter.
+        #
+        # `%s` inside a dollar-quoted DO body is not a placeholder psycopg
+        # can bind -- it rewrites parameters server-side, the statement
+        # then takes none, and Postgres raises IndeterminateDatatype. That
+        # aborted the transaction and rolled back every UPDATE above.
+        #
+        # The failure was invisible on a clean database, because the whole
+        # block is guarded by `if changed:` and there was nothing to
+        # change. It would have fired on exactly the deployments that hold
+        # the rows this migration exists to repair.
+        print(f"[0038] renormalised durable values: {summary} "
+              f"(correlation results for these platforms may change)")
 
 
 def downgrade() -> None:

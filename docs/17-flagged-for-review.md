@@ -98,6 +98,46 @@ wrong in the tight direction means people route around the system during
 an incident, which is worse than the access; too broad and the review
 queue becomes noise nobody reads.
 
+### F15 — Phase 4 and 9 SERVICE defects found 2026-07-25, fixed at the
+router and NOT at the service
+
+An adversarial review of `collection.py` and `ingest.py` (their first
+ever) found defects in the service layer. The **routers** now compensate,
+which closes the reachable attack — but the services are still wrong, and
+anything that calls them directly (a worker, a script, a future endpoint)
+gets the original behaviour.
+
+**These are the ones to fix properly.**
+
+| | Service defect | Router mitigation | Why the service still needs fixing |
+|---|---|---|---|
+| **a** | `reveal_credential(credential_id, case_id=…)` checks a live authorisation for *the case the caller named*, then decrypts by credential id with **no join back to the record**. An authorisation on any case decrypted any credential in the corpus, and the audit event recorded the wrong case against the disclosure. | The router now resolves the credential's own case and refuses a mismatch. | A worker calling the service directly still crosses cases. `IngestService` takes no clearance at all — `CommsService` and `GraphService` both do. |
+| **b** | `search_by_fingerprint` has no case, classification or compartment predicate — it answers for the whole corpus. | The router filters the result to cases the caller may read. | Filtering after the fact is not the same as not asking. The query should carry the ceiling. |
+| **c** | `credentials_masked(record_id)` takes only a record id and offers no way to scope it. | The router gates on the record's own case and labels. | Same shape as (a). |
+| **d** | `_dead_letter` stores `fragment[:8000]` **verbatim**, and `ingest.dead_letter` has no classification, no compartments and no retention. A `CREDENTIAL_DUMP` or `DATABASE_LEAK` key can be issued with no compartment (only `STEALER_LOG` is gated at issue), and `categorise` routes any record with top-level `email`+`password` down that path — so a whole feed can dead-letter victim PII in the clear. | None. The listing endpoint no longer returns `raw_fragment`, which is not the same thing. | **This is the most serious one left.** The table needs labels and a retention rule, and `ingest.py` needs a `redact()` — `collection.py` has one; ingest does not. |
+| **e** | A single NUL byte in a fragment raises `DataError` from inside the `except` handler in `parse_batch`. On an autocommit connection the records already inserted are committed, the bad fragment is **not** dead-lettered, every fragment after it is never processed, and the batch is stranded in `PARSING`. Reached by valid gzipped NDJSON, which docs/12 says to accept. | None. | Invariant 12 failing on the exact path built to catch loss. |
+| **f** | `fetch()` validates the initial URL and `urlopen` then follows redirects internally, so hops 2..N are never re-checked. Proven: a public host returning `302 -> http://127.0.0.1/` fetched the internal page. `_BLOCKED_NETWORKS` also misses `::ffff:127.0.0.1`, `::`, and the 100.64/192.0.0/198.18 ranges. | None — no router calls `fetch()` with a caller-supplied URL today. | The module docstring names DNS rebinding as the known gap and does not mention redirects, so the stated floor is not reached. Fix before any adapter lands. |
+| **g** | `simhash` tokenises with `\w+` over the serialised JSON, so key names count as content and field position is lost. `{"note":"leaked by LockBit","victim":"ACME"}` and its inverse hash **identically** (hamming 0) and the second is marked a duplicate; meanwhile a genuine repost with a mirror's envelope fields lands at 6–13, above the threshold of 3. It false-positives on semantics and false-negatives on its stated purpose. | None. | A ransom-leak post and its inverse are not the same record. |
+| **h** | `categorise` inspects **top-level keys only**, so `{"log": {...}}` classifies a stealer log as `UNKNOWN` — skipping the compartment check and taking the 365-day default instead of 90. A partner wrapping their payload defeats the control. | None. | Routine input, not adversarial. |
+| **i** | `RateLimiter` state is per-instance and the router builds `CollectionService` per request, so per-source `max_rps` never fires. Jitter is re-rolled on every `due_sources()` call rather than persisted, so the realised interval depends on how often the scheduler polls, and frequent polling collapses the variance toward the floor — a regular cadence, which is the signature jitter exists to avoid. | None. | docs/04 ties `max_rps` directly to not burning personas. |
+| **j** | `redact()` is a keyword list (`password\|passwd\|pwd\|secret\|token\|…`), not structural. `pass`, `p=`, `credential`, `bearer`, `passphrase` and any unlabelled echo pass through. **No live leak today** — `PersonaVault.use()` has no caller and `run_once` passes no secret — but this becomes real the moment the XenForo/Telegram adapters land, which is the next Phase 4 step and the case redaction exists for. | None. | Invariant 7. |
+
+Two more, lower severity but the same shape: `detect_format` is computed
+and never consulted, so CSV and pretty-printed JSON are shredded into
+dead letters; and whitespace-only input yields `records=0 dead=0
+state=PARSED` — a silent drop, invariant 12 again.
+
+### F16 — `victim_pii.reveal` is granted to no role
+
+Exactly the defect 0039 fixed for `break_glass.invoke` and did not check
+for elsewhere. The permission exists, the endpoint is wired, and
+`SELECT role_key FROM iam.role_permission WHERE permission_key =
+'victim_pii.reveal'` returns nothing — so the route 403s for everyone.
+
+**Left ungranted deliberately.** Who may decrypt a victim credential is a
+docs/16 L2 decision, not a default this build should pick, and F15(a)
+means the service-layer binding should be fixed *before* the grant lands.
+
 ### F3 — Six retention rules ship with placeholder periods
 
 **Built:** migration 0032 seeds per-category retention, `STEALER_LOG` at
@@ -207,22 +247,39 @@ database constraints rather than by types.
 
 ---
 
-## Newly built and NOT yet reviewed
+## Reviewed 2026-07-25 — what the second pass cost
 
-The four routers added 2026-07-25 (retention, break-glass, collection,
-ingest — 30 endpoints) have tests but **no adversarial pass**. Phases 4
-and 9 have never had one at all. Every hostile review run on this project
-has found a real defect, twice a critical one under a fully green suite,
-so treat these as unknown rather than fine.
+The four routers added that day, and the Phase 4/9 services, were both
+reviewed the same evening. The routers' findings are fixed and have
+regressions; the services' are recorded above as **F15** and are not.
 
-Two defects surfaced merely by *writing the tests* for them, which is a
-reasonable prior for what a hostile pass would find:
+The router findings are worth stating plainly because they were all one
+mistake made five times: **`require_global` checks the verb, the account
+and step-up, and knows nothing about a case.** Every route that let
+`case_id` default to `None` therefore ran with no case check at all.
 
-- `break_glass.invoke` granted to nobody (F14 above).
-- The ingest 202 endpoint carried a USER-scoped rate limit, so the
-  dependency resolved `current_user` and rejected every legitimate
-  key-authenticated submission with "invalid or expired session". A
-  key-authenticated endpoint cannot carry a session-scoped limit.
+Reproduced live, by a caller holding only a global role and no
+relationship to the victim case:
+
+- a purge with no `case_id` destroyed an exhibit in another owner's
+  compartmented case, writing the tombstone under `case_id NULL` so the
+  victim case had no record it happened;
+- `POST /retention/legal-hold` lifted a court-ordered hold on any exhibit
+  in the deployment — which, chained with the above, is the complete kill;
+- `GET /retention/due` and `/tombstones` returned object ids, deadlines
+  and hold reasons across every case, to a GREEN analyst assigned to none;
+- `GET /ingest/records/{id}/credentials` listed which victims of which
+  organisation were in a compartmented case.
+
+And two that were simply broken: every break-glass response 500'd
+(`awaiting_review` is a `@property` and was being called), so access was
+granted invisibly and the review queue — the control — could not be read;
+and `parse_batch` read `raw_bytes`, which is a byte COUNT, so `bytes(int)`
+shredded a run of NULs into the dead-letter queue on every call.
+
+The suite missed the break-glass one because the only queue test asserted
+`200` against an **empty** queue, where the list comprehension never runs.
+A test that exercises the empty case is not a test of the serialiser.
 
 ## Deferred security items
 

@@ -71,16 +71,64 @@ break_glass_router = APIRouter(prefix="/break-glass", tags=["governance"])
 
 
 def _case_scoped(conn: psycopg.Connection, user: CurrentUser,
-                 case_id: UUID | None, permission: str) -> None:
-    """Run the full gate when a global route is handed a case id.
+                 case_id: UUID, permission: str) -> None:
+    """Run the full gate for one case. `case_id` is REQUIRED.
 
-    `require_global` checks the verb, the account and step-up; it knows
-    nothing about a case. Without this a caller holding a global retention
-    role could read deadlines and tombstones for a case they have no
-    relationship to -- and a tombstone names what was destroyed.
+    It used to accept None and no-op, which was the hole: `require_global`
+    checks the verb, the account and step-up and knows nothing about a
+    case, so every route that let `case_id` default to None ran with no
+    case check at all. A caller holding only the global role could purge
+    every expired exhibit in the deployment, read any case's deadlines,
+    and lift any exhibit's legal hold. All three were reproduced live.
     """
-    if case_id is not None:
-        authorize_object(conn, user, case_id=case_id, permission_key=permission)
+    authorize_object(conn, user, case_id=case_id, permission_key=permission)
+
+
+def _authorised_cases(conn: psycopg.Connection, user: CurrentUser,
+                      permission: str) -> list[UUID]:
+    """Every case where the FULL five-part gate would allow `permission`.
+
+    The cross-case listings here are genuinely useful -- an operator wants
+    one deadline list, not one per case -- so they are SCOPED rather than
+    refused.
+
+    All four checks, matching `CaseService.list_for_user`, which exists
+    for exactly this problem and says why: a listing must return exactly
+    the set the gate would allow, "or the list becomes a disclosure
+    channel". Assignment alone is not enough, because `assign_user`
+    performs no clearance check and a case's classification can be raised
+    after somebody is assigned to it.
+    """
+    rows = conn.execute(
+        """SELECT c.id
+             FROM iam.case_assignment ca
+             JOIN core."case" c ON c.id = ca.case_id
+             JOIN iam.app_user u ON u.id = ca.user_id
+            WHERE ca.user_id = %s
+              AND (ca.expires_at IS NULL OR ca.expires_at > now())
+              AND u.is_active
+              AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                           WHERE rp.role_key = ca.role_key
+                             AND rp.permission_key = %s)
+              AND c.classification <= u.tlp_clearance
+              AND c.compartments <@ u.compartments""",
+        (user.user_id, permission)).fetchall()
+    return [r[0] for r in rows]
+
+
+def _own_evidence(conn: psycopg.Connection, evidence_id: UUID) -> UUID:
+    """The case an exhibit belongs to, or a 404 that reveals nothing.
+
+    `evidence.py` established this pattern and this router did not adopt
+    it: gate the case, then confirm the object is IN that case. Without
+    it an exhibit id from anywhere was accepted on trust.
+    """
+    row = conn.execute(
+        "SELECT case_id FROM core.evidence WHERE id = %s",
+        (evidence_id,)).fetchone()
+    if row is None:
+        raise Problem(404, "Not found", "no such exhibit")
+    return row[0]
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +221,19 @@ def due(
     and all of them are frozen by a court order" are different answers,
     and an operator needs the second one.
     """
-    _case_scoped(conn, user, case_id, "retention.read")
-    items = RetentionService(conn).due(case_id=case_id, as_of=as_of,
-                                       limit=limit)
+    if case_id is not None:
+        _case_scoped(conn, user, case_id, "retention.read")
+        scope = [case_id]
+    else:
+        # NOT "every case in the deployment". A global retention role is
+        # not a relationship to a case, and this returns object ids,
+        # deadlines and hold reasons.
+        scope = _authorised_cases(conn, user, "retention.read")
+    svc = RetentionService(conn)
+    items = []
+    for cid in scope:
+        items.extend(svc.due(case_id=cid, as_of=as_of, limit=limit))
+    items = items[:limit]
     held = [i for i in items if i.held]
     return {
         "due": [
@@ -194,13 +252,19 @@ def due(
 
 class PurgeBody(BaseModel):
     authority: str = Field(min_length=10)
-    case_id: UUID | None = None
+    #: REQUIRED. It was optional, and a purge with no case id ran
+    #: `due(case_id=None)` -- every expired exhibit in the DEPLOYMENT --
+    #: for any holder of a global retention role, writing the tombstone
+    #: under case_id NULL so the victim case had no record it happened.
+    #: Reproduced live. A purge is destruction; it names its case.
+    case_id: UUID
     #: TRUE by default. An endpoint whose default is destruction will
     #: eventually be called by a script that meant to ask a question.
     dry_run: bool = True
 
 
-@router.post("/purge", response_model=dict)
+@router.post("/purge", response_model=dict,
+             dependencies=[Depends(rate_limit("retention.destroy"))])
 def purge(
     body: PurgeBody,
     user: CurrentUser = Depends(require_global("retention.purge")),
@@ -233,7 +297,8 @@ class OutOfScheduleBody(BaseModel):
     authority: str = Field(min_length=10)
 
 
-@router.post("/purge/out-of-schedule", response_model=dict)
+@router.post("/purge/out-of-schedule", response_model=dict,
+             dependencies=[Depends(rate_limit("retention.destroy"))])
 def purge_out_of_schedule(
     body: OutOfScheduleBody,
     user: CurrentUser = Depends(require_global("retention.purge")),
@@ -247,6 +312,31 @@ def purge_out_of_schedule(
     """
     authorize_object(conn, user, case_id=body.case_id,
                      permission_key="retention.purge")
+    # Every exhibit must be IN the approved case.
+    #
+    # The service constrains nothing: its legal-hold pre-check and its
+    # UPDATE are both `WHERE id = ANY(%s)`. The four-eyes approval does
+    # not save you either -- the payload hash covers the id LIST, so it
+    # proves the approver saw those UUIDs, not that the UUIDs belong to
+    # the case they approved. Mixing in another case's exhibits destroyed
+    # them and wrote the tombstone under the wrong case.
+    # Counted POSITIVELY: how many of the requested ids are present in
+    # this case. Counting the foreign ones instead would pass a
+    # nonexistent id straight through, because it matches neither side.
+    ids = list(dict.fromkeys(body.evidence_ids))
+    present = conn.execute(
+        """SELECT count(*) FROM core.evidence
+            WHERE id = ANY(%s) AND case_id = %s""",
+        (ids, body.case_id)).fetchone()[0]
+    if present != len(ids):
+        raise Problem(
+            400, "Invalid request",
+            f"{len(ids) - present} of the {len(ids)} selected exhibits are "
+            f"not in this case. An out-of-schedule purge destroys exactly "
+            f"what its approval named, in the case it named -- and the "
+            f"tombstone is written against that case, so a cross-case "
+            f"destruction would leave the other case with no record that "
+            f"it happened.")
     try:
         result = RetentionService(conn).purge_out_of_schedule(
             actor_id=user.user_id, authority=body.authority,
@@ -277,7 +367,8 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
     }
 
 
-@router.get("/tombstones", response_model=dict)
+@router.get("/tombstones", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
 def tombstones(
     case_id: UUID | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
@@ -291,8 +382,18 @@ def tombstones(
     had it, and "destroyed lawfully on this date under this authority" is
     the answer a disclosure request needs.
     """
-    _case_scoped(conn, user, case_id, "retention.read")
-    rows = RetentionService(conn).tombstones(case_id=case_id, limit=limit)
+    svc = RetentionService(conn)
+    if case_id is not None:
+        _case_scoped(conn, user, case_id, "retention.read")
+        rows = svc.tombstones(case_id=case_id, limit=limit)
+    else:
+        # A tombstone names what was destroyed, out of which case, under
+        # what authority. Listing every one of them to any holder of a
+        # global retention role was a disclosure channel.
+        rows = []
+        for cid in _authorised_cases(conn, user, "retention.read"):
+            rows.extend(svc.tombstones(case_id=cid, limit=limit))
+        rows = rows[:limit]
     return {"tombstones": rows, "count": len(rows)}
 
 
@@ -302,7 +403,8 @@ class LegalHoldBody(BaseModel):
     reason: str | None = None
 
 
-@router.post("/legal-hold", response_model=dict)
+@router.post("/legal-hold", response_model=dict,
+             dependencies=[Depends(rate_limit("retention.destroy"))])
 def legal_hold(
     body: LegalHoldBody,
     user: CurrentUser = Depends(require_global("retention.manage")),
@@ -315,13 +417,20 @@ def legal_hold(
     -- so both are audited, and applying one requires a reason the service
     enforces.
     """
+    # The exhibit's OWN case, resolved from the row rather than taken on
+    # trust. Without this the endpoint was a blind UPDATE by id: a holder
+    # of the global role could LIFT a court-ordered hold on any exhibit in
+    # the deployment and then purge it. Reproduced live.
+    case_id = _own_evidence(conn, body.evidence_id)
+    _case_scoped(conn, user, case_id, "retention.manage")
     try:
         RetentionService(conn).set_legal_hold(
             body.evidence_id, actor_id=user.user_id, on=body.on,
             reason=body.reason)
     except RetentionError as exc:
         raise Problem(400, "Invalid request", str(exc)) from exc
-    return {"evidence_id": str(body.evidence_id), "legal_hold": body.on}
+    return {"evidence_id": str(body.evidence_id),
+            "case_id": str(case_id), "legal_hold": body.on}
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +446,12 @@ def _grant(g: Grant) -> dict:
         "started_at": g.started_at.isoformat() if g.started_at else None,
         "expires_at": g.expires_at.isoformat() if g.expires_at else None,
         "is_live": g.is_live(),
-        "awaiting_review": g.awaiting_review(),
+        # A @property, not a method. Calling it raised TypeError and
+        # every break-glass response 500'd -- including the review
+        # queue, which IS the control. The grant row was still
+        # written, so access was granted invisibly and the officer
+        # who must review it could not list it.
+        "awaiting_review": g.awaiting_review,
         "action_count": getattr(g, "action_count", 0),
         "reviewed_by": str(g.reviewed_by) if g.reviewed_by else None,
         "reviewed_at": g.reviewed_at.isoformat() if g.reviewed_at else None,
