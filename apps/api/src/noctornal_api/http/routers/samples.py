@@ -238,6 +238,13 @@ def download(
 
 class RejectBody(BaseModel):
     reason: str = Field(min_length=1)
+    #: Defaults to destroying, because that is what a rejection means. The
+    #: opt-out exists for the one case the service refuses outright: a
+    #: sample under a legal hold, where preservation and destruction are
+    #: both legal obligations and the caller has to say which one they are
+    #: acting under. Making it a parameter rather than an override keeps
+    #: the choice in the request body, where the audit row records it.
+    purge_bytes: bool = True
 
 
 @router.post("/{sample_id}/reject", response_model=SampleOut)
@@ -247,10 +254,16 @@ def reject(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SampleOut:
     """Record THAT something was rejected and why, without retaining the
-    content. The bytes go; the row stays."""
+    content. The bytes go; the row stays.
+
+    Unless the sample is under a legal hold, in which case the service
+    refuses and says so — docs/08: a hold overrides all deletion,
+    everywhere.
+    """
     try:
         return _out(_svc(conn).reject(sample_id, actor_id=user.user_id,
-                                      reason=body.reason))
+                                      reason=body.reason,
+                                      purge_bytes=body.purge_bytes))
     except SampleError as exc:
         raise Problem(409, "Conflict", str(exc)) from exc
 
