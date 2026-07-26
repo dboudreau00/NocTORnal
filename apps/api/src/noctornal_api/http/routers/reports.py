@@ -202,7 +202,14 @@ def release(
                             destination_ceiling=body.destination_ceiling)
     _audit(conn, case_id, user.user_id,
            "REPORT_RELEASED" if decision.allowed else "REPORT_RELEASE_REFUSED",
-           {"target_tlp": body.target_tlp, "destination": destination.value,
+           {# CR1 follow-up: the EFFECTIVE value, plus what was asked for.
+        # This audited body.target_tlp, so an AMBER analyst posting
+        # target_tlp=RED left a permanent append-only record saying a
+        # RED document had crossed the boundary -- on the one action
+        # that actually crosses it. The build path was fixed and this
+        # one was missed.
+        "target_tlp": effective_tlp,
+        "target_tlp_requested": body.target_tlp, "destination": destination.value,
             "reason": decision.reason, "note": body.recipient_note},
            outcome="SUCCESS" if decision.allowed else "DENIED")
 

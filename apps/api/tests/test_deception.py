@@ -346,3 +346,115 @@ def test_defanging_a_bare_domain_still_breaks_it():
 def test_defanging_is_safe_on_empty_and_odd_input():
     assert defang("") == ""
     assert "javascript" in defang("javascript:alert(1)")
+
+
+# ---------------------------------------------------------------------------
+# The ninth adversarial pass, 2026-07-26. Each of these fails without its fix.
+# ---------------------------------------------------------------------------
+
+def test_an_appended_authentication_results_header_does_not_win():
+    """THE forged-verdict defect of this subsystem.
+
+    An MTA PREPENDS, so index 0 is the receiving organisation's own
+    verdict and anything the sender wrote is LAST. Reading last-wins let
+    an attacker append their own `dkim=pass header.d=microsoft.com` and
+    have it override the real `dkim=fail` -- producing microsoft.com as a
+    DURABLE, "cryptographically authenticated" DOMAIN selector.
+
+    This module gets the direction right for `Received` and got it exactly
+    backwards here. Same shape as the Phase 7 forged-PGP verdict: the DB
+    CHECK could not help, because the parser made the result and the
+    domain agree on the forged value.
+    """
+    evil = (
+        b"Received: from evil.example ([203.0.113.9]) by mx.corp.example;"
+        b" Mon, 20 Jul 2026 09:00:00 +0000\r\n"
+        b"Authentication-Results: mx.corp.example; spf=fail"
+        b" smtp.mailfrom=evil.example; dkim=fail header.d=evil.example;"
+        b" dmarc=fail\r\n"
+        b"Authentication-Results: mx.corp.example; spf=pass"
+        b" smtp.mailfrom=microsoft.com; dkim=pass header.d=microsoft.com;"
+        b" dmarc=pass\r\n"
+        b"From: a@evil.example\r\nSubject: x\r\n\r\nbody\r\n")
+    parsed = parse_eml(evil, trusted=("corp.example",))
+    assert parsed.dkim_result == "FAIL"
+    assert parsed.dkim_domain is None
+    assert parsed.spf_domain is None
+    domains = {c["value"] for c in selector_candidates_for_email(parsed)
+               if c["selector_type"] == "DOMAIN"}
+    assert "microsoft.com" not in domains
+    # And the extra header is itself a finding, not something to discard.
+    assert any("Authentication-Results headers" in g.get("reason", "")
+               for g in parsed.gaps)
+
+
+def test_a_pass_then_fail_signature_pair_is_ordinary_mail_not_a_500():
+    """A mailing list or forwarder re-signs, so `dkim=pass ...; dkim=fail
+    ...` is routine. Reading the result last-wins and the domain
+    first-pass produced FAIL + a domain, which violates
+    `email_dkim_domain_needs_pass` -- surfacing as a CheckViolation 500
+    AFTER the WORM exhibit had already committed, leaving an object-locked
+    exhibit with nothing describing it."""
+    raw = (b"Authentication-Results: mx.corp.example;"
+           b" dkim=pass header.d=acme.example;"
+           b" dkim=fail header.d=list.example\r\n"
+           b"From: a@acme.example\r\nSubject: x\r\n\r\nbody\r\n")
+    parsed = parse_eml(raw)
+    assert parsed.dkim_result == "PASS"
+    assert parsed.dkim_domain == "acme.example"
+    # The invariant the DB constraint expresses, asserted here too.
+    assert not (parsed.dkim_domain and parsed.dkim_result != "PASS")
+
+
+def test_a_failing_method_never_carries_a_domain_even_alone():
+    raw = (b"Authentication-Results: mx.corp.example;"
+           b" dkim=fail header.d=spoofed.example\r\n"
+           b"From: a@b.example\r\nSubject: x\r\n\r\nbody\r\n")
+    parsed = parse_eml(raw)
+    assert parsed.dkim_result == "FAIL"
+    assert parsed.dkim_domain is None
+
+
+def test_no_infrastructure_is_proposed_when_no_trusted_mtas_are_configured():
+    """Unconfigured means unknown, and the honest output for unknown is
+    nothing.
+
+    With no NOCTORNAL_TRUSTED_MTA_HOSTS the boundary defaults to seq 0 --
+    correct for what to EXCLUDE, and silently inverted for what to
+    include: hop 0 is the RECIPIENT'S OWN server, so this was offering the
+    victim's internal relay address as durable actor infrastructure while
+    suppressing the attacker's real sending IP one hop above it.
+    """
+    chain = [
+        "from mail-internal.corp.local ([10.1.2.3]) by exchange.corp.local;"
+        " Mon, 20 Jul 2026 09:00:02 +0000",
+        "from evil.example ([203.0.113.9]) by mx.corp.local;"
+        " Mon, 20 Jul 2026 09:00:01 +0000",
+    ]
+    parsed = ParsedEmail()
+    parsed.hops = parse_received_chain(chain, trusted=())
+    ips = {c["value"] for c in selector_candidates_for_email(parsed)
+           if c["selector_type"] in ("IPV4", "IPV6")}
+    assert ips == set(), "the victim's own relay must not be proposed"
+    # Configured, the same chain does yield the observation.
+    parsed.hops = parse_received_chain(chain, trusted=("corp.local",))
+    ips = {c["value"] for c in selector_candidates_for_email(parsed)
+           if c["selector_type"] in ("IPV4", "IPV6")}
+    assert "203.0.113.9" in ips
+
+
+def test_defang_breaks_a_host_that_carries_no_scheme():
+    """`split("/", 3)` puts the authority at index 2 only when a
+    `scheme://` occupied 0 and 1. Without one, index 2 is a PATH segment,
+    so the authority was never bracketed and -- no scheme having matched
+    either -- the string came back untouched. A live host, out of the
+    helper whose whole job is that it is not one.
+
+    Not exotic: requested_url and final_url are free text and a victim
+    report routinely omits the scheme."""
+    assert defang("paypal-secure.example/login/x") == "paypal-secure[.]example/login/x"
+    assert defang("www.evil.example/a/b") == "www[.]evil[.]example/a/b"
+    assert defang("evil.example") == "evil[.]example"
+    # The scheme-carrying forms still behave.
+    assert defang("https://evil.example/x") == "hxxps://evil[.]example/x"
+    assert defang("http://a.b.example") == "hxxp://a[.]b[.]example"
