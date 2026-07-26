@@ -35,7 +35,7 @@ determination, and none of the controls here substitute for it.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import psycopg
@@ -467,6 +467,201 @@ def replay(
             "notice": ("The original fragment is retained. A repair that "
                        "overwrote it would make the next format change "
                        "unattributable.")}
+
+
+# ---------------------------------------------------------------------------
+# The triage queue itself
+# ---------------------------------------------------------------------------
+
+#: Shared by `/records` and `/quarantine`. One projection, so the two
+#: endpoints cannot drift into returning different shapes for the same row
+#: -- and so a column added for one is never accidentally exposed by the
+#: other under a different permission.
+_QUEUE_SQL = """
+        SELECT r.id, r.case_id, r.category, r.category_confidence,
+               r.category_source, r.priority, r.priority_detail,
+               r.created_at, r.duplicate_of, r.classification,
+               r.compartments, r.retain_until, b.received_at,
+               k.name, k.key_id,
+               (SELECT count(*) FROM ingest.victim_credential vc
+                 WHERE vc.record_id = r.id),
+               (SELECT count(*) FROM ingest.record d
+                 WHERE d.duplicate_of = r.id)
+          FROM ingest.record r
+          JOIN ingest.batch b ON b.id = r.batch_id
+          JOIN ingest.api_key k ON k.id = b.api_key_id
+         WHERE r.purged_at IS NULL"""
+
+
+def _queue_row(r) -> dict:
+    return {
+        "id": str(r[0]),
+        "case_id": str(r[1]) if r[1] else None,
+        "quarantined": r[1] is None,
+        "category": r[2],
+        "category_confidence": float(r[3]),
+        "category_source": r[4],
+        "priority": float(r[5]),
+        "priority_detail": r[6],
+        "created_at": r[7].isoformat(),
+        "is_duplicate": r[8] is not None,
+        "classification": r[9],
+        "compartments": list(r[10] or []),
+        "retain_until": r[11].isoformat() if r[11] else None,
+        "received_at": r[12].isoformat() if r[12] else None,
+        "feed": r[13], "key_id": r[14],
+        "credential_count": r[15],
+        "duplicate_count": r[16],
+    }
+
+
+@router.get("/records", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
+def records(
+    case_id: UUID | None = Query(None),
+    category: str | None = Query(None),
+    include_duplicates: bool = Query(False),
+    limit: int = Query(50, ge=1, le=200),
+    user: CurrentUser = Depends(require_global("ingest.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The queue, highest priority first.
+
+    docs/12: "A record containing a selector on somebody's watchlist should
+    surface in seconds, and a generic combo list should sink silently to the
+    bottom. Volume is the enemy, and a queue nobody can prioritise is a
+    queue nobody reads."
+
+    Near-duplicates are hidden by default and counted rather than dropped:
+    "the same leak post from nine sources" is the failure this exists to
+    prevent, and silently discarding the other eight is a different failure
+    (invariant 12). `duplicate_count` says how many were folded away.
+
+    **The payload is not returned.** A record can hold a whole stealer log;
+    this is a queue, and the fields here are the ones an analyst triages on.
+
+    Records attached to no case are NOT here — see `/quarantine`. They are
+    a different job with a different verb, and a hidden branch inside one
+    endpoint that widens what it returns based on a second permission is
+    exactly the shape that becomes a hole.
+    """
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    allowed = _authorised_cases_for_ingest(conn, user)
+    if case_id is not None and case_id not in allowed:
+        raise Problem(404, "Not found", "no such case")
+    scope = [case_id] if case_id is not None else allowed
+
+    rows = conn.execute(
+        _QUEUE_SQL + """
+              AND r.case_id = ANY(%s)
+              AND (%s::text IS NULL OR r.category = %s)
+              AND (%s OR r.duplicate_of IS NULL)
+              AND r.classification <= %s::core.tlp
+              AND r.compartments <@ %s
+            ORDER BY r.priority DESC, r.created_at DESC
+            LIMIT %s""",
+        (scope, category, category, include_duplicates,
+         clearance.name, list(compartments), limit)).fetchall()
+    return {"records": [_queue_row(r) for r in rows], "count": len(rows),
+            "notice": (
+                "Near-duplicates are folded, not dropped — duplicate_count "
+                "says how many. Payloads are not returned here: a record can "
+                "hold a whole stealer log, and this is a queue.")}
+
+
+@router.get("/quarantine", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
+def quarantine(
+    limit: int = Query(50, ge=1, le=200),
+    user: CurrentUser = Depends(require_global("ingest.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Records that belong to no case yet.
+
+    Its own endpoint and its own verb. A record with no case cannot be
+    granted by a case assignment, so the ordinary five-part gate hides it
+    from everybody — and if nobody can see it, nothing is ever attached and
+    the material sits there until its retention clock destroys it.
+
+    `ingest.manage` is the operator verb: it already covers issuing keys
+    and parsing batches, which is the same job. It is deliberately NOT
+    `ingest.read` — SYS_ADMIN holding that would mean the operator reads
+    every case's records, which is the over-broad grant this system exists
+    to avoid.
+
+    The classification predicate still applies. Unattached is not
+    unclassified: the record carries the issuing key's ceiling.
+    """
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    rows = conn.execute(
+        _QUEUE_SQL + """
+              AND r.case_id IS NULL
+              AND r.classification <= %s::core.tlp
+              AND r.compartments <@ %s
+            ORDER BY r.priority DESC, r.created_at DESC
+            LIMIT %s""",
+        (clearance.name, list(compartments), limit)).fetchall()
+    return {"records": [_queue_row(r) for r in rows], "count": len(rows),
+            "notice": ("Unattached material. Attaching it to a case is what "
+                       "puts it under that case's authority and review "
+                       "clock; until then it expires on the category's.")}
+
+
+@router.post("/records/{record_id}/score", response_model=dict)
+def rescore(
+    record_id: UUID,
+    user: CurrentUser = Depends(require_global("ingest.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Recompute one record's triage score.
+
+    Worth having by hand because the score depends on `collect.watch`
+    selectors, which change: a record ingested before a selector was added
+    scored zero against it and will keep scoring zero until something asks.
+    """
+    _authorise_record(conn, user, record_id, "ingest.read")
+    try:
+        score = IngestService(conn).score_record(record_id)
+    except IngestError as exc:
+        raise Problem(404, "Not found", str(exc)) from exc
+    return {"record_id": str(record_id), "priority": score}
+
+
+@router.get("/keys", response_model=dict)
+def keys(
+    include_revoked: bool = Query(False),
+    user: CurrentUser = Depends(require_global("ingest.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Issued keys. **Never the secret** — it exists once, at issue.
+
+    `last_used_at` is the column that matters: docs/12 says a key unused
+    for thirty days is either a dead integration or somebody else's.
+    """
+    rows = conn.execute(
+        """SELECT k.id, k.key_id, k.name, k.environment, k.declared_category,
+                  k.classification_ceiling, k.forced_compartment,
+                  k.created_at, k.expires_at, k.last_used_at, k.revoked_at,
+                  k.revoked_reason,
+                  (SELECT count(*) FROM ingest.batch b WHERE b.api_key_id = k.id)
+             FROM ingest.api_key k
+            WHERE (%s OR k.revoked_at IS NULL)
+            ORDER BY k.revoked_at NULLS FIRST, k.last_used_at NULLS FIRST""",
+        (include_revoked,)).fetchall()
+    now = datetime.now(timezone.utc)
+    return {"keys": [{
+        "id": str(r[0]), "key_id": r[1], "name": r[2], "environment": r[3],
+        "declared_category": r[4], "classification_ceiling": r[5],
+        "forced_compartment": r[6],
+        "created_at": r[7].isoformat(),
+        "expires_at": r[8].isoformat(),
+        "expired": r[8] <= now,
+        "last_used_at": r[9].isoformat() if r[9] else None,
+        "stale_days": (now - r[9]).days if r[9] else None,
+        "revoked_at": r[10].isoformat() if r[10] else None,
+        "revoked_reason": r[11],
+        "batch_count": r[12],
+    } for r in rows], "count": len(rows)}
 
 
 # ---------------------------------------------------------------------------

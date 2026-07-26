@@ -33,6 +33,7 @@ from noctornal_api.ingest import (  # noqa: E402
     categorise,
     iter_fragments,
     redact_fragment,
+    redact_message,
     redact_text,
     simhash_payload,
 )
@@ -186,6 +187,23 @@ def test_redaction_keeps_the_shape_and_discards_the_content():
     assert "hunter2" not in out and "jsmith" not in out
     assert "DESKTOP-8F2A" not in out
     assert "victim@acme.example" not in out, "a key can BE the datum"
+
+
+def test_our_own_error_text_stays_readable():
+    """The fragment is the partner's bytes; the error detail is our own
+    exception. Running the aggressive pass over both turned `Expecting
+    value: line 1 column 31` into `Expecting value:[redacted] 1 column 31`
+    — the `column` survived and the `line` did not, which destroys the one
+    thing the message is for and reads like a bug. Caught by looking at the
+    rendered queue rather than by a test, which is the argument for looking.
+    """
+    out = redact_message("Expecting value: line 1 column 31 (char 30)")
+    assert out == "Expecting value: line 1 column 31 (char 30)"
+    # It still removes what cannot be prose.
+    assert "victim@acme.example" not in redact_message(
+        "could not parse record for victim@acme.example")
+    assert "aB3xK9mQ7pL2vN8rT5wY1zC4" not in redact_message(
+        "unexpected token aB3xK9mQ7pL2vN8rT5wY1zC4")
 
 
 def test_redaction_survives_the_shapes_a_blocklist_misses():
