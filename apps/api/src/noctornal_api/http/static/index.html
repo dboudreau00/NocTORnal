@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>NocTORnal — analyst console</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -17,6 +18,7 @@
 <!-- ───────────────────────────── LOGIN ───────────────────────────── -->
 <main id="view-login" class="login-view">
   <form id="login-form" class="card login-card" novalidate>
+    <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
     <p class="eyebrow">NocTORnal</p>
     <h1 class="h-lg">Analyst sign-in</h1>
     <p class="muted">Case material is TLP-classified. Access is logged against your
@@ -51,6 +53,7 @@
 <div id="view-app" class="app" hidden>
 
   <header class="appbar">
+    <img class="brand-mark" src="logo.svg" alt="" width="22" height="22">
     <span class="brand">NocTORnal</span>
     <span class="appbar-sep" aria-hidden="true"></span>
     <span id="hdr-case" class="hdr-case">No case selected</span>
@@ -212,6 +215,16 @@
           <span class="rail-glyph" aria-hidden="true">&#x21E3;</span>
           <span class="rail-cap">Feeds</span>
           <span id="feeds-badge" class="rail-badge" hidden></span>
+        </button>
+        <button id="tab-ach" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-ach" aria-selected="false" tabindex="-1"
+                data-tab="ach"
+                title="ACH — analysis of competing hypotheses">
+          <span class="rail-glyph" aria-hidden="true">&#x25EB;</span>
+          <!-- "ACH" rather than "Hypotheses": the rail is a fixed narrow
+               column and the long form overflowed it. The full name is in
+               the title, and ACH is what an analyst calls it anyway. -->
+          <span class="rail-cap">ACH</span>
         </button>
         <button id="tab-governance" type="button" class="tab rail-btn"
                 role="tab" aria-controls="pane-governance" aria-selected="false"
@@ -877,6 +890,74 @@
             <div id="key-list"></div>
             <p id="key-empty" class="empty">No keys issued.</p>
           </div>
+        </section>
+
+        <!-- HYPOTHESES (Phase 6, docs/13 tier 2). Analysis of competing
+             hypotheses.
+
+             The ranking is by INCONSISTENCY, ascending — the hypothesis
+             that survives is the one with the least evidence AGAINST it,
+             not the most for it. Counting support ranks whichever theory
+             the team has been collecting for longest, which is the bias
+             ACH exists to defeat (Heuer). The UI has to lead with that or
+             an analyst reads the grid as a scoreboard.
+
+             Evidence is an ASSERTION, never typed-in text. A matrix built
+             from bullet points launders a hunch into a grid. -->
+        <section id="pane-ach" class="pane" role="tabpanel"
+                 aria-labelledby="tab-ach" tabindex="-1" hidden>
+
+          <div class="pane-head">
+            <button id="ach-refresh" type="button" class="btn">Refresh</button>
+            <label class="field inline check">
+              <input id="ach-rejected" type="checkbox">
+              <span class="label">Include rejected</span>
+            </label>
+            <span id="ach-counts" class="muted small"></span>
+          </div>
+
+          <p id="ach-method" class="help"></p>
+          <div id="ach-warnings"></div>
+
+          <div id="ach-ranking"></div>
+          <p id="ach-empty" class="empty">
+            No hypotheses yet. ACH is worth the effort when you have at
+            least three, including one you expect to lose.
+          </p>
+
+          <h2 class="h-sm">The matrix</h2>
+          <p class="help">
+            A cell is how one piece of evidence stands against one
+            hypothesis. Evidence consistent with <em>everything</em> is kept
+            in the record and excluded from the ranking, because it
+            discriminates nothing — that is the row marked not diagnostic.
+          </p>
+          <div id="ach-matrix" class="scroll-x"></div>
+
+          <details class="card">
+            <summary>Add a hypothesis</summary>
+            <p class="help">
+              Write the one you think is wrong too. A set of hypotheses that
+              are all variations of the same theory produces a confident
+              answer to a question nobody asked.
+            </p>
+            <label class="field">
+              <span class="label">Statement</span>
+              <input id="ach-statement" type="text" spellcheck="false"
+                     placeholder="e.g. NIGHTJAR and KESTREL are the same operator">
+            </label>
+            <label class="field inline">
+              <span class="label">Initial confidence</span>
+              <select id="ach-confidence" class="select">
+                <option value="LOW" selected>LOW</option>
+                <option value="MODERATE">MODERATE</option>
+                <option value="HIGH">HIGH</option>
+              </select>
+            </label>
+            <p id="ach-msg" class="msg" hidden></p>
+            <button id="ach-add" type="button" class="btn primary">
+              Add hypothesis</button>
+          </details>
         </section>
 
         <!-- LIFECYCLE (Phase 6). When material expires, what is held, what

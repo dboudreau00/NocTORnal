@@ -34,6 +34,7 @@ from noctornal_api.ingest import (  # noqa: E402
     iter_fragments,
     redact_fragment,
     redact_message,
+    redact_structure,
     redact_text,
     simhash_payload,
 )
@@ -192,6 +193,73 @@ def test_redaction_keeps_the_shape_and_discards_the_content():
     assert "victim@acme.example" not in out, "a key can BE the datum"
 
 
+# ---------------------------------------------------------------------------
+# The second adversarial pass, 2026-07-25 evening. These were found in the
+# fixes above — which is the argument for reviewing a fix, not only a
+# feature.
+# ---------------------------------------------------------------------------
+
+def test_a_truncated_json_batch_does_not_leak_the_next_value():
+    """The pair matcher did the opposite of its job on the input it named
+    as most common.
+
+    `("...":\\s*)("..."|[^,\\s}\\]]+)` given `…"credentials": [{"password":
+    "Hunter2"…` matched `[{"password":` as the VALUE — swallowing the next
+    key — so the output was `"credentials": "[redacted]" "Hunter2"` and the
+    password went into `ingest.dead_letter.raw_fragment` in cleartext, in a
+    column with no index and no encryption, served by GET /dead-letters.
+
+    Reached by a partner's writer crashing, or a batch cut at the key's
+    `max_bytes_per_request`. Not an attack.
+    """
+    truncated = ('{"machine_id": "DESKTOP-7", "country": "RU", '
+                 '"credentials": [{"password": "Hunter2", "username": '
+                 '"alice", "host": "https://bank.example"}], '
+                 '"cookies": [{"value": "sid-8812')
+    out = redact_fragment(truncated)
+    for secret in ("Hunter2", "alice", "sid-8812", "DESKTOP-7"):
+        assert secret not in out, secret
+    # The shape survives, which is the entire point of keeping it at all.
+    assert "machine_id" in out and "credentials" in out and "cookies" in out
+
+
+def test_a_dangling_open_quote_does_not_keep_its_contents():
+    """A batch cut mid-string ends with an unterminated quote, which no
+    quoted-string pattern can match. `"value": "sid-8812` used to keep
+    `sid-8812` verbatim for exactly that reason."""
+    out = redact_fragment('{"a": "ok", "session": "tail-value-not-closed')
+    assert "tail-value-not-closed" not in out
+    assert "session" in out
+
+
+def test_a_non_ascii_or_idn_victim_address_is_redacted():
+    """`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}` is ASCII on both
+    sides. `josé@corp.example` did not match at ALL — the character before
+    the `@` is outside the local-part class — and `ivan@корп.рф` failed on
+    the domain and the TLD. Both survived every path including
+    `_redact_key`, whose whole reason for existing is the feed keyed by
+    victim address."""
+    masked = redact_structure({
+        "ivan@корп.рф": {"password": "x"},
+        "josé@corp.example": {"password": "x"},
+        "ivan@corp.ru": {"password": "x"},
+    })
+    joined = json.dumps(masked, ensure_ascii=False)
+    for address in ("корп.рф", "josé@corp.example", "ivan@corp.ru"):
+        assert address not in joined, address
+    assert "[redacted" in joined
+
+
+def test_masked_keys_are_deduplicated_not_merged():
+    """Every key masks to the same string, and a plain dict comprehension
+    collapses two hundred victims into one entry — turning "this feed
+    carried 200 people" into "1" in the only view anybody looks at. The
+    count IS the shape."""
+    masked = redact_structure({f"victim{i}@corp.example": {"p": 1}
+                               for i in range(5)})
+    assert len(masked) == 5
+
+
 def test_our_own_error_text_stays_readable():
     """The fragment is the partner's bytes; the error detail is our own
     exception. Running the aggressive pass over both turned `Expecting
@@ -248,6 +316,39 @@ def test_a_nul_byte_does_not_strand_the_batch(conn, svc):
         "every fragment is accounted for, including the one after the NUL")
 
 
+def test_a_broken_container_records_the_break_instead_of_vanishing(conn, svc):
+    """An exception raised by the GENERATOR escaped both inner handlers.
+
+    `for fragment in iter_fragments(raw)` puts the `next()` outside the
+    try blocks, so `csv.Error` — raised on a field over
+    `csv.field_size_limit()`, which a stealer log's cookie column
+    routinely exceeds — propagated past them, past the router's `except
+    IngestError`, and out as a 500. Every remaining fragment was dropped
+    with `dead_count` still 0: nothing recorded that anything was lost or
+    how much, and re-parsing died at the same row every time.
+
+    This is the second time this exact shape has broken invariant 12 here;
+    the first was the NUL byte in F15(e).
+    """
+    owner = _user(conn)
+    key = _key(svc, owner)
+    oversized = "x" * 200_000
+    raw = ("name,cookies\n"
+           "alice,ok\n"
+           "bob,ok\n"
+           f'carol,"{oversized}"\n'
+           "dave,ok\n").encode()
+    batch = svc.accept(key, raw)
+    result = svc.parse_batch(batch.batch_id, raw=raw)
+
+    state = conn.execute("SELECT state FROM ingest.batch WHERE id = %s",
+                         (batch.batch_id,)).fetchone()[0]
+    assert state != "PARSING"
+    assert result.dead >= 1, "the break itself must be recorded"
+    assert result.warnings, "and the extent of the loss must be stated"
+    assert any("container" in w for w in result.warnings)
+
+
 def test_a_batch_that_yields_nothing_is_not_reported_as_parsed(conn, svc):
     """`records=0 dead=0 state=PARSED` is a silent drop with a green light
     on it. `accept()` refuses an empty body, so a batch that produces no
@@ -284,6 +385,44 @@ def test_csv_becomes_header_keyed_records():
         b"indicator,type\n1.2.3.4,ipv4\n5.6.7.8,ipv4\n"))
     assert len(fragments) == 2
     assert json.loads(fragments[0]) == {"indicator": "1.2.3.4", "type": "ipv4"}
+
+
+def test_csv_overflow_columns_are_kept_not_deleted():
+    """`DictReader` puts fields beyond the header under the key `None`, and
+    the comprehension `{k: v for k, v in row.items() if k is not None}`
+    deleted exactly those.
+
+    Not just loss — silent CORRUPTION. The row below stored
+    `password = "Summer"` for a credential that is `Summer,2024!`, and
+    `store_credential` fingerprints what it is given, so
+    `search_by_fingerprint` — "the ONLY lookup", and the correlation the
+    analytic work depends on — would miss the real credential for ever.
+    Ragged rows are normal input, not an attack.
+
+    Twenty clean rows first, because `_looks_like_csv` samples only the
+    first twenty and correctly declines to guess CSV when it sees ragged
+    ones in that window. The bug bites exactly when the sample is uniform
+    and the drift arrives later — which is the ordinary way a feed widens.
+    """
+    clean = b"".join(
+        f"https://s{i}.example,u{i}@acme.co,pw{i}\n".encode() for i in range(21))
+    fragments = list(iter_fragments(
+        b"url,login,password\n" + clean
+        + b"https://mail.example,bob@acme.co,Summer,2024!\n"))
+    assert len(fragments) == 22
+    assert "2024!" in fragments[-1], "the tail of the row must survive"
+
+
+def test_a_csv_row_whose_content_is_all_overflow_is_not_dropped():
+    """The all-blank guard ran on the dict AFTER the overflow had been
+    deleted, so a header that drifted left produced `{'a': '', 'b': ''}`
+    from a row carrying a real password — and nothing anywhere recorded
+    that the row existed. `seen` never incremented, so even the EmptyParse
+    net could not fire."""
+    clean = b"".join(f"x{i},y{i}\n".encode() for i in range(21))
+    fragments = list(iter_fragments(b"a,b\n" + clean + b",,realpassword\n"))
+    assert len(fragments) == 22, "the ragged row must still be yielded"
+    assert "realpassword" in fragments[-1]
 
 
 def test_a_combo_list_is_not_guessed_to_be_csv():

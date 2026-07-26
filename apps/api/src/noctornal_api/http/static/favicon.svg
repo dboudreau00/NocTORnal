@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="NocTORnal">
+  <title>NocTORnal</title>
+
+  <!--
+    The 16px cut. Everything that does not survive at 16px is removed
+    rather than shrunk: the five-node graph becomes three, the dashed
+    outbound tie goes entirely, and the strokes thicken.
+
+    Separate from logo.svg on purpose. One file scaled to both sizes gives
+    you either a favicon that is a smudge or a header mark that is a
+    cartoon, and the favicon is the one that matters most — it is how
+    somebody finds this tab among nine others.
+
+    Colours are literal rather than `currentColor`: a favicon has no
+    inherited colour to take.
+  -->
+
+  <defs>
+    <mask id="bite">
+      <rect width="64" height="64" fill="#fff"/>
+      <circle cx="42" cy="25" r="22" fill="#000"/>
+    </mask>
+  </defs>
+
+  <rect width="64" height="64" rx="12" fill="#14181B"/>
+  <circle cx="31" cy="33" r="23" fill="#4FB3A9" mask="url(#bite)"/>
+
+  <g fill="none" stroke="#14181B" stroke-width="3" stroke-linecap="round">
+    <path d="M18 22 L14 35"/>
+    <path d="M14 35 L23 46"/>
+  </g>
+  <g fill="#14181B">
+    <circle cx="18" cy="22" r="4.6"/>
+    <circle cx="14" cy="35" r="3.6"/>
+    <circle cx="23" cy="46" r="3"/>
+  </g>
+</svg>
