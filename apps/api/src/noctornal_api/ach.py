@@ -131,6 +131,17 @@ class Diagnosticity:
     #: True when the item is consistent (or inconsistent) with everything
     #: equally, and therefore settles nothing.
     is_diagnostic: bool
+    #: How many of the live hypotheses this item has actually been scored
+    #: against. Below two, `is_diagnostic` is not a judgement about the
+    #: item at all -- it is a statement that the row is unfinished, and
+    #: those are different facts an analyst acts on differently. Conflating
+    #: them told an analyst that ten good items "settle nothing" when they
+    #: had simply not been entered against the second hypothesis yet.
+    assessed_against: int = 0
+
+    @property
+    def is_incomplete(self) -> bool:
+        return self.assessed_against < 2
 
 
 @dataclass(frozen=True)
@@ -188,23 +199,63 @@ def score(hypotheses: list[tuple[UUID, str]],
     # THE ranking. Least inconsistency first; support breaks ties only, and
     # only because something has to. Never the other way round.
     ranked = sorted(scored, key=lambda h: (h.inconsistency, -h.support))
-    least = ranked[0].hypothesis_id if ranked and any(
-        h.assessed for h in ranked) else None
 
-    if least is not None and len(ranked) > 1:
-        first, second = ranked[0], ranked[1]
+    # AN UNTESTED HYPOTHESIS DOES NOT SURVIVE; IT HAS NOT COMPETED.
+    #
+    # This was the sharpest defect in the module (F20, 2026-07-26). A
+    # hypothesis assessed against NOTHING scores inconsistency 0.0, which
+    # is the lowest value the scale can produce, so it sorted first and
+    # `least_inconsistent` named it. The guard asked whether ANY hypothesis
+    # had been assessed, never whether the winner had.
+    #
+    # The failure lands precisely where the method is supposed to help. A
+    # team eight months into one theory has assessed everything against
+    # that theory and nothing against the alternative -- which is the
+    # situation docs/13 cites as the reason to build ACH at all -- and the
+    # matrix then reported the alternative as surviving, on the strength of
+    # never having been examined. Confirmation bias with a scoreboard, in
+    # the tool built to correct it.
+    tested = [h for h in ranked if h.assessed]
+    least = tested[0].hypothesis_id if tested else None
+
+    untested = [h for h in ranked if not h.assessed]
+    if untested and tested:
+        warnings.append(
+            f"{len(untested)} hypothes{'is has' if len(untested) == 1 else 'es have'} "
+            f"no evidence assessed against "
+            f"{'it' if len(untested) == 1 else 'them'} at all, so "
+            f"{'it is' if len(untested) == 1 else 'they are'} excluded from "
+            f"the ranking. An untested hypothesis has not survived; it has "
+            f"not competed. Score the existing evidence against "
+            f"{'it' if len(untested) == 1 else 'them'} before reading "
+            f"anything into this matrix.")
+
+    if least is not None and len(tested) > 1:
+        first, second = tested[0], tested[1]
         if abs(first.inconsistency - second.inconsistency) < 1e-9:
             warnings.append(
                 "The top two hypotheses are equally inconsistent, so this "
                 "matrix does not discriminate between them yet. Look for "
                 "evidence that would be inconsistent with exactly one.")
 
-    undiagnostic = sum(1 for d in diagnosticity if not d.is_diagnostic)
-    if undiagnostic and diagnosticity:
+    # "Says the same thing about everything" and "has not been entered
+    # against everything" are DIFFERENT facts, and reporting the second as
+    # the first told an analyst their ten good items were worthless when
+    # they were merely half-entered.
+    undiagnostic = [d for d in diagnosticity
+                    if not d.is_incomplete and not d.is_diagnostic]
+    incomplete = [d for d in diagnosticity if d.is_incomplete]
+    if undiagnostic:
         warnings.append(
-            f"{undiagnostic} of {len(diagnosticity)} items say the same thing "
-            f"about every hypothesis and settle nothing. They are kept in the "
-            f"record and excluded from the ranking.")
+            f"{len(undiagnostic)} of {len(diagnosticity)} items say the same "
+            f"thing about every hypothesis and settle nothing. They are kept "
+            f"in the record and excluded from the ranking.")
+    if incomplete:
+        warnings.append(
+            f"{len(incomplete)} of {len(diagnosticity)} items have been "
+            f"scored against fewer than two hypotheses, so their "
+            f"diagnosticity is unknown rather than zero. Finishing those "
+            f"rows is the cheapest work available here.")
 
     thin = [h for h in scored if h.assessed and h.unassessed > h.assessed]
     if thin:
@@ -212,12 +263,18 @@ def score(hypotheses: list[tuple[UUID, str]],
             "Some hypotheses have more unassessed evidence than assessed. A "
             "low inconsistency score there means untested, not surviving.")
 
-    # The cheapest next test: the most diagnostic item that some hypothesis
-    # has not yet been scored against. Deliberately NOT "the item that would
-    # most support the leader".
+    # The cheapest next test: the most diagnostic item that some LIVE
+    # hypothesis has not yet been scored against. Deliberately NOT "the
+    # item that would most support the leader".
+    #
+    # Counted over the live hypotheses rather than over `len(item.stances)`,
+    # which includes stances against SUPERSEDED hypotheses -- `reports.py`
+    # filters the hypothesis list on status and does not filter the cells,
+    # so a row could look complete while a real gap remained.
+    live = {hid for hid, _ in hypotheses}
     gaps = [d for d in diagnosticity
             if any(item.assertion_id == d.assertion_id
-                   and len(item.stances) < len(hypotheses)
+                   and len(live & set(item.stances)) < len(live)
                    for item in evidence)]
     refute_first = max(gaps, key=lambda d: d.score).assertion_id if gaps else None
 
@@ -242,11 +299,16 @@ def _diagnosticity(item: EvidenceItem,
     """
     stances = [item.stances[hid] for hid, _ in hypotheses if hid in item.stances]
     if len(stances) < 2:
-        return Diagnosticity(item.assertion_id, item.label, 0.0, False)
+        # Not "undiagnostic". UNKNOWN — the row is unfinished, and
+        # `assessed_against` says so rather than letting a caller read the
+        # 0.0 as a verdict on the evidence.
+        return Diagnosticity(item.assertion_id, item.label, 0.0, False,
+                             assessed_against=len(stances))
     spread = max(stances) - min(stances)
     return Diagnosticity(
         assertion_id=item.assertion_id, label=item.label,
-        score=round(spread * item.weight, 4), is_diagnostic=spread > 0)
+        score=round(spread * item.weight, 4), is_diagnostic=spread > 0,
+        assessed_against=len(stances))
 
 
 def as_response(matrix: Matrix) -> dict:
@@ -258,7 +320,13 @@ def as_response(matrix: Matrix) -> dict:
             for h in matrix.hypotheses],
         "evidence": [
             {"assertion_id": str(d.assertion_id), "label": d.label,
-             "diagnosticity": d.score, "is_diagnostic": d.is_diagnostic}
+             "diagnosticity": d.score, "is_diagnostic": d.is_diagnostic,
+             "assessed_against": d.assessed_against,
+             # So the UI can render "unknown" differently from "settles
+             # nothing". They look identical at 0.0 and mean opposite
+             # things: one is a judgement about the evidence, the other is
+             # a gap in the matrix.
+             "is_incomplete": d.is_incomplete}
             for d in matrix.evidence],
         "least_inconsistent": (str(matrix.least_inconsistent)
                                if matrix.least_inconsistent else None),
