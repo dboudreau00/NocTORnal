@@ -382,6 +382,112 @@ The suite missed the break-glass one because the only queue test asserted
 `200` against an **empty** queue, where the list comprehension never runs.
 A test that exercises the empty case is not a test of the serialiser.
 
+## F19 — reviewed 2026-07-26: Phases 5 and 8, the two that never had been
+
+**27 findings survived refutation. Nine were CRITICAL. All 27 are now
+fixed, with regressions.** `apps/api/tests/test_f19_review_pg.py` is that
+pass written down; nineteen of its first twenty-two tests fail on the
+commit before the fix.
+
+The headline is not any single defect. It is that **Phase 8 had 673
+passing tests and shipped a security control that did not exist**, and
+Phase 5 shipped a notification centre missing half the case gate. An
+unreviewed phase is not "probably fine". It is unknown.
+
+### The two criticals
+
+| | |
+|---|---|
+| **`download()` applied no label check of any kind** | Not the sample's classification, not its compartments, not its case's. `queue()` filtered and `detail()` 404'd, so the same caller was told a sample did not exist and handed its bytes one request later — on the one path in the system that puts working malware on a disk. The omission was an *inconsistency inside one file*. |
+| **The "encrypted archive" was a plain ZIP** | Python's `zipfile` cannot write encrypted entries — `setpassword()` is decrypt-only — so `ARCHIVE_PASSWORD` was defined, exported in `__all__` and referenced by nothing, while the archive comment and the `X-Sample-Archive-Password` header both told the analyst a password protected it. Now real ZipCrypto, written by hand, verified by round-tripping through Python's own decryptor. |
+
+### Three root causes, each producing several findings
+
+**1. A rule enforced in one place and absent in the second place that
+needed it.** This is most of the list.
+
+- The notification centre filtered on clearance and never on case
+  assignment, so an analyst taken off a case kept reading its merges and
+  approvals indefinitely — and being removed from a case is far commoner
+  than having a clearance lowered. The outbox drain checked neither, so
+  the same material went out by **email**. `readable_predicate()` is now
+  that rule, written once and shared by `inbox()`, `unread_count()` and
+  the drain.
+- `check_egress` dropped the `compartments` argument entirely, so the two
+  call sites of the one shared gate disagreed about a third of its inputs
+  and `DENY_COMPARTMENTED` could never fire for a report.
+- Evidence egress was fed the exhibit's OWN compartments — a column with
+  no inheritance trigger and no code path that sets it, so reliably empty.
+- `lab.sample` was the one labelled table with no `enforce_tlp_floor`
+  trigger, so a sample in a RED compartmented case sat at the router's
+  `AMBER` default with nothing to catch it. Fixed at the service *and* in
+  migration 0043, because a rule enforced only in application code holds
+  until somebody writes the second caller — and `download()` was that
+  second caller.
+
+**2. Deriving a mark from part of a document.** Report release computed
+the document's classification from the graph body while copying the case
+header — code, title, summary, legal basis — in unfiltered. A RED case
+emitted a document marked **TLP:CLEAR** carrying the operation's codename,
+and that laundered value was what the egress gate was then asked about.
+
+**3. A defence that was written, tested, exported and never called.**
+`effective_labels_for_notification` composes an element's labels with its
+case's. It had a test and **zero production call sites**, beside a
+`notify()` that took the case's labels and used them verbatim. *Grep for
+the call sites of anything security-relevant, not just for its
+definition.*
+
+### Individually notable
+
+- **`reject()` destroyed sample bytes and the data key while ignoring
+  `legal_hold`**, which docs/08 says overrides all deletion, everywhere.
+  The two rules genuinely conflict — a prohibited-content policy may
+  require destruction, a preservation order requires retention — so the
+  destruction is refused and the conflict goes to a person, with
+  `purge_bytes=False` to record the rejection and keep the material. See
+  **docs/18 L1**: this is that open question arriving as a runtime refusal
+  rather than as a silent irreversible act.
+- **`submit()` wrote hostile bytes to the WORM bucket before the row
+  existed.** Object lock means an orphan there cannot be deleted by
+  anyone, including root. Row first, then bytes.
+- **A failed sample integrity check was silent** — it raised into a 409 and
+  recorded nothing, so the one signal that the malware store had been
+  altered produced an error message for one analyst. `core.evidence` has
+  written a failed `HASH_VERIFIED` custody row since Phase 1.
+- **The break-glass alert sent the security officer the case code, the
+  case classification and the analyst's justification verbatim.** Migration
+  0017 is explicit: *"SECURITY_OFFICER: can read the audit trail but NOT
+  case content."* The alert now carries a grant id and a clock; the case
+  owner gets the detail separately, which `KINDS` has always described and
+  nothing raised.
+- **Any authenticated user could redirect their own case notifications to
+  an arbitrary mailbox** — no permission, no step-up, no format check, no
+  audit. The egress gate cannot help: it reasons about the *kind* of
+  destination, so a corporate mailbox and a burner are one decision.
+
+### Two defects the suite could not see, found on a screenshot
+
+Recorded here because the lesson generalises: **look at it rendered.**
+
+- **The right-to-left override won.** `dir="ltr"` and `unicode-bidi:
+  isolate` set the *base* direction and leave an explicit U+202E doing
+  exactly its job, so a filename `harmless<RLO>fdp.exe` rendered as
+  `harmlessexe.pdf`. The CSS looked like the defence and was not one.
+  Deceptive characters are now substituted before reaching the DOM, at the
+  data boundary rather than at the two dozen sites a label is drawn.
+- **A staggered row animation could hide data.**
+  `animation-fill-mode: backwards` holds an element invisible for its whole
+  delay, so a screenshot showed three samples out of twenty-eight beside a
+  count that said 28.
+
+And a third, on the way out: `screenshot_ui.py` now refuses an output
+directory inside the repo that git would not ignore. `.gitignore` covered
+the default and that was treated as the control, until `--out shots` left
+fifteen renders of a live case untracked in the working tree.
+
+---
+
 ## Deferred security items
 
 Not defects, not done. Listed so they are not mistaken for oversights.
