@@ -60,6 +60,13 @@
     <span id="hdr-tlp" class="chip" hidden></span>
     <span class="spacer"></span>
     <span id="hdr-asof" class="hdr-asof mono" hidden>as-of: now</span>
+    <!-- Whether another analyst's changes will arrive without a refresh.
+         Shown rather than assumed: a push UI that silently stops pushing
+         is worse than one that never pushed, because people stop
+         refreshing. Title carries the explanation; the dot alone never
+         has to be the whole message. -->
+    <span id="live-dot" class="live-dot live-off" role="status"
+          aria-live="polite" aria-label="Live update status"></span>
     <button id="btn-palette" type="button" class="btn ghost small"
             aria-keyshortcuts="Control+K Meta+K"
             aria-label="Open the command palette">⌘K</button>

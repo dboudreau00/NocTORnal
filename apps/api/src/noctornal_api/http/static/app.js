@@ -463,6 +463,11 @@ function endSession(title, detail) {
   sessionStorage.removeItem(TOKEN_KEY);
   closePalette();
   stopGraph();
+  /* Before the view swap. A socket left open on a dead session keeps a
+     database connection LISTENing on the server for as long as the tab
+     lives, and the reconnect loop would retry against a token that is
+     gone — which reads as an attack in the audit log. */
+  disconnectLive();
   show($('view-app'), false);
   show($('view-login'), true);
   /* On first load a stale token is expected, not news — boot() handles it. */
@@ -664,6 +669,9 @@ async function openCase(caseId) {
        analyst without `sample.read` will 403 on it, and neither the wait
        nor the failure should delay a workspace that is otherwise ready. */
     refreshSampleBadge();
+    /* After the first full load, so an event arriving mid-boot cannot
+       race the initial fetch and redraw a half-built workspace. */
+    connectLive();
     selectTab('graph');
     // After the graph, so a deep-linked pane lands on a workspace that is
     // already populated rather than one still fetching.
@@ -6447,6 +6455,8 @@ async function openSample(id) {
   }
   body.appendChild(anal);
 
+  body.appendChild(detonationPanel(s, data.detonations || []));
+
   /* --- custody. Append-only, and it outlives the sample. */
   const cust = el('div', 'card sub');
   cust.appendChild(el('h3', 'h-xs', 'Access ledger'));
@@ -6472,6 +6482,191 @@ async function openSample(id) {
   body.appendChild(cust);
 
   body.appendChild(sampleActions(s));
+}
+
+/* ── detonation: the VM / sandbox surface ─────────────────────────────
+ *
+ * docs/11 is emphatic that you INTEGRATE with a sandbox rather than build
+ * one, and no integration exists. So this panel records an authorisation
+ * and submits nothing — and it says so on every row rather than once at
+ * the top, because a reader scanning a column of "AUTHORISED" should not
+ * have to remember that none of them went anywhere.
+ *
+ * The exposure level is the decision the panel exists to slow down.
+ * Submitting a sample to a public sandbox exposes the sample AND your
+ * interest in it; operators watch public sandboxes for their own malware
+ * and treat a hit as a signal they have been noticed, which can end an
+ * operation that took months to build. That is why anything other than a
+ * private instance needs a named authoriser and a written reason — a
+ * database CHECK enforces it, and this form asks for it rather than
+ * letting the server refuse after the fact.
+ */
+
+const EXPOSURE = [
+  ['NONE', 'Private instance — nothing leaves your estate',
+    'A sandbox you run. The sample does not leave the boundary and nobody '
+    + 'outside learns you hold it. No authoriser required.'],
+  ['VENDOR', 'Vendor sandbox — the vendor sees the sample',
+    'The sample and its hash reach a commercial vendor. Several "private" '
+    + 'tiers still share hashes with partners; confirm what yours does '
+    + 'before relying on this being quiet.'],
+  ['PUBLIC', 'Public sandbox — anyone watching sees it',
+    'The sample, its hash and the fact somebody submitted it become '
+    + 'public. Operators monitor public sandboxes for their own samples. '
+    + 'Assume the subject learns you have it, the same day.'],
+];
+
+function detonationPanel(s, rows) {
+  const box = el('details', 'card sub');
+  const summary = el('summary', null,
+    'Detonation / VM' + (rows.length ? ` (${rows.length})` : ''));
+  box.appendChild(summary);
+
+  box.appendChild(el('p', 'help warn',
+    'Nothing here submits anything anywhere. There is no sandbox '
+    + 'integration in this build — docs/11 says integrate rather than '
+    + 'build, and none has been integrated. What this records is the '
+    + 'AUTHORISATION, captured before anything could be sent, so that it '
+    + 'exists whether or not an integration ever appears.'));
+
+  if (rows.length) {
+    const list = el('div', 'rows');
+    for (const d of rows) list.appendChild(detonationRow(d));
+    box.appendChild(list);
+  } else {
+    box.appendChild(el('p', 'muted', 'No detonation requested.'));
+  }
+
+  /* --- the request form */
+  const form = el('div', 'stack');
+  form.appendChild(el('hr', 'rule'));
+  form.appendChild(el('h3', 'h-xs', 'Request a detonation'));
+
+  const target = el('input', 'input');
+  target.type = 'text';
+  target.spellcheck = false;
+  target.placeholder = 'which VM or sandbox — e.g. "lab-win10-isolated"';
+  const targetField = el('label', 'field');
+  targetField.appendChild(el('span', 'label', 'Target'));
+  targetField.appendChild(target);
+  form.appendChild(targetField);
+
+  const exposure = el('select', 'select');
+  for (const [value, label] of EXPOSURE) {
+    const o = el('option', null, label);
+    o.value = value;
+    exposure.appendChild(o);
+  }
+  const exposureField = el('label', 'field');
+  exposureField.appendChild(el('span', 'label', 'Exposure'));
+  exposureField.appendChild(exposure);
+  form.appendChild(exposureField);
+
+  /* The consequence of the selected level, in place, updating as it
+     changes. A dropdown whose options differ by one word and by an
+     operation is a dropdown somebody gets wrong once. */
+  const consequence = el('p', 'help');
+  const paint = () => {
+    const entry = EXPOSURE.find((e) => e[0] === exposure.value);
+    consequence.textContent = entry ? entry[2] : '';
+    consequence.className = 'help' + (exposure.value === 'NONE' ? '' : ' warn');
+    show(authWrap, exposure.value !== 'NONE');
+  };
+
+  const authWrap = el('div', 'stack');
+  const auth = el('input', 'input');
+  auth.type = 'text';
+  auth.spellcheck = false;
+  auth.placeholder = 'user id of the person authorising this';
+  const authField = el('label', 'field');
+  authField.appendChild(el('span', 'label', 'Authorised by'));
+  authField.appendChild(auth);
+  authWrap.appendChild(authField);
+  const note = el('textarea', 'input');
+  note.rows = 2;
+  note.placeholder = 'why the exposure is acceptable — this is what a later '
+    + 'review reads';
+  const noteField = el('label', 'field');
+  noteField.appendChild(el('span', 'label', 'Authorisation note'));
+  noteField.appendChild(note);
+  authWrap.appendChild(noteField);
+  authWrap.appendChild(el('p', 'help warn',
+    'A named human and a written reason are required by a database '
+    + 'constraint, not just by this form. Submitting to a vendor or public '
+    + 'sandbox exposes the sample AND your interest in it, so it cannot be '
+    + 'a side effect of clicking Analyse.'));
+
+  form.appendChild(consequence);
+  form.appendChild(authWrap);
+
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const btn = el('button', 'btn', 'Record the request');
+  btn.type = 'button';
+  btn.addEventListener('click', async () => {
+    if (!target.value.trim()) {
+      setMsg(msg, 'Name the VM or sandbox.');
+      msg.className = 'msg bad';
+      return;
+    }
+    btn.disabled = true;
+    const payload = {
+      target: target.value.trim(),
+      exposure_level: exposure.value,
+    };
+    if (exposure.value !== 'NONE') {
+      payload.authorised_by = auth.value.trim() || null;
+      payload.note = note.value.trim() || null;
+    }
+    try {
+      await api('/samples/' + encodeURIComponent(s.id) + '/detonation', {
+        method: 'POST', json: payload,
+      });
+      setMsg(msg, 'Recorded. Nothing has been sent anywhere.');
+      msg.className = 'msg ok';
+      await openSample(s.id);
+    } catch (err) {
+      setMsg(msg, refusalText(err,
+        'Requesting a detonation needs sample.detonate and a fresh second '
+        + 'factor.'));
+      msg.className = 'msg bad';
+      btn.disabled = false;
+    }
+  });
+  form.appendChild(msg);
+  form.appendChild(btn);
+  box.appendChild(form);
+
+  exposure.addEventListener('change', paint);
+  paint();
+  return box;
+}
+
+function detonationRow(d) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', d.target));
+  head.appendChild(el('span', 'chip exposure-' + d.exposure_level,
+    d.exposure_level.toLowerCase()));
+  head.appendChild(el('span', 'chip', d.status.toLowerCase()));
+  /* On EVERY row. "AUTHORISED" reads as "it went" unless something says
+     otherwise, and nothing in this build ever sends. */
+  const never = el('span', 'chip ok', 'not submitted');
+  never.title = 'No sandbox integration exists. This row is an '
+    + 'authorisation record, not a submission.';
+  head.appendChild(never);
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('requested by', d.requested_by));
+  facts.appendChild(fact('when',
+    (d.requested_at || '').slice(0, 16).replace('T', ' ')));
+  if (d.authorised_by) facts.appendChild(fact('authorised by', d.authorised_by));
+  card.appendChild(facts);
+  if (d.authorisation_note) {
+    card.appendChild(el('p', 'why', d.authorisation_note));
+  }
+  return card;
 }
 
 /** The dangerous half. Deliberately below everything an analyst can act on
@@ -6690,6 +6885,116 @@ async function submitSample() {
     msg.className = 'msg ' + (legal ? 'warn' : 'bad');
   } finally {
     btn.disabled = false;
+  }
+}
+
+/* ── live change hints ────────────────────────────────────────────────
+ *
+ * Until this existed there was no timer anywhere in this file. Two
+ * analysts on one case each saw the graph as it was when they opened it,
+ * and a merge one of them performed was invisible to the other until a
+ * manual refresh — in a tool whose entire premise is a shared picture.
+ *
+ * The socket carries NO case content. An event says "case X changed, kind
+ * node" and the client refetches through the ordinary gated endpoints. So
+ * nothing here has to reason about classifications or compartments, which
+ * is the point: that filtering has been got wrong in five separate places
+ * in this codebase already.
+ *
+ * It is also entirely optional. If the socket will not connect the console
+ * behaves exactly as it did before — the analyst refreshes — and the
+ * status dot says so rather than pretending to be live. A push UI that
+ * silently stops pushing is worse than one that never pushed, because
+ * people stop refreshing.
+ */
+
+let _ws = null;
+let _wsRetry = 0;
+let _wsTimer = null;
+
+/** Coalesce a burst. A bulk import fires one event per statement, and an
+ *  import is many statements; refetching the projection per event would
+ *  turn somebody else's write into our own denial of service. */
+const _refetchSoon = debounce(async () => {
+  if (!state.caseId) return;
+  try {
+    await loadCaseGraph();
+    await refreshSociogram();
+  } catch (_e) {
+    /* A failed refetch is not worth a banner: the next event or a manual
+       refresh will pick it up, and the socket is a convenience. */
+  }
+}, 900);
+
+const _badgeSoon = debounce(() => { refreshInboxBadge(); }, 400);
+
+function liveStatus(state_) {
+  const dot = $('live-dot');
+  if (!dot) return;
+  dot.className = 'live-dot live-' + state_;
+  dot.title = {
+    live: 'Live. Changes to this case by other analysts arrive without a '
+      + 'refresh.',
+    connecting: 'Connecting to the live channel…',
+    off: 'Not live. The console works normally; you will need to refresh '
+      + 'to see another analyst\'s changes. This is a convenience, not a '
+      + 'correctness feature.',
+  }[state_] || '';
+}
+
+function connectLive() {
+  if (!state.token || !window.WebSocket) { liveStatus('off'); return; }
+  disconnectLive();
+  liveStatus('connecting');
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let ws;
+  try {
+    ws = new WebSocket(`${scheme}//${location.host}${API}/live`);
+  } catch (_e) {
+    liveStatus('off');
+    return;
+  }
+  _ws = ws;
+
+  ws.addEventListener('open', () => {
+    /* The token goes in the FIRST FRAME, never the URL. A URL lands in
+       proxy logs, browser history and Referer, and this one would carry a
+       session bearer token. WebSocket has no header API in the browser,
+       so the first frame is the only place left. */
+    ws.send(JSON.stringify({ token: state.token, case_id: state.caseId }));
+  });
+
+  ws.addEventListener('message', (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch (_e) { return; }
+    if (msg.type === 'ready') { _wsRetry = 0; liveStatus('live'); return; }
+    if (msg.type !== 'change') return;
+    if (msg.kind === 'notification') { _badgeSoon(); return; }
+    _refetchSoon();
+  });
+
+  ws.addEventListener('close', () => {
+    if (_ws === ws) _ws = null;
+    liveStatus('off');
+    /* Reconnect with a backoff, and give up after a while rather than
+       hammering a server that has told us no. `1008` is the policy close
+       the server sends for a bad token or a revoked assignment — retrying
+       that is pointless and looks like an attack in the audit log. */
+    if (!state.token || _wsRetry >= 6) return;
+    const delay = Math.min(30000, 1000 * Math.pow(2, _wsRetry));
+    _wsRetry += 1;
+    _wsTimer = setTimeout(connectLive, delay);
+  });
+
+  ws.addEventListener('error', () => { /* `close` follows; handled there */ });
+}
+
+function disconnectLive() {
+  if (_wsTimer) { clearTimeout(_wsTimer); _wsTimer = null; }
+  if (_ws) {
+    const ws = _ws;
+    _ws = null;
+    try { ws.close(); } catch (_e) { /* already gone */ }
   }
 }
 

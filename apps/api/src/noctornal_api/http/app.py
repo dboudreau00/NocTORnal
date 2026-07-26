@@ -34,6 +34,7 @@ from noctornal_api.http.routers import (
     graph,
     graphview,
     ingest,
+    live,
     merges,
     notifications,
     proposals,
@@ -148,7 +149,11 @@ def create_app() -> FastAPI:
                    ach.router, reports.router,
                    comms.router, comms.global_router,
                    governance.router, governance.break_glass_router,
-                   collection.router, ingest.router):
+                   collection.router, ingest.router,
+                   # The change-hint socket. Carries no case content by
+                   # design — see `live.py`; the client refetches through
+                   # the gated REST endpoints.
+                   live.router):
         app.include_router(router, prefix=API_PREFIX)
 
     # The analyst UI: plain HTML/CSS/JS, no build step, same origin as the
