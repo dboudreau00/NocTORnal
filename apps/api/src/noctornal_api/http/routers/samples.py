@@ -278,6 +278,7 @@ def detail(
         raise Problem(404, "Not found", "no such sample")
     return {"sample": _out(sample).model_dump(mode="json"),
             "analyses": svc.analyses(sample_id),
+            "detonations": svc.detonations(sample_id),
             "custody": svc.custody(sample_id)}
 
 
