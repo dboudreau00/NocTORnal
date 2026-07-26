@@ -197,7 +197,8 @@ class ReportBuilder:
     def build(self, case_id: UUID, *, target_tlp: str,
               generated_by: UUID,
               preset: str = "all",
-              include_hypotheses: bool = True) -> Report:
+              include_hypotheses: bool = True,
+              compartments: frozenset[str] = frozenset()) -> Report:
         """Build at `target_tlp`. Nothing above it is read at any point.
 
         The projection is computed with the TARGET as the clearance, which
@@ -225,12 +226,19 @@ class ReportBuilder:
         # The case header -- code, title, summary, legal basis, authority
         # reference -- is material classified at the case's own level, not
         # free metadata. It goes in only when the case's labels are within
-        # what was asked for. `compartments` is part of that test: the
-        # projection below is built with none, so including a compartmented
-        # case's title would be the one piece of compartmented material in a
-        # document that excluded all the others.
+        # what was asked for, on BOTH axes.
+        #
+        # `compartments` is the requester's read-in, and it is a real
+        # parameter rather than a hardcoded empty set. The first version of
+        # this fix hardcoded it, which closed the leak and broke the
+        # feature: an analyst read into a compartment could not produce a
+        # report naming their OWN case, and `report.compartments` was
+        # therefore always empty, so `DENY_COMPARTMENTED` remained
+        # unreachable on the built path — the exact defect the same fix had
+        # just repaired in `check_egress`. Closing a hole by refusing
+        # everybody is its own defect.
         header_ok = (tlp_from_name(case_tlp) <= target
-                     and not case_compartments)
+                     and case_compartments <= compartments)
 
         # `target_tlp` is a CEILING on what may be included, not the mark the
         # document gets. The mark is derived below from what actually went
@@ -244,30 +252,26 @@ class ReportBuilder:
         # The redacted view, from the SAME code path that protects a live
         # analyst.
         redacted = GraphService(self._c, clearance=target.name,
-                                compartments=frozenset())
+                                compartments=compartments)
         projection = Projection(case_id=case_id, preset=preset,
                                 include_inferred=False, min_confidence="LOW",
                                 as_of=None)
         sub = redacted.project(projection, limit=5000)
         withheld = redacted.withheld(projection)
 
-        # `compartments = '{}'` mirrors the projection, which is built with
-        # no compartments. Without it the exhibit register was the one place
-        # compartmented material entered a report -- the graph filtered it,
-        # the evidence query did not, and `core.evidence.compartments` is
-        # never populated from the case (there is a classification floor
-        # trigger and no compartment inheritance at all), so this is the
-        # exhibit's OWN compartments and they are usually empty. Both halves
-        # matter: the query below, and the case-level union in
-        # `report.compartments`.
+        # The compartment filter mirrors the projection, which is built at
+        # the requester's read-in. Without it the exhibit register was the
+        # one place compartmented material entered a report: the graph
+        # filtered it and the evidence query did not.
         evidence_rows = self._c.execute(
             """SELECT id, title, sha256, blake3, media_type, byte_size,
-                      acquired_at, acquisition_method, classification
+                      acquired_at, acquisition_method, classification,
+                      compartments
                  FROM core.evidence
                 WHERE case_id = %s AND classification <= %s::core.tlp
-                  AND compartments <@ '{}'::text[]
+                  AND compartments <@ %s
                 ORDER BY acquired_at""",
-            (case_id, target.name)).fetchall()
+            (case_id, target.name, sorted(compartments))).fetchall()
         evidence_total = self._c.execute(
             "SELECT count(*) FROM core.evidence WHERE case_id = %s",
             (case_id,)).fetchone()[0]
@@ -337,9 +341,15 @@ class ReportBuilder:
                 "opened": case[9].isoformat()
                 if header_ok and case[9] else None,
             },
-            # Only the header can contribute compartments: the projection is
-            # built with none and the exhibit query now excludes them.
-            compartments=case_compartments if header_ok else frozenset(),
+            # The union of what actually went in: the case header when it
+            # is included, plus every exhibit's own. The projection's nodes
+            # and edges cannot contribute beyond the requester's read-in
+            # because `GraphService` filtered on it, and an exhibit is in
+            # the register for the same reason — so this is bounded by
+            # `compartments` and is the honest subset of it, not the whole.
+            compartments=frozenset(
+                (case_compartments if header_ok else frozenset())
+                | {c for r in evidence_rows for c in (r[9] or [])}),
             redaction=redaction,
             summary={
                 "entities": len(sub.nodes),

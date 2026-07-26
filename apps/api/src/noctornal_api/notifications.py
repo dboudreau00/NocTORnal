@@ -674,11 +674,18 @@ def effective_labels_for_notification(
     when it was written, reviewed and then never wired in; grep for the
     call sites of anything security-relevant, not just for its definition.
     """
-    strictest = case_classification
+    # The case's label is parsed UNCONDITIONALLY, even when there is no
+    # element to compare it against. The first version only parsed inside
+    # the `if`, so `notify()`'s "fail closed and loudly" applied to
+    # notifications about an element and not to the plain ones — an
+    # unparseable classification fell through to the INSERT and surfaced as
+    # a psycopg DataError. A validator that only runs on the harder input
+    # is not a validator.
+    case_level = tlp_from_name(case_classification)
+    strictest = case_level
     if element_classification is not None:
-        strictest = max(tlp_from_name(case_classification),
-                        tlp_from_name(element_classification)).name
-    return strictest, case_compartments | element_compartments
+        strictest = max(case_level, tlp_from_name(element_classification))
+    return strictest.name, case_compartments | element_compartments
 
 
 # Bare for INSERT ... RETURNING; table-qualified for the reads, which join
