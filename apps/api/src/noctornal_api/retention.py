@@ -105,6 +105,12 @@ class PurgeResult:
     tombstones: list[UUID] = field(default_factory=list)
     evidence_purged: int = 0
     documents_purged: int = 0
+    #: Ingest, added 2026-07-25 (docs/17 F17(a)). Counted SEPARATELY rather
+    #: than folded into a total: an exhibit and a partner's raw record have
+    #: different authority behind their destruction, and a single number
+    #: would hide which of the two an operator just destroyed.
+    records_purged: int = 0
+    dead_letters_purged: int = 0
     held_back: int = 0
     storage_locked: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -218,6 +224,54 @@ class RetentionService:
                 deadline=row[1], rule=f"retention_rule[{row[3]}]",
                 held=bool(row[2]),
                 hold_reason="document-level legal hold" if row[2] else None))
+
+        # Ingest. docs/17 F17(a): `ingest.record.retain_until` has carried a
+        # clock since migration 0033 and `ingest.dead_letter.retain_until`
+        # since 0040, and until now NOTHING read either. The labels and the
+        # gating shipped; the expiry did not. The 90-day dead-letter default
+        # was chosen precisely because unassessed third-party victim data
+        # deserves the shortest rule, and a clock nobody reads delivers the
+        # longest possible one instead.
+        #
+        # A case legal hold covers ingest records attached to that case: a
+        # hold that stopped at the schema boundary would be a hold with a
+        # gap in it, and the material on the ingest side is the material
+        # most likely to be the subject of one.
+        records = self._c.execute(
+            """SELECT r.id, r.case_id, r.retain_until, r.category,
+                      coalesce(c.legal_hold, false)
+                 FROM ingest.record r
+                 LEFT JOIN core."case" c ON c.id = r.case_id
+                WHERE r.purged_at IS NULL AND r.retain_until IS NOT NULL
+                  AND r.retain_until <= %s
+                  AND (%s::uuid IS NULL OR r.case_id = %s)
+                ORDER BY r.retain_until LIMIT %s""",
+            (now, case_id, case_id, limit)).fetchall()
+        for row in records:
+            items.append(DueItem(
+                object_type="ingest_record", object_id=row[0], case_id=row[1],
+                deadline=row[2], rule=f"retention_rule[{row[3]}]",
+                held=bool(row[4]),
+                hold_reason="case-level legal hold" if row[4] else None))
+
+        # Dead letters have no case, so no case hold can reach them. They
+        # are scoped out entirely when a case_id is named rather than
+        # silently included in every case's sweep.
+        if case_id is None:
+            dead = self._c.execute(
+                """SELECT dl.id, dl.retain_until, dl.redacted
+                     FROM ingest.dead_letter dl
+                    WHERE dl.purged_at IS NULL AND dl.retain_until IS NOT NULL
+                      AND dl.retain_until <= %s
+                    ORDER BY dl.retain_until LIMIT %s""",
+                (now, limit)).fetchall()
+            for row in dead:
+                items.append(DueItem(
+                    object_type="dead_letter", object_id=row[0], case_id=None,
+                    deadline=row[1], rule="dead_letter[90d default]",
+                    held=False,
+                    hold_reason=None if row[2] else
+                    "predates the redactor: still verbatim on disk"))
         return items
 
     # -- purge -------------------------------------------------------------
@@ -258,6 +312,10 @@ class RetentionService:
                         if i.object_type == "evidence"]
         document_ids = [i.object_id for i in actionable
                         if i.object_type == "document"]
+        record_ids = [i.object_id for i in actionable
+                      if i.object_type == "ingest_record"]
+        dead_ids = [i.object_id for i in actionable
+                    if i.object_type == "dead_letter"]
 
         with self._c.transaction():
             if evidence_ids:
@@ -293,6 +351,47 @@ class RetentionService:
                     case_id=case_id, object_type="document",
                     ids=document_ids, authority=authority, actor_id=actor_id,
                     rule="retention_rule", storage_outcome=STORAGE_NA))
+
+            # Ingest records. The PAYLOAD goes; the row stays, exactly as
+            # for a document. Keeping the row is what lets "we held 4,000
+            # records from that feed and destroyed them on this date" be
+            # answered without holding them -- and the victim credentials
+            # attached to the record have to go with it, or the payload is
+            # destroyed and the credential it named is not.
+            if record_ids:
+                self._c.execute(
+                    "DELETE FROM ingest.victim_credential "
+                    "WHERE record_id = ANY(%s)", (record_ids,))
+                self._c.execute(
+                    """UPDATE ingest.record
+                          SET purged_at = now(), payload = '{}'::jsonb,
+                              priority_detail = '{}'::jsonb
+                        WHERE id = ANY(%s)""", (record_ids,))
+                result.records_purged = len(record_ids)
+                result.tombstones.append(self._tombstone(
+                    case_id=case_id, object_type="ingest_record",
+                    ids=record_ids, authority=authority, actor_id=actor_id,
+                    rule="retention_rule", storage_outcome=STORAGE_NA))
+
+            if dead_ids:
+                # `raw_fragment` is NOT NULL (0033), so it is replaced
+                # rather than blanked -- and `redacted` is set true in the
+                # same statement, because migration 0040's CHECK is
+                # re-evaluated on every UPDATE and a pre-redactor row would
+                # otherwise be the ONE thing a purge cannot destroy.
+                self._c.execute(
+                    """UPDATE ingest.dead_letter
+                          SET purged_at = now(),
+                              raw_fragment = '[purged on retention]',
+                              error_detail = NULL,
+                              redacted = true
+                        WHERE id = ANY(%s)""", (dead_ids,))
+                result.dead_letters_purged = len(dead_ids)
+                result.tombstones.append(self._tombstone(
+                    case_id=None, object_type="dead_letter",
+                    ids=dead_ids, authority=authority, actor_id=actor_id,
+                    rule="dead_letter[90d default]",
+                    storage_outcome=STORAGE_NA))
         return result
 
     def purge_out_of_schedule(self, *, actor_id: UUID, authority: str,
