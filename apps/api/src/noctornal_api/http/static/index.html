@@ -153,6 +153,13 @@
          with the timeline scrubber under the canvas. -->
     <section id="view-workspace" class="workspace" hidden>
 
+      <!-- One indicator for every fetch in the app, driven by an in-flight
+           counter in api(). A pane that fetches and draws nothing is
+           indistinguishable from a pane that is broken, and several here
+           load four sections independently. aria-hidden because the
+           sections it covers announce their own state. -->
+      <div id="busy" class="busy" aria-hidden="true" hidden></div>
+
       <nav class="rail" role="tablist" aria-orientation="vertical"
            aria-label="Case views">
         <button id="tab-graph" type="button" class="tab rail-btn" role="tab"
@@ -1714,6 +1721,56 @@
 </div>
 
 <!-- ─────────────────── COMMAND PALETTE (⌘K / Ctrl+K) ─────────────────── -->
+<!-- Keyboard reference. This app is driven from the keyboard more than it
+     looks: the triage queue is J/K, the sociogram takes space and
+     shift-click, and the palette is the fastest way to anything. All of it
+     was documented in a 10px legend under the canvas, which is to say
+     nowhere. `?` is the convention and costs one keystroke to discover. -->
+<div id="keys-scrim" class="palette-scrim" hidden>
+  <div class="palette keys-sheet" role="dialog" aria-modal="true"
+       aria-labelledby="keys-heading">
+    <h2 id="keys-heading" class="h-sm">Keyboard</h2>
+    <div class="keys-grid">
+      <h3 class="h-xs">Anywhere</h3>
+      <dl class="keys">
+        <dt><span class="kbd" id="keys-palette">Ctrl K</span></dt>
+        <dd>Command palette — entities, projections, commands</dd>
+        <dt><span class="kbd">?</span></dt>
+        <dd>This sheet</dd>
+        <dt><span class="kbd">Esc</span></dt>
+        <dd>Close whatever is open</dd>
+      </dl>
+
+      <h3 class="h-xs">Sociogram</h3>
+      <dl class="keys">
+        <dt><span class="kbd">drag</span></dt><dd>Pan</dd>
+        <dt><span class="kbd">scroll</span></dt><dd>Zoom</dd>
+        <dt><span class="kbd">click</span></dt><dd>Inspect an element</dd>
+        <dt><span class="kbd">dbl-click</span></dt><dd>Ego network</dd>
+        <dt><span class="kbd">shift-click</span></dt>
+        <dd>Shortest path from the selection</dd>
+        <dt><span class="kbd">space</span></dt>
+        <dd>Hide inferred edges while held — the fastest way to see how
+            much of a picture is assessment rather than evidence</dd>
+      </dl>
+
+      <h3 class="h-xs">Triage</h3>
+      <dl class="keys">
+        <dt><span class="kbd">J</span> <span class="kbd">K</span></dt>
+        <dd>Next / previous proposal</dd>
+        <dt><span class="kbd">A</span></dt><dd>Accept</dd>
+        <dt><span class="kbd">R</span></dt><dd>Reject</dd>
+      </dl>
+    </div>
+    <p class="help">
+      Nothing here writes to the graph without a confirmation step. Accept
+      in triage promotes a <em>proposal</em>, which is still an assertion
+      with a source and a grading — machines propose, analysts dispose.
+    </p>
+    <button id="keys-close" type="button" class="btn">Close</button>
+  </div>
+</div>
+
 <div id="palette-scrim" class="palette-scrim" hidden>
   <div id="palette" class="palette" role="dialog" aria-modal="true"
        aria-labelledby="palette-heading">

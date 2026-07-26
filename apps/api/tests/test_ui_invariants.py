@@ -283,14 +283,38 @@ def test_every_pane_is_reachable_from_the_rail():
 
 
 @pytest.mark.parametrize("element_id", sorted({
-    # The lab pane's ids, which app.js addresses by name. A typo in either
-    # file is a silent no-op at boot -- $() returns null and the listener is
-    # never attached, so the button simply does nothing when clicked.
+    # Ids app.js addresses by name. A typo in either file is a silent no-op
+    # at boot -- $() returns null and the listener is never attached, so
+    # the button simply does nothing when clicked, with no error anywhere.
     "smp-policy", "smp-state", "smp-refresh", "smp-counts", "smp-list",
     "smp-empty", "smp-detail", "smp-detail-title", "smp-detail-body",
     "smp-close", "smp-file", "smp-case", "smp-class", "smp-note",
     "smp-submit", "smp-submit-msg", "smp-origin", "samples-badge",
+    "busy", "keys-scrim", "keys-close", "keys-palette",
 }))
-def test_lab_element_ids_exist(element_id: str):
+def test_element_ids_exist(element_id: str):
     assert f'id="{element_id}"' in _html(), (
         f"app.js addresses #{element_id} and index.html does not define it")
+
+
+def test_the_busy_indicator_cannot_get_stuck_on():
+    """A busy bar that never clears is worse than none: it says the app is
+    working when it has given up. The decrement has to be in a `finally`,
+    because half the calls in this app throw on a 403 by design."""
+    js = _js()
+    start = js.index("async function api(path, options)")
+    body = js[start:js.index("\nasync function", start + 10)]
+    assert "_busy(+1)" in body
+    assert "finally {" in body and "_busy(-1)" in body, (
+        "the indicator is decremented outside a finally, so a throw strands "
+        "it on")
+
+
+def test_the_shortcut_sheet_does_not_hijack_typing():
+    """`?` is a printable character. An analyst typing a case note must get
+    a question mark, not a modal."""
+    js = _js()
+    start = js.index("if (e.key === '?'")
+    guard = js[start:start + 500]
+    assert "isContentEditable" in guard
+    assert "'TEXTAREA'" in guard and "'INPUT'" in guard
