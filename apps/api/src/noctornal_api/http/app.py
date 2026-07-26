@@ -29,6 +29,7 @@ from noctornal_api.http.routers import (
     cases,
     collection,
     comms,
+    deception,
     evidence,
     governance,
     graph,
@@ -150,6 +151,8 @@ def create_app() -> FastAPI:
                    comms.router, comms.global_router,
                    governance.router, governance.break_glass_router,
                    collection.router, ingest.router,
+                   # Phishing / vishing / BEC evidence (docs/19).
+                   deception.router,
                    # The change-hint socket. Carries no case content by
                    # design — see `live.py`; the client refetches through
                    # the gated REST endpoints.

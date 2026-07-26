@@ -179,19 +179,74 @@ def mxid_norm(v: str) -> str:
 
 
 def telegram_id_norm(v: str) -> str:
-    """Telegram numeric IDs: user IDs are positive; Bot-API prefixes
-    supergroups/channels with -100 (strip it — the MTProto form of the
-    same channel has no prefix) and basic-group chat IDs with a bare
-    minus (KEEP it — a chat id and an unrelated user id must never share
-    a norm_value)."""
+    """Telegram numeric IDs, decoded arithmetically and namespaced by type.
+
+    Three Telegram id spaces overlap numerically and must never collide in
+    `norm_value`, because `TELEGRAM_ID` is `is_strong` and therefore feeds
+    auto-merge — where a false merge is worse than a missed one:
+
+        u:<id>   user
+        c:<id>   channel / supergroup
+        g:<id>   basic group
+
+    ## CR3 (2026-07-26) — the old version string-stripped a leading "100"
+
+    The Bot-API encoding is ARITHMETIC: `chat_id = -(10**12 + channel_id)`.
+    Dropping the characters `100` from the front happens to invert that
+    only when the channel id is exactly ten digits, which is why the one
+    test covering the ten-digit case passed while the function was wrong.
+
+    - A NINE-digit channel id encodes to `-1000123456789`; stripping three
+      characters leaves `0123456789`, with a spurious leading zero that
+      matches nothing.
+    - An ELEVEN-digit id (common since the 64-bit migration) encodes to
+      `-112345678901`, which does not begin `100` after the sign, so the
+      strip never fires and the two observations of one channel never
+      meet.
+    - A ten-digit channel id normalised to bare digits equal to an
+      unrelated USER id — and with a strong selector, that is a channel
+      and a person auto-merged onto one row.
+
+    Namespacing also removes a whole class of collision the arithmetic
+    alone would not: a user id and a channel id may be the same number and
+    are not the same thing.
+
+    ## A bare positive integer is genuinely ambiguous, and stays that way
+
+    In MTProto, user ids and channel ids are separate spaces and both
+    positive, so `1234567890` alone cannot be resolved — it is a user id
+    or a channel id and nothing in the string says which. This function
+    assumes `u:`, because a bare positive in the wild is overwhelmingly a
+    user, and **accepts an explicit `u:`/`c:`/`g:` prefix from a caller
+    that knows better**. A scraper recording an MTProto channel should pass
+    `c:1234567890`, and it will then meet the Bot-API observation
+    `-1001234567890` on the same `c:` row.
+
+    Guessing instead of separating is what the old version did, and it is
+    the wrong trade for a strong selector: a missed merge is an analyst's
+    afternoon, a false merge is a channel and a person fused into one
+    actor.
+    """
     s = v.strip()
-    neg = s.startswith("-")
-    d = _NON_DIGIT.sub("", s)
-    if neg and d.startswith("100") and len(d) > 3:
-        return d[3:]
-    if neg and d:
-        return "-" + d
-    return d
+    for prefix in ("u:", "c:", "g:"):
+        if s.lower().startswith(prefix):
+            rest = _NON_DIGIT.sub("", s[2:])
+            return prefix + str(int(rest)) if rest else ""
+    negative = s.startswith("-")
+    digits_only = _NON_DIGIT.sub("", s)
+    if not digits_only:
+        return ""
+    if not negative:
+        return "u:" + str(int(digits_only))
+
+    value = int(digits_only)
+    # Bot-API supergroup/channel: -(10**12 + id). The MTProto form of the
+    # same channel is the bare id, so both must land on c:<id>.
+    if value > 1_000_000_000_000:
+        return "c:" + str(value - 1_000_000_000_000)
+    # A bare negative is a basic-group chat id. Distinct space, kept
+    # distinct — it is not a channel and it is not a user.
+    return "g:" + str(value)
 
 
 def tlsh_norm(v: str) -> str:
@@ -308,6 +363,51 @@ def tox_pubkey(v: str) -> str:
     return s
 
 
+def sip_norm(v: str) -> str:
+    """Bare SIP AOR: scheme lowercased, user part kept BYTE-EXACT, host
+    lowercased, and the parameters dropped.
+
+    Two deliberate asymmetries, both from RFC 3261 §19.1.4:
+
+    - The user part is case-SENSITIVE. `sip:Alice@x` and `sip:alice@x`
+      are different AORs, and folding them would merge two subscribers.
+      (Contrast `email_norm`, where the local part is folded because
+      every mailbox provider in practice treats it that way.)
+    - `;user=phone`, `;transport=tls` and friends are transport
+      decisions, not identity — the same AOR observed over UDP and over
+      TLS must collide, so the parameters go.
+
+    A trailing `;tag=` never belongs to an AOR at all; it is dialogue
+    state that only appears if someone pasted a raw From: header.
+    """
+    s = v.strip()
+    if "<" in s and ">" in s:                     # a name-addr: "Bob" <sip:b@x>
+        s = s[s.find("<") + 1:s.find(">")].strip()
+    scheme, sep, rest = s.partition(":")
+    if not sep or scheme.lower() not in ("sip", "sips", "tel"):
+        return s
+    rest = rest.split(";", 1)[0].split("?", 1)[0]
+    user, at, host = rest.rpartition("@")
+    if not at:                                    # tel: or a hostless AOR
+        return f"{scheme.lower()}:{rest.lower()}"
+    return f"{scheme.lower()}:{user}@{host.lower()}"
+
+
+def msgid_norm(v: str) -> str:
+    """RFC 5322 Message-ID without its angle brackets.
+
+    The id-left is case-sensitive per the grammar and is left alone; only
+    the domain-ish id-right folds. This is a WEAK selector by design
+    (docs/19) — a Message-ID on attacker-sent mail is attacker-generated,
+    so it fingerprints the sending KIT, never the sender.
+    """
+    s = v.strip()
+    if s.startswith("<") and s.endswith(">"):
+        s = s[1:-1].strip()
+    left, at, right = s.rpartition("@")
+    return f"{left}@{right.lower()}" if at else s
+
+
 NORMALISERS: dict[str, Callable[[str], str]] = {
     "exact": exact,
     "trim": trim,
@@ -334,6 +434,8 @@ NORMALISERS: dict[str, Callable[[str], str]] = {
     "asn_norm": asn_norm,
     "url_norm": url_norm,
     "tox_pubkey": tox_pubkey,
+    "sip_norm": sip_norm,
+    "msgid_norm": msgid_norm,
 }
 
 

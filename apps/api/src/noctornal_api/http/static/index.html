@@ -262,6 +262,13 @@
           <span class="rail-cap">Lab</span>
           <span id="samples-badge" class="rail-badge" hidden></span>
         </button>
+        <button id="tab-deception" type="button" class="tab rail-btn"
+                role="tab" aria-controls="pane-deception" aria-selected="false"
+                tabindex="-1" data-tab="deception"
+                title="Phishing captures, BEC email and vishing call records">
+          <span class="rail-glyph" aria-hidden="true">&#x2691;</span>
+          <span class="rail-cap">Deception</span>
+        </button>
         <span class="rail-gap"></span>
         <button id="tab-add-node" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
@@ -1443,6 +1450,103 @@
         </section>
 
         <!-- ADD ENTITY -->
+        <!-- DECEPTION: phishing / vishing / BEC (docs/19) -->
+        <section id="pane-deception" class="pane" role="tabpanel"
+                 aria-labelledby="tab-deception" tabindex="-1" hidden>
+
+          <div class="subtabs" role="tablist" aria-label="Deception evidence">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="captures"
+                    aria-controls="dcp-captures-pane">Web captures</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="emails"
+                    aria-controls="dcp-emails-pane">Email / BEC</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="calls"
+                    aria-controls="dcp-calls-pane">Calls / vishing</button>
+          </div>
+
+          <!-- WEB CAPTURES -->
+          <div id="dcp-captures-pane" class="subpane">
+            <div class="pane-head">
+              <h2 class="h-sm">Web captures</h2>
+              <button id="dcp-cap-refresh" type="button" class="btn">
+                Refresh</button>
+              <span id="dcp-cap-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              A screenshot on its own proves somebody had a screenshot. The
+              evidence is the whole fetch — requested URL, redirect chain,
+              final URL, TLS certificate, screenshot and DOM, all at one
+              timestamp. Every URL below is <strong>defanged and
+              non-clickable</strong>: a mis-click would fetch attacker
+              infrastructure from this machine and tell them the
+              investigation exists.
+            </p>
+            <div id="dcp-cap-list" class="rows"></div>
+            <p id="dcp-cap-empty" class="empty">No captures recorded.</p>
+
+            <div id="dcp-cap-detail" class="card detail-card" hidden>
+              <div class="pane-head">
+                <h2 class="h-sm" id="dcp-cap-title">Capture</h2>
+                <button id="dcp-cap-close" type="button" class="btn subtle">
+                  Close</button>
+              </div>
+              <div id="dcp-cap-body"></div>
+            </div>
+          </div>
+
+          <!-- EMAIL / BEC -->
+          <div id="dcp-emails-pane" class="subpane" hidden>
+            <div class="pane-head">
+              <h2 class="h-sm">Email</h2>
+              <label class="field inline">
+                <input id="dcp-divergent" type="checkbox" class="check">
+                <span class="label">Divergent only</span>
+              </label>
+              <button id="dcp-eml-refresh" type="button" class="btn">
+                Refresh</button>
+              <span id="dcp-eml-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              The message body is <strong>never rendered</strong>. An HTML
+              email loads remote images, and doing that fires the actor's
+              tracking pixel from this organisation's IP at a timestamp
+              that tells them when the investigation reached them.
+            </p>
+            <div id="dcp-eml-list" class="rows"></div>
+            <p id="dcp-eml-empty" class="empty">No messages recorded.</p>
+
+            <div id="dcp-eml-detail" class="card detail-card" hidden>
+              <div class="pane-head">
+                <h2 class="h-sm" id="dcp-eml-title">Message</h2>
+                <button id="dcp-eml-close" type="button" class="btn subtle">
+                  Close</button>
+              </div>
+              <div id="dcp-eml-body"></div>
+            </div>
+          </div>
+
+          <!-- CALLS -->
+          <div id="dcp-calls-pane" class="subpane" hidden>
+            <div class="pane-head">
+              <h2 class="h-sm">Call records</h2>
+              <button id="dcp-call-refresh" type="button" class="btn">
+                Refresh</button>
+              <span id="dcp-call-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              Caller ID is the attack, not a detail. What the victim's
+              handset displayed is shown separately from what the carrier
+              vouched for, and the presented number never becomes a
+              selector — putting it on an actor would attribute the crime
+              to whoever's number the attacker picked.
+            </p>
+            <div id="dcp-call-list" class="rows"></div>
+            <p id="dcp-call-empty" class="empty">No calls recorded.</p>
+          </div>
+        </section>
+
         <section id="pane-add-node" class="pane" role="tabpanel"
                  aria-labelledby="tab-add-node" tabindex="-1" hidden>
           <form id="node-form" class="card stack narrow" novalidate>
