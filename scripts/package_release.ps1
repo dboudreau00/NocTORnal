@@ -149,6 +149,28 @@ try {
     }
     Good 'install.sh is LF'
 
+    # BOTH INSTALLERS MUST PARSE. Added after this script happily packaged
+    # an install.ps1 that did not: an edit put a literal newline inside a
+    # comment, so the continuation line stopped being a comment and
+    # PowerShell tried to run `at`. The failure appeared only when somebody
+    # ran the packaged artefact. A syntax check is free; a recipient
+    # discovering it is not.
+    $psErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Destination 'release\install.ps1'),
+        [ref]$null, [ref]$psErrors) | Out-Null
+    if ($psErrors -and $psErrors.Count) {
+        Die ("install.ps1 does not parse -- " + $psErrors[0].Message +
+             " (line " + $psErrors[0].Extent.StartLineNumber + ")")
+    }
+    Good 'install.ps1 parses'
+
+    if (Get-Command bash -ErrorAction SilentlyContinue) {
+        $null = & bash -n (Join-Path $Destination 'release/install.sh') 2>&1
+        if ($LASTEXITCODE -ne 0) { Die 'install.sh does not parse (bash -n).' }
+        Good 'install.sh parses'
+    }
+
     if ($Zip) {
         $zipPath = "$Destination.zip"
         if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
