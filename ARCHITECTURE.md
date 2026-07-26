@@ -150,7 +150,7 @@ Sequenced in `docs/09-roadmap.md` so each phase is independently useful; the num
 | 5 | Notification & integration | `egress.py` TLP gate (one function, fails closed), `notifications.py` centre (Alembic 0029), SMTP digest/quiet-hours, HMAC webhooks | 1 (TLP/classification); events from 6 (merge, dual-control) | **partial, 70%.** Model+tests partial, API done, UI partial, **never reviewed.** Gap: Jira, integration admin surface, priority-1 escalation, worker. |
 | 6 | Tradecraft & hardening | Entity merge with reversal (`merges.py`, 0027), dual control (decision 44, 0028), ACH (`ach.py`), report builder (`reports.py`) | 1 (nodes/edges, assertions); 5 (approval notifications) | **partial, 55%.** Model+tests partial, API done (router 2026-07-25), UI none, **never reviewed.** Gap: WebAuthn, timeline replay, assumptions register, retention/purge, break-glass. |
 | 7 | Comms channels | `comms.platform` (15 seeded), contact-block parser, CLAIMED/OBSERVED/CONFIRMED bindings, PGP verification (`pgp.py`), co-participation, minimisation, 20-endpoint router | 1 (selectors, proposals); 5 (egress gate); 2 (co-participation into sociogram) | **partial, 75%.** Model+tests done, API done, UI none, reviewed. Gap: **UI only.** |
-| 8 | Sample handling | Separate-origin download-only service (`samples.py`, 0031), encrypted-at-rest by SHA-256, quarantine to triage to RE queue, `MALWARE_ANALYST` role, static triage, REJECTED path | 0 (role, gate); 1 (case model) | **partial, 45%.** Model+tests partial, API done, UI none, **never reviewed.** Gap: imphash/ssdeep/TLSH, YARA, prohibited-content screening, sandbox. |
+| 8 | Sample handling | Separate-origin download-only service (`samples.py`, 0031), encrypted-at-rest by SHA-256, quarantine to triage to RE queue, `MALWARE_ANALYST` role, static triage, REJECTED path | 0 (role, gate); 1 (case model) | **partial, 45%.** Model+tests partial, API done, UI none, **never reviewed.** Gap: imphash/ssdeep/TLSH, YARA (corpus pull started — see the YARA detection corpus section), prohibited-content screening, sandbox. |
 | 9 | Ingest API | `noct_sk_` write-only keys (invariant 11 CHECK), raw-persist-before-parse, sniffed format detection, category classifier, triage scoring, simhash dedupe, dead-letter replay, stealer-log compartment | 1 (case file, selectors, dead-letter); 4 (watch/triage, proposals) | **partial, 55%.** Model+tests partial, API done (router 2026-07-25), UI none, **never reviewed.** Gap: HTTP 202 wiring, outbound credential vault. |
 
 ### Build-order rationale
@@ -403,6 +403,45 @@ Invariant 10 is enforced at runtime, not documented. `SampleService.download` re
 **The policy gate.** `SampleService.submit` calls `policy_declared()`, which requires both `NOCTORNAL_PROHIBITED_CONTENT_POLICY` (an auditor-followable reference, not a boolean) and `NOCTORNAL_DESIGNATED_PERSON`. Absent either, submit raises `PolicyNotDeclared` and the router returns **HTTP 451** — the refusal is legal, not technical. `GET /samples/policy` surfaces the state and a counsel-review notice. Samples land in `QUARANTINED`; triage is static-only (magic-byte typing, entropy, MD5/SHA-1/SHA-256) with absent steps recorded as `triage_gaps` rather than silent NULLs.
 
 Stealer logs are segregated from evidence: they live in the `ingest` schema, never `core.evidence` (decision 19). The malware store is `lab.sample` in its own bucket (`SAMPLE_BUCKET`, default `noctornal-samples`; `SAMPLE_ENDPOINT` / `SAMPLE_ACCESS_KEY` / `SAMPLE_SECRET_KEY`, falling back to the MINIO_* vars only for a single-node dev stack).
+
+### YARA detection corpus (in progress)
+
+The static-triage side of Phase 8 is backed by a provenance-tracked YARA corpus
+pulled from public sources, laid out under `yara/` and driven by
+`scripts/yara_db.py` (`fetch` / `build` / `stats`). It is built to the same
+rules as the rest of the system, not as a loose dump of signatures:
+
+- **Not bundled.** The manifest `yara/sources.json` lists each upstream repo
+  with its licence; the tool clones them (shallow) into a **gitignored**
+  `yara/vendor/` tree and compiles them into `yara/dist/`. The rules are a
+  fetched build artifact, never committed — a prosecution-grade tool must not
+  silently inherit the licence of every third-party rule, and several sources
+  (`signature-base`, `elastic-protections`) carry non-permissive terms flagged
+  `"review": true` for counsel to clear before any redistribution.
+- **Provenance.** `yara/fetch.lock.json` records the exact commit of each source
+  pulled and when — reproducible and auditable in a disclosure context, the same
+  discipline `core.assertion` applies to graph elements.
+- **Nothing dropped (invariant 12).** `build` compiles each file with
+  `yara-python` when present and routes non-compiling files to
+  `yara/dist/dead_letter.json` with the reason; rule-name collisions across
+  sources go to `yara/dist/collisions.json` rather than a silent
+  last-writer-wins merge.
+- **Rules only, off the cloud.** `fetch` prunes every non-`.yar`/`.yara` file
+  after each clone, and threat-intel/IOC repos that ship live samples are
+  excluded from the manifest — a lesson from a pulled IOC dump
+  (`StrangerealIntel/DailyIOC`) that carried live FIN7 and Babuk samples the
+  workstation AV quarantined mid-clone. `NOCTORNAL_YARA_HOME` relocates the
+  corpus outside a cloud-synced or AV-watched tree.
+
+**Status: scaffolding and a fetch-on-demand, rules-only pipeline; not yet wired
+into `samples.py`.** Two invariants govern that wiring when it happens: a YARA match
+is static pattern-matching over bytes in the sample store and must never cause a
+sample to render or execute (**invariant 10**), and a match is graded evidence
+attributed to its rule and source — written as a proposal/assertion for an
+analyst, **never as a fact** (invariant 1). Remaining: namespaced multi-file
+compilation (per-file compile currently sends cross-referencing rules to the
+dead-letter), external-module coverage, and a scan endpoint that records hits as
+gradeable assertions.
 
 ### Ingest (`ingest.py`, `http/routers/ingest.py`, Phase 9)
 
