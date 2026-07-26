@@ -51,6 +51,12 @@ def conn():
         c.execute(f"DELETE FROM ingest.batch WHERE api_key_id IN {ksub}")
         c.execute(f"DELETE FROM ingest.api_key WHERE owner_user_id IN {sub}")
         c.execute(f"DELETE FROM ingest.pii_authorisation WHERE case_id IN {csub}")
+        # `collect.watch` references the case, and the triage-score test
+        # creates one. Cleaning it in the test BODY only works when the
+        # test passes: a failure part-way through leaves an orphan watch
+        # that blocks every later teardown with a foreign-key violation
+        # pointing at a table those tests never touched. Teardown owns it.
+        c.execute(f"DELETE FROM collect.watch WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
         c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {sub}")
@@ -76,10 +82,21 @@ def _case(conn, owner):
         review_due=date(2027, 1, 1), owner_user_id=owner, created_by=owner)
 
 
+#: `accept()` now REFUSES when it has nowhere to put the bytes, rather
+#: than acknowledging them and dropping them -- docs/12's "raw before
+#: parse, always" is not satisfied by recording that we meant to. So every
+#: fixture that accepts a batch has to say where the raw goes.
+#:
+#: In-memory, not MinIO: these tests are about the parser and the access
+#: gate, and a test that needs object storage running is a test that gets
+#: marked flaky and then skipped.
+
+
 @pytest.fixture
 def svc(conn):
     from noctornal_api.ingest import IngestService
-    return IngestService(conn)
+    from noctornal_api.rawstore import InMemoryRawStorage
+    return IngestService(conn, InMemoryRawStorage())
 
 
 @pytest.fixture
@@ -96,7 +113,8 @@ def reader(conn):
     records; a reader without it sees nothing, which is a test below.
     """
     from noctornal_api.ingest import IngestService
-    return IngestService(conn, clearance="RED",
+    from noctornal_api.rawstore import InMemoryRawStorage
+    return IngestService(conn, InMemoryRawStorage(), clearance="RED",
                          compartments=frozenset({"STEALER-2026"}))
 
 
