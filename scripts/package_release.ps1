@@ -174,8 +174,54 @@ try {
     if ($Zip) {
         $zipPath = "$Destination.zip"
         if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-        Compress-Archive -Path "$Destination\*" -DestinationPath $zipPath
-        Good "wrote $zipPath"
+        # ARCHIVE THE DIRECTORY, NOT ITS CONTENTS.
+        #
+        # `-Path "$Destination\*"` produces a zip whose entries sit at the
+        # ROOT, so unzipping it scatters twenty-two top-level files and
+        # folders loose into whatever directory the recipient happened to
+        # be in -- typically Downloads, mixed in with everything else.
+        # Getting that back out is manual and irritating, and it is the
+        # first thing they experience.
+        #
+        # Passing the directory itself wraps everything in one folder,
+        # which is what every release archive a developer has ever
+        # downloaded does.
+        Compress-Archive -Path $Destination -DestinationPath $zipPath
+
+        # Confirm the wrapper is actually there rather than assuming it.
+        # This script has already shipped one artefact it had "verified"
+        # without executing -- see the install.ps1 parse check above.
+        #
+        # Split on EITHER separator. The zip format stores forward slashes
+        # and the archive on disk does use them, but .NET's
+        # ZipArchiveEntry.FullName reports the platform separator here, so
+        # a check that split on '/' alone saw one 300-segment "root" and
+        # failed a perfectly good archive. Accepting both is correct
+        # whichever way the runtime reports it.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        try {
+            $roots = @($archive.Entries |
+                ForEach-Object { ($_.FullName -split '[\\/]')[0] } |
+                Sort-Object -Unique)
+            # Portability: a zip carrying backslash separators makes Unix
+            # `unzip` create files literally named "dir\sub\file" instead of
+            # directories. Checked because this is a cross-platform release
+            # artefact and the failure is invisible from Windows.
+            $backslashed = @($archive.Entries |
+                Where-Object { $_.FullName -like '*\*' }).Count
+        }
+        finally { $archive.Dispose() }
+        if ($roots.Count -ne 1) {
+            Die ("the zip has $($roots.Count) top-level entries and should " +
+                 "have exactly one wrapper directory: " + ($roots -join ', '))
+        }
+        if ($backslashed) {
+            Die ("$backslashed zip entries use backslash separators. Unix " +
+                 "unzip would create literal 'a\b\c' filenames rather than " +
+                 "directories.")
+        }
+        Good "wrote $zipPath (wraps in '$($roots[0])', forward-slash paths)"
         Warn 'A recipient unzipping this on Linux/macOS must run:'
         Warn '    chmod +x release/install.sh'
         Warn 'and on Windows must launch it as:'
