@@ -1222,3 +1222,64 @@ select.select { appearance: none; padding-right: 24px; }
   line-height: 1.5;
 }
 .keys-sheet .btn { margin-top: 12px; }
+
+/* --- deception pane: phishing / vishing / BEC (docs/19) ---------------- */
+
+.chip.good { color: var(--sign-positive); border-color: var(--sign-positive); }
+.chip.subtle { color: var(--text-tertiary); }
+
+.h-xs {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-tertiary);
+  margin: 0 0 6px;
+}
+.sub-card {
+  padding: 10px 12px; margin-top: 10px; background: var(--surface-2);
+}
+
+/* A defanged URL. Monospaced so `[.]` and `hxxp` are legible at a glance,
+   and given a text cursor rather than a pointer: the shape of the thing
+   should say "this is a string to read", not "this is a link to click". */
+.defanged {
+  cursor: text; word-break: break-all;
+  border-bottom: 1px dotted var(--text-tertiary);
+}
+
+.hop-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  margin: 0; padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.hop-row:last-child { border-bottom: 0; }
+
+/* Above the trust boundary. Dimmed and struck through the host names,
+   because these hops were written by machines outside this organisation
+   and reading them as observations is the classic BEC attribution error. */
+.hop-row.claimed { opacity: 0.55; }
+.hop-row.claimed .mono { text-decoration: line-through dotted; }
+
+/* The presented-vs-durable split, given a visible left rule each so the
+   two blocks cannot be skim-read as one list of "caller" fields. */
+.presented-block { border-left: 3px solid var(--danger); }
+.durable-block { border-left: 3px solid var(--sign-positive); }
+
+/* The one inline exhibit in the platform. Boxed and clearly framed so it
+   reads as a specimen rather than as part of the console's own chrome. */
+.capture-shot {
+  display: block; max-width: 100%; height: auto; margin: 8px 0;
+  border: 1px solid var(--border, #2A3244); border-radius: 3px;
+  background: var(--surface-2);
+}
+
+.body-text {
+  max-height: 320px; overflow: auto; padding: 10px 12px;
+  background: var(--surface-2); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; margin: 10px 0 0;
+}
+
+/* The redirect-target line in a capture card: a `fact-k` label followed by
+   a defanged URL. Without a gap they render as "REDIRECTED TOhxxps://…",
+   which a screenshot review caught and reading the code did not. */
+.card .why {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+}

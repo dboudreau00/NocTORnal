@@ -58,6 +58,7 @@ PANES = [
     ("report", "Report — build and release", 1400, 1100),
     ("governance", "Lifecycle — retention", 1400, 1200),
     ("samples", "Lab — sample queue", 1400, 1200),
+    ("deception", "Deception — phishing, BEC, vishing", 1400, 1200),
     ("add-node", "Add entity", 1200, 1000),
     ("add-edge", "Add relationship", 1200, 1000),
 ]
