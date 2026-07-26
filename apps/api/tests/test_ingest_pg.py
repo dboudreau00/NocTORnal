@@ -142,7 +142,7 @@ STEALER_RECORD = {
 # --- invariant 11: keys are write-only ----------------------------------
 
 def test_an_ingest_key_can_never_read_the_case_file(conn, svc):
-    """CLAUDE.md invariant 11, as a CHECK constraint rather than a
+    """CONVENTIONS.md invariant 11, as a CHECK constraint rather than a
     convention. A leaked ingest key means junk data, never the case file."""
     import psycopg
     owner = _user(conn)

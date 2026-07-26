@@ -1,7 +1,7 @@
 """Vocabulary for social-engineering evidence: LURE, IMPERSONATES, four
 selectors, and one widened edge.
 
-docs/19 §3.4. `CLAUDE.md` says to ask before adding a node or edge type
+docs/19 §3.4. `CONVENTIONS.md` says to ask before adding a node or edge type
 that duplicates an existing one, so this is deliberately two additions and
 not twelve. A phishing host is already `INFRA`, a kit is `TOOL`, a victim
 is `VICTIM`, a call is an `EVENT`. Two things had no home:

@@ -32,21 +32,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The repository is the PARENT of this release directory when the release
-# ships alongside the source, and the release directory itself when it
-# ships standalone. Resolve rather than assume, so a moved folder produces
-# a clear message instead of a confusing failure four steps later.
+# THE PROJECT ROOT IS THE PARENT OF THIS DIRECTORY. Nothing else.
+#
+# This used to probe four candidates, the last of which was the HARDCODED
+# sibling folder name "NocTORnal - Social Network Analysis software"
+# (release finding R1). That resolved on exactly one machine -- the one it
+# was written on -- and produced "the application source could not be
+# found" everywhere else, with a suggestion ("put it next to the
+# application source directory") that silently failed for any other folder
+# name.
+#
+# The package is now self-contained: `release/` sits inside the project
+# tree, so its parent IS the project. One rule, no search, no dependence
+# on what any adjacent directory happens to be called or whether it
+# exists at all.
 $ReleaseDir = $PSScriptRoot
 $RepoRoot   = $null
-foreach ($candidate in @(
-        $ReleaseDir,
-        (Join-Path $ReleaseDir 'app'),
-        (Split-Path -Parent $ReleaseDir),
-        (Join-Path (Split-Path -Parent $ReleaseDir) 'NocTORnal - Social Network Analysis software'))) {
-    if ($candidate -and (Test-Path (Join-Path $candidate 'alembic.ini'))) {
-        $RepoRoot = (Resolve-Path $candidate).Path
-        break
-    }
+$candidate  = Split-Path -Parent $ReleaseDir
+if ($candidate -and (Test-Path (Join-Path $candidate 'alembic.ini'))) {
+    $RepoRoot = (Resolve-Path $candidate).Path
 }
 
 function Invoke-Capture {
@@ -107,11 +111,17 @@ Write-Host '  STATUS". Installing is fine; pointing it at a real case is' -Foreg
 Write-Host '  not, until those are settled.' -ForegroundColor Yellow
 
 if (-not $RepoRoot) {
-    Stop-With 'the application source could not be found.' @'
-This installer looks for alembic.ini in, and beside, its own directory.
+    Stop-With 'this does not look like a complete NocTORnal package.' @'
+install.ps1 expects to live in the `release/` directory of the project,
+so that its parent contains alembic.ini. That parent has no alembic.ini.
 
-If you have the release folder on its own, put it next to the
-application source directory, or move it inside it.
+The usual cause is copying release/ out on its own. It is documentation
+and installers only -- there is no application source in it. Download or
+clone the whole repository and run:
+
+    powershell -ExecutionPolicy Bypass -File .elease\install.ps1
+
+from the project root.
 '@
 }
 Write-Step 'Locating the application'

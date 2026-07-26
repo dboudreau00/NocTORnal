@@ -107,6 +107,85 @@ and been unable to answer *"where did that line come from?"*
 
 ---
 
+## What you actually do with it
+
+### The four investigations it was built for
+
+**1 · Ransomware affiliate structure.** You have twenty handles across
+three forums and a leak site. Who is the same person? Who vouched for
+whom, and when did that vouch turn into a rip-off accusation? NocTORnal
+keeps `IDENTITY` (the handle you observed) separate from `PERSON` (the
+human you assessed) and joins them with a reversible attribution carrying
+a confidence — so "we think these five handles are one operator" is a
+claim you can show your working for, and withdraw without losing the
+underlying observations.
+
+**2 · Initial-access brokerage.** The interesting actor is rarely the
+loudest. Betweenness and Burt's constraint find the broker whose removal
+disconnects two crews; key-player analysis then tells you that removing
+*two* named brokers achieves less than removing one, because they
+redundantly bridge the same pair. That is a different answer from "the top
+two by centrality", and it is the one that matters operationally.
+
+**3 · Business email compromise.** A finance team paid an invoice to the
+wrong account. You have the mail, a phishing page and a phone call. The
+`Received` chain gives you the sender's real IP *as observed by your own
+relay* — with the trust boundary drawn, so nobody attributes the case to a
+forged upstream hop. The capture ties the screenshot to the redirect chain
+and the TLS certificate. The call record keeps the spoofed caller ID and
+the carrier's attestation apart, so the bank's real number never lands on
+the attacker's node.
+
+**4 · Fraud and mule networks.** The transactions are the easy part. The
+social layer above them — who recruited whom, which escrow both sides
+accept, which guarantor turns up in unrelated disputes — is what the
+sociogram is for.
+
+### A session, start to finish
+
+1. **Open a case.** It carries a legal basis, a retention date, a review
+   date and a TLP classification. Every element inside inherits that floor.
+2. **Put in what you have.** Paste a forum profile, upload an exhibit,
+   drop in a vendor contact block, attach a `.eml`. Extraction runs and
+   raises *proposals* — it does not touch the graph.
+3. **Triage.** Accept, reject or defer. An acceptance writes an assertion
+   carrying the machine's rationale and an Admiralty grading, so the graph
+   never forgets a machine suggested it.
+4. **Look at the shape.** Choose a projection — which edge types count as
+   a social tie — and run the metrics. Drag the timeline to see what was
+   believed last month.
+5. **Test your explanation.** Put the competing hypotheses in the ACH
+   matrix and score them against the evidence. The one that survives is
+   the finding; the ones that did not go in the report beside it.
+6. **Release it.** Build the report at a target classification. Anything
+   above it is structurally withheld — not redacted afterwards. The egress
+   gate decides whether the document may leave, and records the decision
+   either way.
+
+### Where it fits against what you already use
+
+| | |
+|---|---|
+| **vs. Maltego** | Maltego is better at breadth-first OSINT pivoting from a transform marketplace. NocTORnal is a *case system*: it keeps the assertion ledger, the custody chain and the classification model that a disclosure exercise needs. |
+| **vs. i2 Analyst's Notebook** | i2 has the mature chart-drawing and decades of trained analysts. NocTORnal makes provenance non-optional and ships the SNA maths (Leiden, Burt, key-player) rather than leaving it to a separate tool. |
+| **vs. a Neo4j project** | A graph database gives you the graph. Everything here that is hard — the assertion layer, the five-part access gate, TLP-gated egress, WORM custody, retention and legal hold — is the part you would then have to build. |
+| **vs. a spreadsheet** | Honestly, a spreadsheet is fine for ten actors. The moment somebody asks "why do you say that?" about row 400, it is not. |
+
+### What it is *not*
+
+- **Not an OSINT collection suite.** It ingests; it is not a scraper farm.
+  Collection adapters exist for RSS and the ingest API, and the rest is
+  deliberately your problem — see the legal items above.
+- **Not an attribution oracle.** There is no "is this the same person?"
+  button. There is a model that makes your reasoning explicit and
+  reversible.
+- **Not a malware sandbox.** The lab holds samples safely and records
+  detonation *requests*; nothing in this build detonates anything.
+- **Not deployable against real material today.** Five legal decisions
+  gate that, and no amount of code closes them.
+
+---
+
 ## Install
 
 Two supported paths. Both are one command, and both are safe to re-run.
@@ -271,40 +350,62 @@ Retention schedules; legal holds that override every deletion path; purge
 tombstones that outlive what they describe; break-glass access that is
 loud, dual-controlled and time-boxed.
 
-<details>
-<summary><b>The remaining panes</b> — entities, triage, notifications, search, feeds, reporting, editing</summary>
+### Entity list
+![Entity list](docs/images/02-entities.png)
 
-**Entity list** — every node with its labels, selectors and grading
+Every node in the case with its type, labels, selectors and Admiralty
+grading. The type colour is the same one the sociogram uses, so the two
+views read as one thing. Filter by type, by tag, or by whether an element
+still rests on a live assertion.
 
-![](docs/images/02-entities.png)
+### Capture and triage
+![Capture and triage](docs/images/04-triage.png)
 
-**Capture and triage** — paste an observation, get proposals
+Paste an observation — a forum profile, a vendor advert, a contact block —
+and extraction raises **proposals**. Nothing here writes to the graph.
+Accept, reject or defer; a deferral parks the ambiguous item as DISPUTED
+rather than forcing a yes/no on something that does not deserve one yet.
+`J` and `K` move through the queue.
 
-![](docs/images/04-triage.png)
+### Notifications
+![Notifications](docs/images/05-inbox.png)
 
-**Notifications** — re-authorised on every delivery, not only at subscribe
+Re-authorised **on every delivery**, not only at subscribe time. A
+long-lived subscription and a case assignment have different lifetimes,
+and a notification centre that checked once was the headline finding of a
+previous review.
 
-![](docs/images/05-inbox.png)
+### Search
+![Search](docs/images/07-search.png)
 
-**Search** — filtered by your own clearance, so an over-classified element is invisible rather than discoverable-then-403
+Filtered by your own clearance and compartments, so an over-classified
+element is *invisible* rather than discoverable-then-403. The two columns
+load independently — one failing does not blank the other.
 
-![](docs/images/07-search.png)
+### Feeds and ingest
+![Feeds and ingest](docs/images/09-feeds.png)
 
-**Feeds and ingest** — the triage queue and the dead-letter table
+Monitored sources, their run history, the persona vault, and the
+**dead-letter table**: anything unparseable is kept with its raw fragment.
+Silent drops are how you find out six months later that a feed has been
+half-failing.
 
-![](docs/images/09-feeds.png)
+### Report
+![Report](docs/images/11-report.png)
 
-**Report** — build at a target classification, release through the egress gate
+Build at a target classification — the redaction is *structural*, so
+nothing above that level is read at any point and it cannot be defeated by
+a name in a rationale field. Release is a separate action, through the
+egress gate, and is recorded either way.
 
-![](docs/images/11-report.png)
+### Add entity and add relationship
+![Add entity](docs/images/15-add-node.png)
 
-**Add entity** and **add relationship**
+Neither form will complete without a source, an Admiralty
+reliability/credibility grading and a basis. That is invariant 1 at the
+point of entry: there is no "add it now, justify it later" path.
 
-![](docs/images/15-add-node.png)
-
-![](docs/images/16-add-edge.png)
-
-</details>
+![Add relationship](docs/images/16-add-edge.png)
 
 ---
 
@@ -498,7 +599,7 @@ noctornal/
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
-| [`CLAUDE.md`](CLAUDE.md) | the working agreement, if you are contributing |
+| [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
 
 ---
 

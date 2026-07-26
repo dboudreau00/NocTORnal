@@ -293,16 +293,16 @@ change-point detection on network structure
 
 ---
 
-## Handing tasks to Claude Code
+## Handing tasks to a contributor
 
 Work one phase at a time, one checklist item per session where the item is
 substantial. Useful opening prompt shape:
 
-> Read CLAUDE.md, docs/01-domain-model.md and db/schema.sql. Implement
+> Read CONVENTIONS.md, docs/01-domain-model.md and db/schema.sql. Implement
 > Phase 1 item "Assertion layer." Requirements: no code path writes to
 > `node` or `edge` without creating an `assertion` in the same
 > transaction. Write the failing test first, named for invariant 1 in
-> CLAUDE.md. Show me the migration before you apply it.
+> CONVENTIONS.md. Show me the migration before you apply it.
 
 Pinning it to the invariant by number is worth doing — it keeps the
 non-negotiables in context and gives the test a name that explains itself

@@ -17,7 +17,7 @@ node_modules/
 .vscode/
 .idea/
 
-# Claude Code machine-local permission grants
+# Editor/agent machine-local permission grants
 .claude/settings.local.json
 
 # UI screenshots (scripts/screenshot_ui.py). These are renders of real

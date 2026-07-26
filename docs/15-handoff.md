@@ -2,7 +2,7 @@
 
 Everything a fresh session needs to continue this build. Written 2026-07-25
 after Phases 0–2 shipped; **updated 2026-07-25 after Phase 3 shipped**. Read
-this, then `CLAUDE.md`, then `docs/14-enhancement-map.md`. What to do next is
+this, then `CONVENTIONS.md`, then `docs/14-enhancement-map.md`. What to do next is
 at the bottom.
 
 > **Phases 0-3 complete; Phases 4, 5 and 6 partially built.** 421 tests

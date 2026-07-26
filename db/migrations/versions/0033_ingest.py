@@ -51,7 +51,7 @@ script goes around.
 
 ## Ingest keys are write-only, by CHECK constraint
 
-CLAUDE.md invariant 11: "A `case:read` scope on an `ingest.api_key` is a
+CONVENTIONS.md invariant 11: "A `case:read` scope on an `ingest.api_key` is a
 bug, and there is a check constraint saying so. A leaked ingest key means
 junk data, never the case file." That constraint is `api_key_write_only`
 below.
