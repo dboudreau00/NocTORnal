@@ -145,6 +145,61 @@ rows recorded *before* 2026-07-25 are still verbatim on disk. They are
 labelled, on a clock and withheld from the API, and
 `scripts/redact_dead_letters.py --apply` finishes it.
 
+### F17 — the third adversarial pass, 2026-07-25 evening
+
+Run over that evening's own work: the F15 fixes, the new ingest endpoints,
+the three new UI panes, and migrations 0040–0042. Six lenses, every finding
+then put through an independent refutation round.
+
+**25 findings, 16 survived refutation, 14 are now fixed.** The pattern held
+for the fourth time: a fully green 1093-test suite, and a defect in almost
+every lens. Most of them were in the FIXES, not in the original code —
+which is the argument for reviewing a repair as hostilely as a feature.
+
+#### Fixed
+
+| | What it was | Why it mattered |
+|---|---|---|
+| **CRITICAL, UI** | The purge result read `body.purged` and `body.refused`. The server sends `evidence_purged`, `documents_purged`, `held_back`, `storage_locked`. | A real, irreversible purge reported **"0 object(s) destroyed"**, and the storage-refusal warning — written, styled and correct — could never fire, because it tested a key that does not exist. decision 50 requires `storage_locked` to be reported: object lock can refuse a delete even to satisfy a deletion order, and a tombstone recording a purge that did not happen is a false record. |
+| **HIGH, access** | `POST /ingest/records/{id}/score` applied no case, TLP, compartment or operator check to a QUARANTINED record. `_authorise_record`'s null-case branch said "only the ingest operators see it" and returned without checking. | Three holes in one line. An existence oracle (404 for nonexistent, 200 for quarantined); a content oracle (the score is `10×watched_selector_hits + 2×high_risk − 8×duplicate`, so the number leaks how many watched selectors an unreadable payload matched); and an unauthorised WRITE to `priority`, the column `/quarantine` sorts by — so a GREEN analyst with no compartment could reorder the operator's queue. The branch predated this session and was survivable for its other caller, whose service layer re-checks; a NEW endpoint routed it into the one method with no backstop. |
+| **HIGH, redaction** | `_JSON_PAIR` matched the next KEY as a value. Given a truncated `…"credentials": [{"password": "Hunter2"…`, the alternative `[^,\s}\]]+` matched `[{"password":`, so the output was `"credentials": "[redacted]" "Hunter2"`. | The password was stored **verbatim** in `ingest.dead_letter.raw_fragment` — an unencrypted, ungreppable-by-design column — and served by `GET /dead-letters`. Reached by a partner's writer crashing or a batch cut at `max_bytes_per_request`. Regex-matching pairs in a document that does not parse is the wrong shape; there is no reliable pair. Replaced by: a quoted string is a key if the next non-space character is a colon, everything else is a value. |
+| **HIGH, redaction** | A dangling open quote at the end of a truncated batch. | `"cookies": [{"value": "sid-8812` — no quoted-string pattern can match an unterminated string, so the session id survived. |
+| **MEDIUM, redaction** | `_EMAIL` was ASCII on both sides. | `josé@corp.example` did not match **at all** (the character before the `@` falls outside the local-part class, so the `+` cannot end there) and `ivan@корп.рф` failed on the domain and the TLD. Both survived every path including `_redact_key`, whose entire reason for existing is the feed keyed by victim address. Now defined by what an address cannot contain rather than what it can. |
+| **MEDIUM, redaction** | Masked keys collapsed. | Every victim address masks to the same string, and a dict comprehension merged them — turning "this feed carried 200 people" into "1" in the only view anybody looks at. The count IS the shape. |
+| **HIGH, loss** | CSV overflow columns were deleted. `DictReader` puts fields beyond the header under the key `None`; the comprehension dropped exactly those. | Silent CORRUPTION, not just loss. `url,login,password` + `…,alice@acme.co,Summer,2024!` stored `password = "Summer"`, and `store_credential` fingerprints what it is given — so `search_by_fingerprint`, "the ONLY lookup" and the correlation the analytic work depends on, would miss the real credential for ever. Ragged rows are ordinary input. |
+| **MEDIUM, loss** | A row whose content sat only in overflow vanished whole. | The all-blank guard ran on the dict AFTER the overflow was deleted, so a header that drifted left turned a row carrying a real password into `{'a': '', 'b': ''}` and skipped it. `seen` never incremented, so even the EmptyParse net could not fire. |
+| **HIGH, loss** | An exception from the GENERATOR escaped both handlers. `for fragment in iter_fragments(raw)` puts the `next()` outside the try blocks. | `csv.Error` on a field over 128 KiB — which a stealer log's cookie column routinely is — propagated past them, past the router's `except IngestError`, and out as a 500. Every remaining fragment was dropped with `dead_count` still 0, so nothing recorded that anything was lost OR how much, and re-parsing died at the same row for ever. **The second time this exact shape has broken invariant 12 here**; the first was F15(e). |
+| **HIGH, migrations** | `replay()` on a pre-0040 dead letter. | `CHECK (redacted) NOT VALID` exempts rows that existed at ALTER time; it does **not** exempt UPDATES to them. So `replay` INSERTed the record (committed — autocommit), then raised `CheckViolation` on the UPDATE, which the router did not catch. The caller got a 500, `replayed_at` stayed NULL, and the queue claimed the fragment was unresolved while a record made from it existed. Invariant 12 inverted. The migration reasoned about one writer and missed this one. |
+| **HIGH, UI** | `dueExhibitRow` read `category` / `id` / `retain_until`; the server sends `object_type` / `object_id` / `deadline`. | Every row read "exhibit", every deadline rendered "—", and `daysFromNow(undefined)` is null so `null < 0` is false — the overdue styling **could never fire**. An item 90 days overdue was pixel-identical to one due next year, on the pane whose stated purpose is that "an analyst who cannot see when their case's material expires discovers a deadline by missing it". |
+| **HIGH, UI** | `loadRetention` swallowed a 403 in silence. | The pane then asserts "there are no retention rules and nothing is due" when the truth is "you may not see them" — with the purge control directly beneath it. |
+| **HIGH, UI** | Three hard-coded refusal strings asserted a role fact the response did not support. | `ingest.manage` and `break_glass.review` are **step-up** permissions, so a stale step-up 403s with `"re-authentication required"` — and the UI threw that away to tell the holder they did not hold the permission. There was no re-authentication route anywhere in the UI. Now the server's `detail` comes first, always. |
+| **MEDIUM, UI** | `rules.unconfirmed` is a LIST and `[] ? a : b` takes `a`. | The alert-coloured banner was permanently lit, reading "every rule has been confirmed" in the same red as the real warning. An alarm that is always on carries no information — and this is the one signal separating a jurisdictional retention period from a number somebody typed. |
+| **MEDIUM, UI** | `loadQuarantine` fired on every queue load. | `ingest.manage` is SYS_ADMIN-only, so for every other role it 403s — and `deps.py` writes an `AUTHZ_DENIED` audit row **before** raising. Invariant 6 makes that row permanent, and `AUTHZ_DENIED` is the signal a security officer watches for probing; a continuous hum from ordinary tab-switching is how that signal stops being read. Probed once per session now, and a step-up expiry is deliberately not latched. |
+| **LOW, SSRF** | `fec0::/10` was not blocked. | RFC 3879 deprecated it, so Python reports `is_private=False`, `is_global=True`, `is_reserved=False` — no stdlib predicate fires and `fc00::/7` does not cover it. Still routed internally on any network that predates ULA. |
+| **MEDIUM, SSRF** | `fetch()` read the response body with no size cap. | `timeout` is urllib's per-socket-operation timeout, not a transfer budget: a server drip-feeding one chunk every few seconds keeps an uncapped `read()` alive indefinitely while the buffer grows. The host doing the reading is the one holding every persona credential. Capped at 16 MiB, with no unlimited option. |
+
+#### Recorded and NOT fixed
+
+**F17(a) — nothing sweeps `ingest.record.retain_until` or
+`ingest.dead_letter.retain_until`.** Migration 0040 sets a 90-day clock and
+builds an index its own comment calls "The sweep"; `RetentionService.due()`
+queries `core.evidence` and `collect.document` and nothing else. So the
+labels and the gating shipped and the expiry did not, and the 90-day
+default — chosen precisely because unassessed third-party victim data
+should get the shortest rule — currently delivers the longest possible one.
+`ingest.record.retain_until` has been unswept since 0033.
+
+*Why it is not fixed here:* it is a new sweeper with its own tombstone
+semantics and its own four-eyes question (does purging a partner's raw
+batch need the same authority as purging an exhibit?), not a one-line
+addition to an existing query. It is the top of the Phase 9 list.
+
+**F17(b) — `db/schema.sql` has none of 0040–0042, and no `ingest` schema at
+all.** It is declared a mirror that must be kept in sync and it is not one.
+Refuted as an *attack*, real as a defect. Whether that file should be
+regenerated from the migration chain or deleted as a lie is a decision, not
+a fix.
+
 ### F16 — `victim_pii.reveal` is granted to no role
 
 Exactly the defect 0039 fixed for `break_glass.invoke` and did not check

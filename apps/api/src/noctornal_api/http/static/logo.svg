@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="NocTORnal">
+  <title>NocTORnal</title>
+  <desc>A crescent moon whose arc is a network path: nodes joined along
+  the curve, with one tie leaving the frame. Night, and a graph that does
+  not close.</desc>
+
+  <!--
+    The mark has to survive three sizes and one hard constraint.
+
+    16px favicon: the crescent is the only thing that reads, so it is a
+    solid filled shape rather than a ring of dots pretending to be one.
+    A logo that becomes a grey smudge in a browser tab is a logo the user
+    cannot find among nine tabs.
+
+    24px header: the nodes appear as texture on the inner edge.
+
+    Large: the graph is legible as a graph — nodes of differing weight,
+    edges of differing strength, and one edge running off the frame.
+    That last detail is the only opinionated thing here: an investigation
+    graph is never complete, and a mark that closes its own loop says the
+    opposite.
+
+    The constraint: no gradients, no filters, no external references. The
+    UI runs under a strict CSP and this file is also used as the favicon,
+    where a filter would be ignored by some renderers and honoured by
+    others — a mark that looks different per browser is not a mark.
+
+    `currentColor` on the strokes so the header can tint it without a
+    second file; the crescent keeps the accent so the tab icon is
+    recognisable against any theme.
+  -->
+
+  <!-- The crescent. Two circles, the second subtracted, so it stays a
+       single filled path at any size. -->
+  <defs>
+    <mask id="crescent-bite">
+      <rect width="64" height="64" fill="#fff"/>
+      <circle cx="41" cy="26" r="21" fill="#000"/>
+    </mask>
+  </defs>
+  <circle cx="32" cy="32" r="23" fill="#4FB3A9" mask="url(#crescent-bite)"/>
+
+  <!-- The network along the crescent's inner edge. Drawn over the moon,
+       so the ties read as structure rather than decoration. -->
+  <g fill="none" stroke="currentColor" stroke-width="1.6"
+     stroke-linecap="round" opacity="0.85">
+    <path d="M17 21 L13 34"/>
+    <path d="M13 34 L21 45"/>
+    <path d="M17 21 L28 14"/>
+    <path d="M21 45 L34 50"/>
+    <!-- The tie that leaves the frame. -->
+    <path d="M34 50 L52 57" stroke-dasharray="3 3" opacity="0.6"/>
+  </g>
+
+  <g fill="currentColor">
+    <circle cx="17" cy="21" r="3.4"/>
+    <circle cx="13" cy="34" r="2.6"/>
+    <circle cx="21" cy="45" r="2.2"/>
+    <circle cx="28" cy="14" r="2"/>
+    <circle cx="34" cy="50" r="1.7"/>
+  </g>
+</svg>

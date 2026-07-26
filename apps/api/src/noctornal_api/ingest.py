@@ -248,7 +248,21 @@ def hamming(a: int, b: int) -> int:
 # because "the original is recoverable" is the assumption the whole
 # redaction design rests on, and it was load-bearing before it was true.
 
-_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+#: Deliberately NOT `[A-Za-z0-9._%+-]+@...`, which is the pattern everybody
+#: writes and which is ASCII on both sides. `josé@corp.example` did not
+#: match at ALL — the character before the `@` falls outside the local-part
+#: class, so the `+` cannot end there — and `ivan@корп.рф` failed on the
+#: domain and the TLD. Both survived every redaction path, including
+#: `_redact_key`, whose entire reason for existing is the feed keyed by
+#: victim address.
+#:
+#: So this is defined by what an address CANNOT contain rather than by what
+#: it can. Over-matching here costs a false `[redacted email]` in a
+#: diagnostic; under-matching costs a victim identifier in a table with no
+#: index and no encryption. Those are not comparable.
+_ADDR_STOP = r"\s@,;:\"'<>()\[\]{}\\"
+_EMAIL = re.compile(
+    rf"[^{_ADDR_STOP}]+@[^{_ADDR_STOP}]+\.[^{_ADDR_STOP}.]{{2,}}")
 #: Long unbroken runs of credential-shaped characters: tokens, hashes,
 #: cookies, wallet keys. Length alone is the signal -- no keyword needed.
 _LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
@@ -256,12 +270,23 @@ _LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
 #: which is the single commonest shape in this corpus and carries no key
 #: name to match on.
 _PAIR_LINE = re.compile(r"^(\s*)(\S+?)([:|;,\t])(\S+)\s*$")
-#: `"key": "value"` in text that ALMOST parsed. A truncated or malformed
-#: JSON document is the single most common dead letter and it is still
-#: full of key/value pairs; matching them keeps the key and drops the
-#: value, which is the same rule the structural path applies.
-_JSON_PAIR = re.compile(
-    r'("(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|[^,\s}\]]+)')
+#: Any quoted string. Used by `_mask_json_like` below, which decides
+#: key-or-value by what FOLLOWS the string rather than by trying to match
+#: a pair.
+#:
+#: The pair form this replaces was
+#: `("(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|[^,\s}\]]+)`, and it did
+#: the opposite of its job on the input it named as most common. Given a
+#: truncated `…"credentials": [{"password": "Hunter2"…`, the value
+#: alternative `[^,\s}\]]+` matched `[{"password":` — swallowing the NEXT
+#: KEY — so the output was `"credentials": "[redacted]" "Hunter2"` and the
+#: password was stored verbatim. Regex-matching pairs in a document that
+#: does not parse is the wrong shape: there is no reliable pair.
+_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+#: An unquoted value after a colon: numbers, bare tokens, `nan`. `true`,
+#: `false` and `null` are structure and are kept.
+_BARE_VALUE = re.compile(r'(:\s*)(?!")(?!true\b)(?!false\b)(?!null\b)'
+                         r'([^\s,}\]]+)')
 #: `key=value` and `key: value` outside JSON. The key bound is generous
 #: at the short end on purpose -- `p=` is a real field name in real feeds,
 #: and a blocklist that only knows `password` misses it.
@@ -296,8 +321,20 @@ def redact_structure(value, *, depth: int = 0):
     if depth > 12:
         return "[redacted depth]"
     if isinstance(value, dict):
-        return {_redact_key(str(k)): redact_structure(v, depth=depth + 1)
-                for k, v in list(value.items())[:200]}
+        # Masked keys are DE-DUPLICATED, not merged. A feed keyed by victim
+        # address masks every key to the same string, and a plain dict
+        # comprehension then collapses two hundred victims into one entry —
+        # turning "this feed carried 200 people" into "1" in the only view
+        # anybody looks at. The count is the shape.
+        out: dict = {}
+        for key, item in list(value.items())[:200]:
+            masked = _redact_key(str(key))
+            if masked in out:
+                masked = f"{masked} #{sum(1 for k in out if k.startswith(masked)) + 1}"
+            out[masked] = redact_structure(item, depth=depth + 1)
+        if len(value) > 200:
+            out[f"[... {len(value) - 200} more keys]"] = None
+        return out
     if isinstance(value, list):
         # Length matters (a thousand-credential log is a different thing
         # from a one-credential one); the thousandth element does not.
@@ -306,6 +343,37 @@ def redact_structure(value, *, depth: int = 0):
             kept.append(f"[... {len(value) - 5} more]")
         return kept
     return _redact_scalar(value)
+
+
+def _mask_json_like(line: str) -> str:
+    """Keep the keys of a JSON-ish line, redact everything else.
+
+    Inverted from the pair-matching version, and the inversion is the fix.
+    A quoted string is a KEY if the next non-space character is a colon;
+    every other quoted string is a value and goes. That decision needs no
+    pair, so it holds on a document truncated mid-token — which is the
+    case the pair matcher got exactly backwards, leaving the password
+    exposed and redacting the key that named it.
+
+    The dangling-quote tail is handled explicitly: a batch cut at a byte
+    limit ends mid-string, `_QUOTED` cannot match an unterminated string,
+    and `"cookies": [{"value": "sid-8812` would otherwise keep `sid-8812`
+    verbatim. An odd number of quotes means the tail is inside a string.
+    """
+    out = []
+    pos = 0
+    for match in _QUOTED.finditer(line):
+        out.append(line[pos:match.start()])
+        following = line[match.end():].lstrip(" \t")
+        out.append(match.group(0) if following.startswith(":")
+                   else '"[redacted]"')
+        pos = match.end()
+    tail = line[pos:]
+    if tail.count('"') % 2 == 1:
+        # Unterminated string: everything from the opening quote is content.
+        tail = tail[:tail.index('"')] + '"[redacted, truncated]'
+    out.append(tail)
+    return _BARE_VALUE.sub(r"\1[redacted]", "".join(out))
 
 
 def redact_text(text: str | None, *, keep: int = TEXT_FRAGMENT_KEEP) -> str:
@@ -319,10 +387,11 @@ def redact_text(text: str | None, *, keep: int = TEXT_FRAGMENT_KEEP) -> str:
         return ""
     out_lines = []
     for line in text[:keep * 4].splitlines():
-        # Order matters: the pair rules keep the KEY and drop the value, so
-        # they have to run before the email and token rules, which do not
+        # Order matters: the JSON pass keeps the KEY and drops the value,
+        # so it has to run before the email and token rules, which do not
         # know which side of a delimiter they are on.
-        line = _JSON_PAIR.sub(r'\1"[redacted]"', line)
+        if '"' in line:
+            line = _mask_json_like(line)
         line = _KV.sub(r"\1\2[redacted]", line)
         pair = _PAIR_LINE.match(line)
         if pair and len(pair.group(4)) > 2:
@@ -350,7 +419,7 @@ def redact_message(text: str | None, *, keep: int = 2000) -> str:
     """
     if not text:
         return ""
-    out = _JSON_PAIR.sub(r'\1"[redacted]"', text)
+    out = _mask_json_like(text) if '"' in text else text
     out = _EMAIL.sub("[redacted email]", out)
     out = _LONG_TOKEN.sub("[redacted token]", out)
     return out[:keep] + ("… [truncated]" if len(out) > keep else "")
@@ -740,7 +809,40 @@ class IngestService:
         state = "FAILED"
         try:
             seen = 0
-            for fragment in iter_fragments(raw):
+            # The generator is advanced INSIDE the try, not by a `for`.
+            # `for fragment in iter_fragments(raw)` puts the `next()` call
+            # outside both inner handlers, so anything the generator itself
+            # raises — `csv.Error` on a field over 128 KiB, which a stealer
+            # log's cookie column routinely is — escaped past them, past
+            # the router's `except IngestError`, and out as a 500. Every
+            # remaining fragment was dropped with `dead_count` still 0, so
+            # nothing recorded that anything was lost OR how much, and
+            # re-parsing died at the same row for ever. That is invariant
+            # 12 failing on the path built to catch loss, which is the
+            # second time this exact shape has done so (see `scrub_nuls`).
+            fragments = iter_fragments(raw)
+            while True:
+                try:
+                    fragment = next(fragments)
+                except StopIteration:
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    # The container broke mid-stream. Record the break and
+                    # what was reached, then stop: the remainder is not
+                    # recoverable by this parser, and a repair replays from
+                    # the raw object.
+                    self._dead_letter(
+                        batch_id, key,
+                        f"[container failed after {seen} fragment(s)]",
+                        type(exc).__name__, str(exc), parser_version)
+                    result.dead += 1
+                    result.warnings.append(
+                        f"the container stopped being readable after {seen} "
+                        f"fragment(s): {type(exc).__name__}. What follows it "
+                        f"was NOT parsed and is not in the dead-letter queue "
+                        f"record by record — re-parse from the raw object "
+                        f"once the cause is fixed.")
+                    break
                 seen += 1
                 try:
                     payload = json.loads(fragment)
@@ -947,15 +1049,37 @@ class IngestService:
     def replay(self, dead_letter_id: UUID, *, actor_id: UUID,
                repaired: str, case_id: UUID | None = None) -> UUID:
         """Repair and replay. The original fragment is NOT overwritten --
-        what arrived and what was made of it are different facts."""
+        what arrived and what was made of it are different facts.
+
+        The `redacted` check is not bureaucracy. Migration 0040's
+        constraint is `CHECK (redacted) NOT VALID`, and NOT VALID exempts
+        rows that already existed at ALTER time -- it does not exempt
+        UPDATES to them. So on a pre-0040 row this method used to INSERT
+        the record (committed, because the connection is autocommit), then
+        raise `CheckViolation` on the UPDATE, which the router did not
+        catch. The caller got a 500, `replayed_at` stayed NULL, and the
+        dead letter still claimed the fragment was unresolved while a
+        record made from it existed -- invariant 12 inverted.
+
+        Refusing FIRST, with the repair named, is the honest order. The
+        migration reasoned about one writer (`redact_dead_letters.py`) and
+        missed this one; the fix belongs on both sides.
+        """
         row = self._c.execute(
-            """SELECT dl.batch_id, dl.api_key_id, dl.replayed_at
+            """SELECT dl.batch_id, dl.api_key_id, dl.replayed_at, dl.redacted
                  FROM ingest.dead_letter dl WHERE dl.id = %s""",
             (dead_letter_id,)).fetchone()
         if row is None:
             raise IngestError("no such dead letter")
         if row[2] is not None:
             raise IngestError("already replayed")
+        if not row[3]:
+            raise IngestError(
+                "this dead letter predates the redactor and still holds its "
+                "fragment verbatim, so any UPDATE to it violates migration "
+                "0040's check. Run `scripts/redact_dead_letters.py --apply` "
+                "first — replaying without it would create the record and "
+                "then fail to mark this row resolved.")
         key = self._c.execute(
             """SELECT id, declared_category, classification_ceiling,
                       forced_compartment FROM ingest.api_key WHERE id = %s""",
@@ -1292,6 +1416,12 @@ def iter_fragments(raw: bytes):
             yield line
 
 
+#: Where fields beyond the header go. Named rather than dropped: a feed
+#: that grows a column is a schema change, and the whole reason the
+#: dead-letter queue exists is that schema changes are otherwise silent.
+_CSV_OVERFLOW = "_overflow"
+
+
 def _looks_like_csv(text: str) -> bool:
     """A header line and at least one row, with a consistent column count.
 
@@ -1309,14 +1439,43 @@ def _looks_like_csv(text: str) -> bool:
 def _csv_fragments(text: str):
     """Header-keyed rows. `csv` from the standard library, because quoting
     and embedded commas are exactly where a hand-rolled split goes wrong
-    and a wrong split here silently mis-attributes a column."""
+    and a wrong split here silently mis-attributes a column.
+
+    Two silent losses lived here, both invariant 12:
+
+    **Overflow columns were deleted.** `DictReader` collects fields beyond
+    the header under the key `None`, and `{k: v for k, v in row.items() if
+    k is not None}` threw exactly those away. A row
+    `https://mail.example,alice@acme.co,Summer,2024!` under the header
+    `url,login,password` stored `password = "Summer"` — and
+    `store_credential` then fingerprinted the TRUNCATED value, so
+    `search_by_fingerprint`, the only correlation the analytic work has,
+    would miss the real credential for ever. Ragged rows are normal input,
+    not an attack. They are now kept under `_overflow` so the record is
+    complete and the drift is visible.
+
+    **A row whose content sat ONLY in overflow vanished entirely.** The
+    all-blank guard ran on the dict AFTER the overflow had been deleted, so
+    a header that drifted left produced `{'a': '', 'b': ''}` from a row
+    carrying a real password, and nothing recorded that the row existed.
+
+    `csv.Error` is raised and not swallowed: a field over
+    `csv.field_size_limit()` (128 KiB, and a stealer log's cookie column
+    routinely exceeds it) has to reach `parse_batch`, which now dead-letters
+    the remainder rather than losing it.
+    """
     import csv
     import io
 
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(text), restkey=_CSV_OVERFLOW)
     for row in reader:
         cleaned = {k: v for k, v in row.items() if k is not None}
-        if any((v or "").strip() for v in cleaned.values()):
+        overflow = row.get(_CSV_OVERFLOW)
+        if overflow:
+            # Kept, and named, so a widening feed is visible rather than
+            # quietly truncated.
+            cleaned[_CSV_OVERFLOW] = overflow
+        if any(str(v or "").strip() for v in cleaned.values()):
             yield json.dumps(cleaned)
 
 

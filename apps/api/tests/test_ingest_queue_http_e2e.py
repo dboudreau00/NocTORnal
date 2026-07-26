@@ -307,3 +307,86 @@ def test_rescoring_a_record_you_cannot_read_is_a_404(conn, client):
     r = client.post(f"/api/v1/ingest/records/{uuid4()}/score",
                     headers=_auth(token))
     assert r.status_code == 404
+
+
+def test_rescoring_a_QUARANTINED_record_is_refused(conn, client):
+    """Found by the adversarial pass on 2026-07-25, and it was mine.
+
+    `_authorise_record` returned early for a record with no case — the
+    comment said "only the ingest operators see it" and the code checked
+    nothing. That was survivable for `/credentials`, whose service layer
+    re-applies the labels and refuses a null case; it was a hole for
+    `/score`, which reaches `score_record`: a method with no label
+    predicate that WRITES `priority`.
+
+    Three separate problems in one call, which is why the test asserts all
+    three:
+
+    1. an existence oracle — 404 for a nonexistent id, 200 for a
+       quarantined one, so the status code confirms the record exists;
+    2. a content oracle — the returned score is
+       `10*watched_selector_hits + 2*(high risk) - 8*(duplicate)`, so the
+       number leaks how many watched selectors the unreadable payload
+       matches;
+    3. an unauthorised WRITE — `priority` is the column `/quarantine`
+       sorts by, so a caller with no compartment could reorder the
+       operator's triage queue.
+    """
+    owner, _oe, _os = _make_user(conn, global_roles=("SYS_ADMIN",))
+    _ingest(conn, owner, category="STEALER_LOG", compartment="STEALER-2026",
+            payloads=[{"passwords": [], "cookies": [], "autofill": []}])
+    record_id, before = conn.execute(
+        """SELECT id, priority FROM ingest.record
+            WHERE case_id IS NULL AND compartments @> ARRAY['STEALER-2026']
+            ORDER BY created_at DESC LIMIT 1""").fetchone()
+
+    _, email, secret = _make_user(conn, clearance="GREEN",
+                                  global_roles=("ANALYST",))
+    token = _login(client, email, secret)
+    r = client.post(f"/api/v1/ingest/records/{record_id}/score",
+                    headers=_auth(token))
+    # 404, the same answer a nonexistent id gets: the code must not be an
+    # oracle for "exists but is not yours".
+    assert r.status_code == 404, r.text
+    assert conn.execute(
+        "SELECT priority FROM ingest.record WHERE id = %s",
+        (record_id,)).fetchone()[0] == before, "a refusal must not write"
+
+
+def test_the_operator_can_still_rescore_quarantine(conn, client):
+    """The other half. Closing the hole by refusing everybody would make
+    the operator's own queue unsortable, and quarantine is the one queue
+    with nobody else to work it."""
+    owner, email, secret = _make_user(
+        conn, compartments=("STEALER-2026",), global_roles=("SYS_ADMIN",))
+    _ingest(conn, owner, category="STEALER_LOG", compartment="STEALER-2026",
+            payloads=[{"passwords": [], "cookies": [], "autofill": []}])
+    record_id = conn.execute(
+        """SELECT id FROM ingest.record
+            WHERE case_id IS NULL AND compartments @> ARRAY['STEALER-2026']
+            ORDER BY created_at DESC LIMIT 1""").fetchone()[0]
+    token = _login(client, email, secret)
+    r = client.post(f"/api/v1/ingest/records/{record_id}/score",
+                    headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert "priority" in r.json()
+
+
+def test_an_operator_without_the_compartment_is_still_refused(conn, client):
+    """`ingest.manage` is the verb, not a bypass. Unattached is not
+    unclassified — the record carries the issuing key's ceiling, which is
+    what `/quarantine` says in its own docstring."""
+    owner, _e, _s = _make_user(conn, compartments=("STEALER-2026",),
+                               global_roles=("SYS_ADMIN",))
+    _ingest(conn, owner, category="STEALER_LOG", compartment="STEALER-2026",
+            payloads=[{"passwords": [], "cookies": [], "autofill": []}])
+    record_id = conn.execute(
+        """SELECT id FROM ingest.record
+            WHERE case_id IS NULL AND compartments @> ARRAY['STEALER-2026']
+            ORDER BY created_at DESC LIMIT 1""").fetchone()[0]
+
+    _, blind_email, blind_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
+    token = _login(client, blind_email, blind_secret)
+    r = client.post(f"/api/v1/ingest/records/{record_id}/score",
+                    headers=_auth(token))
+    assert r.status_code == 404, r.text

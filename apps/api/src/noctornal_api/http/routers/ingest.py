@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
+    current_user,
     get_conn,
     require_global,
     require_step_up,
@@ -59,6 +60,8 @@ from noctornal_api.ingest import (
     IngestService,
 )
 from noctornal_api.rawstore import MissingObject, RawBatchStorage, RawStoreError
+from noctornal_api.security.access import tlp_from_name
+from noctornal_api.security.sessions import STEP_UP_FRESHNESS
 
 
 def _with_raw(conn: psycopg.Connection, **kw) -> IngestService:
@@ -113,8 +116,52 @@ def _own_record(conn: psycopg.Connection, record_id: UUID) -> tuple:
     return row[0], row[1], frozenset(row[2] or [])
 
 
+def _operator_may_see_quarantine(conn: psycopg.Connection, user: CurrentUser,
+                                 classification: str,
+                                 compartments: frozenset[str]) -> None:
+    """The gate for a record attached to NO case. Raises 404 or returns.
+
+    Written out rather than reusing `require_global` because that is a
+    FastAPI dependency: it runs before the handler, and whether a record is
+    unattached is only known after it has been read. The three checks are
+    the same ones `deps.require_global` makes — verb through a global role,
+    the account active, and step-up freshness where the permission demands
+    it — plus the label check, which `require_global` never makes because
+    it knows nothing about an object.
+
+    Ordering: 404 for every failure. "This record exists but is not yours"
+    is itself a disclosure about a compartmented feed, and a status code
+    that distinguishes the two is an existence oracle (deps.py rule 2).
+    """
+    row = conn.execute(
+        """SELECT bool_or(p.requires_step_up)
+             FROM iam.user_role ur
+             JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+             JOIN iam.permission p ON p.key = rp.permission_key
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.user_id = %s AND rp.permission_key = 'ingest.manage'
+              AND u.is_active""", (user.user_id,)).fetchone()
+    if row is None or row[0] is None:
+        raise Problem(404, "Not found", "no such record")
+    if row[0]:
+        fresh = (
+            user.session_mfa_at is not None
+            and (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
+            < STEP_UP_FRESHNESS)
+        if not fresh:
+            raise Problem(403, "Forbidden", "re-authentication required")
+    clearance, held = user_ceiling(conn, user.user_id)
+    # Unattached is not unclassified: the record carries the issuing key's
+    # ceiling, and `/quarantine` applies exactly this predicate in SQL.
+    # `Tlp` is an IntEnum ordered to match the SQL enum, so `>` here means
+    # the same thing as `<=` does in the query.
+    if tlp_from_name(classification) > clearance \
+            or not frozenset(compartments).issubset(held):
+        raise Problem(404, "Not found", "no such record")
+
+
 def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
-                      record_id: UUID, permission: str) -> UUID:
+                      record_id: UUID, permission: str) -> UUID | None:
     """Gate a record by its OWN case and its OWN labels.
 
     Answered as 404 either way: a status code must not be an existence
@@ -123,9 +170,20 @@ def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
     """
     case_id, classification, compartments = _own_record(conn, record_id)
     if case_id is None:
-        # A record not yet attached to a case is quarantine material.
-        # Only the ingest operators see it.
-        return case_id
+        # Quarantine: no case assignment can reach it, so the OPERATOR verb
+        # is the gate -- the same one `/quarantine` uses -- and the labels
+        # still apply.
+        #
+        # This branch used to `return case_id` and check nothing at all. It
+        # was safe for `credentials`, whose service layer re-applies the
+        # labels and refuses a null case outright; it was a hole for
+        # `rescore`, which reaches `score_record` -- a method with no label
+        # predicate that WRITES `priority`. A GREEN analyst with no case
+        # assignment could confirm a compartmented quarantine record
+        # existed, read its watched-selector hit count out of the returned
+        # score, and reorder the operator's triage queue.
+        _operator_may_see_quarantine(conn, user, classification, compartments)
+        return None
     try:
         authorize_object(conn, user, case_id=case_id,
                          permission_key=permission,
@@ -613,7 +671,7 @@ def quarantine(
 @router.post("/records/{record_id}/score", response_model=dict)
 def rescore(
     record_id: UUID,
-    user: CurrentUser = Depends(require_global("ingest.read")),
+    user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """Recompute one record's triage score.
@@ -621,6 +679,18 @@ def rescore(
     Worth having by hand because the score depends on `collect.watch`
     selectors, which change: a record ingested before a selector was added
     scored zero against it and will keep scoring zero until something asks.
+
+    **No `require_global` on the route, deliberately.** Which verb applies
+    depends on what the record IS: a record in a case needs `ingest.read`
+    plus that case's five-part gate; a quarantined record belongs to no
+    case and needs the operator verb `ingest.manage`, because no case
+    assignment can reach it. `_authorise_record` picks, and refuses with a
+    404 either way.
+
+    Gating the route on `ingest.read` — which is what it did — made the
+    operator unable to sort the one queue nobody else works, while leaving
+    the quarantine branch checking nothing at all. Both halves were wrong
+    in the same line.
     """
     _authorise_record(conn, user, record_id, "ingest.read")
     try:
