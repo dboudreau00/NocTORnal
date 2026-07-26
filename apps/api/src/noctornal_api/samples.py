@@ -88,6 +88,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.security import envelope
+from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 
 SUBMITTED = "SUBMITTED"
 QUARANTINED = "QUARANTINED"
@@ -502,6 +503,17 @@ class SampleService:
             raise SampleError(
                 f"sample exceeds {MAX_SAMPLE_BYTES} bytes; a submission that "
                 f"large is a disk image or a mistake")
+        # Validated HERE, before anything is written anywhere. The router
+        # takes `classification` as an unconstrained `Form(...)` string and
+        # it lands in a `core.tlp` column, so a typo used to surface as a
+        # psycopg DataError from inside the INSERT -- which, under the old
+        # ordering, was AFTER the bytes had already gone to the object
+        # store. A label the system cannot parse is a bad request, not a
+        # database error.
+        try:
+            tlp_from_name(classification)
+        except AccessResolutionError as exc:
+            raise SampleError(str(exc)) from exc
 
         result = triage(data)
         digest_hex = result.sha256.hex()
@@ -525,27 +537,48 @@ class SampleService:
 
         storage_key = f"samples/{digest_hex[:2]}/{digest_hex}"
         bucket = os.environ.get("SAMPLE_BUCKET", "noctornal-samples")
-        if self._storage is not None:
-            self._storage.put(storage_key, ciphertext)
 
-        row = self._c.execute(
-            """INSERT INTO lab.sample
-                   (case_id, sha256, sha1, md5, original_filename, byte_size,
-                    storage_key, storage_bucket, data_key_ciphertext,
-                    data_key_id, state, file_type, entropy, triage_gaps,
-                    submitted_by, source_note, classification, compartments)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       'QUARANTINED', %s, %s, %s, %s, %s, %s, %s)
-               RETURNING """ + _COLUMNS,
-            (case_id, result.sha256, result.sha1, result.md5,
-             original_filename, result.byte_size, storage_key, bucket,
-             key_blob, key_id, result.file_type, result.entropy,
-             Json(result.gaps), submitted_by, source_note, classification,
-             sorted(compartments)),
-        ).fetchone()
-        sample = _record(row)
-        self._access(sample.id, submitted_by, "VIEWED_META",
-                     {"event": "submitted", "policy_reference": detail})
+        # ROW FIRST, THEN BYTES. The order matters more here than anywhere
+        # else in the system (F19, 2026-07-26).
+        #
+        # The old order put the ciphertext in the bucket and then inserted.
+        # Any failure in between -- a constraint violation, a bad label, a
+        # dropped connection -- left a copy of LIVE MALWARE in an
+        # object-locked bucket with no row naming it, no submitter attached
+        # to it and no state machine covering it. Object lock means it
+        # cannot then be deleted, by anyone, including root. That is the
+        # single worst durable outcome this module can produce.
+        #
+        # Reversed, the failure modes swap for strictly better ones: a
+        # storage failure rolls the row back and nothing is retained
+        # anywhere, and every validation error now fires before a single
+        # byte leaves the process. The residual window -- put succeeds, then
+        # COMMIT fails -- is far narrower than "put succeeds, then INSERT
+        # rejects the row", and it is the one an operator can actually
+        # detect, because a bucket object whose digest matches no row is a
+        # query rather than an archaeology exercise.
+        with self._c.transaction():
+            row = self._c.execute(
+                """INSERT INTO lab.sample
+                       (case_id, sha256, sha1, md5, original_filename,
+                        byte_size, storage_key, storage_bucket,
+                        data_key_ciphertext, data_key_id, state, file_type,
+                        entropy, triage_gaps, submitted_by, source_note,
+                        classification, compartments)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           'QUARANTINED', %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING """ + _COLUMNS,
+                (case_id, result.sha256, result.sha1, result.md5,
+                 original_filename, result.byte_size, storage_key, bucket,
+                 key_blob, key_id, result.file_type, result.entropy,
+                 Json(result.gaps), submitted_by, source_note, classification,
+                 sorted(compartments)),
+            ).fetchone()
+            sample = _record(row)
+            if self._storage is not None:
+                self._storage.put(storage_key, ciphertext)
+            self._access(sample.id, submitted_by, "VIEWED_META",
+                         {"event": "submitted", "policy_reference": detail})
         return sample
 
     def reject(self, sample_id: UUID, *, actor_id: UUID, reason: str,
@@ -556,6 +589,29 @@ class SampleService:
         The bytes go; the row stays. That asymmetry is the point -- an
         auditor asking "did anything prohibited ever come through here"
         needs an answer, and the answer cannot be the material itself.
+
+        ## Legal hold beats this, and the collision is not ours to resolve
+
+        docs/08 states it without qualification: **"legal_hold overrides all
+        deletion, everywhere."** `lab.sample.legal_hold` has existed since
+        migration 0031 and, until F19 (2026-07-26), was read by nothing --
+        so one non-step-up call irreversibly destroyed material under a
+        court hold, and did it through the code path most likely to be
+        reached in a hurry.
+
+        What makes this worse than an ordinary missing check is that the two
+        rules genuinely conflict. A prohibited-content policy may require
+        destruction; a preservation order requires retention; and in some
+        jurisdictions doing either is an offence against the other. Software
+        cannot pick. So the destruction is REFUSED and the conflict is put
+        in front of a person, with `purge_bytes=False` available to record
+        the rejection and the reason while the bytes stay put. That is
+        docs/18 L1's open question arriving as a runtime refusal rather than
+        as a silent irreversible act.
+
+        The case's hold counts too. docs/08 puts `legal_hold` on the case
+        precisely so a hold can be applied to everything in it at once
+        without enumerating the contents.
         """
         if not reason or not reason.strip():
             raise SampleError("a rejection has to say why; that record is the "
@@ -566,6 +622,23 @@ class SampleService:
         if current.state == REJECTED:
             raise SampleError("already rejected")
 
+        held = self._c.execute(
+            """SELECT s.legal_hold, coalesce(c.legal_hold, false)
+                 FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.id = %s""", (sample_id,)).fetchone()
+        if purge_bytes and held and (held[0] or held[1]):
+            raise SampleError(
+                "this sample is under a legal hold, and docs/08 is "
+                "unqualified: a hold overrides all deletion, everywhere. "
+                "Rejecting it would destroy material somebody has been "
+                "ordered to preserve. If a prohibited-content policy also "
+                "requires destruction, that conflict is a decision for "
+                "counsel and the designated person, not for this endpoint "
+                "-- lift the hold deliberately, or call this with "
+                "purge_bytes=False to record the rejection and keep the "
+                "bytes.")
+
         if purge_bytes and self._storage is not None:
             self._storage.delete(
                 self._c.execute(
@@ -575,11 +648,16 @@ class SampleService:
         row = self._c.execute(
             """UPDATE lab.sample
                   SET state = 'REJECTED', reject_reason = %s,
-                      data_key_ciphertext = %s
+                      data_key_ciphertext = CASE WHEN %s THEN %s
+                                                 ELSE data_key_ciphertext END
                 WHERE id = %s RETURNING """ + _COLUMNS,
-            # The data key is destroyed too. Even if the object survives a
-            # bucket-lifecycle race, nothing can decrypt it.
-            (reason.strip(), b"", sample_id)).fetchone()
+            # The data key is destroyed WITH the bytes, so that even if the
+            # object survives a bucket-lifecycle race nothing can decrypt
+            # it. Only with them, though: destroying the key while keeping
+            # the ciphertext preserves a file nobody can ever read, which
+            # satisfies a preservation order in form and defeats it in
+            # substance.
+            (reason.strip(), purge_bytes, b"", sample_id)).fetchone()
         self._access(sample_id, actor_id, "REJECTED",
                      {"reason": reason.strip(), "bytes_purged": purge_bytes})
         return _record(row)

@@ -160,37 +160,90 @@ class BreakGlassService:
         Somebody's evening is interrupted on purpose: docs/05 calls for an
         "immediate alert to the security officer", and an alert that waits
         until 08:00 is a report.
+
+        ## This alert carries NO case content, and that is the whole design
+
+        The seed is explicit about the role (migration 0017): *"Note
+        SECURITY_OFFICER: can read the audit trail but NOT case content."*
+        They hold `audit.read`, `break_glass.review` and
+        `victim_pii.authorise`, and no case-content permission at all. They
+        are normally not assigned to the case either.
+
+        Until F19 (2026-07-26) this alert sent them the case CODE, the case
+        CLASSIFICATION and the analyst's JUSTIFICATION verbatim — a free
+        text field whose whole purpose is to describe the emergency, which
+        means it quotes case facts. Labelled with the case's classification,
+        so an officer with a high enough clearance received case material
+        the permission model says they may not read, by email.
+
+        Now it is what an oversight alert should be: a grant id, a clock,
+        and an instruction to go and look. The justification lives in
+        `iam.break_glass` and is read through `break_glass.review`, which is
+        the permission that actually authorises reading it. GREEN because it
+        contains nothing about the case — deliberately NOT inherited from
+        the case, since inheriting a label you are not carrying the content
+        of is how a notification ends up over-classified and undeliverable
+        or under-classified and leaked.
         """
         from noctornal_api.notifications import URGENT, NotificationService
 
         svc = NotificationService(self._c)
-        code = "a case"
-        classification = "AMBER"
-        compartments: frozenset[str] = frozenset()
+        for officer in officers:
+            svc.notify(
+                # No `case_id`: this notification is ABOUT a grant, not
+                # about a case, and attaching the case would put it behind
+                # an assignment the officer is not supposed to need.
+                recipient_id=officer, case_id=None,
+                kind="BREAK_GLASS_INVOKED", priority=URGENT,
+                subject="Emergency access was used",
+                summary=(f"Break-glass access was invoked and expires at "
+                         f"{grant.expires_at:%H:%M UTC}. It needs your "
+                         f"review."),
+                body=(f"An analyst invoked break-glass access.\n\n"
+                      f"Grant: {grant.id}\n"
+                      f"Expires: {grant.expires_at.isoformat()}\n\n"
+                      f"Their justification is held with the grant and is "
+                      f"readable with break_glass.review — it is not "
+                      f"reproduced here, because it describes the emergency "
+                      f"and therefore the case.\n\n"
+                      f"Every action taken under this grant is counted and "
+                      f"audited. Your review is mandatory and the grant "
+                      f"sits in the unreviewed queue until you record one."),
+                classification="GREEN", compartments=frozenset(),
+                object_type="break_glass", object_id=grant.id,
+                actor_id=grant.user_id)
+
+        # The case owner, separately and with the case content the officer
+        # does not get. `KINDS["BREAK_GLASS_INVOKED"]` has always described
+        # this one -- "Emergency access was used on a case you own" -- and
+        # nothing raised it. The owner is assigned and cleared, so they may
+        # have the code and the justification; `notify_case_owner` applies
+        # the same suppressions, so the analyst who invoked it is not told
+        # about their own invocation.
         if grant.case_id is not None:
             row = self._c.execute(
                 'SELECT code, classification, compartments FROM core."case" '
                 'WHERE id = %s', (grant.case_id,)).fetchone()
             if row:
-                code, classification = row[0], row[1]
-                compartments = frozenset(row[2] or [])
-        for officer in officers:
-            svc.notify(
-                recipient_id=officer, case_id=grant.case_id,
-                kind="BREAK_GLASS_INVOKED", priority=URGENT,
-                subject=f"{code}: emergency access was used",
-                summary=(f"Break-glass access was invoked on {code}. It "
-                         f"expires at {grant.expires_at:%H:%M UTC} and needs "
-                         f"your review."),
-                body=(f"An analyst invoked break-glass access.\n\n"
-                      f"Their justification:\n\n    {grant.justification}\n\n"
-                      f"It expires at {grant.expires_at.isoformat()}. Every "
-                      f"action taken under it is counted and audited. Your "
-                      f"review is mandatory and the grant will sit in the "
-                      f"unreviewed queue until you record one."),
-                classification=classification, compartments=compartments,
-                object_type="break_glass", object_id=grant.id,
-                actor_id=grant.user_id)
+                svc.notify_case_owner(
+                    grant.case_id,
+                    kind="BREAK_GLASS_INVOKED", priority=URGENT,
+                    subject=f"{row[0]}: emergency access was used",
+                    summary=(f"Break-glass access was invoked on {row[0]}. It "
+                             f"expires at {grant.expires_at:%H:%M UTC}. A "
+                             f"security officer has been alerted."),
+                    body=(f"An analyst invoked break-glass access on your "
+                          f"case.\n\nTheir justification:\n\n"
+                          f"    {grant.justification}\n\n"
+                          f"It expires at {grant.expires_at.isoformat()}. A "
+                          f"security officer has been alerted independently "
+                          f"and their review is mandatory; you are told "
+                          f"because it is your case, not because anything "
+                          f"is required of you."),
+                    classification=row[1],
+                    compartments=frozenset(row[2] or []),
+                    object_type="break_glass", object_id=grant.id,
+                    actor_id=grant.user_id)
 
     # -- using it ----------------------------------------------------------
 
