@@ -73,8 +73,19 @@ SPEC = [
      "GREEN"),
     # The filename attack, seeded on purpose so the quarantine treatment in
     # the UI is exercised by something rather than only described.
+    #
+    # The RLO is an ESCAPE, never a literal byte in this file.
+    # `scripts/check_source_hygiene.py` refuses a literal U+202E in source
+    # (CVE-2021-42574, Trojan Source) and is right to: source that does not
+    # read the way it executes is the entire attack. This is the one place
+    # in the tree that legitimately needs the character, and an allowlist
+    # would have punched a hole in that check for the sake of demo data.
+    #
+    # `"\u202e"` produces the identical string at runtime, so the seeded
+    # filename still renders as "harmlessexe.pdf" wherever the direction is
+    # not forced -- which is the whole point of seeding it.
     (b"MZ\x90\x00", 7000, 200,
-     "harmless‮fdp.exe",
+     "harmless\u202efdp.exe",
      "Submitted with a U+202E RIGHT-TO-LEFT OVERRIDE in the filename: it "
      "renders as 'harmlessexe.pdf' anywhere the direction is not forced. "
      "The oldest presentation attack there is.",
