@@ -94,9 +94,20 @@ def unhealthy(
     by returning zero items rather than by raising -- so without somebody
     watching this list, a feed goes quiet and the case simply stops
     growing.
+
+    `never_polled` is reported separately rather than mixed in. A source
+    that has never run is not broken, and listing it here alongside a
+    parser that genuinely stopped matching pads the alert with non-alerts
+    — which is how a list that exists to be watched stops being watched.
     """
-    rows = CollectionService(conn).unhealthy_sources()
-    return {"sources": rows, "count": len(rows)}
+    svc = CollectionService(conn)
+    rows = svc.unhealthy_sources()
+    never = svc.never_polled_sources()
+    return {"sources": rows, "count": len(rows),
+            "never_polled": never, "never_polled_count": len(never),
+            "notice": ("Never-polled sources are listed separately: added "
+                       "and never collected from is worth knowing, and it is "
+                       "not the same thing as broken.")}
 
 
 class RunBody(BaseModel):

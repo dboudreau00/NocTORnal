@@ -560,6 +560,20 @@ function selectTab(name) {
      workspace does not pay for a tab nobody opened. */
   if (name === 'comms') loadCommsPlatforms().catch(fail);
   if (name === 'inbox') { loadInbox(); loadInboxPreferences(); }
+  /* Only the visible subtab loads. Four fetches on tab-open would mean
+     three of them are for a panel nobody is looking at, and one of those
+     three is a rate-limited search. */
+  if (name === 'feeds' && selectFeedsSub) selectFeedsSub(currentSub('pane-feeds'));
+  if (name === 'governance' && selectGovSub) {
+    selectGovSub(currentSub('pane-governance'));
+  }
+}
+
+/** Which subtab is selected in a pane, so re-entering it reloads THAT one
+ *  rather than snapping back to the first. */
+function currentSub(paneId) {
+  const on = $(paneId).querySelector('.subtab[aria-selected="true"]');
+  return on ? on.dataset.subtab : null;
 }
 
 function initTabs() {
@@ -3732,6 +3746,7 @@ function wire() {
   initTabs();
   initInbox();
   initComms();
+  initOpsPanes();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
@@ -4484,6 +4499,750 @@ function renderBalance(a) {
       + 'same two actors usually means a relationship that changed.'));
   }
   box.appendChild(card);
+}
+
+/* ── FEEDS and LIFECYCLE (Phases 9, 4, 6) ─────────────────────────────────
+ *
+ * Two panes over four routers. What they have in common is that everything
+ * they show is a QUEUE somebody has to work, and every one of those queues
+ * fails the same way: it fills up, nobody can tell what matters, and it
+ * stops being read. docs/12 says it outright — "volume is the enemy".
+ *
+ * So each list leads with the thing that decides whether to look:
+ *
+ *   ingest queue   → the triage score, and WHY it scored that
+ *   dead letters   → the error class, because a run of identical ones is a
+ *                    partner changing their schema
+ *   sources        → consecutive failures, because a parser that stopped
+ *                    matching fails silently
+ *   retention      → days remaining, signed, so overdue reads as overdue
+ *   break-glass    → how long the grant has been waiting for review
+ *
+ * Nothing here renders a payload, a fragment or a credential as HTML.
+ * Everything is `textContent` through `el()`. Invariant 10's reasoning is
+ * about samples, but the argument — attacker-controlled bytes must not be
+ * interpreted — applies to every one of these.
+ */
+
+/** A subtab group: `.subtabs > .subtab[data-subtab]` over `.subpane`s. */
+function initSubtabs(paneId, onSelect) {
+  const pane = $(paneId);
+  const tabs = Array.from(pane.querySelectorAll('.subtab'));
+  const select = (name) => {
+    for (const t of tabs) {
+      const on = t.dataset.subtab === name;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.tabIndex = on ? 0 : -1;
+      show($(t.getAttribute('aria-controls')), on);
+    }
+    if (onSelect) onSelect(name);
+  };
+  tabs.forEach((t, i) => {
+    t.addEventListener('click', () => select(t.dataset.subtab));
+    t.addEventListener('keydown', (e) => {
+      let next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      if (next) { e.preventDefault(); next.focus(); select(next.dataset.subtab); }
+    });
+  });
+  return select;
+}
+
+/** Signed days from now. Negative reads as overdue, which is the point. */
+function daysFromNow(iso) {
+  if (!iso) return null;
+  return Math.round((new Date(iso) - Date.now()) / 86400000);
+}
+
+function whenText(iso) {
+  if (!iso) return '—';
+  const d = daysFromNow(iso);
+  if (d === null) return '—';
+  if (d < 0) return Math.abs(d) + 'd overdue';
+  if (d === 0) return 'today';
+  return 'in ' + d + 'd';
+}
+
+/** A labelled key/value pair on a row. */
+function fact(label, value, cls) {
+  const wrap = el('span', 'fact' + (cls ? ' ' + cls : ''));
+  wrap.appendChild(el('span', 'fact-k', label));
+  wrap.appendChild(el('span', 'fact-v', value === null || value === undefined
+    ? '—' : String(value)));
+  return wrap;
+}
+
+function labelChips(row) {
+  const chips = el('span', 'chips');
+  if (row.classification) {
+    chips.appendChild(
+      el('span', 'chip tlp-' + row.classification, row.classification));
+  }
+  for (const c of row.compartments || []) {
+    chips.appendChild(el('span', 'chip compartment', c));
+  }
+  return chips;
+}
+
+/** Render a list, or show its empty state. Returns whether anything drew. */
+function renderList(listId, emptyId, rows, build) {
+  const box = $(listId);
+  clear(box);
+  for (const row of rows) box.appendChild(build(row));
+  show($(emptyId), rows.length === 0);
+  return rows.length > 0;
+}
+
+/* --- ingest queue ------------------------------------------------------ */
+
+async function loadIngestQueue() {
+  if (!state.caseId) return;
+  const params = new URLSearchParams({ case_id: state.caseId, limit: '100' });
+  if ($('ing-category').value) params.set('category', $('ing-category').value);
+  if ($('ing-dupes').checked) params.set('include_duplicates', 'true');
+  try {
+    const body = await api('/ingest/records?' + params.toString());
+    renderList('ing-list', 'ing-empty', body.records, ingestRow);
+    $('ing-counts').textContent = body.count
+      ? body.count + ' record' + (body.count === 1 ? '' : 's') : '';
+    /* Categories are populated FROM the data rather than from a fixed list:
+       a category the classifier emits and the filter cannot select is a
+       filter that lies. */
+    const seen = new Set(body.records.map((r) => r.category));
+    const sel = $('ing-category');
+    const keep = sel.value;
+    if (seen.size) {
+      clear(sel);
+      sel.appendChild(Object.assign(el('option', null, 'All'), { value: '' }));
+      for (const c of Array.from(seen).sort()) {
+        sel.appendChild(Object.assign(el('option', null, c), { value: c }));
+      }
+      sel.value = keep;
+    }
+  } catch (err) {
+    /* 403 is not a fault: most roles do not hold `ingest.read`, and a
+       banner on every tab open would train people to dismiss banners. */
+    if (err instanceof ApiError && err.status === 403) {
+      renderList('ing-list', 'ing-empty', [], ingestRow);
+      $('ing-empty').textContent =
+        'You do not hold ingest.read on this case.';
+      return;
+    }
+    fail(err);
+  }
+  loadQuarantine();
+}
+
+function ingestRow(r) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  const score = el('span', 'score' + (r.priority >= 10 ? ' hot' : ''),
+    r.priority.toFixed(1));
+  score.title = 'Triage score. The watched-selector term dominates on '
+    + 'purpose: a hit should surface in seconds and a generic combo list '
+    + 'should sink.';
+  head.appendChild(score);
+  head.appendChild(el('span', 'row-title', r.category));
+  head.appendChild(labelChips(r));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('confidence',
+    (r.category_confidence * 100).toFixed(0) + '% ' + r.category_source));
+  facts.appendChild(fact('feed', r.feed));
+  facts.appendChild(fact('received', (r.received_at || '').slice(0, 16)
+    .replace('T', ' ')));
+  facts.appendChild(fact('expires', whenText(r.retain_until),
+    daysFromNow(r.retain_until) < 0 ? 'bad' : ''));
+  if (r.credential_count) {
+    facts.appendChild(fact('credentials', r.credential_count, 'warn'));
+  }
+  if (r.duplicate_count) {
+    const f = fact('also sent by', r.duplicate_count + ' other');
+    f.title = 'Folded, not dropped. The same leak post from nine sources is '
+      + 'what near-duplicate suppression exists for.';
+    facts.appendChild(f);
+  }
+  if (r.is_duplicate) facts.appendChild(fact('', 'folded duplicate', 'muted'));
+  card.appendChild(facts);
+
+  /* WHY it scored what it scored. A score with no reason is a number an
+     analyst learns to ignore. */
+  const why = r.priority_detail || {};
+  if (why.watched_selector_hits) {
+    card.appendChild(el('p', 'why',
+      why.watched_selector_hits + ' watched selector hit'
+      + (why.watched_selector_hits === 1 ? '' : 's')));
+  }
+
+  const actions = el('div', 'row-actions');
+  const rescore = el('button', 'btn small', 'Rescore');
+  rescore.type = 'button';
+  rescore.title = 'The score depends on watch selectors, which change. A '
+    + 'record ingested before a selector was added scored zero against it.';
+  rescore.addEventListener('click', async () => {
+    try {
+      await api('/ingest/records/' + r.id + '/score', { method: 'POST' });
+      loadIngestQueue();
+    } catch (err) { fail(err); }
+  });
+  actions.appendChild(rescore);
+
+  if (r.credential_count) {
+    const creds = el('button', 'btn small', 'Credentials (masked)');
+    creds.type = 'button';
+    creds.addEventListener('click', () => showCredentials(r, card));
+    actions.appendChild(creds);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+/** The masked view. **Never a value** — that is a separate, audited act
+ *  requiring a live authorisation, and it is not a button on a queue. */
+async function showCredentials(record, card) {
+  let box = card.querySelector('.cred-box');
+  if (box) { box.remove(); return; }
+  box = el('div', 'cred-box');
+  card.appendChild(box);
+  try {
+    const body = await api('/ingest/records/' + record.id + '/credentials');
+    box.appendChild(el('p', 'help', body.notice || ''));
+    for (const c of body.credentials) {
+      const line = el('div', 'facts');
+      line.appendChild(fact('kind', c.kind));
+      line.appendChild(fact('service', c.service_domain));
+      line.appendChild(fact('captured', (c.captured_at || '').slice(0, 10)));
+      line.appendChild(fact('value held', c.value_held ? 'yes' : 'not retained'));
+      if (c.reveal_count) line.appendChild(fact('revealed', c.reveal_count, 'warn'));
+      box.appendChild(line);
+    }
+    if (!body.credentials.length) {
+      box.appendChild(el('p', 'empty', 'No credentials on this record.'));
+    }
+  } catch (err) {
+    box.appendChild(el('p', 'form-error',
+      err instanceof ApiError ? (err.detail || err.title) : String(err)));
+  }
+}
+
+async function loadQuarantine() {
+  const box = $('ing-quarantine-box');
+  try {
+    const body = await api('/ingest/quarantine?limit=50');
+    show(box, true);
+    renderList('ing-quarantine-list', 'ing-quarantine-empty',
+      body.records, ingestRow);
+  } catch (_err) {
+    /* Not an operator. The whole section stays hidden rather than showing
+       a permission error for a job that is not theirs. */
+    show(box, false);
+  }
+}
+
+/* --- dead letters ------------------------------------------------------ */
+
+async function loadDeadLetters() {
+  try {
+    const body = await api('/ingest/dead-letters?limit=100');
+    renderList('dl-list', 'dl-empty', body.dead_letters, deadLetterRow);
+    $('dl-counts').textContent = body.count
+      ? body.count + ' unparsed fragment' + (body.count === 1 ? '' : 's') : '';
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      renderList('dl-list', 'dl-empty', [], deadLetterRow);
+      $('dl-empty').textContent = 'You do not hold ingest.read.';
+      return;
+    }
+    fail(err);
+  }
+}
+
+function deadLetterRow(d) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', d.error_class));
+  if (d.classification) {
+    head.appendChild(
+      el('span', 'chip tlp-' + d.classification, d.classification));
+  }
+  if (d.replayed_at) head.appendChild(el('span', 'chip ok', 'replayed'));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('when', (d.occurred_at || '').slice(0, 16)
+    .replace('T', ' ')));
+  facts.appendChild(fact('expires', whenText(d.retain_until)));
+  card.appendChild(facts);
+
+  if (d.error_detail) card.appendChild(el('p', 'why', d.error_detail));
+
+  if (d.fragment_withheld) {
+    card.appendChild(el('p', 'help warn',
+      'Recorded before the redactor existed, so this fragment is verbatim '
+      + 'and is withheld. scripts/redact_dead_letters.py --apply is the '
+      + 'repair.'));
+  } else if (d.fragment) {
+    /* textContent, never innerHTML: this is attacker-supplied input that
+       failed to parse, which is the least trustworthy string in the system. */
+    const pre = el('pre', 'fragment mono-sm', d.fragment);
+    pre.title = 'Structurally redacted: keys, types and lengths only.';
+    card.appendChild(pre);
+  }
+  return card;
+}
+
+/* --- collection sources ------------------------------------------------ */
+
+/** One section of a tab, loaded independently.
+ *
+ *  Independently is the point. These four sections need three different
+ *  permissions — `collection.read` for sources and runs,
+ *  `collection_account.manage` for personas — and gathering them with
+ *  `Promise.all` meant the FIRST 403 rejected the lot: a CASE_OWNER, who
+ *  holds `collection.read`, saw an empty Sources tab claiming they did
+ *  not, because personas (which they genuinely may not see) failed first.
+ *
+ *  A section the caller may not read says so where that section is,
+ *  rather than blanking its neighbours.
+ */
+async function section(path, listId, emptyId, pick, build, missing) {
+  try {
+    const body = await api(path);
+    renderList(listId, emptyId, pick(body) || [], build);
+    return body;
+  } catch (err) {
+    renderList(listId, emptyId, [], build);
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      $(emptyId).textContent = missing;
+    } else {
+      $(emptyId).textContent = err instanceof ApiError
+        ? (err.detail || err.title) : String(err);
+    }
+    return null;
+  }
+}
+
+async function loadSources() {
+  const [unhealthy, due] = await Promise.all([
+    section('/collection/sources/unhealthy', 'src-unhealthy',
+      'src-unhealthy-empty', (b) => b.sources, unhealthyRow,
+      'Source health needs collection.read.')
+      .then((body) => {
+        /* Same response, second list. Never-polled is not an alert and
+           must not pad one. */
+        renderList('src-never', 'src-never-empty',
+          (body && body.never_polled) || [], neverPolledRow);
+        return body;
+      }),
+    section('/collection/sources/due', 'src-due', 'src-due-empty',
+      (b) => b.due, dueRow, 'The poll schedule needs collection.read.'),
+    section('/collection/personas', 'src-personas', 'src-personas-empty',
+      (b) => b.personas, personaRow,
+      'Personas belong to the collector role. Credentials never leave the '
+      + 'collector (invariant 7), and neither does the roster.'),
+    section('/collection/runs?limit=25', 'src-runs', 'src-runs-empty',
+      (b) => b.runs, runRow, 'Run history needs collection.read.'),
+  ]);
+  $('src-counts').textContent = (due && unhealthy)
+    ? ((due.due || []).length + ' due · '
+       + (unhealthy.sources || []).length + ' unhealthy')
+    : '';
+}
+
+function unhealthyRow(s) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', s.name));
+  head.appendChild(el('span', 'chip bad', s.health));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('consecutive failures', s.consecutive_failures, 'bad'));
+  facts.appendChild(fact('last ok', (s.last_ok_at || 'never').slice(0, 16)
+    .replace('T', ' ')));
+  card.appendChild(facts);
+  if (s.note) card.appendChild(el('p', 'why', s.note));
+  return card;
+}
+
+function neverPolledRow(s) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', s.name));
+  head.appendChild(el('span', 'chip', s.kind));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('added', (s.created_at || '').slice(0, 10)));
+  card.appendChild(facts);
+  return card;
+}
+
+function dueRow(s) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', s.name));
+  head.appendChild(el('span', 'chip', s.kind));
+  if (s.health && s.health !== 'OK') {
+    head.appendChild(el('span', 'chip bad', s.health));
+  }
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('due', (s.due_at || '').slice(0, 16).replace('T', ' ')));
+  facts.appendChild(fact('max rps', s.max_rps));
+  facts.appendChild(fact('parser', s.parser_key));
+  card.appendChild(facts);
+
+  const actions = el('div', 'row-actions');
+  const run = el('button', 'btn small', 'Poll now');
+  run.type = 'button';
+  run.addEventListener('click', async () => {
+    run.disabled = true;
+    try {
+      const body = await api('/collection/sources/' + s.id + '/run',
+        { method: 'POST', json: {} });
+      card.appendChild(el('p', body.error ? 'form-error' : 'form-ok',
+        body.error || (body.items_new + ' new of ' + body.items_seen + ' seen')));
+      loadSources();
+    } catch (err) { fail(err); } finally { run.disabled = false; }
+  });
+  actions.appendChild(run);
+  card.appendChild(actions);
+  return card;
+}
+
+function personaRow(p) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', p.handle || p.name || p.id));
+  const cls = p.status === 'BURNED' ? 'bad'
+    : (p.status === 'HEALTHY' ? 'ok' : 'warn');
+  head.appendChild(el('span', 'chip ' + cls, p.status));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  if (p.platform) facts.appendChild(fact('platform', p.platform));
+  facts.appendChild(fact('last used', (p.last_used_at || 'never').slice(0, 16)
+    .replace('T', ' ')));
+  if (p.cooldown_until) {
+    facts.appendChild(fact('cooling until',
+      p.cooldown_until.slice(0, 16).replace('T', ' '), 'warn'));
+  }
+  card.appendChild(facts);
+  if (p.status === 'BURNED') {
+    card.appendChild(el('p', 'why',
+      'Terminal. Re-using a persona a forum admin has already flagged is how '
+      + 'you burn the next one too.'));
+  }
+  return card;
+}
+
+function runRow(r) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', r.source_name || r.source_id));
+  head.appendChild(el('span', 'chip ' + (r.status === 'OK' ? 'ok' : 'bad'),
+    r.status));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('started', (r.started_at || '').slice(0, 16)
+    .replace('T', ' ')));
+  if (r.items_seen !== undefined) {
+    facts.appendChild(fact('items', r.items_new + ' new / ' + r.items_seen));
+  }
+  card.appendChild(facts);
+  if (r.error_detail) card.appendChild(el('p', 'why', r.error_detail));
+  return card;
+}
+
+/* --- ingest keys ------------------------------------------------------- */
+
+async function loadKeys() {
+  const params = $('key-revoked').checked ? '?include_revoked=true' : '';
+  try {
+    const body = await api('/ingest/keys' + params);
+    renderList('key-list', 'key-empty', body.keys, keyRow);
+    $('key-counts').textContent = body.count + ' key'
+      + (body.count === 1 ? '' : 's');
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      renderList('key-list', 'key-empty', [], keyRow);
+      $('key-empty').textContent =
+        'Key administration needs ingest.manage. Which feeds exist and what '
+        + 'they are cleared for is operational intelligence about the '
+        + 'deployment.';
+      return;
+    }
+    fail(err);
+  }
+}
+
+function keyRow(k) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', k.name));
+  head.appendChild(el('span', 'chip', k.environment));
+  head.appendChild(el('span', 'chip tlp-' + k.classification_ceiling,
+    k.classification_ceiling));
+  if (k.forced_compartment) {
+    head.appendChild(el('span', 'chip compartment', k.forced_compartment));
+  }
+  if (k.revoked_at) head.appendChild(el('span', 'chip bad', 'revoked'));
+  else if (k.expired) head.appendChild(el('span', 'chip bad', 'expired'));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('key id', k.key_id));
+  facts.appendChild(fact('category', k.declared_category));
+  facts.appendChild(fact('batches', k.batch_count));
+  facts.appendChild(fact('expires', whenText(k.expires_at),
+    k.expired ? 'bad' : ''));
+  /* The column that matters. docs/12: a key unused for thirty days is
+     either a dead integration or somebody else's. */
+  const stale = k.stale_days === null || k.stale_days === undefined;
+  facts.appendChild(fact('last used', stale ? 'never' : k.stale_days + 'd ago',
+    (stale || k.stale_days > 30) ? 'warn' : ''));
+  card.appendChild(facts);
+
+  if (k.revoked_reason) card.appendChild(el('p', 'why', k.revoked_reason));
+  else if (stale || k.stale_days > 30) {
+    card.appendChild(el('p', 'why',
+      'Unused for over thirty days. docs/12: that is either a dead '
+      + 'integration or somebody else’s.'));
+  }
+  return card;
+}
+
+/* --- retention --------------------------------------------------------- */
+
+async function loadRetention() {
+  try {
+    const rules = await api('/retention/rules');
+    renderList('ret-rules', 'ret-rules-notice', rules.rules, ruleRow);
+    const notice = $('ret-rules-notice');
+    notice.textContent = rules.unconfirmed ? (rules.notice || '') : '';
+    show(notice, Boolean(rules.unconfirmed && rules.notice));
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 403)) fail(err);
+  }
+  if (!state.caseId) return;
+  try {
+    const due = await api('/retention/due?case_id=' + state.caseId);
+    renderList('ret-due', 'ret-due-empty', due.due || [], dueExhibitRow);
+    $('ret-counts').textContent = (due.due || []).length + ' due';
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 403)) fail(err);
+  }
+}
+
+function ruleRow(r) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', r.category));
+  head.appendChild(el('span', 'chip', r.retain_days + ' days'));
+  if (r.is_placeholder) head.appendChild(el('span', 'chip warn', 'unconfirmed'));
+  card.appendChild(head);
+  if (r.rationale) card.appendChild(el('p', 'why', r.rationale));
+  return card;
+}
+
+function dueExhibitRow(d) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', d.category || 'exhibit'));
+  if (d.legal_hold) head.appendChild(el('span', 'chip warn', 'legal hold'));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('id', String(d.id || '').slice(0, 8)));
+  facts.appendChild(fact('due', whenText(d.retain_until),
+    daysFromNow(d.retain_until) < 0 ? 'bad' : ''));
+  card.appendChild(facts);
+  if (d.legal_hold) {
+    card.appendChild(el('p', 'why',
+      'Held. A hold outranks the retention clock, and lifting one is its own '
+      + 'audited act.'));
+  }
+  return card;
+}
+
+async function runPurge() {
+  const msg = $('ret-purge-msg');
+  const out = $('ret-purge-out');
+  setMsg(msg, '');
+  clear(out);
+  if (!state.caseId) { setMsg(msg, 'Open a case first.'); return; }
+  const authority = $('ret-authority').value.trim();
+  if (!authority) {
+    setMsg(msg, 'A purge has to say under what authority it runs.');
+    return;
+  }
+  try {
+    const body = await api('/retention/purge', {
+      method: 'POST',
+      json: { case_id: state.caseId, authority, dry_run: $('ret-dry').checked },
+    });
+    out.appendChild(el('p', body.dry_run ? 'form-ok' : 'form-error',
+      body.notice || ''));
+    out.appendChild(el('p', null,
+      (body.purged !== undefined ? body.purged : 0) + ' object(s) '
+      + (body.dry_run ? 'would be destroyed' : 'destroyed')));
+    if ((body.refused || []).length) {
+      out.appendChild(el('p', 'form-error',
+        'Storage refused ' + body.refused.length + ': object lock can refuse '
+        + 'a delete even to satisfy a deletion order, and a purge that '
+        + 'reported success while the bytes remained would be worse.'));
+    }
+    loadRetention();
+  } catch (err) { inlineProblem(msg, err); }
+}
+
+async function loadTombstones() {
+  if (!state.caseId) return;
+  try {
+    const body = await api('/retention/tombstones?case_id=' + state.caseId);
+    renderList('tomb-list', 'tomb-empty', body.tombstones || [], tombRow);
+    $('tomb-counts').textContent = (body.tombstones || []).length + ' record(s)';
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      $('tomb-empty').textContent = 'You do not hold retention.read.';
+      return;
+    }
+    fail(err);
+  }
+}
+
+function tombRow(t) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', t.object_type || 'object'));
+  head.appendChild(el('span', 'chip', (t.purged_at || '').slice(0, 10)));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('id', String(t.object_id || '').slice(0, 8)));
+  if (t.sha256) facts.appendChild(fact('sha256', String(t.sha256).slice(0, 12)));
+  card.appendChild(facts);
+  if (t.authority) card.appendChild(el('p', 'why', 'Authority: ' + t.authority));
+  return card;
+}
+
+/* --- break-glass ------------------------------------------------------- */
+
+async function loadBreakGlass() {
+  const mine = $('glass-mine');
+  clear(mine);
+  show(mine, false);
+  try {
+    const body = await api('/break-glass/mine');
+    if (body.live) {
+      show(mine, true);
+      mine.appendChild(el('h2', 'h-sm', 'You are operating under break-glass'));
+      mine.appendChild(el('p', 'help warn',
+        'Every action is counted against this grant and a security officer '
+        + 'will review it. It expires on its own — that is the design, not a '
+        + 'limitation.'));
+      if (body.expires_at) {
+        mine.appendChild(el('p', null,
+          'Expires ' + body.expires_at.slice(0, 16).replace('T', ' ')));
+      }
+    }
+  } catch (_err) { /* no grant, or no permission: both mean nothing to show */ }
+
+  try {
+    const body = await api('/break-glass/unreviewed');
+    renderList('glass-queue', 'glass-empty', body.grants || [], glassRow);
+    $('glass-counts').textContent = (body.count || 0) + ' awaiting review';
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      renderList('glass-queue', 'glass-empty', [], glassRow);
+      $('glass-empty').textContent =
+        'The review belongs to the security officer, and only to them — a '
+        + 'team that can review its own emergencies is the one thing the '
+        + 'separation exists to prevent.';
+      return;
+    }
+    fail(err);
+  }
+}
+
+function glassRow(g) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', g.user_email || g.user_id));
+  head.appendChild(el('span', 'chip warn',
+    (g.action_count || 0) + ' action' + (g.action_count === 1 ? '' : 's')));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('started', (g.started_at || '').slice(0, 16)
+    .replace('T', ' ')));
+  facts.appendChild(fact('expired', (g.expires_at || '').slice(0, 16)
+    .replace('T', ' ')));
+  card.appendChild(facts);
+  if (g.justification) card.appendChild(el('p', 'why', g.justification));
+
+  const actions = el('div', 'row-actions');
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  for (const [outcome, label, cls] of [
+    ['JUSTIFIED', 'Justified', 'btn small'],
+    ['UNJUSTIFIED', 'Not justified', 'btn small danger'],
+  ]) {
+    const b = el('button', cls, label);
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      try {
+        await api('/break-glass/' + g.id + '/review',
+          { method: 'POST', json: { outcome } });
+        loadBreakGlass();
+      } catch (err) { inlineProblem(msg, err); }
+    });
+    actions.appendChild(b);
+  }
+  card.appendChild(actions);
+  card.appendChild(msg);
+  return card;
+}
+
+async function invokeBreakGlass() {
+  const msg = $('glass-msg');
+  setMsg(msg, '');
+  const justification = $('glass-why').value.trim();
+  try {
+    await api('/break-glass', { method: 'POST', json: { justification } });
+    $('glass-why').value = '';
+    setMsg(msg, 'Granted. It is short, counted and will be reviewed.');
+    loadBreakGlass();
+  } catch (err) { inlineProblem(msg, err); }
+}
+
+/* --- wiring ------------------------------------------------------------ */
+
+let selectFeedsSub = null;
+let selectGovSub = null;
+
+function initOpsPanes() {
+  selectFeedsSub = initSubtabs('pane-feeds', (name) => {
+    if (name === 'queue') loadIngestQueue();
+    if (name === 'dead') loadDeadLetters();
+    if (name === 'sources') loadSources();
+    if (name === 'keys') loadKeys();
+  });
+  selectGovSub = initSubtabs('pane-governance', (name) => {
+    if (name === 'retention') loadRetention();
+    if (name === 'tombstones') loadTombstones();
+    if (name === 'glass') loadBreakGlass();
+  });
+
+  $('ing-refresh').addEventListener('click', loadIngestQueue);
+  $('ing-category').addEventListener('change', loadIngestQueue);
+  $('ing-dupes').addEventListener('change', loadIngestQueue);
+  $('dl-refresh').addEventListener('click', loadDeadLetters);
+  $('src-refresh').addEventListener('click', loadSources);
+  $('key-refresh').addEventListener('click', loadKeys);
+  $('key-revoked').addEventListener('change', loadKeys);
+  $('ret-refresh').addEventListener('click', loadRetention);
+  $('ret-purge').addEventListener('click', runPurge);
+  $('tomb-refresh').addEventListener('click', loadTombstones);
+  $('glass-refresh').addEventListener('click', loadBreakGlass);
+  $('glass-invoke').addEventListener('click', invokeBreakGlass);
 }
 
 async function boot() {

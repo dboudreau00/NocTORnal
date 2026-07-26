@@ -326,6 +326,28 @@ def redact_text(text: str | None, *, keep: int = TEXT_FRAGMENT_KEEP) -> str:
     return out[:keep] + ("… [truncated]" if len(out) > keep else "")
 
 
+def redact_message(text: str | None, *, keep: int = 2000) -> str:
+    """The conservative pass, for text WE generated.
+
+    An error detail is our own exception message, not the partner's bytes,
+    and the aggressive `key: value` rule mangles it: `Expecting value: line
+    1 column 31` became `Expecting value:[redacted] 1 column 31`, which
+    destroys the one thing the message is for. The `column` survived and
+    the `line` did not, which is worse than either — it reads like a bug.
+
+    So the detail gets only the rules that cannot fire on prose: addresses,
+    long opaque runs, and quoted JSON pairs. A library that stringifies its
+    input into an exception is the residual risk, and it is covered by the
+    fragment being redacted independently.
+    """
+    if not text:
+        return ""
+    out = _JSON_PAIR.sub(r'\1"[redacted]"', text)
+    out = _EMAIL.sub("[redacted email]", out)
+    out = _LONG_TOKEN.sub("[redacted token]", out)
+    return out[:keep] + ("… [truncated]" if len(out) > keep else "")
+
+
 def redact_fragment(fragment: str) -> str:
     """Structural if it parses, line-oriented if it does not.
 
@@ -831,7 +853,7 @@ class IngestService:
             key[0], key[1], key[2], key[3])
         digest = hashlib.sha256(fragment.encode("utf-8", "replace")).digest()
         safe_fragment = scrub_nuls(redact_fragment(fragment))
-        safe_detail = scrub_nuls(redact_text(detail, keep=2000))
+        safe_detail = scrub_nuls(redact_message(detail))
         try:
             self._c.execute(
                 """INSERT INTO ingest.dead_letter
