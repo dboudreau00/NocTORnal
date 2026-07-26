@@ -44,7 +44,9 @@ def _case(conn: psycopg.Connection, case_id: UUID) -> tuple[str, str, frozenset[
 
 def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                     source_label: str, target_label: str, edges_repointed: int,
-                    reason: str, actor_id: UUID) -> None:
+                    reason: str, actor_id: UUID,
+                    element_classification: str | None = None,
+                    element_compartments: frozenset[str] = frozenset()) -> None:
     """docs/01 asks for this one by name: "Merges require `graph.merge` with
     step-up auth, and generate an audit event and a case-owner
     notification." The audit event has existed since decision 41; this is
@@ -69,11 +71,15 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
               f"entity-resolution panel and the reversal restores every "
               f"original endpoint exactly."),
         classification=classification, compartments=compartments,
+        element_classification=element_classification,
+        element_compartments=element_compartments,
         object_type="node_merge", object_id=merge_id, actor_id=actor_id)
 
 
 def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
-                   edges_restored: int, reason: str, actor_id: UUID) -> None:
+                   edges_restored: int, reason: str, actor_id: UUID,
+                   element_classification: str | None = None,
+                   element_compartments: frozenset[str] = frozenset()) -> None:
     code, classification, compartments = _case(conn, case_id)
     NotificationService(conn).notify_case_owner(
         case_id,
@@ -84,6 +90,8 @@ def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
         body=(f"A merge was reversed. {edges_restored} relationship(s) were "
               f"restored to their original endpoints.\n\nReason given: {reason}"),
         classification=classification, compartments=compartments,
+        element_classification=element_classification,
+        element_compartments=element_compartments,
         object_type="node_merge", object_id=merge_id, actor_id=actor_id)
 
 
@@ -99,6 +107,13 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
 
     An approval nobody is told about is an approval nobody gives, and then
     dual control is just a merge button that does not work.
+
+    The `expires_at` predicate is not decoration. Without it this notified
+    every user who was EVER assigned to the case, which is a fresh WRITE of
+    case material — the justification quotes case facts — to somebody the
+    access gate would answer 404. It is also the same set the decide
+    endpoint accepts, and that endpoint has always checked expiry, so the
+    queue item was one the recipient could not have actioned anyway.
     """
     code, classification, compartments = _case(conn, case_id)
     rows = conn.execute(
@@ -107,7 +122,8 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
              JOIN iam.role_permission rp ON rp.role_key = ca.role_key
              JOIN iam.app_user u ON u.id = ca.user_id
             WHERE ca.case_id = %s AND rp.permission_key = %s
-              AND u.is_active AND ca.user_id <> %s""",
+              AND u.is_active AND ca.user_id <> %s
+              AND (ca.expires_at IS NULL OR ca.expires_at > now())""",
         (case_id, permission, actor_id)).fetchall()
     svc = NotificationService(conn)
     sent = 0

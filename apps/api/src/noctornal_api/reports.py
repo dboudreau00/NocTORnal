@@ -38,6 +38,32 @@ is what makes a hash-value certification possible later; a report that
 describes exhibits without identifying them evidentially is a summary, not
 a disclosure.
 
+## The case header is case content
+
+This was the hole (F19, 2026-07-26). The document's mark is DERIVED from
+what actually went into it, which is right -- but it was derived from the
+graph elements and the exhibits only, while `report.case` copied the case
+code, title, summary, legal basis and authority reference in unconditionally
+and unfiltered. A RED case with nothing at or below the target therefore
+produced a document containing the operation's codename and its summary,
+computed a mark of TLP:CLEAR because the graph body was empty, and handed
+that laundered value to the egress gate.
+
+So the header is now treated as what it is: material classified at the
+case's own level.
+
+- If the case's labels are within the target, the header goes in AND the
+  mark is floored at the case's classification. A document quoting an AMBER
+  case's title is an AMBER document however empty its graph.
+- If they are not, the narrative fields are WITHHELD and the redaction
+  statement says so. That still leaves the feature intact -- an
+  AMBER_STRICT case can produce a GREEN report -- it just produces one that
+  does not name the operation.
+
+A case code IS intelligence. `transports.py` reasons the same way about
+putting one in an email subject line: "OP-KESTREL" tells a reader that an
+operation by that name exists and that this person works on it.
+
 ## Egress
 
 `can_egress()` decides whether the finished document may leave, and it is
@@ -45,6 +71,11 @@ called with the DOCUMENT's classification -- which is the target level, not
 the case's. That is the whole point of building at a lower level: an
 AMBER_STRICT case can produce a GREEN report, and the GREEN report may
 leave when the case never could.
+
+It is also called with the document's COMPARTMENTS, which `check_egress`
+used to drop on the floor -- so the two call sites of the one shared gate
+disagreed about one of its three arguments, and `DENY_COMPARTMENTED` could
+never fire for a report.
 """
 from __future__ import annotations
 
@@ -81,11 +112,16 @@ class Redaction:
     nodes_withheld: int
     edges_withheld: int
     evidence_withheld: int
+    #: True when the case's OWN labels are above the ceiling, so its code,
+    #: title, summary and authority reference are not in the document. A
+    #: reader who is not told this reads an untitled report as an
+    #: administrative quirk rather than as a redaction.
+    header_withheld: bool = False
 
     @property
     def anything_withheld(self) -> bool:
         return bool(self.nodes_withheld or self.edges_withheld
-                    or self.evidence_withheld)
+                    or self.evidence_withheld or self.header_withheld)
 
     def statement(self) -> str:
         if not self.anything_withheld:
@@ -93,10 +129,18 @@ class Redaction:
                     f"prepared to include material up to TLP:{self.ceiling_tlp}. "
                     f"Nothing in the case file was above that ceiling, so "
                     f"nothing has been withheld from it.")
+        header = ""
+        if self.header_withheld:
+            header = (
+                " **The case's own identifying detail is above that ceiling "
+                "and has been withheld**, so this document does not name the "
+                "operation, its subject or the authority it was collected "
+                "under -- which means it is not a disclosure document as it "
+                "stands.")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
-            f"classified TLP:{self.case_tlp}. "
+            f"classified TLP:{self.case_tlp}.{header} "
             f"{self.nodes_withheld} entit(y/ies), {self.edges_withheld} "
             f"relationship(s) and {self.evidence_withheld} exhibit(s) are "
             f"above that level and have been withheld. **Every figure below "
@@ -113,6 +157,10 @@ class Report:
     relationships: list[dict] = field(default_factory=list)
     evidence: list[dict] = field(default_factory=list)
     hypotheses: dict = field(default_factory=dict)
+    #: The compartments of everything actually in the document. Carried on
+    #: the report rather than re-derived at the gate, because the gate is
+    #: pure and the thing that knows what went in is the builder.
+    compartments: frozenset[str] = field(default_factory=frozenset)
     generated_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc))
     generated_by: UUID | None = None
@@ -121,6 +169,7 @@ class Report:
         return {
             "case": self.case,
             "classification": self.redaction.built_at_tlp,
+            "compartments": sorted(self.compartments),
             "redaction": {
                 "built_at_tlp": self.redaction.built_at_tlp,
                 "ceiling_tlp": self.redaction.ceiling_tlp,
@@ -129,6 +178,7 @@ class Report:
                 "edges_withheld": self.redaction.edges_withheld,
                 "evidence_withheld": self.redaction.evidence_withheld,
                 "statement": self.redaction.statement(),
+                "header_withheld": self.redaction.header_withheld,
             },
             "summary": self.summary,
             "actors": self.actors,
@@ -164,11 +214,23 @@ class ReportBuilder:
 
         case = self._c.execute(
             """SELECT code, title, summary, status, classification, legal_basis,
-                      authority_ref, retention_until, review_due, created_at
+                      authority_ref, retention_until, review_due, created_at,
+                      compartments
                  FROM core."case" WHERE id = %s""", (case_id,)).fetchone()
         if case is None:
             raise ReportError("case does not exist")
         case_tlp = case[4]
+        case_compartments = frozenset(case[10] or [])
+
+        # The case header -- code, title, summary, legal basis, authority
+        # reference -- is material classified at the case's own level, not
+        # free metadata. It goes in only when the case's labels are within
+        # what was asked for. `compartments` is part of that test: the
+        # projection below is built with none, so including a compartmented
+        # case's title would be the one piece of compartmented material in a
+        # document that excluded all the others.
+        header_ok = (tlp_from_name(case_tlp) <= target
+                     and not case_compartments)
 
         # `target_tlp` is a CEILING on what may be included, not the mark the
         # document gets. The mark is derived below from what actually went
@@ -189,11 +251,21 @@ class ReportBuilder:
         sub = redacted.project(projection, limit=5000)
         withheld = redacted.withheld(projection)
 
+        # `compartments = '{}'` mirrors the projection, which is built with
+        # no compartments. Without it the exhibit register was the one place
+        # compartmented material entered a report -- the graph filtered it,
+        # the evidence query did not, and `core.evidence.compartments` is
+        # never populated from the case (there is a classification floor
+        # trigger and no compartment inheritance at all), so this is the
+        # exhibit's OWN compartments and they are usually empty. Both halves
+        # matter: the query below, and the case-level union in
+        # `report.compartments`.
         evidence_rows = self._c.execute(
             """SELECT id, title, sha256, blake3, media_type, byte_size,
                       acquired_at, acquisition_method, classification
                  FROM core.evidence
                 WHERE case_id = %s AND classification <= %s::core.tlp
+                  AND compartments <@ '{}'::text[]
                 ORDER BY acquired_at""",
             (case_id, target.name)).fetchall()
         evidence_total = self._c.execute(
@@ -201,10 +273,14 @@ class ReportBuilder:
             (case_id,)).fetchone()[0]
 
         # The document's own mark: the highest classification of anything
-        # actually in it, never the ceiling that was asked for.
+        # actually in it, never the ceiling that was asked for. The case
+        # header counts as "in it" -- deriving the mark from the graph body
+        # alone is what let a RED case emit a TLP:CLEAR document carrying
+        # its own codename and summary.
         included = ([n["classification"] for n in sub.nodes]
                     + [e["classification"] for e in sub.edges]
-                    + [r[8] for r in evidence_rows])
+                    + [r[8] for r in evidence_rows]
+                    + ([case_tlp] if header_ok else []))
         marking = (max((tlp_from_name(c) for c in included), default=Tlp.CLEAR)
                    if included else Tlp.CLEAR)
 
@@ -214,6 +290,7 @@ class ReportBuilder:
             nodes_withheld=withheld.nodes or 0,
             edges_withheld=withheld.edges or 0,
             evidence_withheld=evidence_total - len(evidence_rows),
+            header_withheld=not header_ok,
         )
 
         metrics = redacted.metrics(projection) if hasattr(
@@ -232,19 +309,37 @@ class ReportBuilder:
              "has_evidence": e.get("has_evidence", False)}
             for e in sub.edges]
 
+        withheld_mark = "[withheld: above this document's ceiling]"
         report = Report(
             case={
-                "id": str(case_id), "code": case[0], "title": case[1],
-                "summary": case[2], "status": case[3],
+                # The id is not withheld: it identifies nothing to a reader
+                # without access, and without it the document cannot be tied
+                # back to the file it was drawn from.
+                "id": str(case_id),
+                "code": case[0] if header_ok else withheld_mark,
+                "title": case[1] if header_ok else withheld_mark,
+                "summary": case[2] if header_ok else None,
+                "status": case[3] if header_ok else None,
                 "classification": case_tlp,
                 # docs/08: legal basis and retention are NOT NULL for a
                 # reason. A disclosure document that does not state the
-                # authority it was collected under is not disclosable.
-                "legal_basis": case[5], "authority_ref": case[6],
-                "retention_until": case[7].isoformat() if case[7] else None,
-                "review_due": case[8].isoformat() if case[8] else None,
-                "opened": case[9].isoformat() if case[9] else None,
+                # authority it was collected under is not disclosable --
+                # which is precisely why withholding them has to be stated
+                # in the redaction statement rather than left to look like
+                # an empty field. A report built below its case's own
+                # classification is a briefing, not a disclosure.
+                "legal_basis": case[5] if header_ok else withheld_mark,
+                "authority_ref": case[6] if header_ok else withheld_mark,
+                "retention_until": case[7].isoformat()
+                if header_ok and case[7] else None,
+                "review_due": case[8].isoformat()
+                if header_ok and case[8] else None,
+                "opened": case[9].isoformat()
+                if header_ok and case[9] else None,
             },
+            # Only the header can contribute compartments: the projection is
+            # built with none and the exhibit query now excludes them.
+            compartments=case_compartments if header_ok else frozenset(),
             redaction=redaction,
             summary={
                 "entities": len(sub.nodes),
@@ -319,8 +414,16 @@ def check_egress(report: Report, destination: Destination | str,
     AMBER_STRICT case can produce a GREEN report, and the GREEN report may
     leave when the case never could. Passing the case's classification here
     would make redaction pointless.
+
+    The compartments are the document's too, and they are passed. This
+    function used to omit the argument entirely, so the two call sites of
+    the one shared gate — here and `transports.dispatch_due` — disagreed
+    about one of its three parameters, and `DENY_COMPARTMENTED` could never
+    fire on the report path. A gate whose callers each supply a different
+    subset of its inputs is not one gate.
     """
     return can_egress(report.redaction.built_at_tlp, destination,
+                      compartments=report.compartments,
                       destination_ceiling=destination_ceiling)
 
 

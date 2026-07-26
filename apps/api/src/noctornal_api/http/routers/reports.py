@@ -85,8 +85,13 @@ def build(
                 # body: a file saved out of a browser loses everything that
                 # was only on the page.
                 "X-TLP": report.redaction.built_at_tlp,
+                # The case code is withheld when the case's own labels are
+                # above the ceiling, and the withheld marker is not a
+                # filename -- it has brackets, spaces and a colon in it. A
+                # saved file must not carry the codename the document
+                # deliberately omits, either.
                 "Content-Disposition":
-                    f'attachment; filename="{report.case["code"]}-'
+                    f'attachment; filename="{_slug(report)}-'
                     f'TLP-{report.redaction.built_at_tlp}.md"',
                 "X-Content-Type-Options": "nosniff",
             })
@@ -153,6 +158,16 @@ def release(
             "still a human act with a human's name on it."
         ),
     }
+
+
+def _slug(report) -> str:
+    """A filename stem. The case code when the document carries it, and a
+    neutral one when it does not — never the withheld marker, and never the
+    codename the report deliberately left out."""
+    if report.redaction.header_withheld:
+        return "report"
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-"
+                   for ch in report.case["code"])[:64] or "report"
 
 
 def _audit(conn, case_id: UUID, actor_id: UUID, action: str, detail: dict,

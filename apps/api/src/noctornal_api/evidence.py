@@ -251,20 +251,45 @@ class EvidenceService:
 
         Bytes are re-verified before release, so a swapped object can never
         be exported with a clean log.
+
+        ## The gate is fed the EFFECTIVE labels, not the exhibit's own
+
+        F19, 2026-07-26. This used to pass `core.evidence.compartments`
+        alone. That column defaults to `'{}'`, and — unlike classification,
+        which has `core.enforce_tlp_floor` — **no trigger propagates the
+        case's compartments to it and no code path sets it**. So it was
+        empty on essentially every row, `DENY_COMPARTMENTED` could never
+        fire for evidence, and the one control that says "compartmented
+        material does not cross the boundary at all" was decorative on the
+        exhibit path.
+
+        The access gate has always composed the two (`deps.effective_labels`:
+        stricter classification, union of compartments). Egress now composes
+        them the same way. Doing it here rather than adding a trigger is
+        deliberate: composing at read time is what every other gate in the
+        system does, and a trigger would have to backfill every existing row
+        to be worth anything.
         """
         from noctornal_api.egress import can_egress
+        from noctornal_api.security.access import tlp_from_name
 
         row = self._c.execute(
-            """SELECT classification, case_id, compartments
-                 FROM core.evidence WHERE id = %s""",
+            """SELECT e.classification, e.case_id, e.compartments,
+                      c.classification, c.compartments
+                 FROM core.evidence e
+                 JOIN core."case" c ON c.id = e.case_id
+                WHERE e.id = %s""",
             (evidence_id,),
         ).fetchone()
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
-        classification, case_id, compartments = row
+        classification, case_id, compartments, case_cls, case_comp = row
+        classification = max(tlp_from_name(classification),
+                             tlp_from_name(case_cls)).name
         decision = can_egress(
             classification, destination,
-            compartments=frozenset(compartments or []),
+            compartments=(frozenset(compartments or [])
+                          | frozenset(case_comp or [])),
             destination_ceiling=destination_ceiling,
         )
         if decision.denied:

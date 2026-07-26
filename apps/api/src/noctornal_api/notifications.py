@@ -32,11 +32,24 @@ the access gate, and does not follow anyone home.
 4. **Digest defers too**, to the next digest boundary. Same principle:
    the notification exists, its delivery is later.
 
-## Reading is filtered by CURRENT clearance
+## Reading is filtered by CURRENT clearance AND CURRENT assignment
 
 Not the clearance the recipient had when the row was written. A revoked
 clearance has to hide old notifications, or the centre quietly becomes a
 retention loophole for everything the analyst used to be able to see.
+
+The assignment half was missing until F19 (2026-07-26), and it was the
+larger hole of the two: clearance is a property of the person, assignment
+is the thing that actually ties them to *this* case, and taking somebody
+off a case is far commoner than downgrading their clearance. Every other
+"which cases can this caller see" query in the repo carried the
+`expires_at` predicate; this one did not, so an analyst removed from a case
+kept reading its merges, its approvals and its triage counts from
+`/notifications` forever.
+
+`readable_predicate()` is that rule, written once. Three copies of a
+predicate is three chances for one of them to be the stale one — which is
+exactly how the outbox drain came to disagree with the centre it drains.
 
 ## What this module will not do
 
@@ -54,7 +67,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg
 
-from noctornal_api.security.access import Tlp, tlp_from_name
+from noctornal_api.security.access import (
+    AccessResolutionError,
+    Tlp,
+    tlp_from_name,
+)
 
 IN_APP = "IN_APP"
 SMTP = "SMTP"
@@ -75,6 +92,39 @@ URGENT, NORMAL, LOW = 1, 2, 3
 
 class NotificationError(Exception):
     pass
+
+
+def readable_predicate(alias: str = "n") -> str:
+    """SQL that is true when `alias`'s recipient may STILL read it.
+
+    Both halves of the case gate, against the world as it is NOW:
+
+    - the **labels** — the recipient's current clearance dominates the
+      notification's classification, and their current compartments contain
+      its compartments;
+    - the **assignment** — for a notification that names a case, a live
+      `iam.case_assignment` row, unexpired.
+
+    A notification with no `case_id` skips the assignment half because there
+    is nothing to be assigned to. Nothing in this build raises one; the
+    branch exists so that adding a genuinely case-independent notification
+    later is a decision rather than an accident.
+
+    Aliases are deliberately obscure (`ru`, `rca`): this fragment is
+    embedded in queries that already join `u` and `c`, and a collision would
+    silently re-bind the outer alias rather than fail.
+    """
+    return f"""
+        EXISTS (SELECT 1 FROM iam.app_user ru
+                 WHERE ru.id = {alias}.recipient_id AND ru.is_active
+                   AND {alias}.classification <= ru.tlp_clearance
+                   AND {alias}.compartments <@ ru.compartments)
+        AND ({alias}.case_id IS NULL OR EXISTS (
+                SELECT 1 FROM iam.case_assignment rca
+                 WHERE rca.case_id = {alias}.case_id
+                   AND rca.user_id = {alias}.recipient_id
+                   AND (rca.expires_at IS NULL OR rca.expires_at > now())))
+    """
 
 
 @dataclass(frozen=True)
@@ -113,9 +163,12 @@ KINDS: dict[str, Kind] = {
     "EVIDENCE_INTEGRITY_ALARM": Kind(
         "EVIDENCE_INTEGRITY_ALARM", URGENT,
         "An exhibit failed its integrity check"),
+    # Raised twice with different content: the security officer gets an
+    # oversight alert carrying NO case material (they hold no case-content
+    # permission), the case owner gets the code and the justification.
     "BREAK_GLASS_INVOKED": Kind(
         "BREAK_GLASS_INVOKED", URGENT,
-        "Emergency access was used on a case you own"),
+        "Emergency access was used on a case you own, or needs your review"),
     "CASE_REVIEW_DUE": Kind(
         "CASE_REVIEW_DUE", LOW, "A case you own is due for review"),
 }
@@ -175,8 +228,24 @@ class NotificationService:
                compartments: frozenset[str] = frozenset(),
                object_type: str | None = None, object_id: UUID | None = None,
                actor_id: UUID | None = None,
-               priority: int | None = None) -> Notification | None:
+               priority: int | None = None,
+               element_classification: str | None = None,
+               element_compartments: frozenset[str] = frozenset(),
+               ) -> Notification | None:
         """Raise one notification and queue its deliveries.
+
+        `classification` / `compartments` are the CASE's. When the
+        notification is about a specific element that carries its own labels
+        — the nodes in a merge, the exhibit in an integrity alarm — pass
+        them as `element_*` and they are composed here: the stricter
+        classification, the union of compartments.
+
+        That composition is the same one the access gate performs, and it
+        has to happen somewhere. An element may be classified ABOVE its case
+        (the floor trigger only stops it going below), so labelling a
+        notification with the case's classification alone under-labels every
+        notification about a raised element — and the label is what decides
+        whether the summary may go out by email.
 
         Returns None when the notification was suppressed -- which is a
         normal outcome, not an error: telling somebody what they just did,
@@ -196,14 +265,23 @@ class NotificationService:
         if not subject.strip() or not summary.strip():
             raise NotificationError("subject and summary are mandatory")
 
+        try:
+            classification, compartments = effective_labels_for_notification(
+                classification, compartments,
+                element_classification, element_compartments)
+        except AccessResolutionError as exc:
+            # Fail closed and loudly. Silently keeping the case's label would
+            # send an unlabelled element out by email.
+            raise NotificationError(
+                f"cannot label this notification: {exc}") from exc
+
         # Suppression 1: never tell someone what they just did.
         if actor_id is not None and actor_id == recipient_id:
             return None
 
-        # Suppression 2: never write a row the recipient could not read. The
-        # read filter would hide it anyway; writing it puts case content in a
-        # table keyed by a user with no business with it.
-        if not self._recipient_may_read(recipient_id, classification, compartments):
+        # Suppression 2: never write a row the recipient could not read.
+        if not self._recipient_may_read(recipient_id, classification,
+                                        compartments, case_id):
             return None
 
         row = self._c.execute(
@@ -237,11 +315,13 @@ class NotificationService:
 
     def inbox(self, recipient_id: UUID, *, unread_only: bool = False,
               limit: int = 50, case_id: UUID | None = None) -> list[Notification]:
-        """Filtered by the caller's CURRENT clearance and compartments.
+        """Filtered by the caller's CURRENT clearance, compartments AND case
+        assignment.
 
-        A revoked clearance hides old notifications too. Doing this in SQL
-        rather than in Python means a paginated read cannot return a short
-        page and call it the end of the list.
+        A revoked clearance hides old notifications, and so does a revoked
+        or expired assignment. Doing this in SQL rather than in Python means
+        a paginated read cannot return a short page and call it the end of
+        the list.
         """
         clauses = ["n.recipient_id = %s"]
         params: list = [recipient_id]
@@ -250,13 +330,7 @@ class NotificationService:
         if case_id is not None:
             clauses.append("n.case_id = %s")
             params.append(case_id)
-        # The lattice check and the compartment check, against the user row
-        # as it is NOW.
-        clauses.append("""
-            EXISTS (SELECT 1 FROM iam.app_user u
-                     WHERE u.id = n.recipient_id AND u.is_active
-                       AND n.classification <= u.tlp_clearance
-                       AND n.compartments <@ u.compartments)""")
+        clauses.append(readable_predicate("n"))
         params.append(limit)
         rows = self._c.execute(
             f"""SELECT {_N_COLUMNS} FROM notify.notification n
@@ -266,13 +340,14 @@ class NotificationService:
         return [_record(r) for r in rows]
 
     def unread_count(self, recipient_id: UUID) -> int:
+        """The badge. Filtered by exactly the same rule as `inbox()` — a
+        count that disagrees with the list it counts is a badge that never
+        clears, and an analyst who learns to ignore the badge has lost the
+        notification system."""
         row = self._c.execute(
-            """SELECT count(*) FROM notify.notification n
-                WHERE n.recipient_id = %s AND n.read_at IS NULL
-                  AND EXISTS (SELECT 1 FROM iam.app_user u
-                               WHERE u.id = n.recipient_id AND u.is_active
-                                 AND n.classification <= u.tlp_clearance
-                                 AND n.compartments <@ u.compartments)""",
+            f"""SELECT count(*) FROM notify.notification n
+                 WHERE n.recipient_id = %s AND n.read_at IS NULL
+                   AND {readable_predicate('n')}""",
             (recipient_id,)).fetchone()
         return int(row[0])
 
@@ -360,7 +435,20 @@ class NotificationService:
     # -- internals --------------------------------------------------------
 
     def _recipient_may_read(self, recipient_id: UUID, classification: str,
-                            compartments: frozenset[str]) -> bool:
+                            compartments: frozenset[str],
+                            case_id: UUID | None) -> bool:
+        """Suppression 2, at WRITE time: the same rule `readable_predicate`
+        applies at read time.
+
+        Both are needed and neither is redundant. The read filter protects
+        against a clearance or an assignment revoked *after* the row was
+        written; this one stops the row existing at all when the recipient
+        already could not read it. Writing a notification nobody may read
+        puts case content in a table keyed by a user with no business with
+        it and then relies on the read filter forever after — and the read
+        filter is precisely the thing that turned out to be missing half its
+        rule.
+        """
         row = self._c.execute(
             "SELECT tlp_clearance, compartments, is_active "
             "FROM iam.app_user WHERE id = %s", (recipient_id,)).fetchone()
@@ -373,7 +461,16 @@ class NotificationService:
             return False
         if level > clearance:
             return False
-        return compartments <= frozenset(row[1] or [])
+        if not compartments <= frozenset(row[1] or []):
+            return False
+        if case_id is None:
+            return True
+        assigned = self._c.execute(
+            """SELECT 1 FROM iam.case_assignment
+                WHERE case_id = %s AND user_id = %s
+                  AND (expires_at IS NULL OR expires_at > now())""",
+            (case_id, recipient_id)).fetchone()
+        return assigned is not None
 
     def _queue_deliveries(self, n: Notification) -> None:
         """One PENDING row per eligible channel. IN_APP is written already
@@ -493,6 +590,14 @@ def effective_labels_for_notification(
     Duplicated deliberately rather than imported: `deps` is the HTTP layer
     and this runs in services that have no request. The pair is asserted
     equal by a test, so the two cannot drift.
+
+    Called from `NotificationService.notify`, which is the only place it has
+    ever needed to be called from. Until F19 (2026-07-26) it was exported,
+    tested and called by NOTHING — a correct composition function sitting
+    beside a `notify()` that took the case's labels and used them verbatim.
+    A function with a test and no call site is the shape a defence takes
+    when it was written, reviewed and then never wired in; grep for the
+    call sites of anything security-relevant, not just for its definition.
     """
     strictest = case_classification
     if element_classification is not None:
@@ -523,5 +628,5 @@ __all__ = [
     "IN_APP", "SMTP", "WEBHOOK", "JIRA", "URGENT", "NORMAL", "LOW",
     "KINDS", "Kind", "Notification", "NotificationError",
     "NotificationService", "Preference", "Tlp", "deliver_after",
-    "effective_labels_for_notification",
+    "effective_labels_for_notification", "readable_predicate",
 ]
