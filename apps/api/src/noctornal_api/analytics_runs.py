@@ -219,19 +219,44 @@ class AnalyticsRunService:
 
         duration = int((time.monotonic() - started) * 1000)
         payload = {**payload, "computed_at_ms": duration}
-        with self._c.transaction():
+        # CR9 (2026-07-26): the failure handler covers the PERSISTENCE too.
+        #
+        # The comment above claims "every exception marks the run FAILED",
+        # and the try/except above wrapped only `compute(sub)` -- so a
+        # failure in the COMPLETE write or in `_persist_node_metrics`
+        # stranded the run at RUNNING with no FAILED status and no
+        # ANALYTICS_RUN_FAILED audit event. The RUNNING row was inserted on
+        # an autocommit connection, so it survives the rollback.
+        #
+        # CR8 made this reachable rather than theoretical: `Json(NaN)`
+        # raises HERE, inside the write, which is precisely the region the
+        # handler did not cover. Each retry then inserted another stranded
+        # RUNNING row.
+        try:
+            with self._c.transaction():
+                self._c.execute(
+                    """UPDATE analytics.metric_run
+                          SET status = 'COMPLETE', finished_at = now(),
+                              duration_ms = %s, result = %s,
+                              is_approximate = %s, sample_size = %s
+                        WHERE id = %s""",
+                    (duration, Json(payload),
+                     bool(payload.get("is_approximate")
+                          or payload.get("key_player", {}).get("is_approximate")),
+                     payload.get("sample_size"), run_id),
+                )
+                self._persist_node_metrics(run_id, payload)
+        except Exception as exc:
             self._c.execute(
                 """UPDATE analytics.metric_run
-                      SET status = 'COMPLETE', finished_at = now(),
-                          duration_ms = %s, result = %s,
-                          is_approximate = %s, sample_size = %s
+                      SET status = 'FAILED', error = %s, finished_at = now(),
+                          duration_ms = %s
                     WHERE id = %s""",
-                (duration, Json(payload),
-                 bool(payload.get("is_approximate")
-                      or payload.get("key_player", {}).get("is_approximate")),
-                 payload.get("sample_size"), run_id),
+                (f"persist: {type(exc).__name__}: {exc}", duration, run_id),
             )
-            self._persist_node_metrics(run_id, payload)
+            self._audit(p.case_id, run_id, algorithm, "ANALYTICS_RUN_FAILED",
+                        {"error_type": type(exc).__name__, "stage": "persist"})
+            raise
         self._audit(p.case_id, run_id, algorithm, "ANALYTICS_RUN",
                     {"duration_ms": duration,
                      "node_count": len(sub.nodes),

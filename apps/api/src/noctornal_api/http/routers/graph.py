@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
 from noctornal_api.http.deps import (
     CurrentUser,
+    authorize_object,
     check_writable_labels,
     get_conn,
     require,
@@ -154,13 +155,47 @@ def _element_case(conn: psycopg.Connection, table: str, element_id: UUID) -> UUI
     return row[0] if row else None
 
 
+def _element_labels(conn: psycopg.Connection, table: str,
+                    element_id: UUID) -> tuple[UUID, str, frozenset[str]] | None:
+    """The element's case AND its own labels, for the gate.
+
+    CR7 (2026-07-26). `_add_assertion` and `retract_assertion` authorised
+    with `require(...)` alone — the CASE-level form, `classification=None`.
+    `create_node` and `create_edge` use `check_writable_labels`, and the
+    evidence router resolves the row's labels and passes them to
+    `authorize_object`. The assertion endpoints did neither, so
+    `deps.py`'s rule 1 ("an element is protected by BOTH its own labels and
+    its case's") did not hold on the writes that matter most.
+
+    It matters most because of what retraction DOES: the projection
+    requires a live assertion, so retracting the last one dissolves the
+    element from every analyst's graph. An AMBER analyst who once held RED
+    and noted a RED node's assertion id could therefore destroy that node
+    for everyone, while not being cleared to see it.
+    """
+    assert table in ("node", "edge")
+    row = conn.execute(
+        f"SELECT case_id, classification, compartments "
+        f"  FROM core.{table} WHERE id = %s", (element_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0], row[1], frozenset(row[2] or [])
+
+
 def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> IdOut:
     table = "node" if node_id else "edge"
-    owner = _element_case(conn, table, node_id or edge_id)
+    found = _element_labels(conn, table, node_id or edge_id)
     # The path's case_id is the one the gate authorised, so an element from
     # another case must not be reachable through it.
-    if owner != case_id:
+    if found is None or found[0] != case_id:
         raise Problem(404, "Not found", f"no such {table} in this case")
+    # CR7: re-authorise against the ELEMENT's labels, not just the case's.
+    # A RED node can live in an AMBER case, and asserting about it is a
+    # write against the node.
+    authorize_object(conn, user, case_id=case_id,
+                     permission_key="assertion.create",
+                     classification=found[1], compartments=found[2])
     _check_evidence(conn, case_id, body.evidence_id)
     try:
         aid = GraphWriteService(conn).add_assertion(
@@ -211,10 +246,21 @@ def retract_assertion(
     """
     from fastapi import Response
     row = conn.execute(
-        "SELECT case_id FROM core.assertion WHERE id = %s", (assertion_id,)
+        "SELECT case_id, node_id, edge_id FROM core.assertion WHERE id = %s",
+        (assertion_id,),
     ).fetchone()
     if row is None or row[0] != case_id:
         raise Problem(404, "Not found", "no such assertion in this case")
+    # CR7: the element's own labels gate the retraction. Retracting the
+    # last live assertion dissolves the element from every projection, so
+    # this endpoint destroys graph structure — it must not be reachable by
+    # a caller who could not see what they are destroying.
+    subject = _element_labels(conn, "node" if row[1] else "edge",
+                              row[1] or row[2]) if (row[1] or row[2]) else None
+    if subject is not None:
+        authorize_object(conn, user, case_id=case_id,
+                         permission_key="assertion.retract",
+                         classification=subject[1], compartments=subject[2])
     try:
         GraphWriteService(conn).retract_assertion(
             assertion_id, retracted_by=user.user_id, reason=body.reason,

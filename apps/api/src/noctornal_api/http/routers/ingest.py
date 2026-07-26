@@ -860,11 +860,30 @@ def reveal_credential(
                        "authorisation that permitted it. " + L2_NOTICE)}
 
 
-@router.get("/search", response_model=dict,
-            dependencies=[Depends(rate_limit("search"))])
+class FingerprintSearchBody(BaseModel):
+    """CR12: the value travels in a BODY, not a query string.
+
+    It used to be `value: str = Query(...)`, which puts a victim's email
+    address or password in the GET request line — and therefore in every
+    uvicorn and nginx access log, in plaintext, outside the compartment
+    gate, outside the PII-authorisation gate, and under whatever retention
+    the log shipper happens to have. These values are stored as ciphertext
+    in the database precisely so that plaintext is not loggable; a query
+    parameter undid that for the one endpoint whose whole input is the
+    plaintext.
+
+    The sibling reveal endpoint already used a POST body for the same
+    reason. This is now consistent with it.
+    """
+
+    value: str = Field(..., min_length=3)
+    case_id: UUID
+
+
+@router.post("/search", response_model=dict,
+             dependencies=[Depends(rate_limit("search"))])
 def search_by_fingerprint(
-    value: str = Query(..., min_length=3),
-    case_id: UUID = Query(...),
+    body: FingerprintSearchBody,
     user: CurrentUser = Depends(require_global("ingest.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -877,7 +896,7 @@ def search_by_fingerprint(
     "is this address in the corpus", and you cannot ask "show me every
     address at this company".
     """
-    authorize_object(conn, user, case_id=case_id,
+    authorize_object(conn, user, case_id=body.case_id,
                      permission_key="ingest.read")
     clearance, compartments = user_ceiling(conn, user.user_id)
     try:
@@ -888,7 +907,8 @@ def search_by_fingerprint(
         # the disclosure had already happened by the time the filter ran.
         rows = IngestService(
             conn, clearance=clearance.name, compartments=compartments
-        ).search_by_fingerprint(value, actor_id=user.user_id, case_id=case_id)
+        ).search_by_fingerprint(body.value, actor_id=user.user_id,
+                                 case_id=body.case_id)
         # Clearance is not assignment: a RED analyst may read the LABEL of
         # a case they are not on. The case predicate stays here because
         # assignment is the router's knowledge, not the service's.
