@@ -328,14 +328,30 @@ def test_a_report_carries_the_alternatives_that_were_ruled_out(conn, builder):
             """INSERT INTO core.hypothesis (case_id, statement, created_by)
                VALUES (%s, %s, %s) RETURNING id""",
             (case_id, statement, owner)).fetchone()[0])
-    conn.execute(
-        """INSERT INTO core.hypothesis_evidence
-               (hypothesis_id, assertion_id, stance) VALUES (%s, %s, -2)""",
-        (ids[0], assertion_id))
+    # Both hypotheses are scored against the assertion, because a matrix
+    # where only one has been examined cannot rank anything (docs/17 F20).
+    # `ids[0]` is strongly contradicted; `ids[1]` is merely consistent with
+    # it, so `ids[1]` is what survives — and it survives on the evidence
+    # rather than on never having been looked at.
+    #
+    # This test previously scored only `ids[0]` and asserted that `ids[1]`
+    # won anyway. It was green, and it was asserting the defect: an
+    # untested hypothesis coming top because zero inconsistency is the
+    # lowest score the scale can produce.
+    for hypothesis_id, stance in ((ids[0], -2), (ids[1], 1)):
+        conn.execute(
+            """INSERT INTO core.hypothesis_evidence
+                   (hypothesis_id, assertion_id, stance) VALUES (%s, %s, %s)""",
+            (hypothesis_id, assertion_id, stance))
 
     report = builder.build(case_id, target_tlp="AMBER", generated_by=owner)
     assert report.hypotheses["least_inconsistent"] == str(ids[1])
     assert "least evidence against it" in report.hypotheses["method"]
+    # And the alternative that was ruled out is still IN the document. A
+    # report naming only the survivor is the confirmation bias ACH exists
+    # to correct, on letterhead.
+    assert {h["id"] for h in report.hypotheses["hypotheses"]} == {
+        str(ids[0]), str(ids[1])}
 
 
 def test_a_case_with_no_hypotheses_omits_the_section(conn, builder):

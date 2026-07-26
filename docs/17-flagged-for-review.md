@@ -488,6 +488,68 @@ fifteen renders of a live case untracked in the working tree.
 
 ---
 
+## F20 — 2026-07-26: the untested hypothesis was winning
+
+**Three compounding defects in `ach.py`, all in the one number the module
+exists to produce, and the situation they fire in is exactly the one
+docs/13 cites as the reason to build ACH at all.**
+
+None was found by a test. All three were found by reading the code
+hostilely and then writing twelve lines that ran it.
+
+### 1. An untested hypothesis came top
+
+`least_inconsistent` took `ranked[0]`, and the ranking is by inconsistency
+ascending. **A hypothesis assessed against nothing scores 0.0, which is the
+lowest value the scale can produce**, so it sorted first. The guard asked
+whether *any* hypothesis had been assessed, never whether the winner had.
+
+A team eight months into one theory has assessed everything against that
+theory and nothing against the alternative. The matrix then reported the
+alternative as *surviving* — on the strength of never having been
+examined. Confirmation bias with a scoreboard, in the tool built to
+correct it, and printed into disclosure documents by `reports.py`.
+
+Fixed: only hypotheses with evidence assessed against them can be the
+survivor. They still appear in the table — hiding them would be its own
+distortion — they just cannot win by absence.
+
+### 2. The warning that would have caught it could not fire
+
+The "more unassessed than assessed" warning is guarded on `h.assessed`
+being truthy, so **the worst case — zero assessed — was the one case it
+was structurally unable to report.** A hypothesis nobody had looked at
+came top, silently.
+
+### 3. "Settles nothing" and "not entered yet" were the same output
+
+`_diagnosticity` returns `0.0, is_diagnostic=False` both for an item
+consistent with every hypothesis and for one scored against fewer than
+two. The warning then reported the second as the first, so ten
+well-graded items scored against one hypothesis produced *"10 of 10 items
+say the same thing about every hypothesis and settle nothing."* They said
+no such thing; the row was half-entered.
+
+One is a judgement about the evidence, the other is a gap in the matrix,
+and an analyst acts on them very differently. `assessed_against` and
+`is_incomplete` now separate them, in the scoring, in the response and in
+the pane — where an unfinished row is marked as *work available* rather
+than dimmed like a dead end.
+
+### And a test that was asserting the defect
+
+`test_a_report_carries_the_alternatives_that_were_ruled_out` scored one
+hypothesis, left the other untouched, and asserted that **the untouched
+one won.** It was green, it had been green since Phase 6, and it encoded
+the bug as the expectation. Corrected to score both — which is also the
+only configuration in which a matrix can rank anything.
+
+That is the third time on this project that the suite has agreed with a
+defect rather than caught it. A test written from the implementation
+inherits the implementation's mistakes.
+
+---
+
 ## Deferred security items
 
 Not defects, not done. Listed so they are not mistaken for oversights.

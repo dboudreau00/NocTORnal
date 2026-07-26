@@ -208,6 +208,84 @@ def test_a_complete_matrix_has_nothing_to_test_next():
     assert m.refute_first is None
 
 
+# --- an untested hypothesis has not survived; it has not competed -------
+#
+# docs/17 F20. Three compounding defects, all in the one number the module
+# exists to produce, all found by reading the code hostilely rather than by
+# any test — and the situation they fire in is precisely the one docs/13
+# cites as the reason to build ACH at all.
+
+def test_an_untested_hypothesis_does_not_win():
+    """A hypothesis assessed against NOTHING scores inconsistency 0.0,
+    which is the lowest value the scale can produce, so it sorted first and
+    `least_inconsistent` named it. The guard asked whether ANY hypothesis
+    had been assessed, never whether the winner had.
+
+    A team eight months into one theory has assessed everything against
+    that theory and nothing against the alternative. The matrix then
+    reported the alternative as surviving, on the strength of never having
+    been examined: confirmation bias with a scoreboard, in the tool built
+    to correct it.
+    """
+    worked = [_item(f"item {i}", {H1: STRONGLY_INCONSISTENT if i % 3 == 0
+                                  else CONSISTENT})
+              for i in range(10)]
+    m = score([(H1, "tested against ten items"), (H2, "nobody looked")],
+              worked)
+    assert m.least_inconsistent == H1, "the untested hypothesis won"
+    # It still RANKS in the table -- it is part of the picture, and hiding
+    # it would be its own distortion. It just cannot be the survivor.
+    assert {h.hypothesis_id for h in m.hypotheses} == {H1, H2}
+
+
+def test_an_untested_hypothesis_is_named_in_the_warnings():
+    """The `thin` warning required `h.assessed` to be truthy, so the WORST
+    case -- zero assessed -- was the one case it could not fire on."""
+    m = score([(H1, "tested"), (H2, "nobody looked")],
+              [_item("a", {H1: CONSISTENT})])
+    joined = " ".join(m.warnings)
+    assert "not competed" in joined
+    assert "excluded from the ranking" in joined
+
+
+def test_an_unfinished_row_is_unknown_not_undiagnostic():
+    """"Says the same thing about everything" and "has not been entered
+    against everything" are different facts, and reporting the second as
+    the first told an analyst their ten good items settled nothing when
+    they were merely half-entered."""
+    m = score(HYPOTHESES, [_item("only judged against H1", {H1: CONSISTENT})])
+    item = m.evidence[0]
+    assert item.is_incomplete
+    assert item.assessed_against == 1
+    joined = " ".join(m.warnings)
+    assert "unknown rather than zero" in joined
+    assert "settle nothing" not in joined
+
+
+def test_a_genuinely_undiagnostic_row_still_says_so():
+    """The other side. Closing one hole by silencing the warning entirely
+    would be its own defect."""
+    m = score(HYPOTHESES, [_item("consistent with everything",
+                                 {H1: CONSISTENT, H2: CONSISTENT,
+                                  H3: CONSISTENT})])
+    assert not m.evidence[0].is_incomplete
+    assert not m.evidence[0].is_diagnostic
+    assert "settle nothing" in " ".join(m.warnings)
+
+
+def test_a_stance_against_a_superseded_hypothesis_does_not_fill_a_gap():
+    """`refute_first` counted `len(item.stances)` against
+    `len(hypotheses)`. `reports.py` filters the hypothesis list on status
+    and does NOT filter the cells, so an item carrying a stance against a
+    SUPERSEDED hypothesis looked complete while a real gap remained — and
+    the cheapest next test went unnamed."""
+    superseded = uuid4()
+    item = _item("looks complete, is not",
+                 {H1: STRONGLY_CONSISTENT, superseded: INCONSISTENT})
+    m = score([(H1, "live"), (H2, "live too")], [item])
+    assert m.refute_first == item.assertion_id
+
+
 # --- the response ------------------------------------------------------
 
 def test_the_response_states_the_method_it_used():
