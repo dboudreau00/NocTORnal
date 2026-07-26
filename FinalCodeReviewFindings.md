@@ -6,8 +6,13 @@
 > all 21 release findings (R1–R21) have been actioned.** The two REFUTED
 > items (CX1, CX2) were correctly refuted and no change was made.
 >
-> Verified after the work: **1252 passed, 12 skipped** across both pytest
+> Verified after the work: **1257 passed, 12 skipped** across both pytest
 > roots, `ruff` clean, Alembic head **0052**.
+>
+> **A ninth adversarial pass then reviewed this remediation and found ten
+> more, two of them defects in the fixes above — including a migration
+> that would have recreated the very collision it was written to remove.
+> See Part III. All ten are actioned.**
 >
 > (The header of this document says the series runs to R22; it stops at
 > R21. There is no R22.)
@@ -42,6 +47,75 @@
 >    Recorded here because it is the ninth instance of this project's
 >    recurring shape: **a defence that is written, present, and not
 >    actually connected.**
+
+---
+
+# Part III — the ninth adversarial pass (2026-07-26, over Part I + II's own fixes)
+
+The remediation above was itself reviewed. Ten findings, three confirmed
+by execution rather than inspection. **All ten actioned; two were defects
+in the fixes themselves.**
+
+| # | Sev | Finding | Status |
+|---|---|---|---|
+| 1 | HIGH | `/captures/{id}/screenshot` composed the CAPTURE's labels and never checked the EXHIBIT's own; `EvidenceService.view()` has no authorisation of its own | ✅ fixed |
+| 2 | HIGH | **Migration 0051 was wrong** — it re-keyed channel selectors into the USER namespace, recreating the collision CR3 removed | ✅ rewritten |
+| 3 | HIGH | An attacker-appended `Authentication-Results` header WON, minting a forged "cryptographically authenticated" durable domain | ✅ fixed |
+| 4 | MED-HIGH | Ordinary multi-signature mail violated `email_dkim_domain_needs_pass` → 500 with an orphaned WORM exhibit | ✅ fixed |
+| 5 | MED | Cross-case evidence existence oracle on the capture path (create and read) | ✅ fixed |
+| 6 | MED | CR1 clamped the release path but audited the UNCLAMPED value | ✅ fixed |
+| 7 | MED-LOW | `defang()` returned a scheme-less host untouched | ✅ fixed |
+| 8 | MED-LOW | With no trusted MTAs configured, the VICTIM'S OWN relay IP was proposed as durable actor infrastructure | ✅ fixed |
+| 9 | LOW | CR6's fix left a comment describing behaviour it had just changed | ✅ fixed |
+| 10 | LOW | Unvalidated free-form fields reached the driver as 500s | ✅ fixed |
+
+## The two that were defects in the remediation
+
+**#2 is the serious one, and it was mine.** Migration 0051 transformed
+`norm_value` in place. But the OLD `telegram_id_norm` had *already*
+stripped the `-100` prefix, so a Bot-API channel was stored as a bare
+positive with no leading minus — and the rewrite, keyed on `^-`, missed it
+and stamped a CHANNEL as `u:`:
+
+| raw | old `norm_value` | in-place rewrite | correct |
+|---|---|---|---|
+| `-1001234567890` | `1234567890` | `u:1234567890` ✗ | `c:1234567890` |
+| `-1000123456789` | `0123456789` | `u:123456789` ✗ | `c:123456789` |
+
+A later observation of user `1234567890` would then have matched that
+strong selector and auto-merged a person onto a channel — precisely the
+harm CR3 exists to remove, recreated by the migration written to remove
+it. It could also have aborted mid-upgrade on the unique constraint. And
+the docstring's claim that it "can only reduce collisions, never create
+them" was simply false.
+
+Rewritten to re-derive from **`raw_value`**, which is not lossy, with two
+pre-flights: one that refuses to run if any two rows would collapse onto
+one selector (merging selectors is a case decision, not a migration's),
+and one that reports how many rows may ALREADY be wrongly merged — which
+recomputation cannot fix and which the migration now says out loud.
+
+**#3 is the same shape as the Phase 7 forged-PGP verdict.** This module
+gets the trust direction right for `Received` — MTAs prepend, so index 0
+is the recipient's own and trust decays upward — and then read
+`Authentication-Results` last-wins, which is the exact inverse. An
+attacker appending their own `dkim=pass header.d=microsoft.com` had it
+override the real `dkim=fail`, and `microsoft.com` came out as a
+**durable** DOMAIN selector labelled "the only cryptographically
+authenticated field in the mail". The `email_dkim_domain_needs_pass`
+CHECK could not help: the parser made the result and the domain agree on
+the forged value. *A constraint defends against the application forgetting
+to check, never against it checking a forged input.*
+
+## And one more instance of the recurring shape
+
+Finding #1's second half: the router docstring asserted that a caller
+"cannot name" an evidence id, so the attach-any-exhibit pivot "does not
+exist". `CaptureIn.screenshot_evidence_id` is caller-supplied. **The
+guard was documented, believed, and absent** — the tenth instance in this
+project of a defence that is written and not connected.
+
+---
 
 **Date:** 2026-07-26
 **Scope:** the Alpha release delivery — `release/` (installers, INSTALL, README,
