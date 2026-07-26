@@ -3,11 +3,16 @@
 Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0044`, **1178 tests passing, 0 skipped**
-(1079 under `apps/api/tests`, 99 under `packages/ontology` — run both;
-earlier handoffs quoted a single figure and the next session spent time
-working out why it did not reconcile), ruff clean. Nothing pushed (no
-remote configured).
+**State:** `main`, Alembic head `0045`, **1206 tests passing, 0 skipped**
+(run BOTH `apps/api/tests` and `packages/ontology` — earlier handoffs
+quoted a single figure and the next session spent time working out why it
+did not reconcile), ruff clean. Nothing pushed (no remote configured).
+
+**`release/` is the packaged Alpha release** — a README leading with the
+legal status, an analyst manual, install instructions and one-shot
+installers for Windows and Linux/macOS. `scripts/assemble_release.ps1`
+copies it out to a standalone folder; `release/` is the source of truth
+and the copy is disposable.
 
 > **EVERY PHASE HAS NOW HAD AN ADVERSARIAL PASS.** Phases 5 and 8 were the
 > last two, reviewed 2026-07-26: **27 findings survived refutation, nine
@@ -58,7 +63,7 @@ regressed — the measure got honest.**
 |---|---|---|---|---|---|---|
 | 0 — Foundation | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. No typecheck, deliberately (decision 42). |
 | 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
-| 2 — Sociogram | **95%** | ✅ | ✅ | ◐ | ✅ | WebSocket push; the UI polls. |
+| 2 — Sociogram | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. **Live push landed 2026-07-26** — Postgres LISTEN/NOTIFY, one listener per process, the socket carrying no case content. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
 | 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
@@ -67,20 +72,21 @@ regressed — the measure got honest.**
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
-### Overall: **~92%** (was ~84% at the start of 2026-07-26)
+### Overall: **~95%** (was ~84% at the start of 2026-07-26)
 
-Unweighted mean across the ten phases. The +8 came from two things:
+Unweighted mean across the ten phases. The +11 came from three things:
 
 - **Phase 8 from 45% to 80%.** It gained the two dimensions it had none
-  of: a hostile review (nine criticals) and a UI. It is the largest single
-  move any phase has made.
+  of: a hostile review (nine criticals) and a UI, plus the detonation/VM
+  panel. The largest single move any phase has made.
 - **Phase 5 from 70% to 85%**, entirely from its first review.
+- **Phase 2 to 100%** — live push, its last named gap.
 
 Three things the number still hides:
 
-1. **UI is no longer the largest gap.** Every phase has a pane. What is
-   left there is a WebSocket push for the sociogram (it polls) and metric
-   history charting.
+1. **UI is no longer the gap at all.** Every phase has a pane, the console
+   updates live, and there is a keyboard map. What is left on that axis is
+   metric-history charting.
 2. **Completion is not lawfulness.** A phase at 100% here may still be
    unlawful to operate. Phase 8 is now at 80% and **must not be switched
    on** until L1 is settled — see the register below. That is not a
@@ -212,11 +218,11 @@ gain each buys.
 | 3 | **The remaining retrospective items** (docs/18 Section D) | 0% on this scale | The dead-letter repair is checked and clean on this database (2026-07-26). What is left: batches accepted before object storage was wired cannot be re-parsed, and whether the original exposure is reportable. Neither scores; both are real. |
 | 4 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, DNS-rebinding-proof SSRF protection, login timing. |
 
-That reaches roughly **97%** with no phase below 85%. The last 3% is
-WebSocket push, CONCOR, and the two-mode presets for actor×forum and
-actor×wallet.
+That reaches roughly **98%** with no phase below 85%. The last 2% is
+CONCOR, metric-history charting, and the two-mode presets for actor×forum
+and actor×wallet.
 
-**None of it changes the four BLOCKING legal items.** A 97% build is still
+**None of it changes the four BLOCKING legal items.** A 98% build is still
 one that must not be operated until L1–L4 are settled.
 
 ### 4. The remaining per-phase work

@@ -22,10 +22,14 @@ analyst UI under a strict CSP with no build step.
 
 ## 2. Where it is
 
-**~92% complete** on a four-dimension weighted measure (model+tests 45%,
+**~95% complete** on a four-dimension weighted measure (model+tests 45%,
 HTTP API 15%, analyst UI 25%, adversarial review 15%).
 
-- **1189 tests, 0 skipped.** Alembic head **0044**. ruff clean.
+- **1206 tests, 0 skipped.** Alembic head **0045**. ruff clean.
+- **`release/` is the packaged Alpha release** — README leading with the
+  legal status, an analyst MANUAL, INSTALL, and one-shot installers for
+  Windows and Linux/macOS. `scripts/assemble_release.ps1` copies it out to
+  a standalone folder; `release/` is the source of truth.
 
   ⚠ **The count spans TWO roots.** `apps/api/tests` (1079) and
   `packages/ontology` (99). Run both:
@@ -54,6 +58,10 @@ Seven commits, all on `main`. `docs/17` **F19** and **F20** are the record
 | `8291e57` | **Three defects in this session's OWN fixes.** |
 | `26f4165` | UI: a request indicator for every fetch, and a `?` keyboard sheet. |
 | `1d648bc` | **F20: the untested hypothesis was winning the ACH matrix.** |
+| `06ad0d8` | Live change push (Phase 2's last gap) and the detonation/VM panel. |
+| `fd5f01b` | The Alpha release: installers, manual, legal status first. |
+| `1cca5d9` | `.gitattributes`: shell scripts keep LF, or `install.sh` is broken on the Linux box it exists to serve. |
+| `d429ed9` | **live: one listener per process, not two connections per client.** |
 
 **All 27 findings from the Phase 5/8 pass are actioned.** So is a hostile
 pass over the fixes themselves, and one over Phase 6's ACH.
@@ -79,6 +87,16 @@ pass over the fixes themselves, and one over Phase 6's ACH.
   and it also meant a cleared analyst could not name their own case and
   `DENY_COMPARTMENTED` remained unreachable — the exact defect the same
   commit had just repaired elsewhere.
+- **The live socket worked with one analyst and would have failed with
+  ten.** Two Postgres connections per client, both held; Postgres ships
+  with `max_connections = 100`, so twenty-five people with two tabs each
+  would have taken the whole API down — a total outage caused by leaving
+  tabs open. Now one listener per process, verified at 20 concurrent
+  sockets. **Both of that fix's own bugs were found by measuring
+  `pg_stat_activity`, not by reading the code**: `asyncio.to_thread`
+  cannot be cancelled, so the cleanup ran against a connection another
+  thread still held and was silently suppressed; and a disconnect was not
+  noticed until the next send, 25 seconds later.
 
 ---
 
@@ -220,6 +238,18 @@ docs/18 L1.
   and the running API will happily serve a UI that reads a field the old
   code does not send. Restart after touching Python, or you are testing
   two versions at once.
+- **`asyncio.to_thread` cannot be cancelled.** Cancelling the task raises
+  at the await point immediately and leaves the worker thread running with
+  whatever it was holding. Any cleanup in `finally` then runs against a
+  resource another thread is still using — and if it is wrapped in
+  `contextlib.suppress`, it fails silently. Use a flag the loop checks.
+- **A shell script committed from Windows will be checked out with CRLF
+  unless `.gitattributes` says otherwise**, and `#!/usr/bin/env bash\r` is
+  not a shebang. The error names neither the file nor line endings.
+- **Do not run `release/install.sh` under Git Bash.** It now refuses, but
+  the reason is worth knowing: a Windows virtualenv puts its interpreter
+  in `Scripts/` rather than `bin/`, so the "does a venv exist?" check said
+  no and it recreated one over a working environment.
 
 ---
 
