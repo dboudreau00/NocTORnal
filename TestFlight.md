@@ -270,6 +270,59 @@ one whatever the installer does.
 
 ---
 
+## 6a) The zip
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package_release.ps1 -Zip
+```
+
+Produces `NocTORnal - Alpha Release.zip` — **2.5 MB, 294 entries**,
+verified from outside PowerShell (which is the only place the questions
+below can be answered honestly):
+
+| | |
+|---|---|
+| CRC integrity | OK, every entry |
+| Top-level entries | exactly one: `NocTORnal - Alpha Release/` |
+| Path separators | 294 forward slashes, 0 backslashes |
+| Secrets | no `.env.local`, no `.venv/`, no `.git/` |
+| `install.sh` | 0 CRLF, shebang intact through the archive |
+| Extraction | 294 files, installer resolves the project from inside the tree, both installers parse |
+
+Three things this got wrong before it got right, all worth knowing:
+
+- **The first zip had no wrapper directory.** `Compress-Archive -Path
+  "$dir\*"` archives the CONTENTS, so unzipping scattered twenty-two
+  top-level entries loose into the recipient's Downloads folder.
+- **The check written to catch that then failed a good archive.** It split
+  entry names on `/`, but .NET's `ZipArchiveEntry.FullName` reports the
+  PLATFORM separator, so all 294 entries looked like a single
+  294-segment root. The stored bytes were correct the whole time.
+- **Which also means PowerShell cannot answer the separator question at
+  all.** `ZipFile.CreateFromDirectory` is used instead of
+  `Compress-Archive` partly because it writes spec-compliant forward
+  slashes; confirming that needs a tool outside .NET, and the command to
+  do it is in the script's comment.
+
+### One Windows constraint worth stating
+
+Windows' 260-character `MAX_PATH` still applies to extraction. The
+archive's longest entry is 89 characters:
+
+```
+NocTORnal - Alpha Release/db/migrations/versions/0036_renormalise_comms_durable_values.py
+```
+
+So extraction fails if the destination path exceeds roughly 170
+characters. A Downloads or Desktop folder is nowhere near that — the
+first extraction attempt here failed only because the scratchpad used for
+testing has a 178-character base path, which is not a real-world
+location. Extracting to `%TEMP%
+zt` (37 characters) succeeded with all
+294 files.
+
+---
+
 ## 7) Re-running this
 
 ```powershell

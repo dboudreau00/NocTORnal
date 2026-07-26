@@ -186,7 +186,17 @@ try {
         # Passing the directory itself wraps everything in one folder,
         # which is what every release archive a developer has ever
         # downloaded does.
-        Compress-Archive -Path $Destination -DestinationPath $zipPath
+        # ZipFile.CreateFromDirectory, not Compress-Archive.
+        #
+        # `includeBaseDirectory: $true` is the wrapper, done by the API
+        # rather than by argument-shape trickery, and this is the
+        # documented .NET entry point rather than a cmdlet whose path
+        # handling has changed between PowerShell versions.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $Destination, $zipPath,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $true)
 
         # Confirm the wrapper is actually there rather than assuming it.
         # This script has already shipped one artefact it had "verified"
@@ -204,24 +214,28 @@ try {
             $roots = @($archive.Entries |
                 ForEach-Object { ($_.FullName -split '[\\/]')[0] } |
                 Sort-Object -Unique)
-            # Portability: a zip carrying backslash separators makes Unix
-            # `unzip` create files literally named "dir\sub\file" instead of
-            # directories. Checked because this is a cross-platform release
-            # artefact and the failure is invisible from Windows.
-            $backslashed = @($archive.Entries |
-                Where-Object { $_.FullName -like '*\*' }).Count
+            $entryCount = $archive.Entries.Count
         }
         finally { $archive.Dispose() }
         if ($roots.Count -ne 1) {
             Die ("the zip has $($roots.Count) top-level entries and should " +
                  "have exactly one wrapper directory: " + ($roots -join ', '))
         }
-        if ($backslashed) {
-            Die ("$backslashed zip entries use backslash separators. Unix " +
-                 "unzip would create literal 'a\b\c' filenames rather than " +
-                 "directories.")
-        }
-        Good "wrote $zipPath (wraps in '$($roots[0])', forward-slash paths)"
+
+        # NOT checked here: whether the stored separators are forward
+        # slashes. They must be -- a zip carrying backslashes makes Unix
+        # `unzip` create files literally named "dir\sub\file" instead of
+        # directories -- but this runtime cannot answer the question.
+        # .NET's ZipArchiveEntry.FullName reports the PLATFORM separator on
+        # read, so a check here reports backslashes for an archive whose
+        # stored bytes are correct. An earlier version of this script did
+        # exactly that and refused to package a perfectly good zip.
+        #
+        # ZipFile.CreateFromDirectory writes spec-compliant forward slashes,
+        # which is one of the reasons it is used above instead of
+        # Compress-Archive. Confirm from outside PowerShell if it matters:
+        #     python -c "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).namelist()[:3])" <zip>
+        Good "wrote $zipPath ($entryCount entries, wrapped in '$($roots[0])')"
         Warn 'A recipient unzipping this on Linux/macOS must run:'
         Warn '    chmod +x release/install.sh'
         Warn 'and on Windows must launch it as:'
