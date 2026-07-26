@@ -748,6 +748,83 @@
             <button type="submit" class="btn primary">Parse</button>
           </form>
           <div id="comms-block-out"></div>
+
+          <!-- PGP verification. The one path in Phase 7 that produces a
+               CONFIRMATION rather than a claim, which is why the outcome
+               is rendered as loudly as it is: docs/10 says a CONFIRMED
+               binding may carry weight in automatic identity resolution,
+               so being wrong here is worst.
+
+               NO_VERIFIER is displayed differently from BAD_SIGNATURE on
+               purpose. "Nobody checked" and "checked and failed" must not
+               look the same, or an unchecked claim reads as a
+               checked-and-rejected one. -->
+          <form id="comms-pgp-form" class="card stack" novalidate>
+            <h2 class="h-sm">Verify a signature</h2>
+            <p class="help">
+              A message signed by a key whose fingerprint appears in the
+              contact block is <strong>cryptographic evidence of
+              control</strong>, not a claim. Everything else on this pane
+              produces claims.
+            </p>
+            <label class="field">
+              <span class="label">The clearsigned message, as published</span>
+              <textarea id="comms-pgp-message" rows="8" required
+                        spellcheck="false"
+                        placeholder="-----BEGIN PGP SIGNED MESSAGE-----"></textarea>
+            </label>
+            <label class="field">
+              <span class="label">The vendor's public key</span>
+              <textarea id="comms-pgp-key" rows="5" required spellcheck="false"
+                        placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+            </label>
+            <label class="field">
+              <span class="label">Fingerprint it should be signed by</span>
+              <input id="comms-pgp-fpr" type="text" spellcheck="false"
+                     placeholder="spaced or unspaced, both accepted">
+            </label>
+            <label class="field">
+              <span class="label">Identifier this should confirm (optional)</span>
+              <input id="comms-pgp-confirms" type="text" spellcheck="false"
+                     placeholder="the Tox key or handle the signature should cover">
+            </label>
+            <p id="comms-pgp-msg" class="msg" hidden></p>
+            <button type="submit" class="btn primary">Verify</button>
+          </form>
+          <div id="comms-pgp-out"></div>
+
+          <h2 class="h-sm">Awaiting verification</h2>
+          <p class="help">
+            Bindings still at CLAIMED that have a fingerprint to check
+            against. A claim nobody checked is not a rejected one.
+          </p>
+          <div class="pane-head">
+            <button id="comms-unverified-refresh" type="button" class="btn">
+              Refresh</button>
+            <span id="comms-unverified-count" class="muted small"></span>
+          </div>
+          <div id="comms-unverified"></div>
+          <p id="comms-unverified-empty" class="empty">
+            Nothing awaiting verification.</p>
+
+          <!-- Co-participation. An INFERRED tie, and invariant 4 says an
+               inferred edge stays visually and structurally distinct. -->
+          <h2 class="h-sm">Co-participation</h2>
+          <p class="help">
+            Ties inferred from being in the same room. These are
+            <strong>inferred</strong>, weighted by the room's size — two
+            people in a 500-member channel is not the same evidence as a
+            private exchange — and they are excluded from metrics unless a
+            projection opts in.
+          </p>
+          <div class="pane-head">
+            <button id="comms-copart-refresh" type="button" class="btn">
+              Load</button>
+            <span id="comms-copart-count" class="muted small"></span>
+          </div>
+          <div id="comms-copart"></div>
+          <p id="comms-copart-empty" class="empty">
+            No co-participation computed for this case.</p>
         </section>
 
         <!-- FEEDS (Phases 9 and 4). Material arriving from outside: what a

@@ -575,7 +575,13 @@ function selectTab(name) {
   if (name === 'triage') loadTriage();
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
-  if (name === 'comms') loadCommsPlatforms().catch(fail);
+  if (name === 'comms') {
+    loadCommsPlatforms().catch(fail);
+    /* The unverified queue loads with the pane; co-participation does NOT.
+       It is a projection over every conversation in the case and belongs
+       behind a button for the same reason the report does. */
+    loadUnverified();
+  }
   if (name === 'inbox') { loadInbox(); loadInboxPreferences(); }
   /* Only the visible subtab loads. Four fetches on tab-open would mean
      three of them are for a panel nobody is looking at, and one of those
@@ -5554,6 +5560,166 @@ async function addHypothesis() {
   } catch (err) { inlineProblem(msg, err); }
 }
 
+/* --- PGP verification and co-participation (Phase 7) --------------------
+ *
+ * PGP is the one path in this phase that produces a CONFIRMATION rather
+ * than a claim, so it is the one place where being wrong is worst —
+ * docs/10 says a CONFIRMED binding may carry weight in automatic identity
+ * resolution.
+ *
+ * The outcomes are therefore rendered as three visually distinct classes,
+ * not as pass/fail:
+ *
+ *   VERIFIED             — cryptographic evidence of control
+ *   BAD_SIGNATURE,
+ *   KEY_MISMATCH,
+ *   VALUE_NOT_IN_PAYLOAD — checked, and it did not hold
+ *   NO_VERIFIER          — NOBODY CHECKED
+ *
+ * That last one is the reason this is not a boolean. "Nobody checked" and
+ * "checked and failed" must never look the same, or an unchecked claim
+ * reads as a checked-and-rejected one and an analyst discounts a real
+ * lead — or, worse, treats an unavailable verifier as a refutation.
+ */
+
+const PGP_GOOD = 'VERIFIED';
+const PGP_UNCHECKED = new Set(['NO_VERIFIER', 'KEY_UNAVAILABLE', 'MALFORMED']);
+
+async function verifyPgp(e) {
+  e.preventDefault();
+  const msg = $('comms-pgp-msg');
+  const out = $('comms-pgp-out');
+  setMsg(msg, '');
+  clear(out);
+  try {
+    const body = await api(cpath('/comms/pgp/verify'), {
+      method: 'POST',
+      json: {
+        signed_message: $('comms-pgp-message').value,
+        public_key: $('comms-pgp-key').value,
+        claimed_fingerprint: $('comms-pgp-fpr').value.trim(),
+        confirms_value: $('comms-pgp-confirms').value.trim() || null,
+      },
+    });
+    out.appendChild(pgpOutcome(body));
+    loadUnverified();
+  } catch (err) { inlineProblem(msg, err); }
+}
+
+function pgpOutcome(body) {
+  const outcome = body.outcome || 'MALFORMED';
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  const chip = el('span', 'chip '
+    + (outcome === PGP_GOOD ? 'ok'
+      : (PGP_UNCHECKED.has(outcome) ? 'warn' : 'bad')), outcome);
+  head.appendChild(chip);
+  head.appendChild(el('span', 'row-title',
+    outcome === PGP_GOOD ? 'Cryptographic evidence of control'
+      : (PGP_UNCHECKED.has(outcome)
+        ? 'Nobody checked — this is not a finding about the evidence'
+        : 'Checked, and it did not hold')));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  if (body.signing_fingerprint) {
+    facts.appendChild(fact('signed by',
+      String(body.signing_fingerprint).slice(0, 16)));
+  }
+  if (body.value_in_payload !== undefined) {
+    facts.appendChild(fact('identifier inside the signed region',
+      body.value_in_payload ? 'yes' : 'no',
+      body.value_in_payload ? '' : 'bad'));
+  }
+  if (body.binding_upgraded) {
+    facts.appendChild(fact('binding', 'upgraded to CONFIRMED', 'warn'));
+  }
+  card.appendChild(facts);
+  if (body.detail || body.note) {
+    card.appendChild(el('p', 'why', body.detail || body.note));
+  }
+  if (PGP_UNCHECKED.has(outcome)) {
+    card.appendChild(el('p', 'help warn',
+      'A failure to LOOK, not a finding about the evidence. The binding '
+      + 'stays CLAIMED and should be checked again when a verifier is '
+      + 'available.'));
+  }
+  return card;
+}
+
+async function loadUnverified() {
+  if (!state.caseId) return;
+  try {
+    const body = await api(cpath('/comms/pgp/unverified'));
+    const claims = body.claims || [];
+    renderList('comms-unverified', 'comms-unverified-empty', claims,
+      (c) => {
+        const card = el('div', 'card row-card compact');
+        const head = el('div', 'row-head');
+        head.appendChild(el('span', 'row-title',
+          c.observed_value || c.durable_value || c.id));
+        head.appendChild(el('span', 'chip', c.platform_key || '?'));
+        /* The split the endpoint exists for. Without it, "not confirmed"
+           and "not checked" look identical. */
+        head.appendChild(c.attempted
+          ? el('span', 'chip bad', 'checked, not confirmed')
+          : el('span', 'chip warn', 'never checked'));
+        card.appendChild(head);
+        if (c.last_outcome) card.appendChild(el('p', 'why', c.last_outcome));
+        return card;
+      });
+    $('comms-unverified-count').textContent = claims.length
+      ? claims.length + ' claim(s)' : '';
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      renderList('comms-unverified', 'comms-unverified-empty', [], () => el('div'));
+      $('comms-unverified-empty').textContent = refusalText(
+        err, 'This needs comms.read on the case.');
+      return;
+    }
+    fail(err);
+  }
+}
+
+async function loadCoParticipation() {
+  if (!state.caseId) return;
+  try {
+    const body = await api(cpath('/comms/co-participation'));
+    const ties = body.ties || body.edges || [];
+    renderList('comms-copart', 'comms-copart-empty', ties, (t) => {
+      const card = el('div', 'card row-card compact');
+      const head = el('div', 'row-head');
+      const w = Number(t.weight || 0);
+      head.appendChild(el('span', 'score', w.toFixed(2)));
+      head.appendChild(el('span', 'row-title',
+        (t.source_label || t.source || t.a) + ' — '
+        + (t.target_label || t.target || t.b)));
+      /* Invariant 4: an inferred edge stays visually distinct and never
+         silently becomes an asserted one. */
+      head.appendChild(el('span', 'chip warn', 'inferred'));
+      card.appendChild(head);
+      const facts = el('div', 'facts');
+      if (t.rooms !== undefined) facts.appendChild(fact('rooms', t.rooms));
+      if (t.weighting) facts.appendChild(fact('weighting', t.weighting));
+      card.appendChild(facts);
+      return card;
+    });
+    $('comms-copart-count').textContent = ties.length
+      ? ties.length + ' inferred tie(s)' : '';
+    for (const w of body.warnings || []) {
+      $('comms-copart').appendChild(el('p', 'help warn', w));
+    }
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 403 || err.status === 400)) {
+      renderList('comms-copart', 'comms-copart-empty', [], () => el('div'));
+      $('comms-copart-empty').textContent = refusalText(
+        err, 'Co-participation needs comms.read on the case.');
+      return;
+    }
+    fail(err);
+  }
+}
+
 /* --- Report (Phase 6, docs/08) -----------------------------------------
  *
  * Build and release are two controls because they are two decisions, and
@@ -5787,6 +5953,10 @@ function initOpsPanes() {
   $('ach-refresh').addEventListener('click', loadAch);
   $('ach-rejected').addEventListener('change', loadAch);
   $('ach-add').addEventListener('click', addHypothesis);
+
+  $('comms-pgp-form').addEventListener('submit', verifyPgp);
+  $('comms-unverified-refresh').addEventListener('click', loadUnverified);
+  $('comms-copart-refresh').addEventListener('click', loadCoParticipation);
 
   $('rep-build').addEventListener('click', buildReport);
   $('rep-download').addEventListener('click', downloadReport);
