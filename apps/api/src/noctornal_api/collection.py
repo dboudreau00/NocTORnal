@@ -66,6 +66,8 @@ a constraint that is either wrong or unenforceable.
 """
 from __future__ import annotations
 
+import base64
+import contextvars
 import hashlib
 import ipaddress
 import random
@@ -93,12 +95,121 @@ _TERMINAL = frozenset({BURNED})
 
 #: Private ranges an outbound fetch must never reach. A floor, not a
 #: solution -- see the module docstring and docs/16.
+#:
+#: docs/17 F15(f): the enumerated list missed `::ffff:127.0.0.1` (the
+#: IPv4-mapped form of loopback, which `ip_address` parses as IPv6 and
+#: which no entry here matched), the unspecified address `::`, and the
+#: 100.64/10, 192.0.0/24 and 198.18/15 ranges. Enumerating was the
+#: mistake -- `_is_blocked` below asks the address what it IS and uses
+#: this list only for the cases the stdlib does not classify.
 _BLOCKED_NETWORKS = [
     ipaddress.ip_network(n) for n in (
         "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
         "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10", "0.0.0.0/8",
+        # Carrier-grade NAT: inside a provider's network, not the public
+        # internet, and reachable from a cloud instance.
+        "100.64.0.0/10",
+        # IETF protocol assignments, which include 192.0.0.192 -- the
+        # shape of a metadata endpoint.
+        "192.0.0.0/24",
+        # Benchmarking. Routed internally in more networks than you would
+        # expect.
+        "198.18.0.0/15",
+        # The unspecified address. `http://[::]/` and `http://0.0.0.0/`
+        # both reach the local host on most stacks.
+        "::/128",
     )
 ]
+
+#: The cloud metadata endpoint, by name and by address. Not private space
+#: -- 169.254.169.254 IS in link-local, but the alias hosts are not, and
+#: reaching any of them from a collector is credential theft against
+#: ourselves rather than an SSRF against somebody else.
+_METADATA_HOSTS = frozenset({
+    "metadata.google.internal", "metadata.goog", "instance-data",
+    "metadata.azure.com",
+})
+
+#: A redirect chain longer than this is either a loop or an attempt to
+#: exhaust the validator. urllib's own default is 10.
+MAX_REDIRECTS = 5
+
+
+def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Ask the address what it is, then check the ranges the stdlib misses.
+
+    `ipv4_mapped` is the load-bearing line: `::ffff:127.0.0.1` parses as an
+    IPv6Address, is not `is_loopback`, and matched no entry in the
+    enumerated list -- so it was a complete bypass of this check with a
+    two-character prefix.
+    """
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    sixtofour = getattr(address, "sixtofour", None)
+    if sixtofour is not None:
+        # 2002::/16 embeds an IPv4 address; if the embedded one is
+        # internal, so is the tunnel.
+        if _is_blocked(sixtofour):
+            return True
+    if (address.is_loopback or address.is_private or address.is_link_local
+            or address.is_multicast or address.is_reserved
+            or address.is_unspecified):
+        return True
+    return any(address in network for network in _BLOCKED_NETWORKS)
+
+
+def _resolve_and_check(url: str) -> str:
+    """Validate ONE hop. Returns the host, raises if it must not be reached.
+
+    Split out of `fetch` because it has to run on every redirect target as
+    well as the first URL -- docs/17 F15(f). `urlopen` follows redirects
+    internally, so hops 2..N used to be reached with no check at all: a
+    public host returning `302 -> http://127.0.0.1/` fetched the internal
+    page, which is the whole SSRF this function exists to stop, arrived at
+    by the one route nobody looked at.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise CollectionError(
+            f"refusing scheme {parsed.scheme!r}: only http and https are "
+            f"fetched, and file:// or gopher:// in a watch target is an "
+            f"attempt rather than a mistake")
+    host = parsed.hostname
+    if not host:
+        raise CollectionError("no host in URL")
+    if host.lower().rstrip(".") in _METADATA_HOSTS:
+        raise CollectionError(
+            f"{host} is a cloud metadata endpoint. Reaching it from a "
+            f"collector steals our own credentials, which is worse than the "
+            f"SSRF this check is usually about")
+    try:
+        resolved = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except OSError as exc:
+        raise CollectionError(f"cannot resolve {host}") from exc
+    if not resolved:
+        raise CollectionError(f"cannot resolve {host}")
+    for address in resolved:
+        # A host with ONE internal answer is refused even if it also has
+        # public ones: which answer the connect() uses is not ours to
+        # choose, and a mixed answer is the classic rebinding setup.
+        if _is_blocked(ipaddress.ip_address(address.split("%")[0])):
+            raise CollectionError(
+                f"{host} resolves into private address space, which a watch "
+                f"target must not: that is the SSRF shape docs/09 names")
+    return host
+
+
+class _NoAutoRedirect(urllib.request.HTTPRedirectHandler):
+    """Turns a redirect into an HTTPError so the caller can re-validate.
+
+    Returning None from `redirect_request` makes urllib raise instead of
+    following, which is exactly what is wanted: the decision to follow has
+    to be ours, because following is what crosses the boundary.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class CollectionError(Exception):
@@ -117,28 +228,102 @@ class PersonaUnavailable(CollectionError):
 
 _SECRET_PATTERNS = [
     re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|"
-               r"authorization|cookie|session)([\"'\s:=]+)([^\s\"',;&]+)"),
+               r"authorization|cookie|session|passphrase|credential|bearer|"
+               r"auth|otp|totp|pin)([\"'\s:=]+)([^\s\"',;&]+)"),
     re.compile(r"(?i)(https?://)([^:/@\s]+):([^@\s]+)@"),
+    # An unlabelled high-entropy run: a cookie, a bearer token, a session
+    # id. Requires a digit AND a letter so ordinary long words in error
+    # prose survive -- an error nobody can read is its own failure.
+    re.compile(r"\b(?=[A-Za-z0-9+/=_\-]{24,})"
+               r"(?=[A-Za-z0-9+/=_\-]*[0-9])(?=[A-Za-z0-9+/=_\-]*[A-Za-z])"
+               r"[A-Za-z0-9+/=_\-]{24,}\b"),
+    # `user:pass` alone on a line: the shape a form echo takes, with no key
+    # name anywhere near it.
+    re.compile(r"(?m)^(\s*)([^\s:|]{1,64})([:|])([^\s:|]{4,})\s*$"),
+    # `anything=<long opaque value>`. The field NAME is not the signal --
+    # `p=` is a real one in real feeds, and that is precisely what a
+    # keyword list cannot express. The length floor is what keeps ordinary
+    # prose readable: assignments in an error message with an eight-plus
+    # character unbroken value are overwhelmingly parameters, not English.
+    re.compile(r"([A-Za-z0-9_.\-]{1,40})=([^\s,;&\"'<>]{8,})"),
 ]
 
+#: Below this length an exact-match replacement does more harm than good:
+#: a four-character secret appearing inside ordinary words would shred the
+#: message it is supposed to keep readable. Same floor and same reasoning
+#: as `pgp.MIN_CONFIRMABLE_LENGTH`.
+MIN_REDACTABLE_LENGTH = 6
 
-def redact(text: str | None) -> str:
-    """Mask anything that looks like a credential.
+#: Secrets that are live RIGHT NOW, for the duration of a `PersonaVault.use`
+#: block. A ContextVar rather than a global so concurrent workers do not
+#: share -- and so a secret cannot outlive its block by being forgotten.
+_LIVE_SECRETS: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "noctornal_live_secrets", default=())
+
+
+def _secret_forms(value: str):
+    """The shapes one secret takes on the way into an error message.
+
+    A password does not usually appear verbatim in the thing that leaks
+    it. It appears percent-encoded in a request line, form-encoded in a
+    body echo, and base64'd in a Basic-auth header -- and a redactor that
+    only knows the raw form catches none of those.
+    """
+    yield value
+    yield urllib.parse.quote(value, safe="")
+    yield urllib.parse.quote_plus(value)
+    yield base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+@contextmanager
+def secret_in_scope(*values: str):
+    """Register secrets as live, so `redact` removes them exactly.
+
+    docs/17 F15(j). Shape-matching is a backstop for secrets we do not
+    hold; for the one we just handed to an adapter, exact removal is
+    strictly better and is the only defence that does not depend on
+    guessing what the remote server will call it.
+    """
+    live = tuple(v for v in values if v and len(v) >= MIN_REDACTABLE_LENGTH)
+    token = _LIVE_SECRETS.set(_LIVE_SECRETS.get() + live)
+    try:
+        yield
+    finally:
+        _LIVE_SECRETS.reset(token)
+
+
+def redact(text: str | None, *, secrets: tuple[str, ...] = ()) -> str:
+    """Mask anything that looks like a credential, and anything that IS one.
 
     Applied to EVERY adapter error before it reaches the database. A
     persona's password lands in an HTTP error body far more often than
     anybody expects -- a 401 that echoes the submitted form, a proxy error
     quoting the request line, a library that stringifies its config.
 
-    Structural rather than exact-match, for the same reason `SecretRedactor`
-    is in the Monero project it was learned from: you cannot enumerate the
-    places a secret will appear, so you mask the SHAPE.
+    Two layers, and the order is the point:
+
+    1. **Exact.** Every secret currently live in a `PersonaVault.use`
+       block, in each of the forms it takes on the wire. This is the layer
+       that actually holds invariant 7, because it does not depend on the
+       remote server labelling the field in a way we anticipated.
+    2. **Structural**, for secrets we do not hold: labelled fields, URL
+       credentials, unlabelled high-entropy runs, bare `user:pass` lines.
+       docs/17 F15(j) is right that a keyword list alone is not enough --
+       `pass`, `p=`, `credential` and any unlabelled echo walk through one.
     """
     if not text:
         return ""
     out = text
+    for value in tuple(_LIVE_SECRETS.get()) + tuple(secrets):
+        if len(value) < MIN_REDACTABLE_LENGTH:
+            continue
+        for form in _secret_forms(value):
+            out = out.replace(form, "[REDACTED]")
     out = _SECRET_PATTERNS[0].sub(r"\1\2[REDACTED]", out)
     out = _SECRET_PATTERNS[1].sub(r"\1\2:[REDACTED]@", out)
+    out = _SECRET_PATTERNS[2].sub("[REDACTED]", out)
+    out = _SECRET_PATTERNS[3].sub(r"\1\2\3[REDACTED]", out)
+    out = _SECRET_PATTERNS[4].sub(r"\1=[REDACTED]", out)
     return out
 
 
@@ -220,7 +405,12 @@ class PersonaVault:
         self._audit(actor_id, "PERSONA_USED", persona_id, {"purpose": purpose})
         secret = envelope.decrypt(bytes(row[0]), key_id=row[1])
         try:
-            yield secret
+            # For exactly as long as the plaintext is live, `redact` knows
+            # it verbatim and in its wire forms (docs/17 F15(j)). This is
+            # the layer that holds invariant 7 when a remote server echoes
+            # the credential back under a field name nobody anticipated.
+            with secret_in_scope(secret):
+                yield secret
         finally:
             # Python cannot guarantee the string is gone, and pretending
             # otherwise would be worse than saying so: the real control is
@@ -437,53 +627,65 @@ def parse_rss(body: bytes) -> list[Item]:
 
 
 def fetch(url: str, *, etag: str | None = None,
-          timeout: float = 15.0) -> tuple[bytes, int, str | None, str | None]:
+          timeout: float = 15.0,
+          max_redirects: int = MAX_REDIRECTS
+          ) -> tuple[bytes, int, str | None, str | None]:
     """An outbound HTTP GET with the floor of SSRF protection.
 
-    Refuses non-HTTP schemes and addresses that resolve into private space.
-    **This is a floor, not a solution**: DNS rebinding defeats a
-    resolve-then-connect check, and the real fix is a proxy that enforces
-    the policy at connect time. Recorded in docs/16 rather than implied by
-    its presence.
-    """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise CollectionError(
-            f"refusing scheme {parsed.scheme!r}: only http and https are "
-            f"fetched, and file:// or gopher:// in a watch target is an "
-            f"attempt rather than a mistake")
-    host = parsed.hostname
-    if not host:
-        raise CollectionError("no host in URL")
-    try:
-        resolved = {info[4][0] for info in socket.getaddrinfo(host, None)}
-    except OSError as exc:
-        raise CollectionError(f"cannot resolve {host}") from exc
-    for address in resolved:
-        parsed_address = ipaddress.ip_address(address)
-        if any(parsed_address in network for network in _BLOCKED_NETWORKS):
-            raise CollectionError(
-                f"{host} resolves into private address space, which a watch "
-                f"target must not: that is the SSRF shape docs/09 names")
+    Refuses non-HTTP schemes and addresses that resolve into private space,
+    and re-validates **every redirect hop** rather than the first URL only.
 
-    request = urllib.request.Request(url, headers={
-        # Honest about being a collector. A user-agent that impersonates a
-        # browser is a decision with a legal dimension (docs/16 L3), not a
-        # default.
-        "User-Agent": "NocTORnal-collector/1",
-        **({"If-None-Match": etag} if etag else {}),
-    })
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return (response.read(), response.status,
-                    response.headers.get("ETag"),
-                    response.headers.get("Last-Modified"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304:
-            return b"", 304, etag, None
-        raise CollectionError(f"HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise CollectionError(f"unreachable: {redact(str(exc))}") from exc
+    **This is a floor, not a solution**: DNS rebinding defeats a
+    resolve-then-connect check -- the name is resolved once here and again
+    by the socket layer, and nothing stops those two answers differing. The
+    real fix is a proxy that enforces the policy at connect time. Recorded
+    in docs/16 rather than implied by its presence.
+
+    What it is no longer missing (docs/17 F15(f)): redirects. `urlopen`
+    followed them internally, so hops 2..N were reached with no check at
+    all and a public host answering `302 -> http://127.0.0.1/` fetched the
+    internal page. The module docstring named DNS rebinding as the known
+    gap and did not mention this one, so the stated floor was not the
+    actual floor.
+    """
+    opener = urllib.request.build_opener(_NoAutoRedirect)
+    seen = [url]
+    for hop in range(max_redirects + 1):
+        current = seen[-1]
+        _resolve_and_check(current)
+        request = urllib.request.Request(current, headers={
+            # Honest about being a collector. A user-agent that impersonates
+            # a browser is a decision with a legal dimension (docs/16 L3),
+            # not a default.
+            "User-Agent": "NocTORnal-collector/1",
+            **({"If-None-Match": etag} if etag else {}),
+        })
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return (response.read(), response.status,
+                        response.headers.get("ETag"),
+                        response.headers.get("Last-Modified"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return b"", 304, etag, None
+            if exc.code not in {301, 302, 303, 307, 308}:
+                raise CollectionError(f"HTTP {exc.code}") from exc
+            location = exc.headers.get("Location")
+            if not location:
+                raise CollectionError(
+                    f"HTTP {exc.code} with no Location header") from exc
+            # Relative targets are legal and common; resolve against the
+            # hop we are ON, not against the original URL.
+            target = urllib.parse.urljoin(current, location)
+            if target in seen:
+                raise CollectionError(
+                    f"redirect loop at {hop + 1} hop(s)") from exc
+            seen.append(target)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise CollectionError(f"unreachable: {redact(str(exc))}") from exc
+    raise CollectionError(
+        f"more than {max_redirects} redirects. A chain this long is a loop "
+        f"or an attempt to exhaust the validator, and neither is a feed")
 
 
 # ---------------------------------------------------------------------------
@@ -523,12 +725,22 @@ def next_due_at(last_ok: datetime | None, interval_s: int, jitter_pct: int,
 class RateLimiter:
     """Per-source `max_rps`, spaced rather than bursted.
 
-    docs/04 asks for it globally through Redis; this is the in-process half
+    docs/04 asks for it globally through Redis; this is the durable half
     and it is honest about being that. A burst that respects an average is
     still a burst, and a burst is what gets noticed.
+
+    docs/17 F15(i): the state used to live on the INSTANCE, and
+    `CollectionService` is constructed per request, so the dict was always
+    empty and this never spaced anything. It now reads and writes
+    `collect.source.last_request_at`, which survives the process and is
+    shared between workers -- the property that actually matters. A Redis
+    token bucket remains the right optimisation; it is no longer the fix
+    for a correctness bug.
     """
 
-    def __init__(self, sleep=time.sleep, clock=time.monotonic):
+    def __init__(self, conn: psycopg.Connection | None = None, *,
+                 sleep=time.sleep, clock=time.monotonic):
+        self._c = conn
         self._last: dict[UUID, float] = {}
         self._sleep = sleep
         self._clock = clock
@@ -537,9 +749,31 @@ class RateLimiter:
         if max_rps <= 0:
             return 0.0
         gap = 1.0 / max_rps
+        delay = 0.0
+        if self._c is not None:
+            # `now()` is the TRANSACTION timestamp in Postgres and would
+            # be identical for two calls in one transaction; clock_timestamp
+            # is the wall clock, which is what a gap between requests means.
+            row = self._c.execute(
+                """SELECT extract(epoch FROM
+                              clock_timestamp() - last_request_at)
+                     FROM collect.source WHERE id = %s""",
+                (source_id,)).fetchone()
+            elapsed = float(row[0]) if row and row[0] is not None else None
+            if elapsed is not None and 0 <= elapsed < gap:
+                delay = gap - elapsed
+                self._sleep(delay)
+            self._c.execute(
+                "UPDATE collect.source SET last_request_at = clock_timestamp() "
+                "WHERE id = %s", (source_id,))
+            return delay
+
+        # No connection: in-process only, which is what the unit tests use
+        # and what a caller gets if they construct this by hand. Kept so
+        # the class is still testable without a database, and NOT the
+        # default anywhere real.
         now = self._clock()
         previous = self._last.get(source_id)
-        delay = 0.0
         if previous is not None and now - previous < gap:
             delay = gap - (now - previous)
             self._sleep(delay)
@@ -562,7 +796,7 @@ class CollectionService:
                  limiter: RateLimiter | None = None):
         self._c = conn
         self._adapters = adapters or {"rss": RssAdapter()}
-        self._limiter = limiter or RateLimiter()
+        self._limiter = limiter or RateLimiter(conn)
 
     def due_sources(self, *, now: datetime | None = None,
                     rng: random.Random | None = None) -> list[dict]:
@@ -571,17 +805,33 @@ class CollectionService:
         Nothing loops here. A collector that runs itself on a timer nobody
         watches is how a persona gets burnt at 3am, and the same reasoning
         (decisions 30, 46) applies: the seam is deliberate.
+
+        It also does not ROLL here. docs/17 F15(i): this used to compute
+        `next_due_at` freshly on every call, so the schedule was re-rolled
+        every time anybody looked and the realised interval depended on how
+        often the scheduler polls. Frequent polling collapsed the variance
+        toward the floor -- a regular cadence, which is the signature
+        jitter exists to avoid. The schedule is now stored, rolled once
+        when a run finishes, and read as-is.
         """
         now = now or datetime.now(timezone.utc)
         rows = self._c.execute(
             """SELECT id, kind, name, base_url, poll_interval_s, jitter_pct,
                       max_rps, parser_key, last_ok_at, consecutive_failures,
-                      health
+                      health, next_due_at
                  FROM collect.source
-                WHERE is_active ORDER BY last_ok_at NULLS FIRST""").fetchall()
+                WHERE is_active ORDER BY next_due_at NULLS FIRST""").fetchall()
         due = []
         for row in rows:
-            when = next_due_at(row[8], row[4], row[5], now=now, rng=rng)
+            when = row[11]
+            if when is None:
+                # A source added before 0042, or one whose schedule was
+                # never set. Roll it ONCE and persist, rather than treating
+                # a missing schedule as "not due" and never polling it.
+                when = next_due_at(row[8], row[4], row[5], now=now, rng=rng)
+                self._c.execute(
+                    "UPDATE collect.source SET next_due_at = %s WHERE id = %s",
+                    (when, row[0]))
             if when <= now:
                 due.append({
                     "id": row[0], "kind": row[1], "name": row[2],
@@ -590,6 +840,18 @@ class CollectionService:
                     "consecutive_failures": row[9], "health": row[10],
                 })
         return due
+
+    def _reschedule(self, source_id: UUID, *,
+                    rng: random.Random | None = None) -> datetime:
+        """Roll the next due time ONCE, after a poll, and store it."""
+        row = self._c.execute(
+            "SELECT poll_interval_s, jitter_pct FROM collect.source "
+            "WHERE id = %s", (source_id,)).fetchone()
+        when = next_due_at(datetime.now(timezone.utc), row[0], row[1], rng=rng)
+        self._c.execute(
+            "UPDATE collect.source SET next_due_at = %s WHERE id = %s",
+            (when, source_id))
+        return when
 
     def run_once(self, source_id: UUID, *, actor_id: UUID,
                  persona_id: UUID | None = None,
@@ -630,6 +892,11 @@ class CollectionService:
                     WHERE id = %s""",
                 (type(exc).__name__, message, run_id))
             self._record_failure(source_id, type(exc).__name__)
+            # Rescheduled on failure too. A source that only reschedules on
+            # success is one that retries as fast as the scheduler runs the
+            # moment it breaks -- which is a hammering pattern aimed at a
+            # site that has just started refusing us.
+            self._reschedule(source_id)
             result.error = message
             return result
 
@@ -654,6 +921,7 @@ class CollectionService:
                   SET last_ok_at = now(), consecutive_failures = 0,
                       health = 'OK'
                 WHERE id = %s""", (source_id,))
+        self._reschedule(source_id)
         return result
 
     def _store_document(self, source_id: UUID, run_id: UUID,

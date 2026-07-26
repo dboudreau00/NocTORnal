@@ -120,6 +120,67 @@ def hash_secret(secret: str) -> bytes:
     return hmac.new(_pepper(), secret.encode("utf-8"), hashlib.sha256).digest()
 
 
+#: Bumped whenever the token stream changes. Fingerprints from different
+#: versions are not comparable, and comparing them silently is how a
+#: dedup pass starts marking unrelated records as duplicates of each
+#: other. `_near_duplicate` filters on it.
+SIMHASH_VERSION = 2
+
+#: Envelope keys a mirror adds and the original does not. Excluded from
+#: the token stream so a repost is still recognisably the same post --
+#: which is the entire stated purpose of near-duplicate suppression.
+_ENVELOPE_KEYS = frozenset({
+    "id", "uuid", "guid", "_id", "seen_at", "collected_at", "fetched_at",
+    "ingested_at", "received_at", "source", "source_url", "feed", "mirror",
+    "url", "link", "permalink", "crawler", "collector", "batch", "batch_id",
+    "checksum", "etag", "retrieved", "retrieved_at", "scrape_time",
+})
+
+
+def _value_tokens(value, path: str = "", depth: int = 0) -> list[str]:
+    """Path-qualified tokens over VALUES only.
+
+    docs/17 F15(g). The previous version ran `\\w+` over the serialised
+    JSON, which meant key names counted as content and field position was
+    lost entirely: `{"note": "leaked by LockBit", "victim": "ACME"}` and the
+    same document with those two values SWAPPED produced an identical hash,
+    hamming distance 0, and the second was silently filed as a duplicate of
+    the first. A ransom-leak post and its inverse are not the same record.
+
+    Qualifying each token with its path fixes that, and dropping envelope
+    keys fixes the other half -- a mirror's `source_url` and `seen_at` used
+    to push a genuine repost past the threshold, so the feature failed in
+    both directions at once.
+    """
+    if depth > 8:
+        return []
+    out: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            name = str(key).lower()
+            if name in _ENVELOPE_KEYS:
+                continue
+            out += _value_tokens(item, f"{path}.{name}" if path else name,
+                                 depth + 1)
+        return out
+    if isinstance(value, list):
+        # Position within a list is NOT part of the path: a reordered list
+        # of the same indicators is the same content, and feeds reorder.
+        for item in value:
+            out += _value_tokens(item, path, depth + 1)
+        return out
+    if value is None or isinstance(value, bool):
+        return []
+    for word in re.findall(r"\w+", str(value).lower()):
+        out.append(f"{path}={word}")
+    return out
+
+
+def simhash_payload(payload: dict, bits: int = 64) -> int:
+    """The fingerprint actually stored on a record."""
+    return _simhash_tokens(_value_tokens(payload), bits)
+
+
 def simhash(text: str, bits: int = 64) -> int:
     """A 64-bit simhash over token shingles.
 
@@ -131,8 +192,14 @@ def simhash(text: str, bits: int = 64) -> int:
     Deliberately simple and dependency-free. It is a triage aid, not a
     forensic identity -- exact duplicates are caught by `content_sha256`,
     and this catches the reposted-with-a-different-header case.
+
+    This remains the plain-text form, for prose. Structured payloads go
+    through `simhash_payload`, which is field-aware.
     """
-    tokens = re.findall(r"\w+", (text or "").lower())
+    return _simhash_tokens(re.findall(r"\w+", (text or "").lower()), bits)
+
+
+def _simhash_tokens(tokens: list[str], bits: int = 64) -> int:
     if not tokens:
         return 0
     vector = [0] * bits
@@ -151,6 +218,139 @@ def simhash(text: str, bits: int = 64) -> int:
 
 def hamming(a: int, b: int) -> int:
     return bin((a ^ b) & ((1 << 64) - 1)).count("1")
+
+
+# ---------------------------------------------------------------------------
+# Dead-letter redaction (docs/17 F15(d))
+# ---------------------------------------------------------------------------
+#
+# `collection.py` redacts with a keyword blocklist. That is the wrong shape
+# here and arguably there: you cannot enumerate the keys a partner will use
+# for a password, and `pass`, `p`, `credential`, an unlabelled second CSV
+# column and a bare `user:pass` line all walk through a blocklist.
+#
+# So this inverts it. A dead letter keeps the SHAPE -- keys, types, lengths,
+# nesting -- and keeps no leaf value at all. That is not a compromise; the
+# shape is the entire diagnostic. A dead letter exists because a partner
+# changed their schema, and a schema change is visible in the keys. The
+# error class and detail are stored separately and answer "why".
+#
+# Invariant 12 is satisfied by the row existing with the digest of what
+# arrived, not by the row being quotable. The verbatim bytes stay in the
+# batch's raw object under the batch's own retention and access rules,
+# which is where third-party credentials belong if they are held at all.
+
+_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+#: Long unbroken runs of credential-shaped characters: tokens, hashes,
+#: cookies, wallet keys. Length alone is the signal -- no keyword needed.
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
+#: `something:something` or `something|something` -- the combo-list line,
+#: which is the single commonest shape in this corpus and carries no key
+#: name to match on.
+_PAIR_LINE = re.compile(r"^(\s*)(\S+?)([:|;,\t])(\S+)\s*$")
+#: `"key": "value"` in text that ALMOST parsed. A truncated or malformed
+#: JSON document is the single most common dead letter and it is still
+#: full of key/value pairs; matching them keeps the key and drops the
+#: value, which is the same rule the structural path applies.
+_JSON_PAIR = re.compile(
+    r'("(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|[^,\s}\]]+)')
+#: `key=value` and `key: value` outside JSON. The key bound is generous
+#: at the short end on purpose -- `p=` is a real field name in real feeds,
+#: and a blocklist that only knows `password` misses it.
+_KV = re.compile(r"([A-Za-z0-9_.\-]{1,40})\s*([=:])\s*([^\s,;&\"']{3,})")
+
+#: How much of a text fragment is worth keeping. 8000 characters of an
+#: unparseable credential dump is 8000 characters of liability; 512 is more
+#: than enough to see that a feed started emitting CSV.
+TEXT_FRAGMENT_KEEP = 512
+
+
+def _redact_scalar(value) -> str:
+    """A leaf becomes its type and its size. Never its content."""
+    if value is None or isinstance(value, bool):
+        return f"[{json.dumps(value)}]"
+    if isinstance(value, (int, float)):
+        # Even a number can be a card number, an account or a national id.
+        return f"[redacted number:{len(str(value))}]"
+    text = str(value)
+    return f"[redacted {type(value).__name__}:{len(text)}]"
+
+
+def _redact_key(key: str) -> str:
+    """Keys are structure and are kept -- unless the key IS the datum,
+    which happens in every feed keyed by victim address."""
+    masked = _EMAIL.sub("[redacted email]", key)
+    return _LONG_TOKEN.sub("[redacted token]", masked)
+
+
+def redact_structure(value, *, depth: int = 0):
+    """Walk a parsed payload, keeping shape and discarding content."""
+    if depth > 12:
+        return "[redacted depth]"
+    if isinstance(value, dict):
+        return {_redact_key(str(k)): redact_structure(v, depth=depth + 1)
+                for k, v in list(value.items())[:200]}
+    if isinstance(value, list):
+        # Length matters (a thousand-credential log is a different thing
+        # from a one-credential one); the thousandth element does not.
+        kept = [redact_structure(v, depth=depth + 1) for v in value[:5]]
+        if len(value) > 5:
+            kept.append(f"[... {len(value) - 5} more]")
+        return kept
+    return _redact_scalar(value)
+
+
+def redact_text(text: str | None, *, keep: int = TEXT_FRAGMENT_KEEP) -> str:
+    """The fallback for a fragment that would not parse at all.
+
+    Line-oriented, because the thing that arrives here is usually a combo
+    list or a CSV row and both put the credential after a delimiter with no
+    key name attached to it.
+    """
+    if not text:
+        return ""
+    out_lines = []
+    for line in text[:keep * 4].splitlines():
+        # Order matters: the pair rules keep the KEY and drop the value, so
+        # they have to run before the email and token rules, which do not
+        # know which side of a delimiter they are on.
+        line = _JSON_PAIR.sub(r'\1"[redacted]"', line)
+        line = _KV.sub(r"\1\2[redacted]", line)
+        pair = _PAIR_LINE.match(line)
+        if pair and len(pair.group(4)) > 2:
+            line = f"{pair.group(1)}{pair.group(2)}{pair.group(3)}[redacted]"
+        line = _EMAIL.sub("[redacted email]", line)
+        line = _LONG_TOKEN.sub("[redacted token]", line)
+        out_lines.append(line)
+    out = "\n".join(out_lines)
+    return out[:keep] + ("… [truncated]" if len(out) > keep else "")
+
+
+def redact_fragment(fragment: str) -> str:
+    """Structural if it parses, line-oriented if it does not.
+
+    A fragment that parses reached the dead letter because `_store_record`
+    refused it -- a mis-declared compartment, a bad category -- and the
+    structure is what the operator has to fix. A fragment that does not
+    parse is the schema-drift case and the head is what shows it.
+    """
+    try:
+        parsed = json.loads(fragment)
+    except Exception:  # noqa: BLE001 - unparseable IS the common case
+        return redact_text(fragment)
+    return json.dumps(redact_structure(parsed), sort_keys=True)[:8000]
+
+
+def scrub_nuls(text: str) -> str:
+    """Postgres `text` cannot hold U+0000 and raises from the driver.
+
+    docs/17 F15(e): this raised from INSIDE the `except` handler in
+    `parse_batch`, so the fragment that caused it was never dead-lettered,
+    every later fragment was never processed, and the batch stayed in
+    PARSING for ever with its records already committed. Invariant 12
+    failing on the exact path built to catch loss.
+    """
+    return text.replace("\x00", "\\x00") if "\x00" in text else text
 
 
 @dataclass(frozen=True)
@@ -183,10 +383,85 @@ class ParseResult:
     warnings: list[str] = field(default_factory=list)
 
 
+class CaseMismatch(IngestError):
+    """The object named does not belong to the case the caller named.
+
+    Its own type because the caller's response differs: this is never a
+    retry, and it is always worth logging as an attempt rather than a
+    mistake.
+    """
+
+
 class IngestService:
-    def __init__(self, conn: psycopg.Connection, storage=None):
+    """docs/17 F15(a,b,c). The three victim-PII methods used to take a
+    `case_id` and never join back to the object's own case, and the service
+    took no clearance at all -- `CommsService` and `GraphService` both do.
+    An authorisation on ANY case decrypted any credential in the corpus,
+    and the audit event recorded the wrong case against the disclosure.
+
+    The routers were fixed first because that closed the reachable attack.
+    This is the same fix one layer down, where a worker or a script calling
+    the service directly gets it too.
+    """
+
+    def __init__(self, conn: psycopg.Connection, storage=None, *,
+                 clearance: str | None = None,
+                 compartments: frozenset[str] = frozenset()):
         self._c = conn
         self._storage = storage
+        self._clearance = clearance
+        self._comp = list(compartments)
+
+    # -- the labels a caller reads with ------------------------------------
+
+    def _ceiling(self, what: str) -> tuple[str, list[str]]:
+        """The caller's labels, or a refusal to guess at them.
+
+        Defaulting to RED would make every future caller that forgets to
+        pass a clearance silently maximally privileged, which is exactly
+        how this defect arrived.
+        """
+        if self._clearance is None:
+            raise IngestError(
+                f"{what} returns case content and needs the caller's "
+                f"clearance: construct IngestService(conn, clearance=..., "
+                f"compartments=...)")
+        return self._clearance, self._comp
+
+    def _record_scope(self, record_id: UUID, *, what: str) -> dict:
+        """A record's OWN case and labels, checked against the caller's.
+
+        Ordered deliberately: the record is looked up by id alone and the
+        labels are applied in the same query, so a caller who may not read
+        it gets "no such record" rather than a refusal that confirms it
+        exists.
+        """
+        clearance, compartments = self._ceiling(what)
+        row = self._c.execute(
+            """SELECT case_id, classification, compartments
+                 FROM ingest.record
+                WHERE id = %s AND purged_at IS NULL
+                  AND classification <= %s::core.tlp AND compartments <@ %s""",
+            (record_id, clearance, compartments)).fetchone()
+        if row is None:
+            raise IngestError("no such record")
+        return {"case_id": row[0], "classification": row[1],
+                "compartments": list(row[2] or [])}
+
+    def _require_same_case(self, actual: UUID | None, claimed: UUID,
+                           *, what: str) -> None:
+        if actual is None:
+            raise CaseMismatch(
+                f"this {what} is not attached to a case, so no "
+                f"case-scoped authorisation can cover it. Attach it first: "
+                f"an authorisation that names a case it does not belong to "
+                f"is not an authorisation for it.")
+        if actual != claimed:
+            raise CaseMismatch(
+                f"this {what} belongs to another case. An authorisation is "
+                f"granted for ONE case (docs/12), and decrypting across "
+                f"cases with it would also record the disclosure against "
+                f"the wrong one.")
 
     # -- keys --------------------------------------------------------------
 
@@ -388,34 +663,70 @@ class IngestService:
             "UPDATE ingest.batch SET state = 'PARSING' WHERE id = %s",
             (batch_id,))
 
-        for fragment in iter_fragments(raw):
-            try:
-                payload = json.loads(fragment)
-                if not isinstance(payload, dict):
-                    raise ValueError("a record must be a JSON object")
-            except Exception as exc:  # noqa: BLE001 - every failure is a row
-                self._dead_letter(batch_id, key[0], fragment,
-                                  type(exc).__name__, str(exc), parser_version)
-                result.dead += 1
-                continue
-            try:
-                created = self._store_record(
-                    batch_id, key, payload, case_id=case_id)
-                result.records += 1
-                if created.get("duplicate"):
-                    result.duplicates += 1
-            except Exception as exc:  # noqa: BLE001
-                self._dead_letter(batch_id, key[0], fragment,
-                                  type(exc).__name__, str(exc), parser_version)
-                result.dead += 1
+        # The state is settled in a `finally` on purpose. docs/17 F15(e): a
+        # single NUL byte used to raise from inside the `except` below, and
+        # because nothing caught THAT, the batch stayed in PARSING for ever
+        # with its already-inserted records committed and the fragment that
+        # broke it never recorded. A batch must always end somewhere.
+        state = "FAILED"
+        try:
+            seen = 0
+            for fragment in iter_fragments(raw):
+                seen += 1
+                try:
+                    payload = json.loads(fragment)
+                    if not isinstance(payload, dict):
+                        raise ValueError("a record must be a JSON object")
+                except Exception as exc:  # noqa: BLE001 - failures are rows
+                    self._dead_letter(batch_id, key, fragment,
+                                      type(exc).__name__, str(exc),
+                                      parser_version)
+                    result.dead += 1
+                    continue
+                try:
+                    created = self._store_record(
+                        batch_id, key, payload, case_id=case_id)
+                    result.records += 1
+                    if created.get("duplicate"):
+                        result.duplicates += 1
+                except Exception as exc:  # noqa: BLE001
+                    self._dead_letter(batch_id, key, fragment,
+                                      type(exc).__name__, str(exc),
+                                      parser_version)
+                    result.dead += 1
 
-        self._c.execute(
-            """UPDATE ingest.batch
-                  SET state = %s, record_count = %s, dead_count = %s,
-                      parsed_at = now(), parser_version = %s
-                WHERE id = %s""",
-            ("PARSED" if result.records or not result.dead else "FAILED",
-             result.records, result.dead, parser_version, batch_id))
+            if seen == 0:
+                # `accept()` refuses an empty body, so a batch that yields
+                # no fragments at all held SOMETHING and we made nothing of
+                # it. Whitespace, a BOM alone, a container we cannot open.
+                # Reporting `records=0 dead=0 state=PARSED` for that is a
+                # silent drop with a green light on it -- invariant 12.
+                self._dead_letter(
+                    batch_id, key, raw.decode("utf-8", errors="replace"),
+                    "EmptyParse",
+                    "the batch yielded no parseable fragments; nothing was "
+                    "stored and nothing was lost silently",
+                    parser_version)
+                result.dead += 1
+                result.warnings.append(
+                    "this batch produced no fragments at all. That is a "
+                    "container this parser cannot open, not an empty feed.")
+
+            state = "PARSED" if result.records or not result.dead else "FAILED"
+        finally:
+            try:
+                self._c.execute(
+                    """UPDATE ingest.batch
+                          SET state = %s, record_count = %s, dead_count = %s,
+                              parsed_at = now(), parser_version = %s
+                        WHERE id = %s""",
+                    (state, result.records, result.dead, parser_version,
+                     batch_id))
+            except Exception:  # noqa: BLE001
+                # Swallowed so the ORIGINAL failure is what the caller
+                # sees. A batch stuck in PARSING is visible in the queue;
+                # a masked root cause is not.
+                pass
 
         if result.dead and result.records == 0:
             result.warnings.append(
@@ -441,7 +752,7 @@ class IngestService:
 
         body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         content_sha = hashlib.sha256(body.encode()).digest()
-        fingerprint = simhash(body)
+        fingerprint = simhash_payload(payload)
 
         exact = self._c.execute(
             "SELECT id FROM ingest.record WHERE content_sha256 = %s LIMIT 1",
@@ -453,12 +764,13 @@ class IngestService:
             """INSERT INTO ingest.record
                    (batch_id, case_id, category, category_confidence,
                     category_source, payload, content_sha256, simhash,
-                    duplicate_of, classification, compartments, retain_until)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    duplicate_of, classification, compartments, retain_until,
+                    simhash_version)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (batch_id, case_id, category, confidence, source, Json(payload),
              content_sha, fingerprint, duplicate_of, key[2], compartments,
-             retain_until)).fetchone()
+             retain_until, SIMHASH_VERSION)).fetchone()
         return {"id": row[0], "duplicate": duplicate_of is not None}
 
     def _near_duplicate(self, fingerprint: int, threshold: int = 3) -> UUID | None:
@@ -470,7 +782,9 @@ class IngestService:
         rows = self._c.execute(
             """SELECT id, simhash FROM ingest.record
                 WHERE simhash IS NOT NULL AND duplicate_of IS NULL
-                ORDER BY created_at DESC LIMIT 500""").fetchall()
+                  AND simhash_version = %s
+                ORDER BY created_at DESC LIMIT 500""",
+            (SIMHASH_VERSION,)).fetchall()
         for record_id, other in rows:
             if hamming(fingerprint, other) <= threshold:
                 return record_id
@@ -488,15 +802,65 @@ class IngestService:
         days = row[0] if row else 365
         return datetime.now(timezone.utc) + timedelta(days=days)
 
-    def _dead_letter(self, batch_id: UUID, key_id: UUID, fragment: str,
+    def _dead_letter_retention(self, declared_category: str | None) -> datetime:
+        """90 days by default, not 365.
+
+        `_retain_until` gives an unknown RECORD a year, which is right --
+        its category was at least assessed. A dead letter's category is
+        unknown by construction: the parse failed, so nothing looked at the
+        content. The safe default for unassessed third-party data is the
+        shortest rule, not the longest (migration 0040).
+        """
+        row = self._c.execute(
+            "SELECT retain_days FROM core.retention_rule WHERE category = %s",
+            (declared_category,)).fetchone()
+        return datetime.now(timezone.utc) + timedelta(days=row[0] if row else 90)
+
+    def _dead_letter(self, batch_id: UUID, key, fragment: str,
                      error_class: str, detail: str, parser_version: str) -> None:
-        self._c.execute(
-            """INSERT INTO ingest.dead_letter
-                   (batch_id, api_key_id, raw_fragment, error_class,
-                    error_detail, parser_version)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (batch_id, key_id, fragment[:8000], error_class, detail[:2000],
-             parser_version))
+        """Record the loss, redacted, labelled and on a clock.
+
+        docs/17 F15(d). The fragment is redacted structurally before it is
+        stored, and the row inherits the issuing key's classification and
+        compartment -- a parse failing does not declassify the data. The
+        digest is of what ACTUALLY arrived, taken before redaction, so a
+        later repair can be checked against the batch's raw object without
+        a second copy of the credential living in this table.
+        """
+        key_id, declared_category, ceiling, compartment = (
+            key[0], key[1], key[2], key[3])
+        digest = hashlib.sha256(fragment.encode("utf-8", "replace")).digest()
+        safe_fragment = scrub_nuls(redact_fragment(fragment))
+        safe_detail = scrub_nuls(redact_text(detail, keep=2000))
+        try:
+            self._c.execute(
+                """INSERT INTO ingest.dead_letter
+                       (batch_id, api_key_id, raw_fragment, error_class,
+                        error_detail, parser_version, classification,
+                        compartments, retain_until, redacted, fragment_sha256)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)""",
+                (batch_id, key_id, safe_fragment, error_class, safe_detail,
+                 parser_version, ceiling or "AMBER",
+                 [compartment] if compartment else [],
+                 self._dead_letter_retention(declared_category), digest))
+        except Exception:  # noqa: BLE001
+            # The fact of the loss outranks the detail of it. Retry with
+            # only what cannot fail: no fragment, no error text, just the
+            # digest of what arrived and the class of the failure. If this
+            # raises too, it propagates -- and `parse_batch`'s `finally`
+            # still settles the batch state.
+            self._c.execute(
+                """INSERT INTO ingest.dead_letter
+                       (batch_id, api_key_id, raw_fragment, error_class,
+                        error_detail, parser_version, classification,
+                        compartments, retain_until, redacted, fragment_sha256)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)""",
+                (batch_id, key_id, "[fragment not storable]", error_class,
+                 "the fragment could not be stored even redacted; its digest "
+                 "is recorded and the bytes are in the batch raw object",
+                 parser_version, ceiling or "AMBER",
+                 [compartment] if compartment else [],
+                 self._dead_letter_retention(declared_category), digest))
 
     def dead_letter_rate(self, api_key_id: UUID, hours: int = 24) -> float:
         """docs/12: alert when a key's dead-letter rate crosses a threshold.
@@ -565,12 +929,19 @@ class IngestService:
              ciphertext, key_id, captured_at)).fetchone()
         return row[0]
 
-    def credentials_masked(self, record_id: UUID) -> list[dict]:
+    def credentials_masked(self, record_id: UUID, *,
+                           case_id: UUID) -> list[dict]:
         """The analytic view. **Never returns a value.**
 
         This is the shape docs/12 asks for: service, kind and timing are
         what the investigation needs, and none of it is the credential.
+
+        `case_id` is required and is checked against the record's own. Even
+        the masked view discloses which victims of which organisation are
+        in a compartmented case, which is the thing the compartment is for.
         """
+        scope = self._record_scope(record_id, what="credentials_masked")
+        self._require_same_case(scope["case_id"], case_id, what="record")
         rows = self._c.execute(
             """SELECT id, kind, service_domain, captured_at, reveal_count,
                       value_ciphertext IS NOT NULL
@@ -635,6 +1006,27 @@ class IngestService:
         """
         if not (reason or "").strip():
             raise IngestError("a reveal has to say why")
+
+        # The credential's OWN case, resolved before anything is decrypted
+        # and before the authorisation is even looked up. docs/17 F15(a):
+        # this used to check an authorisation for the case the CALLER
+        # named and then decrypt by credential id with no join back to the
+        # record, so an authorisation on any case opened any credential in
+        # the corpus -- and the audit event recorded the wrong case against
+        # the disclosure, which is worse than no event.
+        clearance, compartments = self._ceiling("reveal_credential")
+        scope = self._c.execute(
+            """SELECT r.case_id, vc.value_ciphertext, vc.value_key_id
+                 FROM ingest.victim_credential vc
+                 JOIN ingest.record r ON r.id = vc.record_id
+                WHERE vc.id = %s AND r.purged_at IS NULL
+                  AND r.classification <= %s::core.tlp
+                  AND r.compartments <@ %s""",
+            (credential_id, clearance, compartments)).fetchone()
+        if scope is None:
+            raise IngestError("no such credential")
+        self._require_same_case(scope[0], case_id, what="credential")
+
         authorisation = self._live_authorisation(actor_id, case_id)
         if authorisation is None:
             self._audit(case_id, actor_id, "PII_REVEAL_REFUSED",
@@ -645,12 +1037,7 @@ class IngestService:
                 "authorisation for this case. Without one the platform is a "
                 "credential lookup service, and someone will use it as one "
                 "(docs/12).")
-        row = self._c.execute(
-            """SELECT value_ciphertext, value_key_id
-                 FROM ingest.victim_credential WHERE id = %s""",
-            (credential_id,)).fetchone()
-        if row is None:
-            raise IngestError("no such credential")
+        row = (scope[1], scope[2])
         if row[0] is None:
             raise IngestError(
                 "this credential's value was not retained; only its metadata "
@@ -681,6 +1068,7 @@ class IngestService:
         because knowing that a specific credential is in the corpus is
         itself a disclosure.
         """
+        clearance, compartments = self._ceiling("search_by_fingerprint")
         if self._live_authorisation(actor_id, case_id) is None:
             self._audit(case_id, actor_id, "PII_SEARCH_REFUSED",
                         {"reason": "no live authorisation"})
@@ -689,18 +1077,26 @@ class IngestService:
                 "logged authorisation for this case")
         fingerprint = hmac.new(_pepper(), value.encode("utf-8"),
                                hashlib.sha256).digest()
+        # docs/17 F15(b). The query carries the caller's ceiling rather
+        # than the router filtering the answer afterwards. Filtering after
+        # the fact is not the same as not asking: the count, the timing and
+        # the audit event were all computed over the whole corpus, so the
+        # disclosure had already happened by the time the filter ran.
         rows = self._c.execute(
             """SELECT vc.id, vc.kind, vc.service_domain, r.category,
-                      r.created_at
+                      r.created_at, r.case_id
                  FROM ingest.victim_credential vc
                  JOIN ingest.record r ON r.id = vc.record_id
-                WHERE vc.value_fingerprint = %s
+                WHERE vc.value_fingerprint = %s AND r.purged_at IS NULL
+                  AND r.classification <= %s::core.tlp
+                  AND r.compartments <@ %s
                 ORDER BY r.created_at DESC LIMIT 100""",
-            (fingerprint,)).fetchall()
+            (fingerprint, clearance, compartments)).fetchall()
         self._audit(case_id, actor_id, "PII_CORRELATED",
                     {"hits": len(rows)})
         return [{"id": str(r[0]), "kind": r[1], "service_domain": r[2],
-                 "category": r[3], "seen_at": r[4].isoformat()} for r in rows]
+                 "category": r[3], "seen_at": r[4].isoformat(),
+                 "case_id": str(r[5]) if r[5] else None} for r in rows]
 
     # -- triage ------------------------------------------------------------
 
@@ -788,21 +1184,71 @@ def iter_fragments(raw: bytes):
     A JSON array is expanded rather than stored whole, because a batch of
     ten thousand records that fails on the last one should not lose the
     other 9,999 -- and a dead letter should name the record, not the file.
+
+    The order matters and was wrong. Line mode used to be tried second for
+    arrays and FIRST for everything else, so a pretty-printed JSON object
+    -- the single most common thing a human pastes into a feed test -- was
+    shredded into one dead letter per line. `detect_format` was computed at
+    accept time, stored, and then never consulted by the parser.
     """
-    text = raw.decode("utf-8", errors="replace").strip()
+    text = raw.decode("utf-8-sig", errors="replace").strip()
     if not text:
         return
-    if text.startswith("["):
+    if text[0] in "[{":
+        # Whole-document first: this is the only branch that handles
+        # pretty-printed input, and a single-line document parses here just
+        # as well.
         try:
-            for item in json.loads(text):
-                yield json.dumps(item)
-            return
-        except Exception:  # noqa: BLE001 - fall through to line mode
+            document = json.loads(text)
+        except Exception:  # noqa: BLE001 - NDJSON lands here, as it should
             pass
+        else:
+            if isinstance(document, list):
+                for item in document:
+                    yield json.dumps(item)
+            else:
+                yield json.dumps(document)
+            return
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                yield line
+        return
+    if _looks_like_csv(text):
+        yield from _csv_fragments(text)
+        return
     for line in text.splitlines():
         line = line.strip()
         if line:
             yield line
+
+
+def _looks_like_csv(text: str) -> bool:
+    """A header line and at least one row, with a consistent column count.
+
+    Deliberately strict: guessing CSV wrongly turns a combo list into a
+    hundred thousand one-column records, which is worse than a dead letter
+    because it looks like it worked.
+    """
+    lines = [line for line in text.splitlines()[:20] if line.strip()]
+    if len(lines) < 2:
+        return False
+    widths = {len(line.split(",")) for line in lines}
+    return len(widths) == 1 and next(iter(widths)) >= 2
+
+
+def _csv_fragments(text: str):
+    """Header-keyed rows. `csv` from the standard library, because quoting
+    and embedded commas are exactly where a hand-rolled split goes wrong
+    and a wrong split here silently mis-attributes a column."""
+    import csv
+    import io
+
+    reader = csv.DictReader(io.StringIO(text))
+    for row in reader:
+        cleaned = {k: v for k, v in row.items() if k is not None}
+        if any((v or "").strip() for v in cleaned.values()):
+            yield json.dumps(cleaned)
 
 
 #: Structural signatures. Deliberately about the SHAPE of the payload:
@@ -821,6 +1267,29 @@ _SIGNATURES: list[tuple[str, frozenset[str], float]] = [
 ]
 
 
+def _key_sets(value, depth: int = 0, max_depth: int = 4):
+    """Every object's key set in the payload, shallowest first.
+
+    docs/17 F15(h). `categorise` used to look at top-level keys ONLY, so a
+    partner who wraps their payload -- `{"log": {...}}`, `{"data": [...]}`,
+    the shape half of them use -- had their stealer log classified UNKNOWN.
+    That skipped the high-risk compartment check entirely and gave the
+    record the 365-day default instead of 90. Routine input, not an attack.
+
+    Shallowest first so the outer document still wins when both match: a
+    `CHAT_EXPORT` containing one quoted credential dump is a chat export.
+    """
+    if depth > max_depth:
+        return
+    if isinstance(value, dict):
+        yield {str(k).lower() for k in value}
+        for item in value.values():
+            yield from _key_sets(item, depth + 1, max_depth)
+    elif isinstance(value, list):
+        for item in value[:20]:
+            yield from _key_sets(item, depth + 1, max_depth)
+
+
 def categorise(payload: dict, *, declared: str = "UNKNOWN"
                ) -> tuple[str, float, str]:
     """Declared by the key, refined by structure.
@@ -831,13 +1300,19 @@ def categorise(payload: dict, *, declared: str = "UNKNOWN"
     better than a confident wrong label, because a mis-categorised record
     gets the wrong retention clock.
     """
-    keys = {k.lower() for k in payload}
-    for category, signature, confidence in _SIGNATURES:
-        if signature <= keys:
-            # A structural match that CONTRADICTS the declaration is worth
-            # trusting -- the structure is what arrived, the declaration is
-            # what somebody configured once.
-            return category, confidence, "STRUCTURE"
+    for level, keys in enumerate(_key_sets(payload)):
+        for category, signature, confidence in _SIGNATURES:
+            if signature <= keys:
+                # A structural match that CONTRADICTS the declaration is
+                # worth trusting -- the structure is what arrived, the
+                # declaration is what somebody configured once.
+                if level == 0:
+                    return category, confidence, "STRUCTURE"
+                # A nested match is real but weaker evidence about the
+                # document as a whole, and the confidence is what an
+                # analyst's correction is measured against.
+                return (category, round(max(confidence - 0.1, 0.3), 3),
+                        "STRUCTURE_NESTED")
     if declared and declared != "UNKNOWN":
         return declared, 0.5, "DECLARED"
     return "UNKNOWN", 1.0, "STRUCTURE"
