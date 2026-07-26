@@ -1,17 +1,24 @@
 # What is left on the roadmap
 
-Regenerated 2026-07-25, end of session. `docs/09-roadmap.md` is the plan;
-this is the honest delta between that plan and the build.
+Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
+honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0042`, **1093 tests passing, 0 skipped**,
-ruff clean, source hygiene clean. Nothing pushed (no remote configured).
+**State:** `main`, Alembic head `0044`, **1178 tests passing, 0 skipped**
+(1079 under `apps/api/tests`, 99 under `packages/ontology` — run both;
+earlier handoffs quoted a single figure and the next session spent time
+working out why it did not reconcile), ruff clean. Nothing pushed (no
+remote configured).
 
-> **Phase 7 has had its adversarial pass** (three lenses: access control,
-> false attribution, cryptographic evidence), and every finding was put
-> through a refutation round before being acted on. It produced **three
-> CRITICAL/HIGH defects that a fully green 953-test suite did not see** —
-> a forged PGP verdict, a 499× overstated tie weight, and a label defence
-> that was absent on Russian-language forums. See decisions 59–60.
+> **EVERY PHASE HAS NOW HAD AN ADVERSARIAL PASS.** Phases 5 and 8 were the
+> last two, reviewed 2026-07-26: **27 findings survived refutation, nine
+> CRITICAL, all now fixed with regressions** (docs/17 F19). Phase 8 had
+> 673 green tests and shipped a security control that did not exist — its
+> "encrypted archive" was a plain ZIP — and its download endpoint applied
+> no label check of any kind.
+>
+> Six passes, six times a real defect, four times a critical one, every
+> time under a fully green suite. Treat an unreviewed change as unknown
+> rather than fine.
 
 > **The most important files in the repo are
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) and
@@ -54,39 +61,31 @@ regressed — the measure got honest.**
 | 2 — Sociogram | **95%** | ✅ | ✅ | ◐ | ✅ | WebSocket push; the UI polls. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
-| 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Never reviewed.** |
-| 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. **The UI is complete**: merge and its reversal live in the inspector (with the merge history and a per-merge Reverse), and Lifecycle, ACH and Report landed 2026-07-26. What remains is model work and a hostile review. |
+| 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
+| 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. **The UI is complete**: merge and its reversal live in the inspector (with the merge history and a per-merge Reverse), and Lifecycle, ACH and Report landed 2026-07-26. What remains is model work and a hostile review of the phase as a whole. |
 | 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. What is left is the Telegram id-collision model change (F1 / docs/16 D8) and optional niceties: detached signatures, and a keyserver-free way to obtain a vendor key. |
-| 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **The one phase where 100% here would still mean "do not switch on" — see L1.** |
+| 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
-### Overall: **~84%** (was ~72% at the start of this session)
+### Overall: **~92%** (was ~84% at the start of 2026-07-26)
 
-Unweighted mean across the ten phases. The +10 came from three things, in
-descending order of how much they mattered:
+Unweighted mean across the ten phases. The +8 came from two things:
 
-- **Phase 9 from 55% to 90%**, mostly because raw-before-parse stopped
-  being aspirational. `accept()` used to acknowledge a batch and drop the
-  bytes; there was no listing endpoint, so a scored and prioritised queue
-  had nothing reading it.
-- **Phase 4 from 45% to 75%** and **Phase 6 from 55% to 80%** — UI, and
-  the ten F15 service defects fixed at the service rather than compensated
-  for at the router.
-- Three new panes, which is most of the UI dimension for three phases.
+- **Phase 8 from 45% to 80%.** It gained the two dimensions it had none
+  of: a hostile review (nine criticals) and a UI. It is the largest single
+  move any phase has made.
+- **Phase 5 from 70% to 85%**, entirely from its first review.
 
-Four things the number still hides:
+Three things the number still hides:
 
-1. **UI remains the largest single gap**, now concentrated rather than
-   general: Phase 7 (comms — everything else about it is finished), the
-   merge/ACH/report half of Phase 6, and Phase 8.
-2. **Phases 5 and 8 have never had a hostile review.** Every review run on
-   this project has found a real defect — four times a critical one, every
-   time under a fully green suite. Treat an unreviewed phase as unknown
-   rather than fine.
-3. **Completion is not lawfulness.** A phase at 100% here may still be
-   unlawful to operate. Phase 8 could reach 100% and must not be switched
-   on until L1 is settled.
-4. **Two retrospective items are open**, not future work: the dead-letter
+1. **UI is no longer the largest gap.** Every phase has a pane. What is
+   left there is a WebSocket push for the sociogram (it polls) and metric
+   history charting.
+2. **Completion is not lawfulness.** A phase at 100% here may still be
+   unlawful to operate. Phase 8 is now at 80% and **must not be switched
+   on** until L1 is settled — see the register below. That is not a
+   caveat on the number; it is the point.
+3. **Two retrospective items are open**, not future work: the dead-letter
    rows recorded before the redactor existed are still verbatim on disk
    (`scripts/redact_dead_letters.py --apply`), and any batch accepted
    before object storage was wired cannot be re-parsed. Both are docs/18
@@ -116,17 +115,21 @@ attribution.
 
 ## Prioritised engineering work
 
-### 1. ~~An adversarial review pass over Phases 4 and 9~~ — done 2026-07-25
+### 1. ~~An adversarial review pass over every phase~~ — done 2026-07-26
 
-Both had one, and both produced real defects. The Phase 4/9 pass found ten
-service-layer defects under a fully green suite, including victim PII
-stored verbatim in an unlabelled table with no retention, an SSRF bypass
-via `::ffff:127.0.0.1`, and a near-duplicate fingerprint that hashed a
-document and its inverse identically. All ten are fixed at the service
-with regressions (docs/17 F15).
+**Every phase has now had one**, and every pass found a real defect. The
+last two were Phases 5 and 8 (docs/17 **F19**): 27 findings survived
+refutation, nine CRITICAL, all fixed with regressions. Phase 8 had 673
+green tests and shipped a security control that did not exist — its
+"encrypted archive" was a plain ZIP, and its download endpoint applied no
+label check at all.
 
-**Phases 5 and 8 have still had none.** That is now the whole of this
-line item.
+What is left on this axis is **Phase 6**, whose review is partial, and a
+pass over this session's own fixes. That second one is not
+belt-and-braces: the 2026-07-25 evening pass found that *most of its
+findings were in the previous pass's fixes*, and this session repeated the
+pattern — a filename defence written that morning was defeated by the
+exact attack it was written for, and only a screenshot showed it.
 
 ### 1b. The pattern, for whoever runs the next one
 
@@ -153,26 +156,14 @@ running first: **diff two implementations of the same rule against each
 other.** It found the normaliser divergence in seconds, where every unit
 test passed on both sides because each was internally consistent.
 
-### 2. UI for the phases that still have none
+### 2. ~~UI for the phases that had none~~ — done 2026-07-26
 
-Ingest, collection and governance landed 2026-07-25 as the **Feeds** and
-**Lifecycle** panes. What is left:
+Every phase now has a pane. The **Lab** pane was the last, and it was
+built after Phase 8's adversarial pass rather than before, deliberately:
+fixing a model defect once its UI exists costs the UI too, and that pass
+changed three service signatures.
 
-- ~~**Comms (Phase 7)**~~ — done 2026-07-26. PGP verification, the
-  unverified queue and co-participation joined the normalise preview and
-  the contact-block parser.
-- ~~**Entity merge (Phase 6)**~~ — already built, in the inspector rather
-  than as a pane, which is why it was missed in an earlier pass of this
-  file. It does what docs/01 asks: names the losing record before acting,
-  offers only same-type entities, and lists every merge with a Reverse
-  beside the live ones. Checking before writing a gap into the roadmap is
-  cheaper than building a second one.
-- **Samples (Phase 8)** — last and carefully. Invariant 10: metadata may
-  render, bytes may not, and no sandbox attribute may combine
-  `allow-scripts` with `allow-same-origin`. **Do the adversarial pass
-  first** — fixing a model defect after its UI is built costs the UI too.
-
-Three things the first three panes taught, worth carrying into the next:
+Five things the panes taught, worth carrying into anything added next:
 
 1. **`Promise.all` over endpoints with different permissions is wrong.**
    The first 403 rejects the lot, so a caller who holds four of five
@@ -181,9 +172,22 @@ Three things the first three panes taught, worth carrying into the next:
 2. **A permission error is not an empty state.** "Nothing here" and "you
    may not see what is here" are different facts and an analyst acts on
    them differently.
-3. **Look at it rendered.** Two of the three defects in that work — the
-   Promise.all one and an alert list padded with never-polled sources —
-   were invisible to the test suite and obvious on screen in ten seconds.
+3. **Look at it rendered.** Five defects across this work were invisible
+   to the suite and obvious on a screenshot in ten seconds: an alert list
+   padded with never-polled sources; a `Promise.all` whose first 403
+   blanked a tab; a purge screen reading a key the server never sends; a
+   staggered animation that hid twenty-five of twenty-eight rows; and a
+   right-to-left override that defeated the very control written to catch
+   it.
+4. **`textContent` stops a string EXECUTING and does nothing about it
+   LYING.** Bidi overrides, zero-width characters and controls change what
+   a string looks like without changing what it is. Substitute them at the
+   data boundary — there are two dozen sites that draw a node label and
+   one of them will always be the one somebody forgot.
+5. **Motion must never be load-bearing.** `animation-fill-mode: backwards`
+   with a delay holds content invisible; if the animation clock stalls,
+   rows are simply missing with no error. Everything in `app.css` now
+   animates from a visible resting state.
 
 ### 3. ~~HTTP routers for Phases 4, 6 and 9~~ — done 2026-07-25
 
@@ -198,17 +202,18 @@ gain each buys.
 |---|---|---|---|
 | ~~1~~ | ~~Routers for 4, 6 and 9~~ | done 2026-07-25 | Every service has a router. |
 | ~~2~~ | ~~Adversarial pass over 4 and 9~~ | done 2026-07-25 | Ten service defects, all now fixed at the service. |
-| 1 | **Adversarial pass over 5 and 8** | +15% each (~**+3%**) | The only two phases never reviewed, and Phase 8 handles malware. Do it before its UI, not after: fixing a model defect once a UI is built costs the UI too. |
-| 2 | **UI for 7 (finish), 6 (merge/ACH/reports), then 8** | ~**+6%** | Comms first — everything else about that phase is done. Samples **last** and carefully. |
-| 3 | **Close the per-phase feature gaps** below | ~**+8%** | Adapters, WebAuthn, Jira, fuzzy hashing. Genuine feature work, and the part most exposed to the legal blockers. |
-| 4 | **The two retrospective items** (docs/18 Section D) | 0% on this scale | Run the dead-letter redaction repair; decide what to do about batches accepted before object storage was wired. Neither scores; both are real. |
-| 5 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, DNS-rebinding-proof SSRF protection, login timing. |
+| ~~3~~ | ~~Adversarial pass over 5 and 8~~ | done 2026-07-26 | 27 findings, nine critical, all fixed (docs/17 F19). Every phase has now had one. |
+| ~~4~~ | ~~UI for 7, 6 and 8~~ | done 2026-07-26 | Every phase has a pane. |
+| 1 | **Close the per-phase feature gaps** below | ~**+5%** | Adapters, WebAuthn, Jira, fuzzy hashing. Genuine feature work, and the part most exposed to the legal blockers. |
+| 2 | **A hostile pass over Phase 6, and over this session's own fixes** | ~**+2%** | Phase 6 is the last phase with a partial review. And the fourth pass's lesson stands: most of its findings were in the previous pass's FIXES. |
+| 3 | **The two retrospective items** (docs/18 Section D) | 0% on this scale | Run the dead-letter redaction repair; decide what to do about batches accepted before object storage was wired. Neither scores; both are real. |
+| 4 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, DNS-rebinding-proof SSRF protection, login timing. |
 
-That reaches roughly **95%** with no phase below 85%. The last 5% is
+That reaches roughly **97%** with no phase below 85%. The last 3% is
 WebSocket push, CONCOR, and the two-mode presets for actor×forum and
 actor×wallet.
 
-**None of it changes the four BLOCKING legal items.** A 95% build is still
+**None of it changes the four BLOCKING legal items.** A 97% build is still
 one that must not be operated until L1–L4 are settled.
 
 ### 4. The remaining per-phase work
@@ -216,8 +221,9 @@ one that must not be operated until L1–L4 are settled.
 - **Phase 4** — XenForo, MyBB, Telegram MTProto adapters (each blocked on
   L3 as much as on code); document embeddings; a scheduler process.
 - **Phase 5** — Jira, the integration admin surface (the `notify.delivery`
-  ledger records every refusal with a reason and nothing renders it),
-  escalation of an unacknowledged priority-1, a worker.
+  ledger records every refusal with a reason, and now the address each
+  message actually reached, and nothing renders any of it), escalation of
+  an unacknowledged priority-1, a worker.
 - **Phase 6** — WebAuthn, timeline replay, the assumptions register.
 - **Phase 7** — done except the UI. What remains is genuinely optional:
   loose matching of a differently-formatted identifier inside a signed
@@ -227,7 +233,9 @@ one that must not be operated until L1–L4 are settled.
 - **Phase 8** — imphash/ssdeep/TLSH (each a dependency; ssdeep needs a C
   toolchain on Windows), YARA, capped archive expansion, sandbox
   integration. Every absence is already recorded on the sample row as a gap
-  with a reason.
+  with a reason, and the Lab pane renders those gaps before it renders any
+  finding — an analyst reading findings needs to know what was never
+  looked at.
 - **Phase 9** — the outbound credential vault with per-provider quota and
   exposure levels. *(The 202 wiring and object storage are done —
   `rawstore.py`, 2026-07-25.)*
@@ -263,6 +271,30 @@ one that must not be operated until L1–L4 are settled.
 
 ## Traps worth carrying forward
 
+- **The test count is TWO roots.** `apps/api/tests` and
+  `packages/ontology`. Run both or the number will not reconcile with this
+  file, which is how a previous session lost twenty minutes.
+- **`alembic` must be run from the repo root.** `alembic.ini` lives there,
+  not in `db/`, and running it from `db/` fails with "No 'script_location'
+  key found in configuration" — which reads as a broken install and is
+  not.
+- **An append-only ledger outlives its subject, so teardown must check and
+  skip.** `lab.sample_access`, `core.evidence_custody`,
+  `core.purge_tombstone` and `audit.event` all raise on DELETE **and**
+  carry foreign keys to the thing they describe. So a test that ingests
+  evidence can never delete that evidence, its case, or the user named on
+  the custody row. Four separate suites have now learned this the same
+  way.
+- **A CSS character class of literal invisible characters will be
+  mangled.** It happened between writing the bidi defence and it landing on
+  disk. Declare them as `\uXXXX` escapes — that is also the only form a
+  test can assert on.
+- **`animation-fill-mode: backwards` plus a delay hides content.** Not
+  "briefly": for the whole delay, and indefinitely if the animation clock
+  stalls — which a hidden tab already causes in this app.
+- **`--out` is not covered by `.gitignore` just because the default is.**
+  `screenshot_ui.py` now refuses an un-ignored directory inside the repo,
+  after fifteen renders of a live case sat untracked in the working tree.
 - **uvicorn runs WITHOUT `--reload`.** A new route 404s until restart.
 - **TOTP cannot work on this host** — unsynchronised clock, in 2026. Use
   `bootstrap.py session --email <you>`.
