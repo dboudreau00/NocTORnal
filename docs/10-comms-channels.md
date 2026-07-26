@@ -1,7 +1,7 @@
 # 10 — Communication channels
 
 **Status: concept. Not implementation-ready. Decide the open questions at
-the end before Claude Code touches this.**
+the end before anyone implements this.**
 
 Actors advertise and use a spread of channels, and the spread itself is
 diagnostic. A vendor running Jabber + Tox + Session with a PGP key is

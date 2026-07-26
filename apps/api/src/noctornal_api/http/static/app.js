@@ -190,6 +190,42 @@ function el(tag, cls, text) {
   return n;
 }
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+/** Make an identifier click-to-copy.
+ *
+ *  Copying a selector, a hash or a TLS key to paste it into the next tool
+ *  is the single most repeated action in this console, and the alternative
+ *  is a triple-click that reliably catches a trailing space or the
+ *  neighbouring chip.
+ *
+ *  `copyValue` exists because the DISPLAYED and USEFUL forms differ in the
+ *  one place it matters most: a defanged URL reads `hxxps://evil[.]com`
+ *  and that is what belongs in a report, so that is what is copied. An
+ *  analyst who wants the live form has the capture detail, where the
+ *  original is shown. Copying a re-fanged URL to the clipboard would put a
+ *  working link one careless paste away from a browser — the same hazard
+ *  the defanging exists to prevent.
+ *
+ *  Deliberately a <button>: it is an action, it must be keyboard
+ *  reachable, and a <span> with a click handler is neither.
+ */
+function copyable(node, copyValue, label) {
+  const value = copyValue === undefined || copyValue === null
+    ? node.textContent : String(copyValue);
+  if (!value) return node;
+  const wrap = el('span', 'copyable');
+  wrap.appendChild(node);
+  const btn = el('button', 'copy-btn', '⎘');
+  btn.type = 'button';
+  btn.title = 'Copy ' + (label || 'to clipboard');
+  btn.setAttribute('aria-label', btn.title);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();          /* never select the row underneath */
+    copyText(value, btn);
+  });
+  wrap.appendChild(btn);
+  return wrap;
+}
 /** Trailing debounce. Used for the comms normalise preview: one request
  *  per pause in typing, not one per keystroke. */
 function debounce(fn, ms) {
@@ -3040,10 +3076,15 @@ function renderSelectors(box, list) {
        address renders as a different address than the bytes the system
        correlated on, and two distinct selectors can render identically.
        These values are attacker-chosen forum identifiers. */
-    item.appendChild(el('div', 'sel-val', visibleText(s.raw_value)));
+    /* Copy the RAW value, not the de-fanged rendering: the raw form is
+       what the next tool needs, and visibleText only changes how it
+       looks. */
+    item.appendChild(copyable(
+      el('div', 'sel-val', visibleText(s.raw_value)), s.raw_value, 'selector'));
     if (s.norm_value && s.norm_value !== s.raw_value) {
-      item.appendChild(el('div', 'mono small muted',
-        'normalised ' + visibleText(s.norm_value)));
+      item.appendChild(copyable(
+        el('div', 'mono small muted', 'normalised ' + visibleText(s.norm_value)),
+        s.norm_value, 'normalised value'));
     }
     item.appendChild(el('div', 'ev-meta',
       'observed ' + s.observation_cnt + ' time(s)'));
@@ -3489,6 +3530,25 @@ function initPalette() {
     if (e.key === 'Escape' && !$('keys-scrim').hidden) {
       e.preventDefault();
       toggleKeys(false);
+    }
+    /* Alt+1..9 jumps to a pane. An analyst working one case crosses
+       Graph -> Evidence -> Comms -> Report dozens of times an hour, and
+       the rail is a mouse trip each way.
+
+       ALT, not a bare digit: bare digits are typed into every field in
+       this console, and Ctrl+digit is the browser's own tab switcher.
+       The guard against INPUT/TEXTAREA/SELECT/contentEditable is kept
+       anyway -- Alt+2 in a note should not teleport the analyst out of
+       what they are writing. */
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
+      const t = e.target;
+      const typing = t && (t.isContentEditable
+        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
+      if (typing || !state.token) return;
+      const tabs = Array.from(
+        document.querySelectorAll('.rail-btn[data-tab]:not([hidden])'));
+      const target = tabs[Number(e.key) - 1];
+      if (target) { e.preventDefault(); selectTab(target.dataset.tab); }
     }
   });
   $('keys-close').addEventListener('click', () => toggleKeys(false));
@@ -6158,10 +6218,14 @@ async function releaseReport() {
 
 function dcpUrl(value) {
   /* Defanged, monospaced, and deliberately NOT an anchor. */
-  const span = el('span', 'mono defanged', visibleText(value || '—'));
+  const shown = visibleText(value || '—');
+  const span = el('span', 'mono defanged', shown);
   span.title = 'Defanged and non-clickable on purpose. Fetching this from '
     + 'an analyst workstation would announce the investigation.';
-  return span;
+  /* Copies the DEFANGED form. That is what belongs in a report, and a
+     re-fanged URL on the clipboard is a working link one careless paste
+     from a browser. */
+  return copyable(span, shown, 'the defanged URL');
 }
 
 async function loadCaptures() {
@@ -6289,7 +6353,7 @@ async function openCapture(id) {
     if (c.tls_spki_sha256) {
       const k = el('p', 'mono small', c.tls_spki_sha256);
       k.title = 'SPKI SHA-256 -- pivot on this, not the domain.';
-      tls.appendChild(k);
+      tls.appendChild(copyable(k, c.tls_spki_sha256, 'the TLS key hash'));
     }
     body.appendChild(tls);
   }
@@ -6784,7 +6848,9 @@ function sampleRow(s) {
      to be read as identity. */
   const title = el('span', 'row-title mono', s.sha256.slice(0, 16) + '…');
   title.title = s.sha256;
-  head.appendChild(title);
+  /* The full digest, not the truncated display form -- a 16-character
+     prefix pasted into VirusTotal finds nothing. */
+  head.appendChild(copyable(title, s.sha256, 'the full SHA-256'));
   head.appendChild(stateChip(s.state));
   head.appendChild(labelChips(s));
   card.appendChild(head);

@@ -161,7 +161,7 @@ constraint sits only on the content.
 
 ### 3.4 Ontology — deliberately two additions, not twelve
 
-`CLAUDE.md` says ask before adding a node or edge type that duplicates an
+`CONVENTIONS.md` says ask before adding a node or edge type that duplicates an
 existing one. Most of this domain already has a home: a phishing host is
 `INFRA`, a kit is `TOOL`, a victim is `VICTIM`, a call is an `EVENT`, a
 campaign is a `CAMPAIGN`. Two things had none.

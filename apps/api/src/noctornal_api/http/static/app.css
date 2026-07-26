@@ -1283,3 +1283,27 @@ select.select { appearance: none; padding-right: 24px; }
 .card .why {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
 }
+
+/* --- click-to-copy on identifiers -------------------------------------- */
+
+/* The button only appears on hover or keyboard focus. An always-visible
+   glyph beside every selector, hash and URL would add a column of noise to
+   panes that are already dense. */
+.copyable {
+  display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%;
+}
+.copy-btn {
+  flex: none; border: 0; background: none; cursor: pointer;
+  color: var(--text-tertiary); font-size: 12px; line-height: 1;
+  padding: 1px 3px; border-radius: 3px; opacity: 0;
+  transition: opacity 90ms ease, color 90ms ease, background-color 90ms ease;
+}
+.copyable:hover .copy-btn,
+.copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--text-primary); background: var(--surface-2); }
+/* Focus must be visible even before hover, or the control is unreachable
+   by keyboard in practice. */
+.copy-btn:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: 1px; color: var(--text-primary);
+}
+.copy-btn.is-ok { opacity: 1; color: var(--sign-positive); }

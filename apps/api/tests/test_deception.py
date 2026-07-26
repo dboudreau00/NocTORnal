@@ -10,7 +10,7 @@ one:
     selector;
   * the Received chain is trustworthy inwards only.
 
-Per `CLAUDE.md`, every invariant has a test named after it.
+Per `CONVENTIONS.md`, every invariant has a test named after it.
 """
 from __future__ import annotations
 
