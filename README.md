@@ -10,7 +10,7 @@ where every line of it traces back to an exhibit.
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Postgres 16](https://img.shields.io/badge/postgres-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-1252%20passing-brightgreen.svg)](#verifying-the-install)
+[![Tests](https://img.shields.io/badge/tests-1269%20passing-brightgreen.svg)](#verifying-the-install)
 [![Status](https://img.shields.io/badge/status-alpha%20%C2%B7%20unaudited-orange.svg)](#status)
 
 ![The sociogram](docs/images/01-graph.png)
@@ -271,7 +271,7 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **1252 passed, 12 skipped**. **Without `DATABASE_URL` you will see
+Expect **1269 passed, 0 skipped**. **Without `DATABASE_URL` you will see
 roughly 700 skips instead** — half the suite is database-gated by design.
 That is a correct result, not a broken install.
 
@@ -551,7 +551,7 @@ enforces it.
 
 ### Testing
 
-**1252 tests** across two pytest roots. Every invariant has a test named
+**1269 tests** across two pytest roots. Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
 
@@ -598,6 +598,7 @@ noctornal/
 | [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model |
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
+| [`TestFlight.md`](TestFlight.md) | **the install, actually performed** — every command, the output, and the three defects it found |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
 
