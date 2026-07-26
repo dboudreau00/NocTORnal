@@ -60,12 +60,14 @@ transaction, but the notification and its DELIVERY are not.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg
+from psycopg.types.json import Json
 
 from noctornal_api.security.access import (
     AccessResolutionError,
@@ -397,9 +399,35 @@ class NotificationService:
         return found
 
     def set_preference(self, user_id: UUID, channel: str, **fields) -> Preference:
+        """Change one channel's settings.
+
+        `address` is the dangerous field and it is the one that had no
+        validation at all (F19). Any authenticated user could PUT
+        `{"address": "collector@attacker.example"}` — no permission, no
+        step-up, no format check, no confirmation to either mailbox — and
+        `transports._DUE_SQL` resolves `coalesce(p.address, u.email)`, so
+        every subsequent notification's subject and summary went to a
+        mailbox they chose. Subjects carry the case CODE, which this
+        codebase argues at length is itself intelligence.
+
+        The egress gate cannot help: `can_egress` reasons about the
+        classification and the KIND of destination, so an SMTP send to a
+        corporate account and one to a burner are the same decision. The
+        control that normally backstops it is the account email, which an
+        administrator owns — and `preference.address` handed that to the
+        user.
+
+        So: an override is refused unless an operator has declared where
+        mail may go, and every accepted change is audited with both the old
+        and the new value. Fail closed, because the default has to be the
+        one that is safe when nobody has thought about it.
+        """
         if channel not in _DEFAULTS:
             raise NotificationError(f"unknown channel {channel!r}")
         current = self.preferences(user_id)[channel]
+        if "address" in fields and fields["address"] != current.address:
+            self._check_address(user_id, channel, fields["address"],
+                                current.address)
         merged = {
             "enabled": fields.get("enabled", current.enabled),
             "min_priority": fields.get("min_priority", current.min_priority),
@@ -431,6 +459,53 @@ class NotificationService:
              merged["digest"], merged["quiet_from"], merged["quiet_to"],
              merged["timezone"], merged["address"]))
         return self.preferences(user_id)[channel]
+
+    def _check_address(self, user_id: UUID, channel: str,
+                       new: str | None, old: str | None) -> None:
+        """Decide whether this delivery address may be set, and record it.
+
+        `NOCTORNAL_NOTIFY_ADDRESS_DOMAINS` is a comma-separated list of
+        domains a user may redirect their own notifications to. Unset means
+        NO override: mail goes to the account email, which an administrator
+        controls. That default costs a convenience and closes a
+        self-service exfiltration channel, and of the two the default has
+        to be the safe one.
+
+        Clearing the override (setting it back to None) is always allowed —
+        it can only ever move delivery back to the administrator-owned
+        address — but it is still audited, because "when did this stop
+        going to the burner" is the same question in reverse.
+        """
+        if new is not None:
+            allowed = {d.strip().lower().lstrip("@")
+                       for d in os.environ.get(
+                           "NOCTORNAL_NOTIFY_ADDRESS_DOMAINS", "").split(",")
+                       if d.strip()}
+            if not allowed:
+                raise NotificationError(
+                    "notifications go to your account email, which an "
+                    "administrator controls. Redirecting them is refused "
+                    "unless an operator has declared which domains may "
+                    "receive case material — set "
+                    "NOCTORNAL_NOTIFY_ADDRESS_DOMAINS. A subject line here "
+                    "carries the case code, and a case code is "
+                    "intelligence.")
+            if "@" not in new or new.rsplit("@", 1)[1].lower() not in allowed:
+                raise NotificationError(
+                    f"{new!r} is not in a domain this deployment permits "
+                    f"for notification delivery. Permitted: "
+                    f"{', '.join(sorted(allowed))}")
+        # Audited whichever way it went. The absence of this row was the
+        # sharper half of the finding: changing where a case's
+        # notifications are delivered left no trace anywhere in the system.
+        self._c.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, object_id,
+                    outcome, detail)
+               VALUES (%s, 'USER', 'NOTIFY_ADDRESS_CHANGED', 'app_user', %s,
+                       'SUCCESS', %s)""",
+            (user_id, user_id,
+             Json({"channel": channel, "from": old, "to": new})))
 
     # -- internals --------------------------------------------------------
 

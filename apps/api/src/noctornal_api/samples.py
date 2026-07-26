@@ -487,12 +487,23 @@ class SampleService:
                original_filename: str | None = None,
                source_note: str | None = None,
                classification: str = "AMBER",
-               compartments: frozenset[str] = frozenset()) -> Sample:
+               compartments: frozenset[str] = frozenset(),
+               visible_to_clearance: str | None = None,
+               visible_to_compartments: frozenset[str] = frozenset(),
+               ) -> Sample:
         """Land a sample in QUARANTINE, run static triage, encrypt at rest.
 
         Refuses outright unless a prohibited-content policy has been
         declared. That refusal is the whole reason this phase was blocked,
         and it stays enforced rather than becoming a comment.
+
+        `visible_to_*` are the SUBMITTER's labels, and they are used for
+        exactly one thing: deciding how much the duplicate refusal is
+        allowed to say. They default to None, which means "say nothing" —
+        the conservative direction, so a caller that omits them leaks
+        nothing rather than everything. That is the opposite of how
+        `queue()` and `download()` treated their clearance argument before
+        F19, and deliberately so.
         """
         declared, detail = policy_declared()
         if not declared:
@@ -515,19 +526,71 @@ class SampleService:
         except AccessResolutionError as exc:
             raise SampleError(str(exc)) from exc
 
+        # THE CASE'S FLOOR, APPLIED (F19, 2026-07-26).
+        #
+        # `lab.sample` is the one labelled table with no `enforce_tlp_floor`
+        # trigger -- core.node, core.edge and core.evidence all have one --
+        # and the router's `classification` is a `Form(...)` defaulting to
+        # AMBER. So an analyst attaching the dropper from a RED,
+        # compartmented case and touching nothing else produced a row at
+        # AMBER with no compartments, and every read that consulted the
+        # sample's own labels handed it to anybody with AMBER clearance.
+        #
+        # RAISED rather than refused. Refusing would mean an analyst who
+        # left a form field alone gets an error instead of a safe default,
+        # and the safe direction here is unambiguous. Migration 0043
+        # attaches the floor trigger as the backstop for anything that does
+        # not come through this method.
+        if case_id is not None:
+            case = self._c.execute(
+                'SELECT classification, compartments FROM core."case" '
+                "WHERE id = %s", (case_id,)).fetchone()
+            if case is None:
+                raise SampleError("no such case")
+            classification = max(tlp_from_name(classification),
+                                 tlp_from_name(case[0])).name
+            compartments = frozenset(compartments) | frozenset(case[1] or [])
+
         result = triage(data)
         digest_hex = result.sha256.hex()
 
         existing = self._c.execute(
-            "SELECT id FROM lab.sample WHERE sha256 = %s", (result.sha256,)
-        ).fetchone()
+            """SELECT s.id, greatest(s.classification,
+                                     coalesce(c.classification,
+                                              s.classification)),
+                      s.compartments || coalesce(c.compartments, '{}')
+                 FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.sha256 = %s""", (result.sha256,)).fetchone()
         if existing is not None:
             # Deduplication on content, exactly like evidence. Two analysts
             # finding the same binary is a finding about the actors, not a
             # reason for two copies of live malware.
+            #
+            # But the refusal is an EXISTENCE ORACLE, and it was answering
+            # for everybody (F19). The submitter obviously knows the hash —
+            # they hold the file. What the message discloses is that THIS
+            # DEPLOYMENT already holds it, which in a compartmented case is
+            # the fact that somebody else is working the same intrusion.
+            # Uploading a hash you suspect and reading the error is a cheap
+            # probe.
+            #
+            # So the useful message goes only to a caller who could have
+            # seen the existing row anyway, and everybody else gets a
+            # refusal that says no more than "not accepted". The caller who
+            # may not see it still cannot store a duplicate, which is the
+            # behaviour that matters.
+            if _may_see(existing[1], existing[2], visible_to_clearance,
+                        visible_to_compartments):
+                raise SampleError(
+                    f"this sample is already held (sha256 "
+                    f"{digest_hex[:16]}...); link the existing record rather "
+                    f"than storing it twice")
             raise SampleError(
-                f"this sample is already held (sha256 {digest_hex[:16]}...); "
-                f"link the existing record rather than storing it twice")
+                "this submission was not accepted. If you believe it is new, "
+                "raise it with the lab — a duplicate of something you may "
+                "not see is refused without saying so, because the refusal "
+                "would otherwise answer a question the access gate does not.")
 
         # Per-sample data key, envelope-encrypted with the same scheme
         # persona credentials and TOTP secrets use.
@@ -810,9 +873,38 @@ class SampleService:
             # read and fail closed. A sample whose bytes changed is either a
             # storage fault or a tamper, and neither is a thing to hand to
             # an analyst.
+            #
+            # RECORDED, not merely raised (F19). This used to raise into the
+            # router, which mapped it to a 409 and moved on — so the one
+            # signal that the malware store had been altered produced an
+            # error message for one analyst and nothing anybody would ever
+            # find. `core.evidence` has done this properly since Phase 1:
+            # a failed HASH_VERIFIED custody row, then the refusal.
+            #
+            # Written in its own transaction so it survives the raise. An
+            # audit row rolled back with the failure it records is not an
+            # audit row.
+            with self._c.transaction():
+                self._access(
+                    sample_id, actor_id, "VIEWED_META",
+                    {"event": "integrity_check_failed",
+                     "recorded_sha256": bytes(row[3]).hex(),
+                     "computed_sha256": digest.hex(),
+                     "storage_key": row[0]})
+                self._c.execute(
+                    """INSERT INTO audit.event
+                           (actor_id, actor_kind, action, object_type,
+                            object_id, outcome, detail)
+                       VALUES (%s, 'USER', 'SAMPLE_INTEGRITY_ALARM', 'sample',
+                               %s, 'DENIED', %s)""",
+                    (actor_id, sample_id,
+                     Json({"recorded_sha256": bytes(row[3]).hex(),
+                           "computed_sha256": digest.hex()})))
             raise SampleError(
                 "sample integrity check failed: stored bytes do not match the "
-                "recorded sha256")
+                "recorded sha256. This is a tamper alarm, not a transient "
+                "error — it has been written to the custody ledger and the "
+                "audit log, and the bytes have NOT been served.")
 
         self._access(sample_id, actor_id, "DOWNLOADED",
                      {"origin": configured}, archive_format="ZIP_INFECTED")
@@ -859,18 +951,68 @@ class SampleService:
         return _record(row) if row else None
 
     def queue(self, *, states: tuple[str, ...] = (QUARANTINED, TRIAGED, ASSIGNED),
-              clearance: str = "RED", compartments: frozenset[str] = frozenset(),
+              clearance: str | None = None,
+              compartments: frozenset[str] = frozenset(),
               limit: int = 100) -> list[Sample]:
-        """The RE queue, filtered by the caller's own labels. A sample can be
-        classified above its case, so the case gate alone is not enough."""
+        """The RE queue, filtered by the caller's own labels COMPOSED with
+        each sample's case.
+
+        Both halves are needed and the file used to have neither reliably.
+        A sample can be classified ABOVE its case, so the case gate alone is
+        not enough; and it can sit BELOW its case, because the router's
+        `classification` defaults to AMBER and `lab.sample` has no
+        `enforce_tlp_floor` trigger — so the sample's own labels alone are
+        not enough either. `submit()` now raises the row to the case's floor
+        and this composes at read time as well, because a case whose
+        classification is raised after the fact must take its samples with
+        it.
+
+        `clearance` is REQUIRED. It used to default to `"RED"`, which meant
+        a caller who forgot the argument was silently handed everything —
+        the same fail-open shape that left `download()` with no gate at all,
+        sitting in the same file.
+        """
+        if clearance is None:
+            raise SampleError(
+                "queue() needs the caller's clearance. It used to default to "
+                "RED, so a caller that forgot became maximally privileged in "
+                "silence — which is exactly how download() came to have no "
+                "label check at all.")
         rows = self._c.execute(
-            f"""SELECT {_COLUMNS} FROM lab.sample
-                 WHERE state = ANY(%s)
-                   AND classification <= %s::core.tlp
-                   AND compartments <@ %s
-                 ORDER BY submitted_at DESC LIMIT %s""",
+            f"""SELECT {_SAMPLE_COLUMNS} FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.state = ANY(%s)
+                  AND greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                      <= %s::core.tlp
+                  AND (s.compartments
+                       || coalesce(c.compartments, '{{}}')) <@ %s
+                ORDER BY s.submitted_at DESC LIMIT %s""",
             (list(states), clearance, list(compartments), limit)).fetchall()
         return [_record(r) for r in rows]
+
+    def visible(self, sample_id: UUID, *, clearance: str,
+                compartments: frozenset[str] = frozenset()) -> Sample | None:
+        """One sample, or None if the caller may not know it exists.
+
+        The composition is written once here and once in `download()`
+        rather than in the router, so a second caller cannot skip it —
+        which is what happened to `download()`. Returning None rather than
+        raising keeps the router's answer identical to "no such sample": a
+        status code must not be an existence oracle for a compartmented
+        case.
+        """
+        row = self._c.execute(
+            f"""SELECT {_SAMPLE_COLUMNS} FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.id = %s
+                  AND greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                      <= %s::core.tlp
+                  AND (s.compartments
+                       || coalesce(c.compartments, '{{}}')) <@ %s""",
+            (sample_id, clearance, list(compartments))).fetchone()
+        return _record(row) if row else None
 
     def analyses(self, sample_id: UUID) -> list[dict]:
         rows = self._c.execute(
@@ -936,6 +1078,29 @@ _COLUMNS = ("id, case_id, sha256, sha1, md5, original_filename, byte_size, "
             "state, reject_reason, file_type, entropy, triage_gaps, "
             "submitted_by, submitted_at, source_note, assigned_to, "
             "classification, compartments")
+#: The same list, table-qualified, for the reads that JOIN `core."case"` to
+#: compose its labels. Derived from the one string rather than restated, so
+#: the two cannot fall out of step and unpack into the wrong fields — the
+#: same discipline `notifications._N_COLUMNS` uses for the same reason.
+_SAMPLE_COLUMNS = ", ".join("s." + c.strip() for c in _COLUMNS.split(","))
+
+
+def _may_see(classification: str, compartments, clearance: str | None,
+             held: frozenset[str]) -> bool:
+    """Would this caller have been shown a row with these labels?
+
+    `clearance is None` means the caller did not say, and the answer is no.
+    A helper whose unknown case is "yes" is the shape that left `queue()`
+    defaulting to RED and `download()` with no check at all.
+    """
+    if clearance is None:
+        return False
+    try:
+        if tlp_from_name(classification) > tlp_from_name(clearance):
+            return False
+    except AccessResolutionError:
+        return False
+    return frozenset(compartments or []) <= held
 
 
 def _record(r) -> Sample:

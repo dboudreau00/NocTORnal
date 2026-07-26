@@ -414,10 +414,19 @@ def _succeed(conn: psycopg.Connection, out: Outgoing, *, redacted: bool,
     conn.execute(
         """UPDATE notify.delivery
               SET state = %s, sent_at = %s, attempts = attempts + 1,
-                  last_attempt_at = now(), redacted = %s, detail = %s
+                  last_attempt_at = now(), redacted = %s, detail = %s,
+                  sent_to = %s
             WHERE id = %s""",
         (state, None if redacted else datetime.now(timezone.utc),
-         redacted, detail, out.delivery_id))
+         redacted, detail,
+         # WHERE it went, resolved at drain time (migration 0044). The
+         # preference is current state; this is history, and history is
+         # what answers "what left the building". A delivery queued while
+         # the preference said one thing can be sent after it says
+         # another, which is exactly the case worth being able to see.
+         out.address if out.channel == SMTP
+         else os.environ.get("NOCTORNAL_WEBHOOK_URL"),
+         out.delivery_id))
 
 
 def _fail(conn: psycopg.Connection, out: Outgoing, error: str) -> None:

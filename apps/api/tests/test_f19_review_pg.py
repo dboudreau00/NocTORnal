@@ -633,6 +633,17 @@ def _submit(conn, store, who, **kw):
         submitted_by=who, original_filename="x.bin", **kw)
 
 
+def _cleanup_samples(conn, *sample_ids):
+    """`lab.sample_access` is append-only and references both the sample
+    and the actor, so a sample that was downloaded cannot be deleted. The
+    fixture's teardown already skips those; this is here for the ones that
+    can go."""
+    for sample_id in sample_ids:
+        conn.execute(
+            "DELETE FROM lab.sample WHERE id = %s AND id NOT IN "
+            "(SELECT sample_id FROM lab.sample_access)", (sample_id,))
+
+
 @pg
 def test_a_legal_hold_stops_reject_destroying_the_bytes(conn, policy):
     """docs/08, unqualified: "legal_hold overrides all deletion,
@@ -728,3 +739,197 @@ def test_a_storage_failure_leaves_no_half_submitted_row(conn, policy):
         _submit(conn, store, who)
     assert conn.execute(
         "SELECT count(*) FROM lab.sample").fetchone()[0] == before
+
+
+# --- a sample and its case's labels: three findings, one root -----------
+
+@pg
+def test_a_sample_is_raised_to_its_cases_floor_on_submit(conn, policy):
+    """`lab.sample` was the one labelled table with no `enforce_tlp_floor`
+    trigger, and the router's `classification` is a Form defaulting to
+    AMBER. So an analyst attaching the dropper from a RED, compartmented
+    case and touching nothing else produced a row at AMBER with no
+    compartments — readable by anyone holding AMBER, including a
+    MALWARE_ANALYST whom migration 0031 grants no case access at all.
+
+    Raised rather than refused: the safe direction is unambiguous, and an
+    analyst who left a form field alone should get a safe default rather
+    than an error.
+    """
+    owner = _user(conn, clearance="RED", compartments=("OP-KESTREL",))
+    case_id = _case(conn, owner, classification="RED",
+                    compartments=("OP-KESTREL",))
+    store = _MemStore()
+    sample = _submit(conn, store, owner, case_id=case_id,
+                     classification="AMBER")
+    assert sample.classification == "RED"
+    assert sample.compartments == frozenset({"OP-KESTREL"})
+
+
+@pg
+def test_the_database_refuses_a_sample_below_its_case(conn, policy):
+    """Migration 0043. The service raising the label is the fix; this is
+    the backstop for everything that does not come through the service — a
+    fix-up script, a later migration, a psql session. A rule enforced only
+    in application code holds until somebody writes the second caller, and
+    `download()` was the second caller."""
+    import psycopg
+
+    owner = _user(conn, clearance="RED")
+    case_id = _case(conn, owner, classification="RED")
+    store = _MemStore()
+    sample = _submit(conn, store, owner, case_id=case_id, classification="RED")
+    with pytest.raises(psycopg.errors.RaiseException, match="below the case floor"):
+        conn.execute("UPDATE lab.sample SET classification = 'GREEN' "
+                     "WHERE id = %s", (sample.id,))
+    conn.rollback()
+
+
+@pg
+def test_the_queue_and_detail_compose_the_cases_labels(conn, policy):
+    """Both directions. A sample can be classified ABOVE its case, so the
+    case gate alone leaks its existence; and it could sit BELOW its case,
+    so the sample's own labels alone leaked the case's."""
+    from noctornal_api.samples import SampleService
+
+    owner = _user(conn, clearance="RED", compartments=("OP-KESTREL",))
+    case_id = _case(conn, owner, classification="AMBER",
+                    compartments=("OP-KESTREL",))
+    store = _MemStore()
+    sample = _submit(conn, store, owner, case_id=case_id,
+                     classification="AMBER")
+    svc = SampleService(conn, store)
+
+    # Cleared for AMBER but not read into the compartment: it does not
+    # exist, on either read path.
+    assert not [s for s in svc.queue(clearance="RED", compartments=frozenset())
+                if s.id == sample.id]
+    assert svc.visible(sample.id, clearance="RED",
+                       compartments=frozenset()) is None
+    # Read in: both paths show it.
+    assert [s for s in svc.queue(clearance="RED",
+                                 compartments=frozenset({"OP-KESTREL"}))
+            if s.id == sample.id]
+    assert svc.visible(sample.id, clearance="RED",
+                       compartments=frozenset({"OP-KESTREL"})) is not None
+
+
+@pg
+def test_queue_refuses_to_guess_at_a_clearance(conn):
+    """It used to default to `clearance="RED"`, so a caller who forgot the
+    argument was silently handed everything — the same fail-open shape that
+    left `download()` with no gate at all, in the same file."""
+    from noctornal_api.samples import SampleError, SampleService
+
+    with pytest.raises(SampleError, match="needs the caller's clearance"):
+        SampleService(conn).queue()
+
+
+@pg
+def test_a_failed_integrity_check_is_recorded_not_just_raised(conn, policy,
+                                                             monkeypatch):
+    """A tamper alarm that alarms nobody. This used to raise into the
+    router, which mapped it to a 409 — so the one signal that the malware
+    store had been altered produced an error message for one analyst and
+    nothing anybody would ever find. `core.evidence` has written a failed
+    HASH_VERIFIED custody row since Phase 1."""
+    from noctornal_api.samples import SampleError, SampleService
+
+    monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://samples.example")
+    who = _user(conn, clearance="RED")
+    store = _MemStore()
+    sample = _submit(conn, store, who)
+
+    # Swap the stored bytes, exactly as a tamper or a storage fault would.
+    key = next(iter(store.objects))
+    store.objects[key] = b"substituted" + store.objects[key]
+
+    before = conn.execute(
+        "SELECT count(*) FROM audit.event "
+        "WHERE action = 'SAMPLE_INTEGRITY_ALARM'").fetchone()[0]
+    with pytest.raises(SampleError, match="integrity check failed"):
+        SampleService(conn, store).download(
+            sample.id, actor_id=who,
+            request_origin="https://samples.example", clearance="RED")
+    assert conn.execute(
+        "SELECT count(*) FROM audit.event "
+        "WHERE action = 'SAMPLE_INTEGRITY_ALARM'").fetchone()[0] == before + 1
+    ledger = conn.execute(
+        "SELECT detail FROM lab.sample_access WHERE sample_id = %s "
+        "ORDER BY occurred_at DESC LIMIT 1", (sample.id,)).fetchone()[0]
+    assert ledger["event"] == "integrity_check_failed"
+
+
+# --- notification delivery addresses ------------------------------------
+
+@pg
+def test_notifications_cannot_be_redirected_to_an_arbitrary_mailbox(conn,
+                                                                   monkeypatch):
+    """Any authenticated user could PUT an arbitrary `address` — no
+    permission, no step-up, no format check, no confirmation to either
+    mailbox — and the drain resolves `coalesce(p.address, u.email)`. Every
+    subsequent subject and summary went to a mailbox they chose, and
+    subjects carry the case CODE, which this codebase argues at length is
+    itself intelligence.
+
+    The egress gate cannot help: it reasons about the KIND of destination,
+    so a corporate mailbox and a burner are the same decision.
+    """
+    from noctornal_api.notifications import NotificationError, NotificationService
+
+    monkeypatch.delenv("NOCTORNAL_NOTIFY_ADDRESS_DOMAINS", raising=False)
+    alice = _user(conn)
+    svc = NotificationService(conn)
+    with pytest.raises(NotificationError, match="administrator controls"):
+        svc.set_preference(alice, "SMTP", address="collector@attacker.example")
+
+
+@pg
+def test_a_declared_domain_is_allowed_and_audited(conn, monkeypatch):
+    """The absence of the audit row was the sharper half: changing where a
+    case's notifications are delivered left no trace anywhere."""
+    from noctornal_api.notifications import NotificationError, NotificationService
+
+    monkeypatch.setenv("NOCTORNAL_NOTIFY_ADDRESS_DOMAINS",
+                       "agency.example, partner.example")
+    alice = _user(conn)
+    svc = NotificationService(conn)
+
+    with pytest.raises(NotificationError, match="not in a domain"):
+        svc.set_preference(alice, "SMTP", address="burner@proton.me")
+
+    pref = svc.set_preference(alice, "SMTP", address="a.analyst@agency.example")
+    assert pref.address == "a.analyst@agency.example"
+    detail = conn.execute(
+        "SELECT detail FROM audit.event WHERE actor_id = %s "
+        "AND action = 'NOTIFY_ADDRESS_CHANGED' ORDER BY occurred_at DESC "
+        "LIMIT 1", (alice,)).fetchone()
+    assert detail is not None, "the redirect was not audited"
+    assert detail[0]["to"] == "a.analyst@agency.example"
+    assert detail[0]["from"] is None
+
+
+@pg
+def test_a_delivery_records_where_it_actually_went(conn, monkeypatch):
+    """`notify.delivery` carried the channel, the state, the attempts and
+    the refusal reason, and never the destination — so the address a
+    message actually reached lived only in the SMTP server's log, if one
+    was kept. The preference is current state; the delivery is history, and
+    history is what answers "what left the building"."""
+    from noctornal_api import transports
+    from noctornal_api.notifications import NotificationService
+
+    monkeypatch.setenv("NOCTORNAL_NOTIFY_ADDRESS_DOMAINS", "agency.example")
+    owner, alice = _user(conn), _user(conn)
+    case_id = _case(conn, owner, classification="GREEN")
+    _assign(conn, case_id, alice)
+    NotificationService(conn).set_preference(
+        alice, "SMTP", address="a.analyst@agency.example")
+    n, _nonce = _queue_email(conn, case_id, alice, owner)
+
+    transports.dispatch_due(conn, send_mail=lambda m: None,
+                            post_webhook=lambda *a: None)
+    sent_to = conn.execute(
+        "SELECT sent_to FROM notify.delivery WHERE notification_id = %s "
+        "AND channel = 'SMTP'", (n.id,)).fetchone()[0]
+    assert sent_to == "a.analyst@agency.example"
