@@ -57,6 +57,7 @@ PANES = [
     ("ach", "Competing hypotheses", 1500, 1100),
     ("report", "Report — build and release", 1400, 1100),
     ("governance", "Lifecycle — retention", 1400, 1200),
+    ("samples", "Lab — sample queue", 1400, 1200),
     ("add-node", "Add entity", 1200, 1000),
     ("add-edge", "Add relationship", 1200, 1000),
 ]
@@ -106,6 +107,46 @@ def first_case_id(code: str | None) -> str | None:
     return str(row[0]) if row else None
 
 
+def _refuse_if_committable(out_dir: Path) -> None:
+    """Refuse to write case renders somewhere git would commit them.
+
+    `.gitignore` covers the default `screenshots/`, and that was treated as
+    the control until a run with `--out shots` put fifteen renders of a
+    live case in the working tree as untracked files, one `git add -A` away
+    from the history. The ignore rule was doing its job; the assumption
+    that it covered wherever the flag pointed was the bug.
+
+    A screenshot of an AMBER_STRICT case in a repository is the same
+    disclosure as the case file and does not look like one, so this is a
+    refusal rather than a warning. `--out /somewhere/outside` is always
+    available, and outside the repo git has no opinion.
+    """
+    try:
+        inside = out_dir.is_relative_to(Path(__file__).resolve().parents[1])
+    except AttributeError:            # < 3.9
+        inside = str(out_dir).startswith(str(Path(__file__).resolve().parents[1]))
+    if not inside:
+        return
+    probe = out_dir / ".screenshot-ignore-probe"
+    probe.write_text("", encoding="utf-8")
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", str(probe)],
+            capture_output=True, cwd=str(out_dir))
+    except (OSError, subprocess.SubprocessError):
+        return                        # no git: nothing to protect against
+    finally:
+        probe.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise SystemExit(
+            f"refusing to write to {out_dir}: it is inside the repository "
+            f"and NOT gitignored.\n\n"
+            f"These are renders of a real case against real data and carry "
+            f"that case's classification. Add the directory to .gitignore, "
+            f"use the default (screenshots/), or point --out somewhere "
+            f"outside the repository.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--email", required=True,
@@ -135,6 +176,7 @@ def main() -> int:
     # somewhere else or fails with "Failed to write file" and no path.
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    _refuse_if_committable(out_dir)
     print(f"chrome: {chrome}")
     print(f"case:   {case_id}")
     print(f"out:    {out_dir.resolve()}\n")

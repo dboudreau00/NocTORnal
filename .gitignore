@@ -24,4 +24,15 @@ node_modules/
 # panes against real case data, so they carry that case's classification.
 # A screenshot of an AMBER_STRICT case in a public repository is the same
 # disclosure as the case file, and it does not look like one.
+#
+# `shots/` is here because `--out shots` once put fifteen of them in the
+# working tree as untracked files, one `git add -A` away from history. The
+# script now refuses an output directory inside the repo that git would
+# not ignore, so this pair is belt and braces rather than the only guard.
 screenshots/
+shots/
+# Nothing in this repository is a tracked PNG -- the logo and the favicon
+# are SVG, deliberately, because they are styled by `currentColor`. So a
+# blanket rule costs nothing and catches an --out nobody thought of. If a
+# raster asset is ever genuinely wanted, negate it explicitly here.
+*.png

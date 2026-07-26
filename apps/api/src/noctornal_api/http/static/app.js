@@ -200,6 +200,69 @@ function debounce(fn, ms) {
   };
 }
 function show(node, on) { node.hidden = !on; }
+
+/* Unicode characters that change what a string LOOKS like without changing
+ * what it IS. Rendering them faithfully is how "harmless<RLO>fdp.exe"
+ * appears on screen as "harmlessexe.pdf".
+ *
+ * Bidi overrides (202A–202E, 2066–2069, 200E/200F, 061C), the zero-width
+ * family (200B–200D, FEFF) and the C0/C1 controls.
+ *
+ * NOT confusables. Latin "a" versus Cyrillic "а" is a different problem
+ * needing a script-mixing check rather than a substitution, and this
+ * domain's primary venues are Russian-language — a rule that flagged
+ * Cyrillic would fire on almost every handle in the case file and be
+ * turned off within a day.
+ *
+ * Written as \u escapes, deliberately. A character class of LITERAL
+ * invisible characters is unreadable in review and is silently mangled by
+ * anything that normalises, trims or re-encodes — which would remove a
+ * defence with no diff anybody would notice. That happened once while this
+ * very line was being written. The escapes are also the only form a test
+ * can assert on.
+ */
+const _DECEPTIVE = new RegExp(
+  '['
+  + '\\u061C'                                 // Arabic letter mark
+  + '\\u200B-\\u200F'                         // ZWSP/ZWNJ/ZWJ, LRM, RLM
+  + '\\u202A-\\u202E'                         // LRE RLE PDF LRO RLO
+  + '\\u2060-\\u2064'                         // word joiner, invisible ops
+  + '\\u2066-\\u2069'                         // LRI RLI FSI PDI
+  + '\\uFEFF'                                 // BOM / ZWNBSP
+  + '\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F'   // C0 controls
+  + '\\u007F-\\u009F'                         // DEL and C1 controls
+  + ']', 'g');
+
+/** Make deceptive characters visible instead of effective.
+ *
+ *  `dir="ltr"` and `unicode-bidi: isolate` set the BASE direction and do
+ *  not touch an explicit override character — which is the trap: the CSS
+ *  looks like the defence and is not one. This substitution is, because
+ *  the character is gone by the time it reaches the DOM.
+ *
+ *  Used on every string an attacker chose: filenames, handles, source
+ *  notes, dead-letter fragments.
+ */
+function visibleText(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(_DECEPTIVE, (ch) =>
+    '‹U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
+    + '›');
+}
+
+/** Replace a record's `label` with its safe rendering, keeping the
+ *  original as `label_raw`.
+ *
+ *  Applied once where graph data lands rather than at each render site,
+ *  because there are two dozen of those and the defence is only worth
+ *  anything if it holds at all of them.
+ */
+function withSafeLabel(row) {
+  if (!row || typeof row.label !== 'string') return row;
+  const safe = visibleText(row.label);
+  if (safe === row.label) return row;
+  return Object.assign({}, row, { label: safe, label_raw: row.label });
+}
 function setMsg(node, text) {
   node.textContent = text || '';
   node.hidden = !text;
@@ -556,6 +619,10 @@ async function openCase(caseId) {
     // queue is counted on open rather than on first visit.
     await loadTriage();
     await refreshInboxBadge();
+    /* Not awaited: the lab queue is global rather than case-scoped, an
+       analyst without `sample.read` will 403 on it, and neither the wait
+       nor the failure should delay a workspace that is otherwise ready. */
+    refreshSampleBadge();
     selectTab('graph');
     // After the graph, so a deep-linked pane lands on a workspace that is
     // already populated rather than one still fetching.
@@ -590,6 +657,14 @@ function selectTab(name) {
   if (name === 'feeds' && selectFeedsSub) selectFeedsSub(currentSub('pane-feeds'));
   if (name === 'governance' && selectGovSub) {
     selectGovSub(currentSub('pane-governance'));
+  }
+  if (name === 'samples' && selectSamplesSub) {
+    /* The policy banner loads on every visit, not once: whether ingest is
+       lawfully permitted is the first thing this pane has to say, and a
+       cached "declared" after somebody unset the variable would be the
+       worst possible stale value. */
+    loadSamplePolicy();
+    selectSamplesSub(currentSub('pane-samples'));
   }
 }
 
@@ -632,7 +707,15 @@ async function loadCaseGraph() {
       api(cpath('/nodes?limit=1000')),
       api(cpath('/edges?limit=1000&include_inferred=true')),
     ]);
-    state.nodes = nodes;
+    /* Sanitised HERE, at the boundary, not at the twenty-five places a
+       label is drawn. An IDENTITY node's label IS a forum handle — the
+       analyst pastes it — so it is attacker-chosen, and a bidi override in
+       one would silently flip how that actor reads in the sociogram, the
+       entity table, the palette, the inspector and every analytics
+       summary. One of those sites will always be the one somebody forgets.
+       `label_raw` keeps the original for any path that needs the true
+       bytes; nothing currently does. */
+    state.nodes = nodes.map(withSafeLabel);
     state.edges = edges;
     buildEntityFilter();
     renderEntities();
@@ -704,7 +787,10 @@ async function refreshSociogram() {
   } catch (err) { fail(err); return; }
   if (seq !== state.graphSeq) return;
 
-  state.gnodes = g.nodes || [];
+  /* The projection is a second fetch of the same labels, so it needs the
+     same boundary treatment as `loadCaseGraph` — the sociogram canvas is
+     the single most consequential place a flipped handle could sit. */
+  state.gnodes = (g.nodes || []).map(withSafeLabel);
   state.gedges = g.edges || [];
   state.projMeta = g.projection || null;
   state.projTruncated = !!g.truncated;
@@ -4878,8 +4964,12 @@ function deadLetterRow(d) {
       + 'repair.'));
   } else if (d.fragment) {
     /* textContent, never innerHTML: this is attacker-supplied input that
-       failed to parse, which is the least trustworthy string in the system. */
-    const pre = el('pre', 'fragment mono-sm', d.fragment);
+       failed to parse, which is the least trustworthy string in the system.
+       `visibleText` on top, because textContent stops it EXECUTING and
+       does nothing about it LYING — a bidi override reorders the fragment
+       on screen, and the whole reason to show a fragment is that somebody
+       reads it to work out what the feed sent. */
+    const pre = el('pre', 'fragment mono-sm', visibleText(d.fragment));
     pre.title = 'Structurally redacted: keys, types and lengths only.';
     card.appendChild(pre);
   }
@@ -5923,6 +6013,7 @@ async function releaseReport() {
 
 let selectFeedsSub = null;
 let selectGovSub = null;
+let selectSamplesSub = null;
 
 function initOpsPanes() {
   selectFeedsSub = initSubtabs('pane-feeds', (name) => {
@@ -5935,6 +6026,16 @@ function initOpsPanes() {
     if (name === 'retention') loadRetention();
     if (name === 'tombstones') loadTombstones();
     if (name === 'glass') loadBreakGlass();
+  });
+  selectSamplesSub = initSubtabs('pane-samples', (name) => {
+    if (name === 'queue') loadSamples();
+  });
+  $('smp-refresh').addEventListener('click', loadSamples);
+  $('smp-state').addEventListener('change', loadSamples);
+  $('smp-submit').addEventListener('click', submitSample);
+  $('smp-close').addEventListener('click', () => {
+    $('smp-detail').classList.remove('is-in');
+    show($('smp-detail'), false);
   });
 
   $('ing-refresh').addEventListener('click', loadIngestQueue);
@@ -5971,6 +6072,536 @@ function initOpsPanes() {
     show($('rep-download'), false);
     show($('rep-empty'), true);
   });
+}
+
+/* ── LAB: malware samples (Phase 8, invariant 10) ─────────────────────────
+ *
+ * "Samples never render, never execute. The binary is only ever an
+ *  encrypted archive download from a SEPARATE ORIGIN."
+ *
+ * Everything below renders metadata through `textContent`. There is no
+ * innerHTML anywhere in this section, no preview, no hex view, and no
+ * iframe — so the question of which `sandbox` attributes are safe to
+ * combine never arises, which is the only reliable way to answer it.
+ *
+ * The attacker controls `original_filename`, `source_note` and every
+ * string inside `findings`. They are displayed because an analyst needs
+ * them; they are displayed as TEXT.
+ */
+
+let smpPolicy = null;             // cached /samples/policy
+
+/** Count what is waiting, without drawing the queue.
+ *
+ *  The rail badge is the only signal that a sample arrived while somebody
+ *  was looking at another pane, so it has to be counted on boot rather
+ *  than on first visit — a badge you have to open the tab to see is not a
+ *  badge. Same reasoning as the inbox counter, and same silence on
+ *  failure: an analyst without `sample.read` gets no badge, not an error.
+ */
+async function refreshSampleBadge() {
+  const badge = $('samples-badge');
+  let rows;
+  try {
+    rows = (await api('/samples')).samples || [];
+  } catch (_e) {
+    show(badge, false);
+    return;
+  }
+  const waiting = rows.filter(
+    (s) => s.state === 'QUARANTINED' || s.state === 'TRIAGED').length;
+  badge.textContent = waiting > 99 ? '99+' : String(waiting);
+  badge.title = waiting + ' sample(s) awaiting triage or assignment';
+  show(badge, waiting > 0);
+}
+
+/** The queue. `state` empty means "the working set" — the server's default
+ *  of quarantined/triaged/assigned — rather than everything ever seen. */
+async function loadSamples() {
+  const wanted = $('smp-state').value;
+  const body = await section(
+    '/samples', 'smp-list', 'smp-empty',
+    (b) => (b.samples || []).filter((s) => !wanted || s.state === wanted),
+    sampleRow,
+    'The sample queue needs sample.read. MALWARE_ANALYST holds it and '
+    + 'deliberately holds no case access at all.');
+  if (!body) { $('smp-counts').textContent = ''; return; }
+  const rows = body.samples || [];
+  const shown = wanted ? rows.filter((s) => s.state === wanted).length
+    : rows.length;
+  $('smp-counts').textContent = shown
+    ? shown + ' sample' + (shown === 1 ? '' : 's')
+      + (wanted && rows.length !== shown ? ' of ' + rows.length : '')
+    : '';
+  /* The badge counts what is WAITING, not what exists. A badge that
+     includes finished work is a badge that never clears. Recomputed from
+     the same fetch so acting on a sample updates it immediately. */
+  const waiting = rows.filter(
+    (s) => s.state === 'QUARANTINED' || s.state === 'TRIAGED').length;
+  const badge = $('samples-badge');
+  badge.textContent = waiting > 99 ? '99+' : String(waiting);
+  badge.title = waiting + ' sample(s) awaiting triage or assignment';
+  show(badge, waiting > 0);
+}
+
+/** Entropy reads as a bar because the number alone means nothing to
+ *  anybody who does not do this daily: ~7.9 is packed or encrypted, ~5 is
+ *  a plain PE, ~4 is text. */
+function entropyMeter(value) {
+  const wrap = el('span', 'meter', null);
+  wrap.title = 'Shannon entropy over the whole file, 0–8. Above ~7.2 is '
+    + 'usually packed, compressed or encrypted. It is a hint, not a '
+    + 'verdict — a ZIP scores the same as a packer.';
+  const bar = el('span', 'meter-bar');
+  const fill = el('span', 'meter-fill');
+  const pct = Math.max(0, Math.min(100, (value / 8) * 100));
+  fill.style.width = pct.toFixed(1) + '%';
+  if (value >= 7.2) fill.classList.add('hot');
+  bar.appendChild(fill);
+  wrap.appendChild(bar);
+  wrap.appendChild(el('span', 'meter-val', value.toFixed(2)));
+  return wrap;
+}
+
+function stateChip(s) {
+  const cls = {
+    QUARANTINED: 'chip state-quarantined',
+    TRIAGED: 'chip state-triaged',
+    ASSIGNED: 'chip state-assigned',
+    IN_ANALYSIS: 'chip state-analysis',
+    REPORTED: 'chip state-reported',
+    REJECTED: 'chip state-rejected',
+  }[s] || 'chip';
+  return el('span', cls, s.replace('_', ' ').toLowerCase());
+}
+
+function sampleRow(s) {
+  const card = el('div', 'card row-card sample-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-glyph hazard', '☢'));
+  /* The HASH is the title, never the filename. The filename is
+     attacker-controlled and putting it in the heading position invites it
+     to be read as identity. */
+  const title = el('span', 'row-title mono', s.sha256.slice(0, 16) + '…');
+  title.title = s.sha256;
+  head.appendChild(title);
+  head.appendChild(stateChip(s.state));
+  head.appendChild(labelChips(s));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('type', s.file_type || 'unrecognised'));
+  facts.appendChild(fact('size', humanBytes(s.byte_size)));
+  if (s.entropy !== null && s.entropy !== undefined) {
+    const f = el('span', 'fact');
+    f.appendChild(el('span', 'fact-k', 'entropy'));
+    f.appendChild(entropyMeter(s.entropy));
+    facts.appendChild(f);
+  }
+  facts.appendChild(fact('submitted',
+    (s.submitted_at || '').slice(0, 16).replace('T', ' ')));
+  if (s.case_id) facts.appendChild(fact('case', s.case_id.slice(0, 8)));
+  else facts.appendChild(fact('case', 'unattached', 'muted'));
+  card.appendChild(facts);
+
+  if (s.original_filename) {
+    /* The bidi override is SUBSTITUTED, not merely isolated.
+       `dir="ltr"` and `unicode-bidi: isolate` set the base direction and
+       leave an explicit U+202E doing its job, so the first version of this
+       rendered "harmless<RLO>fdp.exe" on screen as "harmlessexe.pdf" —
+       the CSS looked like the defence and was not one. Found by taking a
+       screenshot and reading it. */
+    const shown = visibleText(s.original_filename);
+    const fn = el('p', 'filename-quarantine');
+    fn.appendChild(el('span', 'fact-k', 'as submitted'));
+    const value = el('bdi', 'mono', shown);
+    value.dir = 'ltr';
+    fn.appendChild(value);
+    if (shown !== s.original_filename) {
+      const flag = el('span', 'chip bad', 'deceptive');
+      flag.title = 'The filename contains characters that change how it '
+        + 'renders without changing what it is — a bidi override, a '
+        + 'zero-width character or a control. They are shown as escapes '
+        + 'above.';
+      fn.appendChild(flag);
+    }
+    fn.title = 'The filename as the submitter supplied it. Stored for the '
+      + 'record; never used as a path component, and never trusted to say '
+      + 'what the file is.';
+    card.appendChild(fn);
+  }
+
+  if ((s.triage_gaps || []).length) {
+    const gaps = el('p', 'why gaps',
+      (s.triage_gaps || []).length + ' triage gap'
+      + (s.triage_gaps.length === 1 ? '' : 's'));
+    gaps.title = 'What triage could NOT establish, and why. A NULL imphash '
+      + 'reads as "no imports"; a recorded gap reads as "nobody looked".';
+    card.appendChild(gaps);
+  }
+  if (s.state === 'REJECTED' && s.reject_reason) {
+    card.appendChild(el('p', 'why bad', 'Rejected: ' + s.reject_reason));
+  }
+
+  const actions = el('div', 'row-actions');
+  const open = el('button', 'btn small', 'Open');
+  open.type = 'button';
+  open.addEventListener('click', () => openSample(s.id));
+  actions.appendChild(open);
+  card.appendChild(actions);
+  return card;
+}
+
+function humanBytes(n) {
+  if (n === null || n === undefined) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+}
+
+async function openSample(id) {
+  const box = $('smp-detail');
+  const body = $('smp-detail-body');
+  clear(body);
+  show(box, true);
+  box.classList.remove('is-in');
+  body.appendChild(el('p', 'muted', 'Loading…'));
+  let data;
+  try {
+    data = await api('/samples/' + encodeURIComponent(id));
+  } catch (err) {
+    clear(body);
+    body.appendChild(el('p', 'msg bad', refusalText(err,
+      'Reading a sample needs sample.read.')));
+    return;
+  }
+  requestAnimationFrame(() => box.classList.add('is-in'));
+  clear(body);
+  const s = data.sample;
+  $('smp-detail-title').textContent = 'Sample ' + s.sha256.slice(0, 12) + '…';
+
+  /* --- hashes. Selectable, monospaced, one per line: these get pasted
+     into other tools, and a hash that wrapped mid-string is a hash that
+     gets pasted wrong. */
+  const hashes = el('div', 'card sub');
+  hashes.appendChild(el('h3', 'h-xs', 'Identity'));
+  for (const [k, v] of [['SHA-256', s.sha256], ['SHA-1', s.sha1],
+    ['MD5', s.md5]]) {
+    if (!v) continue;
+    const line = el('div', 'hash-line');
+    line.appendChild(el('span', 'fact-k', k));
+    const val = el('code', 'mono selectable', v);
+    line.appendChild(val);
+    const copy = el('button', 'btn tiny', 'Copy');
+    copy.type = 'button';
+    copy.addEventListener('click', () => copyText(v, copy));
+    line.appendChild(copy);
+    hashes.appendChild(line);
+  }
+  body.appendChild(hashes);
+
+  /* --- what triage could not do. Listed before the findings, because an
+     analyst reading findings needs to know what was never looked at. */
+  const gaps = s.triage_gaps || [];
+  const gapBox = el('div', 'card sub');
+  gapBox.appendChild(el('h3', 'h-xs', 'Gaps in triage'));
+  if (!gaps.length) {
+    gapBox.appendChild(el('p', 'muted', 'None recorded.'));
+  } else {
+    const ul = el('ul', 'rules');
+    for (const g of gaps) {
+      const li = el('li');
+      li.appendChild(el('strong', null, g.what || g.kind || 'gap'));
+      li.appendChild(document.createTextNode(' — ' + (g.why || g.reason || '')));
+      ul.appendChild(li);
+    }
+    gapBox.appendChild(ul);
+  }
+  body.appendChild(gapBox);
+
+  /* --- findings */
+  const anal = el('div', 'card sub');
+  anal.appendChild(el('h3', 'h-xs', 'Analysis'));
+  if (!(data.analyses || []).length) {
+    anal.appendChild(el('p', 'muted', 'Nothing recorded yet.'));
+  } else {
+    for (const a of data.analyses) {
+      const row = el('div', 'row-card inner');
+      const h = el('div', 'row-head');
+      h.appendChild(el('span', 'row-title', a.kind));
+      if (a.family_assessment) {
+        const fam = el('span', 'chip family', a.family_assessment);
+        /* A family attribution without a confidence is refused by a CHECK
+           constraint, so this pair always renders together. */
+        fam.title = 'An assessment, not a fact. ' + (a.confidence || '');
+        h.appendChild(fam);
+        h.appendChild(el('span', 'chip conf-' + (a.confidence || 'LOW'),
+          a.confidence || 'LOW'));
+      }
+      row.appendChild(h);
+      if (a.narrative) row.appendChild(el('p', 'why', a.narrative));
+      if ((a.yara_hits || []).length) {
+        const hits = el('div', 'chips');
+        for (const y of a.yara_hits) hits.appendChild(el('span', 'chip', y));
+        row.appendChild(hits);
+      }
+      const f = el('div', 'facts');
+      if (a.tool) f.appendChild(fact('tool', a.tool + (a.tool_version
+        ? ' ' + a.tool_version : '')));
+      f.appendChild(fact('recorded',
+        (a.recorded_at || a.created_at || '').slice(0, 16).replace('T', ' ')));
+      row.appendChild(f);
+      anal.appendChild(row);
+    }
+  }
+  body.appendChild(anal);
+
+  /* --- custody. Append-only, and it outlives the sample. */
+  const cust = el('div', 'card sub');
+  cust.appendChild(el('h3', 'h-xs', 'Access ledger'));
+  cust.appendChild(el('p', 'help',
+    'Append-only, and it outlives the sample: a custody ledger you can '
+    + 'prune is not one. Every look is a row, not just every change.'));
+  if (!(data.custody || []).length) {
+    cust.appendChild(el('p', 'muted', 'No entries.'));
+  } else {
+    const list = el('div', 'timeline');
+    for (const c of data.custody) {
+      const item = el('div', 'timeline-item');
+      item.appendChild(el('span', 'timeline-dot'));
+      const t = el('div', 'timeline-body');
+      t.appendChild(el('span', 'row-title', c.action));
+      t.appendChild(el('span', 'muted small',
+        ' ' + (c.at || c.occurred_at || '').slice(0, 16).replace('T', ' ')));
+      item.appendChild(t);
+      list.appendChild(item);
+    }
+    cust.appendChild(list);
+  }
+  body.appendChild(cust);
+
+  body.appendChild(sampleActions(s));
+}
+
+/** The dangerous half. Deliberately below everything an analyst can act on
+ *  without touching bytes. */
+function sampleActions(s) {
+  const box = el('details', 'card sub danger');
+  box.appendChild(el('summary', null, 'Handling actions'));
+
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+
+  /* --- download */
+  const dl = el('div', 'stack');
+  dl.appendChild(el('p', 'help warn',
+    'This produces a password-protected archive of a LIVE sample. The '
+    + 'password is "infected" — an interlock against a double-click and a '
+    + 'mail gateway, not confidentiality. It requires a fresh second '
+    + 'factor and it is refused unless this page is served from the '
+    + 'configured sample origin.'));
+  const origin = (smpPolicy && smpPolicy.sample_origin_configured);
+  const dlBtn = el('button', 'btn danger',
+    origin ? 'Download encrypted archive' : 'Download — no origin configured');
+  dlBtn.type = 'button';
+  dlBtn.disabled = !origin;
+  if (!origin) {
+    dlBtn.title = 'NOCTORNAL_SAMPLE_ORIGIN is not set. Invariant 10 requires '
+      + 'sample bytes to come from a separate origin, and an origin split '
+      + 'that is only written down does not survive the first hurried '
+      + 'deploy — so the button is off rather than failing at the server.';
+  }
+  dlBtn.addEventListener('click', () => downloadSample(s, msg));
+  dl.appendChild(dlBtn);
+  box.appendChild(dl);
+
+  /* --- reject */
+  const rej = el('div', 'stack');
+  rej.appendChild(el('hr', 'rule'));
+  rej.appendChild(el('p', 'help warn',
+    'Rejecting destroys the bytes AND the data key. The row stays: an '
+    + 'auditor asking "did anything prohibited come through here" needs an '
+    + 'answer, and the answer cannot be the material. If the sample is '
+    + 'under a legal hold this is refused — preservation and destruction '
+    + 'can both be legal obligations, and software does not get to pick.'));
+  const reason = el('input', 'input');
+  reason.type = 'text';
+  reason.placeholder = 'why — this record is the only thing that survives';
+  reason.spellcheck = false;
+  rej.appendChild(reason);
+  const keep = el('label', 'field inline check');
+  const keepBox = el('input');
+  keepBox.type = 'checkbox';
+  keep.appendChild(keepBox);
+  keep.appendChild(el('span', 'label', 'Keep the bytes (a hold is in force)'));
+  keep.title = 'Records the rejection and the reason while the material '
+    + 'stays put, for a sample somebody has been ordered to preserve.';
+  rej.appendChild(keep);
+  const rejBtn = el('button', 'btn danger', 'Reject');
+  rejBtn.type = 'button';
+  rejBtn.disabled = s.state === 'REJECTED';
+  rejBtn.addEventListener('click', async () => {
+    if (!reason.value.trim()) {
+      setMsg(msg, 'A rejection has to say why.');
+      msg.className = 'msg bad';
+      return;
+    }
+    rejBtn.disabled = true;
+    try {
+      await api('/samples/' + encodeURIComponent(s.id) + '/reject', {
+        method: 'POST',
+        json: { reason: reason.value.trim(), purge_bytes: !keepBox.checked },
+      });
+      setMsg(msg, 'Rejected. The row stays; the bytes are gone.');
+      msg.className = 'msg ok';
+      await loadSamples();
+      await openSample(s.id);
+    } catch (err) {
+      setMsg(msg, refusalText(err, ''));
+      msg.className = 'msg bad';
+      rejBtn.disabled = false;
+      /* The legal-hold refusal names its own way out, so surface the
+         checkbox rather than leaving the analyst to find it. */
+      if (err instanceof ApiError && /legal hold/i.test(err.detail || '')) {
+        keep.classList.add('is-highlighted');
+      }
+    }
+  });
+  rej.appendChild(rejBtn);
+  box.appendChild(rej);
+
+  box.appendChild(msg);
+  return box;
+}
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const was = btn.textContent;
+    btn.textContent = 'Copied';
+    btn.classList.add('is-ok');
+    setTimeout(() => { btn.textContent = was; btn.classList.remove('is-ok'); },
+      1200);
+  } catch (_e) {
+    btn.textContent = 'Ctrl+C';
+  }
+}
+
+/** POST, then hand the browser a blob.
+ *
+ *  A plain <a href> would be a GET, and this endpoint is a POST behind
+ *  step-up on purpose: a GET that puts malware on a disk is one that a
+ *  prefetcher, a link scanner or a chat unfurl can trigger.
+ */
+async function downloadSample(s, msg) {
+  setMsg(msg, 'Requesting…');
+  msg.className = 'msg';
+  const headers = { Authorization: 'Bearer ' + state.token };
+  let res;
+  try {
+    res = await fetch(API + '/samples/' + encodeURIComponent(s.id) + '/download',
+      { method: 'POST', headers });
+  } catch (_e) {
+    setMsg(msg, 'The request did not complete.');
+    msg.className = 'msg bad';
+    return;
+  }
+  if (!res.ok) {
+    const p = await problemOf(res);
+    setMsg(msg, p.detail || p.title);
+    msg.className = 'msg bad';
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = el('a');
+  a.href = url;
+  a.download = s.sha256 + '.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  /* Revoked immediately: an object URL left alive is a live sample
+     reachable from the page's own origin for as long as the tab is open. */
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  setMsg(msg, 'Archive saved as ' + s.sha256.slice(0, 12)
+    + '….zip — password "infected". It is a live sample.');
+  msg.className = 'msg warn';
+}
+
+async function loadSamplePolicy() {
+  const banner = $('smp-policy');
+  try {
+    smpPolicy = await api('/samples/policy');
+  } catch (err) {
+    setMsg(banner, refusalText(err, 'Could not read the policy status.'));
+    banner.className = 'banner banner-legal';
+    show(banner, true);
+    return;
+  }
+  clear(banner);
+  banner.className = 'banner banner-legal';
+  banner.appendChild(el('strong', null, 'Counsel must review this deployment.'));
+  banner.appendChild(document.createTextNode(' ' + smpPolicy.notice));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('policy',
+    smpPolicy.policy_declared ? smpPolicy.policy_reference : 'NOT DECLARED',
+    smpPolicy.policy_declared ? 'ok' : 'bad'));
+  facts.appendChild(fact('separate origin',
+    smpPolicy.sample_origin_configured ? 'configured' : 'NOT configured',
+    smpPolicy.sample_origin_configured ? 'ok' : 'bad'));
+  banner.appendChild(facts);
+  if (!smpPolicy.policy_declared) {
+    banner.appendChild(el('p', 'help', smpPolicy.detail || ''));
+  }
+  show(banner, true);
+
+  const originBox = $('smp-origin');
+  clear(originBox);
+  originBox.appendChild(el('strong', null, 'This deployment: '));
+  originBox.appendChild(document.createTextNode(
+    smpPolicy.sample_origin_configured
+      ? 'a separate sample origin is configured, so downloads are possible.'
+      : 'no separate sample origin is configured, so every download is '
+        + 'refused. That is invariant 10 as a runtime check rather than a '
+        + 'deployment note.'));
+}
+
+async function submitSample() {
+  const msg = $('smp-submit-msg');
+  const file = $('smp-file').files[0];
+  if (!file) {
+    setMsg(msg, 'Choose a file first.');
+    msg.className = 'msg bad';
+    return;
+  }
+  const form = new FormData();
+  form.append('file', file);
+  if ($('smp-case').value.trim()) form.append('case_id', $('smp-case').value.trim());
+  if ($('smp-note').value.trim()) form.append('source_note', $('smp-note').value.trim());
+  form.append('classification', $('smp-class').value);
+  const btn = $('smp-submit');
+  btn.disabled = true;
+  setMsg(msg, 'Uploading…');
+  msg.className = 'msg';
+  try {
+    const out = await api('/samples', { method: 'POST', form });
+    setMsg(msg, 'Quarantined as ' + out.sha256.slice(0, 16) + '… ('
+      + (out.file_type || 'unrecognised') + ').');
+    msg.className = 'msg ok';
+    $('smp-file').value = '';
+    await loadSamples();
+  } catch (err) {
+    /* 451 is the legal refusal, and it must not read as an upload problem
+       — that is the whole reason the status code is not a 400. */
+    const legal = err instanceof ApiError && err.status === 451;
+    setMsg(msg, (legal ? 'Refused for legal reasons. ' : '')
+      + refusalText(err, ''));
+    msg.className = 'msg ' + (legal ? 'warn' : 'bad');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function boot() {
