@@ -687,3 +687,42 @@ select.select { appearance: none; padding-right: 24px; }
 .pref-row { align-items: center; flex-wrap: wrap; gap: 8px; }
 .pref-row .label { min-width: 64px; }
 .pref-row input[type="time"] { width: 92px; }
+
+/* ── comms (Phase 7) ──────────────────────────────────────────────────
+ * The normalise preview is the load-bearing element here, not the form.
+ * docs/10 calls the durable-selector mapping the product, so what an
+ * identifier REDUCES TO -- and why -- has to be visible before an analyst
+ * commits to it, and legible after. */
+
+.hint { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; }
+.hint.warn { color: var(--alert); }
+.hint.mono-sm { font-family: var(--mono); font-size: 11px; }
+
+.preview {
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-left: 3px solid var(--alert);
+  border-radius: 4px; padding: 8px 10px;
+}
+.preview-row { display: flex; align-items: baseline; gap: 8px; }
+.preview .label { font-size: 11px; color: var(--text-tertiary);
+                  text-transform: uppercase; letter-spacing: .04em; }
+/* Overflow-wrap, because a 64-hex public key is the normal case here and
+   a preview that clips the value it exists to show is worse than none. */
+.preview code { overflow-wrap: anywhere; }
+.preview code.bad { color: var(--danger); font-style: italic; }
+
+.pill {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  padding: 1px 6px; border: 1px solid var(--hairline); border-radius: 10px;
+  color: var(--text-tertiary); white-space: nowrap;
+}
+.pill.ok { color: var(--sign-positive); border-color: var(--sign-positive); }
+.pill.warn { color: var(--alert); border-color: var(--alert); }
+
+.entry-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  padding: 8px 0; border-bottom: 1px solid var(--hairline);
+}
+.entry-row > .grow { flex: 1 1 200px; overflow-wrap: anywhere; }
+.entry-row > p { flex-basis: 100%; margin: 2px 0 0; }
+.entry-sub { flex-basis: 100%; display: flex; gap: 6px; align-items: baseline; }

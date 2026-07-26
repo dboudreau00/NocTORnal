@@ -72,6 +72,69 @@ def _key_from_header(authorization: str | None) -> str:
         raise Problem(401, "Unauthenticated", "no ingest key presented")
     return authorization[7:].strip()
 
+def _own_record(conn: psycopg.Connection, record_id: UUID) -> tuple:
+    """(case_id, classification, compartments) for a record, or a 404.
+
+    `ingest.record` carries its own classification and compartments --
+    migration 0033 calls the compartment "STEALER LOG CONTROL 1" -- and
+    `IngestService` writes both and reads neither. So the router has to,
+    or a record's victims are visible to anyone holding the global
+    `ingest.read` verb. Reproduced live: a GREEN, unassigned analyst
+    listed the credential inventory of an AMBER_STRICT compartmented
+    record.
+    """
+    row = conn.execute(
+        """SELECT case_id, classification, compartments
+             FROM ingest.record WHERE id = %s""", (record_id,)).fetchone()
+    if row is None:
+        raise Problem(404, "Not found", "no such record")
+    return row[0], row[1], frozenset(row[2] or [])
+
+
+def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
+                      record_id: UUID, permission: str) -> UUID:
+    """Gate a record by its OWN case and its OWN labels.
+
+    Answered as 404 either way: a status code must not be an existence
+    oracle (deps.py rule 2), and "this record exists but is not yours" is
+    itself a disclosure about a compartmented case.
+    """
+    case_id, classification, compartments = _own_record(conn, record_id)
+    if case_id is None:
+        # A record not yet attached to a case is quarantine material.
+        # Only the ingest operators see it.
+        return case_id
+    try:
+        authorize_object(conn, user, case_id=case_id,
+                         permission_key=permission,
+                         classification=classification,
+                         compartments=compartments)
+    except Problem:
+        raise Problem(404, "Not found", "no such record") from None
+    return case_id
+
+
+def _authorised_cases_for_ingest(conn: psycopg.Connection,
+                                 user: CurrentUser) -> list[UUID]:
+    """Cases where the full five-part gate would allow `ingest.read`."""
+    rows = conn.execute(
+        """SELECT c.id
+             FROM iam.case_assignment ca
+             JOIN core."case" c ON c.id = ca.case_id
+             JOIN iam.app_user u ON u.id = ca.user_id
+            WHERE ca.user_id = %s
+              AND (ca.expires_at IS NULL OR ca.expires_at > now())
+              AND u.is_active
+              AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                           WHERE rp.role_key = ca.role_key
+                             AND rp.permission_key = 'ingest.read')
+              AND c.classification <= u.tlp_clearance
+              AND c.compartments <@ u.compartments""",
+        (user.user_id,)).fetchall()
+    return [r[0] for r in rows]
+
+
+
 
 # ---------------------------------------------------------------------------
 # The write path. Key-authenticated, and the ONLY endpoint a key can reach.
@@ -103,8 +166,18 @@ async def submit(
     against.
     """
     svc = IngestService(conn)
+    # From the server's own view of the connection, never from a header:
+    # an allowlist is only a control if the caller cannot choose the
+    # address it is compared against.
     peer = request.client.host if request.client else None
-    key = svc.authenticate(_key_from_header(authorization), peer_ip=peer)
+    token = _key_from_header(authorization)
+    key = svc.authenticate(token, peer_ip=peer)
+    if key is not None and key.get("ip_allowlist") and not peer:
+        # Fail CLOSED. The service skips the allowlist when peer_ip is
+        # None (`if allowlist and peer_ip:`), so a deployment where the
+        # ASGI scope carries no client -- a unix socket, some proxy
+        # setups -- silently dropped the control instead of enforcing it.
+        raise Problem(401, "Unauthenticated", "invalid ingest key")
     if key is None:
         # One message for every failure mode -- unknown, revoked, expired,
         # wrong address. Distinguishing them tells a probing caller which
@@ -148,7 +221,8 @@ class IssueKeyBody(BaseModel):
     ttl_days: int = Field(default=90, ge=1, le=730)
 
 
-@router.post("/keys", response_model=dict, status_code=201)
+@router.post("/keys", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("evidence.export"))])
 def issue_key(
     body: IssueKeyBody,
     user: CurrentUser = Depends(require_global("ingest.manage")),
@@ -215,6 +289,32 @@ def stale_keys(
     return {"keys": rows, "count": len(rows), "unused_for_days": days}
 
 
+def _batch_bytes(raw_key: str | None) -> bytes | None:
+    """Fetch a batch's payload, or None if it is not retrievable.
+
+    **Currently always None, and that is the honest state.**
+    `IngestService.accept()` writes the payload only when it is
+    constructed with a storage adapter, and every construction in this
+    router passes none -- so the bytes were never stored. `ingest.batch`
+    keeps `raw_key` and `raw_bytes` (a byte COUNT, not the bytes), which
+    is what made the first version of this endpoint shred a run of NULs
+    into the dead-letter queue on every call.
+
+    Returning None makes the endpoint refuse with a 409 that says why.
+    The alternative -- an empty buffer -- parses to zero records and marks
+    the batch PARSED, silently losing it, which is invariant 12 failing on
+    the one path designed to catch loss.
+
+    Wiring an ingest storage adapter is the remaining Phase 9 work
+    (`ROADMAP-REMAINING`: "the HTTP 202 endpoint wiring"). It needs a
+    `put(key, data)` / `get(key)` pair; `EvidenceStorage` is NOT it --
+    its `put` demands a media type and an object-lock retention date,
+    because an exhibit and a quarantined third-party dump are different
+    things with different retention.
+    """
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Parsing, and what failed to parse
 # ---------------------------------------------------------------------------
@@ -244,14 +344,26 @@ def parse_batch(
         # gate and not just the global ingest verb.
         authorize_object(conn, user, case_id=body.case_id,
                          permission_key="ingest.manage")
+    # `ingest.batch.raw_bytes` is a bigint -- the byte COUNT, not the
+    # bytes. `bytes(<int>)` allocates that many NULs, so every parse
+    # shredded a run of zeros into the dead-letter queue and never touched
+    # the batch. The payload lives in object storage under `raw_key`.
     row = conn.execute(
-        "SELECT raw_bytes FROM ingest.batch WHERE id = %s",
+        "SELECT raw_key, raw_bytes FROM ingest.batch WHERE id = %s",
         (batch_id,)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "no such batch")
+    raw = _batch_bytes(row[0])
+    if raw is None:
+        raise Problem(
+            409, "Conflict",
+            "the raw payload for this batch is not retrievable: object "
+            "storage is not configured, so `accept()` recorded the batch "
+            "without storing its bytes. Parsing would dead-letter the "
+            "whole batch rather than fail, which is worse.")
     try:
         result = IngestService(conn).parse_batch(
-            batch_id, raw=bytes(row[0] or b""), case_id=body.case_id,
+            batch_id, raw=raw, case_id=body.case_id,
             parser_version=body.parser_version)
     except IngestError as exc:
         raise Problem(409, "Conflict", str(exc)) from exc
@@ -266,7 +378,8 @@ def parse_batch(
     }
 
 
-@router.get("/dead-letters", response_model=dict)
+@router.get("/dead-letters", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
 def dead_letters(
     api_key_id: UUID | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
@@ -310,7 +423,8 @@ class ReplayBody(BaseModel):
     case_id: UUID | None = None
 
 
-@router.post("/dead-letters/{dead_letter_id}/replay", response_model=dict)
+@router.post("/dead-letters/{dead_letter_id}/replay", response_model=dict,
+             dependencies=[Depends(rate_limit("capture"))])
 def replay(
     dead_letter_id: UUID, body: ReplayBody,
     user: CurrentUser = Depends(require_global("ingest.replay")),
@@ -337,7 +451,8 @@ def replay(
 # Victim credentials. Masked by default; the reveal is a two-person act.
 # ---------------------------------------------------------------------------
 
-@router.get("/records/{record_id}/credentials", response_model=dict)
+@router.get("/records/{record_id}/credentials", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
 def credentials(
     record_id: UUID,
     user: CurrentUser = Depends(require_global("ingest.read")),
@@ -350,9 +465,11 @@ def credentials(
     the value. docs/12 wants the unmasked value to be an event, not a
     page load.
     """
+    case_id = _authorise_record(conn, user, record_id, "ingest.read")
     rows = IngestService(conn).credentials_masked(record_id)
-    return {"record_id": str(record_id), "credentials": rows,
-            "count": len(rows), "notice": L2_NOTICE}
+    return {"record_id": str(record_id),
+            "case_id": str(case_id) if case_id else None,
+            "credentials": rows, "count": len(rows), "notice": L2_NOTICE}
 
 
 class AuthoriseBody(BaseModel):
@@ -404,7 +521,8 @@ class RevealBody(BaseModel):
     reason: str = Field(min_length=10)
 
 
-@router.post("/credentials/{credential_id}/reveal", response_model=dict)
+@router.post("/credentials/{credential_id}/reveal", response_model=dict,
+             dependencies=[Depends(rate_limit("evidence.export"))])
 def reveal_credential(
     credential_id: UUID, body: RevealBody,
     user: CurrentUser = Depends(require_global("victim_pii.reveal")),
@@ -419,6 +537,18 @@ def reveal_credential(
     """
     authorize_object(conn, user, case_id=body.case_id,
                      permission_key="victim_pii.reveal")
+    # The credential must belong to the case whose authorisation is being
+    # relied on. The service checks that a live authorisation exists for
+    # `case_id` and then decrypts by credential id with no join back to
+    # the record -- so an authorisation on ANY case decrypted any
+    # credential in the corpus, and the audit event recorded the wrong
+    # case against the disclosure. Reproduced live by the service review.
+    row = conn.execute(
+        """SELECT r.case_id FROM ingest.victim_credential vc
+             JOIN ingest.record r ON r.id = vc.record_id
+            WHERE vc.id = %s""", (credential_id,)).fetchone()
+    if row is None or row[0] != body.case_id:
+        raise Problem(404, "Not found", "no such credential in this case")
     try:
         value = IngestService(conn).reveal_credential(
             credential_id, actor_id=user.user_id, case_id=body.case_id,
@@ -454,6 +584,15 @@ def search_by_fingerprint(
     try:
         rows = IngestService(conn).search_by_fingerprint(
             value, actor_id=user.user_id, case_id=case_id)
+        # The service query carries no case predicate, so it answers for
+        # the WHOLE corpus: one authorisation on one case became a yes/no
+        # oracle plus metadata against every other case's holdings,
+        # including compartments the caller is not read into. Filtered
+        # here until the service takes the caller's ceiling the way
+        # CommsService does.
+        allowed = {str(c) for c in _authorised_cases_for_ingest(conn, user)}
+        rows = [r for r in rows
+                if r.get("case_id") is None or str(r["case_id"]) in allowed]
     except AuthorisationRequired as exc:
         raise Problem(451, "Unavailable for legal reasons", str(exc)) from exc
     except IngestError as exc:

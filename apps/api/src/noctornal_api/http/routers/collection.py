@@ -139,7 +139,8 @@ def run_once(
     }
 
 
-@router.get("/personas", response_model=dict)
+@router.get("/personas", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
 def personas(
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),

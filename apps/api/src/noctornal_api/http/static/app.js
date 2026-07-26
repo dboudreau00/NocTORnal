@@ -182,6 +182,15 @@ function el(tag, cls, text) {
   return n;
 }
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+/** Trailing debounce. Used for the comms normalise preview: one request
+ *  per pause in typing, not one per keystroke. */
+function debounce(fn, ms) {
+  let timer = null;
+  return function debounced(...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn.apply(this, args); }, ms);
+  };
+}
 function show(node, on) { node.hidden = !on; }
 function setMsg(node, text) {
   node.textContent = text || '';
@@ -547,6 +556,9 @@ function selectTab(name) {
   }
   if (name === 'graph') { resizeGraph(); resizeDensity(); }
   if (name === 'triage') loadTriage();
+  /* Platforms are reference data: fetched once, on first use, so the
+     workspace does not pay for a tab nobody opened. */
+  if (name === 'comms') loadCommsPlatforms().catch(fail);
   if (name === 'inbox') { loadInbox(); loadInboxPreferences(); }
 }
 
@@ -3469,12 +3481,257 @@ function initInbox() {
   });
 }
 
+
+/* ── comms: channels, durable selectors, contact blocks (Phase 7) ──────
+ *
+ * docs/10: "Read the durable selector column carefully. Getting this wrong
+ * is the single biggest source of false attribution in this domain."
+ *
+ * So the centrepiece of this pane is the NORMALISE PREVIEW, not the form.
+ * An analyst who cannot see that their 76-hex Tox ID will be indexed on
+ * its first 64 characters has no way to understand why two observations
+ * did or did not correlate — and the failure is silent either way: the
+ * graph simply shows one person, or two.
+ *
+ * Every refusal is shown WITH ITS REASON for the same reason. "No durable
+ * value" on its own reads as a broken form; "a Telegram @username is not
+ * durable because usernames are recycled" is a fact the analyst can act on.
+ */
+
+let commsPlatforms = [];
+
+async function loadCommsPlatforms() {
+  if (commsPlatforms.length) return commsPlatforms;
+  const body = await api('/comms/platforms');
+  commsPlatforms = body.platforms || [];
+  for (const id of ['comms-platform', 'comms-corr-platform']) {
+    const sel = $(id);
+    clear(sel);
+    for (const p of commsPlatforms) {
+      const opt = el('option', null, p.display_name);
+      opt.value = p.key;
+      sel.appendChild(opt);
+    }
+  }
+  renderPlatformNote();
+  return commsPlatforms;
+}
+
+function platformByKey(key) {
+  return commsPlatforms.find((p) => p.key === key) || null;
+}
+
+/** What this platform's identifier MEANS, and what sparse data means. */
+function renderPlatformNote() {
+  const p = platformByKey($('comms-platform').value);
+  const note = $('comms-platform-note');
+  const cover = $('comms-platform-coverage');
+  if (!p) { show(note, false); show(cover, false); return; }
+  note.textContent = p.durable_selector_type
+    ? p.durable_selector_type + ' — ' + p.note
+    : 'No durable identifier exists. ' + p.note;
+  show(note, true);
+  /* Surfaced rather than buried: an actor on a platform with no coverage
+     looks INACTIVE, and an analyst reads inactivity as a finding. */
+  cover.textContent = p.coverage || '';
+  show(cover, Boolean(p.coverage));
+}
+
+/** Ask the API what an identifier reduces to, WITHOUT storing it. */
+async function previewNormalise() {
+  const box = $('comms-preview');
+  const observed = $('comms-observed').value.trim();
+  const platform = $('comms-platform').value;
+  if (!observed || !platform) { show(box, false); return; }
+  try {
+    const q = '?platform_key=' + encodeURIComponent(platform)
+            + '&observed=' + encodeURIComponent(observed);
+    const body = await api('/comms/normalise' + q);
+    const durable = $('comms-preview-durable');
+    if (body.durable_value) {
+      durable.textContent = body.durable_value;
+      durable.classList.remove('bad');
+    } else {
+      durable.textContent = 'nothing durable';
+      durable.classList.add('bad');
+    }
+    $('comms-preview-note').textContent = body.note || '';
+    show(box, true);
+  } catch (_e) {
+    /* A preview that cannot reach the API is not worth a banner: the
+       submit will report it properly. */
+    show(box, false);
+  }
+}
+
+function initCommsBind() {
+  $('comms-platform').addEventListener('change', () => {
+    renderPlatformNote();
+    previewNormalise();
+  });
+  $('comms-observed').addEventListener('input', debounce(previewNormalise, 250));
+
+  $('comms-bind-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = $('comms-bind-msg');
+    setMsg(msg, '');
+    try {
+      const body = await api(cpath('/comms/bindings'), {
+        method: 'POST',
+        json: {
+          platform_key: $('comms-platform').value,
+          observed: $('comms-observed').value.trim(),
+          verification: $('comms-verification').value,
+          co_declaration_ref: $('comms-codecl').value.trim() || null,
+        },
+      });
+      setMsg(msg, body.durable_value
+        ? 'Recorded, indexed as ' + body.durable_value
+        : 'Recorded. ' + (body.note || 'No durable value — it will not correlate.'));
+      $('comms-observed').value = '';
+      show($('comms-preview'), false);
+    } catch (err) {
+      if (err instanceof ApiError) setMsg(msg, err.detail || err.title);
+      else fail(err);
+    }
+  });
+}
+
+function initCommsCorrelate() {
+  $('comms-correlate-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const out = $('comms-correlate-out');
+    clear(out);
+    try {
+      const q = '?platform_key='
+              + encodeURIComponent($('comms-corr-platform').value)
+              + '&observed='
+              + encodeURIComponent($('comms-corr-observed').value.trim());
+      const body = await api(cpath('/comms/correlate') + q);
+      const head = el('p', 'hint');
+      head.textContent = body.durable_value
+        ? 'Correlating on ' + body.durable_value + ' — ' + body.matches.length
+          + ' binding(s) in this case.'
+        : 'No durable value, so nothing can correlate. ' + (body.note || '');
+      out.appendChild(head);
+      for (const m of body.matches) {
+        const row = el('div', 'hit');
+        row.appendChild(el('code', 'mono', m.observed));
+        row.appendChild(el('span', 'pill', m.verification));
+        out.appendChild(row);
+      }
+      if (body.durable_value && !body.matches.length) {
+        out.appendChild(el('p', 'hint',
+          'Nothing else in this case reduces to that value.'));
+      }
+    } catch (err) { fail(err); }
+  });
+}
+
+/* ── contact blocks ─────────────────────────────────────────────────── */
+
+const ROLE_PILL = {
+  SELF: 'pill ok',
+  THIRD_PARTY: 'pill warn',
+  UNPARSED: 'pill',
+};
+
+function renderContactBlock(block) {
+  const out = $('comms-block-out');
+  clear(out);
+
+  const card = el('div', 'card stack');
+  const h = el('h3', 'h-sm', block.already_parsed
+    ? 'Already parsed — showing the existing reading'
+    : 'Parsed');
+  card.appendChild(h);
+
+  const codecl = (block.co_declaration || []).length;
+  card.appendChild(el('p', 'hint',
+    codecl + ' identifier(s) read as the publisher’s own. '
+    + 'That SET is the finding — a vendor running Jabber, Tox and Session '
+    + 'with a PGP key operates differently from one running a Telegram bot.'));
+
+  for (const e of block.entries) {
+    const row = el('div', 'entry-row');
+
+    const role = el('span', ROLE_PILL[e.role] || 'pill', e.role);
+    row.appendChild(role);
+
+    const kind = e.platform_key || e.selector_type || 'unresolved';
+    row.appendChild(el('span', 'pill', kind));
+
+    row.appendChild(el('code', 'mono grow', e.observed_value));
+
+    const score = el('span', 'pill', e.score.toFixed(2));
+    row.appendChild(score);
+
+    if (e.durable_value) {
+      const d = el('div', 'entry-sub');
+      d.appendChild(el('span', 'label', 'indexed as'));
+      d.appendChild(el('code', 'mono', e.durable_value));
+      row.appendChild(d);
+    }
+    /* The reason is not decoration. docs/03: a bare 0.87 will be either
+       over-trusted or ignored, and the same is true of a bare role. */
+    row.appendChild(el('p', 'hint', e.role_reason));
+    row.appendChild(el('p', 'hint mono-sm', e.score_reason));
+    if (e.stoplisted) {
+      row.appendChild(el('p', 'hint warn',
+        'On the service stoplist — this belongs to a known escrow, '
+        + 'guarantor or admin, not to the publisher.'));
+    }
+    if (e.shared_service_publishers) {
+      row.appendChild(el('p', 'hint warn',
+        'Advertised by ' + e.shared_service_publishers
+        + ' other publisher(s): a shared SERVICE, not a shared identity.'));
+    }
+    if (e.proposal_id) {
+      row.appendChild(el('p', 'hint',
+        'Raised as a proposal for review. Nothing was written to the graph.'));
+    }
+    card.appendChild(row);
+  }
+
+  card.appendChild(el('p', 'hint', block.notice || ''));
+  out.appendChild(card);
+}
+
+function initCommsBlocks() {
+  $('comms-block-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = $('comms-block-msg');
+    setMsg(msg, '');
+    try {
+      const block = await api(cpath('/comms/contact-blocks'), {
+        method: 'POST',
+        json: {
+          raw_text: $('comms-block-text').value,
+          source_ref: $('comms-block-source').value.trim(),
+          publisher_handle: $('comms-block-handle').value.trim() || null,
+        },
+      });
+      renderContactBlock(block);
+    } catch (err) {
+      if (err instanceof ApiError) setMsg(msg, err.detail || err.title);
+      else fail(err);
+    }
+  });
+}
+
+function initComms() {
+  initCommsBind();
+  initCommsCorrelate();
+  initCommsBlocks();
+}
+
 /* ── boot ─────────────────────────────────────────────────────────────── */
 
 function wire() {
   loadPaint();
   initTabs();
   initInbox();
+  initComms();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
