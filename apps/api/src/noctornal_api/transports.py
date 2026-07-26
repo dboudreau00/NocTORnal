@@ -66,7 +66,14 @@ from uuid import UUID
 import psycopg
 
 from noctornal_api.egress import Destination, can_egress
-from noctornal_api.notifications import JIRA, REFUSED, SENT, SMTP, WEBHOOK
+from noctornal_api.notifications import (
+    JIRA,
+    REFUSED,
+    SENT,
+    SMTP,
+    WEBHOOK,
+    readable_predicate,
+)
 
 log = logging.getLogger("noctornal.transports")
 
@@ -258,7 +265,18 @@ def send_webhook(url: str, payload: dict, secret: str | None) -> None:
 # The outbox drain
 # ---------------------------------------------------------------------------
 
-_DUE_SQL = """
+#: Due, AND still deliverable to this recipient.
+#:
+#: `readable_predicate` is imported from `notifications` rather than
+#: restated. This query used to check only `u.is_active`, so between the
+#: notification being written and the drain running the recipient could be
+#: taken off the case or have their clearance lowered and the summary went
+#: out by email anyway — on the one path in the system that actually crosses
+#: the boundary. The notification centre would have hidden the same row.
+#:
+#: A drain that disagrees with the centre it drains is worse than either
+#: rule alone, because the in-app copy is the thing an auditor looks at.
+_DUE_SQL = f"""
 SELECT d.id, d.notification_id, d.channel, d.attempts,
        n.recipient_id, n.case_id, n.kind, n.priority, n.subject, n.summary,
        n.classification, n.compartments,
@@ -270,9 +288,33 @@ SELECT d.id, d.notification_id, d.channel, d.attempts,
          ON p.user_id = n.recipient_id AND p.channel = d.channel
   LEFT JOIN core."case" c ON c.id = n.case_id
  WHERE d.state = 'PENDING' AND d.deliver_after <= now()
-   AND u.is_active
+   AND {readable_predicate('n')}
  ORDER BY n.priority ASC, d.deliver_after ASC
  LIMIT %s
+"""
+
+#: The other half of the same rule, and the reason it is not simply a
+#: filter. A PENDING delivery whose recipient may no longer read it would
+#: sit in the outbox forever if `due()` merely skipped it — a permanently
+#: undrainable queue, and (invariant 12) a silent drop dressed as a pending
+#: one. So it is closed out explicitly, with a reason, before each drain.
+#:
+#: SUPPRESSED rather than REFUSED, and `redacted` left false, because both
+#: of those columns mean something specific here: REFUSED with
+#: `redacted = true` is "the gate refused the content and a content-free
+#: stub went out instead". Nothing went out. `attempts` is not incremented
+#: for the same reason — nothing was attempted.
+_REVOKE_SQL = f"""
+UPDATE notify.delivery d
+   SET state = 'SUPPRESSED', last_attempt_at = now(),
+       detail = 'the recipient may no longer read this notification: '
+                'clearance, compartments or case assignment changed after '
+                'it was queued'
+  FROM notify.notification n
+ WHERE n.id = d.notification_id
+   AND d.state = 'PENDING'
+   AND NOT ({readable_predicate('n')})
+RETURNING d.id
 """
 
 
@@ -284,6 +326,17 @@ def due(conn: psycopg.Connection, limit: int = MAX_PER_DRAIN) -> list[Outgoing]:
         subject=r[8], summary=r[9], classification=r[10],
         compartments=frozenset(r[11] or []), address=r[12], case_code=r[13],
     ) for r in rows]
+
+
+def revoke_undeliverable(conn: psycopg.Connection) -> int:
+    """Close out every PENDING delivery the recipient may no longer read.
+
+    Not time-bounded and not limited: this is a cheap UPDATE over a small
+    working set, and a cap here would mean a revocation that took several
+    drains to take effect. Returns how many were closed so the caller can
+    report it rather than discover it in the table.
+    """
+    return len(conn.execute(_REVOKE_SQL).fetchall())
 
 
 def destination_for(channel: str) -> Destination:
@@ -303,8 +356,14 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
 
     The transports are injectable so the tests exercise the gate, the
     redaction and the ledger without a mail server.
+
+    Begins by closing out any PENDING delivery whose recipient may no longer
+    read it — see `revoke_undeliverable`. That has to happen BEFORE the
+    drain rather than as a filter inside it, or the rows would queue up
+    invisibly forever.
     """
-    counters = {"sent": 0, "redacted": 0, "refused": 0, "failed": 0}
+    counters = {"sent": 0, "redacted": 0, "refused": 0, "failed": 0,
+                "revoked": revoke_undeliverable(conn)}
     for out in due(conn, limit):
         decision = can_egress(
             out.classification, destination_for(out.channel),

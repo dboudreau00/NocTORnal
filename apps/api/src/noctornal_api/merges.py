@@ -34,6 +34,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api import notify_events
+from noctornal_api.security.access import tlp_from_name
 
 # The identity layer, per the ontology's ACTOR category. A merge within a
 # layer is a claim that two records describe one thing; a merge ACROSS this
@@ -183,7 +184,13 @@ class MergeService:
                 self._c, case_id=case_id, merge_id=merge_id,
                 source_label=src["label"], target_label=dst["label"],
                 edges_repointed=moved, reason=reason.strip(),
-                actor_id=merged_by)
+                actor_id=merged_by,
+                # The body names both nodes, so the notification is at least
+                # as classified as the more restricted of them.
+                element_classification=max(
+                    (src["classification"], dst["classification"]),
+                    key=lambda c: tlp_from_name(c)),
+                element_compartments=src["compartments"] | dst["compartments"])
         return self.get(merge_id)
 
     def unmerge(self, merge_id: UUID, *, reversed_by: UUID,
@@ -238,10 +245,16 @@ class MergeService:
                 "edges_restored": len(rows),
                 "reason": reason.strip(),
             })
+            src = self._node(record.case_id, record.source_node_id, "source")
+            dst = self._node(record.case_id, record.target_node_id, "target")
             notify_events.merge_reversed(
                 self._c, case_id=record.case_id, merge_id=merge_id,
                 edges_restored=len(rows), reason=reason.strip(),
-                actor_id=reversed_by)
+                actor_id=reversed_by,
+                element_classification=max(
+                    (src["classification"], dst["classification"]),
+                    key=lambda c: tlp_from_name(c)),
+                element_compartments=src["compartments"] | dst["compartments"])
         return self.get(merge_id)
 
     def history(self, case_id: UUID, limit: int = 100) -> list[MergeRecord]:
@@ -276,14 +289,21 @@ class MergeService:
     # -- internals --------------------------------------------------------
     def _node(self, case_id: UUID, node_id: UUID, which: str) -> dict:
         row = self._c.execute(
-            """SELECT node_type, label, merged_into_id, deleted_at
+            """SELECT node_type, label, merged_into_id, deleted_at,
+                      classification, compartments
                  FROM core.node WHERE id = %s AND case_id = %s""",
             (node_id, case_id),
         ).fetchone()
         if row is None:
             raise MergeError(f"the {which} node is not in this case")
+        # The labels come back because the merge NOTIFICATION quotes both
+        # node labels in its body, and a node may be classified above its
+        # case (the floor trigger only stops it going below). Labelling that
+        # notification with the case's classification alone under-labels it.
         return {"node_type": row[0], "label": row[1],
-                "merged_into_id": row[2], "deleted_at": row[3]}
+                "merged_into_id": row[2], "deleted_at": row[3],
+                "classification": row[4],
+                "compartments": frozenset(row[5] or [])}
 
     def _check_layers(self, src_type: str, dst_type: str) -> None:
         """Invariant 2, at the merge boundary."""
