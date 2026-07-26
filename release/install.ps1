@@ -119,7 +119,8 @@ The usual cause is copying release/ out on its own. It is documentation
 and installers only -- there is no application source in it. Download or
 clone the whole repository and run:
 
-    powershell -ExecutionPolicy Bypass -File .elease\install.ps1
+    powershell -ExecutionPolicy Bypass -File .
+elease\install.ps1
 
 from the project root.
 '@
@@ -140,7 +141,12 @@ foreach ($name in @('python', 'python3', 'py')) {
     # `python` alias fires first and writes to stderr, which under
     # EAP=Stop killed this loop before python3/py were ever tried.
     $probe = Invoke-Capture $cmd.Source @('-c', "import sys; print('%d.%d' % sys.version_info[:2])")
-    $raw = $probe.Text
+    # Trim: Invoke-Capture pipes through Out-String, which appends a
+    # trailing newline, and the banner below interpolates $raw mid-string
+    # -- so without this the very first thing a new user sees is
+    # "Python 3.13
+ at C:\...".
+    $raw = ($probe.Text).Trim()
     if ($probe.Code -ne 0 -or -not $raw -or -not ($raw.Trim() -match '^\d+\.\d+$')) { continue }
     $parts = $raw.Trim().Split('.')
     if ([int]$parts[0] -gt 3 -or ([int]$parts[0] -eq 3 -and [int]$parts[1] -ge 12)) {

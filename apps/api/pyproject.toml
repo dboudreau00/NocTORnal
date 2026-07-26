@@ -15,6 +15,22 @@ dependencies = [
     "blake3>=0.4",         # second independent integrity anchor for evidence
     "fastapi>=0.110",      # REST API
     "uvicorn>=0.29",       # ASGI server
+    # FastAPI needs this for EVERY `Form(...)` and `UploadFile` parameter,
+    # and it does not depend on it — it raises at REQUEST time with
+    # "Form data requires python-multipart to be installed".
+    #
+    # Found 2026-07-26 by installing the packaged release into a clean
+    # venv and running the suite there: 117 errors that do not occur on
+    # the development machine, whose venv acquired the package by hand
+    # long ago (`pip show` reports an empty `Required-by`).
+    #
+    # This is R3's shape and worse. R3 (alembic) failed loudly at install
+    # time. This one installs cleanly, passes every test that does not
+    # touch a multipart route, and then fails the first time an analyst
+    # uploads an exhibit, a sample or a `.eml` — the three routes that
+    # matter most. Nothing in 1257 passing tests on this machine could
+    # have caught it, because this machine had the package.
+    "python-multipart>=0.0.9",
     # WebSocket transport for /api/v1/live. uvicorn will not serve a
     # WebSocket route without one of these installed -- it declines the
     # upgrade and the client falls back to manual refresh, silently. A
