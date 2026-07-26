@@ -132,18 +132,31 @@ labels from the issuing key and puts every row on a clock. Fragments are
 now structurally redacted before storage — keys, types and lengths, never
 values — and a database constraint refuses any new unredacted row.
 
+**Checked 2026-07-26 on the development database: nothing to repair
+here.** All three dead-letter rows present are `redacted = true`, labelled
+AMBER and on a clock, so every one of them was written after the fix.
+`scripts/redact_dead_letters.py` reports "0 unredacted dead-letter row(s)".
+
+That closes item 1 **for this deployment only**, and the distinction
+matters: the script exists because any deployment that ran the code before
+migration 0040 will have rows this one does not. Run it there before
+concluding anything.
+
 **Outstanding, and it needs a decision:**
 
-1. **Rows recorded before the fix are still verbatim on disk.** They are
-   labelled, on a clock and withheld from the API.
-   `scripts/redact_dead_letters.py --apply` rewrites them. It is
-   irreversible, which is why a human runs it rather than a migration.
+1. ~~Rows recorded before the fix are still verbatim on disk.~~ None on
+   this database (checked 2026-07-26). Still required on any deployment
+   that processed feeds before 0040; `scripts/redact_dead_letters.py
+   --apply` rewrites them, and it is irreversible, which is why a human
+   runs it rather than a migration.
 2. **Whether this constitutes a reportable data-protection incident** in
    either operating jurisdiction, given the material involved and the
    access controls that were absent while it existed. On this deployment
    the affected rows are development data; on any deployment that has
    processed real feeds, this is a question for counsel and not for the
-   engineer who found it.
+   engineer who found it. **Still open, and the check above does not touch
+   it** — "we found nothing left on this machine" is not an answer to
+   "was anything disclosed".
 3. Confirm B9 (the 90-day dead-letter clock).
 
 | **Determination** | |

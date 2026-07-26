@@ -85,11 +85,14 @@ Three things the number still hides:
    unlawful to operate. Phase 8 is now at 80% and **must not be switched
    on** until L1 is settled — see the register below. That is not a
    caveat on the number; it is the point.
-3. **Two retrospective items are open**, not future work: the dead-letter
-   rows recorded before the redactor existed are still verbatim on disk
-   (`scripts/redact_dead_letters.py --apply`), and any batch accepted
-   before object storage was wired cannot be re-parsed. Both are docs/18
-   Section D.
+3. **Retrospective items** (docs/18 Section D). The dead-letter repair was
+   **checked on 2026-07-26 and this database has nothing to fix** — all
+   three rows are already redacted, so every one was written after the
+   fix. That closes it *here* and not on any deployment that ran the code
+   before migration 0040. Still open: batches accepted before object
+   storage was wired cannot be re-parsed, and whether the original
+   exposure is reportable — which "we found nothing left on this machine"
+   does not answer.
 
 ---
 
@@ -206,7 +209,7 @@ gain each buys.
 | ~~4~~ | ~~UI for 7, 6 and 8~~ | done 2026-07-26 | Every phase has a pane. |
 | 1 | **Close the per-phase feature gaps** below | ~**+5%** | Adapters, WebAuthn, Jira, fuzzy hashing. Genuine feature work, and the part most exposed to the legal blockers. |
 | 2 | **A hostile pass over Phase 6, and over this session's own fixes** | ~**+2%** | Phase 6 is the last phase with a partial review. And the fourth pass's lesson stands: most of its findings were in the previous pass's FIXES. |
-| 3 | **The two retrospective items** (docs/18 Section D) | 0% on this scale | Run the dead-letter redaction repair; decide what to do about batches accepted before object storage was wired. Neither scores; both are real. |
+| 3 | **The remaining retrospective items** (docs/18 Section D) | 0% on this scale | The dead-letter repair is checked and clean on this database (2026-07-26). What is left: batches accepted before object storage was wired cannot be re-parsed, and whether the original exposure is reportable. Neither scores; both are real. |
 | 4 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, DNS-rebinding-proof SSRF protection, login timing. |
 
 That reaches roughly **97%** with no phase below 85%. The last 3% is

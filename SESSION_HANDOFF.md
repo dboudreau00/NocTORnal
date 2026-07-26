@@ -83,7 +83,7 @@ step is a choice rather than a continuation.
 | **1** | **A hostile pass over THIS session's fixes** | The pattern has held twice now: the 2026-07-25 evening pass found that *most of its findings were in the previous pass's fixes*, and this session repeated it — a filename defence written that morning was defeated by the exact attack it was written for, and only a screenshot showed it. This session changed three service signatures, added two migrations and rewrote the notification read path. |
 | **2** | **Phase 6's review** | The last phase with only a partial pass. |
 | **3** | **Per-phase feature gaps** | Adapters (Phase 4), WebAuthn and timeline replay (6), Jira and a worker (5), fuzzy hashing and YARA (8). `ROADMAP-REMAINING.md` §4. |
-| **4** | **The two retrospective items** | `scripts/redact_dead_letters.py --apply` has still not been run, and batches accepted before object storage was wired cannot be re-parsed. docs/18 Section D. Neither scores on the completion measure; both are real. |
+| **4** | **The remaining retrospective items** | The dead-letter repair was **checked on 2026-07-26: this database has nothing to fix**, all three rows are already redacted. That closes it here and not on any deployment that ran pre-0040 code. Still open: batches accepted before object storage was wired cannot be re-parsed, and whether the original exposure is reportable — which "nothing left on this machine" does not answer. docs/18 Section D. |
 
 ### 4.2 If you touch the UI
 
