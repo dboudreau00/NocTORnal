@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import (
     CurrentUser,
+    authorize_object,
     current_user,
     get_conn,
     require_global,
@@ -47,6 +48,7 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.samples import (
+    MAX_SAMPLE_BYTES,
     PolicyNotDeclared,
     Sample,
     SampleError,
@@ -99,6 +101,37 @@ def _out(s: Sample) -> SampleOut:
     )
 
 
+async def _read_capped(file: UploadFile) -> bytes:
+    """Read the upload, refusing as soon as it exceeds the cap.
+
+    `await file.read()` with no argument buffers the WHOLE body first and
+    the service checks the size afterwards — so a caller could hand the API
+    four gigabytes and the refusal arrived only once four gigabytes had
+    been accumulated. The cap was documented, enforced, and useless against
+    the thing a cap is for.
+
+    Chunked, and it stops at the first chunk that crosses the line. The
+    limit is `MAX_SAMPLE_BYTES` itself rather than a second number, because
+    two limits drift and the one that drifts is the one nobody is looking
+    at.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_SAMPLE_BYTES:
+            raise Problem(
+                413, "Payload too large",
+                f"a sample submission is capped at {MAX_SAMPLE_BYTES} bytes; "
+                f"anything larger is a disk image or a mistake. The upload "
+                f"was refused at the cap rather than buffered whole.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.get("/policy", response_model=dict)
 def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
     """Whether an operator has declared a prohibited-content policy, and
@@ -134,20 +167,47 @@ async def submit(
     case_id: UUID | None = Form(None),
     source_note: str | None = Form(None),
     classification: str = Form("AMBER"),
+    compartments: str = Form(""),
     user: CurrentUser = Depends(require_global("sample.submit")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SampleOut:
     """Land a sample in QUARANTINE. Nothing reaches the RE queue until
     triage has run, and nothing is accepted at all until a
-    prohibited-content policy has been declared."""
-    data = await file.read()
+    prohibited-content policy has been declared.
+
+    `sample.submit` is a GLOBAL permission — `require_global` resolves the
+    verb, the active account and step-up freshness, and knows nothing about
+    a case. So a caller holding it could previously attach a sample to ANY
+    case id, including one the access gate would answer 404 for: a write
+    into a case file they cannot see, which then carries that case's labels
+    and appears in its report. `authorize_object` closes that, and it is
+    the same five-part decision every other case-scoped write makes.
+
+    `compartments` exists at all now because the form had no field for it,
+    so every sample landed with `'{}'` whatever its case required. The
+    service unions the case's in regardless; this is for the case where the
+    SAMPLE is more restricted than the case it came from, which is the
+    normal direction for a sample carrying a source's fingerprints.
+    """
+    parsed = frozenset(c.strip() for c in compartments.split(",") if c.strip())
+    if case_id is not None:
+        authorize_object(conn, user, case_id=case_id,
+                         permission_key="sample.submit",
+                         classification=classification, compartments=parsed)
+    data = await _read_capped(file)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return _out(_svc(conn).submit(
             data, submitted_by=user.user_id, case_id=case_id,
             # The filename is stored for the record and is NEVER used as a
             # path component or rendered unescaped.
             original_filename=file.filename, source_note=source_note,
-            classification=classification))
+            classification=classification, compartments=parsed,
+            # Only for how much the duplicate refusal may say: uploading a
+            # hash you suspect and reading the error back is a cheap probe
+            # for "is anybody else working this intrusion".
+            visible_to_clearance=clearance.name,
+            visible_to_compartments=held))
     except PolicyNotDeclared as exc:
         # 451: the refusal is legal, not technical, and a 400 would send
         # somebody looking at their upload.
@@ -161,9 +221,15 @@ def queue(
     user: CurrentUser = Depends(require_global("sample.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The RE queue, filtered by the caller's own clearance and
-    compartments -- a sample can be classified above its case, so the case
-    gate alone would leak its existence."""
+    """The RE queue, filtered by the caller's own clearance and compartments
+    COMPOSED with each sample's case.
+
+    Both directions matter and the service handles both: a sample can be
+    classified above its case, so the case gate alone would leak its
+    existence; and it can sit below its case, because `lab.sample` has no
+    classification floor trigger, so the sample's own labels alone would
+    leak the case's.
+    """
     clearance, compartments = user_ceiling(conn, user.user_id)
     rows = _svc(conn).queue(clearance=clearance.name, compartments=compartments)
     return {"samples": [_out(s).model_dump(mode="json") for s in rows]}
@@ -175,16 +241,26 @@ def detail(
     user: CurrentUser = Depends(require_global("sample.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
+    """One sample's metadata, its findings and its custody ledger.
+
+    The label check moved INTO the service as `visible()` (F19). It used to
+    live here, comparing the sample's own classification and compartments
+    and nothing else — so a sample submitted into a RED compartmented case
+    at the router's `AMBER` default was readable by anyone with AMBER
+    clearance, because `lab.sample` has no `enforce_tlp_floor` trigger to
+    stop the row existing at AMBER in the first place.
+
+    Doing it in the service means the composition is written once and a
+    second caller cannot skip it. That is not hypothetical: `download()` is
+    the caller that skipped it.
+    """
     svc = _svc(conn)
-    sample = svc.get(sample_id)
-    if sample is None:
-        raise Problem(404, "Not found", "no such sample")
     clearance, compartments = user_ceiling(conn, user.user_id)
-    from noctornal_api.security.access import tlp_from_name
-    if (tlp_from_name(sample.classification) > clearance
-            or not sample.compartments <= compartments):
-        # Same 404 a nonexistent sample gives: a status code must not be an
-        # existence oracle (deps.py rule 2).
+    # 404 rather than 403: a status code must not be an existence oracle
+    # for a compartmented case (deps.py rule 2).
+    sample = svc.visible(sample_id, clearance=clearance.name,
+                         compartments=compartments)
+    if sample is None:
         raise Problem(404, "Not found", "no such sample")
     return {"sample": _out(sample).model_dump(mode="json"),
             "analyses": svc.analyses(sample_id),

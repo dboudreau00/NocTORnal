@@ -11,6 +11,7 @@ Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import date
 from uuid import uuid4
@@ -202,12 +203,33 @@ def test_nothing_is_stored_as_an_executable(conn, svc, store):
 
 def test_the_same_binary_is_not_stored_twice(conn, svc):
     """Two analysts finding the same binary is a finding about the actors,
-    not a reason for two copies of live malware."""
+    not a reason for two copies of live malware.
+
+    The refusal names the hash only for a caller who could have seen the
+    existing row anyway. `submit()` without `visible_to_clearance` says
+    nothing, and that default is the point: uploading a hash you suspect
+    and reading the error back is a cheap probe for "is anybody else
+    working this intrusion", which in a compartmented case is the answer
+    the access gate exists to withhold (docs/17 F19).
+    """
     from noctornal_api.samples import SampleError
     alice = _user(conn)
     svc.submit(FAKE_PE, submitted_by=alice)
+
+    # Cleared: the useful message, so the analyst can go and link it.
     with pytest.raises(SampleError, match="already held"):
-        svc.submit(FAKE_PE, submitted_by=alice)
+        svc.submit(FAKE_PE, submitted_by=alice, visible_to_clearance="RED")
+
+    # Not cleared, and — the default — a caller who did not say. Both get a
+    # refusal that discloses nothing, and neither stores a second copy.
+    for kwargs in ({}, {"visible_to_clearance": "CLEAR"}):
+        with pytest.raises(SampleError, match="not accepted") as raised:
+            svc.submit(FAKE_PE, submitted_by=alice, **kwargs)
+        assert "already held" not in str(raised.value)
+        assert hashlib.sha256(FAKE_PE).hexdigest()[:16] not in str(raised.value)
+    assert conn.execute(
+        "SELECT count(*) FROM lab.sample WHERE sha256 = %s",
+        (hashlib.sha256(FAKE_PE).digest(),)).fetchone()[0] == 1
 
 
 def test_an_oversized_submission_is_refused(conn, svc, monkeypatch):
