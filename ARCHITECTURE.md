@@ -532,11 +532,11 @@ Verified from `apps/api/pyproject.toml`, `infra/docker-compose.yml`, `docs/02-ar
 | Evidence store | MinIO (`minio/minio`) + `minio/mc` init | WORM evidence via object lock; buckets `noctornal-evidence` (`--with-lock`) and `noctornal-raw` | Implemented. Compose sets `--default GOVERNANCE 365d`; app writes COMPLIANCE-mode locks (`docs/00` #26) |
 | Authorization | OpenFGA (`openfga/openfga`, Postgres datastore, playground `:3001`) | Relationship-based authz (`docs/02`: "OpenFGA or SpiceDB") | **Provisioned in compose.** Shipped access path is an in-code five-part gate resolving roles/clearance/compartments in SQL (`docs/00` #29); whether the API queries OpenFGA is unverified. SpiceDB not present |
 | Message bus | NATS 2 (`nats:2-alpine`, JetStream `-js`) | Zone C to B queue (`docs/02`) | Provisioned in compose; no producer/consumer wired (`apps/collector` has no Python) |
-| Mail | Mailpit (`axllent/mailpit`, service `mailhog`) | Captured dev SMTP (`:1025`), inbox UI (`:8025`) | Implemented |
+| Mail | Mailpit (`axllent/mailpit`, service `mailpit`) | Captured dev SMTP (`:1025`), inbox UI (`:8025`) | Implemented |
 
 ### Infra services defined in `infra/docker-compose.yml`
 
-`postgres` (TCP healthcheck, `pg_stat_statements` preloaded, extensions from `../db/init` only — schema comes from Alembic), `redis`, `minio` + `minio-init` (one-shot bucket/lock creation, `set -e`), `mailhog` (Mailpit), `openfga-migrate` + `openfga`, `nats`. Named volumes: `pgdata`, `redisdata`, `miniodata`, `natsdata`. Header comment: development only; production runs the three `docs/02` zones under separate network policies.
+`postgres` (TCP healthcheck, `pg_stat_statements` preloaded, extensions from `../db/init` only — schema comes from Alembic), `redis`, `minio` + `minio-init` (one-shot bucket/lock creation, `set -e`), `mailpit`. OpenFGA and NATS were REMOVED on 2026-07-26 (R13): neither was referenced by a line of `apps/api`, and between them they published four host ports (8080, 3001, 4222, 8222) that could fail the whole `compose up`. Named volumes: `pgdata`, `redisdata`, `miniodata`. Header comment: development only; production runs the three `docs/02` zones under separate network policies.
 
 ### Conventions
 

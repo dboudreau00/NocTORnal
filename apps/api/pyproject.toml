@@ -34,6 +34,21 @@ dependencies = [
     "igraph>=0.11",
     "leidenalg>=0.10",     # Leiden, not Louvain: Louvain can produce
                            # internally disconnected communities (docs/03)
+    # R3 (2026-07-26): alembic and SQLAlchemy are RUNTIME dependencies of
+    # this application, not a separate database-tooling concern.
+    #
+    # They lived only in `db/requirements.txt`, which nothing installed.
+    # `pip show alembic` reported an empty `Required-by:`, and both
+    # installers ran `pip install -e packages/ontology -e apps/api` and
+    # then invoked alembic -- so every clean machine died at the migration
+    # step (`.venv/bin/alembic: No such file or directory` on Linux; a
+    # correct-but-fatal remedy message on Windows). The dev machine never
+    # felt it because its venv predates the installers.
+    #
+    # The schema is not optional: this product does not start without its
+    # migrations, so the thing that applies them is a dependency.
+    "alembic>=1.13",
+    "SQLAlchemy>=2.0",     # alembic's own requirement, pinned explicitly
     # noctornal-ontology is a sibling package in this monorepo (the ONE
     # source of selector normalisers). Install it editable alongside:
     #   pip install -e packages/ontology -e apps/api

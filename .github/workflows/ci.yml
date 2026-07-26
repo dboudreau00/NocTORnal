@@ -27,6 +27,7 @@ env:
   MINIO_ACCESS_KEY: noctornal
   MINIO_SECRET_KEY: dev_only_change_me
   EVIDENCE_BUCKET: noctornal-evidence
+  SAMPLE_BUCKET: noctornal-samples
   # A fixed, throwaway KEK. Real deployments supply this from the
   # environment or Vault and there is no default anywhere in the code --
   # see security/envelope.py.
@@ -132,7 +133,7 @@ jobs:
       # The evidence bucket needs OBJECT LOCK, which cannot be enabled
       # after creation -- getting it wrong here would make the WORM tests
       # pass against a bucket with no WORM.
-      - name: Create the evidence bucket with object lock
+      - name: Create the object-store buckets
         run: |
           curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
           chmod +x /tmp/mc
@@ -142,6 +143,13 @@ jobs:
           done
           /tmp/mc mb --ignore-existing --with-lock local/noctornal-evidence
           /tmp/mc retention set --default GOVERNANCE 365d local/noctornal-evidence
+          /tmp/mc mb --ignore-existing local/noctornal-raw
+          # R10 (2026-07-26): the samples bucket. CI had the same gap the
+          # compose file did -- nothing created it, so the first test to
+          # exercise a real sample upload would have got NoSuchBucket.
+          # NOT --with-lock: docs/11's rejection path must be able to
+          # destroy sample bytes, which an object lock would prevent.
+          /tmp/mc mb --ignore-existing local/noctornal-samples
 
       - name: Migrate to head
         run: alembic upgrade head
