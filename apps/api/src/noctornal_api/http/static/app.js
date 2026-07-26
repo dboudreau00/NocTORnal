@@ -5675,7 +5675,13 @@ function renderAchMatrix(body) {
 
   const tbody = el('tbody');
   for (const e of body.evidence) {
-    const tr = el('tr', e.is_diagnostic ? '' : 'not-diagnostic');
+    /* Three states, not two. "Settles nothing" and "we have not finished
+       entering this row" both render 0.00 and mean opposite things: one is
+       a judgement about the evidence, the other is a gap in the matrix.
+       Showing them identically told an analyst their evidence was
+       worthless when it was merely half-entered (docs/17 F20). */
+    const tr = el('tr', e.is_incomplete ? 'row-incomplete'
+      : (e.is_diagnostic ? '' : 'not-diagnostic'));
     const label = el('td', 'ach-el', e.label);
     label.title = e.label;
     tr.appendChild(label);
@@ -5690,8 +5696,15 @@ function renderAchMatrix(body) {
         : (h.statement + ' — ' + td.textContent);
       tr.appendChild(td);
     }
-    const diag = el('td', 'ach-diag', e.diagnosticity.toFixed(2));
-    if (!e.is_diagnostic) {
+    const diag = el('td', 'ach-diag',
+      e.is_incomplete ? '—' : e.diagnosticity.toFixed(2));
+    if (e.is_incomplete) {
+      diag.title = 'UNKNOWN, not zero. This item has been scored against '
+        + (e.assessed_against === 1 ? 'only one hypothesis'
+          : 'no hypotheses')
+        + ', so whether it discriminates cannot be said yet. Finishing the '
+        + 'row is the cheapest work available here.';
+    } else if (!e.is_diagnostic) {
       diag.title = 'Consistent with every hypothesis, so it discriminates '
         + 'nothing and is excluded from the ranking. Kept in the record '
         + 'rather than deleted.';

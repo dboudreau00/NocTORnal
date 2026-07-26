@@ -878,6 +878,17 @@ select.select { appearance: none; padding-right: 24px; }
 .not-diagnostic { opacity: 0.5; }
 .not-diagnostic .ach-el { font-style: italic; }
 
+/* A row that has not been finished. Deliberately NOT dimmed like the one
+   above: "settles nothing" and "we have not entered this yet" both render
+   0.00 and mean opposite things, and dimming an unfinished row invites an
+   analyst to skip the cheapest work on the screen. Marked as an action
+   instead (docs/17 F20). */
+.row-incomplete { border-left: 2px solid var(--alert); }
+.row-incomplete .ach-el::after {
+  content: " ·"; color: var(--alert); font-weight: 700;
+}
+.row-incomplete .ach-diag { color: var(--alert); }
+
 /* ── Brand mark ─────────────────────────────────────────────────────────
  *
  * The SVG takes `currentColor` for its network and keeps the accent for
