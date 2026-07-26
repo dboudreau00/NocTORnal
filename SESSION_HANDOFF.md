@@ -1,7 +1,67 @@
-# Session handoff — 2026-07-26 (second session)
+# Session handoff — 2026-07-26 (third session)
 
 Written so a fresh session can resume without re-deriving anything.
-Supersedes the earlier 2026-07-26 handoff.
+Supersedes both earlier 2026-07-26 handoffs.
+
+---
+
+## 0. What the THIRD session did (2026-07-26, evening)
+
+Branch **`deception-and-release-hardening`**, four commits on top of
+`d4595ff`. Nothing pushed — there is still no remote.
+
+**(a) The deception subsystem** — `docs/19`, migrations 0046–0050,
+`deception.py`, its router, its pane, 52 tests. Phishing captures, BEC
+email forensics, vishing call records. Three rules carry it: a captured
+page is attacker-authored code (invariant 10 generalised), the displayed
+identifier is the spoofed one (invariant 9 generalised), and the Received
+chain is trustworthy inwards only. See ARCHITECTURE's new section.
+
+**(b) `FinalCodeReviewFindings.md` fully remediated.** All 18 CONFIRMED
+code findings, the 1 PLAUSIBLE, and all 21 release findings. The two
+REFUTED were correctly refuted. Every entry in that file now carries a
+`✅ FIXED` line naming what changed. Two migrations came out of it: 0051
+re-keys Telegram selectors after the decode fix, 0052 adds the two missing
+TRUNCATE guards.
+
+  - **CR1 was a real confidentiality breach**: `target_tlp` travelled from
+    the query string into `GraphService(clearance=...)` unclamped, so an
+    AMBER analyst could request a RED report and get RED nodes and exhibit
+    hashes. Both call sites already computed `user_ceiling()` and used only
+    index `[1]`.
+  - **CR3 closed determination D8**, which `docs/16` carried as knowingly
+    unfixed. The Telegram Bot-API encoding is arithmetic, not a text
+    prefix; the old string-strip was correct only for a ten-digit channel
+    id, which is exactly what its one test used.
+
+**(c) Release packaging.** AGPL-3.0-or-later (forced — `igraph` is
+GPL-2.0-or-later, `leidenalg` GPL-3.0-or-later, both imported by
+`analytics.py`, so no permissive licence was available; see `NOTICE.md`).
+Rewritten README with 16 screenshots and three mermaid diagrams,
+`SECURITY.md`, `CONTRIBUTING.md`, `scripts/package_release.ps1` (git
+archive, verified), OpenFGA and NATS removed from compose.
+
+**Screenshots are a TLP:CLEAR synthetic case** (`OP-SHOWCASE-26`, seeded
+by `bootstrap.py demo-network` + `scripts/seed_deception_demo.py`).
+`.gitignore`'s blanket `*.png` rule is negated ONLY for `docs/images/`;
+`screenshots/` and `shots/` stay ignored. **Check the TLP badge reads
+CLEAR before adding any image there.**
+
+### Two things worth carrying forward
+
+1. **A test can encode the wrong mental model.** The Received-chain
+   boundary test was written asserting that the attacker's originating IP
+   should be EXCLUDED. It should not: our own relay wrote that line, so it
+   is our observation and the single most valuable identifier in the
+   message. The code was right and the test was wrong.
+
+2. **The ninth instance of this project's recurring defect shape.** The
+   R10 fix added comments *inside* `minio-init`'s `entrypoint: >` — a YAML
+   **folded** scalar — so the `#` joined onto one shell line and commented
+   out the very bucket creation it described. `docker compose config`
+   caught it; reading the diff did not.
+
+---
 
 > **Read order:** this file → **`docs/18-legal-review-pack.md`** (the
 > register as a *decision document* — hand this to a reviewer) →
@@ -22,10 +82,12 @@ analyst UI under a strict CSP with no build step.
 
 ## 2. Where it is
 
-**~95% complete** on a four-dimension weighted measure (model+tests 45%,
+**~97% complete** on a four-dimension weighted measure (model+tests 45%,
 HTTP API 15%, analyst UI 25%, adversarial review 15%).
 
-- **1206 tests, 0 skipped.** Alembic head **0045**. ruff clean.
+- **1252 tests, 12 skipped.** Alembic head **0052**. ruff clean.
+  (Without `DATABASE_URL` you see ~700 skips — half the suite is
+  deliberately database-gated. That is a correct result.)
 - **`release/` is the packaged Alpha release** — README leading with the
   legal status, an analyst MANUAL, INSTALL, and one-shot installers for
   Windows and Linux/macOS. `scripts/assemble_release.ps1` copies it out to

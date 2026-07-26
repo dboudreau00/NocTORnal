@@ -23,7 +23,7 @@ analytics, API, security, storage, collection, UI and stack, closing with the
 load-bearing decisions and the legal gates enforced in code.
 
 > **Freshness.** This map reflects the source as surveyed on **2026-07-25** at
-> **Alembic head 0039**, **1012 tests passing**. It follows the *code*, not the
+> **Alembic head 0052**, **1252 tests passing**. It follows the *code*, not the
 > original design intent — where the two diverge (front-end stack, UUID
 > version, pagination style, OpenFGA/NATS wiring) this document says so rather
 > than describing the aspiration as if it were built. Companion documents:
@@ -159,7 +159,7 @@ The one ordering constraint that matters (`docs/09` line 4): the graph and asser
 
 ### Current state
 
-`main`, Alembic head **0044**, **1189 tests passing, 0 skipped**, ruff clean; nothing pushed (no remote). The test count spans **two pytest roots** — `apps/api/tests` and `packages/ontology` — so run both or the figure will not reconcile.
+Branch `deception-and-release-hardening`, Alembic head **0052**, **1252 tests passing, 12 skipped**, ruff clean; nothing pushed (no remote). The 12 skips are optional-dependency paths; without `DATABASE_URL` set you will instead see ~700, because half the suite is deliberately database-gated. The test count spans **two pytest roots** — `apps/api/tests` and `packages/ontology` — so run both or the figure will not reconcile.
 
 Overall completion is **~92%**, the unweighted mean across the ten phases under the four-dimension measure. As of 2026-07-26 **every phase has a service, tests, an HTTP API, an analyst pane and an adversarial review.** UI was the single largest gap for most of this build's life and is no longer: the Lab pane (Phase 8) was the last, and what remains on that axis is WebSocket push for the sociogram and metric-history charting.
 
@@ -455,6 +455,97 @@ Parsing (`parse_batch`) splits the raw into fragments; anything that will not pa
 
 ---
 
+## Social-engineering evidence: phishing, BEC, vishing
+
+`docs/19`. Schema `deception`, migrations 0046–0050, service
+`deception.py`, router `http/routers/deception.py`, pane `DECEPTION`.
+
+The design premise: each of the three claims an analyst needs to make is a
+**tuple**, and the model had nowhere to put the tuple. A screenshot alone
+proves somebody had a screenshot; a `From:` header alone proves nothing at
+all. So `deception.capture` holds requested URL, redirect chain, final
+URL, TLS identity, screenshot, DOM and HAR **on one row** — the pairing is
+the evidential value, and a schema that stored them as independent
+exhibits would invite a screenshot to be re-paired with another page's DOM.
+
+### Invariant 10 generalised — a captured page is attacker-authored code
+
+`core.evidence.is_hostile_markup` (0046) marks bytes that may be
+downloaded and never rendered by the API origin: DOM, HAR, `.eml`, SVG.
+`EvidenceService.ingest` derives it from a media-type allowlist at the one
+place bytes enter, so a caller cannot forget it.
+
+`/captures/{id}/screenshot` is the **first and only inline-rendering
+exhibit path in the product** — every other route serves
+`application/octet-stream` as an attachment. Five guards, all
+load-bearing: the five-part gate against composed labels; the evidence id
+is read from the capture row so a caller cannot name one; `is_hostile_markup`
+refuses outright; the content type is **re-derived from the magic bytes**
+(`raster_type_of`) because `media_type` is `UploadFile.content_type` and
+therefore client-supplied; and `CSP: default-src 'none'; sandbox` plus
+`nosniff` and `Cross-Origin-Resource-Policy: same-origin`. WebP and AVIF
+are deliberately absent from the allowlist.
+
+### Invariant 9 generalised — the displayed identifier is the spoofed one
+
+In this domain the displayed identifier is chosen by the attacker *as* the
+attack. `deception.call_record` therefore has `presented_number` /
+`presented_name` **and** `originating_trunk` / `p_asserted_identity` /
+`stir_shaken_attestation` as separate columns, and
+`selector_candidates_for_call()` — the one function that decides what
+becomes a selector — returns nothing derived from a presented value. A
+verified attestation A promotes the presented number only to *weak*.
+`stir_shaken_verified` is separate from the letter, because an unverified
+claim of attestation A is worth nothing and one boolean would have let it
+read as verified.
+
+### The Received chain is trustworthy inwards only
+
+`deception.email_hop.seq` is numbered **recipient-first** (0 = the
+receiving organisation's own MTA) and `is_trusted_boundary` marks where
+trust stops. Trust follows the **`by`** host — the MTA that WROTE the
+header — so the boundary hop's `from_ip` is our own infrastructure's
+observation of who connected, and is the most valuable identifier in the
+message; everything above it is attacker-writable. `NOCTORNAL_TRUSTED_MTA_HOSTS`
+configures it, and an unset value means only hop 0 is trusted, which is the
+only defensible default. A partial unique index enforces at most one
+boundary per message, because two would make the question unanswerable.
+
+`email_message` stores parsed headers as columns that are **allowed to
+disagree** (`header_from`, `header_from_display`, `header_reply_to`,
+`header_return_path`, `envelope_from`) plus what the receiving MTA
+decided. `from_replyto_divergent` is stored rather than computed on read,
+because it is the finding and a historical report must not change when the
+parser improves. A DKIM domain is recorded **only when DKIM passed** —
+`email_dkim_domain_needs_pass` is a CHECK, because `header.d=` on a failing
+signature is a claim by the attacker.
+
+### Ontology and legal
+
+Two additions: `LURE` (the pretext, distinct from the `TOOL` that
+generates it) and `IMPERSONATES` — a FALSE identity claim, where
+`ALIAS_OF`/`SAME_AS` assert the subjects *are* the same. `IMPERSONATES` is
+`is_social_tie = false`, `default_sign = 0`, and that is the point: as an
+affiliation it would make the impersonated brand the highest-betweenness
+node in every phishing case in the system. `TARGETED` is widened rather
+than duplicated. Four selectors: `TLS_SPKI` (strong — survives the domain
+rotation phishing infrastructure does constantly), `SIP_URI` (strong),
+`EMAIL_MSGID` and `FAVICON_MMH3` (both weak, pivots not identities).
+
+**Legal item L5** is new and blocking: entering input into a phishing
+page, including canary credentials, may constitute unauthorised access.
+`capture_submission_needs_authority` is a CHECK; there is no code in this
+platform that submits anything. `capture_active_needs_egress_profile` is
+an **attestation, not a routing control** — nothing here performs the
+fetch, and `collect.egress_profile.endpoint_ciphertext` is read by zero
+lines of Python. Stated plainly because a constraint that looks like a
+technical control while being an attestation is this codebase's recurring
+defect shape.
+
+Deliberately not built: live SIP interception, credential-submission
+automation, a mailbox connector, URL detonation from the UI, and any
+"is this phishing?" classifier.
+
 ## Collection, comms and curation
 
 ### Collection layer (Phase 4)
@@ -611,6 +702,6 @@ deployment lawful.
 
 *Generated 2026-07-25 from a parallel source survey (eleven readers over the
 data model, ontology, graph/analytics, API, security, storage, collection,
-comms, UI, stack and decisions) at Alembic head 0039, 1012 tests passing. It
+comms, UI, stack and decisions) at Alembic head 0052, 1252 tests passing. It
 describes the code as built; where the code diverges from `docs/02` or the
 stated conventions, this document follows the code.*
