@@ -239,6 +239,14 @@ def hamming(a: int, b: int) -> int:
 # arrived, not by the row being quotable. The verbatim bytes stay in the
 # batch's raw object under the batch's own retention and access rules,
 # which is where third-party credentials belong if they are held at all.
+#
+# That last sentence was FALSE when it was first written: `accept()` only
+# stored the payload when constructed with a storage adapter and every
+# construction in the router passed none, so redaction was lossy and the
+# original was simply gone. `rawstore.py` closes it, and `accept()` now
+# refuses rather than acknowledging bytes it has nowhere to put. Recorded
+# because "the original is recoverable" is the assumption the whole
+# redaction design rests on, and it was load-bearing before it was true.
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 #: Long unbroken runs of credential-shaped characters: tokens, hashes,
@@ -648,18 +656,57 @@ class IngestService:
                                     detail="already received within 24h")
 
         digest = hashlib.sha256(raw).digest()
-        raw_key = f"ingest/{digest.hex()[:2]}/{digest.hex()}"
-        if self._storage is not None:
-            self._storage.put(raw_key, raw)
+        key_name = f"ingest/{digest.hex()[:2]}/{digest.hex()}"
+        if self._storage is None:
+            # Refuse rather than accept-and-drop. `accept()` returning 202
+            # writes a batch row whose `raw_key` points at nothing: the
+            # partner is told their submission was accepted, `parse` has
+            # nothing to read, and the loss is discovered months later when
+            # somebody tries to re-parse. docs/12's "raw before parse,
+            # always" is not satisfied by recording that we meant to.
+            raise IngestError(
+                "no raw-payload storage is configured, so these bytes would "
+                "be acknowledged and dropped. docs/12 requires the raw "
+                "payload to be persisted BEFORE parsing, because that is "
+                "what makes a wrong parser recoverable without asking a "
+                "partner to resend three months of feed.")
+        self._storage.put(key_name, raw)
 
         row = self._c.execute(
             """INSERT INTO ingest.batch
                    (api_key_id, idempotency_key, raw_key, raw_bytes,
                     raw_sha256, content_type, detected_format)
                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-            (key["id"], idempotency_key, raw_key, len(raw), digest,
+            (key["id"], idempotency_key, key_name, len(raw), digest,
              content_type, detect_format(raw))).fetchone()
         return AcceptResult(batch_id=row[0], accepted=True)
+
+    def raw_for(self, batch_id: UUID) -> bytes:
+        """The bytes as they arrived, for a re-parse.
+
+        Verified against `raw_sha256` before they are returned. The digest
+        is on the batch row and the object is content-addressed, so a
+        mismatch means either the object was replaced or the row was — and
+        re-parsing something that is not what arrived would produce records
+        attributed to a submission that never happened.
+        """
+        if self._storage is None:
+            raise IngestError("no raw-payload storage is configured")
+        row = self._c.execute(
+            "SELECT raw_key, raw_sha256, raw_bytes FROM ingest.batch "
+            "WHERE id = %s", (batch_id,)).fetchone()
+        if row is None:
+            raise IngestError("no such batch")
+        data = self._storage.get(row[0])
+        if hashlib.sha256(data).digest() != bytes(row[1]):
+            raise IngestError(
+                "the stored payload does not match the digest recorded when "
+                "it was accepted. Re-parsing it would attribute records to a "
+                "submission that never happened.")
+        if len(data) != row[2]:
+            raise IngestError(
+                "the stored payload is not the length recorded at accept")
+        return data
 
     # -- parse -------------------------------------------------------------
 

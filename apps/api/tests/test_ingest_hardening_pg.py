@@ -37,6 +37,7 @@ from noctornal_api.ingest import (  # noqa: E402
     redact_text,
     simhash_payload,
 )
+from noctornal_api.rawstore import InMemoryRawStorage  # noqa: E402
 
 PW = "correct-horse-battery-staple"
 #: A prefix of this file's OWN, not shared with `test_ingest_pg.py`. Two
@@ -92,12 +93,14 @@ def _case(conn, owner):
 
 @pytest.fixture
 def svc(conn):
-    return IngestService(conn)
+    # In-memory raw storage: `accept()` refuses when it has nowhere to put
+    # the bytes rather than acknowledging and dropping them.
+    return IngestService(conn, InMemoryRawStorage())
 
 
 @pytest.fixture
 def reader(conn):
-    return IngestService(conn, clearance="RED",
+    return IngestService(conn, InMemoryRawStorage(), clearance="RED",
                          compartments=frozenset({"STEALER-2026"}))
 
 
@@ -417,11 +420,12 @@ def test_correlation_does_not_answer_for_compartments_the_caller_lacks(
         scope_note="correlating one known credential across the corpus",
         legal_basis="production order")
 
-    blind = IngestService(conn, clearance="RED", compartments=frozenset())
+    blind = IngestService(conn, InMemoryRawStorage(), clearance="RED",
+                          compartments=frozenset())
     assert blind.search_by_fingerprint(
         "a-shared-value", actor_id=owner, case_id=case_id) == []
 
-    read_in = IngestService(conn, clearance="RED",
+    read_in = IngestService(conn, InMemoryRawStorage(), clearance="RED",
                             compartments=frozenset({"STEALER-2026"}))
     assert len(read_in.search_by_fingerprint(
         "a-shared-value", actor_id=owner, case_id=case_id)) == 1
@@ -445,6 +449,7 @@ def test_a_record_above_the_callers_clearance_does_not_exist(conn, svc):
     owner = _user(conn)
     case_id = _case(conn, owner)
     record_id, _cred = _record_with_credential(conn, svc, owner, case_id)
-    green = IngestService(conn, clearance="GREEN", compartments=frozenset())
+    green = IngestService(conn, InMemoryRawStorage(), clearance="GREEN",
+                          compartments=frozenset())
     with pytest.raises(IngestError, match="no such record"):
         green.credentials_masked(record_id, case_id=case_id)

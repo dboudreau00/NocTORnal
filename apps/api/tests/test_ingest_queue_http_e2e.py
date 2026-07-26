@@ -125,7 +125,8 @@ def _ingest(conn, owner, *, payloads, case_id=None, compartment=None,
     """Put records in the queue by the service, since the write path needs
     object storage the dev stack does not have."""
     from noctornal_api.ingest import IngestService
-    svc = IngestService(conn)
+    from noctornal_api.rawstore import InMemoryRawStorage
+    svc = IngestService(conn, InMemoryRawStorage())
     key = svc.authenticate(svc.issue_key(
         name="e2e feed", owner_user_id=owner, declared_category=category,
         forced_compartment=compartment).secret)

@@ -372,6 +372,14 @@ $defaults = [ordered]@{
     MINIO_ACCESS_KEY = 'noctornal'
     MINIO_SECRET_KEY = 'dev_only_change_me'
     EVIDENCE_BUCKET  = 'noctornal-evidence'
+    # Raw ingest payloads, in their OWN bucket and deliberately without
+    # object lock. An exhibit is locked so not even root can delete it
+    # before its deadline; a partner's raw submission must stay deletable,
+    # because it runs on a short category clock and may have to go in
+    # response to a deletion order (decision 50). Compose creates it with
+    # `mc mb --ignore-existing local/noctornal-raw` -- note the absent
+    # `--with-lock`, which is the difference that matters.
+    INGEST_BUCKET    = 'noctornal-raw'
 }
 
 foreach ($name in $defaults.Keys) {
