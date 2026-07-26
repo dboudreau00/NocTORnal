@@ -922,7 +922,19 @@ def run_suite(sub: Subgraph, p: Projection,
         "dyad_count": m.dyad_count,
         "dyad_note": "metrics treat the graph as simple: parallel edges "
                      "between the same pair count once",
-        "density": round(g.density(), 6),
+        # CR8 (2026-07-26): through `_clean`, not `round`.
+        #
+        # `run_suite` guards n == 0 but not n == 1, and igraph's density()
+        # on a single vertex is NaN (the denominator n(n-1) is zero).
+        # `round(NaN, 6)` is still NaN, psycopg serialises it as a literal
+        # `NaN`, and Postgres jsonb rejects that -- so any single-node
+        # projection 500s the whole suite. Density was the ONLY float in
+        # this payload not already routed through `_clean`, which exists
+        # for exactly this and returns None instead.
+        #
+        # A single-node projection is not exotic: a case with one entity,
+        # or TLP filtering that leaves one visible node, reaches it.
+        "density": _clean(g.density()),
         "is_approximate": cent["is_approximate"],
         "sample_size": cent["sample_size"],
         "approximation_note": (

@@ -142,8 +142,34 @@ def install_error_handlers(app) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception):
         """Catch-all so an unexpected failure is still problem+json with no
-        internals — a bare 500 would also bypass the security headers."""
+        internals — and still carries the security headers.
+
+        ## CR17 (2026-07-26): the headers half of that promise was false
+
+        Starlette routes the `Exception` handler to the OUTERMOST
+        `ServerErrorMiddleware`, which sits *above* the `_headers`
+        middleware in `app.py`. So an exception with no registered handler
+        — a raw `psycopg.Error`, a `TypeError` — propagates up through
+        `_headers` and `_blanket` (neither of which catches), is turned
+        into a 500 out there, and that response never travels back DOWN
+        through the header middleware.
+
+        The result shipped with no CSP, no `nosniff`, no `Referrer-Policy`,
+        no `Cache-Control`. The docstring above claimed otherwise and was
+        only ever true of the body.
+
+        Stamped explicitly here rather than by restructuring the middleware
+        into a pure-ASGI `send()` wrapper: this is the one response class
+        that escapes, the fix is local to it, and the alternative touches
+        every response in the product to fix the rarest one. `setdefault`
+        semantics are preserved by constructing the headers first and
+        letting `problem_response` win on any key it sets.
+        """
         cid = uuid.uuid4().hex[:12]
         log.exception("unhandled error %s", cid)
-        return problem_response(500, "Internal error",
-                                f"unexpected failure (ref {cid})")
+        response = problem_response(500, "Internal error",
+                                    f"unexpected failure (ref {cid})")
+        from noctornal_api.http.app import _SECURITY_HEADERS
+        for key, value in _SECURITY_HEADERS.items():
+            response.headers.setdefault(key, value)
+        return response

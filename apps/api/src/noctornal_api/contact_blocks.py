@@ -416,6 +416,25 @@ def _durable_for(platform_key: str | None, selector_type: str | None,
     return None, ""
 
 
+#: Unicode categories whose members occupy no visual space: Cf (format —
+#: ZWSP, ZWNJ, the bidi controls, BOM) and Cc (C0/C1 controls). Removed
+#: from every line before parsing (CR4).
+#:
+#: Category-based rather than an explicit character list, deliberately.
+#: The bidi defence in the UI (`visibleText`) enumerates specific code
+#: points because it has to SHOW what it found; a parser only has to
+#: refuse to be fooled, and an enumeration is a list somebody has to
+#: remember to extend when Unicode adds a character.
+#:
+#: Whitespace is NOT in scope: `\s` already matches it and `_LINE` handles
+#: it. This is only about characters that render as nothing at all.
+def _strip_invisible(line: str) -> str:
+    import unicodedata
+    return "".join(ch for ch in line
+                   if unicodedata.category(ch) not in ("Cf", "Cc")
+                   or ch in "\t")
+
+
 def parse(text: str) -> list[ParsedEntry]:
     """Read a block. PURE -- no database, no stoplist, no scoring against
     other blocks. Those are `ContactBlockService`'s job, and keeping them
@@ -435,7 +454,31 @@ def parse(text: str) -> list[ParsedEntry]:
     total = len(candidates)
 
     for index, (line_no, raw) in enumerate(candidates):
-        line = _TRIM_DECORATION.sub("", raw).strip()
+        # CR4 (2026-07-26). Invisible formatting characters are stripped
+        # BEFORE anything reads the line.
+        #
+        # `_LINE`'s label group is `[^\W\d_][\w /_.+-]{0,28}?`, and a
+        # Unicode category-Cf character (U+200B ZWSP, U+200E LRM, U+FEFF)
+        # matches neither `\w` nor `\s`. So `Гарант<ZWSP>: <76-hex Tox ID>`
+        # failed `_LINE` entirely, `label` came out None, and the line fell
+        # through to `_resolve_by_shape` — which strips every non-hex
+        # character, recovers a clean 76-hex Tox ID, and files it as
+        # ROLE_SELF. `_looks_third_party(None, ...)` then skipped its
+        # label word-set branch, because that branch is gated on `if
+        # label:`.
+        #
+        # Net effect: one invisible byte moved the GUARANTOR's key onto the
+        # VENDOR's node, at a score high enough to raise a proposal. That
+        # is the exact attribution docs/10 calls "serious and defamatory",
+        # and the ASCII/Cyrillic version of this hole was already found and
+        # closed once — the invisible-character variant reopened it.
+        #
+        # Stripped rather than rejected: a block is attacker-authored text
+        # and refusing the whole artefact over one character would lose the
+        # other fifteen lines of genuine evidence. The `visibleText`
+        # treatment in the UI still shows the analyst what was really
+        # there.
+        line = _TRIM_DECORATION.sub("", _strip_invisible(raw)).strip()
         if not line:
             continue
         match = _LINE.match(line)
@@ -1135,7 +1178,9 @@ class ContactBlockService:
         }
 
     def impersonation_candidates(self, case_id: UUID, *,
-                                 visible_case_ids: tuple[UUID, ...] = ()
+                                 visible_case_ids: tuple[UUID, ...] = (),
+                                 clearance: str | None = None,
+                                 compartments: frozenset[str] = frozenset()
                                  ) -> list[dict]:
         """Blocks with the same selector set under DIFFERENT publishers.
 
@@ -1146,7 +1191,27 @@ class ContactBlockService:
         Both readings are reported, in that order, because the tool cannot
         tell them apart and an interface that picked one would be guessing
         on the analyst's behalf about which of two people is the fraud.
+
+        ## CR5 (2026-07-26) — this filtered on case_id and nothing else
+
+        The sibling `get()` composes the block's own labels with its case's
+        and gates on both, and its docstring says why: **a block can be
+        classified above its case.** This method skipped that entirely, and
+        it aggregates `publisher_handle` and `source_ref` — so a RED block
+        sharing a fingerprint inside an AMBER case handed its publisher and
+        its source to any AMBER analyst holding `comms.read`.
+
+        `clearance` is REQUIRED rather than defaulted, for the reason
+        `SampleService.queue` learned the same lesson (F19): a caller who
+        forgets an optional clearance argument becomes maximally
+        privileged in silence.
         """
+        if clearance is None:
+            raise ValueError(
+                "impersonation_candidates() needs the caller's clearance. A "
+                "default would mean a forgetful caller silently sees "
+                "everything, which is how this method came to have no label "
+                "filter at all.")
         scope = list({case_id, *visible_case_ids})
         rows = self._c.execute(
             """SELECT b.block_fingerprint,
@@ -1156,12 +1221,18 @@ class ContactBlockService:
                                                   '(unattributed)')),
                       array_agg(DISTINCT b.source_ref)
                  FROM comms.contact_block b
+                 LEFT JOIN core."case" c ON c.id = b.case_id
                 WHERE b.case_id = ANY(%s)
+                  AND greatest(b.classification,
+                               coalesce(c.classification, b.classification))
+                      <= %s::core.tlp
+                  AND (b.compartments
+                       || coalesce(c.compartments, '{}')) <@ %s
                 GROUP BY b.block_fingerprint
                HAVING count(DISTINCT coalesce(
                           b.publisher_identity_node_id::text,
                           lower(b.publisher_handle))) > 1""",
-            (scope,)).fetchall()
+            (scope, clearance, list(compartments))).fetchall()
         return [
             {"block_fingerprint": r[0], "blocks": r[1],
              "publishers": sorted(r[2]), "sources": sorted(r[3]),

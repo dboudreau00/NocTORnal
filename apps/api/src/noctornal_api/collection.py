@@ -585,6 +585,19 @@ class RssAdapter(Adapter):
 _DOCTYPE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.I)
 
 
+#: The XML prolog ends at the first element start-tag. Anything before it
+#: is a declaration, comment or processing instruction — the only region
+#: where a DTD may legally appear (CP1).
+_ROOT_START = re.compile(rb"<[A-Za-z_]")
+
+
+def _root_element_offset(body: bytes, cap: int = 1 << 20) -> int:
+    """Where the prolog ends, capped so a body with no root element does
+    not turn the DOCTYPE scan into a full pass over 16 MiB."""
+    match = _ROOT_START.search(body[:cap])
+    return match.start() if match else min(len(body), cap)
+
+
 def parse_rss(body: bytes) -> list[Item]:
     """Minimal RSS/Atom parsing that REFUSES a DOCTYPE.
 
@@ -600,7 +613,22 @@ def parse_rss(body: bytes) -> list[Item]:
     """
     from xml.etree import ElementTree
 
-    if _DOCTYPE.search(body[:8192]):
+    # CP1 (2026-07-26): scan up to the ROOT ELEMENT, not a fixed 8 KiB.
+    #
+    # The window was `body[:8192]` while bodies up to 16 MiB are accepted,
+    # so an 8 KiB XML comment ahead of the DTD walked straight past the
+    # regex. ElementTree resolves no external entities and modern libexpat
+    # caps entity amplification, so the demonstrated harm is limited — but
+    # this is the check that is supposed to make those two facts
+    # irrelevant, and a defence with a documented bypass is not one.
+    #
+    # The prolog is everything before the first element start-tag that is
+    # not a comment, PI or declaration. Scanning to the first `<` that
+    # begins a name character bounds the work without bounding the
+    # coverage: a DTD cannot legally appear after the root element starts,
+    # so anything past that point is not a prolog DTD.
+    prolog_end = _root_element_offset(body)
+    if _DOCTYPE.search(body[:prolog_end]):
         raise CollectionError(
             "refusing a feed containing a DOCTYPE or ENTITY declaration: a "
             "feed has no legitimate need for one, and an XXE here is a "

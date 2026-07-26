@@ -350,7 +350,28 @@ def reject(
     Unless the sample is under a legal hold, in which case the service
     refuses and says so — docs/08: a hold overrides all deletion,
     everywhere.
+
+    ## CR11 (2026-07-26) — the destructive path had no label check
+
+    `reject(purge_bytes=True)` is irreversible: it deletes the object and
+    zeroes the data key. It resolved the sample through `get()`, which is
+    `WHERE id = %s` with no clearance, compartment or case predicate, and
+    the route gated only on the GLOBAL `sample.analyse` role.
+
+    `download()` composes the sample's labels with its case's before it
+    will serve a byte. `reject()` — which destroys those same bytes
+    forever — did not. So a MALWARE_ANALYST, who deliberately holds no
+    case access at all, could permanently destroy a sample belonging to a
+    compartmented case knowing only its UUID.
+
+    The check runs BEFORE anything is deleted, and returns the same
+    "no such sample" a nonexistent id gives: a 403 here would confirm that
+    a particular sample exists in a case the caller cannot see.
     """
+    clearance, comps = user_ceiling(conn, user.user_id)
+    if _svc(conn).visible(sample_id, clearance=clearance.name,
+                          compartments=comps) is None:
+        raise Problem(404, "Not found", "no such sample")
     try:
         return _out(_svc(conn).reject(sample_id, actor_id=user.user_id,
                                       reason=body.reason,

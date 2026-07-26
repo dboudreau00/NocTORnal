@@ -330,36 +330,38 @@ def _normalise_telegram(value: str) -> Normalised:
         return Normalised(None, _NOT_DURABLE_TELEGRAM)
     canonical = _canonical("TELEGRAM_ID", cleaned)
     if cleaned.startswith("-100") and len(cleaned) > 4:
-        # KNOWN UNRESOLVED COLLISION -- see docs/16 D8.
+        # RESOLVED by CR3 (2026-07-26). docs/16 D8 is closed.
         #
-        # The ontology strips the Bot-API `-100` prefix so that the two
-        # encodings of one channel collapse, and its own docstring says a
-        # chat id and an unrelated user id "must never share a
-        # norm_value". Stripping the prefix produces exactly that: the
-        # channel `-1001234567890` and the USER `1234567890` both
-        # normalise to `1234567890`.
+        # This block used to carry a "KNOWN UNRESOLVED COLLISION" warning:
+        # the ontology stripped the Bot-API `-100` prefix so the two
+        # encodings of one channel would collapse, and the result was then
+        # indistinguishable from the USER id of the same number. The note
+        # said so on every observation because the value could not be
+        # trusted.
         #
-        # It is NOT fixed here on purpose. Namespacing channels would
-        # re-key every stored TELEGRAM_ID selector, and it cannot be done
-        # correctly by the normaliser alone -- a bare positive number is
-        # a user in one encoding and a channel in another, and only the
-        # collector knows which. So the risk is REPORTED on every such
-        # observation rather than hidden behind a value that looks
-        # certain. An analyst who sees this note can check the entity
-        # type; one who sees nothing cannot.
+        # `telegram_id_norm` now decodes arithmetically (the encoding is
+        # `-(10**12 + id)`, not a text prefix) and namespaces the result by
+        # id space, so `c:1234567890` and `u:1234567890` are different
+        # values and cannot auto-merge. The collision is gone, and with it
+        # two silent MISSES the old string-strip also caused, for 9- and
+        # 11-digit channel ids.
+        #
+        # The note is kept but is now informational: a bare positive
+        # number remains ambiguous between a user and an MTProto channel,
+        # and only the collector knows which. It no longer warns about a
+        # merge that can happen.
         return Normalised(
             canonical,
-            "WARNING -- possible identifier collision. The Bot-API '-100' "
-            "prefix is stripped so the MTProto form of this CHANNEL "
-            "matches, but the result is indistinguishable from the USER "
-            "id of the same number. Confirm the entity type before "
-            "treating a correlation on this value as the same actor "
-            "(docs/16 D8).")
+            "a Bot-API channel id, decoded to its MTProto form and indexed "
+            "in the channel namespace. It can no longer collide with the "
+            "user id of the same number (CR3). A BARE positive number "
+            "observed elsewhere is still ambiguous between a user and a "
+            "channel; record which, if the collector knows.")
     if cleaned.startswith("-"):
         return Normalised(
             canonical,
-            "a negative id is a basic GROUP, not a user. The minus is kept "
-            "so a chat id never collides with a user id.")
+            "a negative id is a basic GROUP, not a user. It is indexed in "
+            "its own namespace so a chat id never collides with a user id.")
     return Normalised(canonical)
 
 

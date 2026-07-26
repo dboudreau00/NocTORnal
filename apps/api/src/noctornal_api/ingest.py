@@ -650,10 +650,29 @@ class IngestService:
             return None
         if row[10] <= datetime.now(timezone.utc):
             return None
+        # CR6 (2026-07-26). This used to read `if allowlist and peer_ip:`,
+        # which SKIPS the check whenever the peer address is unknown —
+        # exactly the case a fail-closed control exists for. uvicorn behind
+        # a unix-socket reverse proxy leaves `request.client` as None, so a
+        # key restricted to a partner's CIDR was accepted from anywhere.
+        #
+        # The router carried a second guard for this, and it was dead code:
+        # the dict returned below omitted `ip_allowlist` entirely, so
+        # `key.get("ip_allowlist")` was always None and could never fire.
+        # A defence written twice and connected zero times.
+        #
+        # Invariant 11 bounds the damage — an ingest key is write-only, so
+        # a leaked one buys junk in quarantine and never the case file —
+        # but a restriction the operator configured must actually restrict.
         allowlist = [str(a) for a in (row[9] or [])]
-        if allowlist and peer_ip:
+        if allowlist:
+            if not peer_ip:
+                return None
             import ipaddress
-            address = ipaddress.ip_address(peer_ip)
+            try:
+                address = ipaddress.ip_address(peer_ip)
+            except ValueError:
+                return None
             if not any(address in ipaddress.ip_network(cidr, strict=False)
                        for cidr in allowlist):
                 return None
@@ -664,6 +683,9 @@ class IngestService:
             "id": row[0], "scopes": list(row[3] or []), "source_id": row[4],
             "declared_category": row[5], "default_reliability": row[6],
             "classification_ceiling": row[7], "forced_compartment": row[8],
+            # CR6: present so the router's second guard is reachable. It
+            # was absent, which made that guard permanently None-valued.
+            "ip_allowlist": allowlist or None,
             "max_records_per_hour": row[12],
             "max_bytes_per_request": row[13],
         }

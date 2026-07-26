@@ -223,6 +223,31 @@ class ProposalReview:
         node_id = edge_id = None
         try:
             with self._c.transaction():
+                # CR10 (2026-07-26): take the row lock INSIDE the writing
+                # transaction, and re-check the state under it.
+                #
+                # `get_for_update` is a plain SELECT despite its name, on
+                # an autocommit connection — so it took no lock at all. The
+                # graph write then ran BEFORE the state-guarded UPDATE, and
+                # that UPDATE's rowcount was never checked. Under READ
+                # COMMITTED two concurrent accepts each passed the
+                # pre-check, each created an element, and the loser's
+                # `WHERE state = 'PROPOSED'` matched zero rows, raised
+                # nothing, and committed anyway.
+                #
+                # Result: two nodes from one suggestion, the second
+                # unreferenced by `applied_node_id` — an orphan inflating
+                # the actor count with no record of where it came from,
+                # which is invariant 3 undone by a race.
+                locked = self._c.execute(
+                    "SELECT state FROM collect.proposal WHERE id = %s "
+                    "FOR UPDATE", (proposal_id,)).fetchone()
+                if locked is None:
+                    raise ProposalError(f"proposal {proposal_id} not found")
+                if locked[0] != STATE_PROPOSED:
+                    raise ProposalError(
+                        f"proposal is {locked[0]}, not {STATE_PROPOSED}; it "
+                        "has already been dispositioned")
                 if row.kind == KIND_NODE:
                     node_id = self._graph.create_node(
                         case_id=row.case_id,
@@ -272,7 +297,7 @@ class ProposalReview:
                 else:
                     raise ProposalError(f"cannot apply kind {row.kind!r}")
 
-                self._c.execute(
+                applied = self._c.execute(
                     """UPDATE collect.proposal
                           SET state = 'ACCEPTED', reviewed_by = %s,
                               reviewed_at = %s, review_note = %s,
@@ -281,6 +306,15 @@ class ProposalReview:
                     (reviewed_by, datetime.now(timezone.utc), note,
                      node_id, edge_id, proposal_id),
                 )
+                # CR10: the rowcount is the last line of defence. With the
+                # FOR UPDATE above this should be unreachable — so if it
+                # ever fires, the lock is not doing what this code thinks,
+                # and rolling back is far better than committing an
+                # element nothing points at.
+                if applied.rowcount != 1:
+                    raise ProposalError(
+                        "the proposal changed state while it was being "
+                        "applied; nothing was written")
                 self._audit(row.case_id, proposal_id, reviewed_by,
                             "PROPOSAL_ACCEPTED",
                             {"kind": row.kind, "origin": row.origin,
