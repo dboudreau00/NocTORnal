@@ -726,3 +726,101 @@ select.select { appearance: none; padding-right: 24px; }
 .entry-row > .grow { flex: 1 1 200px; overflow-wrap: anywhere; }
 .entry-row > p { flex-basis: 100%; margin: 2px 0 0; }
 .entry-sub { flex-basis: 100%; display: flex; gap: 6px; align-items: baseline; }
+
+/* ── Feeds and Lifecycle (Phases 9, 4, 6) ───────────────────────────────
+ *
+ * These panes are lists of things somebody has to work through, and the
+ * failure mode of every one of them is the same: it fills up and stops
+ * being read. So the layout puts the deciding fact FIRST and in a
+ * different weight from everything else — the triage score, the error
+ * class, the failure count — and everything else is a quiet key/value
+ * run underneath it.
+ */
+
+.subtabs {
+  display: flex; gap: 2px; margin-bottom: 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+.subtab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-tertiary); font: inherit; font-size: 12px;
+  padding: 6px 12px; cursor: pointer;
+}
+.subtab:hover { color: var(--text-secondary); }
+.subtab[aria-selected="true"] {
+  color: var(--text-primary); border-bottom-color: var(--accent);
+}
+.subtab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+.row-card { padding: 10px 12px; margin-bottom: 6px; }
+.row-card.compact { padding: 7px 12px; }
+.row-head {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.row-title {
+  font-weight: 600; font-size: 13px; overflow-wrap: anywhere;
+}
+
+/* The triage score. Tabular figures so a column of them lines up, which is
+   what makes "sorted by priority" legible at a glance rather than on
+   inspection. */
+.score {
+  font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px;
+  min-width: 2.6em; text-align: right; color: var(--text-tertiary);
+}
+.score.hot { color: var(--accent); }
+
+.facts {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 5px;
+}
+.fact { display: inline-flex; align-items: baseline; gap: 5px; }
+.fact-k {
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.fact-v {
+  font-size: 12px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.fact.bad .fact-v { color: var(--danger); }
+.fact.warn .fact-v { color: var(--alert); }
+.fact.muted .fact-v { color: var(--text-tertiary); font-style: italic; }
+
+/* The reason a row looks the way it does. A score with no reason is a
+   number an analyst learns to ignore. */
+.why {
+  font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0;
+  border-left: 2px solid var(--hairline); padding-left: 8px;
+}
+
+.chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.chip.compartment { color: var(--alert); border-color: var(--alert); }
+.chip.ok { color: var(--sign-positive); border-color: var(--sign-positive); }
+.chip.warn { color: var(--alert); border-color: var(--alert); }
+
+.row-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+
+/* A dead-letter fragment. Redacted before it was ever stored, and rendered
+   as TEXT — this is the least trustworthy string in the system, and the
+   reasoning behind invariant 10 is not limited to samples. */
+.fragment {
+  margin: 8px 0 0; padding: 8px; max-height: 11em; overflow: auto;
+  background: var(--surface-3); border: 1px solid var(--hairline);
+  border-radius: 3px; font-size: 11px; white-space: pre-wrap;
+  overflow-wrap: anywhere; color: var(--text-secondary);
+}
+
+.cred-box {
+  margin-top: 8px; padding: 8px; border-radius: 3px;
+  background: var(--surface-3); border: 1px solid var(--alert);
+}
+
+.help.warn { color: var(--alert); }
+.field.inline.check { gap: 6px; }
+.field.inline.check input { margin: 0; }
+/* Explicit, because `hidden` is only honoured while nothing else sets
+   `display` on the element — and a container that ignores `hidden` shows
+   every subtab at once, which looks like a rendering bug rather than a
+   missing rule. */
+.subpane { display: block; }
+.subpane[hidden] { display: none; }

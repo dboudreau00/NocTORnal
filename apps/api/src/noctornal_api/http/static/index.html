@@ -205,6 +205,21 @@
           <span class="rail-glyph" aria-hidden="true">&#x2318;</span>
           <span class="rail-cap">Comms</span>
         </button>
+        <button id="tab-feeds" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-feeds" aria-selected="false" tabindex="-1"
+                data-tab="feeds"
+                title="Ingest queue, dead letters, collection sources">
+          <span class="rail-glyph" aria-hidden="true">&#x21E3;</span>
+          <span class="rail-cap">Feeds</span>
+          <span id="feeds-badge" class="rail-badge" hidden></span>
+        </button>
+        <button id="tab-governance" type="button" class="tab rail-btn"
+                role="tab" aria-controls="pane-governance" aria-selected="false"
+                tabindex="-1" data-tab="governance"
+                title="Retention, legal holds, purge record, break-glass">
+          <span class="rail-glyph" aria-hidden="true">&#x25F4;</span>
+          <span class="rail-cap">Lifecycle</span>
+        </button>
         <span class="rail-gap"></span>
         <button id="tab-add-node" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
@@ -713,6 +728,275 @@
             <button type="submit" class="btn primary">Parse</button>
           </form>
           <div id="comms-block-out"></div>
+        </section>
+
+        <!-- FEEDS (Phases 9 and 4). Material arriving from outside: what a
+             partner sent, what would not parse, and what we went and got.
+
+             The queue is the product here. docs/12: "Volume is the enemy,
+             and a queue nobody can prioritise is a queue nobody reads." So
+             the first thing on screen is priority order, and the reason for
+             a record's score is on the row rather than behind a click. -->
+        <section id="pane-feeds" class="pane" role="tabpanel"
+                 aria-labelledby="tab-feeds" tabindex="-1" hidden>
+
+          <div class="subtabs" role="tablist" aria-label="Feeds sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="queue"
+                    aria-controls="feeds-queue">Ingest queue</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="dead"
+                    aria-controls="feeds-dead">Dead letters</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="sources"
+                    aria-controls="feeds-sources">Sources</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="keys"
+                    aria-controls="feeds-keys">Keys</button>
+          </div>
+
+          <!-- INGEST QUEUE -->
+          <div id="feeds-queue" class="subpane">
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Category</span>
+                <select id="ing-category" class="select">
+                  <option value="">All</option>
+                </select>
+              </label>
+              <label class="field inline check">
+                <input id="ing-dupes" type="checkbox">
+                <span class="label">Show folded duplicates</span>
+              </label>
+              <button id="ing-refresh" type="button" class="btn">Refresh</button>
+              <span id="ing-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              Near-duplicates are <strong>folded, not dropped</strong> &mdash;
+              the count on a row says how many other feeds sent the same
+              thing. Payloads are never listed here: a record can hold a whole
+              stealer log, and this is a queue.
+            </p>
+            <div id="ing-list"></div>
+            <p id="ing-empty" class="empty">Nothing in the queue for this case.</p>
+
+            <details id="ing-quarantine-box" class="card" hidden>
+              <summary>Quarantine &mdash; material attached to no case</summary>
+              <p class="help">
+                A record with no case cannot be reached by a case
+                assignment, so nobody sees it through the ordinary gate. It
+                still expires: until it is attached to a case it runs on the
+                <em>category's</em> retention clock, not a case's.
+              </p>
+              <div id="ing-quarantine-list"></div>
+              <p id="ing-quarantine-empty" class="empty">Nothing unattached.</p>
+            </details>
+          </div>
+
+          <!-- DEAD LETTERS -->
+          <div id="feeds-dead" class="subpane" hidden>
+            <p class="help">
+              Invariant 12: nothing is silently dropped. A rising rate on one
+              key is usually a partner changing their schema without telling
+              you &mdash; and it is invisible unless somebody looks, which is
+              what this is for.
+            </p>
+            <p class="help warn">
+              Fragments are <strong>structurally redacted</strong>: keys,
+              types and lengths, never values. Rows recorded before the
+              redactor existed are withheld and marked.
+            </p>
+            <div class="pane-head">
+              <button id="dl-refresh" type="button" class="btn">Refresh</button>
+              <span id="dl-counts" class="muted small"></span>
+            </div>
+            <div id="dl-list"></div>
+            <p id="dl-empty" class="empty">Nothing has failed to parse.</p>
+          </div>
+
+          <!-- COLLECTION SOURCES -->
+          <div id="feeds-sources" class="subpane" hidden>
+            <p class="help">
+              Nothing loops on its own. A collector that runs itself on a
+              timer nobody watches is how a persona gets burnt at 3am, so
+              polling is a button.
+            </p>
+            <div class="pane-head">
+              <button id="src-refresh" type="button" class="btn">Refresh</button>
+              <span id="src-counts" class="muted small"></span>
+            </div>
+            <h2 class="h-sm">Unhealthy</h2>
+            <p class="help">
+              A parser that stopped matching fails silently. Consecutive
+              failures are the signal.
+            </p>
+            <div id="src-unhealthy"></div>
+            <p id="src-unhealthy-empty" class="empty">Every source is healthy.</p>
+
+            <h2 class="h-sm">Never polled</h2>
+            <p class="help">
+              Not broken and not healthy either. A source somebody added and
+              nobody ever ran is the quiet way a collection plan turns out to
+              have been aspirational.
+            </p>
+            <div id="src-never"></div>
+            <p id="src-never-empty" class="empty">Every source has been polled.</p>
+
+            <h2 class="h-sm">Due to poll</h2>
+            <div id="src-due"></div>
+            <p id="src-due-empty" class="empty">Nothing is due.</p>
+
+            <h2 class="h-sm">Personas</h2>
+            <p class="help">
+              BURNED is terminal. Re-using one a forum admin has already
+              flagged is how you burn the next one too.
+            </p>
+            <div id="src-personas"></div>
+            <p id="src-personas-empty" class="empty">No personas.</p>
+
+            <h2 class="h-sm">Recent runs</h2>
+            <div id="src-runs"></div>
+            <p id="src-runs-empty" class="empty">No runs recorded.</p>
+          </div>
+
+          <!-- INGEST KEYS -->
+          <div id="feeds-keys" class="subpane" hidden>
+            <p class="help">
+              Keys are <strong>write-only</strong> (invariant 11). A leaked
+              key means junk data in a quarantine bucket, never the case file
+              &mdash; there is a CHECK constraint saying so.
+            </p>
+            <div class="pane-head">
+              <label class="field inline check">
+                <input id="key-revoked" type="checkbox">
+                <span class="label">Include revoked</span>
+              </label>
+              <button id="key-refresh" type="button" class="btn">Refresh</button>
+              <span id="key-counts" class="muted small"></span>
+            </div>
+            <div id="key-list"></div>
+            <p id="key-empty" class="empty">No keys issued.</p>
+          </div>
+        </section>
+
+        <!-- LIFECYCLE (Phase 6). When material expires, what is held, what
+             was destroyed, and who took emergency access.
+
+             docs/05 wants break-glass "available, loud and SHORT" — and the
+             loudness IS the mandatory review, so the review queue is on the
+             same screen as the grants rather than buried in an admin area. -->
+        <section id="pane-governance" class="pane" role="tabpanel"
+                 aria-labelledby="tab-governance" tabindex="-1" hidden>
+
+          <div class="subtabs" role="tablist" aria-label="Lifecycle sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="retention"
+                    aria-controls="gov-retention">Retention</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="tombstones"
+                    aria-controls="gov-tombstones">Destroyed</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="glass"
+                    aria-controls="gov-glass">Break-glass</button>
+          </div>
+
+          <!-- RETENTION -->
+          <div id="gov-retention" class="subpane">
+            <h2 class="h-sm">Rules</h2>
+            <p class="help">
+              These periods govern data about people who are not under
+              investigation. A rule nobody has confirmed is a number somebody
+              typed, and it becomes policy by default if it is never
+              surfaced.
+            </p>
+            <div id="ret-rules"></div>
+            <p id="ret-rules-notice" class="help warn" hidden></p>
+
+            <h2 class="h-sm">Due for destruction</h2>
+            <p class="help">
+              An analyst who cannot see when their case's material expires
+              discovers a deadline by missing it.
+            </p>
+            <div class="pane-head">
+              <button id="ret-refresh" type="button" class="btn">Refresh</button>
+              <span id="ret-counts" class="muted small"></span>
+            </div>
+            <div id="ret-due"></div>
+            <p id="ret-due-empty" class="empty">Nothing is due.</p>
+
+            <details class="card">
+              <summary>Run a purge for this case</summary>
+              <p class="help warn">
+                A dry run reports what <em>would</em> be destroyed and
+                destroys nothing. That is the default, and it stays the
+                default: an endpoint whose default is destruction will
+                eventually be called by a script that meant to ask a
+                question.
+              </p>
+              <label class="field">
+                <span class="label">Authority for this run</span>
+                <input id="ret-authority" type="text" spellcheck="false"
+                       placeholder="e.g. scheduled retention run 2026-07">
+              </label>
+              <label class="field inline check">
+                <input id="ret-dry" type="checkbox" checked>
+                <span class="label">Dry run</span>
+              </label>
+              <p id="ret-purge-msg" class="msg" hidden></p>
+              <button id="ret-purge" type="button" class="btn">Run</button>
+              <div id="ret-purge-out"></div>
+            </details>
+          </div>
+
+          <!-- TOMBSTONES -->
+          <div id="gov-tombstones" class="subpane" hidden>
+            <p class="help">
+              What was destroyed, when, under whose authority. The tombstone
+              is append-only and outlives the thing it records &mdash;
+              otherwise a destruction and a deletion of the record of it look
+              identical.
+            </p>
+            <div class="pane-head">
+              <button id="tomb-refresh" type="button" class="btn">Refresh</button>
+              <span id="tomb-counts" class="muted small"></span>
+            </div>
+            <div id="tomb-list"></div>
+            <p id="tomb-empty" class="empty">Nothing has been destroyed.</p>
+          </div>
+
+          <!-- BREAK-GLASS -->
+          <div id="gov-glass" class="subpane" hidden>
+            <div id="glass-mine" class="card" hidden></div>
+
+            <details class="card">
+              <summary>Invoke emergency access</summary>
+              <p class="help warn">
+                Loud by design. The grant is short, every action under it is
+                counted, and a security officer <strong>must</strong> review
+                it afterwards. Say what the emergency is &mdash; this is the
+                text somebody defends later.
+              </p>
+              <label class="field">
+                <span class="label">Justification</span>
+                <textarea id="glass-why" rows="3" spellcheck="false"
+                          placeholder="Incident reference and what access is needed for, right now."></textarea>
+              </label>
+              <p id="glass-msg" class="msg" hidden></p>
+              <button id="glass-invoke" type="button" class="btn">Invoke</button>
+            </details>
+
+            <h2 class="h-sm">Awaiting review</h2>
+            <p class="help">
+              The review is the control that makes emergency access
+              acceptable at all. A grant nobody looked at is a role.
+            </p>
+            <div class="pane-head">
+              <button id="glass-refresh" type="button" class="btn">Refresh</button>
+              <span id="glass-counts" class="muted small"></span>
+            </div>
+            <div id="glass-queue"></div>
+            <p id="glass-empty" class="empty">Nothing awaiting review.</p>
+          </div>
         </section>
 
         <!-- ADD ENTITY -->

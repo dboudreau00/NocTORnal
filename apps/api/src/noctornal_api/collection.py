@@ -1049,10 +1049,27 @@ class CollectionService:
                 WHERE id = %s""", (source_id,))
 
     def unhealthy_sources(self) -> list[dict]:
+        """Sources that have actually FAILED, not sources nobody has polled.
+
+        `WHERE health <> 'OK'` looked right and was not: a source that has
+        never run carries the default health with zero failures, so every
+        newly added source appeared on the alert list next to a parser that
+        genuinely broke. Found by looking at the rendered list — three
+        entries, one real.
+
+        That matters more than it sounds. This list exists because "a
+        parser that stopped matching fails silently unless somebody is
+        watching", and a list padded with non-alerts is one people stop
+        watching. Never-polled sources are reported separately, because
+        "added and never collected" is also worth knowing — it is just not
+        the same thing as broken.
+        """
         rows = self._c.execute(
             """SELECT id, name, health, consecutive_failures, last_ok_at
                  FROM collect.source
-                WHERE health <> 'OK' AND is_active
+                WHERE is_active
+                  AND (consecutive_failures > 0
+                       OR (health <> 'OK' AND last_ok_at IS NOT NULL))
                 ORDER BY consecutive_failures DESC""").fetchall()
         return [{"id": str(r[0]), "name": r[1], "health": r[2],
                  "consecutive_failures": r[3],
@@ -1060,4 +1077,23 @@ class CollectionService:
                  "note": "a parser that stopped matching is usually the site "
                          "changing its markup, and it fails silently unless "
                          "somebody is watching this"}
+                for r in rows]
+
+    def never_polled_sources(self) -> list[dict]:
+        """Active, configured, and never successfully collected from.
+
+        Not an error and not healthy either. A source somebody added and
+        nobody ever ran is the quiet way a collection plan turns out to
+        have been aspirational.
+        """
+        rows = self._c.execute(
+            """SELECT id, name, kind, created_at, consecutive_failures
+                 FROM collect.source
+                WHERE is_active AND last_ok_at IS NULL
+                  AND consecutive_failures = 0
+                ORDER BY created_at""").fetchall()
+        return [{"id": str(r[0]), "name": r[1], "kind": r[2],
+                 "created_at": r[3].isoformat() if r[3] else None,
+                 "consecutive_failures": r[4],
+                 "note": "configured but never collected from"}
                 for r in rows]

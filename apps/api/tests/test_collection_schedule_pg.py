@@ -118,6 +118,33 @@ def test_the_rate_limit_survives_a_new_service_instance(conn):
     assert slept and slept[-1] == delay
 
 
+def test_a_never_polled_source_is_not_reported_as_broken(conn):
+    """`WHERE health <> 'OK'` looked right and was not: a source that has
+    never run carries the default health with zero failures, so every newly
+    added source appeared on the alert list beside a parser that genuinely
+    stopped matching.
+
+    Found by looking at the rendered list — three entries, one real. It
+    matters because the list exists BECAUSE silent failure is silent, and a
+    list padded with non-alerts is one people stop watching.
+    """
+    from noctornal_api.collection import CollectionService
+    fresh = _source(conn)
+    broken = _source(conn)
+    conn.execute(
+        "UPDATE collect.source SET consecutive_failures = 7, health = 'BROKEN',"
+        " last_ok_at = now() - interval '3 days' WHERE id = %s", (broken,))
+
+    svc = CollectionService(conn)
+    unhealthy = {s["id"] for s in svc.unhealthy_sources()}
+    never = {s["id"] for s in svc.never_polled_sources()}
+
+    assert str(broken) in unhealthy
+    assert str(fresh) not in unhealthy, "never polled is not broken"
+    assert str(fresh) in never
+    assert str(broken) not in never, "a source is in one list or the other"
+
+
 def test_the_limiter_records_every_attempt_not_every_success(conn):
     """The rate limit exists to space REQUESTS, and a failed request cost
     a request."""
