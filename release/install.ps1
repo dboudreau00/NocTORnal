@@ -119,8 +119,7 @@ The usual cause is copying release/ out on its own. It is documentation
 and installers only -- there is no application source in it. Download or
 clone the whole repository and run:
 
-    powershell -ExecutionPolicy Bypass -File .
-elease\install.ps1
+    powershell -ExecutionPolicy Bypass -File .\release\install.ps1
 
 from the project root.
 '@
@@ -297,7 +296,19 @@ if (Test-Path $EnvLocal) {
         'SMTP_HOST=localhost',
         'SMTP_PORT=1025',
         'SMTP_ALLOW_PLAINTEXT=1'
-    ) | Set-Content -LiteralPath $EnvLocal -Encoding UTF8
+    # ASCII, NOT `-Encoding UTF8`.
+    #
+    # PowerShell 5.1's UTF8 encoder writes a BYTE ORDER MARK, and
+    # install.sh sources this file with `set -a; . "$ENV_LOCAL"`. Bash
+    # does not strip a BOM, so line 1 becomes the token $'ï»¿#'
+    # and the shell reports "command not found" for it and for the next
+    # word on that line. bootstrap.py's own loader survived it only
+    # because line 1 happens to be a comment -- had a KEY been first, that
+    # key would have been silently mis-named.
+    #
+    # Every byte written here is ASCII (base64 secrets, a URL, a port), so
+    # this loses nothing and cannot introduce a BOM.
+    ) | Set-Content -LiteralPath $EnvLocal -Encoding ascii
     Write-Good 'wrote .env.local with fresh random keys'
     Write-Note 'Back this file up. Losing the TOTP key locks every account out.'
 }
