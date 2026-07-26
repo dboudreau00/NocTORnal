@@ -6,7 +6,7 @@
 
 
 
-**HUMINT and social network analysis for cybercrime investigation.**
+**HUMINT and social network analysis toolkit platform for cybercrime investigation.**
 
 Build the graph of actors, personas, groups and the trust between them —
 where every line of it traces back to an exhibit.
