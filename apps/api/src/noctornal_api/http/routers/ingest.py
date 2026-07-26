@@ -48,11 +48,13 @@ from noctornal_api.http.deps import (
     get_conn,
     require_global,
     require_step_up,
+    user_ceiling,
 )
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.ingest import (
     AuthorisationRequired,
+    CaseMismatch,
     IngestError,
     IngestService,
 )
@@ -392,23 +394,43 @@ def dead_letters(
     changed their format -- and it is invisible unless somebody looks,
     which is what this endpoint is for.
     """
-    # `raw_fragment` is deliberately NOT selected. It is the unparsed
-    # attacker-supplied bytes, which is exactly what a triage list should
-    # summarise rather than render.
+    # The fragment IS returned, and only because migration 0040 made that
+    # safe: it is redacted structurally before it is stored, so what comes
+    # back is keys, types and lengths and never a value. A queue you cannot
+    # see the shape of is a queue nobody can diagnose, which is how a feed
+    # half-fails for six months.
+    #
+    # Rows recorded before 0040 are verbatim and are withheld: `redacted`
+    # says which is which, and `scripts/redact_dead_letters.py` is the
+    # repair. Never render `raw_fragment` as HTML -- invariant 10's
+    # reasoning applies to any attacker-controlled bytes, not only samples.
+    clearance, compartments = user_ceiling(conn, user.user_id)
     rows = conn.execute(
         """SELECT id, batch_id, error_class, error_detail, occurred_at,
-                  replayed_at, resolution
+                  replayed_at, resolution, raw_fragment, redacted,
+                  classification, retain_until
              FROM ingest.dead_letter
             WHERE (%s::uuid IS NULL OR api_key_id = %s)
+              AND purged_at IS NULL
+              AND classification <= %s::core.tlp AND compartments <@ %s
             ORDER BY occurred_at DESC LIMIT %s""",
-        (api_key_id, api_key_id, limit)).fetchall()
+        (api_key_id, api_key_id, clearance.name, list(compartments),
+         limit)).fetchall()
     out = {"dead_letters": [
         {"id": str(r[0]), "batch_id": str(r[1]) if r[1] else None,
          "error_class": r[2], "error_detail": r[3],
          "occurred_at": r[4].isoformat() if r[4] else None,
          "replayed_at": r[5].isoformat() if r[5] else None,
-         "resolution": r[6]} for r in rows],
-        "count": len(rows)}
+         "resolution": r[6],
+         "fragment": r[7] if r[8] else None,
+         "fragment_withheld": not r[8],
+         "classification": r[9],
+         "retain_until": r[10].isoformat() if r[10] else None}
+        for r in rows],
+        "count": len(rows),
+        "notice": ("Fragments are structurally redacted: keys, types and "
+                   "lengths only, never values. Rows recorded before "
+                   "2026-07-25 are withheld until the repair script runs.")}
     if api_key_id is not None:
         out["dead_letter_rate_24h"] = IngestService(conn).dead_letter_rate(
             api_key_id)
@@ -466,7 +488,13 @@ def credentials(
     page load.
     """
     case_id = _authorise_record(conn, user, record_id, "ingest.read")
-    rows = IngestService(conn).credentials_masked(record_id)
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    try:
+        rows = IngestService(conn, clearance=clearance.name,
+                             compartments=compartments).credentials_masked(
+            record_id, case_id=case_id)
+    except IngestError as exc:
+        raise Problem(404, "Not found", "no such record in this case") from exc
     return {"record_id": str(record_id),
             "case_id": str(case_id) if case_id else None,
             "credentials": rows, "count": len(rows), "notice": L2_NOTICE}
@@ -538,24 +566,26 @@ def reveal_credential(
     authorize_object(conn, user, case_id=body.case_id,
                      permission_key="victim_pii.reveal")
     # The credential must belong to the case whose authorisation is being
-    # relied on. The service checks that a live authorisation exists for
-    # `case_id` and then decrypts by credential id with no join back to
-    # the record -- so an authorisation on ANY case decrypted any
-    # credential in the corpus, and the audit event recorded the wrong
-    # case against the disclosure. Reproduced live by the service review.
-    row = conn.execute(
-        """SELECT r.case_id FROM ingest.victim_credential vc
-             JOIN ingest.record r ON r.id = vc.record_id
-            WHERE vc.id = %s""", (credential_id,)).fetchone()
-    if row is None or row[0] != body.case_id:
-        raise Problem(404, "Not found", "no such credential in this case")
+    # relied on, and that check now lives in the SERVICE (docs/17 F15(a))
+    # rather than here, so a worker or a script calling it directly gets it
+    # too. `CaseMismatch` and "no such credential" both surface as 404: a
+    # status code must not tell you that a credential you may not read
+    # exists somewhere else.
+    clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        value = IngestService(conn).reveal_credential(
+        value = IngestService(
+            conn, clearance=clearance.name, compartments=compartments
+        ).reveal_credential(
             credential_id, actor_id=user.user_id, case_id=body.case_id,
             reason=body.reason)
     except AuthorisationRequired as exc:
         raise Problem(451, "Unavailable for legal reasons", str(exc)) from exc
+    except CaseMismatch as exc:
+        raise Problem(404, "Not found",
+                      "no such credential in this case") from exc
     except IngestError as exc:
+        if "no such credential" in str(exc):
+            raise Problem(404, "Not found", str(exc)) from exc
         raise Problem(409, "Conflict", str(exc)) from exc
     return {"credential_id": str(credential_id), "value": value,
             "notice": ("This reveal is audited against you and the "
@@ -581,15 +611,19 @@ def search_by_fingerprint(
     """
     authorize_object(conn, user, case_id=case_id,
                      permission_key="ingest.read")
+    clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        rows = IngestService(conn).search_by_fingerprint(
-            value, actor_id=user.user_id, case_id=case_id)
-        # The service query carries no case predicate, so it answers for
-        # the WHOLE corpus: one authorisation on one case became a yes/no
-        # oracle plus metadata against every other case's holdings,
-        # including compartments the caller is not read into. Filtered
-        # here until the service takes the caller's ceiling the way
-        # CommsService does.
+        # The ceiling is carried INTO the query now (docs/17 F15(b)). It
+        # used to answer for the whole corpus and be filtered here, which
+        # is not the same thing: the hit count, the timing and the audit
+        # event were all computed over records the caller may not read, so
+        # the disclosure had already happened by the time the filter ran.
+        rows = IngestService(
+            conn, clearance=clearance.name, compartments=compartments
+        ).search_by_fingerprint(value, actor_id=user.user_id, case_id=case_id)
+        # Clearance is not assignment: a RED analyst may read the LABEL of
+        # a case they are not on. The case predicate stays here because
+        # assignment is the router's knowledge, not the service's.
         allowed = {str(c) for c in _authorised_cases_for_ingest(conn, user)}
         rows = [r for r in rows
                 if r.get("case_id") is None or str(r["case_id"]) in allowed]

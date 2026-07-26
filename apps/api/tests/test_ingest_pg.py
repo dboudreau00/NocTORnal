@@ -82,6 +82,24 @@ def svc(conn):
     return IngestService(conn)
 
 
+@pytest.fixture
+def reader(conn):
+    """The service as a caller that reads case content must construct it.
+
+    docs/17 F15(a,b,c): `IngestService` used to take no clearance at all,
+    so the three victim-PII methods answered for the whole corpus. It now
+    refuses rather than defaulting -- defaulting to RED would make every
+    caller that forgets silently maximally privileged, which is how the
+    defect arrived.
+
+    STEALER-2026 is the compartment `_stealer_key` forces onto its
+    records; a reader without it sees nothing, which is a test below.
+    """
+    from noctornal_api.ingest import IngestService
+    return IngestService(conn, clearance="RED",
+                         compartments=frozenset({"STEALER-2026"}))
+
+
 def _key(svc, owner, **kw):
     defaults = dict(name="partner feed", owner_user_id=owner)
     defaults.update(kw)
@@ -448,23 +466,24 @@ def test_a_stealer_record_gets_the_shortest_retention_clock(conn, svc):
 
 # --- credentials: masked by default, revealed narrowly ------------------
 
-def test_the_analytic_view_never_returns_a_value(conn, svc):
+def test_the_analytic_view_never_returns_a_value(conn, svc, reader):
     """The whole design. docs/12: "You can extract almost all of that from
     the metadata without ever exposing the credential contents. Design for
     that." Infection timeline, victim organisation and C2 metadata are all
     available without touching a password."""
     owner = _user(conn)
+    case_id = _case(conn, owner)
     key = svc.authenticate(_stealer_key(svc, owner).secret)
     raw = json.dumps(STEALER_RECORD).encode()
     batch = svc.accept(key, raw)
-    svc.parse_batch(batch.batch_id, raw=raw)
+    svc.parse_batch(batch.batch_id, raw=raw, case_id=case_id)
     record_id = conn.execute(
         "SELECT id FROM ingest.record WHERE batch_id = %s", (batch.batch_id,)
     ).fetchone()[0]
     svc.store_credential(record_id, kind="PASSWORD", value="hunter2",
                          service_domain="bank.example")
 
-    view = svc.credentials_masked(record_id)
+    view = reader.credentials_masked(record_id, case_id=case_id)
     assert view[0]["service_domain"] == "bank.example"
     assert view[0]["value"] is None and view[0]["masked"] is True
     assert "hunter2" not in json.dumps(view)
@@ -493,7 +512,7 @@ def test_free_text_search_across_victim_pii_is_IMPOSSIBLE(conn):
     assert "search_tsv" not in columns
 
 
-def test_revealing_a_credential_without_an_authorisation_is_refused(conn, svc):
+def test_revealing_a_credential_without_an_authorisation_is_refused(conn, svc, reader):
     from noctornal_api.ingest import AuthorisationRequired
     owner = _user(conn)
     case_id = _case(conn, owner)
@@ -507,11 +526,11 @@ def test_revealing_a_credential_without_an_authorisation_is_refused(conn, svc):
     cred = svc.store_credential(record_id, kind="PASSWORD", value="hunter2")
 
     with pytest.raises(AuthorisationRequired, match="credential lookup service"):
-        svc.reveal_credential(cred, actor_id=owner, case_id=case_id,
-                              reason="checking")
+        reader.reveal_credential(cred, actor_id=owner, case_id=case_id,
+                                 reason="checking")
 
 
-def test_a_refused_reveal_is_audited(conn, svc):
+def test_a_refused_reveal_is_audited(conn, svc, reader):
     """The attempt is the interesting event."""
     from noctornal_api.ingest import AuthorisationRequired
     owner = _user(conn)
@@ -525,13 +544,14 @@ def test_a_refused_reveal_is_audited(conn, svc):
     ).fetchone()[0]
     cred = svc.store_credential(record_id, kind="PASSWORD", value="hunter2")
     with pytest.raises(AuthorisationRequired):
-        svc.reveal_credential(cred, actor_id=owner, case_id=case_id, reason="x")
+        reader.reveal_credential(cred, actor_id=owner, case_id=case_id,
+                                 reason="x")
     assert conn.execute(
         "SELECT count(*) FROM audit.event WHERE case_id = %s "
         "AND action = 'PII_REVEAL_REFUSED'", (case_id,)).fetchone()[0] == 1
 
 
-def test_a_reveal_under_an_authorisation_works_and_is_counted(conn, svc):
+def test_a_reveal_under_an_authorisation_works_and_is_counted(conn, svc, reader):
     owner, grantor = _user(conn), _user(conn)
     case_id = _case(conn, owner)
     key = svc.authenticate(_stealer_key(svc, owner).secret)
@@ -547,9 +567,9 @@ def test_a_reveal_under_an_authorisation_works_and_is_counted(conn, svc):
         case_id=case_id, granted_to=owner, granted_by=grantor,
         scope_note="credentials for the two named victim organisations only",
         legal_basis="production order 2026-0001")
-    assert svc.reveal_credential(cred, actor_id=owner, case_id=case_id,
-                                 reason="victim organisation attribution") \
-        == "hunter2"
+    assert reader.reveal_credential(
+        cred, actor_id=owner, case_id=case_id,
+        reason="victim organisation attribution") == "hunter2"
     row = conn.execute(
         "SELECT reveal_count FROM ingest.victim_credential WHERE id = %s",
         (cred,)).fetchone()
@@ -591,7 +611,7 @@ def test_an_authorisation_is_time_boxed_by_constraint(conn):
              "a scope note long enough to pass the length floor"))
 
 
-def test_correlation_works_without_disclosure(conn, svc):
+def test_correlation_works_without_disclosure(conn, svc, reader):
     """The same credential appearing in two feeds is a finding, and it is
     findable without either being readable."""
     owner, grantor = _user(conn), _user(conn)
@@ -613,24 +633,25 @@ def test_correlation_works_without_disclosure(conn, svc):
         case_id=case_id, granted_to=owner, granted_by=grantor,
         scope_note="correlating one known credential across the corpus",
         legal_basis="production order")
-    hits = svc.search_by_fingerprint("shared-secret", actor_id=owner,
-                                     case_id=case_id)
+    hits = reader.search_by_fingerprint("shared-secret", actor_id=owner,
+                                        case_id=case_id)
     assert len(hits) == 2
     # You had to already hold the value to ask. The answer does not contain it.
     assert "shared-secret" not in json.dumps(hits)
 
 
-def test_correlation_still_needs_an_authorisation(conn, svc):
+def test_correlation_still_needs_an_authorisation(conn, svc, reader):
     """Knowing that a specific credential is in the corpus is itself a
     disclosure."""
     from noctornal_api.ingest import AuthorisationRequired
     owner = _user(conn)
     case_id = _case(conn, owner)
     with pytest.raises(AuthorisationRequired):
-        svc.search_by_fingerprint("anything", actor_id=owner, case_id=case_id)
+        reader.search_by_fingerprint("anything", actor_id=owner,
+                                     case_id=case_id)
 
 
-def test_a_credential_whose_value_was_never_kept_says_so(conn, svc):
+def test_a_credential_whose_value_was_never_kept_says_so(conn, svc, reader):
     """Metadata-only ingest is the recommended shape; asking for a value
     that was deliberately not retained should say that, not fail
     obscurely."""
@@ -651,8 +672,8 @@ def test_a_credential_whose_value_was_never_kept_says_so(conn, svc):
         scope_note="a scope note long enough to pass the floor check",
         legal_basis="production order")
     with pytest.raises(IngestError, match="not retained"):
-        svc.reveal_credential(cred, actor_id=owner, case_id=case_id,
-                              reason="checking")
+        reader.reveal_credential(cred, actor_id=owner, case_id=case_id,
+                                 reason="checking")
 
 
 # --- triage -------------------------------------------------------------
