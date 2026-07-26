@@ -208,10 +208,20 @@ def download(
     # Where the request actually arrived, from the server's own view of the
     # URL -- never from a header the client controls.
     arrived_at = f"{request.url.scheme}://{request.url.netloc}"
+    # The caller's ceiling, exactly as `detail()` twenty lines above already
+    # does. Its absence here was the worst defect found in this codebase:
+    # `detail()` 404'd an over-classified sample and this endpoint handed
+    # the same caller its bytes one request later.
+    clearance, compartments = user_ceiling(conn, user.user_id)
     try:
         blob, digest = _svc(conn).download(
-            sample_id, actor_id=user.user_id, request_origin=arrived_at)
+            sample_id, actor_id=user.user_id, request_origin=arrived_at,
+            clearance=clearance.name, compartments=compartments)
     except SampleError as exc:
+        if "no such sample" in str(exc):
+            # 404, not 409: "this sample exists but is not yours" is itself
+            # a disclosure about a compartmented case.
+            raise Problem(404, "Not found", "no such sample") from exc
         raise Problem(409, "Conflict", str(exc)) from exc
     return Response(
         content=blob, media_type="application/octet-stream",
