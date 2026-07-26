@@ -55,12 +55,12 @@ regressed — the measure got honest.**
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
 | 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Never reviewed.** |
-| 6 — Tradecraft | **80%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. Retention, tombstones and break-glass reached the UI 2026-07-25 (Lifecycle). The merge/ACH/report half of the phase still has no interface. |
+| 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register, and a merge/reversal interface. Lifecycle, ACH and Report panes all landed 2026-07-26; entity merge is the one Phase 6 surface still API-only. |
 | 7 — Comms | **85%** | ✅ | ✅ | ◐ | ✅ | **UI only.** The Comms pane covers the normalise preview and the contact-block parser — the two things an analyst gets wrong unaided. Bindings, PGP verification and co-participation are API-only. |
 | 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **The one phase where 100% here would still mean "do not switch on" — see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
-### Overall: **~82%** (was ~72% at the start of this session)
+### Overall: **~83%** (was ~72% at the start of this session)
 
 Unweighted mean across the ten phases. The +10 came from three things, in
 descending order of how much they mattered:
@@ -158,14 +158,18 @@ test passed on both sides because each was internally consistent.
 Ingest, collection and governance landed 2026-07-25 as the **Feeds** and
 **Lifecycle** panes. What is left:
 
-- **Comms (Phase 7)** — the only phase where everything else is finished,
-  so it is the cleanest remaining win. *(Partly done: a Comms pane exists
-  with the normalise preview and contact-block parser; bindings, PGP
-  verification and co-participation have no interface.)*
-- **Merge / ACH / reports (Phase 6)** — the analytic half of tradecraft.
+- **Comms (Phase 7)** — the Comms pane covers the normalise preview and the
+  contact-block parser, which are the two things an analyst gets wrong
+  unaided. Bindings, PGP verification and co-participation are API-only.
+- **Entity merge (Phase 6)** — the one Phase 6 surface still without an
+  interface. docs/01 calls merging "the operation most likely to quietly
+  corrupt a case", so the control has to say what it will do *before* it
+  does it, name which record loses, and keep every merge listed with a
+  one-click reversal beside it. ACH and Report landed 2026-07-26.
 - **Samples (Phase 8)** — last and carefully. Invariant 10: metadata may
   render, bytes may not, and no sandbox attribute may combine
-  `allow-scripts` with `allow-same-origin`.
+  `allow-scripts` with `allow-same-origin`. **Do the adversarial pass
+  first** — fixing a model defect after its UI is built costs the UI too.
 
 Three things the first three panes taught, worth carrying into the next:
 
