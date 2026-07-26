@@ -25,7 +25,7 @@ analyst UI under a strict CSP with no build step.
 **~92% complete** on a four-dimension weighted measure (model+tests 45%,
 HTTP API 15%, analyst UI 25%, adversarial review 15%).
 
-- **1178 tests, 0 skipped.** Alembic head **0044**. ruff clean.
+- **1189 tests, 0 skipped.** Alembic head **0044**. ruff clean.
 
   ⚠ **The count spans TWO roots.** `apps/api/tests` (1079) and
   `packages/ontology` (99). Run both:
@@ -42,22 +42,23 @@ HTTP API 15%, analyst UI 25%, adversarial review 15%).
 
 ## 3. What changed this session
 
-Three commits, all on `main`.
+Seven commits, all on `main`. `docs/17` **F19** and **F20** are the record
+— read those rather than the commit messages.
 
-1. **`af81c44` — F19, first batch.** The notification and egress clusters,
-   plus sample legal-hold and write ordering. Nineteen of twenty-two new
-   tests fail on the commit before it.
-2. **`683d9df` — the Lab pane**, Phase 8's UI, and two defects only a
-   screenshot could find.
-3. **`543da59` — F19, second batch.** Samples versus their case's labels
-   (migration 0043), the silent integrity alarm, notification delivery
-   addresses (migration 0044), the unbuffered size cap, the dedup oracle.
+| | |
+|---|---|
+| `af81c44` | **F19, first batch.** Notification and egress clusters, sample legal hold, write ordering. Nineteen of twenty-two new tests fail on the commit before it. |
+| `683d9df` | **The Lab pane** — Phase 8's UI — and two defects only a screenshot could find. |
+| `543da59` | **F19, second batch.** Samples versus their case's labels (migration 0043), the silent integrity alarm, delivery addresses (0044), the unbuffered size cap, the dedup oracle. |
+| `f390b9c` | Docs: F19 written down, roadmap to ~92%. |
+| `8291e57` | **Three defects in this session's OWN fixes.** |
+| `26f4165` | UI: a request indicator for every fetch, and a `?` keyboard sheet. |
+| `1d648bc` | **F20: the untested hypothesis was winning the ACH matrix.** |
 
-**All 27 findings from the Phase 5/8 adversarial pass are now actioned.**
-They are written up in `docs/17` as **F19** — read that rather than the
-commit messages.
+**All 27 findings from the Phase 5/8 pass are actioned.** So is a hostile
+pass over the fixes themselves, and one over Phase 6's ACH.
 
-### The two that matter most, for anyone doing archaeology
+### The four that matter most, for anyone doing archaeology
 
 - **Phase 8 had 673 green tests and shipped a security control that did
   not exist.** `archive()` produced a plain ZIP; Python's `zipfile` cannot
@@ -68,6 +69,16 @@ commit messages.
   the system that puts working malware on a disk. `detail()` 404'd an
   over-classified sample and `download()` handed the same caller its bytes
   one request later.
+- **The ACH matrix crowned the hypothesis nobody had examined.** Zero
+  inconsistency is the lowest score the scale can produce, so an untested
+  hypothesis sorted first — in the tool built to correct confirmation
+  bias, in exactly the situation docs/13 cites as the reason to build it.
+  A test had been asserting that behaviour, green, since Phase 6.
+- **Closing a hole by refusing everybody is its own defect.** My own report
+  fix hardcoded the builder's compartments to empty. It stopped the leak,
+  and it also meant a cleared analyst could not name their own case and
+  `DENY_COMPARTMENTED` remained unreachable — the exact defect the same
+  commit had just repaired elsewhere.
 
 ---
 
@@ -80,8 +91,8 @@ step is a choice rather than a continuation.
 
 | | | |
 |---|---|---|
-| **1** | **A hostile pass over THIS session's fixes** | The pattern has held twice now: the 2026-07-25 evening pass found that *most of its findings were in the previous pass's fixes*, and this session repeated it — a filename defence written that morning was defeated by the exact attack it was written for, and only a screenshot showed it. This session changed three service signatures, added two migrations and rewrote the notification read path. |
-| **2** | **Phase 6's review** | The last phase with only a partial pass. |
+| **1** | **Finish Phase 6's review** | ACH has now had one and it produced F20. **`merges.py`, `retention.py`, `approvals.py` and `break_glass.py` have not.** I read `approvals.py` and `retention.py`'s purge path closely enough to confirm two specific claims — `consume()` is a genuine atomic compare-and-set, and `purge_out_of_schedule` checks legal hold on both exhibit and case *before* burning the approval — but that is spot-checking, not a pass. |
+| **2** | **Another pass over this session's fixes** | The pattern has now held three times: most of a pass's findings land in the previous pass's repairs. One pass has been run over this session's work (`8291e57`, three defects) and it was not exhaustive. Migrations 0043/0044, the rewritten notification read path and the new pane are all one-pass-old. |
 | **3** | **Per-phase feature gaps** | Adapters (Phase 4), WebAuthn and timeline replay (6), Jira and a worker (5), fuzzy hashing and YARA (8). `ROADMAP-REMAINING.md` §4. |
 | **4** | **The remaining retrospective items** | The dead-letter repair was **checked on 2026-07-26: this database has nothing to fix**, all three rows are already redacted. That closes it here and not on any deployment that ran pre-0040 code. Still open: batches accepted before object storage was wired cannot be re-parsed, and whether the original exposure is reportable — which "nothing left on this machine" does not answer. docs/18 Section D. |
 
@@ -199,6 +210,16 @@ docs/18 L1.
   asserted the opposite of the truth in their own docstrings — the
   dead-letter redactor's, and `archive()`'s. Both were found by writing
   the sentence down and then going to look.
+- **A green test can be asserting the defect.** Three times now.
+  `test_a_report_carries_the_alternatives_that_were_ruled_out` scored one
+  hypothesis, left the other untouched and asserted that the untouched one
+  won — green since Phase 6, encoding the bug as the expectation. A test
+  written from the implementation inherits the implementation's mistakes.
+- **uvicorn serves STATIC files from disk and Python from memory.** An
+  `app.js` or `app.css` edit is live on reload; a service change is not,
+  and the running API will happily serve a UI that reads a field the old
+  code does not send. Restart after touching Python, or you are testing
+  two versions at once.
 
 ---
 
