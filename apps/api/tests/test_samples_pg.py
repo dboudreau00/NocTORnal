@@ -75,6 +75,12 @@ class MemoryStore:
         self.objects.pop(key, None)
 
 
+#: `download()` refuses without a clearance (docs/17 F18). These tests are
+#: about the origin split, the tamper check and the state machine, so they
+#: pass a cleared caller and let the dedicated gate tests in
+#: `test_samples_hardening_pg.py` cover the label check itself.
+CLEARED = dict(clearance="RED")
+
 def _user(conn, clearance="RED"):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
@@ -275,7 +281,7 @@ def test_download_is_refused_when_no_separate_origin_is_configured(
     alice = _user(conn)
     s = svc.submit(_unique("origin"), submitted_by=alice)
     with pytest.raises(SampleError, match="not a deployment suggestion"):
-        svc.download(s.id, actor_id=alice, request_origin="https://app.example")
+        svc.download(s.id, actor_id=alice, request_origin="https://app.example", **CLEARED)
 
 
 def test_download_is_refused_from_the_application_origin(conn, svc, monkeypatch):
@@ -284,7 +290,7 @@ def test_download_is_refused_from_the_application_origin(conn, svc, monkeypatch)
     alice = _user(conn)
     s = svc.submit(_unique("appOrigin"), submitted_by=alice)
     with pytest.raises(SampleError, match="never from the application origin"):
-        svc.download(s.id, actor_id=alice, request_origin="https://app.example")
+        svc.download(s.id, actor_id=alice, request_origin="https://app.example", **CLEARED)
 
 
 def test_download_from_the_sample_origin_returns_an_archive(conn, svc, monkeypatch):
@@ -295,7 +301,7 @@ def test_download_from_the_sample_origin_returns_an_archive(conn, svc, monkeypat
     payload = _unique("good")
     s = svc.submit(payload, submitted_by=alice)
     blob, digest = svc.download(s.id, actor_id=alice,
-                                request_origin="https://samples.example")
+                                request_origin="https://samples.example", **CLEARED)
     assert zipfile.is_zipfile(__import__("io").BytesIO(blob))
     with zipfile.ZipFile(__import__("io").BytesIO(blob)) as zf:
         assert zf.namelist() == [digest + ".bin"]
@@ -327,7 +333,7 @@ def test_a_tampered_sample_is_never_served(conn, svc, store, monkeypatch):
     key = next(iter(store.objects))
     store.objects[key] = b"something else entirely"
     with pytest.raises(SampleError, match="integrity check failed"):
-        svc.download(s.id, actor_id=alice, request_origin="https://samples.example")
+        svc.download(s.id, actor_id=alice, request_origin="https://samples.example", **CLEARED)
 
 
 # --- the REJECTED path --------------------------------------------------
@@ -359,7 +365,7 @@ def test_a_rejected_sample_can_never_be_downloaded(conn, svc, monkeypatch):
     svc.reject(s.id, actor_id=alice, reason="prohibited")
     with pytest.raises(SampleError):
         svc.download(s.id, actor_id=alice,
-                     request_origin="https://samples.example")
+                     request_origin="https://samples.example", **CLEARED)
 
 
 def test_rejection_destroys_the_data_key_too(conn, svc):
@@ -503,7 +509,7 @@ def test_every_touch_is_in_the_custody_ledger(conn, svc, monkeypatch):
     s = svc.submit(_unique("custody"), submitted_by=alice)
     svc.assign(s.id, analyst_id=re_analyst, actor_id=alice)
     svc.download(s.id, actor_id=re_analyst,
-                 request_origin="https://samples.example")
+                 request_origin="https://samples.example", **CLEARED)
     actions = [row["action"] for row in svc.custody(s.id)]
     assert "DOWNLOADED" in actions and "ASSIGNED" in actions
 
@@ -512,7 +518,7 @@ def test_a_download_records_the_wrapper_it_left_in(conn, svc, monkeypatch):
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://samples.example")
     alice = _user(conn)
     s = svc.submit(_unique("wrapper"), submitted_by=alice)
-    svc.download(s.id, actor_id=alice, request_origin="https://samples.example")
+    svc.download(s.id, actor_id=alice, request_origin="https://samples.example", **CLEARED)
     row = next(r for r in svc.custody(s.id) if r["action"] == "DOWNLOADED")
     assert row["archive_format"] == "ZIP_INFECTED"
 
