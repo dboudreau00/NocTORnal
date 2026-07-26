@@ -145,12 +145,27 @@ def defang(value: str) -> str:
     out = _SCHEME_RE.sub(lambda m: m.group(1) + "xx" + m.group(2)[2:] + m.group(3), value)
     # Only the authority is bracketed. Dots in a path are not navigable and
     # bracketing them makes long URLs unreadable for no gain.
+    #
+    # `parts[1] == ""` is the load-bearing half of this test, and it was
+    # missing. `split("/", 3)` puts the authority at index 2 ONLY when a
+    # `scheme://` occupied indices 0 and 1. Without a scheme —
+    # `paypal-secure.example/login` — index 2 is a PATH segment, so the
+    # authority was never bracketed and, since no scheme matched either,
+    # the function returned the string untouched. A live host, from a
+    # helper whose whole job is that it is not one.
+    #
+    # That form is not exotic: `requested_url` and `final_url` are free
+    # text and a victim report routinely omits the scheme, and
+    # `GET /deception/defang` is documented as safe for a report.
     parts = out.split("/", 3)
-    if len(parts) >= 3 and parts[2]:
+    if len(parts) >= 3 and parts[1] == "" and parts[2]:
         parts[2] = parts[2].replace(".", "[.]")
         out = "/".join(parts)
     else:
-        out = out.replace(".", "[.]")
+        # No authority to isolate — bracket the first segment, which is
+        # where a bare host lives, and leave any path alone.
+        head, sep, tail = out.partition("/")
+        out = head.replace(".", "[.]") + sep + tail
     return out
 
 
@@ -182,6 +197,18 @@ class Hop:
     tls_used: bool | None
     received_at: datetime | None
     is_trusted_boundary: bool = False
+    #: True when the boundary is the seq-0 DEFAULT rather than a hop whose
+    #: `by` host was actually recognised as the recipient's.
+    #:
+    #: The distinction is not cosmetic. An assumed boundary means nobody
+    #: told this system which MTAs are ours, so hop 0 is "the first line in
+    #: the file" and not "a machine we control" — and its `from_ip` is
+    #: therefore an address INSIDE the victim's network, not an
+    #: observation of the sender. It lives on the hop rather than being
+    #: re-derived from the environment by each consumer, because a
+    #: consumer that re-read `NOCTORNAL_TRUSTED_MTA_HOSTS` could disagree
+    #: with the parse that produced these hops.
+    boundary_is_assumed: bool = False
 
 
 def trusted_mta_suffixes() -> tuple[str, ...]:
@@ -250,15 +277,20 @@ def parse_received_chain(headers: list[str],
         return hops
 
     boundary = 0
+    # Assumed unless a hop's `by` host is actually recognised as ours.
+    assumed = True
     if trusted:
         for hop in hops:
             host = (hop.by_host or "").lower()
             if any(host == t or host.endswith("." + t) for t in trusted):
                 boundary = hop.seq
+                assumed = False
             else:
                 break
     return [
-        Hop(**{**h.__dict__, "is_trusted_boundary": h.seq == boundary})
+        Hop(**{**h.__dict__,
+               "is_trusted_boundary": h.seq == boundary,
+               "boundary_is_assumed": assumed})
         for h in hops
     ]
 
@@ -433,8 +465,41 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
     except Exception:                                         # noqa: BLE001
         auth_headers = []
     if auth_headers:
+        # ONLY THE FIRST HEADER IS EVIDENCE. The rest are recorded and not
+        # believed.
+        #
+        # Found by an adversarial pass, 2026-07-26, and it was the same
+        # mistake this module gets RIGHT for `Received` and then made in
+        # the inverse direction here. An MTA PREPENDS, so index 0 is the
+        # receiving organisation's own verdict and anything the sender put
+        # in the message they wrote is LAST. `_apply_auth_results` built a
+        # dict comprehension over the joined string, which is last-wins —
+        # so an attacker appending their own `Authentication-Results:
+        # dkim=pass header.d=microsoft.com` had it override the real
+        # `dkim=fail`, and `microsoft.com` came out as a **durable,
+        # cryptographically authenticated** DOMAIN selector.
+        #
+        # That defeats this module's own rule 2 and invariant 9 using
+        # bytes the attacker typed. The `email_dkim_domain_needs_pass`
+        # CHECK could not catch it either: the parser made the result and
+        # the domain agree on the forged value, which is exactly the
+        # shape of the Phase 7 forged-PGP-verdict defect (docs/17) — a
+        # constraint defends against the application forgetting to check,
+        # never against it checking a forged input.
+        #
+        # The whole set is still stored in `auth_results_raw`, because a
+        # message carrying two of these is itself a finding.
         out.auth_results_raw = " | ".join(str(a) for a in auth_headers)[:8000]
-        _apply_auth_results(out, out.auth_results_raw)
+        _apply_auth_results(out, str(auth_headers[0]))
+        if len(auth_headers) > 1:
+            out.gaps.append({
+                "step": "authentication_results",
+                "reason": f"{len(auth_headers)} Authentication-Results "
+                          "headers were present; only the first (the "
+                          "receiving MTA's) was believed. The others are "
+                          "in auth_results_raw and are attacker-writable — "
+                          "a message carrying a second one is suspicious in "
+                          "itself."})
     else:
         out.gaps.append({
             "step": "authentication_results",
@@ -492,38 +557,61 @@ def _apply_auth_results(out: ParsedEmail, raw: str) -> None:
     on a FAILING signature is a claim by the attacker, not an identity —
     recording it would invite every downstream reader, and every report,
     to treat a forgery as authenticated.
-    """
-    verdicts = {m.group(1).lower(): m.group(2).upper()
-                for m in _AUTH_RESULT.finditer(raw)}
-    known = {"PASS", "FAIL", "SOFTFAIL", "NEUTRAL", "NONE", "TEMPERROR", "PERMERROR"}
-    out.spf_result = verdicts.get("spf") if verdicts.get("spf") in known else None
-    out.dmarc_result = (verdicts.get("dmarc")
-                        if verdicts.get("dmarc") in {"PASS", "FAIL", "NONE",
-                                                     "TEMPERROR", "PERMERROR"}
-                        else None)
-    out.dkim_result = (verdicts.get("dkim")
-                       if verdicts.get("dkim") in {"PASS", "FAIL", "NONE",
-                                                   "TEMPERROR", "PERMERROR"}
-                       else None)
 
-    # Scope each domain to its own method's clause. Splitting on ';' keeps
-    # `spf=pass smtp.mailfrom=a.com; dkim=fail header.d=b.com` from
-    # attributing b.com to SPF.
+    ## The result and the domain are decided TOGETHER, per method
+
+    A message may legitimately carry more than one signature for the same
+    method — a mailing list or a forwarder re-signs, so
+    `dkim=pass header.d=acme.example; dkim=fail header.d=list.example` is
+    ordinary mail, not an attack.
+
+    The previous version read the RESULT from a last-wins dict over the
+    whole string and the DOMAIN from whichever clause passed, so that
+    input produced `dkim_result = FAIL` alongside
+    `dkim_domain = acme.example`. That combination violates
+    `email_dkim_domain_needs_pass`, and the violation surfaced as a raw
+    `CheckViolation` — a 500 — AFTER `EvidenceService.ingest` had already
+    committed the WORM exhibit in its own transaction. Net result: an
+    object-locked, retention-committed exhibit with no `email_message`
+    describing it and nothing in the dead letter. `parse_eml`'s own
+    docstring says the parser must not crash on hostile input; it was
+    crashing on *well-formed* input.
+
+    So each method is resolved once, over its own clauses:
+    **any PASS wins, and carries its own domain.** That is also the
+    correct reading — one valid signature is a valid signature — and it
+    makes the constraint satisfiable by construction rather than by luck.
+    """
+    known = {"spf": {"PASS", "FAIL", "SOFTFAIL", "NEUTRAL", "NONE",
+                     "TEMPERROR", "PERMERROR"},
+             "dkim": {"PASS", "FAIL", "NONE", "TEMPERROR", "PERMERROR"},
+             "dmarc": {"PASS", "FAIL", "NONE", "TEMPERROR", "PERMERROR"}}
+    # method -> (result, domain-or-None), built clause by clause so
+    # `spf=pass smtp.mailfrom=a.com; dkim=fail header.d=b.com` cannot
+    # attribute b.com to SPF.
+    found: dict[str, tuple[str, str | None]] = {}
     for clause in raw.split(";"):
         method = _AUTH_RESULT.search(clause)
-        domain = _AUTH_DOMAIN.search(clause)
-        if not (method and domain):
+        if not method:
             continue
         name, result = method.group(1).lower(), method.group(2).upper()
-        value = _domain_of("@" + domain.group(1)) or domain.group(1).lower()
-        if result != "PASS":
-            continue                      # a failing method proves nothing
-        if name == "spf":
-            out.spf_domain = value
-        elif name == "dkim":
-            out.dkim_domain = value
-        elif name == "dmarc":
-            out.dmarc_domain = value
+        if name not in known or result not in known[name]:
+            continue
+        domain_match = _AUTH_DOMAIN.search(clause)
+        value = None
+        if domain_match:
+            value = (_domain_of("@" + domain_match.group(1))
+                     or domain_match.group(1).lower())
+        previous = found.get(name)
+        # A PASS beats anything already seen; otherwise the first verdict
+        # stands. Never record a domain for a non-PASS: `header.d=` on a
+        # failing signature is a claim by the attacker, not an identity.
+        if previous is None or (result == "PASS" and previous[0] != "PASS"):
+            found[name] = (result, value if result == "PASS" else None)
+
+    out.spf_result, out.spf_domain = found.get("spf", (None, None))
+    out.dkim_result, out.dkim_domain = found.get("dkim", (None, None))
+    out.dmarc_result, out.dmarc_domain = found.get("dmarc", (None, None))
 
 
 def _walk_parts(msg: EmailMessage, out: ParsedEmail) -> None:
@@ -672,15 +760,41 @@ def selector_candidates_for_email(parsed: ParsedEmail) -> list[dict]:
                     "strength": "weak",
                     "why": "attacker-generated: fingerprints the sending kit, "
                            "never the sender"})
-    # Infrastructure ONLY from at-or-below the trust boundary.
+    # Infrastructure ONLY from at-or-below the trust boundary — and ONLY
+    # when a boundary was actually established.
+    #
+    # With no `NOCTORNAL_TRUSTED_MTA_HOSTS` configured, the boundary
+    # defaults to seq 0. That default is right for what to EXCLUDE, and it
+    # was silently wrong for what to include: hop 0 is the receiving
+    # organisation's own MTA, so its `from_ip` is a machine INSIDE the
+    # victim's network. This function was therefore offering
+    # `10.1.2.3` — the victim's internal relay — as durable infrastructure
+    # to attach to the criminal actor, while suppressing the attacker's
+    # real sending IP one hop above it. Precisely inverted.
+    #
+    # Unconfigured means unknown, and the honest output for unknown is
+    # nothing. An operator who sets the variable gets the real answer.
+    if parsed.hops and all(h.boundary_is_assumed for h in parsed.hops):
+        out.append({"selector_type": None, "value": None, "strength": "none",
+                    "why": "no infrastructure proposed: no trusted MTA was "
+                           "recognised in this chain (see "
+                           "NOCTORNAL_TRUSTED_MTA_HOSTS), so this system "
+                           "cannot tell an observation from a claim. Hop 0 "
+                           "is the recipient's OWN server; proposing its "
+                           "address would attach the victim's internal "
+                           "relay to the actor."})
+        return out
+    boundary = _boundary_seq(parsed.hops)
     for hop in parsed.hops:
-        if hop.seq > _boundary_seq(parsed.hops):
+        if hop.seq > boundary:
             break
         if hop.from_ip:
             out.append({"selector_type": "IPV4" if "." in hop.from_ip else "IPV6",
                         "value": hop.from_ip, "strength": "durable",
                         "why": f"Received hop {hop.seq}, at or inside the "
-                               f"trusted boundary"})
+                               f"trusted boundary — written by infrastructure "
+                               f"the recipient controls, so it is an "
+                               f"observation rather than a claim"})
     return out
 
 

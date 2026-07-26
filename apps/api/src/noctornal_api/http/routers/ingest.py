@@ -253,10 +253,23 @@ async def submit(
     token = _key_from_header(authorization)
     key = svc.authenticate(token, peer_ip=peer)
     if key is not None and key.get("ip_allowlist") and not peer:
-        # Fail CLOSED. The service skips the allowlist when peer_ip is
-        # None (`if allowlist and peer_ip:`), so a deployment where the
-        # ASGI scope carries no client -- a unix socket, some proxy
-        # setups -- silently dropped the control instead of enforcing it.
+        # Defence in depth, and as of CR6 (2026-07-26) it is UNREACHABLE
+        # by design rather than by accident. Saying so, because the
+        # previous comment here described service behaviour that has since
+        # changed and would mislead the next reader.
+        #
+        # `authenticate()` used to read `if allowlist and peer_ip:`, which
+        # SKIPPED the check whenever the peer address was unknown -- a unix
+        # socket, some proxy setups -- so a key restricted to a partner
+        # CIDR was accepted from anywhere. This guard was written to catch
+        # that, and could not: the dict `authenticate()` returned omitted
+        # `ip_allowlist` entirely, so the condition was always false. A
+        # defence written twice and connected zero times.
+        #
+        # The service now returns None in that case, so `key is None`
+        # short-circuits before this line. `ip_allowlist` is nevertheless
+        # in the dict and this check nevertheless runs, so that if the
+        # service is ever relaxed the router still fails closed.
         raise Problem(401, "Unauthenticated", "invalid ingest key")
     if key is None:
         # One message for every failure mode -- unknown, revoked, expired,
