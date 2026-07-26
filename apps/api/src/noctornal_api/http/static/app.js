@@ -5218,11 +5218,17 @@ async function runPurge() {
        record. */
     out.appendChild(el('p', body.dry_run ? 'form-ok' : 'form-error',
       body.notice || ''));
-    const evidence = body.evidence_purged || 0;
-    const documents = body.documents_purged || 0;
-    out.appendChild(el('p', null,
-      evidence + ' exhibit(s) and ' + documents + ' document(s) '
-      + (body.dry_run ? 'would be destroyed' : 'destroyed')));
+    const verb = body.dry_run ? 'would be destroyed' : 'destroyed';
+    const counted = [
+      [body.evidence_purged || 0, 'exhibit'],
+      [body.documents_purged || 0, 'document'],
+      [body.records_purged || 0, 'ingest record'],
+      [body.dead_letters_purged || 0, 'dead letter'],
+    ].filter(([n]) => n > 0)
+      .map(([n, noun]) => n + ' ' + noun + (n === 1 ? '' : 's'));
+    out.appendChild(el('p', null, counted.length
+      ? counted.join(', ') + ' ' + verb
+      : 'Nothing ' + verb + '.'));
     if (body.held_back) {
       out.appendChild(el('p', null,
         body.held_back + ' skipped under a legal hold. A hold outranks the '

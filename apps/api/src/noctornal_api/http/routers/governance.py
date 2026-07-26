@@ -352,6 +352,11 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         "dry_run": dry_run,
         "evidence_purged": result.evidence_purged,
         "documents_purged": result.documents_purged,
+        # Ingest counted separately: an exhibit and a partner's raw record
+        # are destroyed under different authority, and one total would hide
+        # which of them just went (docs/17 F17(a)).
+        "records_purged": result.records_purged,
+        "dead_letters_purged": result.dead_letters_purged,
         "held_back": result.held_back,
         # decision 50, reported rather than folded into a boolean.
         "storage_locked": result.storage_locked,
