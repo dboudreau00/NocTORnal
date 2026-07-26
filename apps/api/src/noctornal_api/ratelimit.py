@@ -538,6 +538,25 @@ LIMITS: dict[str, Limit] = {
         "graph.view", quota=240, per_seconds=60, scope=Scope.USER, burst=80,
         on_backend_failure=OnBackendFailure.DENY,
     ),
+    # The ingest 202 endpoint, and the ONE limit in this catalogue that
+    # cannot be USER-scoped.
+    #
+    # Its caller presents an ingest API key, not a session, so a
+    # `Scope.USER` limit would resolve `current_user` and reject every
+    # legitimate submission with "invalid or expired session" -- which is
+    # exactly what happened when it was first wired to `evidence.ingest`.
+    #
+    # CREDENTIAL scope is safe HERE, unlike for the blanket ceiling that
+    # adversarial review broke. There the subject was client-chosen and a
+    # rotating token minted a fresh bucket per request. An ingest key
+    # cannot be rotated by its holder: they have the one key they were
+    # issued, and an unauthenticated caller sending fresh garbage keys is
+    # refused at 401 before doing work and is bounded by the
+    # address-scoped `request.source` ceiling regardless.
+    "ingest.submit": Limit(
+        "ingest.submit", quota=600, per_seconds=3600, scope=Scope.CREDENTIAL,
+        burst=120, on_backend_failure=OnBackendFailure.DENY,
+    ),
     # PGP verification SPAWNS A SUBPROCESS, twice, with a 20-second timeout
     # each. It is the only route in this system that forks, which makes an
     # unmetered loop of it a trivial way to exhaust process slots and file

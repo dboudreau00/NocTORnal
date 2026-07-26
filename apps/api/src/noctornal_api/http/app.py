@@ -27,10 +27,13 @@ from noctornal_api.http.routers import (
     approvals,
     auth,
     cases,
+    collection,
     comms,
     evidence,
+    governance,
     graph,
     graphview,
+    ingest,
     merges,
     notifications,
     proposals,
@@ -143,7 +146,9 @@ def create_app() -> FastAPI:
                    approvals.router, approvals.policy_router,
                    notifications.router, samples.router,
                    ach.router, reports.router,
-                   comms.router, comms.global_router):
+                   comms.router, comms.global_router,
+                   governance.router, governance.break_glass_router,
+                   collection.router, ingest.router):
         app.include_router(router, prefix=API_PREFIX)
 
     # The analyst UI: plain HTML/CSS/JS, no build step, same origin as the
