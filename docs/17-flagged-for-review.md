@@ -98,34 +98,52 @@ wrong in the tight direction means people route around the system during
 an incident, which is worse than the access; too broad and the review
 queue becomes noise nobody reads.
 
-### F15 — Phase 4 and 9 SERVICE defects found 2026-07-25, fixed at the
-router and NOT at the service
+### F15 — Phase 4 and 9 SERVICE defects — **FIXED at the service,
+2026-07-25**
 
 An adversarial review of `collection.py` and `ingest.py` (their first
-ever) found defects in the service layer. The **routers** now compensate,
-which closes the reachable attack — but the services are still wrong, and
-anything that calls them directly (a worker, a script, a future endpoint)
-gets the original behaviour.
+ever) found ten defects in the service layer. The routers were patched the
+same evening, which closed the reachable attack; the services stayed wrong
+for any direct caller — a worker, a script, a future endpoint.
 
-**These are the ones to fix properly.**
+**All ten are now fixed at the service layer, with regressions.**
+Migrations 0040, 0041 and 0042; tests in
+`apps/api/tests/test_ingest_hardening_pg.py`,
+`test_collection_hardening.py` and `test_collection_schedule_pg.py`.
 
-| | Service defect | Router mitigation | Why the service still needs fixing |
-|---|---|---|---|
-| **a** | `reveal_credential(credential_id, case_id=…)` checks a live authorisation for *the case the caller named*, then decrypts by credential id with **no join back to the record**. An authorisation on any case decrypted any credential in the corpus, and the audit event recorded the wrong case against the disclosure. | The router now resolves the credential's own case and refuses a mismatch. | A worker calling the service directly still crosses cases. `IngestService` takes no clearance at all — `CommsService` and `GraphService` both do. |
-| **b** | `search_by_fingerprint` has no case, classification or compartment predicate — it answers for the whole corpus. | The router filters the result to cases the caller may read. | Filtering after the fact is not the same as not asking. The query should carry the ceiling. |
-| **c** | `credentials_masked(record_id)` takes only a record id and offers no way to scope it. | The router gates on the record's own case and labels. | Same shape as (a). |
-| **d** | `_dead_letter` stores `fragment[:8000]` **verbatim**, and `ingest.dead_letter` has no classification, no compartments and no retention. A `CREDENTIAL_DUMP` or `DATABASE_LEAK` key can be issued with no compartment (only `STEALER_LOG` is gated at issue), and `categorise` routes any record with top-level `email`+`password` down that path — so a whole feed can dead-letter victim PII in the clear. | None. The listing endpoint no longer returns `raw_fragment`, which is not the same thing. | **This is the most serious one left.** The table needs labels and a retention rule, and `ingest.py` needs a `redact()` — `collection.py` has one; ingest does not. |
-| **e** | A single NUL byte in a fragment raises `DataError` from inside the `except` handler in `parse_batch`. On an autocommit connection the records already inserted are committed, the bad fragment is **not** dead-lettered, every fragment after it is never processed, and the batch is stranded in `PARSING`. Reached by valid gzipped NDJSON, which docs/12 says to accept. | None. | Invariant 12 failing on the exact path built to catch loss. |
-| **f** | `fetch()` validates the initial URL and `urlopen` then follows redirects internally, so hops 2..N are never re-checked. Proven: a public host returning `302 -> http://127.0.0.1/` fetched the internal page. `_BLOCKED_NETWORKS` also misses `::ffff:127.0.0.1`, `::`, and the 100.64/192.0.0/198.18 ranges. | None — no router calls `fetch()` with a caller-supplied URL today. | The module docstring names DNS rebinding as the known gap and does not mention redirects, so the stated floor is not reached. Fix before any adapter lands. |
-| **g** | `simhash` tokenises with `\w+` over the serialised JSON, so key names count as content and field position is lost. `{"note":"leaked by LockBit","victim":"ACME"}` and its inverse hash **identically** (hamming 0) and the second is marked a duplicate; meanwhile a genuine repost with a mirror's envelope fields lands at 6–13, above the threshold of 3. It false-positives on semantics and false-negatives on its stated purpose. | None. | A ransom-leak post and its inverse are not the same record. |
-| **h** | `categorise` inspects **top-level keys only**, so `{"log": {...}}` classifies a stealer log as `UNKNOWN` — skipping the compartment check and taking the 365-day default instead of 90. A partner wrapping their payload defeats the control. | None. | Routine input, not adversarial. |
-| **i** | `RateLimiter` state is per-instance and the router builds `CollectionService` per request, so per-source `max_rps` never fires. Jitter is re-rolled on every `due_sources()` call rather than persisted, so the realised interval depends on how often the scheduler polls, and frequent polling collapses the variance toward the floor — a regular cadence, which is the signature jitter exists to avoid. | None. | docs/04 ties `max_rps` directly to not burning personas. |
-| **j** | `redact()` is a keyword list (`password\|passwd\|pwd\|secret\|token\|…`), not structural. `pass`, `p=`, `credential`, `bearer`, `passphrase` and any unlabelled echo pass through. **No live leak today** — `PersonaVault.use()` has no caller and `run_once` passes no secret — but this becomes real the moment the XenForo/Telegram adapters land, which is the next Phase 4 step and the case redaction exists for. | None. | Invariant 7. |
+The table below is kept in full rather than deleted. What a defect WAS is
+the only thing that makes the fix reviewable, and half of these are the
+kind that come back when somebody simplifies the code that prevents them.
 
-Two more, lower severity but the same shape: `detect_format` is computed
-and never consulted, so CSV and pretty-printed JSON are shredded into
-dead letters; and whitespace-only input yields `records=0 dead=0
-state=PARSED` — a silent drop, invariant 12 again.
+| | Service defect (as found) | What now holds it |
+|---|---|---|
+| **a** | `reveal_credential(credential_id, case_id=…)` checks a live authorisation for *the case the caller named*, then decrypts by credential id with **no join back to the record**. An authorisation on any case decrypted any credential in the corpus, and the audit event recorded the wrong case against the disclosure. | `IngestService` takes `clearance` / `compartments` like `CommsService`, and refuses rather than defaulting — a default would make every caller that forgets silently maximally privileged, which is how this arrived. `reveal_credential` resolves the credential's own case in the SAME query that applies the caller's ceiling, before any decryption or authorisation lookup, and raises `CaseMismatch`. The router maps that to 404, not 403. |
+| **b** | `search_by_fingerprint` has no case, classification or compartment predicate — it answers for the whole corpus. | The ceiling is a predicate IN the query. The hit count, the timing and the audit event are now all computed over readable records only — filtering afterwards meant the disclosure had already happened. |
+| **c** | `credentials_masked(record_id)` takes only a record id and offers no way to scope it. | `credentials_masked(record_id, *, case_id)` — `case_id` is required and checked against the record's own. Even the masked view discloses which victims of which organisation are in a compartmented case. |
+| **d** | `_dead_letter` stores `fragment[:8000]` **verbatim**, and `ingest.dead_letter` has no classification, no compartments and no retention. A `CREDENTIAL_DUMP` or `DATABASE_LEAK` key can be issued with no compartment (only `STEALER_LOG` is gated at issue), and `categorise` routes any record with top-level `email`+`password` down that path — so a whole feed can dead-letter victim PII in the clear. | Migration 0040 gives `ingest.dead_letter` a classification, compartments, a `retain_until` and a `redacted` flag, backfilled from the issuing key — a parse failing does not declassify the data. `redact_fragment` keeps keys, types and lengths and **no leaf value at all**: the shape is the whole diagnostic, because a dead letter exists because a schema changed and a schema change is visible in the keys. A NOT VALID CHECK grandfathers existing rows and refuses new unredacted ones. Retention defaults to 90 days rather than 365 — a dead letter's category is unknown *by construction*. **Outstanding:** `scripts/redact_dead_letters.py --apply` rewrites rows recorded before this; it is irreversible so a human runs it, and the listing endpoint withholds `raw_fragment` on any row still flagged unredacted. |
+| **e** | A single NUL byte in a fragment raises `DataError` from inside the `except` handler in `parse_batch`. On an autocommit connection the records already inserted are committed, the bad fragment is **not** dead-lettered, every fragment after it is never processed, and the batch is stranded in `PARSING`. Reached by valid gzipped NDJSON, which docs/12 says to accept. | `scrub_nuls` before the INSERT, the dead-letter write has its own fallback that keeps only the digest and the error class, and `parse_batch` settles the batch state in a `finally`. A batch always ends somewhere. |
+| **f** | `fetch()` validates the initial URL and `urlopen` then follows redirects internally, so hops 2..N are never re-checked. Proven: a public host returning `302 -> http://127.0.0.1/` fetched the internal page. `_BLOCKED_NETWORKS` also misses `::ffff:127.0.0.1`, `::`, and the 100.64/192.0.0/198.18 ranges. | `fetch` follows redirects itself with `_NoAutoRedirect` and re-validates **every hop**, bounded at 5 with loop detection. `_is_blocked` asks the address what it *is* (`is_loopback` / `is_private` / `is_link_local` / `is_reserved` / `is_multicast` / `is_unspecified`) and unwraps `ipv4_mapped` and `sixtofour` first — enumerating was the original mistake. Cloud-metadata hostnames are refused by name. DNS rebinding remains the known gap and is still the docstring's stated floor. |
+| **g** | `simhash` tokenises with `\w+` over the serialised JSON, so key names count as content and field position is lost. `{"note":"leaked by LockBit","victim":"ACME"}` and its inverse hash **identically** (hamming 0) and the second is marked a duplicate; meanwhile a genuine repost with a mirror's envelope fields lands at 6–13, above the threshold of 3. It false-positives on semantics and false-negatives on its stated purpose. | `simhash_payload` tokenises path-qualified VALUES and drops a mirror's envelope keys. Migration 0041 adds `simhash_version`; existing rows keep 1 and are never compared across the boundary. |
+| **h** | `categorise` inspects **top-level keys only**, so `{"log": {...}}` classifies a stealer log as `UNKNOWN` — skipping the compartment check and taking the 365-day default instead of 90. A partner wrapping their payload defeats the control. | `categorise` walks every object in the payload, shallowest first, so the outer document still wins when both match — a chat export containing one quoted credential dump is a chat export. `STRUCTURE_NESTED` records that it was the weaker kind of match. |
+| **i** | `RateLimiter` state is per-instance and the router builds `CollectionService` per request, so per-source `max_rps` never fires. Jitter is re-rolled on every `due_sources()` call rather than persisted, so the realised interval depends on how often the scheduler polls, and frequent polling collapses the variance toward the floor — a regular cadence, which is the signature jitter exists to avoid. | Migration 0042 puts `next_due_at` and `last_request_at` on `collect.source`. The schedule is rolled ONCE after a run (including a failed one) and read as-is; the rate-limit gap is measured from `clock_timestamp()` against the stored value, so it survives the per-request service instance. |
+| **j** | `redact()` is a keyword list (`password\|passwd\|pwd\|secret\|token\|…`), not structural. `pass`, `p=`, `credential`, `bearer`, `passphrase` and any unlabelled echo pass through. **No live leak today** — `PersonaVault.use()` has no caller and `run_once` passes no secret — but this becomes real the moment the XenForo/Telegram adapters land, which is the next Phase 4 step and the case redaction exists for. | Two layers. `PersonaVault.use` registers the live plaintext in a `ContextVar` for the duration of its block and `redact` removes it verbatim, percent-encoded, form-encoded and base64 — the layer that actually holds invariant 7, because it does not depend on the remote server labelling the field in a way we anticipated. Structural rules (unlabelled high-entropy runs, bare `user:pass` lines, `anything=<long opaque value>`) are the backstop for secrets we do not hold. A readability test guards against a redactor that makes errors undebuggable. |
+
+Two more, lower severity and the same shape, **also fixed**:
+`detect_format` was computed at accept time and never consulted by the
+parser, so a pretty-printed JSON object — the commonest thing a human
+pastes into a feed test — was shredded into one dead letter per line, and
+CSV was shredded entirely. `iter_fragments` now tries the whole document
+first, then NDJSON, then header-keyed CSV, and it refuses to *guess* CSV
+without a consistent column count because guessing wrong turns a combo
+list into a hundred thousand one-column records, which is worse than a
+dead letter because it looks like it worked. And a batch that yields no
+fragments at all is now a dead letter rather than `records=0 dead=0
+state=PARSED` — a silent drop with a green light on it.
+
+**What is still open from F15.** Only the data repair: the dead-letter
+rows recorded *before* 2026-07-25 are still verbatim on disk. They are
+labelled, on a clock and withheld from the API, and
+`scripts/redact_dead_letters.py --apply` finishes it.
 
 ### F16 — `victim_pii.reveal` is granted to no role
 
@@ -135,8 +153,16 @@ for elsewhere. The permission exists, the endpoint is wired, and
 'victim_pii.reveal'` returns nothing — so the route 403s for everyone.
 
 **Left ungranted deliberately.** Who may decrypt a victim credential is a
-docs/16 L2 decision, not a default this build should pick, and F15(a)
-means the service-layer binding should be fixed *before* the grant lands.
+docs/16 L2 decision, not a default this build should pick.
+
+F15(a) — the reason to wait — is now fixed, so the blocker is purely the
+policy one. When you grant it, `SECURITY_OFFICER` is the wrong holder:
+that role grants the *authorisation* and `grant_pii_authorisation` refuses
+`granted_to == granted_by`, so giving it both would collapse the two
+humans back into one. The shape that works is a case role (`ANALYST` or
+`CASE_OWNER`) holding `victim_pii.reveal` while `SECURITY_OFFICER` keeps
+`victim_pii.authorise` — the reveal is then always two people by
+construction, which is the control docs/12 is asking for.
 
 ### F3 — Six retention rules ship with placeholder periods
 
