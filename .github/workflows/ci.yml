@@ -1,0 +1,179 @@
+# Phase 0 asked for "CI: lint, typecheck, test, migration round-trip" and
+# all four were run by hand for the whole build (docs/14 O1). This is that.
+#
+# The jobs are separated by what a failure MEANS, not to parallelise:
+# a lint failure is untidy, a drift failure means generated files no longer
+# match their source, and a test failure means the product is wrong. Reading
+# a red tick should immediately tell you which of those happened.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.13"
+  # Mirrors infra/docker-compose.yml. These only ever address services
+  # inside the runner, and are the same literals the compose file uses.
+  DATABASE_URL: postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal
+  # The rate limiter's Lua runs in Redis, not in Python, so the only way to
+  # know the two implementations still agree is to run both. Without this
+  # the Redis leg would skip -- and the "No tests were skipped" gate below
+  # would then fail the build, which is the intended behaviour.
+  REDIS_URL: redis://localhost:6379/0
+  MINIO_ENDPOINT: localhost:9000
+  MINIO_ACCESS_KEY: noctornal
+  MINIO_SECRET_KEY: dev_only_change_me
+  EVIDENCE_BUCKET: noctornal-evidence
+  SAMPLE_BUCKET: noctornal-samples
+  # A fixed, throwaway KEK. Real deployments supply this from the
+  # environment or Vault and there is no default anywhere in the code --
+  # see security/envelope.py.
+  NOCTORNAL_TOTP_KEK: QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pipx install ruff==0.6.9
+      - name: Ruff
+        run: ruff check apps packages scripts db
+
+  source-hygiene:
+    name: Source hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # docs/15 records this the hard way: the editing tools on the
+      # development machine have corrupted non-ASCII literals into NUL
+      # bytes more than once, and a NUL in a served .js file is a blank
+      # screen with nothing in the console. Cheap to check, expensive to
+      # debug.
+      - name: No NUL bytes in source
+        run: python scripts/check_source_hygiene.py
+
+  drift:
+    name: Ontology drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -e packages/ontology
+      # The ontology generates TypeScript and SQL from one definition. If
+      # the generated files stop matching, edge-type strings drift between
+      # the front end and the database, which is silent data corruption
+      # rather than a crash (packages/ontology README).
+      - name: Generated files match the definition
+        run: python -m noctornal_ontology.generate --check
+
+  test:
+    name: Tests and migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: noctornal
+          POSTGRES_USER: noctornal
+          POSTGRES_PASSWORD: dev_only_change_me
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U noctornal"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: noctornal
+          MINIO_ROOT_PASSWORD: dev_only_change_me
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install -r db/requirements.txt
+          pip install -e packages/ontology -e apps/api
+          pip install pytest httpx
+
+      # CREATE EXTENSION needs superuser, which the migration role must
+      # never be -- so extensions are loaded out of band exactly as
+      # db/init does on a real deployment, and Alembic owns everything else
+      # (decision 17).
+      - name: Load extensions
+        run: |
+          PGPASSWORD=dev_only_change_me psql -h localhost -U noctornal \
+            -d noctornal -v ON_ERROR_STOP=1 -f db/init/00-extensions.sql
+
+      # The evidence bucket needs OBJECT LOCK, which cannot be enabled
+      # after creation -- getting it wrong here would make the WORM tests
+      # pass against a bucket with no WORM.
+      - name: Create the object-store buckets
+        run: |
+          curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          for i in $(seq 1 30); do
+            /tmp/mc alias set local http://localhost:9000 noctornal dev_only_change_me && break
+            sleep 2
+          done
+          /tmp/mc mb --ignore-existing --with-lock local/noctornal-evidence
+          /tmp/mc retention set --default GOVERNANCE 365d local/noctornal-evidence
+          /tmp/mc mb --ignore-existing local/noctornal-raw
+          # R10 (2026-07-26): the samples bucket. CI had the same gap the
+          # compose file did -- nothing created it, so the first test to
+          # exercise a real sample upload would have got NoSuchBucket.
+          # NOT --with-lock: docs/11's rejection path must be able to
+          # destroy sample bytes, which an object lock would prevent.
+          /tmp/mc mb --ignore-existing local/noctornal-samples
+
+      - name: Migrate to head
+        run: alembic upgrade head
+
+      # Every migration is required to be reversible (CONVENTIONS.md
+      # conventions). Round-tripping the WHOLE chain is the only way to
+      # find the one that silently is not -- and it has caught a real
+      # defect already: 0026 originally only applied to an empty table.
+      - name: Migration round-trip (head -> base -> head)
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+          alembic current
+
+      - name: Tests
+        run: pytest apps/api/tests packages/ontology/tests -q
+
+      # The suite must not quietly become unit-only because a service died:
+      # every _pg test skips without DATABASE_URL, so a broken Postgres
+      # service would show as a green run with 100+ skips.
+      - name: No tests were skipped
+        run: |
+          pytest apps/api/tests packages/ontology/tests -q -rs 2>&1 | tee /tmp/out
+          if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/out; then
+            echo "::error::Tests were SKIPPED. The Postgres or MinIO leg is not running."
+            exit 1
+          fi

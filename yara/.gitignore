@@ -1,0 +1,7 @@
+# Pulled third-party rules are NEVER committed here: licences vary per source
+# (see sources.json) and redistributing them in this repo would inherit every
+# one of those licences. They are fetched on demand into vendor/ and compiled
+# into dist/. Provenance (which commit of each source) is recorded in
+# fetch.lock.json, which IS tracked.
+vendor/
+dist/

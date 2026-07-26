@@ -1,2 +1,30 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Cryptographic test fixtures are bytes, not text.
+#
+# A clearsigned OpenPGP signature is a TEXT-mode signature and canonicalises
+# line endings, so today's fixtures verify whether git checks them out with
+# LF or CRLF -- that was measured, not assumed. A detached binary signature
+# would not, and the failure would be a signature that verifies on Linux and
+# does not on Windows, which reads as a code bug for as long as it takes
+# somebody to think of line endings.
+#
+# Marking them binary costs nothing and removes the class.
+apps/api/tests/fixtures/pgp/** -text
+
+# Migrations are executed as-is against Postgres. Nothing here depends on
+# line endings, but a diff that shows a whole file changed because a
+# checkout rewrote it makes review harder for no benefit.
+*.sql text eol=lf
+
+# Shell scripts MUST keep LF, and this one is not cosmetic.
+#
+# `#!/usr/bin/env bash\r` is not a shebang any kernel recognises. A release
+# installer authored on Windows and checked out with CRLF fails on the
+# Linux box it was written for with:
+#
+#     /usr/bin/env: 'bash\r': No such file or directory
+#
+# which names neither the file nor line endings, and reads as a corrupt
+# download. The whole point of shipping install.sh is that it works on a
+# machine nobody has prepared, so it cannot depend on the person who
+# cloned it having configured core.autocrlf correctly.
+*.sh text eol=lf
