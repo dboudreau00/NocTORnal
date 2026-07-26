@@ -198,6 +198,13 @@
           <span class="rail-glyph" aria-hidden="true">⌕</span>
           <span class="rail-cap">Search</span>
         </button>
+        <button id="tab-comms" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-comms" aria-selected="false" tabindex="-1"
+                data-tab="comms"
+                title="Channels, contact blocks and durable selectors">
+          <span class="rail-glyph" aria-hidden="true">&#x2318;</span>
+          <span class="rail-cap">Comms</span>
+        </button>
         <span class="rail-gap"></span>
         <button id="tab-add-node" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
@@ -612,6 +619,100 @@
               <div id="search-evidence" class="hit-list"></div>
             </div>
           </div>
+        </section>
+
+        <!-- COMMS (Phase 7) -->
+        <section id="pane-comms" class="pane" role="tabpanel"
+                 aria-labelledby="tab-comms" tabindex="-1" hidden>
+
+          <!-- Bind a channel. The normalise PREVIEW is the point of this
+               form: docs/10 says the durable-selector mapping is the
+               product, and an analyst who cannot see that their 76-hex Tox
+               ID will be indexed on its first 64 characters has no way to
+               know why two observations did or did not correlate. -->
+          <form id="comms-bind-form" class="card stack narrow" novalidate>
+            <h2 class="h-sm">Record a channel</h2>
+            <p class="hint">
+              An identifier in a signature block is a <strong>claim</strong>.
+              Confirmation needs a signature over the identifier — record it
+              under Verification, not here.
+            </p>
+            <label class="field">
+              <span class="label">Platform</span>
+              <select id="comms-platform" required></select>
+            </label>
+            <p id="comms-platform-note" class="hint mono-sm" hidden></p>
+            <p id="comms-platform-coverage" class="hint warn" hidden></p>
+            <label class="field">
+              <span class="label">Identifier as observed</span>
+              <input id="comms-observed" type="text" required spellcheck="false"
+                     autocomplete="off">
+            </label>
+            <div id="comms-preview" class="preview" hidden>
+              <div class="preview-row">
+                <span class="label">Will be indexed as</span>
+                <code id="comms-preview-durable" class="mono"></code>
+              </div>
+              <p id="comms-preview-note" class="hint"></p>
+            </div>
+            <label class="field">
+              <span class="label">Verification</span>
+              <select id="comms-verification">
+                <option value="CLAIMED">CLAIMED — advertised in a profile or signature</option>
+                <option value="OBSERVED">OBSERVED — seen in actual use</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Published together with (co-declaration ref)</span>
+              <input id="comms-codecl" type="text" spellcheck="false"
+                     placeholder="e.g. the thread URL this block came from">
+            </label>
+            <p id="comms-bind-msg" class="msg" hidden></p>
+            <button type="submit" class="btn primary">Record channel</button>
+          </form>
+
+          <!-- Correlate -->
+          <form id="comms-correlate-form" class="card row-form" novalidate>
+            <label class="field">
+              <span class="label">Platform</span>
+              <select id="comms-corr-platform" required></select>
+            </label>
+            <label class="field grow">
+              <span class="label">Identifier</span>
+              <input id="comms-corr-observed" type="text" required
+                     spellcheck="false" autocomplete="off">
+            </label>
+            <button type="submit" class="btn">Correlate</button>
+          </form>
+          <div id="comms-correlate-out" class="hit-list"></div>
+
+          <!-- Contact block parser -->
+          <form id="comms-block-form" class="card stack" novalidate>
+            <h2 class="h-sm">Parse a contact block</h2>
+            <p class="hint">
+              Third-party identifiers — the forum's escrow, a guarantor, a
+              partner shop — are flagged rather than attributed to the
+              publisher. Lines whose type is ambiguous are kept
+              <strong>unresolved with a reason</strong> rather than guessed.
+            </p>
+            <label class="field">
+              <span class="label">Where it was published</span>
+              <input id="comms-block-source" type="text" required
+                     spellcheck="false" placeholder="thread or profile URL">
+            </label>
+            <label class="field">
+              <span class="label">Publisher handle</span>
+              <input id="comms-block-handle" type="text" spellcheck="false">
+            </label>
+            <label class="field">
+              <span class="label">The block, as published</span>
+              <textarea id="comms-block-text" rows="8" required
+                        spellcheck="false"></textarea>
+            </label>
+            <p id="comms-block-msg" class="msg" hidden></p>
+            <button type="submit" class="btn primary">Parse</button>
+          </form>
+          <div id="comms-block-out"></div>
         </section>
 
         <!-- ADD ENTITY -->

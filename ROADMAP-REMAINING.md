@@ -50,12 +50,12 @@ regressed — the measure got honest.**
 | 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2 — Sociogram | **95%** | ✅ | ✅ | ◐ | ✅ | WebSocket push; the UI polls. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
-| 4 — Collection | **45%** | ◐ | ✅ | ❌ | ❌ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **No UI, never reviewed.** |
+| 4 — Collection | **45%** | ◐ | ✅ | ❌ | ◐ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler. **No UI.** Reviewed 2026-07-25: the router findings are fixed, the SERVICE ones (SSRF via redirect, `redact()` being a keyword list, the rate limiter never firing) are open — docs/17 F15. |
 | 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. |
 | 6 — Tradecraft | **55%** | ◐ | ✅ | ❌ | ❌ | WebAuthn, timeline replay, the assumptions register. **No UI, never reviewed.** |
 | 7 — Comms | **75%** | ✅ | ✅ | ❌ | ✅ | **UI only.** Parser, PGP verification, co-participation, 20-endpoint router and a full adversarial pass all landed 2026-07-25. |
 | 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. |
-| 9 — Ingest | **55%** | ◐ | ✅ | ❌ | ❌ | The outbound credential vault with per-provider quota. **No UI, never reviewed.** |
+| 9 — Ingest | **55%** | ◐ | ✅ | ❌ | ◐ | The outbound credential vault; object storage for batch payloads (parse cannot work without it). **No UI.** Reviewed 2026-07-25: router findings fixed, SERVICE ones open — victim PII in dead letters, a NUL byte stranding a batch, reveal not bound to its case (docs/17 F15). |
 
 ### Overall: **~72%**
 
@@ -65,10 +65,11 @@ Unweighted mean across the ten phases. Three things that number hides:
    an HTTP API; six have no interface an analyst can use. It is 25% of
    every phase's score and the only dimension missing from more than half
    the board.
-2. **Four phases have never had a hostile review** (4, 5, 8, 9). On the
-   two phases that have, a review found a *critical* defect each time,
-   both under fully green suites. Treat unreviewed phases as unknown
-   rather than fine.
+2. **Phases 5 and 8 have never had a hostile review**; 4 and 9 have had
+   one whose SERVICE findings are still open (docs/17 F15). Every review
+   run on this project has found a real defect — four times a critical
+   one, every time under a fully green suite. Treat an unreviewed phase
+   as unknown rather than fine.
 3. **Completion is not lawfulness.** A phase at 100% may still be
    unlawful to operate — see the four BLOCKING items. Phase 8 could reach
    100% here and still must not be switched on.

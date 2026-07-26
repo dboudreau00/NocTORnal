@@ -538,6 +538,19 @@ LIMITS: dict[str, Limit] = {
         "graph.view", quota=240, per_seconds=60, scope=Scope.USER, burst=80,
         on_backend_failure=OnBackendFailure.DENY,
     ),
+    # Destruction. The tightest quota here, and deliberately so.
+    #
+    # A purge is irreversible and a legal hold is what stands between an
+    # exhibit and one, so both meter together: the attack is not volume,
+    # it is a script looping over cases. Ten an hour is more than any real
+    # retention run needs and far fewer than a loop wants. Fails CLOSED --
+    # if the meter is unavailable, not destroying things is the safe
+    # direction.
+    "retention.destroy": Limit(
+        "retention.destroy", quota=10, per_seconds=3600, scope=Scope.USER,
+        burst=3, on_backend_failure=OnBackendFailure.DENY,
+        audit_every_seconds=60,
+    ),
     # The ingest 202 endpoint, and the ONE limit in this catalogue that
     # cannot be USER-scoped.
     #
