@@ -11,14 +11,20 @@
 **Windows (PowerShell):**
 
 ```powershell
-.\install.ps1
+powershell -ExecutionPolicy Bypass -File .\release\install.ps1
 ```
 
 **macOS / Linux:**
 
 ```bash
-./install.sh
+chmod +x release/install.sh && ./release/install.sh
 ```
+
+Neither prefix is decoration (R6). The default Windows client
+ExecutionPolicy is `Restricted`, and a file extracted from a downloaded
+zip additionally carries Mark-of-the-Web — bare `.\install.ps1` is
+blocked either way. A `.sh` out of a zip has no execute bit, so `./` fails
+with "permission denied" before bash ever sees it.
 
 That is the whole thing. It checks what it needs, installs what is
 missing that it can install, starts the services, creates the database,
@@ -37,7 +43,7 @@ is missing, rather than failing halfway.
 | | Version | Why |
 |---|---|---|
 | **Python** | 3.12 or newer | The API and workers |
-| **Docker** | any recent version, with Compose v2 | Postgres, Redis, MinIO, Mailpit |
+| **Docker** | any recent version, with Compose v2 | Four containers: Postgres, Redis, MinIO, Mailpit. Budget ~3 GB RAM for them. |
 | **~4 GB RAM free** | | Postgres and MinIO are the hungry ones |
 | **~2 GB disk** | | Containers, the virtual environment and the database |
 
@@ -65,6 +71,20 @@ Nothing hidden, in this order:
 5. **Applies the database migrations** (`alembic upgrade head`).
 6. **Creates your account** if no user exists, and prints the enrolment QR
    for your authenticator.
+
+   > **Windows note (R8).** `install.ps1` hands off to `launch.ps1`, which
+   > prints a banner telling you to run `create-user` in a second terminal
+   > — and then starts uvicorn, whose log scrolls that banner off the
+   > screen within seconds. If you reach the sign-in page with no
+   > credentials, that is why. Run:
+   >
+   > ```powershell
+   > .venv\Scripts\python scriptsootstrap.py create-user --email you@example.org --name "Your Name"
+   > ```
+   >
+   > It works in a fresh terminal with no exports: `bootstrap.py` reads
+   > `.env.local` itself.
+
 7. **Starts the API** and prints the console URL.
 
 Every one of those is idempotent. Stopping it half way and running it
@@ -89,6 +109,7 @@ For a machine whose clock cannot be fixed, there is an explicit bypass:
 
 ```bash
 .venv/bin/python scripts/bootstrap.py session --email you@example.com
+# Windows:  .venv\Scripts\python scriptsootstrap.py session --email you@example.com
 ```
 
 It prints a URL carrying a session token. **It is recorded in the audit
@@ -105,7 +126,7 @@ working on a broken host, not as the normal way in.
 docker compose -f infra/docker-compose.yml down
 
 # start everything again:
-./install.sh          # or .\install.ps1
+./release/install.sh          # or: powershell -ExecutionPolicy Bypass -File .\release\install.ps1
 ```
 
 Data lives in Docker volumes and survives `down`. To destroy it
@@ -162,9 +183,41 @@ goes untested. Put `gpg` on `PATH`.
 ## Verifying the install
 
 ```bash
-.venv/bin/python -m pytest apps/api/tests packages/ontology -q
+# macOS / Linux
+DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal"   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **1206 passed, 0 skipped**. Note the two directories: the suite
-spans two roots, and running only one gives a number that will not match
-anything in the documentation.
+```powershell
+# Windows
+$env:DATABASE_URL = "postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal"
+.venv\Scripts\python -m pytest apps/api/tests packages/ontology -q
+```
+
+Expect **1252 passed, 12 skipped**.
+
+**That number has preconditions, and without them you will see something
+very different (R7):**
+
+| | |
+|---|---|
+| the containers are **up** | `docker compose -f infra/docker-compose.yml ps` |
+| `DATABASE_URL` is **exported in this shell** | the installers persist it to `.env.local`, but pytest does not read that file — hence the explicit assignment above |
+| both directories are given | the suite spans two pytest roots; running one gives a number that matches nothing in the documentation |
+
+**Without `DATABASE_URL` you will see roughly 700 skips**, because 37 test
+files are `skipif`-gated on it. That is a correct result and not a broken
+install — the core of the suite is deliberately database-free so it can
+run anywhere.
+
+The 12 remaining skips are optional-dependency paths. If `gpg` is not on
+your `PATH` you will additionally see PGP failures rather than skips:
+`test_pgp.py` asserts the binary is present deliberately, so a missing
+verifier is loud rather than silent. INSTALL lists GnuPG as optional for
+*operating* the product, which is true; it is not optional for running
+the full suite green.
+
+> Running the suite **with** `DATABASE_URL` set writes permanent rows into
+> the append-only tables (`audit.event`, custody ledgers) of the database
+> you point it at. That is by design — those tables refuse deletion — but
+> it is startling on a fresh install, and it is a reason not to point the
+> test suite at anything you care about.

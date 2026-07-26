@@ -58,57 +58,82 @@ services:
 
   # Creates the evidence bucket WITH OBJECT LOCK. Object lock cannot be
   # enabled after creation, so getting this right on first run matters.
+  #
+  # `set -e` + `--ignore-existing` instead of `|| true`: a silently failed
+  # lock-enabled creation is unrecoverable, so real failures must fail this
+  # container visibly.
+  #
+  # R10 (2026-07-26) added `noctornal-samples`, which was created by
+  # nothing. The store defaults to that name, so the first real sample
+  # upload got an uncurated NoSuchBucket where every other refusal in this
+  # system explains itself. The dev machine never hit it because
+  # seed_lab_demo.py deliberately uses a null store.
+  #
+  # The samples bucket is NOT --with-lock, and this is the one bucket where
+  # that needs saying out loud: docs/11's rejection path must be able to
+  # DESTROY sample bytes when prohibited content arrives, and an object
+  # lock would make that impossible for the whole retention period.
+  # Evidence is locked because an exhibit must survive; a sample is not,
+  # because some samples must not.
+  #
+  # EVERY comment about this command lives OUT HERE. `entrypoint: >` is a
+  # YAML *folded* scalar: it joins its lines with spaces into one string,
+  # so a `#` inside it comments out the rest of the entire shell command.
+  # A comment added inside the block on 2026-07-26 silently disabled the
+  # samples-bucket creation it was written to explain, and `docker compose
+  # config` was what caught it.
   minio-init:
     image: minio/mc:latest
     depends_on: [minio]
-    # set -e + --ignore-existing instead of '|| true': a silently failed
-    # lock-enabled creation is unrecoverable (lock cannot be added later),
-    # so real failures must fail this container visibly.
     entrypoint: >
       /bin/sh -c "
       set -e;
       until mc alias set local http://minio:9000 noctornal dev_only_change_me; do sleep 1; done;
       mc mb --ignore-existing --with-lock local/noctornal-evidence;
       mc mb --ignore-existing local/noctornal-raw;
+      mc mb --ignore-existing local/noctornal-samples;
       mc retention set --default GOVERNANCE 365d local/noctornal-evidence;
       echo 'buckets ready';
       "
 
-  mailhog:
+  # Named `mailpit` after the image it actually runs. It was `mailhog`
+  # for historical reasons and the mismatch confused anyone reading
+  # `docker compose ps` against the docs (R21).
+  mailpit:
     image: axllent/mailpit:latest
+    # 1025 SMTP, 8025 web UI. install.ps1/install.sh write matching
+    # SMTP_HOST/SMTP_PORT/SMTP_ALLOW_PLAINTEXT into .env.local, or the
+    # advertised "captured e-mail" demo silently does nothing (R11) --
+    # transports.py defaults to port 587.
     ports: ["1025:1025", "8025:8025"]
 
-  # OpenFGA refuses to `run` against an unmigrated Postgres datastore, so
-  # migrations get their own one-shot service.
-  openfga-migrate:
-    image: openfga/openfga:latest
-    command: migrate
-    environment:
-      OPENFGA_DATASTORE_ENGINE: postgres
-      OPENFGA_DATASTORE_URI: postgres://noctornal:dev_only_change_me@postgres:5432/noctornal?sslmode=disable
-    depends_on:
-      postgres: { condition: service_healthy }
-
-  openfga:
-    image: openfga/openfga:latest
-    command: run
-    environment:
-      OPENFGA_DATASTORE_ENGINE: postgres
-      OPENFGA_DATASTORE_URI: postgres://noctornal:dev_only_change_me@postgres:5432/noctornal?sslmode=disable
-      OPENFGA_PLAYGROUND_ENABLED: "true"
-    depends_on:
-      openfga-migrate: { condition: service_completed_successfully }
-    # Playground on host 3001: 3000 belongs to the Next.js dev server.
-    ports: ["8080:8080", "3001:3000"]
-
-  nats:
-    image: nats:2-alpine
-    command: ["-js", "-sd", "/data", "-m", "8222"]
-    ports: ["4222:4222", "8222:8222"]
-    volumes: [natsdata:/data]
+# ---------------------------------------------------------------------------
+# REMOVED 2026-07-26 (R13): OpenFGA and NATS.
+#
+# Both were scaffolding for a design direction the build did not take.
+# Neither is referenced by a single line in apps/api -- verified by grep --
+# yet between them they published FOUR host ports (8080, 3001, 4222, 8222)
+# and one port collision fails the ENTIRE `docker compose up`, taking the
+# install with it. 8080 in particular is among the most contended ports on
+# a developer workstation.
+#
+# So they were pure risk: no function, and a plausible way for a first-run
+# install to fail with an error about a service the product never calls.
+# Ten published ports became six.
+#
+# docs/02 still names OpenFGA/SpiceDB as the intended relationship-based
+# authorisation store. That remains the plan; the five-part gate in
+# `deps.py` is the current implementation and is entirely in Postgres. When
+# ReBAC is actually wired up, the service comes back -- with code calling
+# it.
+#
+# NOTE for anyone re-adding OpenFGA: `openfga-migrate` declared
+# `depends_on: postgres: service_healthy`, which had the side effect of
+# making `up -d` block until Postgres was genuinely ready. install.sh's
+# wait-loop relied on that without knowing it. R17 added an explicit
+# failure branch to that loop for exactly this reason.
 
 volumes:
   pgdata:
   redisdata:
   miniodata:
-  natsdata:
