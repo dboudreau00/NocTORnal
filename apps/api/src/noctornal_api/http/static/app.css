@@ -892,3 +892,228 @@ select.select { appearance: none; padding-right: 24px; }
 .login-mark {
   display: block; color: var(--text-primary); margin: 0 auto 10px;
 }
+
+/* ══ LAB — malware samples (Phase 8, invariant 10) ══════════════════════
+ *
+ * The visual job here is different from every other pane. Elsewhere the
+ * design gets out of the way; here it has to keep saying, without a modal
+ * on every click, that these rows describe live hostile files.
+ *
+ * So: a hazard glyph, a warm border on the rail button and the cards, and
+ * a quarantine treatment for the one string the attacker wrote. What it
+ * deliberately does NOT do is render anything FROM the file — no preview,
+ * no icon, no hex. There is no innerHTML and no iframe anywhere in this
+ * pane, which is the only reliable way to be certain no sandbox attribute
+ * ever combines allow-scripts with allow-same-origin: the element that
+ * would carry them does not exist.
+ */
+
+.danger-tab .rail-glyph { color: var(--sign-negative); }
+.danger-tab[aria-selected="true"] .rail-glyph { color: var(--danger); }
+
+.sample-card { border-left: 3px solid var(--artefact-malware); }
+.sample-card:hover { border-left-color: var(--danger); }
+
+.row-glyph { font-size: 13px; line-height: 1; }
+.row-glyph.hazard { color: var(--artefact-malware); }
+
+/* The attacker's filename. Boxed, monospaced and direction-locked, so a
+   right-to-left override cannot make "cod.exe" read as "exe.doc" — the
+   oldest presentation attack there is, and one that costs nothing to
+   defeat here. */
+.filename-quarantine {
+  display: flex; align-items: baseline; gap: 8px; margin: 6px 0 0;
+  padding: 4px 8px; border-radius: 3px;
+  background: rgba(196, 110, 138, 0.07);
+  border: 1px dashed var(--artefact-malware);
+  font-size: 12px; overflow-wrap: anywhere;
+}
+.filename-quarantine bdi { unicode-bidi: isolate; color: var(--text-secondary); }
+
+/* Entropy as a bar. The number alone means nothing to anybody who does not
+   do this daily; the bar puts ~7.9 (packed) and ~4 (text) in immediate
+   relation to each other. */
+.meter { display: inline-flex; align-items: center; gap: 6px; }
+.meter-bar {
+  display: inline-block; width: 64px; height: 5px; border-radius: 3px;
+  background: var(--surface-3); overflow: hidden;
+}
+.meter-fill {
+  display: block; height: 100%; background: var(--accent-dim);
+  transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.meter-fill.hot { background: var(--artefact-malware); }
+.meter-val {
+  font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* State, as a colour an analyst can scan a column for. */
+.chip.state-quarantined { color: var(--alert); border-color: var(--alert); }
+.chip.state-triaged { color: var(--accent); border-color: var(--accent-dim); }
+.chip.state-assigned { color: var(--actor-persona);
+                       border-color: var(--actor-persona); }
+.chip.state-analysis { color: var(--actor-person);
+                       border-color: var(--actor-person); }
+.chip.state-reported { color: var(--sign-positive);
+                       border-color: var(--sign-positive); }
+.chip.state-rejected { color: var(--text-tertiary);
+                       text-decoration: line-through; }
+.chip.family { color: var(--artefact-malware);
+               border-color: var(--artefact-malware); }
+.chip.conf-HIGH { color: var(--sign-positive); border-color: var(--sign-positive); }
+.chip.conf-MODERATE { color: var(--alert); border-color: var(--alert); }
+.chip.conf-LOW { color: var(--text-tertiary); }
+
+.banner-legal {
+  display: block; border-left: 3px solid var(--alert);
+  background: rgba(212, 160, 60, 0.06); padding: 12px 14px;
+  border-radius: 4px; margin-bottom: 14px; font-size: 12px;
+  line-height: 1.6; color: var(--text-secondary);
+}
+.banner-legal strong { color: var(--alert); }
+.banner-legal .facts { margin-top: 8px; }
+
+/* Hashes get pasted into other tools, so they are selectable, monospaced
+   and never wrapped mid-string. */
+.hash-line {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  flex-wrap: wrap;
+}
+.hash-line code {
+  font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
+  overflow-wrap: anywhere; user-select: all;
+}
+.btn.tiny { padding: 1px 6px; font-size: 10px; }
+.btn.tiny.is-ok { color: var(--sign-positive); border-color: var(--sign-positive); }
+.btn.subtle { background: transparent; color: var(--text-tertiary); }
+.btn.subtle:hover { color: var(--text-primary); background: var(--surface-2); }
+.btn.danger { color: var(--danger); border-color: var(--sign-negative); }
+.btn.danger:hover:not([disabled]) {
+  background: rgba(192, 71, 60, 0.12); border-color: var(--danger);
+}
+
+.card.sub { background: var(--surface-0); padding: 12px 14px; margin-top: 10px; }
+.card.sub.danger { border-color: var(--sign-negative); }
+.card.sub.danger > summary { color: var(--danger); cursor: pointer;
+                             font-weight: 600; font-size: 12px; }
+.h-xs { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--text-tertiary); margin: 0 0 6px; }
+.row-card.inner { background: var(--surface-1); margin-top: 8px; }
+.rule { border: 0; border-top: 1px solid var(--hairline); margin: 12px 0 0; }
+.rules { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.65;
+         color: var(--text-secondary); }
+.rules li { margin-bottom: 6px; }
+.rules strong { color: var(--text-primary); }
+.why.gaps { border-left-color: var(--alert); color: var(--alert); }
+.selectable { user-select: all; }
+.is-highlighted {
+  outline: 1px solid var(--alert); outline-offset: 3px; border-radius: 3px;
+}
+
+/* The custody ledger as a spine. Chronology is the point of a chain of
+   custody, and a flat list of rows does not read as one. */
+.timeline { margin-top: 8px; padding-left: 4px; }
+.timeline-item {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 3px 0 3px 10px; border-left: 1px solid var(--hairline);
+  margin-left: 3px;
+}
+.timeline-item:first-child { padding-top: 0; }
+.timeline-dot {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent-dim);
+  margin-left: -13px; flex: 0 0 auto; align-self: center;
+}
+.timeline-body { font-size: 12px; }
+
+.detail-card { margin-top: 14px; }
+
+
+/* ══ MOTION ════════════════════════════════════════════════════════════
+ *
+ * Sparing and short. This is an analysis tool: motion is here to say what
+ * changed and where something came from, never to entertain. Everything
+ * below is 110-260ms of opacity or a few pixels of travel, and all of it
+ * is switched off wholesale by the prefers-reduced-motion block earlier in
+ * this file -- which is why nothing here carries information the static
+ * state does not also carry.
+ *
+ * `transform` and `opacity` only. Those are the two properties a browser
+ * can animate off the main thread, and a sociogram holding two thousand
+ * nodes cannot afford a layout pass because a card faded in.
+ */
+
+/* A pane arriving. The 4px rise gives the switch a direction, so it reads
+   as navigation rather than as a flicker. */
+.pane:not([hidden]) { animation: pane-in 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes pane-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Rows arriving after a fetch.
+ *
+ * This was a per-row stagger — `animation-delay` climbing 18ms a row with
+ * `animation-fill-mode: backwards`. It looked good and it was wrong. With
+ * `backwards`, a row is held at `opacity: 0` for the whole of its delay,
+ * so any stall in the animation clock leaves rows INVISIBLE with no error
+ * anywhere: a screenshot of this pane showed three samples out of
+ * twenty-eight and a count that said 28.
+ *
+ * A hidden tab already clamps timers and suspends the compositor in this
+ * app (see the ResizeObserver note), so the stall is not hypothetical.
+ * Motion that can hide a row is not worth having in a queue whose rows are
+ * malware samples, so the whole list fades as one and every row's resting
+ * state is visible.
+ */
+.rows { animation: row-in 170ms cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* The detail card. Opened from a row, so it comes UP from the list. */
+.detail-card {
+  opacity: 0; transform: translateY(6px);
+  transition: opacity 200ms ease,
+              transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.detail-card.is-in { opacity: 1; transform: none; }
+
+/* Hover feedback on the border rather than the fill: a background change
+   at this row density makes the whole list twitch as the pointer crosses
+   it. */
+.row-card { transition: border-color 120ms ease, background-color 120ms ease; }
+.btn { transition: background-color 110ms ease, border-color 110ms ease,
+                   color 110ms ease; }
+.subtab { transition: color 120ms ease, border-color 160ms ease; }
+.rail-btn { transition: background-color 120ms ease, color 120ms ease; }
+
+/* A badge appearing is the one place a little overshoot earns its keep: it
+   is the only signal that work arrived while you were looking elsewhere. */
+.rail-badge:not([hidden]) {
+  animation: badge-in 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes badge-in {
+  from { opacity: 0; transform: scale(0.4); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Messages. A status line that swaps its text silently gets missed, and
+   the ones in this app include "the bytes are gone". */
+.msg {
+  font-size: 12px; border-left: 2px solid var(--hairline);
+  padding-left: 8px; overflow-wrap: anywhere; color: var(--text-secondary);
+}
+.msg:not([hidden]) { animation: msg-in 200ms ease; }
+@keyframes msg-in {
+  from { opacity: 0; transform: translateX(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+.msg.ok { color: var(--sign-positive); border-left-color: var(--sign-positive); }
+.msg.bad { color: var(--danger); border-left-color: var(--danger); }
+.msg.warn { color: var(--alert); border-left-color: var(--alert); }
+
+/* Focus, once, everywhere. Keyboard navigation is not a nicety in a tool
+   whose triage queue is driven with J and K. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

@@ -240,6 +240,14 @@
           <span class="rail-glyph" aria-hidden="true">&#x25F4;</span>
           <span class="rail-cap">Lifecycle</span>
         </button>
+        <button id="tab-samples" type="button" class="tab rail-btn danger-tab"
+                role="tab" aria-controls="pane-samples" aria-selected="false"
+                tabindex="-1" data-tab="samples"
+                title="Malware sample queue — metadata only, never bytes">
+          <span class="rail-glyph" aria-hidden="true">&#x2622;</span>
+          <span class="rail-cap">Lab</span>
+          <span id="samples-badge" class="rail-badge" hidden></span>
+        </button>
         <span class="rail-gap"></span>
         <button id="tab-add-node" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
@@ -1269,6 +1277,154 @@
             </div>
             <div id="glass-queue"></div>
             <p id="glass-empty" class="empty">Nothing awaiting review.</p>
+          </div>
+        </section>
+
+        <!-- LAB (Phase 8). Invariant 10, as a screen:
+             "Samples never render, never execute. The binary is only ever an
+             encrypted archive download from a SEPARATE ORIGIN."
+
+             So this pane shows METADATA and nothing else — hashes, type,
+             entropy, triage gaps, findings, custody. There is no preview, no
+             hex view, no icon extracted from the file, no iframe, and the
+             attacker-supplied filename is rendered as text through
+             textContent like every other value here.
+
+             The download control is deliberately not a link. It is a POST to
+             a separate origin behind step-up, and it is styled as the
+             dangerous act it is. -->
+        <section id="pane-samples" class="pane" role="tabpanel"
+                 aria-labelledby="tab-samples" tabindex="-1" hidden>
+
+          <div id="smp-policy" class="banner banner-legal" hidden></div>
+
+          <div class="subtabs" role="tablist" aria-label="Lab sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="queue"
+                    aria-controls="smp-queue-pane">Queue</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="submit"
+                    aria-controls="smp-submit-pane">Submit</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="handling"
+                    aria-controls="smp-handling-pane">Handling</button>
+          </div>
+
+          <!-- QUEUE -->
+          <div id="smp-queue-pane" class="subpane">
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">State</span>
+                <select id="smp-state" class="select">
+                  <option value="">In the queue</option>
+                  <option value="QUARANTINED">Quarantined</option>
+                  <option value="TRIAGED">Triaged</option>
+                  <option value="ASSIGNED">Assigned</option>
+                  <option value="IN_ANALYSIS">In analysis</option>
+                  <option value="REPORTED">Reported</option>
+                  <option value="REJECTED">Rejected</option>
+                </select>
+              </label>
+              <button id="smp-refresh" type="button" class="btn">Refresh</button>
+              <span id="smp-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              Filtered by <strong>your own</strong> clearance and
+              compartments, not the case's — a sample can be classified
+              above the case it belongs to, so the case gate alone would
+              leak that it exists.
+            </p>
+            <div id="smp-list" class="rows"></div>
+            <p id="smp-empty" class="empty">Nothing in the queue.</p>
+
+            <div id="smp-detail" class="card detail-card" hidden>
+              <div class="pane-head">
+                <h2 class="h-sm" id="smp-detail-title">Sample</h2>
+                <button id="smp-close" type="button" class="btn subtle">
+                  Close</button>
+              </div>
+              <div id="smp-detail-body"></div>
+            </div>
+          </div>
+
+          <!-- SUBMIT -->
+          <div id="smp-submit-pane" class="subpane" hidden>
+            <div class="card stack narrow">
+              <h2 class="h-sm">Submit a sample</h2>
+              <p class="help warn">
+                It lands in <strong>QUARANTINE</strong>, encrypted at rest
+                under a per-sample key, stored under its SHA-256 and never
+                under its filename. Nothing reaches the analysis queue
+                before triage has run.
+              </p>
+              <label class="field">
+                <span class="label">File</span>
+                <input id="smp-file" type="file">
+              </label>
+              <label class="field">
+                <span class="label">Case (optional)</span>
+                <input id="smp-case" type="text" spellcheck="false"
+                       placeholder="case id — leave blank for an unattached sample">
+              </label>
+              <label class="field">
+                <span class="label">Classification</span>
+                <select id="smp-class" class="select">
+                  <option value="CLEAR">CLEAR</option>
+                  <option value="GREEN">GREEN</option>
+                  <option value="AMBER" selected>AMBER</option>
+                  <option value="AMBER_STRICT">AMBER_STRICT</option>
+                  <option value="RED">RED</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Where it came from</span>
+                <input id="smp-note" type="text" spellcheck="false"
+                       placeholder="the source, and anything a later reader needs">
+              </label>
+              <p id="smp-submit-msg" class="msg" hidden></p>
+              <button id="smp-submit" type="button" class="btn primary">
+                Submit to quarantine</button>
+            </div>
+          </div>
+
+          <!-- HANDLING -->
+          <div id="smp-handling-pane" class="subpane" hidden>
+            <div class="card stack">
+              <h2 class="h-sm">What this screen will and will not do</h2>
+              <ul class="rules">
+                <li><strong>Metadata renders. Bytes do not.</strong> There is
+                  no preview, no hex view and no icon taken from the file.
+                  Rendering attacker-supplied bytes in the same origin as the
+                  case file is a drive-by vector into your highest-trust
+                  system, seeded with hostile files by design.</li>
+                <li><strong>The filename is evidence, not a path.</strong> It
+                  is stored for the record and never used as a path
+                  component. The object key is always the SHA-256.</li>
+                <li><strong>Download is a separate origin, step-up gated.</strong>
+                  It is the one action here that puts working malware on a
+                  disk. It refuses unless the request arrived at the
+                  configured sample origin, and the check lives in the
+                  service so a second caller cannot skip it.</li>
+                <li><strong>The archive password is an interlock, not
+                  protection.</strong> <code>infected</code> is public and
+                  ZipCrypto is broken. It stops a double-click and stops a
+                  mail gateway eating the sample. Confidentiality comes from
+                  access control, transport and audit.</li>
+                <li><strong>A legal hold beats a rejection.</strong> Rejecting
+                  destroys the bytes and the data key. If the sample is held,
+                  that is refused — preservation and destruction can both be
+                  legal obligations and software does not get to pick.</li>
+              </ul>
+              <h2 class="h-sm">Gaps, recorded rather than hidden</h2>
+              <p class="help">
+                Fuzzy hashing (imphash, ssdeep, TLSH), YARA and sandbox
+                detonation are not built. Each absence is written onto the
+                sample row as a gap with a reason, because a NULL imphash
+                reads as &ldquo;this sample has no imports&rdquo; and an
+                absent one says nobody looked.
+              </p>
+              <div id="smp-origin" class="help"></div>
+            </div>
           </div>
         </section>
 
