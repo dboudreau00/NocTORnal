@@ -1028,6 +1028,41 @@ class SampleService:
                  "confidence": r[8], "narrative": r[9],
                  "created_at": r[10].isoformat()} for r in rows]
 
+    def detonations(self, sample_id: UUID) -> list[dict]:
+        """Every detonation REQUEST against this sample.
+
+        Requests, not results: nothing in this build submits to a sandbox.
+        The record exists because detonation is an overt act — operators
+        watch public sandboxes for their own samples and treat a
+        submission as a signal they have been noticed, which can end an
+        operation that took months. So the authorisation is captured
+        before anything could be sent, and it stays captured whether or
+        not an integration ever appears.
+
+        `authorised_by` is joined to an email rather than left as a uuid:
+        the whole point of the column is that a NAMED human agreed, and a
+        name a reviewer has to look up separately is one they will not.
+        """
+        rows = self._c.execute(
+            """SELECT d.id, d.target, d.exposure_level, d.status,
+                      d.requested_at, d.submitted_at, d.external_ref,
+                      d.authorisation_note, r.email, a.email
+                 FROM lab.detonation d
+                 JOIN iam.app_user r ON r.id = d.requested_by
+                 LEFT JOIN iam.app_user a ON a.id = d.authorised_by
+                WHERE d.sample_id = %s
+                ORDER BY d.requested_at DESC""", (sample_id,)).fetchall()
+        return [{"id": str(r[0]), "target": r[1], "exposure_level": r[2],
+                 "status": r[3],
+                 "requested_at": r[4].isoformat() if r[4] else None,
+                 "submitted_at": r[5].isoformat() if r[5] else None,
+                 "external_ref": r[6], "authorisation_note": r[7],
+                 "requested_by": r[8], "authorised_by": r[9],
+                 # Stated on every row rather than once on the page: a
+                 # reader scanning a list of "AUTHORISED" rows should not
+                 # have to remember that none of them went anywhere.
+                 "submitted": False} for r in rows]
+
     def custody(self, sample_id: UUID) -> list[dict]:
         rows = self._c.execute(
             """SELECT actor_id, action, occurred_at, archive_format, detail
