@@ -8,6 +8,14 @@ pipeline propose rather than decide. Comparable products: SL Crimewall,
 Maltego, i2 Analyst's Notebook, UCINET (for the SNA maths), Obsidian (for the
 linked-notes feel).
 
+> **Standing.** This is a derived map, not a decision record. Where it
+> disagrees with `docs/00-decisions.md` (the numbered decisions),
+> `docs/16-legal-and-external.md` (the blocking legal items) or
+> `docs/17-flagged-for-review.md` (what is known-wrong), THOSE are
+> authoritative and this is stale. `docs/02-architecture.md` holds the
+> original reasoning for the stack; this file describes what was actually
+> built.
+
 This document is the system map: the founding ideas, the twelve invariants and
 how each is enforced, the ten build phases (0 through 9) and how they depend on
 one another, then a layer-by-layer tour of the data model, ontology, graph and
@@ -151,7 +159,7 @@ The one ordering constraint that matters (`docs/09` line 4): the graph and asser
 
 ### Current state
 
-`main`, Alembic head **0039**, **1012 tests passing, 0 skipped**, ruff and source-hygiene clean, migrations round-trip base to head to base to head on a clean database; nothing pushed (no remote). Overall completion is **~72%**, the unweighted mean across the ten phases under the four-dimension measure — lower than earlier versions because the metric got honest, not because anything regressed. **UI is the single largest gap:** every phase has an HTTP API, but six (4, 5 partial, 6, 8, 9, and 7) have no interface an analyst can use, and UI is 25% of every phase's score. Four phases (4, 5, 8, 9) have never had an adversarial pass; the two that have (3, 7) each turned up a critical defect under a fully green suite.
+`main`, Alembic head **0039**, **1012 tests passing, 0 skipped**, ruff and source-hygiene clean, migrations round-trip base to head to base to head on a clean database; nothing pushed (no remote). Overall completion is **~72%**, the unweighted mean across the ten phases under the four-dimension measure — lower than earlier versions because the metric got honest, not because anything regressed. **UI is the single largest gap:** every phase has an HTTP API, and six (4, 6, 7, 8, 9, and partially 5) have little or no interface an analyst can use. UI is 25% of every phase's score. A first Comms pane landed 2026-07-25 — platforms with their coverage notes, a live durable-selector preview, correlate, and the contact-block parser — so Phase 7 is the worked example for the rest. **Phases 5 and 8 have never had an adversarial pass**; 4 and 9 have had one whose ROUTER findings are fixed and whose SERVICE findings are open (`docs/17` F15). Every review run on this project has found a real defect — four times a critical one, every time under a fully green suite.
 
 Completion is not lawfulness. `docs/16-legal-and-external.md` holds **four BLOCKING items** that gate any real deployment regardless of build percentage: **L1** prohibited-content policy for samples (the build refuses ingest until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and `NOCTORNAL_DESIGNATED_PERSON` are declared — a declaration it records but cannot verify — and `REJECTED` currently destroys bytes, wrong where preservation is required); **L2** lawful basis, victim notification and real retention for stealer-log data on thousands of uninvolved people (90 days is a placeholder); **L3** authority to operate a covert persona against each target; **L4** interception law and consent for message capture. A 95% build still must not be operated until L1–L4 are settled with counsel.
 
