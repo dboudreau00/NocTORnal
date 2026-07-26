@@ -180,19 +180,39 @@ which is the argument for reviewing a repair as hostilely as a feature.
 
 #### Recorded and NOT fixed
 
-**F17(a) — nothing sweeps `ingest.record.retain_until` or
-`ingest.dead_letter.retain_until`.** Migration 0040 sets a 90-day clock and
-builds an index its own comment calls "The sweep"; `RetentionService.due()`
-queries `core.evidence` and `collect.document` and nothing else. So the
-labels and the gating shipped and the expiry did not, and the 90-day
-default — chosen precisely because unassessed third-party victim data
-should get the shortest rule — currently delivers the longest possible one.
-`ingest.record.retain_until` has been unswept since 0033.
+**F17(a) — ✅ FIXED.** Nothing swept `ingest.record.retain_until` or
+`ingest.dead_letter.retain_until`. Migration 0040 set a 90-day clock and
+built an index its own comment calls "The sweep"; `RetentionService.due()`
+queried `core.evidence` and `collect.document` and nothing else. The labels
+and the gating shipped and the expiry did not — so the 90-day default,
+chosen precisely *because* unassessed third-party victim data deserves the
+shortest rule, was delivering the longest possible one.
+`ingest.record.retain_until` had been unswept since 0033.
 
-*Why it is not fixed here:* it is a new sweeper with its own tombstone
-semantics and its own four-eyes question (does purging a partner's raw
-batch need the same authority as purging an exhibit?), not a one-line
-addition to an existing query. It is the top of the Phase 9 list.
+Both are now in `due()` and `purge_due()`, counted separately from evidence
+and documents rather than folded into a total: an exhibit and a partner's
+raw record are destroyed under different authority, and one number would
+hide which just went. Four properties the tests pin down:
+
+- purging a record **destroys its victim credentials too** — destroying the
+  payload and leaving the credential it named is the worst available
+  half-measure;
+- a **case legal hold reaches ingest records**, because a hold that stops
+  at a schema boundary is a hold with a gap in it, and the ingest side is
+  the material most likely to be the subject of one;
+- a dead letter is **not** swept by a case-scoped purge — it has no case,
+  so no case hold can reach it, and including it would mean the first
+  case-scoped purge of the week destroys the deployment's whole queue;
+- a pre-0040 dead letter **can** be purged: the UPDATE sets `redacted =
+  true` in the same statement that replaces the fragment, because the NOT
+  VALID check is re-evaluated on every UPDATE and the unredacted victim
+  credentials would otherwise be the only rows in the table that could
+  never be destroyed — the exact inversion of what 0040 was for.
+
+The four-eyes question is unchanged and still open: `purge_due` runs on a
+schedule under a stated authority, and whether destroying a partner's raw
+batch should instead require dual control the way
+`purge_out_of_schedule` does is **docs/16 B4**, not a code decision.
 
 **F17(b) — `db/schema.sql` has none of 0040–0042, and no `ingest` schema at
 all.** It is declared a mirror that must be kept in sync and it is not one.
