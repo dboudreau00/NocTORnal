@@ -1,0 +1,54 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Node (Phase 2+)
+node_modules/
+.next/
+
+# Local environment — secrets are environment-only, never committed
+.env
+.env.*
+
+# Editor noise
+.vscode/
+.idea/
+
+# Editor/agent machine-local permission grants
+.claude/settings.local.json
+
+# UI screenshots (scripts/screenshot_ui.py). These are renders of real
+# panes against real case data, so they carry that case's classification.
+# A screenshot of an AMBER_STRICT case in a public repository is the same
+# disclosure as the case file, and it does not look like one.
+#
+# `shots/` is here because `--out shots` once put fifteen of them in the
+# working tree as untracked files, one `git add -A` away from history. The
+# script now refuses an output directory inside the repo that git would
+# not ignore, so this pair is belt and braces rather than the only guard.
+screenshots/
+shots/
+# Nothing in this repository is a tracked PNG -- the logo and the favicon
+# are SVG, deliberately, because they are styled by `currentColor`. So a
+# blanket rule costs nothing and catches an --out nobody thought of. If a
+# raster asset is ever genuinely wanted, negate it explicitly here.
+*.png
+
+# docs/images/ IS tracked, and is the ONE negation of the blanket rule
+# above -- exactly the "negate it explicitly here" that comment asks for.
+#
+# Everything in it must be a render of the TLP:CLEAR synthetic showcase
+# case (OP-SHOWCASE-26 -- bootstrap.py demo-network, then
+# scripts/seed_deception_demo.py), so it can appear in a public README.
+# Every actor, handle, domain and phone number in that case is fiction.
+#
+# BEFORE ADDING A FILE HERE, CHECK THE TLP BADGE IN THE TITLE BAR READS
+# "CLEAR". A shot of any other case belongs in screenshots/, which stays
+# ignored for the reason given above -- and note that `screenshots/` and
+# `shots/` are still listed, so the default output path of
+# scripts/screenshot_ui.py cannot land here by accident.
+!docs/images/
+!docs/images/*.png

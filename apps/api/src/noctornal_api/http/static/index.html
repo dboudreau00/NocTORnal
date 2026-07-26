@@ -1,0 +1,1912 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>NocTORnal — analyst console</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<!-- Fetch failures and unexpected server problems land here, never in the console. -->
+<div id="banners" class="banners" role="status" aria-live="polite"></div>
+
+<!-- ───────────────────────────── LOGIN ───────────────────────────── -->
+<main id="view-login" class="login-view">
+  <form id="login-form" class="card login-card" novalidate>
+    <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
+    <p class="eyebrow">NocTORnal</p>
+    <h1 class="h-lg">Analyst sign-in</h1>
+    <p class="muted">Case material is TLP-classified. Access is logged against your
+      user id, and every graph write you make is attributed to it.</p>
+
+    <label class="field">
+      <span class="label">Work email</span>
+      <input id="login-email" type="email" name="email" autocomplete="username"
+             required spellcheck="false">
+    </label>
+
+    <label class="field">
+      <span class="label">Password</span>
+      <input id="login-password" type="password" name="password"
+             autocomplete="current-password" required>
+    </label>
+
+    <div class="field">
+      <label class="label" for="login-totp">Authenticator code</label>
+      <input id="login-totp" type="text" name="totp_code" inputmode="numeric"
+             autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}"
+             class="mono" required aria-describedby="login-totp-help">
+      <span id="login-totp-help" class="help">Six digits from your TOTP app.</span>
+    </div>
+
+    <p id="login-error" class="form-error" role="alert" hidden></p>
+    <button id="login-submit" type="submit" class="btn primary">Sign in</button>
+  </form>
+</main>
+
+<!-- ────────────────────────────── APP ────────────────────────────── -->
+<div id="view-app" class="app" hidden>
+
+  <header class="appbar">
+    <img class="brand-mark" src="logo.svg" alt="" width="22" height="22">
+    <span class="brand">NocTORnal</span>
+    <span class="appbar-sep" aria-hidden="true"></span>
+    <span id="hdr-case" class="hdr-case">No case selected</span>
+    <span id="hdr-tlp" class="chip" hidden></span>
+    <span class="spacer"></span>
+    <span id="hdr-asof" class="hdr-asof mono" hidden>as-of: now</span>
+    <!-- Whether another analyst's changes will arrive without a refresh.
+         Shown rather than assumed: a push UI that silently stops pushing
+         is worse than one that never pushed, because people stop
+         refreshing. Title carries the explanation; the dot alone never
+         has to be the whole message. -->
+    <span id="live-dot" class="live-dot live-off" role="status"
+          aria-live="polite" aria-label="Live update status"></span>
+    <button id="btn-palette" type="button" class="btn ghost small"
+            aria-keyshortcuts="Control+K Meta+K"
+            aria-label="Open the command palette">⌘K</button>
+    <button id="btn-cases" type="button" class="btn ghost" hidden>All cases</button>
+    <span class="hdr-user">
+      <span class="muted small">analyst</span>
+      <code id="hdr-user" class="mono">…</code>
+    </span>
+    <button id="btn-logout" type="button" class="btn ghost">Log out</button>
+  </header>
+
+  <main id="main" class="main">
+
+    <!-- ─────────────────────── CASE LIST ─────────────────────── -->
+    <section id="view-cases" class="cases-view">
+      <div class="cases-col">
+        <h1 class="h-md">Cases</h1>
+        <div class="card">
+          <table class="table" id="cases-table">
+            <caption class="sr-only">Cases you are cleared to open</caption>
+            <thead>
+              <tr>
+                <th scope="col">Code</th>
+                <th scope="col">Title</th>
+                <th scope="col">Status</th>
+                <th scope="col">Classification</th>
+                <th scope="col"><span class="sr-only">Open</span></th>
+              </tr>
+            </thead>
+            <tbody id="cases-body"></tbody>
+          </table>
+          <p id="cases-empty" class="empty" hidden>No cases are open to you yet.</p>
+        </div>
+      </div>
+
+      <div class="cases-col">
+        <h2 class="h-md">New case</h2>
+        <form id="case-form" class="card stack" novalidate>
+          <label class="field">
+            <span class="label">Code</span>
+            <input id="case-code" class="mono" required spellcheck="false"
+                   placeholder="OP-KESTREL-24">
+          </label>
+          <label class="field">
+            <span class="label">Title</span>
+            <input id="case-title" required>
+          </label>
+          <div class="field">
+            <label class="label" for="case-legal">Lawful basis
+              <span class="req">required</span></label>
+            <input id="case-legal" required aria-describedby="case-legal-help">
+            <span id="case-legal-help" class="help">A case cannot exist without a
+              lawful basis for processing. Name the authority, statute or
+              instruction that permits this collection — it is recorded on the case
+              and shown on every export.</span>
+          </div>
+          <label class="field">
+            <span class="label">Authority reference</span>
+            <input id="case-authority" class="mono" spellcheck="false"
+                   placeholder="warrant / RIPA / ticket ref">
+          </label>
+          <div class="row">
+            <label class="field">
+              <span class="label">Retention until</span>
+              <input id="case-retention" type="date" required>
+            </label>
+            <label class="field">
+              <span class="label">Review due</span>
+              <input id="case-review" type="date" required
+                     aria-describedby="case-review-help">
+            </label>
+          </div>
+          <p id="case-review-help" class="help">Review must fall on or before the
+            retention date.</p>
+          <label class="field">
+            <span class="label">Classification</span>
+            <select id="case-class" class="select"></select>
+          </label>
+          <label class="field">
+            <span class="label">Summary</span>
+            <textarea id="case-summary" rows="2"></textarea>
+          </label>
+          <p id="case-error" class="form-error" role="alert" hidden></p>
+          <button type="submit" class="btn primary">Create case</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ─────────────────────── WORKSPACE ─────────────────────── -->
+    <!-- docs/06 layout: 56px icon rail | canvas edge-to-edge | 360px inspector,
+         with the timeline scrubber under the canvas. -->
+    <section id="view-workspace" class="workspace" hidden>
+
+      <!-- One indicator for every fetch in the app, driven by an in-flight
+           counter in api(). A pane that fetches and draws nothing is
+           indistinguishable from a pane that is broken, and several here
+           load four sections independently. aria-hidden because the
+           sections it covers announce their own state. -->
+      <div id="busy" class="busy" aria-hidden="true" hidden></div>
+
+      <nav class="rail" role="tablist" aria-orientation="vertical"
+           aria-label="Case views">
+        <button id="tab-graph" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-graph" aria-selected="true" data-tab="graph"
+                title="Sociogram">
+          <span class="rail-glyph" aria-hidden="true">◈</span>
+          <span class="rail-cap">Graph</span>
+        </button>
+        <button id="tab-entities" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-entities" aria-selected="false" tabindex="-1"
+                data-tab="entities" title="Entity list">
+          <span class="rail-glyph" aria-hidden="true">⬡</span>
+          <span class="rail-cap">Entities</span>
+        </button>
+        <button id="tab-evidence" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-evidence" aria-selected="false" tabindex="-1"
+                data-tab="evidence" title="Evidence and chain of custody">
+          <span class="rail-glyph" aria-hidden="true">▤</span>
+          <span class="rail-cap">Evidence</span>
+        </button>
+        <button id="tab-triage" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-triage" aria-selected="false" tabindex="-1"
+                data-tab="triage"
+                title="Capture and triage: machine suggestions awaiting review">
+          <span class="rail-glyph" aria-hidden="true">&#x2751;</span>
+          <span class="rail-cap">Triage</span>
+          <span id="triage-badge" class="rail-badge" hidden></span>
+        </button>
+        <button id="tab-inbox" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-inbox" aria-selected="false" tabindex="-1"
+                data-tab="inbox" title="Notifications">
+          <span class="rail-glyph" aria-hidden="true">&#x25C9;</span>
+          <span class="rail-cap">Inbox</span>
+          <span id="inbox-badge" class="rail-badge" hidden></span>
+        </button>
+        <button id="tab-analytics" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-analytics" aria-selected="false" tabindex="-1"
+                data-tab="analytics"
+                title="Structural analysis: brokerage, communities, key player">
+          <span class="rail-glyph" aria-hidden="true">&#x25E9;</span>
+          <span class="rail-cap">Analysis</span>
+        </button>
+        <button id="tab-search" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-search" aria-selected="false" tabindex="-1"
+                data-tab="search" title="Full-text search">
+          <span class="rail-glyph" aria-hidden="true">⌕</span>
+          <span class="rail-cap">Search</span>
+        </button>
+        <button id="tab-comms" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-comms" aria-selected="false" tabindex="-1"
+                data-tab="comms"
+                title="Channels, contact blocks and durable selectors">
+          <span class="rail-glyph" aria-hidden="true">&#x2318;</span>
+          <span class="rail-cap">Comms</span>
+        </button>
+        <button id="tab-feeds" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-feeds" aria-selected="false" tabindex="-1"
+                data-tab="feeds"
+                title="Ingest queue, dead letters, collection sources">
+          <span class="rail-glyph" aria-hidden="true">&#x21E3;</span>
+          <span class="rail-cap">Feeds</span>
+          <span id="feeds-badge" class="rail-badge" hidden></span>
+        </button>
+        <button id="tab-ach" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-ach" aria-selected="false" tabindex="-1"
+                data-tab="ach"
+                title="ACH — analysis of competing hypotheses">
+          <span class="rail-glyph" aria-hidden="true">&#x25EB;</span>
+          <!-- "ACH" rather than "Hypotheses": the rail is a fixed narrow
+               column and the long form overflowed it. The full name is in
+               the title, and ACH is what an analyst calls it anyway. -->
+          <span class="rail-cap">ACH</span>
+        </button>
+        <button id="tab-report" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-report" aria-selected="false" tabindex="-1"
+                data-tab="report"
+                title="Build a redacted report, then check whether it may leave">
+          <span class="rail-glyph" aria-hidden="true">&#x25A4;</span>
+          <span class="rail-cap">Report</span>
+        </button>
+        <button id="tab-governance" type="button" class="tab rail-btn"
+                role="tab" aria-controls="pane-governance" aria-selected="false"
+                tabindex="-1" data-tab="governance"
+                title="Retention, legal holds, purge record, break-glass">
+          <span class="rail-glyph" aria-hidden="true">&#x25F4;</span>
+          <span class="rail-cap">Lifecycle</span>
+        </button>
+        <button id="tab-samples" type="button" class="tab rail-btn danger-tab"
+                role="tab" aria-controls="pane-samples" aria-selected="false"
+                tabindex="-1" data-tab="samples"
+                title="Malware sample queue — metadata only, never bytes">
+          <span class="rail-glyph" aria-hidden="true">&#x2622;</span>
+          <span class="rail-cap">Lab</span>
+          <span id="samples-badge" class="rail-badge" hidden></span>
+        </button>
+        <button id="tab-deception" type="button" class="tab rail-btn"
+                role="tab" aria-controls="pane-deception" aria-selected="false"
+                tabindex="-1" data-tab="deception"
+                title="Phishing captures, BEC email and vishing call records">
+          <span class="rail-glyph" aria-hidden="true">&#x2691;</span>
+          <span class="rail-cap">Deception</span>
+        </button>
+        <span class="rail-gap"></span>
+        <button id="tab-add-node" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
+                data-tab="add-node" title="Add entity">
+          <span class="rail-glyph" aria-hidden="true">＋</span>
+          <span class="rail-cap">Entity</span>
+        </button>
+        <button id="tab-add-edge" type="button" class="tab rail-btn" role="tab"
+                aria-controls="pane-add-edge" aria-selected="false" tabindex="-1"
+                data-tab="add-edge" title="Add relationship">
+          <span class="rail-glyph" aria-hidden="true">⇄</span>
+          <span class="rail-cap">Link</span>
+        </button>
+      </nav>
+
+      <div class="work-main">
+
+        <!-- GRAPH -->
+        <section id="pane-graph" class="pane pane-graph" role="tabpanel"
+                 aria-labelledby="tab-graph" tabindex="-1">
+
+          <!-- Projection controls. docs/03: no metric is ever computed against
+               "the graph" — only against a named, parameterised projection. -->
+          <div class="proj-bar">
+            <div class="proj-grp">
+              <label class="field inline">
+                <span class="label">Projection</span>
+                <select id="sel-preset" class="select"
+                        aria-describedby="preset-desc"></select>
+              </label>
+              <label class="field inline">
+                <span class="label">Min confidence</span>
+                <select id="sel-minconf" class="select"></select>
+              </label>
+              <label class="check">
+                <input id="chk-inferred" type="checkbox" checked>
+                <span>Include inferred</span>
+              </label>
+              <!-- E2: a case is defensible in proportion to how much of it
+                   is evidenced, so make the gaps visible on the canvas
+                   rather than one inspector panel at a time. -->
+              <label class="check" title="Hollow out entities and fade ties
+                                          that rest on no exhibit">
+                <input id="chk-provenance" type="checkbox" checked>
+                <span>Mark unevidenced</span>
+              </label>
+            </div>
+
+            <div class="proj-grp">
+              <label class="field inline">
+                <span class="label">Node size</span>
+                <select id="sel-metric" class="select"
+                        aria-describedby="metric-note"></select>
+              </label>
+              <span id="metric-note" class="help" role="status"></span>
+              <span id="evidence-coverage" class="muted small" role="status"></span>
+              <!-- U1: the layout runs off the main thread, so its progress
+                   has to be visible somewhere or a big graph just looks
+                   like it is doing nothing. -->
+              <span id="layout-status" class="muted small" role="status"></span>
+            </div>
+
+            <div class="proj-grp push">
+              <span id="focus-flag" class="focus-flag" role="status" hidden>
+                <span id="focus-text" class="focus-text"></span>
+                <button id="btn-exit-focus" type="button" class="btn small">
+                  <span id="focus-btn-text">Full projection</span>
+                  <span class="kbd">Esc</span>
+                </button>
+              </span>
+              <button id="btn-fit" type="button" class="btn ghost small">Fit</button>
+              <button id="btn-relayout" type="button" class="btn ghost small">Re-layout</button>
+              <button id="btn-save-layout" type="button" class="btn ghost small">Save layout</button>
+              <button id="btn-clear-pins" type="button" class="btn ghost small">Clear pins</button>
+              <button id="btn-refresh" type="button" class="btn ghost small">Reload graph</button>
+            </div>
+
+            <p id="preset-desc" class="proj-desc"></p>
+          </div>
+
+          <div class="canvas-wrap">
+            <canvas id="graph-canvas" tabindex="0" role="application"
+                    aria-label="Sociogram. Left and right arrow keys move the
+                    selection between entities. Enter focuses the selected
+                    entity's ego network. P marks a path anchor and then traces
+                    the shortest path to the selection. Space held hides inferred
+                    edges. Plus and minus zoom, zero fits, escape leaves focus
+                    mode or clears the selection."></canvas>
+            <p id="graph-empty" class="canvas-empty" hidden>
+              Nothing in this projection. Widen it, or add an entity to begin.
+            </p>
+          </div>
+
+          <!-- THE SIGNATURE ELEMENT (docs/06): drag it and the graph plays
+               through history. Density marks show collection volume, so a gap
+               in coverage is not mistaken for a gap in activity. -->
+          <div id="scrubber" class="scrubber">
+            <div class="tl-head">
+              <span class="label">Timeline — world time</span>
+              <span id="tl-current" class="tl-current mono">as-of: now</span>
+              <button id="btn-asof-now" type="button" class="btn small">as-of: now</button>
+            </div>
+            <canvas id="tl-density" class="tl-density" aria-hidden="true"></canvas>
+            <input id="tl-range" type="range" min="0" max="1000" step="1" value="1000"
+                   aria-label="As-of position in world time"
+                   aria-describedby="tl-note">
+            <div class="tl-labels">
+              <span id="tl-min" class="mono small muted"></span>
+              <span id="tl-note" class="help"></span>
+              <span id="tl-max" class="mono small muted"></span>
+            </div>
+          </div>
+
+          <div class="graph-bar">
+            <div class="legend" aria-label="Legend">
+              <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
+              <span class="lg"><i class="swatch hue-actor-person"></i>Person</span>
+              <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
+              <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
+              <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
+              <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
+              <span class="lg"><i class="swatch hue-context"></i>Context</span>
+              <span class="legend-sep" aria-hidden="true"></span>
+              <span class="lg"><i class="line pos"></i>vouch / positive</span>
+              <span class="lg"><i class="line neg"></i>dispute / negative</span>
+              <span class="lg"><i class="line neu"></i>neutral</span>
+              <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
+              <span class="lg" title="Sign is never carried by hue alone: from 120%
+                    zoom a positive tie is marked + at its midpoint and a negative
+                    tie −. The dash pattern cannot carry sign, because solid
+                    versus dashed already means asserted versus inferred.">
+                <code class="mono">+ / −</code>&nbsp;sign mark (zoomed in)</span>
+              <span class="legend-sep" aria-hidden="true"></span>
+              <span class="lg"><i class="ring sel"></i>selected</span>
+              <span class="lg"><i class="ring pin"></i>pinned</span>
+              <span class="lg"><i class="ring prop"></i>unreviewed proposal</span>
+              <span class="legend-sep" aria-hidden="true"></span>
+              <span id="legend-size" class="lg muted">size = degree</span>
+              <span class="lg muted" title="Confidence encodes as opacity — hue is
+                    already spent on node type. The numeric value is in the
+                    inspector, so it is never colour alone.">opacity = confidence</span>
+            </div>
+            <p id="proj-readout" class="proj-readout mono" role="status"></p>
+            <p class="canvas-keys">
+              <span class="kbd">drag</span> pan ·
+              <span class="kbd">scroll</span> zoom ·
+              <span class="kbd">click</span> inspect ·
+              <span class="kbd">dbl-click</span> ego ·
+              <span class="kbd">shift-click</span> path ·
+              <span class="kbd">space</span> hide inferred ·
+              <span class="kbd">⌘K</span> palette
+            </p>
+          </div>
+        </section>
+
+        <!-- ENTITIES -->
+        <section id="pane-entities" class="pane" role="tabpanel"
+                 aria-labelledby="tab-entities" tabindex="-1" hidden>
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Type filter</span>
+              <select id="ent-filter" class="select"></select>
+            </label>
+            <span id="ent-count" class="muted small"></span>
+          </div>
+          <table class="table">
+            <caption class="sr-only">Entities in this case</caption>
+            <thead>
+              <tr>
+                <th scope="col">Type</th>
+                <th scope="col">Label</th>
+                <th scope="col">Classification</th>
+                <th scope="col">First seen</th>
+              </tr>
+            </thead>
+            <tbody id="ent-body"></tbody>
+          </table>
+          <p id="ent-empty" class="empty" hidden>No entities match.</p>
+        </section>
+
+        <!-- TRIAGE (Phase 4). The human half of "machines propose,
+             analysts dispose". Nothing reaches the graph from here without
+             a click, and every suggestion shows the text it came from. -->
+        <!-- INBOX -->
+        <section id="pane-inbox" class="pane" role="tabpanel"
+                 aria-labelledby="tab-inbox" tabindex="-1" hidden>
+
+          <div class="card">
+            <div class="row space-between">
+              <h2 class="pane-title">Notifications</h2>
+              <button id="inbox-read-all" type="button" class="ghost">
+                Mark all read</button>
+            </div>
+            <p class="help">Everything here is filtered by your CURRENT
+              clearance, not the clearance you held when it was written &mdash;
+              so a notification about material you can no longer read
+              disappears rather than lingering. <strong>Email carries a
+              summary and a link, never the detail below</strong>; anything
+              above TLP:AMBER does not leave the platform at all
+              (invariant&nbsp;8).</p>
+            <label class="field inline">
+              <input id="inbox-unread-only" type="checkbox" />
+              <span class="label">Unread only</span>
+            </label>
+          </div>
+
+          <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
+          <div id="inbox-list" class="stack"></div>
+
+          <details class="card">
+            <summary>Delivery preferences</summary>
+            <p class="help">Quiet hours defer, they never drop &mdash; a
+              deferred notification is still queued with a due time. Priority&nbsp;1
+              (an evidence integrity alarm, a break-glass) ignores them, which
+              is the only reason silencing a channel overnight is safe.</p>
+            <div id="inbox-prefs" class="stack"></div>
+          </details>
+        </section>
+
+        <section id="pane-triage" class="pane" role="tabpanel"
+                 aria-labelledby="tab-triage" tabindex="-1" hidden>
+
+          <details id="capture-box" class="card capture">
+            <summary>Capture text</summary>
+            <p class="help">Paste a thread, a chat export or a listing.
+              Selectors are extracted with their offsets and raised as
+              proposals &mdash; <strong>nothing enters the graph here</strong>.
+              The document is stored as the record of what was looked at,
+              even if nothing is found.</p>
+            <label class="field">
+              <span class="label">Title</span>
+              <input id="cap-title" spellcheck="false"
+                     placeholder="nightmarket thread 8841">
+            </label>
+            <label class="field">
+              <span class="label">Source URL</span>
+              <input id="cap-url" spellcheck="false"
+                     placeholder="http://... (optional)">
+            </label>
+            <label class="field">
+              <span class="label">Text</span>
+              <textarea id="cap-text" rows="8"
+                        placeholder="Paste the captured material here."></textarea>
+            </label>
+            <div class="row-form">
+              <label class="field inline">
+                <span class="label">Classification</span>
+                <select id="cap-class" class="select"></select>
+              </label>
+              <button id="cap-run" type="button" class="btn primary">
+                Extract and propose</button>
+            </div>
+            <p id="cap-result" class="form-ok" role="status" hidden></p>
+            <p id="cap-error" class="form-error" role="alert" hidden></p>
+          </details>
+
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Queue</span>
+              <select id="triage-state" class="select">
+                <option value="PROPOSED" selected>Awaiting review</option>
+                <option value="DISPUTED">Deferred</option>
+                <option value="ACCEPTED">Accepted</option>
+                <option value="REJECTED">Rejected</option>
+              </select>
+            </label>
+            <span id="triage-counts" class="muted small"></span>
+          </div>
+
+          <p class="help">
+            <kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept
+            &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer.
+            docs/09 asks for this to be keyboard driven, because triage is an
+            hour of work and a mouse makes it a grim one.
+          </p>
+
+          <div id="triage-list"></div>
+          <p id="triage-empty" class="empty">Nothing awaiting review.</p>
+        </section>
+
+        <!-- ANALYSIS (Phase 3). Every number here is computed against the
+             SAME projection the sociogram is showing, and the parameters are
+             restated on the panel because a metric without its projection is
+             not reproducible (docs/03). -->
+        <section id="pane-analytics" class="pane" role="tabpanel"
+                 aria-labelledby="tab-analytics" tabindex="-1" hidden>
+          <div class="pane-head">
+            <button id="an-run" type="button" class="btn primary">Run analysis</button>
+            <label class="field inline">
+              <span class="label">Trust decay half-life</span>
+              <select id="an-decay" class="select">
+                <option value="">Off</option>
+                <option value="6">6 months</option>
+                <option value="12">12 months</option>
+                <option value="24">24 months</option>
+              </select>
+            </label>
+            <label class="field inline">
+              <span class="label">Removal set</span>
+              <select id="an-kpp-n" class="select">
+                <option value="1">1 actor</option>
+                <option value="2">2 actors</option>
+                <option value="3" selected>3 actors</option>
+                <option value="4">4 actors</option>
+                <option value="5">5 actors</option>
+              </select>
+            </label>
+            <span id="an-status" class="muted small"></span>
+          </div>
+
+          <p id="an-projection" class="muted small"></p>
+          <div id="an-flags"></div>
+
+          <p id="an-empty" class="empty">
+            Run the analysis to compute brokerage, structural holes,
+            communities and the key-player set over the current projection.
+          </p>
+
+          <div id="an-results" hidden>
+            <!-- The teaching panel: docs/03 asks the UI to explain the
+                 low-degree/high-betweenness pattern, not just print it. -->
+            <div id="an-leads"></div>
+
+            <h3 class="h3">Actors by brokerage</h3>
+            <p class="muted small">
+              Rank and percentile sit beside every value: a betweenness of
+              0.0341 means nothing on its own, "3rd of 214" does. Constraint
+              is ranked ascending &mdash; rank 1 is the LEAST constrained
+              actor, the one spanning a structural hole.
+            </p>
+            <div class="scroll-x">
+              <table class="table">
+                <caption class="sr-only">Structural metrics per actor</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Actor</th>
+                    <th scope="col">Deg</th>
+                    <th scope="col">Vouches in/out</th>
+                    <th scope="col">Betweenness</th>
+                    <th scope="col">Constraint</th>
+                    <th scope="col">Eff. size</th>
+                    <th scope="col">Community</th>
+                  </tr>
+                </thead>
+                <tbody id="an-body"></tbody>
+              </table>
+            </div>
+
+            <h3 class="h3">Key player &mdash; who holds this network together</h3>
+            <div id="an-kpp"></div>
+
+            <h3 class="h3">Cohesion</h3>
+            <div id="an-cohesion"></div>
+
+            <h3 class="h3">Signed balance</h3>
+            <div id="an-balance"></div>
+          </div>
+        </section>
+
+        <!-- EVIDENCE -->
+        <section id="pane-evidence" class="pane" role="tabpanel"
+                 aria-labelledby="tab-evidence" tabindex="-1" hidden>
+          <form id="ev-form" class="card row-form" novalidate>
+            <label class="field">
+              <span class="label">Exhibit file</span>
+              <input id="ev-file" type="file" required>
+            </label>
+            <label class="field">
+              <span class="label">Title</span>
+              <input id="ev-title" required>
+            </label>
+            <label class="field">
+              <span class="label">Acquisition</span>
+              <select id="ev-method" class="select">
+                <option value="MANUAL_UPLOAD">Manual upload</option>
+                <option value="COLLECTOR">Collector</option>
+                <option value="LEGAL">Legal process</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Classification</span>
+              <select id="ev-class" class="select"></select>
+            </label>
+            <button type="submit" class="btn primary">Upload exhibit</button>
+            <p id="ev-error" class="form-error" role="alert" hidden></p>
+            <p id="ev-result" class="form-ok" role="status" hidden></p>
+          </form>
+          <p class="help">Uploads are write-once. The digest below is computed by
+            the server on receipt and is what a later verification is checked
+            against.</p>
+          <div id="ev-list" class="ev-list"></div>
+          <p id="ev-empty" class="empty" hidden>No exhibits held for this case.</p>
+        </section>
+
+        <!-- SEARCH -->
+        <section id="pane-search" class="pane" role="tabpanel"
+                 aria-labelledby="tab-search" tabindex="-1" hidden>
+          <form id="search-form" class="card row-form" novalidate>
+            <label class="field grow">
+              <span class="label">Query</span>
+              <input id="search-q" type="search" required spellcheck="false">
+            </label>
+            <button type="submit" class="btn primary">Search</button>
+          </form>
+          <div class="search-cols">
+            <div>
+              <h3 class="h-sm">Entities</h3>
+              <div id="search-nodes" class="hit-list"></div>
+            </div>
+            <div>
+              <h3 class="h-sm">Evidence</h3>
+              <div id="search-evidence" class="hit-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- COMMS (Phase 7) -->
+        <section id="pane-comms" class="pane" role="tabpanel"
+                 aria-labelledby="tab-comms" tabindex="-1" hidden>
+
+          <!-- Bind a channel. The normalise PREVIEW is the point of this
+               form: docs/10 says the durable-selector mapping is the
+               product, and an analyst who cannot see that their 76-hex Tox
+               ID will be indexed on its first 64 characters has no way to
+               know why two observations did or did not correlate. -->
+          <form id="comms-bind-form" class="card stack narrow" novalidate>
+            <h2 class="h-sm">Record a channel</h2>
+            <p class="hint">
+              An identifier in a signature block is a <strong>claim</strong>.
+              Confirmation needs a signature over the identifier — record it
+              under Verification, not here.
+            </p>
+            <label class="field">
+              <span class="label">Platform</span>
+              <select id="comms-platform" required></select>
+            </label>
+            <p id="comms-platform-note" class="hint mono-sm" hidden></p>
+            <p id="comms-platform-coverage" class="hint warn" hidden></p>
+            <label class="field">
+              <span class="label">Identifier as observed</span>
+              <input id="comms-observed" type="text" required spellcheck="false"
+                     autocomplete="off">
+            </label>
+            <div id="comms-preview" class="preview" hidden>
+              <div class="preview-row">
+                <span class="label">Will be indexed as</span>
+                <code id="comms-preview-durable" class="mono"></code>
+              </div>
+              <p id="comms-preview-note" class="hint"></p>
+            </div>
+            <label class="field">
+              <span class="label">Verification</span>
+              <select id="comms-verification">
+                <option value="CLAIMED">CLAIMED — advertised in a profile or signature</option>
+                <option value="OBSERVED">OBSERVED — seen in actual use</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Published together with (co-declaration ref)</span>
+              <input id="comms-codecl" type="text" spellcheck="false"
+                     placeholder="e.g. the thread URL this block came from">
+            </label>
+            <p id="comms-bind-msg" class="msg" hidden></p>
+            <button type="submit" class="btn primary">Record channel</button>
+          </form>
+
+          <!-- Correlate -->
+          <form id="comms-correlate-form" class="card row-form" novalidate>
+            <label class="field">
+              <span class="label">Platform</span>
+              <select id="comms-corr-platform" required></select>
+            </label>
+            <label class="field grow">
+              <span class="label">Identifier</span>
+              <input id="comms-corr-observed" type="text" required
+                     spellcheck="false" autocomplete="off">
+            </label>
+            <button type="submit" class="btn">Correlate</button>
+          </form>
+          <div id="comms-correlate-out" class="hit-list"></div>
+
+          <!-- Contact block parser -->
+          <form id="comms-block-form" class="card stack" novalidate>
+            <h2 class="h-sm">Parse a contact block</h2>
+            <p class="hint">
+              Third-party identifiers — the forum's escrow, a guarantor, a
+              partner shop — are flagged rather than attributed to the
+              publisher. Lines whose type is ambiguous are kept
+              <strong>unresolved with a reason</strong> rather than guessed.
+            </p>
+            <label class="field">
+              <span class="label">Where it was published</span>
+              <input id="comms-block-source" type="text" required
+                     spellcheck="false" placeholder="thread or profile URL">
+            </label>
+            <label class="field">
+              <span class="label">Publisher handle</span>
+              <input id="comms-block-handle" type="text" spellcheck="false">
+            </label>
+            <label class="field">
+              <span class="label">The block, as published</span>
+              <textarea id="comms-block-text" rows="8" required
+                        spellcheck="false"></textarea>
+            </label>
+            <p id="comms-block-msg" class="msg" hidden></p>
+            <button type="submit" class="btn primary">Parse</button>
+          </form>
+          <div id="comms-block-out"></div>
+
+          <!-- PGP verification. The one path in Phase 7 that produces a
+               CONFIRMATION rather than a claim, which is why the outcome
+               is rendered as loudly as it is: docs/10 says a CONFIRMED
+               binding may carry weight in automatic identity resolution,
+               so being wrong here is worst.
+
+               NO_VERIFIER is displayed differently from BAD_SIGNATURE on
+               purpose. "Nobody checked" and "checked and failed" must not
+               look the same, or an unchecked claim reads as a
+               checked-and-rejected one. -->
+          <form id="comms-pgp-form" class="card stack" novalidate>
+            <h2 class="h-sm">Verify a signature</h2>
+            <p class="help">
+              A message signed by a key whose fingerprint appears in the
+              contact block is <strong>cryptographic evidence of
+              control</strong>, not a claim. Everything else on this pane
+              produces claims.
+            </p>
+            <label class="field">
+              <span class="label">The clearsigned message, as published</span>
+              <textarea id="comms-pgp-message" rows="8" required
+                        spellcheck="false"
+                        placeholder="-----BEGIN PGP SIGNED MESSAGE-----"></textarea>
+            </label>
+            <label class="field">
+              <span class="label">The vendor's public key</span>
+              <textarea id="comms-pgp-key" rows="5" required spellcheck="false"
+                        placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+            </label>
+            <label class="field">
+              <span class="label">Fingerprint it should be signed by</span>
+              <input id="comms-pgp-fpr" type="text" spellcheck="false"
+                     placeholder="spaced or unspaced, both accepted">
+            </label>
+            <label class="field">
+              <span class="label">Identifier this should confirm (optional)</span>
+              <input id="comms-pgp-confirms" type="text" spellcheck="false"
+                     placeholder="the Tox key or handle the signature should cover">
+            </label>
+            <p id="comms-pgp-msg" class="msg" hidden></p>
+            <button type="submit" class="btn primary">Verify</button>
+          </form>
+          <div id="comms-pgp-out"></div>
+
+          <h2 class="h-sm">Awaiting verification</h2>
+          <p class="help">
+            Bindings still at CLAIMED that have a fingerprint to check
+            against. A claim nobody checked is not a rejected one.
+          </p>
+          <div class="pane-head">
+            <button id="comms-unverified-refresh" type="button" class="btn">
+              Refresh</button>
+            <span id="comms-unverified-count" class="muted small"></span>
+          </div>
+          <div id="comms-unverified"></div>
+          <p id="comms-unverified-empty" class="empty">
+            Nothing awaiting verification.</p>
+
+          <!-- Co-participation. An INFERRED tie, and invariant 4 says an
+               inferred edge stays visually and structurally distinct. -->
+          <h2 class="h-sm">Co-participation</h2>
+          <p class="help">
+            Ties inferred from being in the same room. These are
+            <strong>inferred</strong>, weighted by the room's size — two
+            people in a 500-member channel is not the same evidence as a
+            private exchange — and they are excluded from metrics unless a
+            projection opts in.
+          </p>
+          <div class="pane-head">
+            <button id="comms-copart-refresh" type="button" class="btn">
+              Load</button>
+            <span id="comms-copart-count" class="muted small"></span>
+          </div>
+          <div id="comms-copart"></div>
+          <p id="comms-copart-empty" class="empty">
+            No co-participation computed for this case.</p>
+        </section>
+
+        <!-- FEEDS (Phases 9 and 4). Material arriving from outside: what a
+             partner sent, what would not parse, and what we went and got.
+
+             The queue is the product here. docs/12: "Volume is the enemy,
+             and a queue nobody can prioritise is a queue nobody reads." So
+             the first thing on screen is priority order, and the reason for
+             a record's score is on the row rather than behind a click. -->
+        <section id="pane-feeds" class="pane" role="tabpanel"
+                 aria-labelledby="tab-feeds" tabindex="-1" hidden>
+
+          <div class="subtabs" role="tablist" aria-label="Feeds sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="queue"
+                    aria-controls="feeds-queue">Ingest queue</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="dead"
+                    aria-controls="feeds-dead">Dead letters</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="sources"
+                    aria-controls="feeds-sources">Sources</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="keys"
+                    aria-controls="feeds-keys">Keys</button>
+          </div>
+
+          <!-- INGEST QUEUE -->
+          <div id="feeds-queue" class="subpane">
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Category</span>
+                <select id="ing-category" class="select">
+                  <option value="">All</option>
+                </select>
+              </label>
+              <label class="field inline check">
+                <input id="ing-dupes" type="checkbox">
+                <span class="label">Show folded duplicates</span>
+              </label>
+              <button id="ing-refresh" type="button" class="btn">Refresh</button>
+              <span id="ing-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              Near-duplicates are <strong>folded, not dropped</strong> &mdash;
+              the count on a row says how many other feeds sent the same
+              thing. Payloads are never listed here: a record can hold a whole
+              stealer log, and this is a queue.
+            </p>
+            <div id="ing-list"></div>
+            <p id="ing-empty" class="empty">Nothing in the queue for this case.</p>
+
+            <details id="ing-quarantine-box" class="card" hidden>
+              <summary>Quarantine &mdash; material attached to no case</summary>
+              <p class="help">
+                A record with no case cannot be reached by a case
+                assignment, so nobody sees it through the ordinary gate. It
+                still expires: until it is attached to a case it runs on the
+                <em>category's</em> retention clock, not a case's.
+              </p>
+              <div id="ing-quarantine-list"></div>
+              <p id="ing-quarantine-empty" class="empty">Nothing unattached.</p>
+            </details>
+          </div>
+
+          <!-- DEAD LETTERS -->
+          <div id="feeds-dead" class="subpane" hidden>
+            <p class="help">
+              Invariant 12: nothing is silently dropped. A rising rate on one
+              key is usually a partner changing their schema without telling
+              you &mdash; and it is invisible unless somebody looks, which is
+              what this is for.
+            </p>
+            <p class="help warn">
+              Fragments are <strong>structurally redacted</strong>: keys,
+              types and lengths, never values. Rows recorded before the
+              redactor existed are withheld and marked.
+            </p>
+            <div class="pane-head">
+              <button id="dl-refresh" type="button" class="btn">Refresh</button>
+              <span id="dl-counts" class="muted small"></span>
+            </div>
+            <div id="dl-list"></div>
+            <p id="dl-empty" class="empty">Nothing has failed to parse.</p>
+          </div>
+
+          <!-- COLLECTION SOURCES -->
+          <div id="feeds-sources" class="subpane" hidden>
+            <p class="help">
+              Nothing loops on its own. A collector that runs itself on a
+              timer nobody watches is how a persona gets burnt at 3am, so
+              polling is a button.
+            </p>
+            <div class="pane-head">
+              <button id="src-refresh" type="button" class="btn">Refresh</button>
+              <span id="src-counts" class="muted small"></span>
+            </div>
+            <h2 class="h-sm">Unhealthy</h2>
+            <p class="help">
+              A parser that stopped matching fails silently. Consecutive
+              failures are the signal.
+            </p>
+            <div id="src-unhealthy"></div>
+            <p id="src-unhealthy-empty" class="empty">Every source is healthy.</p>
+
+            <h2 class="h-sm">Never polled</h2>
+            <p class="help">
+              Not broken and not healthy either. A source somebody added and
+              nobody ever ran is the quiet way a collection plan turns out to
+              have been aspirational.
+            </p>
+            <div id="src-never"></div>
+            <p id="src-never-empty" class="empty">Every source has been polled.</p>
+
+            <h2 class="h-sm">Due to poll</h2>
+            <div id="src-due"></div>
+            <p id="src-due-empty" class="empty">Nothing is due.</p>
+
+            <h2 class="h-sm">Personas</h2>
+            <p class="help">
+              BURNED is terminal. Re-using one a forum admin has already
+              flagged is how you burn the next one too.
+            </p>
+            <div id="src-personas"></div>
+            <p id="src-personas-empty" class="empty">No personas.</p>
+
+            <h2 class="h-sm">Recent runs</h2>
+            <div id="src-runs"></div>
+            <p id="src-runs-empty" class="empty">No runs recorded.</p>
+          </div>
+
+          <!-- INGEST KEYS -->
+          <div id="feeds-keys" class="subpane" hidden>
+            <p class="help">
+              Keys are <strong>write-only</strong> (invariant 11). A leaked
+              key means junk data in a quarantine bucket, never the case file
+              &mdash; there is a CHECK constraint saying so.
+            </p>
+            <div class="pane-head">
+              <label class="field inline check">
+                <input id="key-revoked" type="checkbox">
+                <span class="label">Include revoked</span>
+              </label>
+              <button id="key-refresh" type="button" class="btn">Refresh</button>
+              <span id="key-counts" class="muted small"></span>
+            </div>
+            <div id="key-list"></div>
+            <p id="key-empty" class="empty">No keys issued.</p>
+          </div>
+        </section>
+
+        <!-- HYPOTHESES (Phase 6, docs/13 tier 2). Analysis of competing
+             hypotheses.
+
+             The ranking is by INCONSISTENCY, ascending — the hypothesis
+             that survives is the one with the least evidence AGAINST it,
+             not the most for it. Counting support ranks whichever theory
+             the team has been collecting for longest, which is the bias
+             ACH exists to defeat (Heuer). The UI has to lead with that or
+             an analyst reads the grid as a scoreboard.
+
+             Evidence is an ASSERTION, never typed-in text. A matrix built
+             from bullet points launders a hunch into a grid. -->
+        <section id="pane-ach" class="pane" role="tabpanel"
+                 aria-labelledby="tab-ach" tabindex="-1" hidden>
+
+          <div class="pane-head">
+            <button id="ach-refresh" type="button" class="btn">Refresh</button>
+            <label class="field inline check">
+              <input id="ach-rejected" type="checkbox">
+              <span class="label">Include rejected</span>
+            </label>
+            <span id="ach-counts" class="muted small"></span>
+          </div>
+
+          <p id="ach-method" class="help"></p>
+          <div id="ach-warnings"></div>
+
+          <div id="ach-ranking"></div>
+          <p id="ach-empty" class="empty">
+            No hypotheses yet. ACH is worth the effort when you have at
+            least three, including one you expect to lose.
+          </p>
+
+          <h2 class="h-sm">The matrix</h2>
+          <p class="help">
+            A cell is how one piece of evidence stands against one
+            hypothesis. Evidence consistent with <em>everything</em> is kept
+            in the record and excluded from the ranking, because it
+            discriminates nothing — that is the row marked not diagnostic.
+          </p>
+          <div id="ach-matrix" class="scroll-x"></div>
+
+          <details class="card">
+            <summary>Add a hypothesis</summary>
+            <p class="help">
+              Write the one you think is wrong too. A set of hypotheses that
+              are all variations of the same theory produces a confident
+              answer to a question nobody asked.
+            </p>
+            <label class="field">
+              <span class="label">Statement</span>
+              <input id="ach-statement" type="text" spellcheck="false"
+                     placeholder="e.g. NIGHTJAR and KESTREL are the same operator">
+            </label>
+            <label class="field inline">
+              <span class="label">Initial confidence</span>
+              <select id="ach-confidence" class="select">
+                <option value="LOW" selected>LOW</option>
+                <option value="MODERATE">MODERATE</option>
+                <option value="HIGH">HIGH</option>
+              </select>
+            </label>
+            <p id="ach-msg" class="msg" hidden></p>
+            <button id="ach-add" type="button" class="btn primary">
+              Add hypothesis</button>
+          </details>
+        </section>
+
+        <!-- REPORT (Phase 6, docs/08). Build at a classification, see
+             exactly what was withheld, and only then ask whether it may
+             leave.
+
+             The two steps are separate because an analyst should be able
+             to see what would go before anything does — a single control
+             that builds and sends is one click between a case file and
+             somebody's inbox. The redaction statement is therefore the
+             most important thing on this pane, not a footnote to it. -->
+        <section id="pane-report" class="pane" role="tabpanel"
+                 aria-labelledby="tab-report" tabindex="-1" hidden>
+
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Prepare at</span>
+              <select id="rep-tlp" class="select">
+                <option value="CLEAR">CLEAR</option>
+                <option value="GREEN">GREEN</option>
+                <option value="AMBER" selected>AMBER</option>
+                <option value="AMBER_STRICT">AMBER_STRICT</option>
+                <option value="RED">RED</option>
+              </select>
+            </label>
+            <label class="field inline check">
+              <input id="rep-hypotheses" type="checkbox" checked>
+              <span class="label">Include hypotheses</span>
+            </label>
+            <button id="rep-build" type="button" class="btn primary">
+              Prepare</button>
+            <!-- The markdown carries its classification in an X-TLP header
+                 and in the filename, because a file saved out of a browser
+                 loses everything that was only on the page. -->
+            <button id="rep-download" type="button" class="btn" hidden>
+              Download markdown</button>
+          </div>
+
+          <p class="help">
+            Nothing above the target classification is read at any point —
+            the redaction is <strong>structural</strong>, so it cannot be
+            defeated by a name in a rationale field. A case at
+            AMBER_STRICT can produce a GREEN report, and the GREEN report
+            may leave where the case never could.
+          </p>
+
+          <p id="rep-msg" class="msg" hidden></p>
+          <p id="rep-empty" class="empty">
+            Nothing prepared yet. Preparing materialises a projection and,
+            with hypotheses on, scores the ACH matrix &mdash; so it runs on
+            a button rather than on opening this pane.
+          </p>
+          <div id="rep-redaction"></div>
+          <div id="rep-body"></div>
+
+          <details id="rep-release-box" class="card" hidden>
+            <summary>Ask whether it may leave</summary>
+            <p class="help warn">
+              This decides; it does not send. The platform will tell you
+              whether the document may go at this classification —
+              <strong>sending it, and to whom, is still a human act with a
+              human's name on it.</strong> A refusal is audited as loudly
+              as a permission.
+            </p>
+            <!-- These are `egress.Destination`, verbatim. An earlier
+                 version of this control invented plausible-looking values
+                 (INTERNAL / PARTNER_AGENCY / EXTERNAL / PUBLIC) and every
+                 release attempt 400'd on "unknown destination" — the same
+                 class of defect as a UI reading a field the server never
+                 sends. Each entry is a different audience with a different
+                 access model, which is why the ceiling is per-destination
+                 rather than global. -->
+            <label class="field">
+              <span class="label">Destination</span>
+              <select id="rep-destination" class="select">
+                <option value="in_app">in_app — stays inside the platform</option>
+                <option value="export">export — an analyst downloads it</option>
+                <option value="smtp">smtp — email</option>
+                <option value="jira">jira</option>
+                <option value="webhook">webhook</option>
+              </select>
+            </label>
+            <p class="help">
+              Everything except <code>in_app</code> crosses the boundary
+              into a system with its own access model, which this platform
+              does not control and cannot audit.
+            </p>
+            <label class="field">
+              <span class="label">Destination ceiling (optional)</span>
+              <select id="rep-ceiling" class="select">
+                <option value="">Not stated</option>
+                <option value="CLEAR">CLEAR</option>
+                <option value="GREEN">GREEN</option>
+                <option value="AMBER">AMBER</option>
+                <option value="AMBER_STRICT">AMBER_STRICT</option>
+                <option value="RED">RED</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Who it is for, and why</span>
+              <input id="rep-note" type="text" spellcheck="false"
+                     placeholder="the recipient and the reason — this is what a later review reads">
+            </label>
+            <p id="rep-release-msg" class="msg" hidden></p>
+            <button id="rep-release" type="button" class="btn">
+              Check egress</button>
+            <div id="rep-release-out"></div>
+          </details>
+        </section>
+
+        <!-- LIFECYCLE (Phase 6). When material expires, what is held, what
+             was destroyed, and who took emergency access.
+
+             docs/05 wants break-glass "available, loud and SHORT" — and the
+             loudness IS the mandatory review, so the review queue is on the
+             same screen as the grants rather than buried in an admin area. -->
+        <section id="pane-governance" class="pane" role="tabpanel"
+                 aria-labelledby="tab-governance" tabindex="-1" hidden>
+
+          <div class="subtabs" role="tablist" aria-label="Lifecycle sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="retention"
+                    aria-controls="gov-retention">Retention</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="tombstones"
+                    aria-controls="gov-tombstones">Destroyed</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="glass"
+                    aria-controls="gov-glass">Break-glass</button>
+          </div>
+
+          <!-- RETENTION -->
+          <div id="gov-retention" class="subpane">
+            <h2 class="h-sm">Rules</h2>
+            <p class="help">
+              These periods govern data about people who are not under
+              investigation. A rule nobody has confirmed is a number somebody
+              typed, and it becomes policy by default if it is never
+              surfaced.
+            </p>
+            <div id="ret-rules"></div>
+            <p id="ret-rules-notice" class="help warn" hidden></p>
+
+            <h2 class="h-sm">Due for destruction</h2>
+            <p class="help">
+              An analyst who cannot see when their case's material expires
+              discovers a deadline by missing it.
+            </p>
+            <div class="pane-head">
+              <button id="ret-refresh" type="button" class="btn">Refresh</button>
+              <span id="ret-counts" class="muted small"></span>
+            </div>
+            <div id="ret-due"></div>
+            <p id="ret-due-empty" class="empty">Nothing is due.</p>
+
+            <details class="card">
+              <summary>Run a purge for this case</summary>
+              <p class="help warn">
+                A dry run reports what <em>would</em> be destroyed and
+                destroys nothing. That is the default, and it stays the
+                default: an endpoint whose default is destruction will
+                eventually be called by a script that meant to ask a
+                question.
+              </p>
+              <label class="field">
+                <span class="label">Authority for this run</span>
+                <input id="ret-authority" type="text" spellcheck="false"
+                       placeholder="e.g. scheduled retention run 2026-07">
+              </label>
+              <label class="field inline check">
+                <input id="ret-dry" type="checkbox" checked>
+                <span class="label">Dry run</span>
+              </label>
+              <p id="ret-purge-msg" class="msg" hidden></p>
+              <button id="ret-purge" type="button" class="btn">Run</button>
+              <div id="ret-purge-out"></div>
+            </details>
+          </div>
+
+          <!-- TOMBSTONES -->
+          <div id="gov-tombstones" class="subpane" hidden>
+            <p class="help">
+              What was destroyed, when, under whose authority. The tombstone
+              is append-only and outlives the thing it records &mdash;
+              otherwise a destruction and a deletion of the record of it look
+              identical.
+            </p>
+            <div class="pane-head">
+              <button id="tomb-refresh" type="button" class="btn">Refresh</button>
+              <span id="tomb-counts" class="muted small"></span>
+            </div>
+            <div id="tomb-list"></div>
+            <p id="tomb-empty" class="empty">Nothing has been destroyed.</p>
+          </div>
+
+          <!-- BREAK-GLASS -->
+          <div id="gov-glass" class="subpane" hidden>
+            <div id="glass-mine" class="card" hidden></div>
+
+            <details class="card">
+              <summary>Invoke emergency access</summary>
+              <p class="help warn">
+                Loud by design. The grant is short, every action under it is
+                counted, and a security officer <strong>must</strong> review
+                it afterwards. Say what the emergency is &mdash; this is the
+                text somebody defends later.
+              </p>
+              <label class="field">
+                <span class="label">Justification</span>
+                <textarea id="glass-why" rows="3" spellcheck="false"
+                          placeholder="Incident reference and what access is needed for, right now."></textarea>
+              </label>
+              <p id="glass-msg" class="msg" hidden></p>
+              <button id="glass-invoke" type="button" class="btn">Invoke</button>
+            </details>
+
+            <h2 class="h-sm">Awaiting review</h2>
+            <p class="help">
+              The review is the control that makes emergency access
+              acceptable at all. A grant nobody looked at is a role.
+            </p>
+            <div class="pane-head">
+              <button id="glass-refresh" type="button" class="btn">Refresh</button>
+              <span id="glass-counts" class="muted small"></span>
+            </div>
+            <div id="glass-queue"></div>
+            <p id="glass-empty" class="empty">Nothing awaiting review.</p>
+          </div>
+        </section>
+
+        <!-- LAB (Phase 8). Invariant 10, as a screen:
+             "Samples never render, never execute. The binary is only ever an
+             encrypted archive download from a SEPARATE ORIGIN."
+
+             So this pane shows METADATA and nothing else — hashes, type,
+             entropy, triage gaps, findings, custody. There is no preview, no
+             hex view, no icon extracted from the file, no iframe, and the
+             attacker-supplied filename is rendered as text through
+             textContent like every other value here.
+
+             The download control is deliberately not a link. It is a POST to
+             a separate origin behind step-up, and it is styled as the
+             dangerous act it is. -->
+        <section id="pane-samples" class="pane" role="tabpanel"
+                 aria-labelledby="tab-samples" tabindex="-1" hidden>
+
+          <div id="smp-policy" class="banner banner-legal" hidden></div>
+
+          <div class="subtabs" role="tablist" aria-label="Lab sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="queue"
+                    aria-controls="smp-queue-pane">Queue</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="submit"
+                    aria-controls="smp-submit-pane">Submit</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="handling"
+                    aria-controls="smp-handling-pane">Handling</button>
+          </div>
+
+          <!-- QUEUE -->
+          <div id="smp-queue-pane" class="subpane">
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">State</span>
+                <select id="smp-state" class="select">
+                  <option value="">In the queue</option>
+                  <option value="QUARANTINED">Quarantined</option>
+                  <option value="TRIAGED">Triaged</option>
+                  <option value="ASSIGNED">Assigned</option>
+                  <option value="IN_ANALYSIS">In analysis</option>
+                  <option value="REPORTED">Reported</option>
+                  <option value="REJECTED">Rejected</option>
+                </select>
+              </label>
+              <button id="smp-refresh" type="button" class="btn">Refresh</button>
+              <span id="smp-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              Filtered by <strong>your own</strong> clearance and
+              compartments, not the case's — a sample can be classified
+              above the case it belongs to, so the case gate alone would
+              leak that it exists.
+            </p>
+            <div id="smp-list" class="rows"></div>
+            <p id="smp-empty" class="empty">Nothing in the queue.</p>
+
+            <div id="smp-detail" class="card detail-card" hidden>
+              <div class="pane-head">
+                <h2 class="h-sm" id="smp-detail-title">Sample</h2>
+                <button id="smp-close" type="button" class="btn subtle">
+                  Close</button>
+              </div>
+              <div id="smp-detail-body"></div>
+            </div>
+          </div>
+
+          <!-- SUBMIT -->
+          <div id="smp-submit-pane" class="subpane" hidden>
+            <div class="card stack narrow">
+              <h2 class="h-sm">Submit a sample</h2>
+              <p class="help warn">
+                It lands in <strong>QUARANTINE</strong>, encrypted at rest
+                under a per-sample key, stored under its SHA-256 and never
+                under its filename. Nothing reaches the analysis queue
+                before triage has run.
+              </p>
+              <label class="field">
+                <span class="label">File</span>
+                <input id="smp-file" type="file">
+              </label>
+              <label class="field">
+                <span class="label">Case (optional)</span>
+                <input id="smp-case" type="text" spellcheck="false"
+                       placeholder="case id — leave blank for an unattached sample">
+              </label>
+              <label class="field">
+                <span class="label">Classification</span>
+                <select id="smp-class" class="select">
+                  <option value="CLEAR">CLEAR</option>
+                  <option value="GREEN">GREEN</option>
+                  <option value="AMBER" selected>AMBER</option>
+                  <option value="AMBER_STRICT">AMBER_STRICT</option>
+                  <option value="RED">RED</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Where it came from</span>
+                <input id="smp-note" type="text" spellcheck="false"
+                       placeholder="the source, and anything a later reader needs">
+              </label>
+              <p id="smp-submit-msg" class="msg" hidden></p>
+              <button id="smp-submit" type="button" class="btn primary">
+                Submit to quarantine</button>
+            </div>
+          </div>
+
+          <!-- HANDLING -->
+          <div id="smp-handling-pane" class="subpane" hidden>
+            <div class="card stack">
+              <h2 class="h-sm">What this screen will and will not do</h2>
+              <ul class="rules">
+                <li><strong>Metadata renders. Bytes do not.</strong> There is
+                  no preview, no hex view and no icon taken from the file.
+                  Rendering attacker-supplied bytes in the same origin as the
+                  case file is a drive-by vector into your highest-trust
+                  system, seeded with hostile files by design.</li>
+                <li><strong>The filename is evidence, not a path.</strong> It
+                  is stored for the record and never used as a path
+                  component. The object key is always the SHA-256.</li>
+                <li><strong>Download is a separate origin, step-up gated.</strong>
+                  It is the one action here that puts working malware on a
+                  disk. It refuses unless the request arrived at the
+                  configured sample origin, and the check lives in the
+                  service so a second caller cannot skip it.</li>
+                <li><strong>The archive password is an interlock, not
+                  protection.</strong> <code>infected</code> is public and
+                  ZipCrypto is broken. It stops a double-click and stops a
+                  mail gateway eating the sample. Confidentiality comes from
+                  access control, transport and audit.</li>
+                <li><strong>A legal hold beats a rejection.</strong> Rejecting
+                  destroys the bytes and the data key. If the sample is held,
+                  that is refused — preservation and destruction can both be
+                  legal obligations and software does not get to pick.</li>
+              </ul>
+              <h2 class="h-sm">Gaps, recorded rather than hidden</h2>
+              <p class="help">
+                Fuzzy hashing (imphash, ssdeep, TLSH), YARA and sandbox
+                detonation are not built. Each absence is written onto the
+                sample row as a gap with a reason, because a NULL imphash
+                reads as &ldquo;this sample has no imports&rdquo; and an
+                absent one says nobody looked.
+              </p>
+              <div id="smp-origin" class="help"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ADD ENTITY -->
+        <!-- DECEPTION: phishing / vishing / BEC (docs/19) -->
+        <section id="pane-deception" class="pane" role="tabpanel"
+                 aria-labelledby="tab-deception" tabindex="-1" hidden>
+
+          <div class="subtabs" role="tablist" aria-label="Deception evidence">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="captures"
+                    aria-controls="dcp-captures-pane">Web captures</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="emails"
+                    aria-controls="dcp-emails-pane">Email / BEC</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="calls"
+                    aria-controls="dcp-calls-pane">Calls / vishing</button>
+          </div>
+
+          <!-- WEB CAPTURES -->
+          <div id="dcp-captures-pane" class="subpane">
+            <div class="pane-head">
+              <h2 class="h-sm">Web captures</h2>
+              <button id="dcp-cap-refresh" type="button" class="btn">
+                Refresh</button>
+              <span id="dcp-cap-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              A screenshot on its own proves somebody had a screenshot. The
+              evidence is the whole fetch — requested URL, redirect chain,
+              final URL, TLS certificate, screenshot and DOM, all at one
+              timestamp. Every URL below is <strong>defanged and
+              non-clickable</strong>: a mis-click would fetch attacker
+              infrastructure from this machine and tell them the
+              investigation exists.
+            </p>
+            <div id="dcp-cap-list" class="rows"></div>
+            <p id="dcp-cap-empty" class="empty">No captures recorded.</p>
+
+            <div id="dcp-cap-detail" class="card detail-card" hidden>
+              <div class="pane-head">
+                <h2 class="h-sm" id="dcp-cap-title">Capture</h2>
+                <button id="dcp-cap-close" type="button" class="btn subtle">
+                  Close</button>
+              </div>
+              <div id="dcp-cap-body"></div>
+            </div>
+          </div>
+
+          <!-- EMAIL / BEC -->
+          <div id="dcp-emails-pane" class="subpane" hidden>
+            <div class="pane-head">
+              <h2 class="h-sm">Email</h2>
+              <label class="field inline">
+                <input id="dcp-divergent" type="checkbox" class="check">
+                <span class="label">Divergent only</span>
+              </label>
+              <button id="dcp-eml-refresh" type="button" class="btn">
+                Refresh</button>
+              <span id="dcp-eml-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              The message body is <strong>never rendered</strong>. An HTML
+              email loads remote images, and doing that fires the actor's
+              tracking pixel from this organisation's IP at a timestamp
+              that tells them when the investigation reached them.
+            </p>
+            <div id="dcp-eml-list" class="rows"></div>
+            <p id="dcp-eml-empty" class="empty">No messages recorded.</p>
+
+            <div id="dcp-eml-detail" class="card detail-card" hidden>
+              <div class="pane-head">
+                <h2 class="h-sm" id="dcp-eml-title">Message</h2>
+                <button id="dcp-eml-close" type="button" class="btn subtle">
+                  Close</button>
+              </div>
+              <div id="dcp-eml-body"></div>
+            </div>
+          </div>
+
+          <!-- CALLS -->
+          <div id="dcp-calls-pane" class="subpane" hidden>
+            <div class="pane-head">
+              <h2 class="h-sm">Call records</h2>
+              <button id="dcp-call-refresh" type="button" class="btn">
+                Refresh</button>
+              <span id="dcp-call-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              Caller ID is the attack, not a detail. What the victim's
+              handset displayed is shown separately from what the carrier
+              vouched for, and the presented number never becomes a
+              selector — putting it on an actor would attribute the crime
+              to whoever's number the attacker picked.
+            </p>
+            <div id="dcp-call-list" class="rows"></div>
+            <p id="dcp-call-empty" class="empty">No calls recorded.</p>
+          </div>
+        </section>
+
+        <section id="pane-add-node" class="pane" role="tabpanel"
+                 aria-labelledby="tab-add-node" tabindex="-1" hidden>
+          <form id="node-form" class="card stack narrow" novalidate>
+            <h2 class="h-sm">Add entity</h2>
+            <p class="help assertion-note">Nothing is a fact. Every element needs a
+              source — it is recorded as an assertion and stays attached to this
+              entity for the life of the case.</p>
+            <label class="field">
+              <span class="label">Entity type</span>
+              <select id="node-type" class="select" required></select>
+            </label>
+            <label class="field">
+              <span class="label">Label</span>
+              <input id="node-label" required spellcheck="false">
+            </label>
+            <label class="field">
+              <span class="label">Classification</span>
+              <select id="node-class" class="select"></select>
+            </label>
+
+            <fieldset class="assertion">
+              <legend>Assertion</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Basis</span>
+                  <select id="node-basis" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Confidence (ICD 203)</span>
+                  <select id="node-conf" class="select"></select>
+                </label>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Source reliability</span>
+                  <select id="node-rel" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Info credibility</span>
+                  <select id="node-cred" class="select"></select>
+                </label>
+              </div>
+              <div class="field">
+                <label class="label" for="node-rationale">Rationale
+                  <span id="node-rat-req" class="req" hidden>required for inference</span></label>
+                <textarea id="node-rationale" rows="3"
+                          aria-describedby="node-rat-help"></textarea>
+                <span id="node-rat-help" class="help">An inference must state its
+                  reasoning. The server rejects one that does not.</span>
+              </div>
+              <!-- E1: the exhibit belongs HERE, at the moment the claim is
+                   made. Making an analyst navigate elsewhere to attach one is
+                   how a case ends up with fourteen assertions and no
+                   evidence. -->
+              <div class="field">
+                <label class="label" for="node-evidence">Supporting exhibit</label>
+                <select id="node-evidence" class="select"></select>
+                <span class="help">Optional, but a claim with an exhibit behind it
+                  is defensible and one without it is an opinion. Upload on the
+                  Evidence tab first to see it listed here.</span>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Observed at</span>
+                  <input id="node-observed" type="datetime-local">
+                </label>
+                <label class="field">
+                  <span class="label">Source reference</span>
+                  <input id="node-ref" spellcheck="false"
+                         placeholder="forum/thread/8841">
+                </label>
+              </div>
+            </fieldset>
+
+            <!-- U3: the interval this was true in WORLD time. "Was in
+                 LockBit until March" is the normal case, and without it the
+                 timeline scrubber and trust decay have nothing to replay. -->
+            <fieldset class="assertion">
+              <legend>Valid interval (world time)</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">From</span>
+                  <input id="node-valid-from" type="date">
+                </label>
+                <label class="field">
+                  <span class="label">Until</span>
+                  <input id="node-valid-to" type="date">
+                </label>
+              </div>
+              <span class="help">Leave blank if the claim has no known start or is
+                still current. This drives the timeline scrubber and the
+                trust-decay half-life; it is not when you recorded it.</span>
+            </fieldset>
+
+            <p id="node-error" class="form-error" role="alert" hidden></p>
+            <p id="node-ok" class="form-ok" role="status" hidden></p>
+            <button type="submit" class="btn primary">Create entity</button>
+          </form>
+        </section>
+
+        <!-- ADD RELATIONSHIP -->
+        <section id="pane-add-edge" class="pane" role="tabpanel"
+                 aria-labelledby="tab-add-edge" tabindex="-1" hidden>
+          <form id="edge-form" class="card stack narrow" novalidate>
+            <h2 class="h-sm">Add relationship</h2>
+            <p class="help assertion-note">Nothing is a fact. Every element needs a
+              source — it is recorded as an assertion. Relationship types are
+              offered only where the ontology permits that pair.</p>
+            <div class="row">
+              <label class="field">
+                <span class="label">Source entity</span>
+                <select id="edge-src" class="select" required></select>
+              </label>
+              <label class="field">
+                <span class="label">Target entity</span>
+                <select id="edge-dst" class="select" required></select>
+              </label>
+            </div>
+            <div class="field">
+              <label class="label" for="edge-type">Relationship type</label>
+              <select id="edge-type" class="select" required
+                      aria-describedby="edge-type-note"></select>
+              <span id="edge-type-note" class="help" role="status"></span>
+            </div>
+            <label class="field">
+              <span class="label">Classification</span>
+              <select id="edge-class" class="select"></select>
+            </label>
+
+            <fieldset class="assertion">
+              <legend>Assertion</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Basis</span>
+                  <select id="edge-basis" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Confidence (ICD 203)</span>
+                  <select id="edge-conf" class="select"></select>
+                </label>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Source reliability</span>
+                  <select id="edge-rel" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Info credibility</span>
+                  <select id="edge-cred" class="select"></select>
+                </label>
+              </div>
+              <div class="field">
+                <label class="label" for="edge-rationale">Rationale
+                  <span id="edge-rat-req" class="req" hidden>required for inference</span></label>
+                <textarea id="edge-rationale" rows="3"
+                          aria-describedby="edge-rat-help"></textarea>
+                <span id="edge-rat-help" class="help">An inference must state its
+                  reasoning. The server rejects one that does not.</span>
+              </div>
+              <!-- E1: the exhibit belongs HERE, at the moment the claim is
+                   made. Making an analyst navigate elsewhere to attach one is
+                   how a case ends up with fourteen assertions and no
+                   evidence. -->
+              <div class="field">
+                <label class="label" for="edge-evidence">Supporting exhibit</label>
+                <select id="edge-evidence" class="select"></select>
+                <span class="help">Optional, but a relationship with an exhibit behind it
+                  is defensible and one without it is an opinion. Upload on the
+                  Evidence tab first to see it listed here.</span>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Observed at</span>
+                  <input id="edge-observed" type="datetime-local">
+                </label>
+                <label class="field">
+                  <span class="label">Source reference</span>
+                  <input id="edge-ref" spellcheck="false"
+                         placeholder="forum/thread/8841">
+                </label>
+              </div>
+            </fieldset>
+
+            <!-- U3: the interval this was true in WORLD time. "Was in
+                 LockBit until March" is the normal case, and without it the
+                 timeline scrubber and trust decay have nothing to replay. -->
+            <fieldset class="assertion">
+              <legend>Valid interval (world time)</legend>
+              <div class="row">
+                <label class="field">
+                  <span class="label">From</span>
+                  <input id="edge-valid-from" type="date">
+                </label>
+                <label class="field">
+                  <span class="label">Until</span>
+                  <input id="edge-valid-to" type="date">
+                </label>
+              </div>
+              <span class="help">Leave blank if the relationship has no known start or is
+                still current. This drives the timeline scrubber and the
+                trust-decay half-life; it is not when you recorded it.</span>
+            </fieldset>
+
+            <p id="edge-error" class="form-error" role="alert" hidden></p>
+            <p id="edge-ok" class="form-ok" role="status" hidden></p>
+            <button type="submit" class="btn primary">Create relationship</button>
+          </form>
+        </section>
+      </div>
+
+      <!-- INSPECTOR -->
+      <aside id="inspector" class="inspector" aria-labelledby="insp-heading">
+        <h2 id="insp-heading" class="insp-heading">Inspector</h2>
+        <div id="insp-empty" class="insp-empty">
+          Select an entity or a relationship to see why it is believed.
+        </div>
+        <div id="insp-body" hidden>
+          <div class="insp-id">
+            <span id="insp-type" class="chip type-chip"></span>
+            <span id="insp-class" class="chip"></span>
+          </div>
+          <p id="insp-label" class="insp-label"></p>
+          <p id="insp-sub" class="mono small muted"></p>
+
+          <section id="insp-metrics-sec" class="insp-sec">
+            <div class="insp-sec-head">
+              <h3 class="h-sm">Metrics</h3>
+              <span id="insp-metrics-scope" class="chip stale"></span>
+            </div>
+            <div id="insp-metrics" class="metric-grid"></div>
+            <p id="insp-metrics-proj" class="assert-meta"></p>
+            <p class="help">These are <strong>local</strong> measures: each one
+              describes the entity's own neighbourhood. Brokerage — betweenness,
+              Burt's constraint, key-player fragmentation — is Phase 3 and is not
+              computed here, so nothing on this panel tells you who bridges two
+              clusters.</p>
+          </section>
+
+          <section class="insp-sec">
+            <div class="insp-sec-head">
+              <h3 class="h-sm">Assertions</h3>
+              <label class="check">
+                <input id="chk-retracted" type="checkbox">
+                <span>Include retracted</span>
+              </label>
+            </div>
+            <div id="insp-assertions" class="insp-list"></div>
+          </section>
+
+          <section class="insp-sec">
+            <h3 class="h-sm">Linked evidence</h3>
+            <div id="insp-evidence" class="insp-list"></div>
+          </section>
+
+          <section id="insp-sel-sec" class="insp-sec">
+            <h3 class="h-sm">Selectors</h3>
+            <div id="insp-selectors" class="insp-list"></div>
+          </section>
+
+          <!-- Entity resolution. docs/01: "merging is the operation most
+               likely to quietly corrupt a case", so the control states what
+               it will do before it does it, and every merge is reversible
+               from the history below. -->
+          <section id="insp-merge-sec" class="insp-sec" hidden>
+            <h3 class="h-sm">Entity resolution</h3>
+            <label class="field">
+              <span class="label">Merge this entity into</span>
+              <select id="merge-target" class="select"></select>
+            </label>
+            <p class="help">The entity you are looking at becomes the
+              <strong>losing</strong> record: it keeps its history, its ties
+              move to the one you choose, and it leaves the live graph. Only
+              entities of the same type are listed &mdash; saying a persona
+              IS a person is an attribution, not a merge.</p>
+            <button id="merge-run" type="button" class="btn small">Merge</button>
+            <p id="merge-error" class="form-error" role="alert" hidden></p>
+            <div id="merge-history" class="insp-list"></div>
+          </section>
+        </div>
+      </aside>
+    </section>
+  </main>
+</div>
+
+<!-- ─────────────────── COMMAND PALETTE (⌘K / Ctrl+K) ─────────────────── -->
+<!-- Keyboard reference. This app is driven from the keyboard more than it
+     looks: the triage queue is J/K, the sociogram takes space and
+     shift-click, and the palette is the fastest way to anything. All of it
+     was documented in a 10px legend under the canvas, which is to say
+     nowhere. `?` is the convention and costs one keystroke to discover. -->
+<div id="keys-scrim" class="palette-scrim" hidden>
+  <div class="palette keys-sheet" role="dialog" aria-modal="true"
+       aria-labelledby="keys-heading">
+    <h2 id="keys-heading" class="h-sm">Keyboard</h2>
+    <div class="keys-grid">
+      <h3 class="h-xs">Anywhere</h3>
+      <dl class="keys">
+        <dt><span class="kbd" id="keys-palette">Ctrl K</span></dt>
+        <dd>Command palette — entities, projections, commands</dd>
+        <dt><span class="kbd">?</span></dt>
+        <dd>This sheet</dd>
+        <dt><span class="kbd">Esc</span></dt>
+        <dd>Close whatever is open</dd>
+        <dt><span class="kbd">Alt</span> <span class="kbd">1</span>&ndash;<span class="kbd">9</span></dt>
+        <dd>Jump to a pane, in rail order</dd>
+        <dt><span class="kbd">&#x2398;</span></dt>
+        <dd>Copy an identifier &mdash; the button beside any selector,
+        hash or TLS key. Copies the <em>full</em> value, and for a URL the
+        <em>defanged</em> one, because that is what belongs in a report</dd>
+      </dl>
+
+      <h3 class="h-xs">Sociogram</h3>
+      <dl class="keys">
+        <dt><span class="kbd">drag</span></dt><dd>Pan</dd>
+        <dt><span class="kbd">scroll</span></dt><dd>Zoom</dd>
+        <dt><span class="kbd">click</span></dt><dd>Inspect an element</dd>
+        <dt><span class="kbd">dbl-click</span></dt><dd>Ego network</dd>
+        <dt><span class="kbd">shift-click</span></dt>
+        <dd>Shortest path from the selection</dd>
+        <dt><span class="kbd">space</span></dt>
+        <dd>Hide inferred edges while held — the fastest way to see how
+            much of a picture is assessment rather than evidence</dd>
+      </dl>
+
+      <h3 class="h-xs">Triage</h3>
+      <dl class="keys">
+        <dt><span class="kbd">J</span> <span class="kbd">K</span></dt>
+        <dd>Next / previous proposal</dd>
+        <dt><span class="kbd">A</span></dt><dd>Accept</dd>
+        <dt><span class="kbd">R</span></dt><dd>Reject</dd>
+      </dl>
+    </div>
+    <p class="help">
+      Nothing here writes to the graph without a confirmation step. Accept
+      in triage promotes a <em>proposal</em>, which is still an assertion
+      with a source and a grading — machines propose, analysts dispose.
+    </p>
+    <button id="keys-close" type="button" class="btn">Close</button>
+  </div>
+</div>
+
+<div id="palette-scrim" class="palette-scrim" hidden>
+  <div id="palette" class="palette" role="dialog" aria-modal="true"
+       aria-labelledby="palette-heading">
+    <h2 id="palette-heading" class="sr-only">Command palette</h2>
+    <input id="palette-input" class="pal-input" type="text" role="combobox"
+           autocomplete="off" spellcheck="false" aria-expanded="true"
+           aria-controls="palette-list" aria-autocomplete="list"
+           placeholder="Jump to an entity, switch projection, run a command…">
+    <ul id="palette-list" class="pal-list" role="listbox"
+        aria-label="Commands and entities"></ul>
+    <p id="palette-empty" class="empty" hidden>Nothing matches.</p>
+    <p class="pal-foot">
+      <span class="kbd">↑</span><span class="kbd">↓</span> move ·
+      <span class="kbd">Enter</span> run ·
+      <span class="kbd">Esc</span> close
+    </p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

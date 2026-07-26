@@ -1,0 +1,139 @@
+# Development only. Production runs the three zones from docs/02 as
+# separate network policies — do not derive a prod deployment from this.
+name: noctornal
+
+services:
+  postgres:
+    # pgvector image; add pg_uuidv7 in a derived Dockerfile if you want
+    # time-sortable IDs generated in-database rather than app-side.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: noctornal
+      POSTGRES_USER: noctornal
+      POSTGRES_PASSWORD: dev_only_change_me
+      # Reduce the noise floor when debugging slow graph queries.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c log_min_duration_statement=250
+      -c max_connections=200
+      -c shared_buffers=512MB
+      -c work_mem=32MB
+    ports: ["5432:5432"]
+    # If init ever fails mid-run, pgdata keeps the PARTIAL cluster and the
+    # init scripts will NOT re-run on restart — postgres comes up "healthy"
+    # with a half-loaded schema. Recover with: docker compose down -v
+    # (destroys pgdata), then up again.
+    # Initdb runs ONLY db/init (extensions, which need superuser). The
+    # schema itself comes from Alembic: `alembic upgrade head` from the
+    # repo root — one owner of the schema, no drift.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../db/init:/docker-entrypoint-initdb.d:ro
+    # -h 127.0.0.1 forces the probe over TCP: during first-run init the
+    # entrypoint's temporary server answers on the unix socket only, and a
+    # socket probe reports "healthy" while the schema is still loading.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U noctornal -d noctornal"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: noctornal
+      MINIO_ROOT_PASSWORD: dev_only_change_me
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+
+  # Creates the evidence bucket WITH OBJECT LOCK. Object lock cannot be
+  # enabled after creation, so getting this right on first run matters.
+  #
+  # `set -e` + `--ignore-existing` instead of `|| true`: a silently failed
+  # lock-enabled creation is unrecoverable, so real failures must fail this
+  # container visibly.
+  #
+  # R10 (2026-07-26) added `noctornal-samples`, which was created by
+  # nothing. The store defaults to that name, so the first real sample
+  # upload got an uncurated NoSuchBucket where every other refusal in this
+  # system explains itself. The dev machine never hit it because
+  # seed_lab_demo.py deliberately uses a null store.
+  #
+  # The samples bucket is NOT --with-lock, and this is the one bucket where
+  # that needs saying out loud: docs/11's rejection path must be able to
+  # DESTROY sample bytes when prohibited content arrives, and an object
+  # lock would make that impossible for the whole retention period.
+  # Evidence is locked because an exhibit must survive; a sample is not,
+  # because some samples must not.
+  #
+  # EVERY comment about this command lives OUT HERE. `entrypoint: >` is a
+  # YAML *folded* scalar: it joins its lines with spaces into one string,
+  # so a `#` inside it comments out the rest of the entire shell command.
+  # A comment added inside the block on 2026-07-26 silently disabled the
+  # samples-bucket creation it was written to explain, and `docker compose
+  # config` was what caught it.
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      until mc alias set local http://minio:9000 noctornal dev_only_change_me; do sleep 1; done;
+      mc mb --ignore-existing --with-lock local/noctornal-evidence;
+      mc mb --ignore-existing local/noctornal-raw;
+      mc mb --ignore-existing local/noctornal-samples;
+      mc retention set --default GOVERNANCE 365d local/noctornal-evidence;
+      echo 'buckets ready';
+      "
+
+  # Named `mailpit` after the image it actually runs. It was `mailhog`
+  # for historical reasons and the mismatch confused anyone reading
+  # `docker compose ps` against the docs (R21).
+  mailpit:
+    image: axllent/mailpit:latest
+    # 1025 SMTP, 8025 web UI. install.ps1/install.sh write matching
+    # SMTP_HOST/SMTP_PORT/SMTP_ALLOW_PLAINTEXT into .env.local, or the
+    # advertised "captured e-mail" demo silently does nothing (R11) --
+    # transports.py defaults to port 587.
+    ports: ["1025:1025", "8025:8025"]
+
+# ---------------------------------------------------------------------------
+# REMOVED 2026-07-26 (R13): OpenFGA and NATS.
+#
+# Both were scaffolding for a design direction the build did not take.
+# Neither is referenced by a single line in apps/api -- verified by grep --
+# yet between them they published FOUR host ports (8080, 3001, 4222, 8222)
+# and one port collision fails the ENTIRE `docker compose up`, taking the
+# install with it. 8080 in particular is among the most contended ports on
+# a developer workstation.
+#
+# So they were pure risk: no function, and a plausible way for a first-run
+# install to fail with an error about a service the product never calls.
+# Ten published ports became six.
+#
+# docs/02 still names OpenFGA/SpiceDB as the intended relationship-based
+# authorisation store. That remains the plan; the five-part gate in
+# `deps.py` is the current implementation and is entirely in Postgres. When
+# ReBAC is actually wired up, the service comes back -- with code calling
+# it.
+#
+# NOTE for anyone re-adding OpenFGA: `openfga-migrate` declared
+# `depends_on: postgres: service_healthy`, which had the side effect of
+# making `up -d` block until Postgres was genuinely ready. install.sh's
+# wait-loop relied on that without knowing it. R17 added an explicit
+# failure branch to that loop for exactly this reason.
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
