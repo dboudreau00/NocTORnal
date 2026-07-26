@@ -28,7 +28,7 @@ now complete except for its UI.
 
 ## 2. What was built this session
 
-Six commits on `main`, **807 → 988 tests**, Alembic **0034 → 0037**.
+Eight commits on `main`, **807 → 1012 tests**, Alembic **0034 → 0039**.
 
 | Commit | What |
 |---|---|
@@ -38,6 +38,8 @@ Six commits on `main`, **807 → 988 tests**, Alembic **0034 → 0037**.
 | `565ea7f` | Decisions 55–58, legal register C11–C13, roadmap |
 | `12ff904` | **CRITICAL: forged `VALIDSIG` via a crafted user ID** (0037) |
 | `8595602` | The rest of the review: 10 further defects |
+| `c9a0678` | The last five flagged items, README disclaimer, `docs/17` |
+| `413efbd` | Routers for Phases 4, 6 and 9 (30 endpoints) + migrations 0038/0039 |
 
 ### The contact-block parser (docs/10's "highest-value extraction target")
 
@@ -208,9 +210,9 @@ and `GET /comms/pgp` forked gpg per request unmetered.
 | | |
 |---|---|
 | **Branch** | `main`, clean, **nothing pushed** (no remote configured) |
-| **Migration head** | `0037`; base→head→base→head verified on a clean database |
-| **Tests** | **988 passing**, 0 failing, 0 skipped with the stack up |
-| **Lint** | `ruff check` clean; source hygiene clean (199 files) |
+| **Migration head** | `0039`; base→head→base→head verified on a clean database |
+| **Tests** | **1012 passing**, 0 failing, **0 skipped** |
+| **Lint** | `ruff check` clean; source hygiene clean (206 files) |
 | **Stack** | Docker Compose: postgres, redis, nats, minio, openfga, mailhog |
 
 ### New environment variables
@@ -251,12 +253,23 @@ should be re-derived rather than trusted.
 
 ### Prioritised engineering work
 
-1. **UI.** ACH, reports, samples, ingest, comms and governance all have
-   tested services and no interface. Samples last and carefully —
-   invariant 10 says metadata may render and bytes may not.
-2. **HTTP routers for Phases 4, 6 and 9** — retention, break-glass,
-   collection and ingest still have none.
-3. **An adversarial pass over Phases 4 and 9**, which have had none.
+**Completion is now measured across four weighted dimensions** — model and
+tests 45%, HTTP API 15%, analyst UI 25%, adversarial review 15%. Overall
+**~72%**. See the scoreboard in `ROADMAP-REMAINING.md`; the numbers went
+DOWN from earlier versions because the measure got honest, not because
+anything regressed.
+
+1. **UI — the single largest gap by a wide margin.** Every phase now has
+   an HTTP API; six have no interface an analyst can use. Do comms first
+   (everything else about it is finished, so it is a clean test of the UI
+   patterns) and samples last and carefully — invariant 10 says metadata
+   may render and bytes may not, and no sandbox attribute may combine
+   `allow-scripts` with `allow-same-origin`.
+2. **An adversarial pass over Phases 4 and 9**, which have had none — and
+   over the four routers added at the end of this session, which have
+   tests but no hostile review. Do this BEFORE the UI: fixing a model
+   defect after a UI is built costs the UI too.
+3. ~~HTTP routers for Phases 4, 6 and 9~~ — **done**, 30 endpoints.
 4. **WebAuthn** and the deferred security items (session IP/UA binding,
    non-owner DB role + RLS, login timing equalisation).
 5. **Real SSRF protection.** `collection.fetch()` has a floor; DNS

@@ -32,7 +32,7 @@ If this instance has been used at all, these rows exist and are wrong.
 | **`CONFIRMED` channel bindings** created before commit `12ff904` | `comms.channel_binding` where `verification = 'CONFIRMED'` | The status parser could be fed a forged `VALIDSIG` line through a crafted OpenPGP user ID, minting a confirmation for a key the submitter did not hold. Also reachable without any signature at all, because `POST /bindings` accepted `verification: "CONFIRMED"` from the request body. | Re-derive each from its `comms.pgp_verification` row, or demote to `CLAIMED`. Do not accept the stored value. |
 | **Co-participation figures** produced before commit `8595602` | Nothing persisted — the projection is computed live | Newman weighting divided by the *filtered* participant count, so a tie from a 500-member channel scored identically to a two-party DM. Any figure quoted in a report or a filing is wrong by up to the room size. | Recompute. Nothing to migrate. |
 | **Contact-block attributions from Russian-language forums** parsed before `8595602` | `comms.contact_block_entry` where `role = 'SELF'` | The third-party label defence was ASCII-only, so `Гарант:` (guarantor) and `Эскроу:` (escrow) were read as the vendor's own. Any proposal raised from one is a misattribution of a forum service to a vendor. | Re-parse the affected blocks. `parser_version` on `comms.contact_block` identifies them. |
-| **Durable values for Discord, ICQ, Signal, Wire, Wickr** written before `8595602` | `comms.channel_binding.durable_value` | Discord and ICQ handles without digits normalised to the empty string, which **collides with every other such handle**. Signal and Wire promoted phone numbers and handles their own platform seed says are not durable. | Re-normalise from `observed_value`, as migration 0036 did for Tox/Matrix/Telegram. A migration for this is **not written**. |
+| **Durable values for Discord, ICQ, Signal, Wire, Wickr** written before `8595602` | `comms.channel_binding.durable_value` | Discord and ICQ handles without digits normalised to the empty string, which **collides with every other such handle**. Signal and Wire promoted phone numbers and handles their own platform seed says are not durable. | ✅ **Repaired by migration 0038**, recomputed from `observed_value`. Its rules are written literally in the migration (Python, not SQL, because two of them are Unicode-sensitive) and were diffed against the live normaliser over 25 probes. Verify 0038 ran. |
 | **Tox and Matrix durable values** written before commit `74a055d` | `comms.channel_binding.durable_value` | Repaired by migration **0036**, which recomputes from `observed_value`. | Already handled. Verify 0036 ran. |
 
 ---
@@ -78,6 +78,25 @@ automatically**, so the destructive path is the default in a system whose
 correct default is jurisdictional.
 
 **Decide with counsel before the first ingest.** docs/16 L1.
+
+### F14 — Which roles may invoke break-glass is a guess
+
+**Built:** migration 0032 seeded `break_glass.invoke` and granted it to
+**no role at all**, so the entire feature was unreachable — the permission
+existed, the service enforced every control around it, and nothing could
+call it. Found by the first e2e test that tried, 2026-07-25.
+
+Migration 0039 grants it to `SYS_ADMIN` and `CASE_OWNER`. That is the
+narrowest defensible default, **not a recommendation**: SYS_ADMIN because
+operational emergencies are theirs, CASE_OWNER because the commonest real
+case is the owner locked out of their own case at 3am. `ANALYST` was
+deliberately excluded — docs/05 wants break-glass *available*, and
+"available to everyone" is a different property.
+
+**Decide:** who actually needs emergency access in your unit. Getting this
+wrong in the tight direction means people route around the system during
+an incident, which is worse than the access; too broad and the review
+queue becomes noise nobody reads.
 
 ### F3 — Six retention rules ship with placeholder periods
 
@@ -187,6 +206,23 @@ large, low-yield change to a codebase whose invariants are enforced by
 database constraints rather than by types.
 
 ---
+
+## Newly built and NOT yet reviewed
+
+The four routers added 2026-07-25 (retention, break-glass, collection,
+ingest — 30 endpoints) have tests but **no adversarial pass**. Phases 4
+and 9 have never had one at all. Every hostile review run on this project
+has found a real defect, twice a critical one under a fully green suite,
+so treat these as unknown rather than fine.
+
+Two defects surfaced merely by *writing the tests* for them, which is a
+reasonable prior for what a hostile pass would find:
+
+- `break_glass.invoke` granted to nobody (F14 above).
+- The ingest 202 endpoint carried a USER-scoped rate limit, so the
+  dependency resolved `current_user` and rejected every legitimate
+  key-authenticated submission with "invalid or expired session". A
+  key-authenticated endpoint cannot carry a session-scoped limit.
 
 ## Deferred security items
 
