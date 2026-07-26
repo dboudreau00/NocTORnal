@@ -14,3 +14,17 @@ apps/api/tests/fixtures/pgp/** -text
 # line endings, but a diff that shows a whole file changed because a
 # checkout rewrote it makes review harder for no benefit.
 *.sql text eol=lf
+
+# Shell scripts MUST keep LF, and this one is not cosmetic.
+#
+# `#!/usr/bin/env bash\r` is not a shebang any kernel recognises. A release
+# installer authored on Windows and checked out with CRLF fails on the
+# Linux box it was written for with:
+#
+#     /usr/bin/env: 'bash\r': No such file or directory
+#
+# which names neither the file nor line endings, and reads as a corrupt
+# download. The whole point of shipping install.sh is that it works on a
+# machine nobody has prepared, so it cannot depend on the person who
+# cloned it having configured core.autocrlf correctly.
+*.sh text eol=lf
