@@ -31,7 +31,19 @@ env:
   # A fixed, throwaway KEK. Real deployments supply this from the
   # environment or Vault and there is no default anywhere in the code --
   # see security/envelope.py.
-  NOCTORNAL_TOTP_KEK: QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=
+  #
+  # It MUST decode to exactly 32 bytes. The previous value decoded to 35
+  # and every AES-256-GCM path in the suite died with
+  # "NOCTORNAL_TOTP_KEK must decode to 32 bytes, got 35" -- 147 failures.
+  #
+  # It had been wrong for as long as it had existed and nothing noticed,
+  # because the MinIO service container failed first and the job aborted at
+  # "Initialize containers" before a single test ran. Fixing that unmasked
+  # this. A job that dies in setup is not a passing job, and it hid a
+  # second defect for however long it was red.
+  #
+  # This is base64 of 32 'A' bytes, matching apps/api/tests/conftest.py.
+  NOCTORNAL_TOTP_KEK: QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=
 
 jobs:
   lint:
