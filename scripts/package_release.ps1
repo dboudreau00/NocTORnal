@@ -96,12 +96,25 @@ try {
     New-Item -ItemType Directory -Force $Destination | Out-Null
 
     Say "Packaging $Ref"
-    $tar = Join-Path ([System.IO.Path]::GetTempPath()) "noctornal-$(Get-Random).tar"
-    git archive --format=tar --output="$tar" $Ref
+    # `git archive --format=zip` + Expand-Archive, NOT tar.
+    #
+    # `tar` is not reliably the one you think on Windows. With Git for
+    # Windows on PATH ahead of System32 -- which is the normal result of
+    # installing it -- `tar` is the MSYS build, and it interprets a
+    # `C:/...` destination as a REMOTE HOST, failing with "Cannot connect
+    # to C: resolve failed". Found by running this script rather than by
+    # reading it.
+    #
+    # zip has no such ambiguity: git writes it, and Expand-Archive ships
+    # with PowerShell 5.1, so neither depends on PATH order.
+    $tmpZip = Join-Path ([System.IO.Path]::GetTempPath()) "noctornal-$(Get-Random).zip"
+    git archive --format=zip --output="$tmpZip" $Ref
     if ($LASTEXITCODE -ne 0) { Die "git archive failed for ref '$Ref'." }
-    tar -xf "$tar" -C "$Destination"
-    if ($LASTEXITCODE -ne 0) { Die 'tar extraction failed.' }
-    Remove-Item -Force $tar
+    try {
+        Expand-Archive -LiteralPath $tmpZip -DestinationPath $Destination -Force
+    }
+    catch { Die "extraction failed: $_" }
+    finally { Remove-Item -Force -ErrorAction SilentlyContinue $tmpZip }
     Good "wrote $Destination"
 
     # ---- verify, rather than trust ------------------------------------
