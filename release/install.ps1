@@ -143,9 +143,8 @@ foreach ($name in @('python', 'python3', 'py')) {
     $probe = Invoke-Capture $cmd.Source @('-c', "import sys; print('%d.%d' % sys.version_info[:2])")
     # Trim: Invoke-Capture pipes through Out-String, which appends a
     # trailing newline, and the banner below interpolates $raw mid-string
-    # -- so without this the very first thing a new user sees is
-    # "Python 3.13
- at C:\...".
+    # -- so without this the version and the path break across two lines
+    # in the very first thing a new user sees.
     $raw = ($probe.Text).Trim()
     if ($probe.Code -ne 0 -or -not $raw -or -not ($raw.Trim() -match '^\d+\.\d+$')) { continue }
     $parts = $raw.Trim().Split('.')
