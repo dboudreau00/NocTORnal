@@ -58,6 +58,26 @@ from noctornal_api.ingest import (
     IngestError,
     IngestService,
 )
+from noctornal_api.rawstore import MissingObject, RawBatchStorage, RawStoreError
+
+
+def _with_raw(conn: psycopg.Connection, **kw) -> IngestService:
+    """An `IngestService` that can actually persist and re-read raw bytes.
+
+    Built per request like every other service here. `RawBatchStorage`
+    raises when MinIO is not configured rather than degrading to a no-op:
+    an accept path that acknowledges bytes and drops them is worse than one
+    that refuses, because the partner is told it worked.
+    """
+    try:
+        storage = RawBatchStorage()
+    except RawStoreError as exc:
+        raise Problem(
+            503, "Storage unavailable",
+            "raw ingest storage is not configured, and docs/12 requires the "
+            "raw payload to be persisted before parsing. Set MINIO_ENDPOINT / "
+            "MINIO_ACCESS_KEY / MINIO_SECRET_KEY and INGEST_BUCKET.") from exc
+    return IngestService(conn, storage, **kw)
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -167,7 +187,7 @@ async def submit(
     only a control if the caller cannot choose the address it is compared
     against.
     """
-    svc = IngestService(conn)
+    svc = _with_raw(conn)
     # From the server's own view of the connection, never from a header:
     # an allowlist is only a control if the caller cannot choose the
     # address it is compared against.
@@ -291,31 +311,6 @@ def stale_keys(
     return {"keys": rows, "count": len(rows), "unused_for_days": days}
 
 
-def _batch_bytes(raw_key: str | None) -> bytes | None:
-    """Fetch a batch's payload, or None if it is not retrievable.
-
-    **Currently always None, and that is the honest state.**
-    `IngestService.accept()` writes the payload only when it is
-    constructed with a storage adapter, and every construction in this
-    router passes none -- so the bytes were never stored. `ingest.batch`
-    keeps `raw_key` and `raw_bytes` (a byte COUNT, not the bytes), which
-    is what made the first version of this endpoint shred a run of NULs
-    into the dead-letter queue on every call.
-
-    Returning None makes the endpoint refuse with a 409 that says why.
-    The alternative -- an empty buffer -- parses to zero records and marks
-    the batch PARSED, silently losing it, which is invariant 12 failing on
-    the one path designed to catch loss.
-
-    Wiring an ingest storage adapter is the remaining Phase 9 work
-    (`ROADMAP-REMAINING`: "the HTTP 202 endpoint wiring"). It needs a
-    `put(key, data)` / `get(key)` pair; `EvidenceStorage` is NOT it --
-    its `put` demands a media type and an object-lock retention date,
-    because an exhibit and a quarantined third-party dump are different
-    things with different retention.
-    """
-    return None
-
 
 # ---------------------------------------------------------------------------
 # Parsing, and what failed to parse
@@ -346,25 +341,31 @@ def parse_batch(
         # gate and not just the global ingest verb.
         authorize_object(conn, user, case_id=body.case_id,
                          permission_key="ingest.manage")
-    # `ingest.batch.raw_bytes` is a bigint -- the byte COUNT, not the
-    # bytes. `bytes(<int>)` allocates that many NULs, so every parse
-    # shredded a run of zeros into the dead-letter queue and never touched
-    # the batch. The payload lives in object storage under `raw_key`.
-    row = conn.execute(
-        "SELECT raw_key, raw_bytes FROM ingest.batch WHERE id = %s",
-        (batch_id,)).fetchone()
-    if row is None:
+    if conn.execute("SELECT 1 FROM ingest.batch WHERE id = %s",
+                    (batch_id,)).fetchone() is None:
         raise Problem(404, "Not found", "no such batch")
-    raw = _batch_bytes(row[0])
-    if raw is None:
+    # `raw_for` reads the object and verifies it against `raw_sha256`
+    # before returning. Note what is NOT here any more: this used to read
+    # `ingest.batch.raw_bytes`, which is a bigint -- the byte COUNT --
+    # so `bytes(<int>)` allocated that many NULs and every parse shredded
+    # a run of zeros into the dead-letter queue without touching the
+    # batch. Re-parsing something that is not what arrived attributes
+    # records to a submission that never happened.
+    svc = _with_raw(conn)
+    try:
+        raw = svc.raw_for(batch_id)
+    except MissingObject as exc:
         raise Problem(
             409, "Conflict",
-            "the raw payload for this batch is not retrievable: object "
-            "storage is not configured, so `accept()` recorded the batch "
-            "without storing its bytes. Parsing would dead-letter the "
-            "whole batch rather than fail, which is worse.")
+            "the raw payload for this batch is not in object storage. A "
+            "batch accepted before storage was configured cannot be "
+            "re-parsed; the partner has to resend. Parsing an empty payload "
+            "would mark the batch PARSED with zero records, which is a "
+            "silent loss (invariant 12).") from exc
+    except IngestError as exc:
+        raise Problem(409, "Conflict", str(exc)) from exc
     try:
-        result = IngestService(conn).parse_batch(
+        result = svc.parse_batch(
             batch_id, raw=raw, case_id=body.case_id,
             parser_version=body.parser_version)
     except IngestError as exc:
@@ -374,7 +375,9 @@ def parse_batch(
         "dead_letters": result.dead, "duplicates": result.duplicates,
         "warnings": result.warnings,
         "notice": ("Fragments that failed to parse are in the dead-letter "
-                   "queue WITH their raw bytes. Silent drops are how you "
+                   "queue, structurally redacted — keys, types and lengths, "
+                   "never values. The verbatim bytes stay in the batch's raw "
+                   "object under its own retention. Silent drops are how you "
                    "find out six months later that a feed has been "
                    "half-failing (invariant 12)."),
     }
