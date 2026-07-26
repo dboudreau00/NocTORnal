@@ -3,10 +3,8 @@
 Regenerated 2026-07-25, end of session. `docs/09-roadmap.md` is the plan;
 this is the honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0039`, **1012 tests passing, 0 skipped**,
-ruff clean, source hygiene clean, migrations round-trip
-base→head→base→head on a clean database. Nothing pushed (no remote
-configured).
+**State:** `main`, Alembic head `0042`, **1093 tests passing, 0 skipped**,
+ruff clean, source hygiene clean. Nothing pushed (no remote configured).
 
 > **Phase 7 has had its adversarial pass** (three lenses: access control,
 > false attribution, cryptographic evidence), and every finding was put
@@ -15,10 +13,15 @@ configured).
 > a forged PGP verdict, a 499× overstated tie weight, and a label defence
 > that was absent on Russian-language forums. See decisions 59–60.
 
-> **The most important file in the repo is now
-> [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).** Every
+> **The most important files in the repo are
+> [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) and
+> [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md).** Every
 > phase is built. Four of them cannot lawfully be operated until somebody
-> outside this codebase makes a decision, and that file is the list.
+> outside this codebase makes a decision. docs/16 is that list organised
+> the way the code is; **docs/18 is the same list organised the way a
+> review is** — every question, its option set, the consequence of each,
+> the current default, and a row to write the answer in. Hand somebody
+> docs/18.
 
 ---
 
@@ -50,29 +53,44 @@ regressed — the measure got honest.**
 | 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2 — Sociogram | **95%** | ✅ | ✅ | ◐ | ✅ | WebSocket push; the UI polls. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
-| 4 — Collection | **45%** | ◐ | ✅ | ❌ | ◐ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler. **No UI.** Reviewed 2026-07-25: the router findings are fixed, the SERVICE ones (SSRF via redirect, `redact()` being a keyword list, the rate limiter never firing) are open — docs/17 F15. |
-| 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. |
-| 6 — Tradecraft | **55%** | ◐ | ✅ | ❌ | ❌ | WebAuthn, timeline replay, the assumptions register. **No UI, never reviewed.** |
-| 7 — Comms | **75%** | ✅ | ✅ | ❌ | ✅ | **UI only.** Parser, PGP verification, co-participation, 20-endpoint router and a full adversarial pass all landed 2026-07-25. |
-| 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. |
-| 9 — Ingest | **55%** | ◐ | ✅ | ❌ | ◐ | The outbound credential vault; object storage for batch payloads (parse cannot work without it). **No UI.** Reviewed 2026-07-25: router findings fixed, SERVICE ones open — victim PII in dead letters, a NUL byte stranding a batch, reveal not bound to its case (docs/17 F15). |
+| 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
+| 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Never reviewed.** |
+| 6 — Tradecraft | **80%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. Retention, tombstones and break-glass reached the UI 2026-07-25 (Lifecycle). The merge/ACH/report half of the phase still has no interface. |
+| 7 — Comms | **85%** | ✅ | ✅ | ◐ | ✅ | **UI only.** The Comms pane covers the normalise preview and the contact-block parser — the two things an analyst gets wrong unaided. Bindings, PGP verification and co-participation are API-only. |
+| 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **The one phase where 100% here would still mean "do not switch on" — see L1.** |
+| 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
-### Overall: **~72%**
+### Overall: **~82%** (was ~72% at the start of this session)
 
-Unweighted mean across the ten phases. Three things that number hides:
+Unweighted mean across the ten phases. The +10 came from three things, in
+descending order of how much they mattered:
 
-1. **UI is now the single largest gap by a wide margin.** Every phase has
-   an HTTP API; six have no interface an analyst can use. It is 25% of
-   every phase's score and the only dimension missing from more than half
-   the board.
-2. **Phases 5 and 8 have never had a hostile review**; 4 and 9 have had
-   one whose SERVICE findings are still open (docs/17 F15). Every review
-   run on this project has found a real defect — four times a critical
-   one, every time under a fully green suite. Treat an unreviewed phase
-   as unknown rather than fine.
-3. **Completion is not lawfulness.** A phase at 100% may still be
-   unlawful to operate — see the four BLOCKING items. Phase 8 could reach
-   100% here and still must not be switched on.
+- **Phase 9 from 55% to 90%**, mostly because raw-before-parse stopped
+  being aspirational. `accept()` used to acknowledge a batch and drop the
+  bytes; there was no listing endpoint, so a scored and prioritised queue
+  had nothing reading it.
+- **Phase 4 from 45% to 75%** and **Phase 6 from 55% to 80%** — UI, and
+  the ten F15 service defects fixed at the service rather than compensated
+  for at the router.
+- Three new panes, which is most of the UI dimension for three phases.
+
+Four things the number still hides:
+
+1. **UI remains the largest single gap**, now concentrated rather than
+   general: Phase 7 (comms — everything else about it is finished), the
+   merge/ACH/report half of Phase 6, and Phase 8.
+2. **Phases 5 and 8 have never had a hostile review.** Every review run on
+   this project has found a real defect — four times a critical one, every
+   time under a fully green suite. Treat an unreviewed phase as unknown
+   rather than fine.
+3. **Completion is not lawfulness.** A phase at 100% here may still be
+   unlawful to operate. Phase 8 could reach 100% and must not be switched
+   on until L1 is settled.
+4. **Two retrospective items are open**, not future work: the dead-letter
+   rows recorded before the redactor existed are still verbatim on disk
+   (`scripts/redact_dead_letters.py --apply`), and any batch accepted
+   before object storage was wired cannot be re-parsed. Both are docs/18
+   Section D.
 
 ---
 
@@ -98,7 +116,19 @@ attribution.
 
 ## Prioritised engineering work
 
-### 1. An adversarial review pass over Phases 4 and 9
+### 1. ~~An adversarial review pass over Phases 4 and 9~~ — done 2026-07-25
+
+Both had one, and both produced real defects. The Phase 4/9 pass found ten
+service-layer defects under a fully green suite, including victim PII
+stored verbatim in an unlabelled table with no retention, an SSRF bypass
+via `::ffff:127.0.0.1`, and a near-duplicate fingerprint that hashed a
+document and its inverse identically. All ten are fixed at the service
+with regressions (docs/17 F15).
+
+**Phases 5 and 8 have still had none.** That is now the whole of this
+line item.
+
+### 1b. The pattern, for whoever runs the next one
 
 **Phase 7's is done** (2026-07-25) and the pattern held again, harder than
 before. Three reviewers with distinct lenses, every finding then put
@@ -123,12 +153,32 @@ running first: **diff two implementations of the same rule against each
 other.** It found the normaliser divergence in seconds, where every unit
 test passed on both sides because each was internally consistent.
 
-### 2. UI for the new phases
+### 2. UI for the phases that still have none
 
-ACH, reports, samples, ingest, comms and governance all have tested services
-and **no interface**. Samples last and carefully: invariant 10 says metadata
-may render and bytes may not, and no sandbox attribute may combine
-`allow-scripts` with `allow-same-origin`.
+Ingest, collection and governance landed 2026-07-25 as the **Feeds** and
+**Lifecycle** panes. What is left:
+
+- **Comms (Phase 7)** — the only phase where everything else is finished,
+  so it is the cleanest remaining win. *(Partly done: a Comms pane exists
+  with the normalise preview and contact-block parser; bindings, PGP
+  verification and co-participation have no interface.)*
+- **Merge / ACH / reports (Phase 6)** — the analytic half of tradecraft.
+- **Samples (Phase 8)** — last and carefully. Invariant 10: metadata may
+  render, bytes may not, and no sandbox attribute may combine
+  `allow-scripts` with `allow-same-origin`.
+
+Three things the first three panes taught, worth carrying into the next:
+
+1. **`Promise.all` over endpoints with different permissions is wrong.**
+   The first 403 rejects the lot, so a caller who holds four of five
+   permissions sees an empty pane claiming they hold none. Load each
+   section independently and say where it is refused.
+2. **A permission error is not an empty state.** "Nothing here" and "you
+   may not see what is here" are different facts and an analyst acts on
+   them differently.
+3. **Look at it rendered.** Two of the three defects in that work — the
+   Promise.all one and an alert list padded with never-polled sources —
+   were invisible to the test suite and obvious on screen in ten seconds.
 
 ### 3. ~~HTTP routers for Phases 4, 6 and 9~~ — done 2026-07-25
 
@@ -141,11 +191,13 @@ gain each buys.
 
 | # | Work | Buys | Why here |
 |---|---|---|---|
-| 1 | **Routers for 4, 6 and 9** — collection, retention, break-glass, ingest | +15% each on three phases (~**+5%** overall) | Cheapest points on the board. The services and tests exist; this is wiring, and the UI cannot be built without it. |
-| 2 | **Adversarial pass over 4 and 9** | +15% each (~**+3%**) | Do it *before* the UI, not after. Both phases touch credentials and third-party PII, both have never been reviewed, and the two reviews run so far each found a critical defect. Fixing a model defect after a UI is built costs the UI too. |
-| 3 | **UI for 7, then 6, then 9, then 4** | +25% each (~**+10%**) | Comms first because it is the only phase where everything else is finished, so it is a clean test of the UI patterns. Samples **last** and carefully — invariant 10 says metadata may render and bytes may not, and no sandbox attribute may combine `allow-scripts` with `allow-same-origin`. |
-| 4 | **Close the per-phase feature gaps** below | ~**+8%** | Adapters, WebAuthn, Jira, fuzzy hashing. Genuine feature work, and the part most exposed to the legal blockers. |
-| 5 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, real SSRF protection, login timing. |
+| ~~1~~ | ~~Routers for 4, 6 and 9~~ | done 2026-07-25 | Every service has a router. |
+| ~~2~~ | ~~Adversarial pass over 4 and 9~~ | done 2026-07-25 | Ten service defects, all now fixed at the service. |
+| 1 | **Adversarial pass over 5 and 8** | +15% each (~**+3%**) | The only two phases never reviewed, and Phase 8 handles malware. Do it before its UI, not after: fixing a model defect once a UI is built costs the UI too. |
+| 2 | **UI for 7 (finish), 6 (merge/ACH/reports), then 8** | ~**+6%** | Comms first — everything else about that phase is done. Samples **last** and carefully. |
+| 3 | **Close the per-phase feature gaps** below | ~**+8%** | Adapters, WebAuthn, Jira, fuzzy hashing. Genuine feature work, and the part most exposed to the legal blockers. |
+| 4 | **The two retrospective items** (docs/18 Section D) | 0% on this scale | Run the dead-letter redaction repair; decide what to do about batches accepted before object storage was wired. Neither scores; both are real. |
+| 5 | **The deferred security items** | 0% on this scale | Scores nothing and matters anyway: session binding, RLS under a non-owner role, DNS-rebinding-proof SSRF protection, login timing. |
 
 That reaches roughly **95%** with no phase below 85%. The last 5% is
 WebSocket push, CONCOR, and the two-mode presets for actor×forum and
@@ -171,14 +223,15 @@ one that must not be operated until L1–L4 are settled.
   toolchain on Windows), YARA, capped archive expansion, sandbox
   integration. Every absence is already recorded on the sample row as a gap
   with a reason.
-- **Phase 9** — the HTTP 202 endpoint wiring, and the outbound credential
-  vault with per-provider quota and exposure levels.
+- **Phase 9** — the outbound credential vault with per-provider quota and
+  exposure levels. *(The 202 wiring and object storage are done —
+  `rawstore.py`, 2026-07-25.)*
 
 ### 5. Security items still deferred
 
 | Item | Note |
 |---|---|
-| Real SSRF protection | `collection.fetch()` has a floor; DNS rebinding is not addressed |
+| DNS-rebinding-proof SSRF protection | `fetch()` now re-validates every redirect hop and classifies addresses by what they ARE rather than by an enumerated list, but the name is still resolved once here and again by the socket layer. The real fix is a proxy enforcing policy at connect time. |
 | Session IP/UA binding | A stolen token is portable |
 | Non-owner DB role + RLS | The API connects as the table owner, so RLS is a no-op behind it |
 | Login timing equalisation | A missing account returns faster than a wrong password |
@@ -255,6 +308,12 @@ one that must not be operated until L1–L4 are settled.
   first: `vector`, `pg_trgm`, `pgcrypto`, `btree_gist`, `citext`,
   `uuid-ossp`. Without them the chain dies at 0004 with "type vector does
   not exist", which reads as a migration bug and is not one.
+- **Check the claim, not just the code.** The dead-letter redactor's
+  docstring said the verbatim bytes remained in the batch's raw object,
+  which is the whole reason redacting the fragment is safe rather than
+  lossy. It was false: `accept()` stored the payload only when given a
+  storage adapter and every caller passed none. The defect was found by
+  writing the sentence down and then going to check it.
 - **A locale can hide a security defect.** The PGP status-injection flaw
   was live under UTF-8 and inert under this host's cp1252, so the dev
   machine and CI would have disagreed about whether the system was

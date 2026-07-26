@@ -22,6 +22,14 @@ forums and channels.
 > a working system and an unlawful deployment, and the difference is
 > invisible from inside the code.
 >
+> **If you are the person who has to sign this off, go straight to
+> [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md).** It is
+> the register reorganised as a decision document: every question, its
+> option set, the consequence of each choice, what the build does while it
+> waits, and a row to write the answer in. It also carries a
+> **retrospective** section — things already recorded that may need
+> remediation rather than a forward-looking decision.
+>
 > **Four items in
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) are
 > BLOCKING and none of them is a software problem:**
