@@ -164,6 +164,14 @@ const state = {
   timeSpan: null,            // {min, max} in ms
   timePoints: [],            // element arrival times, for the density strip
 
+  /* deep links, read from the URL fragment at boot and consumed once */
+  deepLinkTab: null,
+  deepLinkCase: null,
+  /* null = not probed, false = refused (stop asking). Latched so ordinary
+     tab-switching does not write an AUTHZ_DENIED row per navigation into
+     an append-only audit log. */
+  quarantineVisible: null,
+
   /* palette */
   paletteOpen: false,
   paletteItems: [],
@@ -416,6 +424,12 @@ async function showCaseList() {
   try {
     state.cases = await api('/cases');
     renderCases();
+    /* A `#case=` deep link opens straight through the list. Consumed once,
+       so "All cases" is not a button that bounces you back where you came
+       from. */
+    const wanted = state.deepLinkCase;
+    state.deepLinkCase = null;
+    if (wanted && state.cases.some((c) => c.id === wanted)) openCase(wanted);
   } catch (err) { fail(err); }
 }
 
@@ -543,6 +557,9 @@ async function openCase(caseId) {
     await loadTriage();
     await refreshInboxBadge();
     selectTab('graph');
+    // After the graph, so a deep-linked pane lands on a workspace that is
+    // already populated rather than one still fetching.
+    applyDeepLinkTab();
   } catch (err) { fail(err); }
 }
 
@@ -563,6 +580,7 @@ function selectTab(name) {
   /* Only the visible subtab loads. Four fetches on tab-open would mean
      three of them are for a panel nobody is looking at, and one of those
      three is a rate-limited search. */
+  if (name === 'ach') loadAch();
   if (name === 'feeds' && selectFeedsSub) selectFeedsSub(currentSub('pane-feeds'));
   if (name === 'governance' && selectGovSub) {
     selectGovSub(currentSub('pane-governance'));
@@ -3832,12 +3850,44 @@ function wire() {
  * phone's can never produce a matching code. A fragment is not sent to the
  * server, so the token does not appear in the access log either. */
 function adoptTokenFromFragment() {
-  const match = /(?:^|[#&])token=([^&]+)/.exec(window.location.hash || '');
-  if (!match) return;
+  const hash = window.location.hash || '';
+  /* Read the deep link BEFORE the fragment is erased. `#case=<id>&tab=feeds`
+   * opens a named case at a named pane — "look at the dead-letter queue on
+   * NIGHTJAR" is a thing one analyst says to another, and without this the
+   * answer is six words of clicking. Kept in the same fragment as the token
+   * because a fragment is never sent to the server, so neither the token nor
+   * the case id reaches an access log. */
+  const wanted = /(?:^|[#&])tab=([a-z-]+)/.exec(hash);
+  const wantedCase = /(?:^|[#&])case=([0-9a-fA-F-]{36})/.exec(hash);
+  if (wanted) state.deepLinkTab = wanted[1];
+  if (wantedCase) state.deepLinkCase = wantedCase[1];
+
+  const match = /(?:^|[#&])token=([^&]+)/.exec(hash);
+  if (!match) {
+    /* No token, but possibly a tab: strip the fragment anyway so a
+     * bookmark of this page does not carry a stale one. */
+    if (hash) history.replaceState(null, '', window.location.pathname);
+    return;
+  }
   const token = decodeURIComponent(match[1]);
   history.replaceState(null, '', window.location.pathname);
   state.token = token;
   sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+/** Honour a `#tab=` deep link once the workspace is up.
+ *
+ *  Called after the case loads rather than during boot: several panes are
+ *  case-scoped and selecting one before `state.caseId` exists produces a
+ *  pane that renders its empty state and then never refreshes, which looks
+ *  exactly like "there is no data".
+ */
+function applyDeepLinkTab() {
+  const name = state.deepLinkTab;
+  state.deepLinkTab = null;
+  if (!name) return;
+  if (!document.querySelector('.rail-btn[data-tab="' + name + '"]')) return;
+  selectTab(name);
 }
 
 
@@ -4549,6 +4599,31 @@ function initSubtabs(paneId, onSelect) {
   return select;
 }
 
+/** What to put on screen when a request was refused.
+ *
+ *  The server's `detail` FIRST, always. Three of the strings in this file
+ *  used to assert a role fact instead — "Key administration needs
+ *  ingest.manage" — and told the holder of that permission they did not
+ *  hold it, because `ingest.manage` is step-up gated and a stale step-up
+ *  also 403s. The response said "re-authentication required" and the UI
+ *  threw it away in favour of a guess.
+ *
+ *  The written explanation is kept as context after it: "you need to sign
+ *  in again" is actionable, and "this queue exists because a record with
+ *  no case cannot be reached by a case assignment" is why the queue is
+ *  there at all. Both are worth having; only one of them is a fact about
+ *  this caller.
+ */
+function refusalText(err, context) {
+  const detail = (err instanceof ApiError && err.detail) ? err.detail : '';
+  if (!detail) return context;
+  if (/re-authentication/i.test(detail)) {
+    return 'Re-authentication required — your step-up has expired. Sign out '
+      + 'and back in to refresh it. ' + context;
+  }
+  return detail + (context ? ' ' + context : '');
+}
+
 /** Signed days from now. Negative reads as overdue, which is the point. */
 function daysFromNow(iso) {
   if (!iso) return null;
@@ -4625,13 +4700,20 @@ async function loadIngestQueue() {
        banner on every tab open would train people to dismiss banners. */
     if (err instanceof ApiError && err.status === 403) {
       renderList('ing-list', 'ing-empty', [], ingestRow);
-      $('ing-empty').textContent =
-        'You do not hold ingest.read on this case.';
+      $('ing-empty').textContent = refusalText(
+        err, 'Reading a case queue needs ingest.read on this case.');
       return;
     }
     fail(err);
   }
-  loadQuarantine();
+  /* Probed ONCE per session, not on every queue load. `ingest.manage` is
+     SYS_ADMIN-only, so for every other role this 403s — and deps.py writes
+     an AUTHZ_DENIED audit row BEFORE raising. Invariant 6 makes that row
+     permanent, and AUTHZ_DENIED is the signal a security officer watches
+     for probing: a continuous hum generated by ordinary tab-switching is
+     how that signal stops being read. It also spent a search-metered
+     request on a response the pane discarded. */
+  if (state.quarantineVisible !== false) loadQuarantine();
 }
 
 function ingestRow(r) {
@@ -4734,10 +4816,15 @@ async function loadQuarantine() {
     show(box, true);
     renderList('ing-quarantine-list', 'ing-quarantine-empty',
       body.records, ingestRow);
-  } catch (_err) {
-    /* Not an operator. The whole section stays hidden rather than showing
-       a permission error for a job that is not theirs. */
+  } catch (err) {
     show(box, false);
+    /* Remember the refusal so the next queue load does not repeat it.
+       A step-up expiry is NOT remembered as a permanent refusal: that one
+       is recoverable, and latching it would hide the section for the rest
+       of the session from somebody who does hold the permission. */
+    const stepUp = err instanceof ApiError
+      && /re-authentication/i.test(err.detail || '');
+    if (!stepUp) state.quarantineVisible = false;
   }
 }
 
@@ -4752,7 +4839,7 @@ async function loadDeadLetters() {
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       renderList('dl-list', 'dl-empty', [], deadLetterRow);
-      $('dl-empty').textContent = 'You do not hold ingest.read.';
+      $('dl-empty').textContent = refusalText(err, 'This needs ingest.read.');
       return;
     }
     fail(err);
@@ -4815,7 +4902,7 @@ async function section(path, listId, emptyId, pick, build, missing) {
   } catch (err) {
     renderList(listId, emptyId, [], build);
     if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
-      $(emptyId).textContent = missing;
+      $(emptyId).textContent = refusalText(err, missing);
     } else {
       $(emptyId).textContent = err instanceof ApiError
         ? (err.detail || err.title) : String(err);
@@ -4966,10 +5053,11 @@ async function loadKeys() {
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       renderList('key-list', 'key-empty', [], keyRow);
-      $('key-empty').textContent =
-        'Key administration needs ingest.manage. Which feeds exist and what '
+      $('key-empty').textContent = refusalText(
+        err,
+        'Key administration needs ingest.manage — which feeds exist and what '
         + 'they are cleared for is operational intelligence about the '
-        + 'deployment.';
+        + 'deployment.');
       return;
     }
     fail(err);
@@ -5019,9 +5107,25 @@ async function loadRetention() {
     const rules = await api('/retention/rules');
     renderList('ret-rules', 'ret-rules-notice', rules.rules, ruleRow);
     const notice = $('ret-rules-notice');
-    notice.textContent = rules.unconfirmed ? (rules.notice || '') : '';
-    show(notice, Boolean(rules.unconfirmed && rules.notice));
+    /* `.length`, not the array. `unconfirmed` is a LIST and `[] ? a : b`
+       takes `a`, so the alert-coloured banner was permanently lit — reading
+       "every rule has been confirmed" in the same red as the real warning.
+       An alarm that is always on carries no information, and this is the
+       one signal separating a jurisdictional retention period from a
+       number somebody typed. */
+    const pending = (rules.unconfirmed || []).length;
+    notice.textContent = pending ? (rules.notice || '') : '';
+    show(notice, pending > 0);
   } catch (err) {
+    clear($('ret-rules'));
+    const notice = $('ret-rules-notice');
+    /* Saying nothing was the bug. Leaving the pane blank asserts "there are
+       no retention rules"; the truth was "you may not see them", and the
+       purge control sits directly beneath. 0039's own docstring says the
+       failure mode of hiding a deadline is that somebody discovers it by
+       missing it. */
+    notice.textContent = refusalText(err, 'Retention rules need retention.read.');
+    show(notice, true);
     if (!(err instanceof ApiError && err.status === 403)) fail(err);
   }
   if (!state.caseId) return;
@@ -5030,6 +5134,10 @@ async function loadRetention() {
     renderList('ret-due', 'ret-due-empty', due.due || [], dueExhibitRow);
     $('ret-counts').textContent = (due.due || []).length + ' due';
   } catch (err) {
+    renderList('ret-due', 'ret-due-empty', [], dueExhibitRow);
+    $('ret-due-empty').textContent = refusalText(
+      err, 'Deadlines for this case need retention.read.');
+    $('ret-counts').textContent = '';
     if (!(err instanceof ApiError && err.status === 403)) fail(err);
   }
 }
@@ -5045,20 +5153,39 @@ function ruleRow(r) {
   return card;
 }
 
+/** One item due for destruction.
+ *
+ *  The field names are `object_type` / `object_id` / `deadline` — NOT
+ *  `category` / `id` / `retain_until`, which is what this read at first.
+ *  Every row rendered "exhibit", an empty id and an em dash for the date,
+ *  so an item ninety days overdue was pixel-identical to one due next
+ *  year. `daysFromNow(undefined)` is null and `null < 0` is false, so the
+ *  overdue styling could never fire either — the one thing this list is
+ *  for. Its own comment says "negative reads as overdue, which is the
+ *  point".
+ */
 function dueExhibitRow(d) {
   const card = el('div', 'card row-card');
   const head = el('div', 'row-head');
-  head.appendChild(el('span', 'row-title', d.category || 'exhibit'));
+  const overdue = daysFromNow(d.deadline);
+  const score = el('span', 'score' + (overdue !== null && overdue < 0 ? ' hot' : ''),
+    overdue === null ? '—' : (overdue < 0 ? Math.abs(overdue) + 'd' : overdue + 'd'));
+  score.title = overdue !== null && overdue < 0
+    ? 'Overdue by this many days.' : 'Days until destruction.';
+  head.appendChild(score);
+  head.appendChild(el('span', 'row-title', d.object_type || 'object'));
   if (d.legal_hold) head.appendChild(el('span', 'chip warn', 'legal hold'));
   card.appendChild(head);
   const facts = el('div', 'facts');
-  facts.appendChild(fact('id', String(d.id || '').slice(0, 8)));
-  facts.appendChild(fact('due', whenText(d.retain_until),
-    daysFromNow(d.retain_until) < 0 ? 'bad' : ''));
+  facts.appendChild(fact('id', String(d.object_id || '').slice(0, 8)));
+  facts.appendChild(fact('due', whenText(d.deadline),
+    (overdue !== null && overdue < 0) ? 'bad' : ''));
+  if (d.rule) facts.appendChild(fact('rule', d.rule));
   card.appendChild(facts);
   if (d.legal_hold) {
     card.appendChild(el('p', 'why',
-      'Held. A hold outranks the retention clock, and lifting one is its own '
+      'Held' + (d.hold_reason ? ': ' + d.hold_reason : '')
+      + '. A hold outranks the retention clock, and lifting one is its own '
       + 'audited act.'));
   }
   return card;
@@ -5080,16 +5207,41 @@ async function runPurge() {
       method: 'POST',
       json: { case_id: state.caseId, authority, dry_run: $('ret-dry').checked },
     });
+    /* The field names are the server's: `evidence_purged`,
+       `documents_purged`, `held_back`, `storage_locked`. This read
+       `body.purged` and `body.refused`, neither of which is ever sent — so
+       a real, irreversible purge reported "0 object(s) destroyed" and the
+       storage-refusal warning could not fire, because the key it tested
+       did not exist. decision 50 requires `storage_locked` to be REPORTED:
+       object lock can refuse a delete even to satisfy a deletion order,
+       and a tombstone recording a purge that did not happen is a false
+       record. */
     out.appendChild(el('p', body.dry_run ? 'form-ok' : 'form-error',
       body.notice || ''));
+    const evidence = body.evidence_purged || 0;
+    const documents = body.documents_purged || 0;
     out.appendChild(el('p', null,
-      (body.purged !== undefined ? body.purged : 0) + ' object(s) '
+      evidence + ' exhibit(s) and ' + documents + ' document(s) '
       + (body.dry_run ? 'would be destroyed' : 'destroyed')));
-    if ((body.refused || []).length) {
+    if (body.held_back) {
+      out.appendChild(el('p', null,
+        body.held_back + ' skipped under a legal hold. A hold outranks the '
+        + 'retention clock.'));
+    }
+    if (body.storage_locked) {
       out.appendChild(el('p', 'form-error',
-        'Storage refused ' + body.refused.length + ': object lock can refuse '
-        + 'a delete even to satisfy a deletion order, and a purge that '
-        + 'reported success while the bytes remained would be worse.'));
+        'Storage REFUSED to delete ' + body.storage_locked + ' object(s). '
+        + 'COMPLIANCE-mode object lock can refuse even to satisfy a deletion '
+        + 'order (decision 50) — the bytes are still there, and a tombstone '
+        + 'recording a purge that did not happen is a false record.'));
+    }
+    for (const w of body.warnings || []) {
+      out.appendChild(el('p', 'help warn', w));
+    }
+    if ((body.tombstones || []).length) {
+      out.appendChild(el('p', 'help',
+        (body.tombstones || []).length + ' tombstone(s) written. They are '
+        + 'append-only and outlive what they record.'));
     }
     loadRetention();
   } catch (err) { inlineProblem(msg, err); }
@@ -5153,10 +5305,11 @@ async function loadBreakGlass() {
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       renderList('glass-queue', 'glass-empty', [], glassRow);
-      $('glass-empty').textContent =
+      $('glass-empty').textContent = refusalText(
+        err,
         'The review belongs to the security officer, and only to them — a '
         + 'team that can review its own emergencies is the one thing the '
-        + 'separation exists to prevent.';
+        + 'separation exists to prevent.');
       return;
     }
     fail(err);
@@ -5213,6 +5366,188 @@ async function invokeBreakGlass() {
   } catch (err) { inlineProblem(msg, err); }
 }
 
+/* --- ACH (Phase 6, docs/13 tier 2) -------------------------------------
+ *
+ * The ranking is by INCONSISTENCY, ascending. That is the whole method and
+ * it is counter-intuitive enough that the UI has to say so before it shows
+ * a number: the hypothesis that survives is the one with the least
+ * evidence AGAINST it, not the most for it. Ranking by support ranks
+ * whichever theory the team has been collecting for longest, which is the
+ * bias ACH exists to defeat.
+ *
+ * So `refute_first` is given equal billing with `least_inconsistent`. An
+ * ACH matrix that only tells you which hypothesis is winning has been read
+ * as a scoreboard, which is the failure mode.
+ */
+
+const STANCE_CLASS = {
+  '-2': 'st-cc', '-1': 'st-c', '0': 'st-n', '1': 'st-s', '2': 'st-ss',
+};
+
+async function loadAch() {
+  if (!state.caseId) return;
+  const q = $('ach-rejected').checked ? '?include_rejected=true' : '';
+  let body;
+  try {
+    body = await api(cpath('/ach') + q);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      clear($('ach-ranking'));
+      show($('ach-empty'), true);
+      $('ach-empty').textContent =
+        'An ACH matrix is an analytical product with a conclusion in it, '
+        + 'so reading one needs report.generate rather than case.read.';
+      return;
+    }
+    fail(err);
+    return;
+  }
+  state.ach = body;
+  $('ach-method').textContent = body.method || '';
+  renderAchWarnings(body);
+  renderAchRanking(body);
+  renderAchMatrix(body);
+  $('ach-counts').textContent =
+    body.hypotheses.length + ' hypothes'
+    + (body.hypotheses.length === 1 ? 'is' : 'es') + ' · '
+    + body.evidence.length + ' item(s) of evidence';
+}
+
+function renderAchWarnings(body) {
+  const box = $('ach-warnings');
+  clear(box);
+  for (const w of body.warnings || []) {
+    box.appendChild(el('p', 'help warn', w));
+  }
+}
+
+function renderAchRanking(body) {
+  const box = $('ach-ranking');
+  clear(box);
+  show($('ach-empty'), body.hypotheses.length === 0);
+  if (!body.hypotheses.length) return;
+
+  for (const h of body.hypotheses) {
+    const card = el('div', 'card row-card');
+    const head = el('div', 'row-head');
+    /* Inconsistency first and in the score slot, because that is what the
+       list is ordered by. Putting support there would be showing the
+       number the method deliberately does not rank on. */
+    const score = el('span', 'score' + (h.inconsistency === 0 ? '' : ' hot'),
+      h.inconsistency.toFixed(1));
+    score.title = 'Inconsistency — evidence AGAINST this hypothesis. '
+      + 'Lower survives. This is what the ranking uses.';
+    head.appendChild(score);
+    head.appendChild(el('span', 'row-title', h.statement));
+    if (String(h.id) === body.least_inconsistent) {
+      const chip = el('span', 'chip ok', 'least inconsistent');
+      chip.title = 'Survives best. NOT "proven" — ACH eliminates, it does '
+        + 'not confirm.';
+      head.appendChild(chip);
+    }
+    if (String(h.id) === body.refute_first) {
+      const chip = el('span', 'chip warn', 'refute this first');
+      chip.title = 'The most efficient next move: the hypothesis whose '
+        + 'refutation would change the picture most.';
+      head.appendChild(chip);
+    }
+    const status = (body.statuses || {})[String(h.id)];
+    if (status && status !== 'PROPOSED') {
+      head.appendChild(el('span', 'chip', status));
+    }
+    card.appendChild(head);
+
+    const facts = el('div', 'facts');
+    facts.appendChild(fact('support', h.support.toFixed(1), 'muted'));
+    facts.appendChild(fact('assessed', h.assessed));
+    if (h.unassessed) {
+      const f = fact('NOT assessed', h.unassessed, 'warn');
+      f.title = 'Evidence nobody has taken a position on against this '
+        + 'hypothesis. An unassessed cell is not a neutral one.';
+      facts.appendChild(f);
+    }
+    card.appendChild(facts);
+    box.appendChild(card);
+  }
+}
+
+/** The grid. Evidence down, hypotheses across. */
+function renderAchMatrix(body) {
+  const box = $('ach-matrix');
+  clear(box);
+  if (!body.hypotheses.length || !body.evidence.length) return;
+
+  const stance = new Map();
+  for (const c of body.cells || []) {
+    stance.set(c.assertion_id + '|' + c.hypothesis_id, c.stance);
+  }
+
+  const table = el('table', 'ach-table');
+  const thead = el('thead');
+  const hrow = el('tr');
+  hrow.appendChild(el('th', 'ach-eh', 'Evidence'));
+  body.hypotheses.forEach((h, i) => {
+    const th = el('th', 'ach-hh', 'H' + (i + 1));
+    th.title = h.statement;
+    hrow.appendChild(th);
+  });
+  hrow.appendChild(el('th', 'ach-eh', 'Diagnosticity'));
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+
+  const tbody = el('tbody');
+  for (const e of body.evidence) {
+    const tr = el('tr', e.is_diagnostic ? '' : 'not-diagnostic');
+    const label = el('td', 'ach-el', e.label);
+    label.title = e.label;
+    tr.appendChild(label);
+    for (const h of body.hypotheses) {
+      const s = stance.get(e.assertion_id + '|' + h.id);
+      const td = el('td', 'ach-cell '
+        + (s === undefined ? 'st-none' : (STANCE_CLASS[String(s)] || 'st-n')));
+      td.textContent = s === undefined ? '·'
+        : (body.stance_scale ? (body.stance_scale[String(s)] || s) : s);
+      td.title = s === undefined
+        ? 'Not assessed. Not the same as neutral.'
+        : (h.statement + ' — ' + td.textContent);
+      tr.appendChild(td);
+    }
+    const diag = el('td', 'ach-diag', e.diagnosticity.toFixed(2));
+    if (!e.is_diagnostic) {
+      diag.title = 'Consistent with every hypothesis, so it discriminates '
+        + 'nothing and is excluded from the ranking. Kept in the record '
+        + 'rather than deleted.';
+    }
+    tr.appendChild(diag);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+
+  /* The key. "-2" means nothing without it, and a legend below a grid is
+     read after the grid has already been misread. */
+  const key = el('p', 'help');
+  key.textContent = 'Scale: '
+    + Object.entries(body.stance_scale || {})
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([k, v]) => k + ' = ' + v).join(' · ');
+  box.appendChild(key);
+}
+
+async function addHypothesis() {
+  const msg = $('ach-msg');
+  setMsg(msg, '');
+  const statement = $('ach-statement').value.trim();
+  try {
+    await api(cpath('/ach/hypotheses'), {
+      method: 'POST',
+      json: { statement, confidence: $('ach-confidence').value },
+    });
+    $('ach-statement').value = '';
+    loadAch();
+  } catch (err) { inlineProblem(msg, err); }
+}
+
 /* --- wiring ------------------------------------------------------------ */
 
 let selectFeedsSub = null;
@@ -5243,6 +5578,10 @@ function initOpsPanes() {
   $('tomb-refresh').addEventListener('click', loadTombstones);
   $('glass-refresh').addEventListener('click', loadBreakGlass);
   $('glass-invoke').addEventListener('click', invokeBreakGlass);
+
+  $('ach-refresh').addEventListener('click', loadAch);
+  $('ach-rejected').addEventListener('change', loadAch);
+  $('ach-add').addEventListener('click', addHypothesis);
 }
 
 async function boot() {

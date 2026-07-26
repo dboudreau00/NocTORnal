@@ -118,6 +118,13 @@ _BLOCKED_NETWORKS = [
         # The unspecified address. `http://[::]/` and `http://0.0.0.0/`
         # both reach the local host on most stacks.
         "::/128",
+        # Deprecated IPv6 site-local. RFC 3879 deprecated it, so Python's
+        # `ipaddress` reports is_private=False, is_global=TRUE and
+        # is_reserved=False -- none of the stdlib predicates fire, and
+        # `fc00::/7` does not cover it. Still routed internally on any
+        # network that predates ULA, which is most of the ones that have
+        # an internal IPv6 plan at all.
+        "fec0::/10",
     )
 ]
 
@@ -133,6 +140,13 @@ _METADATA_HOSTS = frozenset({
 #: A redirect chain longer than this is either a loop or an attempt to
 #: exhaust the validator. urllib's own default is 10.
 MAX_REDIRECTS = 5
+
+#: How much of a response body is worth reading. 16 MiB is far above any
+#: legitimate RSS or forum page and far below what it takes to hurt the
+#: collector. There is no "unlimited" option on purpose: the one host in
+#: this system holding every persona credential should not have a code
+#: path whose memory use is chosen by a monitored source.
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -628,7 +642,8 @@ def parse_rss(body: bytes) -> list[Item]:
 
 def fetch(url: str, *, etag: str | None = None,
           timeout: float = 15.0,
-          max_redirects: int = MAX_REDIRECTS
+          max_redirects: int = MAX_REDIRECTS,
+          max_bytes: int = MAX_RESPONSE_BYTES
           ) -> tuple[bytes, int, str | None, str | None]:
     """An outbound HTTP GET with the floor of SSRF protection.
 
@@ -662,7 +677,25 @@ def fetch(url: str, *, etag: str | None = None,
         })
         try:
             with opener.open(request, timeout=timeout) as response:
-                return (response.read(), response.status,
+                # Capped, and read one byte past the cap so the difference
+                # between "exactly at the limit" and "more coming" is
+                # knowable. `timeout` is urllib's PER-SOCKET-OPERATION
+                # timeout, not a transfer budget: a server drip-feeding one
+                # chunk every few seconds keeps an uncapped `read()` alive
+                # indefinitely while the buffer grows. Everything reached
+                # through here is attacker-adjacent by this module's own
+                # definition -- "a document written by the people under
+                # investigation" -- and the host holding every persona
+                # credential is the one doing the reading.
+                body = response.read(max_bytes + 1)
+                if len(body) > max_bytes:
+                    raise CollectionError(
+                        f"response exceeded {max_bytes} bytes and was "
+                        f"abandoned. A feed larger than this is either a "
+                        f"misconfiguration or something aimed at the "
+                        f"collector; raise max_bytes deliberately if it is "
+                        f"the first.")
+                return (body, response.status,
                         response.headers.get("ETag"),
                         response.headers.get("Last-Modified"))
         except urllib.error.HTTPError as exc:

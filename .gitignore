@@ -19,3 +19,9 @@ node_modules/
 
 # Claude Code machine-local permission grants
 .claude/settings.local.json
+
+# UI screenshots (scripts/screenshot_ui.py). These are renders of real
+# panes against real case data, so they carry that case's classification.
+# A screenshot of an AMBER_STRICT case in a public repository is the same
+# disclosure as the case file, and it does not look like one.
+screenshots/

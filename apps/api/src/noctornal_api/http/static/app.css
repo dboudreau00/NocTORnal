@@ -315,7 +315,15 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .rail-btn:hover { color: var(--text-primary); background: var(--surface-2); }
 .rail-glyph { font-size: 16px; line-height: 1; }
-.rail-cap { font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; }
+/* Clipped rather than allowed to overflow. The rail is a fixed narrow
+   column and a caption that does not fit used to run out of it and over
+   the pane -- "HYPOTHESES" did exactly that. Ellipsis rather than wrap
+   because a two-line caption shifts every button below it. */
+.rail-cap {
+  font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: block;
+}
 .rail-btn[aria-selected="true"] {
   color: var(--text-primary); background: var(--surface-2);
   border-left-color: var(--accent);
@@ -824,3 +832,63 @@ select.select { appearance: none; padding-right: 24px; }
    missing rule. */
 .subpane { display: block; }
 .subpane[hidden] { display: none; }
+
+/* ── ACH matrix (Phase 6) ───────────────────────────────────────────────
+ *
+ * A grid an analyst reads left-to-right and expects to be a scoreboard.
+ * It is not: the ranking is by inconsistency ascending, so the styling
+ * has to make "against" visually louder than "for". Red is the signal
+ * here, not the alarm.
+ */
+
+.scroll-x { overflow-x: auto; max-width: 100%; }
+
+.ach-table {
+  border-collapse: collapse; font-size: 12px; margin-top: 6px;
+}
+.ach-table th, .ach-table td {
+  border: 1px solid var(--hairline); padding: 5px 8px; text-align: center;
+}
+.ach-eh, .ach-el { text-align: left; }
+.ach-el {
+  max-width: 22em; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text-secondary);
+}
+.ach-hh {
+  color: var(--text-tertiary); font-weight: 600; min-width: 3.5em;
+  cursor: help;
+}
+.ach-cell { font-variant-numeric: tabular-nums; cursor: help; }
+.ach-diag {
+  font-variant-numeric: tabular-nums; color: var(--text-tertiary);
+}
+
+/* Inconsistent (against) is the loud end, because it is the end the
+   method ranks on. */
+.st-cc { color: var(--danger); font-weight: 600; }
+.st-c  { color: var(--danger); }
+.st-n  { color: var(--text-tertiary); }
+.st-s  { color: var(--text-secondary); }
+.st-ss { color: var(--sign-positive); }
+.st-none { color: var(--text-tertiary); opacity: 0.45; }
+
+/* Evidence consistent with every hypothesis. Kept in the record and
+   excluded from the ranking — dimmed rather than hidden, because
+   "we looked at this and it told us nothing" is itself a finding. */
+.not-diagnostic { opacity: 0.5; }
+.not-diagnostic .ach-el { font-style: italic; }
+
+/* ── Brand mark ─────────────────────────────────────────────────────────
+ *
+ * The SVG takes `currentColor` for its network and keeps the accent for
+ * the crescent, so one file serves the header and the login card at two
+ * sizes without a second asset. The favicon is a SEPARATE file: things
+ * that do not survive 16px are removed there rather than shrunk.
+ */
+.brand-mark {
+  display: block; color: var(--text-primary); flex: 0 0 auto;
+  margin-right: 2px;
+}
+.login-mark {
+  display: block; color: var(--text-primary); margin: 0 auto 10px;
+}
