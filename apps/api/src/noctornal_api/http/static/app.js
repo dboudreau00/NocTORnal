@@ -5580,6 +5580,7 @@ async function buildReport() {
     const body = await api(cpath('/report') + '?' + params.toString(),
       { method: 'POST' });
     state.report = body;
+    show($('rep-empty'), false);
     renderRedaction(body);
     renderReportBody(body);
     show($('rep-release-box'), true);
@@ -5798,6 +5799,7 @@ function initOpsPanes() {
     clear($('rep-body'));
     show($('rep-release-box'), false);
     show($('rep-download'), false);
+    show($('rep-empty'), true);
   });
 }
 

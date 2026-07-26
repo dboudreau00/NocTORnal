@@ -55,6 +55,7 @@ PANES = [
     ("comms", "Channels and contact blocks", 1400, 1300),
     ("feeds", "Feeds — ingest queue", 1500, 1300),
     ("ach", "Competing hypotheses", 1500, 1100),
+    ("report", "Report — build and release", 1400, 1100),
     ("governance", "Lifecycle — retention", 1400, 1200),
     ("add-node", "Add entity", 1200, 1000),
     ("add-edge", "Add relationship", 1200, 1000),
