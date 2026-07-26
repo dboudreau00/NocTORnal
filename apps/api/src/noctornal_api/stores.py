@@ -214,12 +214,30 @@ class PgAccessResolver:
             raise AccessResolutionError(f"unknown permission: {permission_key!r}")
         requires_step_up = bool(perm_row[0])
 
+        # `is_active` belongs HERE, not only on the global path (CR2,
+        # 2026-07-26).
+        #
+        # `SessionService.validate` resolves a token against `iam.session`
+        # alone and never joins `app_user`, and `revoke_all_for_user` has
+        # zero production callers — so deactivating an account severed
+        # nothing. A deactivated analyst holding a live `__Host-session`
+        # cookie kept full read AND write on every case they were assigned
+        # to, for the remaining twelve hours of the session's absolute
+        # lifetime. Login already refuses them (`auth.py`) and
+        # `require_global` already checks it; the case-scoped path — which
+        # is every graph, evidence and comms mutation in the product — did
+        # not.
+        #
+        # An inactive account resolves to "unknown user" deliberately: the
+        # caller learns their session is no good, not whether a particular
+        # account exists or what state it is in.
         user = self._c.execute(
-            "SELECT tlp_clearance, compartments FROM iam.app_user WHERE id = %s",
+            "SELECT tlp_clearance, compartments FROM iam.app_user "
+            "WHERE id = %s AND is_active",
             (user_id,),
         ).fetchone()
         if user is None:
-            raise AccessResolutionError(f"unknown user: {user_id}")
+            raise AccessResolutionError(f"unknown or inactive user: {user_id}")
         user_clearance = tlp_from_name(user[0])
         user_compartments = frozenset(user[1] or [])
 

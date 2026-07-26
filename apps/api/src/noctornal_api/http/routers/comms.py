@@ -364,8 +364,12 @@ def impersonation(
     other -- because the tool cannot tell them apart and the difference
     decides who the victim is.
     """
+    # CR5: the caller's own ceiling, threaded in. This used to filter on
+    # case_id alone, and a block may be classified above its case.
+    ceiling, comps = user_ceiling(conn, user.user_id)
     return {"candidates": ContactBlockService(conn).impersonation_candidates(
-        case_id, visible_case_ids=_visible_cases(conn, user, case_id))}
+        case_id, visible_case_ids=_visible_cases(conn, user, case_id),
+        clearance=ceiling.name, compartments=comps)}
 
 
 # ---------------------------------------------------------------------------

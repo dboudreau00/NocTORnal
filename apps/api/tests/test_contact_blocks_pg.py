@@ -354,7 +354,7 @@ def test_the_same_block_under_two_handles_is_reported_both_ways(conn, svc):
         raw_text=f"=====\nTOX:  {TOX_ID}\nJABBER:   Real@{STOP_DOMAIN.upper()}\n=====",
         source_ref="https://forum/fake", created_by=uid,
         publisher_handle="the_copy")
-    hits = svc.impersonation_candidates(case_id)
+    hits = svc.impersonation_candidates(case_id, clearance="RED")
     assert len(hits) == 1
     assert sorted(hits[0]["publishers"]) == ["the_copy", "the_real_one"]
     assert "EITHER" in hits[0]["reading"]
@@ -371,7 +371,7 @@ def test_two_vendors_sharing_only_the_forum_escrow_are_not_impersonation(
                       f"Escrow: escrow@{STOP_DOMAIN}"),
             source_ref=f"https://forum/{handle}", created_by=uid,
             publisher_handle=handle)
-    assert svc.impersonation_candidates(case_id) == []
+    assert svc.impersonation_candidates(case_id, clearance="RED") == []
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ def test_two_vendors_quoting_a_stoplisted_escrow_are_not_impersonation(
             raw_text=f"Jabber: escrow@{STOP_DOMAIN}\n{tail}",
             source_ref=f"https://forum/{handle}", created_by=uid,
             publisher_handle=handle)
-    assert svc.impersonation_candidates(case_id) == []
+    assert svc.impersonation_candidates(case_id, clearance="RED") == []
 
 
 def test_a_real_copy_is_still_caught_after_the_reordering(conn, svc):
@@ -465,7 +465,7 @@ def test_a_real_copy_is_still_caught_after_the_reordering(conn, svc):
         svc.parse_and_store(case_id=case_id, raw_text=text,
                             source_ref=f"https://forum/{handle}",
                             created_by=uid, publisher_handle=handle)
-    hits = svc.impersonation_candidates(case_id)
+    hits = svc.impersonation_candidates(case_id, clearance="RED")
     assert len(hits) == 1
     assert sorted(hits[0]["publishers"]) == ["the_copy", "the_real_one"]
 

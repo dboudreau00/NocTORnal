@@ -188,13 +188,24 @@ def test_a_telegram_channel_id_is_durable_and_is_not_called_a_username():
     """A numeric supergroup id was refused with an error saying it was a
     @username -- both a refusal and a wrong explanation."""
     from noctornal_api.comms import normalise
-    # Bot-API and MTProto forms of ONE channel collapse together.
-    assert normalise("TELEGRAM", "-1001234567890").durable == "1234567890"
-    assert normalise("TELEGRAM", "1234567890").durable == "1234567890"
-    # A basic-group chat id keeps its minus, or it collides with a user id.
-    assert normalise("TELEGRAM", "-4881234").durable == "-4881234"
+    # CR3 (2026-07-26): the durable form is namespaced by Telegram id
+    # space (u: user, c: channel/supergroup, g: basic group) and the
+    # Bot-API encoding is decoded ARITHMETICALLY rather than by dropping
+    # the characters "100" — which inverted the encoding only for an
+    # exactly-ten-digit channel id, and this test used one.
+    assert normalise("TELEGRAM", "-1001234567890").durable == "c:1234567890"
+    # A bare positive is genuinely ambiguous between a user and an MTProto
+    # channel, so it is NOT silently merged with the channel above. A
+    # caller that knows says so with an explicit prefix.
+    assert normalise("TELEGRAM", "1234567890").durable == "u:1234567890"
+    # A basic-group chat id keeps its own space, or it collides with a
+    # user id — and TELEGRAM_ID is is_strong, so that is an auto-merge.
+    assert normalise("TELEGRAM", "-4881234").durable == "g:4881234"
     assert normalise("TELEGRAM", "4881234").durable != \
         normalise("TELEGRAM", "-4881234").durable
+    # The two lengths the old string-strip got wrong.
+    assert normalise("TELEGRAM", "-1000123456789").durable == "c:123456789"
+    assert normalise("TELEGRAM", "-1012345678901").durable == "c:12345678901"
 
 
 def test_something_that_is_not_a_tox_id_yields_nothing_and_says_why():
@@ -217,7 +228,7 @@ def test_a_telegram_username_yields_NO_durable_value():
 
 def test_a_telegram_numeric_id_is_durable():
     from noctornal_api.comms import normalise
-    assert normalise("TELEGRAM", "123456789").durable == "123456789"
+    assert normalise("TELEGRAM", "123456789").durable == "u:123456789"
 
 
 def test_a_username_binding_does_not_correlate_to_anything(conn, svc):
