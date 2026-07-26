@@ -1,3 +1,23 @@
+> # ⚠ ARCHIVED — a snapshot of 2026-07-24, retained for history only
+>
+> **Everything below was true on 24 July 2026 and most of it is now
+> false.** It is kept because it records what the project looked like
+> before any of it had run, which is occasionally useful; it is NOT a
+> guide to installing or using NocTORnal.
+>
+> Most conspicuously, this document says *"Nothing has been executed. The
+> schema has never touched a real Postgres."* The schema is at **Alembic
+> revision 0052** with **1252 passing tests** against a live database.
+>
+> The root `README.md` used to mark this file **"Read first"**, which meant
+> an evaluator following the README met a project that appeared not to know
+> its own state within five minutes of arriving (release finding **R18**).
+>
+> **Go instead to [`../release/INSTALL.md`](../release/INSTALL.md) to
+> install, or [`../release/MANUAL.md`](../release/MANUAL.md) to use it.**
+
+---
+
 # Getting started
 
 Practical handoff. Read this at your desk, before you open Claude Code.

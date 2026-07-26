@@ -13,10 +13,25 @@
     it, or you will have two sources of truth and the wrong one will be
     the one you hand over.
 
-    The installers resolve the application by looking for alembic.ini in,
-    and beside, their own directory — so they work identically whether
-    they are run from `release/` inside the repo or from the assembled
-    folder next to it.
+    ## SUPERSEDED 2026-07-26 by scripts/package_release.ps1 (R1)
+
+    THIS SCRIPT DOES NOT PRODUCE AN INSTALLABLE ARTEFACT and never did.
+
+    It copies only the six files in `release/`. The installers then locate
+    the application by probing for `alembic.ini` in and beside their own
+    directory, with a final fallback to the HARDCODED sibling name
+    "NocTORnal - Social Network Analysis software" — which resolves on the
+    machine this was written on and almost nowhere else. A recipient handed
+    the assembled folder alone gets "the application source could not be
+    found", and the error's first suggestion ("put it next to the
+    application source directory") silently fails for any other folder name.
+
+    Use `scripts/package_release.ps1` instead: it exports the whole tree
+    with `git archive`, which cannot include `.env.local`, `.venv`, `.git`
+    or the screenshot directories, and it verifies that before finishing.
+
+    This script is kept only for producing a DOCS-ONLY bundle for somebody
+    who already has the source, and it now says so on the way out.
 
 .PARAMETER Destination
     Where to write it. Defaults to a sibling of the repository named
@@ -73,4 +88,14 @@ Get-ChildItem $Destination | ForEach-Object {
 Write-Host ''
 Write-Host '  On macOS/Linux the shell installer needs its executable bit:' -ForegroundColor Yellow
 Write-Host '      chmod +x install.sh'
+Write-Host ''
+# R1: say plainly what this folder is NOT, at the moment somebody is about
+# to hand it over. The failure it prevents -- a recipient who cannot
+# install anything -- is silent until they try.
+Write-Host '  THIS FOLDER IS DOCUMENTATION AND INSTALLERS ONLY.' -ForegroundColor Red
+Write-Host '  It contains no application source, so it CANNOT install' -ForegroundColor Red
+Write-Host '  NocTORnal on a machine that does not already have the repo.' -ForegroundColor Red
+Write-Host ''
+Write-Host '  For a handover artefact somebody can actually install from:' -ForegroundColor Yellow
+Write-Host '      .\scripts\package_release.ps1 -Zip'
 Write-Host ''

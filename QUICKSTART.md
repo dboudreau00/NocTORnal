@@ -26,7 +26,9 @@ The launcher is safe to re-run. It:
 5. serves the API and UI at <http://127.0.0.1:8000/ui/>.
 
 Stop it with Ctrl-C. Add `-SkipDocker` if the stack is already up, or
-`-Port 8080` to move the API.
+`-Port 8010` to move the API. (Not 8080 — that used to be OpenFGA's
+published port, and it is among the most contended ports on a
+workstation regardless.)
 
 ## 2. Create your account (first run only)
 
@@ -160,7 +162,8 @@ revocation — and it is recorded in the audit trail as an MFA-bypassed login.
 The alternatives are to correct the host clock (`w32tm /resync`, having
 enabled automatic time) or to use `totp-code`, which reads the same clock the
 server checks against and so always agrees. On a real deployment the right
-answer is recovery codes (docs/05), which are **not built yet**.
+answer is recovery codes (docs/05), which `bootstrap.py recovery-codes`
+issues.
 
 ## 3. Use it
 
@@ -211,10 +214,10 @@ deliberate and documented, not hidden:
   HTTPS; the UI uses a Bearer token in `sessionStorage` so it works over
   plain HTTP locally, which is XSS-exposed. Put it behind TLS and switch to
   the cookie + `X-CSRF-Token` path the API already supports.
-- **Still missing:** rate limiting, session IP/UA binding, the
-  destination-aware TLP egress gate (export enforces only the
-  AMBER_STRICT/RED floor today). See `apps/api/README.md` and
-  `docs/00-decisions.md`.
+- **Still missing:** session IP/UA binding, WebAuthn, and row-level
+  security under a non-owner database role. Rate limiting (Redis GCRA)
+  and the destination-aware TLP egress gate both shipped. See
+  `docs/17-flagged-for-review.md` for the current list.
 - **It is unaudited.** `docs/08-governance.md` sets the bar for evidence
   that has to survive a challenge; treat this as a working model of it, not
   as it.

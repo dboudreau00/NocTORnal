@@ -71,6 +71,50 @@ def _fail(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
+def _env_local_path() -> Path:
+    return Path(__file__).resolve().parent.parent / ".env.local"
+
+
+def _load_env_local() -> None:
+    """Load `.env.local` into the environment, without overriding it.
+
+    ## R9 (2026-07-26) — why this exists, and why its absence was dangerous
+
+    `bootstrap.py` required DATABASE_URL and NOCTORNAL_TOTP_KEK from the
+    environment and read no env file, while `launch.ps1` and `open-ui.ps1`
+    both self-load `.env.local`. The pattern was already in the repo; this
+    script was the one that lacked it. So every documented "run this in a
+    second terminal" command — the TOTP bypass in INSTALL.md, QUICKSTART's
+    `create-user` / `demo-case` / `demo-network`, and `launch.ps1`'s own
+    on-screen banner — failed in a fresh shell.
+
+    The dangerous half was the remedy the failure printed. The KEK error
+    said "generate 32 random bytes" and never mentioned that an installed
+    system already has THE key in `.env.local`. An operator who followed it
+    during `create-user` sealed the new account's TOTP secret under a
+    throwaway key the API does not hold — and every later login failed as
+    `bad_totp`, indistinguishable from a mistyped code. `reenrol-totp` in
+    the same poisoned shell repeated the damage. The advice actively broke
+    the thing it was meant to fix.
+
+    Existing environment variables WIN: an operator who deliberately
+    exported a DATABASE_URL pointing at staging must not have it silently
+    replaced by a file.
+    """
+    try:
+        text = _env_local_path().read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def _utf8_output() -> None:
     # The ASCII QR is drawn with cp437 block characters, and the prose here
     # uses dashes a legacy Windows console cannot encode in cp1252 — which
@@ -104,6 +148,23 @@ def _require_kek() -> None:
     """
     if os.environ.get(KEK_ENV):
         return
+    # R9: when an installation already exists, its key is in `.env.local`
+    # and generating a NEW one here poisons every account this command
+    # touches. Say so FIRST; only offer generation when there is genuinely
+    # nothing to copy.
+    existing = _env_local_path()
+    if existing.exists():
+        _fail(
+            f"{KEK_ENV} is not set in this shell, but this installation "
+            f"already has one.\n\n"
+            f"  It is in {existing}\n\n"
+            "DO NOT generate a new key. The existing one seals every TOTP "
+            "secret already enrolled. A fresh key would seal this account's "
+            "secret under something the API does not hold, and every login "
+            "would then fail as a wrong code with nothing to say why.\n\n"
+            f'  bash:       export {KEK_ENV}="<the value from that file>"\n'
+            f'  PowerShell: $env:{KEK_ENV} = "<the value from that file>"'
+        )
     _fail(
         f"{KEK_ENV} is not set, and there is no default key — a hard-coded one "
         "would make every stored TOTP secret readable by anyone with the "
@@ -1235,6 +1296,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     _utf8_output()
+    # R9: before anything reads the environment. Every documented "run this
+    # in a second terminal" command failed in a fresh shell without it.
+    _load_env_local()
     args = _build_parser().parse_args(argv)
     try:
         args.func(args)

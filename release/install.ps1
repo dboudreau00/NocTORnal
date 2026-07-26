@@ -49,6 +49,32 @@ foreach ($candidate in @(
     }
 }
 
+function Invoke-Capture {
+    # R5 (2026-07-26). Runs a native command and returns its exit code plus
+    # combined output, WITHOUT tripping over PowerShell 5.1.
+    #
+    # With $ErrorActionPreference = 'Stop', redirecting a native command's
+    # stderr (`*> $null` or `2>$null`) throws RemoteException the moment
+    # that command writes anything to stderr. `docker info` writes to
+    # stderr exactly when the engine is down -- so this script used to
+    # crash with a raw .NET exception in the precise case its friendly
+    # "start Docker Desktop" message exists for.
+    #
+    # PS 5.1 is the default shell on Windows and `#Requires -Version 5`
+    # blesses it. launch.ps1 documents this hazard and carries this fix;
+    # install.ps1, the script a NEW user meets first, did not.
+    param([Parameter(Mandatory)][string] $Exe, [string[]] $Arguments = @())
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = & $Exe @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+        } | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Text = $text }
+    }
+    finally { $ErrorActionPreference = $saved }
+}
+
 function Write-Step { param([string] $Text)
     Write-Host ''
     Write-Host "  $Text" -ForegroundColor Cyan
@@ -100,8 +126,12 @@ $python = $null
 foreach ($name in @('python', 'python3', 'py')) {
     $cmd = Get-Command $name -ErrorAction SilentlyContinue
     if (-not $cmd) { continue }
-    $raw = & $cmd.Source -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { continue }
+    # R5: via Invoke-Capture. On a fresh Windows box the Microsoft Store
+    # `python` alias fires first and writes to stderr, which under
+    # EAP=Stop killed this loop before python3/py were ever tried.
+    $probe = Invoke-Capture $cmd.Source @('-c', "import sys; print('%d.%d' % sys.version_info[:2])")
+    $raw = $probe.Text
+    if ($probe.Code -ne 0 -or -not $raw -or -not ($raw.Trim() -match '^\d+\.\d+$')) { continue }
     $parts = $raw.Trim().Split('.')
     if ([int]$parts[0] -gt 3 -or ([int]$parts[0] -eq 3 -and [int]$parts[1] -ge 12)) {
         $python = $cmd.Source
@@ -136,14 +166,32 @@ or:
 Start it, wait for the whale icon to stop animating, then run this again.
 '@
 }
-& docker info *> $null
-if ($LASTEXITCODE -ne 0) {
+# R5: this line was `& docker info *> $null`, which THREW instead of
+# setting an exit code when the engine was down.
+if ((Invoke-Capture 'docker' @('info')).Code -ne 0) {
     Stop-With 'Docker is installed but the engine is not running.' @'
 Start Docker Desktop and wait for it to report "Engine running", then run
 this script again. On a cold start that takes a minute or two.
 '@
 }
 Write-Good 'Docker engine is running'
+
+# R16 (2026-07-26): install.sh checks `docker compose version` and this
+# did not, so a CLI-only Docker or a podman alias passed both checks here
+# and failed later at `compose up` with no remedy text. Docker Desktop
+# bundles Compose, so the population hitting this is small -- but the
+# failure it produces is opaque, and the check is one line.
+if ((Invoke-Capture 'docker' @('compose', 'version')).Code -ne 0) {
+    Stop-With 'Docker Compose v2 is not available.' @'
+This needs the Compose plugin (the "docker compose" subcommand, not the
+older standalone "docker-compose" binary). Docker Desktop ships it; a
+CLI-only or podman-aliased Docker may not.
+
+    docker compose version
+
+should print a version. If it does not, install Docker Desktop.
+'@
+}
 
 # ---------------------------------------------------------------------------
 # 3. Virtual environment and dependencies
@@ -180,7 +228,7 @@ a corporate proxy that needs pip configured for it.
 # PowerShell, and pip would silently install the package without the
 # extras rather than error, which is the worst of both.
 $devTarget = (Join-Path $RepoRoot 'apps\api') + '[dev]'
-& $VenvPython -m pip install --quiet -e $devTarget 2>$null
+$null = Invoke-Capture $VenvPython @('-m', 'pip', 'install', '--quiet', '-e', $devTarget)
 if ($LASTEXITCODE -eq 0) { Write-Good 'dependencies installed (with dev extras)' }
 else { Write-Good 'dependencies installed'; Write-Detail 'dev extras skipped' }
 
@@ -198,13 +246,42 @@ if (Test-Path $EnvLocal) {
 } else {
     $kek    = & $VenvPython -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
     $pepper = & $VenvPython -c "import secrets; print(secrets.token_urlsafe(32))"
+    # R9 (2026-07-26): the SERVICE CONFIG is persisted too, not just the
+    # secrets. It used to be exported into the installer's own shell and
+    # lost the moment that shell exited, so every documented "run this in
+    # a second terminal" command -- create-user, demo-case, the TOTP
+    # bypass -- failed for a fresh recipient with a DATABASE_URL error.
+    # bootstrap.py now reads this file (see _load_env_local), so writing
+    # it here is what makes those commands work at all.
+    #
+    # R11: the three SMTP values are here so the advertised Mailpit demo
+    # actually captures mail. The default SMTP_PORT in transports.py is
+    # 587 and Mailpit listens on 1025, and plaintext needs asking for.
     @(
         '# Generated by install.ps1. Machine-local; never commit this file.',
-        '# Rotating either value invalidates what it protects: the TOTP KEK',
+        '# Rotating either secret invalidates what it protects: the TOTP KEK',
         '# makes every enrolled authenticator unreadable, and the pepper',
         '# invalidates every issued ingest key.',
         "NOCTORNAL_TOTP_KEK=$kek",
-        "NOCTORNAL_INGEST_PEPPER=$pepper"
+        "NOCTORNAL_INGEST_PEPPER=$pepper",
+        '',
+        '# Local development stack (infra/docker-compose.yml). Change these',
+        '# to point at a real deployment; they are read by the API, by',
+        '# scripts/launch.ps1 and by scripts/bootstrap.py.',
+        'DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal',
+        'REDIS_URL=redis://localhost:6379/0',
+        'MINIO_ENDPOINT=localhost:9000',
+        'MINIO_ACCESS_KEY=noctornal',
+        'MINIO_SECRET_KEY=dev_only_change_me',
+        'EVIDENCE_BUCKET=noctornal-evidence',
+        'SAMPLE_BUCKET=noctornal-samples',
+        '',
+        '# Mailpit, on the dev stack only. SMTP_ALLOW_PLAINTEXT is required',
+        '# explicitly: sending case material over an unencrypted connection',
+        '# is a decision, not a default.',
+        'SMTP_HOST=localhost',
+        'SMTP_PORT=1025',
+        'SMTP_ALLOW_PLAINTEXT=1'
     ) | Set-Content -LiteralPath $EnvLocal -Encoding UTF8
     Write-Good 'wrote .env.local with fresh random keys'
     Write-Note 'Back this file up. Losing the TOTP key locks every account out.'
