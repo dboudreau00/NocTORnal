@@ -360,6 +360,35 @@ async function problemOf(res) {
   }
 }
 
+/* ── the request indicator ─────────────────────────────────────────────
+ *
+ * One place, driven by an in-flight counter in `api()`, so every fetch in
+ * the app is covered without a single per-pane change. A pane that fetches
+ * and shows nothing is indistinguishable from a pane that is broken, and
+ * several here fetch four sections independently.
+ *
+ * Delayed by 180ms before it appears. Most requests against a local
+ * Postgres finish in under 30ms, and a bar that flashes on every one is
+ * noise that trains people to ignore it — which is exactly what you do not
+ * want on the request that takes four seconds.
+ */
+let _inflight = 0;
+let _busyTimer = null;
+
+function _busy(delta) {
+  _inflight = Math.max(0, _inflight + delta);
+  const bar = $('busy');
+  if (!bar) return;                       // login screen: no workspace yet
+  if (_inflight > 0) {
+    if (_busyTimer === null) {
+      _busyTimer = setTimeout(() => { bar.hidden = false; }, 180);
+    }
+    return;
+  }
+  if (_busyTimer !== null) { clearTimeout(_busyTimer); _busyTimer = null; }
+  bar.hidden = true;
+}
+
 async function api(path, options) {
   const o = options || {};
   const headers = {};
@@ -371,6 +400,18 @@ async function api(path, options) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(o.json);
   }
+  _busy(+1);
+  try {
+    return await _fetch(path, o, headers, body);
+  } finally {
+    /* `finally`, so a throw cannot strand the indicator on. A busy bar
+       that never clears is worse than none: it says the app is working
+       when it has given up. */
+    _busy(-1);
+  }
+}
+
+async function _fetch(path, o, headers, body) {
   let res;
   try {
     res = await fetch(API + path, { method: o.method || 'GET', headers, body });
@@ -3397,12 +3438,47 @@ function initPalette() {
       e.preventDefault();
       if (state.paletteOpen) closePalette();
       else if (state.token) openPalette();
+      return;
     }
+    /* `?` opens the keyboard sheet — but NOT while the caret is in a
+       field, or an analyst typing a case note gets a modal instead of a
+       question mark. `isContentEditable` covers the rich inputs; the tag
+       check covers the rest. */
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const t = e.target;
+      const typing = t && (t.isContentEditable
+        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
+      if (!typing && state.token) { e.preventDefault(); toggleKeys(); }
+      return;
+    }
+    if (e.key === 'Escape' && !$('keys-scrim').hidden) {
+      e.preventDefault();
+      toggleKeys(false);
+    }
+  });
+  $('keys-close').addEventListener('click', () => toggleKeys(false));
+  $('keys-scrim').addEventListener('mousedown', (e) => {
+    if (e.target === $('keys-scrim')) toggleKeys(false);
   });
 
   /* macOS reads ⌘; everywhere else that glyph is noise. */
   const mac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
   $('btn-palette').textContent = mac ? '⌘K' : 'Ctrl K';
+  $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
+}
+
+/** Show or hide the keyboard sheet. `on` omitted means toggle. */
+function toggleKeys(on) {
+  const scrim = $('keys-scrim');
+  const next = on === undefined ? scrim.hidden : on;
+  show(scrim, next);
+  /* Focus follows the dialog, and returns. A modal that steals focus and
+     does not give it back strands a keyboard user on the body element. */
+  if (next) $('keys-close').focus();
+  else if (state.tab) {
+    const tab = $('tab-' + state.tab);
+    if (tab) tab.focus();
+  }
 }
 
 
