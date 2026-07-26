@@ -102,7 +102,13 @@ def _load_env_local() -> None:
     replaced by a file.
     """
     try:
-        text = _env_local_path().read_text(encoding="utf-8")
+        # utf-8-SIG: strips a BOM if one is present, and is identical to
+        # utf-8 when it is not. install.ps1 no longer writes one, but a
+        # file edited in Notepad or written by an older install will have
+        # it -- and a BOM on the FIRST line silently mis-names whatever
+        # key is first, which is the kind of failure that presents as
+        # "the KEK is not set" with the KEK plainly sitting in the file.
+        text = _env_local_path().read_text(encoding="utf-8-sig")
     except OSError:
         return
     for line in text.splitlines():

@@ -35,7 +35,7 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 def _load_env_local() -> None:
     path = Path(__file__).resolve().parent.parent / ".env.local"
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         return
     for line in text.splitlines():
