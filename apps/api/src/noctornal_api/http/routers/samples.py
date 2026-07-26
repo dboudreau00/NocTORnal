@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
+    check_writable_labels,
     current_user,
     get_conn,
     require_global,
@@ -190,6 +191,19 @@ async def submit(
     normal direction for a sample carrying a source's fingerprints.
     """
     parsed = frozenset(c.strip() for c in compartments.split(",") if c.strip())
+    # Refuse to author what the caller could not read back. Without this a
+    # holder of `sample.submit` — CASE_OWNER, ANALYST and REVIEWER all hold
+    # it — could land a RED sample from an AMBER account: a row they
+    # created, cannot see, and cannot correct. It also closes the first
+    # step of the original critical, which began "submit at RED, then
+    # download it".
+    #
+    # Applied on BOTH paths. `authorize_object` covers the case-attached
+    # one and composes the case's labels in, but a sample with no case
+    # never reaches it, and an unattached sample is exactly where an
+    # over-labelled row would sit unnoticed.
+    check_writable_labels(conn, user, classification=classification,
+                          compartments=parsed)
     if case_id is not None:
         authorize_object(conn, user, case_id=case_id,
                          permission_key="sample.submit",

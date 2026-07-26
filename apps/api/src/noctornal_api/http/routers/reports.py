@@ -28,7 +28,13 @@ from psycopg.types.json import Json
 from pydantic import BaseModel
 
 from noctornal_api.egress import Destination
-from noctornal_api.http.deps import CurrentUser, get_conn, require, require_step_up
+from noctornal_api.http.deps import (
+    CurrentUser,
+    get_conn,
+    require,
+    require_step_up,
+    user_ceiling,
+)
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.reports import (
@@ -66,7 +72,11 @@ def build(
     try:
         report = ReportBuilder(conn).build(
             case_id, target_tlp=target_tlp, generated_by=user.user_id,
-            preset=preset, include_hypotheses=include_hypotheses)
+            preset=preset, include_hypotheses=include_hypotheses,
+            # The requester's read-in. The report is built at the TARGET
+            # classification but never above the caller's own compartments:
+            # a ceiling of RED does not read anybody into anything.
+            compartments=user_ceiling(conn, user.user_id)[1])
     except ReportError as exc:
         raise Problem(400, "Invalid request", str(exc)) from exc
 
@@ -132,7 +142,8 @@ def release(
 
     try:
         report = ReportBuilder(conn).build(
-            case_id, target_tlp=body.target_tlp, generated_by=user.user_id)
+            case_id, target_tlp=body.target_tlp, generated_by=user.user_id,
+            compartments=user_ceiling(conn, user.user_id)[1])
     except ReportError as exc:
         raise Problem(400, "Invalid request", str(exc)) from exc
 

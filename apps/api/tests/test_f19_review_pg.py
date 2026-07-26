@@ -536,20 +536,46 @@ def test_a_document_carrying_the_header_is_marked_at_the_cases_level(conn):
 
 
 @pg
-def test_a_compartmented_case_withholds_its_header(conn):
-    """The projection is built with no compartments, so including a
-    compartmented case's title would be the one piece of compartmented
-    material in a document that excluded all the others."""
-    from noctornal_api.reports import ReportBuilder
+def test_a_compartmented_case_header_follows_the_requesters_read_in(conn):
+    """Both directions, and the second was a defect I introduced fixing the
+    first.
+
+    The initial fix hardcoded the builder's compartments to the empty set.
+    That closed the leak and broke the feature: an analyst read into a
+    compartment could not produce a report naming their OWN case, and
+    `report.compartments` was therefore always empty — so
+    `DENY_COMPARTMENTED` stayed unreachable on the built path, which is the
+    exact defect the same commit had just repaired in `check_egress`.
+    Closing a hole by refusing everybody is its own defect.
+    """
+    from noctornal_api.egress import DENY_COMPARTMENTED, Destination
+    from noctornal_api.reports import ReportBuilder, check_egress
 
     owner = _user(conn, clearance="RED", compartments=("OP-KESTREL",))
     case_id = _case(conn, owner, classification="GREEN",
                     compartments=("OP-KESTREL",))
-    report = ReportBuilder(conn).build(
+    code = conn.execute('SELECT code FROM core."case" WHERE id = %s',
+                        (case_id,)).fetchone()[0]
+
+    # Not read in: the header is withheld and the codename does not appear.
+    outside = ReportBuilder(conn).build(
         case_id, target_tlp="RED", generated_by=owner,
-        include_hypotheses=False)
-    assert report.redaction.header_withheld
-    assert report.compartments == frozenset()
+        include_hypotheses=False, compartments=frozenset())
+    assert outside.redaction.header_withheld
+    assert code not in str(outside.case)
+    assert outside.compartments == frozenset()
+
+    # Read in: the header is there, the document carries the compartment,
+    # and the egress gate refuses to let it leave — which is the branch
+    # that could not previously be reached from a real build at all.
+    inside = ReportBuilder(conn).build(
+        case_id, target_tlp="RED", generated_by=owner,
+        include_hypotheses=False, compartments=frozenset({"OP-KESTREL"}))
+    assert not inside.redaction.header_withheld
+    assert inside.case["code"] == code
+    assert inside.compartments == frozenset({"OP-KESTREL"})
+    decision = check_egress(inside, Destination.SMTP)
+    assert decision.denied and decision.reason == DENY_COMPARTMENTED
 
 
 @pg
