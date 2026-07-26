@@ -3,9 +3,10 @@
 Regenerated 2026-07-25, end of session. `docs/09-roadmap.md` is the plan;
 this is the honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0037`, **988 tests passing**, ruff clean,
-source hygiene clean, migrations round-trip base→head→base→head on a clean
-database. Nothing pushed (no remote configured).
+**State:** `main`, Alembic head `0039`, **1012 tests passing, 0 skipped**,
+ruff clean, source hygiene clean, migrations round-trip
+base→head→base→head on a clean database. Nothing pushed (no remote
+configured).
 
 > **Phase 7 has had its adversarial pass** (three lenses: access control,
 > false attribution, cryptographic evidence), and every finding was put
@@ -49,20 +50,21 @@ regressed — the measure got honest.**
 | 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2 — Sociogram | **95%** | ✅ | ✅ | ◐ | ✅ | WebSocket push; the UI polls. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
-| 4 — Collection | **30%** | ◐ | ❌ | ❌ | ❌ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **No router, no UI, never reviewed.** |
+| 4 — Collection | **45%** | ◐ | ✅ | ❌ | ❌ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **No UI, never reviewed.** |
 | 5 — Notification | **70%** | ◐ | ✅ | ◐ | ❌ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. |
-| 6 — Tradecraft | **40%** | ◐ | ❌ | ❌ | ❌ | WebAuthn, timeline replay, the assumptions register. Retention and break-glass have services and tests and **no router at all**. |
+| 6 — Tradecraft | **55%** | ◐ | ✅ | ❌ | ❌ | WebAuthn, timeline replay, the assumptions register. **No UI, never reviewed.** |
 | 7 — Comms | **75%** | ✅ | ✅ | ❌ | ✅ | **UI only.** Parser, PGP verification, co-participation, 20-endpoint router and a full adversarial pass all landed 2026-07-25. |
 | 8 — Samples | **45%** | ◐ | ✅ | ❌ | ❌ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. |
-| 9 — Ingest | **40%** | ◐ | ❌ | ❌ | ❌ | The HTTP 202 endpoint wiring, the outbound credential vault. **No router, no UI, never reviewed.** |
+| 9 — Ingest | **55%** | ◐ | ✅ | ❌ | ❌ | The outbound credential vault with per-provider quota. **No UI, never reviewed.** |
 
-### Overall: **~68%**
+### Overall: **~72%**
 
 Unweighted mean across the ten phases. Three things that number hides:
 
-1. **UI is the single largest gap.** Six phases have tested services that
-   an analyst cannot reach. It is 25% of every phase's score and the most
-   commonly missing dimension.
+1. **UI is now the single largest gap by a wide margin.** Every phase has
+   an HTTP API; six have no interface an analyst can use. It is 25% of
+   every phase's score and the only dimension missing from more than half
+   the board.
 2. **Four phases have never had a hostile review** (4, 5, 8, 9). On the
    two phases that have, a review found a *critical* defect each time,
    both under fully green suites. Treat unreviewed phases as unknown
@@ -127,11 +129,9 @@ and **no interface**. Samples last and carefully: invariant 10 says metadata
 may render and bytes may not, and no sandbox attribute may combine
 `allow-scripts` with `allow-same-origin`.
 
-### 3. HTTP routers for Phases 4, 6 and 9
+### 3. ~~HTTP routers for Phases 4, 6 and 9~~ — done 2026-07-25
 
-Services and tests exist. `approvals`, `notifications`, `samples`, `ach`,
-`reports` and now `comms` have routers; retention, break-glass, collection
-and ingest do not.
+Every service now has a router. What is left on this axis is the UI.
 
 ### The sequence I would actually follow
 
