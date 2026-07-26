@@ -77,7 +77,9 @@ import hashlib
 import io
 import math
 import os
-import zipfile
+import secrets
+import struct
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
@@ -252,7 +254,79 @@ def triage(data: bytes) -> Triage:
     )
 
 
-def archive(data: bytes, sha256_hex: str) -> bytes:
+#: Traditional PKWARE ("ZipCrypto") key schedule. Not a security
+#: primitive here and not treated as one -- see `archive()`.
+_ZC_KEYS = (0x12345678, 0x23456789, 0x34567890)
+
+
+#: The standard CRC-32 table, derived rather than pasted so it cannot be
+#: subtly wrong in a way nobody reads.
+_ZC_TABLE = []
+for _i in range(256):
+    _c = _i
+    for _ in range(8):
+        _c = (0xEDB88320 ^ (_c >> 1)) if (_c & 1) else (_c >> 1)
+    _ZC_TABLE.append(_c)
+
+
+def _zc_crc32(byte: int, crc: int) -> int:
+    return (crc >> 8) ^ _ZC_TABLE[(crc ^ byte) & 0xFF]
+
+
+class _ZipCrypto:
+    """The traditional ZIP cipher, for the `infected` convention.
+
+    **This is not confidentiality and is not used as any part of a
+    security control.** ZipCrypto is broken by a known-plaintext attack
+    older than most of the people who will read this, and the password is
+    printed in the archive comment and in a response header. Its two jobs,
+    which are the two docs/11 asks for, are mechanical:
+
+      1. an interlock, so a live binary cannot be double-clicked out of a
+         file manager without an explicit step;
+      2. an opaque container, so the lab's OWN endpoint protection and mail
+         gateway do not quarantine the sample in transit -- the "routine
+         and embarrassing failure" this module's docstring names.
+
+    Confidentiality of a sample comes from the access gate and the
+    envelope encryption at rest, neither of which this touches.
+
+    Written out because Python's `zipfile` **cannot write encrypted
+    entries at all** -- `setpassword()` is decrypt-only. The previous
+    version of `archive()` believed otherwise, produced a plain DEFLATE
+    entry with the encryption bit clear, and shipped an archive comment
+    telling the analyst a password protected it. Round-tripped in the
+    tests through Python's own decryptor, which is the strongest available
+    check that this is the real format and not a plausible-looking one.
+    """
+
+    def __init__(self, password: bytes):
+        self.k = list(_ZC_KEYS)
+        for byte in password:
+            self._update(byte)
+
+    def _update(self, byte: int) -> None:
+        k0, k1, k2 = self.k
+        k0 = _zc_crc32(byte, k0)
+        k1 = (k1 + (k0 & 0xFF)) & 0xFFFFFFFF
+        k1 = (k1 * 134775813 + 1) & 0xFFFFFFFF
+        k2 = _zc_crc32(k1 >> 24, k2)
+        self.k = [k0, k1, k2]
+
+    def _stream_byte(self) -> int:
+        temp = (self.k[2] | 2) & 0xFFFF
+        return ((temp * (temp ^ 1)) >> 8) & 0xFF
+
+    def encrypt(self, plain: bytes) -> bytes:
+        out = bytearray(len(plain))
+        for i, byte in enumerate(plain):
+            out[i] = byte ^ self._stream_byte()
+            self._update(byte)
+        return bytes(out)
+
+
+def archive(data: bytes, sha256_hex: str,
+            password: bytes = ARCHIVE_PASSWORD) -> bytes:
     """Wrap the sample so it cannot be double-clicked into running.
 
     Named for its hash, not its original filename -- the name is
@@ -261,21 +335,63 @@ def archive(data: bytes, sha256_hex: str) -> bytes:
     because the single commonest mistake with this convention is treating
     it as confidentiality.
 
-    Python's zipfile writes ZipCrypto, which is broken, and that is fine
-    for what this is: an interlock against accident and against scanners,
-    not a control. Anything needing real confidentiality gets 7z with AES
-    and header encryption, out of band (docs/11).
+    **This produced a PLAIN ZIP until 2026-07-26.** The old docstring
+    said "Python's zipfile writes ZipCrypto", which is false in the
+    direction that matters: `zipfile` reads encrypted entries and cannot
+    write them. `ARCHIVE_PASSWORD` was defined, exported in `__all__`, and
+    referenced by nothing. The entry carried flag bits 0x0000 and opened
+    with no prompt in Explorer, 7-Zip, a mail gateway or an EDR agent --
+    while the archive comment and the `X-Sample-Archive-Password` header
+    both told the analyst a password protected it. Invariant 10 says the
+    binary is only ever an *encrypted* archive download; it was not one.
+
+    The ZIP is built by hand because there is no stdlib API for this. The
+    fields that matter and are easy to get wrong:
+
+    - flag bit 0 set (encrypted), and **bit 3 NOT set**: with a data
+      descriptor the check byte comes from the mod-time instead of the
+      CRC, and readers disagree about which;
+    - the 12-byte encryption header's LAST byte must equal the high byte
+      of the entry's CRC-32, which is how a reader recognises a wrong
+      password;
+    - the CRC is over the PLAINTEXT, the sizes are of the ENCRYPTED
+      stream, and compression happens before encryption.
     """
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{sha256_hex}.bin", data)
-        zf.comment = (
-            b"NocTORnal sample. Password: infected. This password prevents "
-            b"accidental execution and stops scanners eating the file. It is "
-            b"PUBLIC and provides NO confidentiality. Handle under the "
-            b"classification this was released at."
-        )
-    return buffer.getvalue()
+    name = f"{sha256_hex}.bin".encode("ascii")
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+    deflated = zlib.compressobj(9, zlib.DEFLATED, -15)
+    body = deflated.compress(data) + deflated.flush()
+
+    cipher = _ZipCrypto(password)
+    # Eleven random bytes and the CRC check byte. `secrets` rather than
+    # `random`: the header is not a secret, but a predictable one makes a
+    # known-plaintext attack on a weak cipher completely free, and there is
+    # no reason to hand that over.
+    header = bytearray(secrets.token_bytes(11))
+    header.append((crc >> 24) & 0xFF)
+    payload = cipher.encrypt(bytes(header)) + cipher.encrypt(body)
+
+    # Fixed timestamp: the archive is content-addressed, and a wall-clock
+    # mod-time would make two archives of identical bytes differ.
+    dos_time, dos_date = 0, 0x21          # 1980-01-01, the DOS epoch
+    flags = 0x0001                        # bit 0: encrypted. NOT bit 3.
+    local = struct.pack(
+        "<IHHHHHIIIHH", 0x04034B50, 20, flags, 8, dos_time, dos_date,
+        crc, len(payload), len(data), len(name), 0) + name
+    central = struct.pack(
+        "<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flags, 8, dos_time,
+        dos_date, crc, len(payload), len(data), len(name), 0, 0, 0, 0,
+        0, 0) + name
+    comment = (
+        b"NocTORnal sample. Password: infected. This password prevents "
+        b"accidental execution and stops scanners eating the file. It is "
+        b"PUBLIC and provides NO confidentiality. Handle under the "
+        b"classification this was released at."
+    )
+    offset = len(local) + len(payload)
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central),
+                      offset, len(comment))
+    return local + payload + central + end + comment
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +644,10 @@ class SampleService:
     # -- egress ------------------------------------------------------------
 
     def download(self, sample_id: UUID, *, actor_id: UUID,
-                 request_origin: str | None) -> tuple[bytes, str]:
+                 request_origin: str | None,
+                 clearance: str | None = None,
+                 compartments: frozenset[str] = frozenset()
+                 ) -> tuple[bytes, str]:
         """The encrypted archive, and only from the separate origin.
 
         `request_origin` is where the request actually arrived, taken from
@@ -537,7 +656,34 @@ class SampleService:
         runs with the analyst's session on the case file -- a drive-by
         vector built into the highest-trust system in the estate, seeded
         with hostile files by design (docs/11).
+
+        **The caller's clearance is REQUIRED, and it was missing entirely.**
+        This method used to select `storage_key, data_key_ciphertext,
+        data_key_id, sha256, state` and nothing else: no classification, no
+        compartments, no case. The router gated it on
+        `require_global("sample.download")` plus step-up, and
+        `require_global` knows nothing about a case OR an element.
+
+        The inconsistency was inside one file. `queue()` filters on
+        `classification <= caller AND compartments <@ caller`, and
+        `detail()` 404s an over-classified sample -- so the same caller was
+        told the sample did not exist and handed its bytes one request
+        later. On the one path in the entire system that puts working
+        malware on somebody's disk.
+
+        The case's labels are composed in as well: a sample can be
+        classified ABOVE its case (queue's docstring says so), and a sample
+        submitted with the router's `AMBER` default sits BELOW a RED case
+        with nothing to catch it -- `lab.sample` has no `enforce_tlp_floor`
+        trigger, unlike node, edge and evidence. Both directions are
+        handled here because neither is handled anywhere else.
         """
+        if clearance is None:
+            raise SampleError(
+                "download() hands over live malware and needs the caller's "
+                "clearance. Defaulting would make every caller that forgets "
+                "silently maximally privileged, which is how this path came "
+                "to have no label check at all.")
         configured = sample_origin()
         if not configured:
             raise SampleError(
@@ -549,10 +695,24 @@ class SampleService:
                 "sample bytes are served only from the configured sample "
                 "origin, never from the application origin")
 
+        # The labels are applied IN the query, and the case's are composed
+        # with the sample's -- stricter classification, union of
+        # compartments, exactly as `deps.effective_labels` does for a node.
+        # A caller who may not read it gets "no such sample", the same
+        # answer a nonexistent id gets, because a status code must not be
+        # an existence oracle.
         row = self._c.execute(
-            """SELECT storage_key, data_key_ciphertext, data_key_id, sha256,
-                      state
-                 FROM lab.sample WHERE id = %s""", (sample_id,)).fetchone()
+            """SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
+                      s.sha256, s.state
+                 FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.id = %s
+                  AND greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                      <= %s::core.tlp
+                  AND (s.compartments
+                       || coalesce(c.compartments, '{}')) <@ %s""",
+            (sample_id, clearance, list(compartments))).fetchone()
         if row is None:
             raise SampleError("no such sample")
         if row[4] == REJECTED:

@@ -26,8 +26,14 @@ analyst UI under a strict CSP with no build step.
 **~85% complete** on a four-dimension weighted measure (model+tests 45%,
 HTTP API 15%, analyst UI 25%, adversarial review 15%).
 
-- **1108 tests, 0 skipped.** Alembic head **0042**. ruff clean, source
-  hygiene clean.
+- **1117 tests, 0 skipped.** Alembic head **0042**. ruff clean.
+
+  ⚠ **The last FULL-suite run I have evidence for was 1108 passing, before
+  the Phase 8 fixes.** After them I ran `test_samples_pg.py` and
+  `test_samples_hardening_pg.py` together — 49 passed — and lint over
+  `apps/`. **Run the full suite before trusting the number above.** The
+  contract change (`download()` now requires a clearance) touched seven
+  existing call sites and they are fixed, but I did not re-run everything.
 - Every phase has a service, tests and an HTTP API.
 - **Five analyst panes** beyond the original set: **Comms**, **Feeds**
   (ingest queue / dead letters / sources / keys), **ACH**, **Lifecycle**
@@ -60,18 +66,68 @@ HTTP API 15%, analyst UI 25%, adversarial review 15%).
 
 ---
 
-## 4. Do these first
+## 4. WHERE I STOPPED — resume here
 
-### 4.1 Adversarial pass over Phases 5 and 8
+**The Phase 5/8 adversarial pass ran and its results are only half
+actioned.** That is the single most important thing in this file.
 
-The only two phases never reviewed, and **Phase 8 handles malware.** Four
-passes out of four on this project have found a real defect, three times a
-critical one, every time under a fully green suite. Treat an unreviewed
-phase as unknown rather than fine.
+### 4.1 What the pass found
 
-Give each reviewer a distinct hostile lens and run a refutation round —
-about a third of a first pass does not survive contact with the code.
-`docs/17` F15 and F17 show the shape and the depth expected.
+27 findings survived refutation, **9 of them CRITICAL**, all in Phase 8 —
+which had never been reviewed. Full list in the workflow output at
+`%TEMP%\claude\…\877b50ed-…\tasks\whjkfqq7q.output` (JSON; the extractor
+`scratchpad/findings58.py` renders it readably). The nine criticals have
+two distinct root causes, and **both are now FIXED and committed**:
+
+1. **`download()` applied no label check of any kind** — not the sample's
+   classification, not its compartments, not its case's. `queue()` filters
+   and `detail()` 404s, so the same caller was told the sample did not
+   exist and was handed its bytes one request later, on the one path in
+   the system that puts working malware on somebody's disk. Fixed: the
+   labels are applied IN the query, the case's are composed with the
+   sample's (`greatest(...)` / `||`), and a caller who may not read it
+   gets "no such sample" rather than a refusal.
+
+2. **The "encrypted archive" was a plain ZIP.** Python's `zipfile` cannot
+   write encrypted entries — `setpassword()` is decrypt-only — so
+   `ARCHIVE_PASSWORD` was defined, exported in `__all__` and referenced by
+   nothing. The entry carried flag bits `0x0000` and opened with no
+   prompt in Explorer, 7-Zip, a mail gateway or an EDR agent, **while the
+   archive comment and the `X-Sample-Archive-Password` header both told
+   the analyst a password protected it.** Fixed: real traditional
+   ZipCrypto, written by hand because there is no stdlib API, verified by
+   round-tripping through Python's own decryptor (refuses with no
+   password, refuses with a wrong one, `testzip()` clean).
+
+### 4.2 What is NOT done — start here tomorrow
+
+**The other 18 surviving findings are unactioned and unrecorded.** They
+are NOT yet in `docs/17`; the only place they exist is the task output
+above. Read it first. The ones I had already read and judged real:
+
+| | |
+|---|---|
+| HIGH, egress | **Report release launders the case's own classification.** A RED case emits a document marked TLP:CLEAR — the graph body is correctly empty, but `report.case` copies code, title, summary and legal_basis unfiltered, so `marking` falls to CLEAR and the gate is fed the laundered value. |
+| HIGH, egress | **`can_egress` is called with the exhibit's OWN compartments, and nothing ever sets them** — `core.evidence.compartments` defaults `'{}'` and no trigger propagates the case's. `DENY_COMPARTMENTED` can therefore never fire for evidence. |
+| HIGH, drift | **`reports.check_egress` drops the compartments argument entirely**, so the two call sites of the single shared gate disagree about one of its three arguments. |
+| HIGH, drift | **`reject()` destroys sample bytes and the data key while ignoring `legal_hold`** — one non-step-up call irreversibly destroys material under a court hold. `lab.sample.legal_hold` exists and is read by nothing. |
+| HIGH, notify | **The notification centre never checks case assignment.** A revoked or expired analyst keeps reading case content from `/notifications` indefinitely; every other "which cases can this caller see" query in the repo carries the `expires_at` predicate. |
+| HIGH, notify | **`approval_requested` notifies users whose assignment has EXPIRED** — a fresh WRITE of case material to someone the gate would 404. |
+| HIGH, notify | **Every notification is labelled with its CASE's classification, never the element's.** `effective_labels_for_notification` exists, is exported, has a test, and has **zero production call sites**. |
+| HIGH, drift | **The outbox drain never re-checks the recipient's CURRENT clearance**, so a revoked analyst still gets the case summary by email — the one path that actually leaves the boundary. |
+| HIGH, lifecycle | **`submit()` writes hostile bytes to the object store before the row exists.** Any DB failure after that leaves an unrecorded, unattributable copy of live malware in a WORM bucket. An unvalidated `classification` Form string reaches a `core.tlp` column and raises. |
+
+**Suggested order:** the notification/egress cluster first (four of them
+are the same missing `expires_at` / current-clearance predicate), then
+`reject()` and legal hold, then `submit()`'s write ordering.
+
+### 4.3 Then: the rest of the review discipline
+
+Every pass on this project has found a real defect — five for five now,
+four times a critical one, every time under a fully green suite. Give
+each reviewer a distinct hostile lens and run a refutation round; about a
+third of a first pass does not survive contact with the code. `docs/17`
+F15 and F17 show the shape and the depth expected.
 
 ### 4.2 Two retrospective items (docs/18 Section D)
 
@@ -157,6 +213,15 @@ this has cost real debugging time more than once.
   is correct rather than inconvenient.
 - **`NOT VALID` does not exempt UPDATEs**, only rows present at ALTER
   time. This bit `replay()` on pre-0040 dead letters.
+- **Append-only records outlive their subject, so a test cannot always
+  clean up after itself.** `lab.sample_access`, `core.purge_tombstone` and
+  `audit.event` all raise on DELETE, and all three carry foreign keys to
+  the thing they describe — so a test that downloads a sample cannot
+  delete the sample OR the actor, and a test that purges cannot delete its
+  case. That is the design working. Teardown has to check and skip, not
+  assume. Three separate suites hit this in one day.
+- **`submit()` deduplicates on content**, so a fixture with a fixed
+  payload fails on the previous test's row. Make the bytes unique.
 - **`for x in gen()` puts the `next()` outside your try blocks.** Twice
   now that has dropped every remaining fragment of a batch with no
   accounting.
