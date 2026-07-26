@@ -1,17 +1,18 @@
-# Session handoff — 2026-07-25 (Phase 7 completion)
+# Session handoff — 2026-07-26
 
 Written so a fresh session can resume without re-deriving anything.
+Supersedes the 2026-07-25 Phase 7 handoff; that session's content lives in
+`docs/17` and the commit log.
 
-> **Read order:** this file → `docs/16-legal-and-external.md` (**every
-> external/legal dependency, and the only file that can stop a
-> deployment**) → `docs/17-flagged-for-review.md` (**everything built on a
-> judgement somebody should confirm, and the rows already recorded that
-> should not be trusted**) → `ROADMAP-REMAINING.md` → `CLAUDE.md` (the
-> twelve invariants) → `docs/00-decisions.md` (60 numbered decisions).
+> **Read order:** this file → **`docs/18-legal-review-pack.md`** (the
+> register as a *decision document* — hand this to a reviewer) →
+> `docs/17-flagged-for-review.md` (engineering judgement, and the rows
+> already recorded that should not be trusted) → `ROADMAP-REMAINING.md` →
+> `CLAUDE.md` (the twelve invariants) → `docs/00-decisions.md`.
 
 ---
 
-## 1. Context & Objective
+## 1. What this is
 
 **NocTORnal** is a HUMINT / social-network-analysis platform for cybercrime
 investigation: analysts build a graph of criminal actors, personas, groups
@@ -20,306 +21,170 @@ a chain of custody. Comparable to Maltego, i2 and SL Crimewall, with
 UCINET-grade SNA maths. Python 3.13 / FastAPI / Postgres 16, plain-HTML
 analyst UI under a strict CSP with no build step.
 
-The previous session brought all nine phases to a first implementation.
-**This session was asked to continue from Phase 7 onward**, and Phase 7 is
-now complete except for its UI.
+## 2. Where it is
+
+**~85% complete** on a four-dimension weighted measure (model+tests 45%,
+HTTP API 15%, analyst UI 25%, adversarial review 15%).
+
+- **1108 tests, 0 skipped.** Alembic head **0042**. ruff clean, source
+  hygiene clean.
+- Every phase has a service, tests and an HTTP API.
+- **Five analyst panes** beyond the original set: **Comms**, **Feeds**
+  (ingest queue / dead letters / sources / keys), **ACH**, **Lifecycle**
+  (retention / destroyed / break-glass) — alongside Graph, Entities,
+  Evidence, Triage, Inbox, Analysis and Search.
+- Nothing pushed — no remote is configured.
+
+## 3. What changed in the 2026-07-26 session
+
+1. **All ten F15 service defects fixed at the service**, not merely
+   compensated for at the router. Migrations 0040–0042.
+2. **Raw-before-parse became real.** `accept()` had been acknowledging
+   batches and dropping the bytes; `rawstore.py` stores them in their own
+   bucket with **no object lock** (an exhibit is locked so not even root
+   can delete it; a partner's unvetted submission on a 90-day clock must
+   stay deletable), and `accept()` now refuses when it has nowhere to put
+   them.
+3. **Three new panes**, a logo and favicon, `#case=…&tab=…` deep links,
+   and `scripts/screenshot_ui.py`.
+4. **The ingest retention clock is now read.** It had ticked since
+   migration 0033 with nothing sweeping it — so the 90-day default chosen
+   *because* unassessed victim data deserves the shortest rule was
+   delivering the longest possible one.
+5. **A fourth adversarial pass**: 25 findings, 16 survived refutation, 14
+   fixed. Recorded as **docs/17 F17**. Most were in the *fixes* from
+   earlier the same day.
+6. **`docs/18-legal-review-pack.md`** written: every legal question with
+   its option set, the consequence of each, the current default and a row
+   to write the answer in — plus a retrospective section.
 
 ---
 
-## 2. What was built this session
+## 4. Do these first
 
-Eight commits on `main`, **807 → 1012 tests**, Alembic **0034 → 0039**.
+### 4.1 Adversarial pass over Phases 5 and 8
 
-| Commit | What |
-|---|---|
-| `74a055d` | Contact-block parser + the normaliser divergence it exposed (0035, 0036) |
-| `ea4fbfa` | PGP signature verification, delegated to gpg |
-| `25cc698` | Co-participation projection + the Phase 7 HTTP router |
-| `565ea7f` | Decisions 55–58, legal register C11–C13, roadmap |
-| `12ff904` | **CRITICAL: forged `VALIDSIG` via a crafted user ID** (0037) |
-| `8595602` | The rest of the review: 10 further defects |
-| `c9a0678` | The last five flagged items, README disclaimer, `docs/17` |
-| `413efbd` | Routers for Phases 4, 6 and 9 (30 endpoints) + migrations 0038/0039 |
+The only two phases never reviewed, and **Phase 8 handles malware.** Four
+passes out of four on this project have found a real defect, three times a
+critical one, every time under a fully green suite. Treat an unreviewed
+phase as unknown rather than fine.
 
-### The contact-block parser (docs/10's "highest-value extraction target")
+Give each reviewer a distinct hostile lens and run a refutation round —
+about a third of a first pass does not survive contact with the code.
+`docs/17` F15 and F17 show the shape and the depth expected.
 
-The design brief is one sentence of docs/10: *"Attributing the escrow's
-Jabber to the vendor is a serious, and easy, error."* So the parser
-**refuses more than it resolves**. A labelled line resolves by its label; an
-unlabelled one only on an unambiguous shape. Bare 40-hex does not resolve
-(SHA-1 is identical), 64-hex does not (Tox pubkey, SHA-256 and OMEMO all
-match), `local@domain` does not (a JID and an email are the same shape).
-Refusals are kept as `UNPARSED` **with the reason** — invariant 12.
+### 4.2 Two retrospective items (docs/18 Section D)
 
-Four defences against the escrow error, deliberately independent: the role
-label, the inline disclaimer, the GLOBAL stoplist, and shared-service
-detection over **distinct publishers**.
+Neither scores on the completion measure and both are real:
 
-Nothing it produces is a binding. It writes `collect.proposal` rows, always
-CLAIMED, and holds no `GraphWriteService` (invariant 3, enforced by absence
-rather than by discipline).
+- **`scripts/redact_dead_letters.py --apply` has not been run.** Rows
+  recorded before the redactor still hold their fragments verbatim. They
+  are labelled, on a clock and withheld from the API — but they are there.
+- **Batches accepted before object storage was wired cannot be
+  re-parsed.** The API says so honestly rather than parsing an empty
+  payload and marking the batch complete. If real feeds submitted during
+  that window, the partner has to resend.
 
-### PGP verification — the only path to CONFIRMED
+### 4.3 Remaining UI
 
-No cryptography is implemented; `gpg` is driven as a subprocess and only its
-`--status-fd` output is parsed. Two traps are closed in code **and** as
-CHECK constraints:
+Merge, reports, and samples. **Samples last and carefully**: invariant 10
+says metadata may render and bytes may not, and no sandbox attribute may
+combine `allow-scripts` with `allow-same-origin`.
 
-- **The wrong key.** A signature proves control of whatever key signed it.
-  `VALIDSIG`'s fingerprint must equal the claimed one.
-- **The replayed message.** Everything after `END PGP SIGNATURE` is
-  unsigned, so any message a vendor published can be reposted with an
-  attacker's Tox ID beneath it — and `value in message` passes. The
-  comparison is against gpg's own `--output` of the verified region.
+Three things the five panes built so far taught, worth carrying forward:
 
-`NO_VERIFIER` is a distinct outcome from every failure, so "nobody checked"
-and "checked and failed" cannot be confused.
-
-### Co-participation
-
-The bipartite projection docs/03 asked for and `analytics._mode_warning`
-recorded as an open item. Newman weighting, a reported room-size cap, and
-`is_inferred` on every edge. Nothing is written to `core.edge`.
-
-### The HTTP router
-
-20 endpoints, Phase 7's first interface. Three things the router enforces
-that the services cannot: the stoplist's two scopes cannot write each
-other's rows; cross-case counts are bounded by assignments read from the
-database rather than from a parameter; and a conversation id from another
-case cannot be minimised under an authorisation that never covered it.
+- **`Promise.all` over endpoints with different permissions is wrong.**
+  The first 403 rejects the lot, so a caller holding four of five
+  permissions sees an empty pane claiming they hold none. Load each
+  section independently.
+- **A permission error is not an empty state** — and show the server's
+  `detail` first. A hard-coded "you need permission X" tells the *holder*
+  of X that they do not hold it, because a stale step-up 403s too.
+- **Look at it rendered.** Two defects this session were invisible to the
+  suite and obvious on a screenshot in ten seconds.
 
 ---
 
-## 3. The adversarial review, and what it found
-
-Three reviewers with distinct hostile lenses — access control, false
-attribution, cryptographic evidence — then **an independent refutation
-round on every finding** before anything was changed. Two commits of
-fixes: `12ff904` (the PGP defect) and `8595602` (everything else).
-
-All of this sat under a **fully green 953-test suite**.
-
-### CRITICAL — a forged PGP verdict
-
-gpg percent-escapes `%` and bytes below `0x20` in the attacker-controlled
-user-ID field, and escapes **nothing at or above `0x80`**. Python's
-`str.splitlines()` breaks on `U+0085`, `U+2028` and `U+2029`. So a key
-whose user ID embedded
+## 5. Running it
 
 ```
-<U+0085>[GNUPG:] VALIDSIG <victim fingerprint> ...
-```
-
-made gpg emit a forged status line inside `GOODSIG` — which it emits
-*before* the real `VALIDSIG` — and the parser took the first match.
-Reproduced end to end: **outcome VERIFIED, signing fingerprint the
-victim's, binding upgraded to CONFIRMED, for a key the attacker never
-held**, through the ordinary submission workflow.
-
-Migration 0035's claim that its CHECK constraints made this
-"unrepresentable" was wrong, and the reason generalises: both
-`signing_fingerprint` and `claimed_fingerprint` were written from the same
-lied-to parse, so they agreed. **A constraint defends against the
-application forgetting to check. It cannot defend against the application
-checking a forged input.**
-
-It was **inert on this Windows host** (cp1252 does not map those bytes)
-and **live on the Linux/UTF-8 deployment target**. The regression test
-therefore asserts on raw bytes, not end to end — the locale-dependent
-version would have passed here while the bug was live.
-
-### CRITICAL — Newman weighting divided by the wrong number
-
-`1/(size-1)` used the participant count remaining *after* incidental,
-unresolved and invisible members were dropped; `raw_size` was computed and
-never read. With the shipped defaults a 500-member channel with two
-resolved identities gave a denominator of 2, so two people who merely sat
-in the same open channel scored **exactly as high as a two-party DM** — a
-499× overstatement of the only number the module produces. The oversize
-cap tested the same filtered count, so the room never appeared in
-`oversized` either. Every existing test had all participants resolved, so
-`raw_size == size` and they passed either way.
-
-### CRITICAL — the label defence was structurally ASCII-only
-
-`_LINE` demanded `[A-Za-z]` and `_looks_third_party` split on `[^a-z]+`.
-Russian-language forums are this domain's primary venue and `Гарант:` is
-*the* standard guarantor label there. The line matched no label at all,
-fell through to shape resolution — which strips non-hex characters — and
-the guarantor's 76-hex Tox ID resolved cleanly out of the whole line, at a
-score high enough to raise a proposal. The transliterated `Garant:` was
-caught; the native form was not.
-
-### The rest, all confirmed
-
-Empty-string durable values merged unrelated actors (every modern Discord
-handle normalises to `''`, and `correlate` short-circuits on `None`, not
-`''`); SIGNAL and WIRE promoted exactly what their own platform seed says
-is *not* durable; the impersonation fingerprint was computed before the
-stoplist pass, so two vendors quoting the same escrow read as
-impersonation; comms reads ignored element labels entirely; `_visible_cases`
-omitted three of the five gate checks; caller-supplied node/document/
-evidence ids were never checked against the case (and an unknown one
-became a 500-vs-201 existence oracle); the global stoplist-retire route
-could retire case-scoped rows; the shared-service count double-counted;
-and `GET /comms/pgp` forked gpg per request unmetered.
-
----
-
-## 4. Bugs found while building, before the review
-
-1. **`comms.normalise` had grown a second set of canonical forms** and they
-   had drifted from the ontology's in three places, each silently:
-   - **Matrix** folded the whole MXID. Localparts are case-SENSITIVE, so
-     `@Alice:x` and `@alice:x` collapsed to one durable value and
-     `correlate()` returned two accounts as one actor. The module written
-     to prevent confident false attribution was manufacturing it.
-   - **Tox** disagreed on case only — invisible until something joined a
-     binding to `core.selector`, which is entity resolution. It would have
-     matched nothing and read as "no correlation".
-   - **Telegram** refused a numeric channel id as though it were a
-     `@username`: a refusal *and* a wrong explanation.
-
-   Every unit test passed on both sides because each was internally
-   consistent. **Only comparing the two implementations finds this**, and
-   that comparison is now a parametrised test.
-
-2. **The stoplist was silently disabled for the lines that need it most.**
-   It only matched on a resolved durable value, so `Contact:
-   escrow@forum.biz` — no third-party label, ambiguous shape — never
-   reached it. Defence 3 was switched off by defence 1 failing, when the
-   two are supposed to be independent.
-
-3. **A CHECK made a real state unrepresentable.** `Escrow: @forum_escrow`
-   has a known owner and a genuinely ambiguous type. `role` answers WHOSE
-   and the kind columns answer WHAT; they are independent questions.
-
-4. **`_visible_cases()` filtered on a column that does not exist**
-   (`case_assignment.valid_to`; the real one is `expires_at`). Caught by an
-   e2e test.
-
-5. **gpg was handed absolute paths.** The Windows gpg on PATH is the MSYS
-   build shipped with Git and expects POSIX paths — it resolved `C:\...`
-   against its own cwd and reported a good key as unreadable.
-
----
-
-## 5. Current system state
-
-| | |
-|---|---|
-| **Branch** | `main`, clean, **nothing pushed** (no remote configured) |
-| **Migration head** | `0039`; base→head→base→head verified on a clean database |
-| **Tests** | **1012 passing**, 0 failing, **0 skipped** |
-| **Lint** | `ruff check` clean; source hygiene clean (206 files) |
-| **Stack** | Docker Compose: postgres, redis, nats, minio, openfga, mailhog |
-
-### New environment variables
-
-| Variable | Effect if unset |
-|---|---|
-| `NOCTORNAL_GPG` | gpg is discovered on PATH. Point it at a missing file and verification returns `NO_VERIFIER` — never a confirmation |
-
-### New permissions (migration 0035)
-
-`comms.read`, `comms.bind`, `comms.minimise` (**step-up** — minimisation
-destroys message bodies irreversibly), `comms.stoplist.manage`.
-
----
-
-## 6. Immediate next steps
-
-### 🔴 Blockers — still legal, not technical
-
-`docs/16-legal-and-external.md` now holds **4 BLOCKING items, 7
-determinations and 13 external confirmations**. Three are new this session,
-and **C11 now matters more than it did when it was written**: the
-verification path it describes had a defect that minted CONFIRMED bindings
-for keys nobody held, so any verification recorded before commit `12ff904`
-should be re-derived rather than trusted.
-
-- **C11** — a CONFIRMED binding asserts a narrow thing (this key signed
-  text containing this identifier). A filing must not widen it silently.
-  The gpg version is stored per verification so rows made with a defective
-  build can be found; the provenance of the vendor's public key is a human
-  step the software deliberately does not automate.
-- **C12** — the GLOBAL stoplist is a cross-case store of identifiers
-  belonging to people who are **not subjects of any investigation**, and it
-  outlives the case that added it, on purpose.
-- **C13** — co-participation manufactures ties. `include_incidental`
-  defaults off, but it is switchable, and the egress gate checks
-  classification rather than that flag.
-
-### Prioritised engineering work
-
-**Completion is now measured across four weighted dimensions** — model and
-tests 45%, HTTP API 15%, analyst UI 25%, adversarial review 15%. Overall
-**~72%**. See the scoreboard in `ROADMAP-REMAINING.md`; the numbers went
-DOWN from earlier versions because the measure got honest, not because
-anything regressed.
-
-1. **UI — the single largest gap by a wide margin.** Every phase now has
-   an HTTP API; six have no interface an analyst can use. Do comms first
-   (everything else about it is finished, so it is a clean test of the UI
-   patterns) and samples last and carefully — invariant 10 says metadata
-   may render and bytes may not, and no sandbox attribute may combine
-   `allow-scripts` with `allow-same-origin`.
-2. **An adversarial pass over Phases 4 and 9**, which have had none — and
-   over the four routers added at the end of this session, which have
-   tests but no hostile review. Do this BEFORE the UI: fixing a model
-   defect after a UI is built costs the UI too.
-3. ~~HTTP routers for Phases 4, 6 and 9~~ — **done**, 30 endpoints.
-4. **WebAuthn** and the deferred security items (session IP/UA binding,
-   non-owner DB role + RLS, login timing equalisation).
-5. **Real SSRF protection.** `collection.fetch()` has a floor; DNS
-   rebinding is not addressed.
-6. **Fuzzy hashing for Phase 8** (ssdeep/TLSH/imphash) and YARA.
-
----
-
-## 7. Traps that cost real time
-
-Everything in the previous handoff still applies (uvicorn without
-`--reload`; TOTP unusable on this host — use `bootstrap.py session`; TOTP
-codes single-use; constraints that tie fields together; `array_length('{}',
-1)` being NULL; a partial unique index needing its predicate restated in
-`ON CONFLICT`; retention rules being global; not running the suite while
-background agents run theirs).
-
-New this session:
-
-- **The comms service stoplist is GLOBAL**, exactly like retention rules.
-  Tests use a reserved `*.cbstop.test` domain so teardown can find the
-  rows; a leaked entry surfaces as a unique violation in an unrelated test.
-- **Teardown order follows the foreign keys.**
-  `contact_block_entry.stoplist_id` references `service_selector`, so
-  deleting the stoplist first fails on an FK — and a failed teardown leaks
-  the global row above.
-- **`iam.case_assignment.granted_by` is NOT NULL.**
-- **gpg-agent does not autostart here** — `gpgconf --launch gpg-agent`.
-  Only SECRET-key operations need it; verification is public-key only,
-  which is why the PGP tests use vendored fixtures and never generate a key.
-- **The `gpg` on PATH is the MSYS build and expects POSIX paths.** `pgp.py`
-  passes RELATIVE paths with an explicit `cwd`; do not "tidy" them into
-  absolutes.
-- **A unique index over nullable columns needs `coalesce`** — two NULLs
-  never conflict, so the duplicate you were preventing gets inserted twice.
-
----
-
-## 8. Running it
-
-```bash
 powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
 ```
 
-```bash
-.venv\Scripts\python -m pytest apps/api/tests packages/ontology/tests -q
+Add `-SkipDocker` when the stack is already up. UI at
+<http://127.0.0.1:8000/ui/>.
+
+**TOTP cannot work on this host** — its clock is unsynchronised and sits in
+2026, and TOTP is a function of absolute time. Do not debug the secret or
+the authenticator. Sign in with:
+
+```
+.venv\Scripts\python scripts\bootstrap.py session --email <you>
 ```
 
-Postgres legs gate on `DATABASE_URL`, evidence on `MINIO_ENDPOINT`, the
-limiter's Lua on `REDIS_URL`. The PGP tests are deliberately **not** gated:
-if gpg vanishes, the only cryptographic-evidence path in the system going
-untested should break the build rather than quietly leave it. **CI fails
-the run if anything skipped.**
+That prints a URL carrying the token in the fragment. Append
+`&case=<uuid>&tab=feeds` to land on a specific pane.
+
+**uvicorn does NOT run with `--reload`.** A new route 404s until restart —
+this has cost real debugging time more than once.
+
+### Useful scripts
+
+| | |
+|---|---|
+| `scripts/seed_feeds_demo.py --case OP-X` | Ingest queue, a folded duplicate, a redacted dead letter, sources |
+| `scripts/seed_ach_demo.py --case OP-X` | An ACH matrix where the obvious hypothesis loses — the method working, not a seeding mistake |
+| `scripts/screenshot_ui.py --email <you>` | Every pane, headless Chrome, through the deep links |
+| `scripts/redact_dead_letters.py` | The outstanding repair. Dry-run by default |
+
+---
+
+## 6. Traps
+
+- **Bash may be unavailable.** Git for Windows was gutted mid-session by
+  antivirus reacting to malware a parallel workstream cloned into this
+  tree; use PowerShell, and `git` may need `C:\Program Files\Git\cmd` on
+  PATH.
+- **gpg must be on PATH** or the PGP tests fail rather than skip — that is
+  deliberate: the only cryptographic-evidence path in the system should
+  break the build if it goes untested. `C:\Program Files\GnuPG\bin`.
+- **Do not run the suite while review agents run theirs.** The e2e cleanup
+  deletes by email pattern and concurrent runs delete each other's
+  fixtures. The failures look real and are not.
+- **A test that purges cannot delete its case or its actor.**
+  `core.purge_tombstone` has foreign keys to both and an append-only
+  trigger — the record of a destruction outlives what it refers to. That
+  is correct rather than inconvenient.
+- **`NOT VALID` does not exempt UPDATEs**, only rows present at ALTER
+  time. This bit `replay()` on pre-0040 dead letters.
+- **`for x in gen()` puts the `next()` outside your try blocks.** Twice
+  now that has dropped every remaining fragment of a batch with no
+  accounting.
+- **`array_length('{}', 1)` is NULL, not 0.** Any `>= 1` check on an array
+  needs `coalesce` or it silently passes on the empty case.
+- **Teardown order follows the foreign keys, not the reading order**, and
+  a test that fails part-way never reaches its inline cleanup — put it in
+  the fixture.
+- **`alembic downgrade base` strands the dev database around 0017** (it
+  has data). Use a scratch database and install `vector`, `pg_trgm`,
+  `pgcrypto`, `btree_gist`, `citext`, `uuid-ossp` first, or the chain dies
+  at 0004 with "type vector does not exist" — which reads as a migration
+  bug and is not one.
+- **A locale can hide a security defect.** The PGP status-injection flaw
+  was live under UTF-8 and inert under this host's cp1252. Where a defence
+  depends on how bytes decode, assert on the BYTES.
+- **Check the claim, not just the code.** The dead-letter redactor's
+  docstring said the verbatim bytes remained in the batch's raw object —
+  the whole reason redacting the fragment is safe rather than lossy. It
+  was false, and it was found by writing the sentence down and then going
+  to look.
+
+---
+
+## 7. The part that is not code
+
+`docs/18` holds **4 blocking legal items, 10 operator determinations, 14
+external confirmations and 3 retrospective items.** A 100% build is still
+one that must not be operated until the four blockers are settled, and
+Phase 8 is the clearest case: it could reach 100% on the completion
+measure and still must not be switched on.
