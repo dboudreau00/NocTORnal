@@ -29,6 +29,7 @@ INSERT INTO node_type (key, display_name, category, colour_token, sort_order) VA
 ('CREDENTIAL_SET', 'Credential set', 'ARTEFACT', 'artefact.data', 110),
 ('DATASET', 'Leaked dataset', 'ARTEFACT', 'artefact.data', 115),
 ('TOOL', 'Tool / kit', 'ARTEFACT', 'artefact.malware', 120),
+('LURE', 'Lure / pretext', 'ARTEFACT', 'artefact.lure', 125),
 ('EVENT', 'Event', 'CONTEXT', 'context.event', 130),
 ('CONVERSATION', 'Conversation', 'CONTEXT', 'context.comms', 135),
 ('CAMPAIGN', 'Campaign', 'CONTEXT', 'context.campaign', 140),
@@ -70,7 +71,8 @@ INSERT INTO edge_type (key, display_name, inverse_name, is_directed, default_sig
 ('EXFILTRATED_FROM', 'was exfiltrated from', 'source of', true, 0, '{DATASET,CREDENTIAL_SET}', '{VICTIM,ORGANISATION}', false),
 ('DEVELOPED', 'developed', 'developed by', true, 0, '{IDENTITY,PERSON,GROUP}', '{MALWARE,TOOL,SERVICE}', false),
 ('USED', 'used', 'used by', true, 0, '{IDENTITY,PERSON,GROUP}', '{MALWARE,TOOL,INFRA,SERVICE}', false),
-('TARGETED', 'targeted', 'was targeted by', true, 0, '{IDENTITY,GROUP,CAMPAIGN}', '{VICTIM,ORGANISATION}', false),
+('TARGETED', 'targeted', 'was targeted by', true, 0, '{IDENTITY,GROUP,CAMPAIGN,LURE,INFRA}', '{VICTIM,ORGANISATION,PERSON}', false),
+('IMPERSONATES', 'impersonates', 'is impersonated by', true, 0, '{IDENTITY,LURE,COMMS_ACCOUNT}', '{ORGANISATION,PERSON,SERVICE}', false),
 ('HOSTED_ON', 'is hosted on', 'hosts', true, 0, '{SERVICE,INFRA,FORUM}', '{INFRA}', false),
 ('PART_OF', 'is part of', 'includes', true, 0, '{INCIDENT,EVENT}', '{CAMPAIGN}', false),
 ('SHARED_INFRA', 'shares infrastructure with', 'shares infrastructure with', false, 0, '{IDENTITY,GROUP,SERVICE}', '{IDENTITY,GROUP,SERVICE}', false),
@@ -138,5 +140,9 @@ INSERT INTO selector_type (key, display_name, is_strong, is_pii, normaliser) VAL
 ('MUTEX', 'Mutex name', false, false, 'exact'),
 ('PDB_PATH', 'PDB path', false, false, 'lower_trim'),
 ('CODESIGN_CN', 'Code-signing subject', false, false, 'trim'),
-('USER_AGENT', 'User agent string', false, false, 'trim')
+('USER_AGENT', 'User agent string', false, false, 'trim'),
+('TLS_SPKI', 'TLS public-key hash', true, false, 'lower_hex'),
+('SIP_URI', 'SIP URI', true, true, 'sip_norm'),
+('EMAIL_MSGID', 'Email Message-ID', false, false, 'msgid_norm'),
+('FAVICON_MMH3', 'Favicon hash', false, false, 'trim')
 ON CONFLICT (key) DO NOTHING;

@@ -145,7 +145,21 @@ class EvidenceService:
         source_url: str | None = None,
         description: str | None = None,
         retain_until: datetime | None = None,
+        is_hostile_markup: bool | None = None,
     ) -> IngestResult:
+        """Store bytes as an exhibit.
+
+        `is_hostile_markup` (migration 0046, docs/19) marks attacker-authored
+        markup — a captured phishing DOM, a HAR, a `.eml`. Left as None it
+        is DERIVED from the media type, so a caller cannot forget it; pass
+        True explicitly to mark something the type does not reveal. Passing
+        False overrides the derivation and is the only way to un-mark a
+        hostile type, which is deliberately the awkward direction.
+        """
+        from noctornal_api.deception import is_hostile_media_type
+
+        if is_hostile_markup is None:
+            is_hostile_markup = is_hostile_media_type(media_type)
         digest = _sha256(data)
         blake = _blake3d(data)
         shahex = digest.hex()
@@ -185,13 +199,14 @@ class EvidenceService:
                            (case_id, title, description, media_type, byte_size,
                             sha256, blake3, storage_key, storage_bucket, is_worm_locked,
                             acquired_at, acquired_by, acquisition_method, source_url,
-                            classification, compartments, retention_until)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s)
+                            classification, compartments, retention_until,
+                            is_hostile_markup)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s)
                        RETURNING id""",
                     (case_id, title, description, media_type, len(data), digest, blake,
                      storage_key, self._s.bucket, acquired, acquired_by,
                      acquisition_method, source_url, classification,
-                     compartments or [], retain.date()),
+                     compartments or [], retain.date(), is_hostile_markup),
                 ).fetchone()[0]
                 self._custody(evidence_id, "ACQUIRED", acquired_by,
                               detail={"sha256": shahex, "bytes": len(data)})

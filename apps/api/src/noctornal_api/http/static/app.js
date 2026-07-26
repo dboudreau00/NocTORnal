@@ -715,6 +715,9 @@ function selectTab(name) {
     loadSamplePolicy();
     selectSamplesSub(currentSub('pane-samples'));
   }
+  if (name === 'deception' && selectDeceptionSub) {
+    selectDeceptionSub(currentSub('pane-deception'));
+  }
 }
 
 /** Which subtab is selected in a pane, so re-entering it reloads THAT one
@@ -2595,16 +2598,27 @@ async function runSearch(event) {
   clear(nodeBox); clear(evBox);
   nodeBox.appendChild(el('p', 'help', 'Searching…'));
   evBox.appendChild(el('p', 'help', 'Searching…'));
-  try {
-    const [nodeHits, evHits] = await Promise.all([
-      api(cpath('/search/nodes?limit=50&q=' + enc)),
-      api(cpath('/search/evidence?q=' + enc)),
-    ]);
-    renderHits(nodeBox, nodeHits, (hit) => { selectNode(hit.id); selectTab('graph'); });
-    renderHits(evBox, evHits, (hit) => focusEvidence(hit.id));
-  } catch (err) {
-    clear(nodeBox); clear(evBox);
-    fail(err);
+  /* CR18: allSettled, so one column's failure does not blank the other.
+     The two calls share the same `search` rate-limit meter and race it, so
+     a 429 on one is an ordinary occurrence — and previously it cleared
+     both boxes and reported a single error, losing results that had
+     already arrived. Same fix the Sources pane got via `section()`. */
+  const [nodeRes, evRes] = await Promise.allSettled([
+    api(cpath('/search/nodes?limit=50&q=' + enc)),
+    api(cpath('/search/evidence?q=' + enc)),
+  ]);
+  if (nodeRes.status === 'fulfilled') {
+    renderHits(nodeBox, nodeRes.value,
+      (hit) => { selectNode(hit.id); selectTab('graph'); });
+  } else {
+    clear(nodeBox);
+    inlineProblem(nodeBox, nodeRes.reason);
+  }
+  if (evRes.status === 'fulfilled') {
+    renderHits(evBox, evRes.value, (hit) => focusEvidence(hit.id));
+  } else {
+    clear(evBox);
+    inlineProblem(evBox, evRes.reason);
   }
 }
 
@@ -2614,7 +2628,12 @@ function renderHits(box, hits, onPick) {
   for (const hit of hits) {
     const b = el('button', 'hit');
     b.type = 'button';
-    b.appendChild(el('span', null, hit.label));
+    /* CR14: the bulk load paths map through `withSafeLabel` at landing
+       (see loadCaseGraph). Search did not — and Search is the primary
+       find-by-name tool, so a label carrying U+202E rendered de-fanged
+       everywhere else and raw here, in the one place an analyst clicks
+       a name to decide which entity they are looking at. */
+    b.appendChild(el('span', null, visibleText(hit.label)));
     const rank = Number(hit.rank);
     b.appendChild(el('span', 'rank', Number.isFinite(rank) ? rank.toFixed(3) : ''));
     b.addEventListener('click', () => onPick(hit));
@@ -2849,7 +2868,9 @@ function projectionSentence() {
 async function loadMissingNode(id) {
   try {
     const n = await api(cpath('/nodes/' + id));
-    state.nodes.push(n);
+    /* CR14: same defence as the bulk paths, at the same boundary. This
+       record feeds the inspector directly. */
+    state.nodes.push(withSafeLabel(n));
     buildEntityFilter();
     renderEntities();
     renderInspector();
@@ -3014,9 +3035,15 @@ function renderSelectors(box, list) {
   for (const s of list) {
     const item = el('div', 'sel-item');
     item.appendChild(el('div', 'label', s.selector_type));
-    item.appendChild(el('div', 'sel-val', s.raw_value));
+    /* CR13: visibleText, not raw. `el()` uses textContent, which stops
+       EXECUTION but not visual reordering — a U+202E inside a Jabber
+       address renders as a different address than the bytes the system
+       correlated on, and two distinct selectors can render identically.
+       These values are attacker-chosen forum identifiers. */
+    item.appendChild(el('div', 'sel-val', visibleText(s.raw_value)));
     if (s.norm_value && s.norm_value !== s.raw_value) {
-      item.appendChild(el('div', 'mono small muted', 'normalised ' + s.norm_value));
+      item.appendChild(el('div', 'mono small muted',
+        'normalised ' + visibleText(s.norm_value)));
     }
     item.appendChild(el('div', 'ev-meta',
       'observed ' + s.observation_cnt + ' time(s)'));
@@ -3869,7 +3896,7 @@ function renderContactBlock(block) {
     const kind = e.platform_key || e.selector_type || 'unresolved';
     row.appendChild(el('span', 'pill', kind));
 
-    row.appendChild(el('code', 'mono grow', e.observed_value));
+    row.appendChild(el('code', 'mono grow', visibleText(e.observed_value)));
 
     const score = el('span', 'pill', e.score.toFixed(2));
     row.appendChild(score);
@@ -3877,7 +3904,7 @@ function renderContactBlock(block) {
     if (e.durable_value) {
       const d = el('div', 'entry-sub');
       d.appendChild(el('span', 'label', 'indexed as'));
-      d.appendChild(el('code', 'mono', e.durable_value));
+      d.appendChild(el('code', 'mono', visibleText(e.durable_value)));
       row.appendChild(d);
     }
     /* The reason is not decoration. docs/03: a bare 0.87 will be either
@@ -6106,11 +6133,472 @@ async function releaseReport() {
   }
 }
 
+
+/* --- deception: phishing captures, BEC email, vishing calls ------------
+ *
+ * docs/19. The pane's whole design is one rule applied three times:
+ * SHOW WHAT THE ATTACKER CHOSE, MARKED AS SUCH, NEXT TO WHAT THE
+ * INFRASTRUCTURE PROVED.
+ *
+ * Concretely, and each of these is a real failure mode rather than a
+ * stylistic preference:
+ *
+ *  - Every URL is defanged and rendered as text, never as an anchor. A
+ *    live href is one mis-click from fetching attacker infrastructure
+ *    from this machine, which is a drive-by surface AND tells the actor
+ *    the investigation exists.
+ *  - No message body is rendered. An HTML email loads remote images; the
+ *    tracking pixel fires from this organisation's IP.
+ *  - The Received chain is drawn recipient-first with the trust boundary
+ *    marked, and everything above it is greyed and labelled "claimed".
+ *  - A screenshot's <img> src is built from an /api/v1/ path and never
+ *    from a value in the response -- enforced by a test, because the UI
+ *    invariant suite did not police `.src` until this pane needed one.
+ */
+
+function dcpUrl(value) {
+  /* Defanged, monospaced, and deliberately NOT an anchor. */
+  const span = el('span', 'mono defanged', visibleText(value || '—'));
+  span.title = 'Defanged and non-clickable on purpose. Fetching this from '
+    + 'an analyst workstation would announce the investigation.';
+  return span;
+}
+
+async function loadCaptures() {
+  if (!state.caseId) return;
+  let data;
+  try {
+    data = await api(cpath('/deception/captures'));
+  } catch (err) {
+    inlineProblem($('dcp-cap-counts'), err);
+    return;
+  }
+  const rows = data.captures || [];
+  $('dcp-cap-counts').textContent = rows.length + ' capture'
+    + (rows.length === 1 ? '' : 's');
+  renderList('dcp-cap-list', 'dcp-cap-empty', rows, captureRow);
+}
+
+function captureRow(c) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-glyph', '⚑'));
+  head.appendChild(dcpUrl(c.requested_url_defanged));
+  if (c.is_live === false) head.appendChild(el('span', 'chip', 'dead'));
+  if (c.is_live === true) head.appendChild(el('span', 'chip bad', 'live'));
+  if (c.submitted_input) {
+    const chip = el('span', 'chip bad', 'input submitted');
+    chip.title = 'Credentials or other input were entered into this page '
+      + 'under a recorded authority (legal item L5).';
+    head.appendChild(chip);
+  }
+  head.appendChild(labelChips(c));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('method', c.capture_method));
+  facts.appendChild(fact('status', c.http_status));
+  facts.appendChild(fact('captured',
+    (c.captured_at || '').slice(0, 16).replace('T', ' ')));
+  if (c.tls_spki_sha256) {
+    const f = fact('TLS key', c.tls_spki_sha256.slice(0, 12) + '…');
+    f.title = 'The certificate public-key hash. Phishing infrastructure '
+      + 'rotates domains constantly and keys rarely, so this outlives the '
+      + 'domain and is the durable identifier for pivoting.';
+    facts.appendChild(f);
+  }
+  if (!c.egress_profile_id
+      && !['ANALYST_UPLOAD', 'VICTIM_SUPPLIED', 'PASSIVE_FEED']
+        .includes(c.capture_method)) {
+    facts.appendChild(fact('egress', 'undeclared', 'muted'));
+  }
+  card.appendChild(facts);
+
+  if (c.final_url_defanged
+      && c.final_url_defanged !== c.requested_url_defanged) {
+    const p = el('p', 'why');
+    p.appendChild(el('span', 'fact-k', 'redirected to'));
+    p.appendChild(dcpUrl(c.final_url_defanged));
+    card.appendChild(p);
+  }
+  const open = el('button', 'btn subtle', 'Open');
+  open.type = 'button';
+  open.addEventListener('click', () => openCapture(c.id));
+  card.appendChild(open);
+  return card;
+}
+
+async function openCapture(id) {
+  const box = $('dcp-cap-detail');
+  const body = $('dcp-cap-body');
+  clear(body);
+  show(box, true);
+  body.appendChild(el('p', 'muted', 'Loading…'));
+  let c;
+  try {
+    c = await api(cpath('/deception/captures/' + encodeURIComponent(id)));
+  } catch (err) {
+    clear(body);
+    body.appendChild(el('p', 'msg bad', refusalText(err,
+      'Reading a capture needs evidence.read.')));
+    return;
+  }
+  clear(body);
+  $('dcp-cap-title').textContent = 'Capture ' + id.slice(0, 8);
+
+  /* The screenshot. The src is an API path built HERE from the capture
+     id; nothing out of the response body reaches it. The endpoint
+     re-derives the content type from the magic bytes and refuses anything
+     that is not a raster image, so a DOM mislabelled image/png cannot
+     arrive here. */
+  if (c.screenshot_evidence_id) {
+    const shot = el('img', 'capture-shot');
+    shot.src = '/api/v1/cases/' + encodeURIComponent(state.caseId)
+      + '/deception/captures/' + encodeURIComponent(id) + '/screenshot';
+    shot.alt = 'Screenshot of the captured page';
+    shot.loading = 'lazy';
+    shot.referrerPolicy = 'no-referrer';
+    body.appendChild(shot);
+  } else {
+    body.appendChild(el('p', 'muted', 'No screenshot on this capture.'));
+  }
+
+  if (c.dom_evidence_id) {
+    const note = el('p', 'why');
+    note.textContent = 'The page DOM is held as evidence and is not shown. '
+      + 'It is attacker-authored code, so it is download-only from the '
+      + 'separate sample origin (invariant 10).';
+    body.appendChild(note);
+  }
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('method', c.capture_method));
+  facts.appendChild(fact('tool', c.capture_tool));
+  facts.appendChild(fact('status', c.http_status));
+  facts.appendChild(fact('title', visibleText(c.page_title || '—')));
+  body.appendChild(facts);
+
+  if (c.tls_subject || c.tls_spki_sha256) {
+    const tls = el('div', 'card sub-card');
+    tls.appendChild(el('h3', 'h-xs', 'TLS certificate'));
+    const tf = el('div', 'facts');
+    tf.appendChild(fact('subject', visibleText(c.tls_subject || '—')));
+    tf.appendChild(fact('issuer', visibleText(c.tls_issuer || '—')));
+    tf.appendChild(fact('not after', (c.tls_not_after || '').slice(0, 10)));
+    tls.appendChild(tf);
+    if (c.tls_spki_sha256) {
+      const k = el('p', 'mono small', c.tls_spki_sha256);
+      k.title = 'SPKI SHA-256 -- pivot on this, not the domain.';
+      tls.appendChild(k);
+    }
+    body.appendChild(tls);
+  }
+
+  const hops = c.hops || [];
+  if (hops.length) {
+    const chain = el('div', 'card sub-card');
+    chain.appendChild(el('h3', 'h-xs',
+      'Redirect chain (' + hops.length + ' hop'
+      + (hops.length === 1 ? '' : 's') + ')'));
+    for (const h of hops) {
+      const row = el('p', 'hop-row');
+      row.appendChild(el('span', 'fact-k', String(h.seq)));
+      row.appendChild(dcpUrl(h.url_defanged));
+      if (h.http_status) {
+        row.appendChild(el('span', 'chip', String(h.http_status)));
+      }
+      if (h.resolved_ip) {
+        row.appendChild(el('span', 'mono small', h.resolved_ip));
+      }
+      if (h.hop_kind) row.appendChild(el('span', 'chip subtle', h.hop_kind));
+      chain.appendChild(row);
+    }
+    body.appendChild(chain);
+  }
+
+  if (c.submitted_input) {
+    const l5 = el('p', 'msg bad');
+    l5.textContent = 'Input was submitted to this page. Authority: '
+      + (c.submission_authority_ref || '(not recorded)');
+    body.appendChild(l5);
+  }
+}
+
+async function loadDeceptionEmails() {
+  if (!state.caseId) return;
+  let data;
+  try {
+    data = await api(cpath('/deception/emails')
+      + ($('dcp-divergent').checked ? '?divergent_only=true' : ''));
+  } catch (err) {
+    inlineProblem($('dcp-eml-counts'), err);
+    return;
+  }
+  const rows = data.emails || [];
+  $('dcp-eml-counts').textContent = rows.length + ' message'
+    + (rows.length === 1 ? '' : 's');
+  renderList('dcp-eml-list', 'dcp-eml-empty', rows, emailRow);
+}
+
+function emailRow(m) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-glyph', '✉'));
+  head.appendChild(el('span', 'row-title',
+    visibleText(m.subject || '(no subject)')));
+  if (m.from_replyto_divergent) {
+    const chip = el('span', 'chip bad', 'From != Reply-To');
+    chip.title = 'A reply to this message goes somewhere other than where '
+      + 'it claims to be from. The classic BEC tell.';
+    head.appendChild(chip);
+  }
+  if (m.reply_to_is_freemail) {
+    head.appendChild(el('span', 'chip bad', 'free-mail reply'));
+  }
+  head.appendChild(labelChips(m));
+  card.appendChild(head);
+
+  /* Display name and address are two facts, never concatenated.
+     "Jane Okafor, CFO <attacker@evil.example>" read as one string is
+     exactly how a display name gets mistaken for an identity. */
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('display name',
+    visibleText(m.header_from_display || '—')));
+  facts.appendChild(fact('from', visibleText(m.header_from || '—')));
+  if (m.header_reply_to) {
+    facts.appendChild(fact('reply-to', visibleText(m.header_reply_to)));
+  }
+  card.appendChild(facts);
+
+  const auth = el('div', 'facts');
+  auth.appendChild(authChip('SPF', m.spf_result));
+  auth.appendChild(authChip('DKIM', m.dkim_result));
+  auth.appendChild(authChip('DMARC', m.dmarc_result));
+  if (m.dkim_domain) {
+    const d = fact('authenticated', m.dkim_domain);
+    d.title = 'DKIM PASSED for this domain -- the only cryptographically '
+      + 'authenticated field in an email.';
+    auth.appendChild(d);
+  }
+  card.appendChild(auth);
+
+  if ((m.parse_gaps || []).length) {
+    const gaps = el('p', 'why gaps',
+      m.parse_gaps.length + ' parse gap'
+      + (m.parse_gaps.length === 1 ? '' : 's'));
+    gaps.title = m.parse_gaps.map((g) => g.step + ': ' + g.reason).join('\n');
+    card.appendChild(gaps);
+  }
+  const open = el('button', 'btn subtle', 'Open');
+  open.type = 'button';
+  open.addEventListener('click', () => openDeceptionEmail(m.id));
+  card.appendChild(open);
+  return card;
+}
+
+function authChip(name, result) {
+  const wrap = el('span', 'fact');
+  wrap.appendChild(el('span', 'fact-k', name));
+  if (!result) {
+    /* Invariant 12 on screen: "nobody checked" and "it failed" must not
+       look the same. */
+    const chip = el('span', 'chip subtle', 'not checked');
+    chip.title = 'No Authentication-Results header said anything about '
+      + name + '. That is an absence, not a failure.';
+    wrap.appendChild(chip);
+    return wrap;
+  }
+  wrap.appendChild(el('span',
+    'chip ' + (result === 'PASS' ? 'good' : 'bad'), result));
+  return wrap;
+}
+
+async function openDeceptionEmail(id) {
+  const box = $('dcp-eml-detail');
+  const body = $('dcp-eml-body');
+  clear(body);
+  show(box, true);
+  body.appendChild(el('p', 'muted', 'Loading…'));
+  let m;
+  try {
+    m = await api(cpath('/deception/emails/' + encodeURIComponent(id)));
+  } catch (err) {
+    clear(body);
+    body.appendChild(el('p', 'msg bad', refusalText(err,
+      'Reading a message needs evidence.read.')));
+    return;
+  }
+  clear(body);
+  $('dcp-eml-title').textContent = visibleText(m.subject || 'Message');
+
+  const hops = m.hops || [];
+  if (hops.length) {
+    const chain = el('div', 'card sub-card');
+    chain.appendChild(el('h3', 'h-xs', 'Received chain'));
+    const note = el('p', 'help');
+    note.textContent = 'Read this from the top. Each MTA prepends its own '
+      + 'line, so hop 0 is the receiving organisation’s own server. '
+      + 'Everything above the boundary was written by machines outside '
+      + 'this organisation and can say anything the sender wants.';
+    chain.appendChild(note);
+    for (const h of hops) {
+      const row = el('p',
+        'hop-row' + (h.is_attacker_writable ? ' claimed' : ''));
+      row.appendChild(el('span', 'fact-k', String(h.seq)));
+      row.appendChild(el('span', 'mono', visibleText(h.from_host || '?')));
+      if (h.from_ip) row.appendChild(el('span', 'mono small', h.from_ip));
+      row.appendChild(el('span', 'muted small', 'by'));
+      row.appendChild(el('span', 'mono', visibleText(h.by_host || '?')));
+      if (h.is_trusted_boundary) {
+        const chip = el('span', 'chip good', 'trust boundary');
+        chip.title = 'The last hop written by infrastructure this '
+          + 'organisation controls. Its observation of who connected is '
+          + 'evidence; everything above it is a claim.';
+        row.appendChild(chip);
+      }
+      if (h.is_attacker_writable) {
+        row.appendChild(el('span', 'chip bad', 'claimed'));
+      }
+      chain.appendChild(row);
+    }
+    body.appendChild(chain);
+  }
+
+  if (m.has_html_body) {
+    const warn = el('p', 'why');
+    warn.textContent = 'This message has an HTML body. It is held in the '
+      + 'exhibit and is never rendered: doing so would load the sender’s '
+      + 'remote images and fire their tracking pixel from this network.';
+    body.appendChild(warn);
+  }
+  if (m.body_text) {
+    const pre = el('pre', 'body-text mono');
+    pre.textContent = visibleText(m.body_text).slice(0, 20000);
+    body.appendChild(pre);
+  }
+
+  const urls = m.extracted_urls_defanged || [];
+  if (urls.length) {
+    const urlBox = el('div', 'card sub-card');
+    urlBox.appendChild(el('h3', 'h-xs',
+      'URLs in the body (' + urls.length + ')'));
+    for (const u of urls) {
+      const p = el('p', 'hop-row');
+      p.appendChild(dcpUrl(u));
+      urlBox.appendChild(p);
+    }
+    body.appendChild(urlBox);
+  }
+
+  const atts = m.attachments || [];
+  if (atts.length) {
+    const attBox = el('div', 'card sub-card');
+    attBox.appendChild(el('h3', 'h-xs',
+      'Attachments (' + atts.length + ')'));
+    for (const a of atts) {
+      const p = el('p', 'hop-row');
+      /* Same bidi treatment as the lab pane: substituted, not isolated. */
+      const name = el('bdi', 'mono', visibleText(a.filename || '(unnamed)'));
+      name.dir = 'ltr';
+      p.appendChild(name);
+      p.appendChild(el('span', 'muted small', a.media_type || '?'));
+      p.appendChild(el('span', 'muted small', humanBytes(a.byte_size)));
+      p.appendChild(el('span', 'chip subtle',
+        a.sample_id ? 'in the lab' : 'metadata only'));
+      attBox.appendChild(p);
+    }
+    body.appendChild(attBox);
+  }
+}
+
+async function loadDeceptionCalls() {
+  if (!state.caseId) return;
+  let data;
+  try {
+    data = await api(cpath('/deception/calls'));
+  } catch (err) {
+    inlineProblem($('dcp-call-counts'), err);
+    return;
+  }
+  const rows = data.calls || [];
+  $('dcp-call-counts').textContent = rows.length + ' call'
+    + (rows.length === 1 ? '' : 's');
+  renderList('dcp-call-list', 'dcp-call-empty', rows, callRow);
+}
+
+function callRow(c) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-glyph', '☎'));
+  head.appendChild(el('span', 'row-title',
+    (c.started_at || '').slice(0, 16).replace('T', ' ')));
+  head.appendChild(el('span', 'chip subtle', c.record_source));
+  if (c.recording_evidence_id) {
+    const chip = el('span', 'chip bad', 'recording held');
+    chip.title = 'Intercepted content, retained under a recorded lawful '
+      + 'basis (legal item L4): ' + (c.recording_lawful_basis || '');
+    head.appendChild(chip);
+  }
+  head.appendChild(labelChips(c));
+  card.appendChild(head);
+
+  /* THE layout decision in this pane. The two blocks are visually
+     separate and separately labelled, because a single "caller" column
+     is how a spoofed number ends up attributed to a real subscriber. */
+  const shown = el('div', 'card sub-card presented-block');
+  shown.appendChild(el('h3', 'h-xs', 'What the victim saw'));
+  const sf = el('div', 'facts');
+  sf.appendChild(fact('number',
+    c.presented.number_e164 || c.presented.number));
+  sf.appendChild(fact('name', visibleText(c.presented.name || '—')));
+  const warn = el('span', 'chip bad', 'attacker-chosen');
+  warn.title = 'Caller ID and CNAM are set by the calling party. This is '
+    + 'the attack, not a detail -- it never becomes a selector.';
+  sf.appendChild(warn);
+  shown.appendChild(sf);
+  card.appendChild(shown);
+
+  const real = el('div', 'card sub-card durable-block');
+  real.appendChild(el('h3', 'h-xs', 'What the network vouched for'));
+  const rf = el('div', 'facts');
+  rf.appendChild(fact('trunk', c.durable.originating_trunk));
+  rf.appendChild(fact('P-Asserted-Identity', c.durable.p_asserted_identity));
+  rf.appendChild(fact('carrier', c.durable.carrier_name));
+  const att = c.durable.stir_shaken_attestation;
+  const attWrap = el('span', 'fact');
+  attWrap.appendChild(el('span', 'fact-k', 'STIR/SHAKEN'));
+  if (!att) {
+    attWrap.appendChild(el('span', 'chip subtle', 'none'));
+  } else if (c.durable.stir_shaken_verified) {
+    attWrap.appendChild(el('span', 'chip good', att + ' verified'));
+  } else {
+    const chip = el('span', 'chip bad', att + ' unverified');
+    chip.title = 'An attestation letter nobody checked is a claim. It '
+      + 'promotes nothing.';
+    attWrap.appendChild(chip);
+  }
+  rf.appendChild(attWrap);
+  real.appendChild(rf);
+  card.appendChild(real);
+
+  const cands = c.selector_candidates || [];
+  if (cands.length) {
+    const p = el('p', 'why');
+    p.textContent = cands.length + ' selector candidate'
+      + (cands.length === 1 ? '' : 's') + ' -- durable fields only';
+    p.title = cands.map((x) => x.selector_type + ' ' + x.value
+      + ' (' + x.strength + '): ' + x.why).join('\n');
+    card.appendChild(p);
+  }
+  return card;
+}
+
 /* --- wiring ------------------------------------------------------------ */
 
 let selectFeedsSub = null;
 let selectGovSub = null;
 let selectSamplesSub = null;
+let selectDeceptionSub = null;
 
 function initOpsPanes() {
   selectFeedsSub = initSubtabs('pane-feeds', (name) => {
@@ -6126,6 +6614,21 @@ function initOpsPanes() {
   });
   selectSamplesSub = initSubtabs('pane-samples', (name) => {
     if (name === 'queue') loadSamples();
+  });
+  selectDeceptionSub = initSubtabs('pane-deception', (name) => {
+    if (name === 'captures') loadCaptures();
+    if (name === 'emails') loadDeceptionEmails();
+    if (name === 'calls') loadDeceptionCalls();
+  });
+  $('dcp-cap-refresh').addEventListener('click', loadCaptures);
+  $('dcp-eml-refresh').addEventListener('click', loadDeceptionEmails);
+  $('dcp-divergent').addEventListener('change', loadDeceptionEmails);
+  $('dcp-call-refresh').addEventListener('click', loadDeceptionCalls);
+  $('dcp-cap-close').addEventListener('click', () => {
+    show($('dcp-cap-detail'), false);
+  });
+  $('dcp-eml-close').addEventListener('click', () => {
+    show($('dcp-eml-detail'), false);
   });
   $('smp-refresh').addEventListener('click', loadSamples);
   $('smp-state').addEventListener('change', loadSamples);

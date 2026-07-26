@@ -69,6 +69,14 @@ NODE_TYPES: tuple[NodeType, ...] = (
     NodeType("DATASET", "Leaked dataset", "ARTEFACT", "artefact.data", 115),
     NodeType("TOOL", "Tool / kit", "ARTEFACT", "artefact.malware", 120),
     # CONTEXT layer
+    # The pretext itself (docs/19): the fake O365 login, the invoice-
+    # redirect story, the "IT support" script. Distinct from TOOL, which
+    # is the kit that GENERATES it, and from CAMPAIGN, which is time-
+    # bounded and actor-scoped. Lures outlive both and recur across
+    # actors — "the same pretext hit six victims via three senders" is
+    # the question this platform exists to answer.
+    NodeType("LURE", "Lure / pretext", "ARTEFACT", "artefact.lure", 125),
+
     NodeType("EVENT", "Event", "CONTEXT", "context.event", 130),
     NodeType("CONVERSATION", "Conversation", "CONTEXT", "context.comms", 135),
     NodeType("CAMPAIGN", "Campaign", "CONTEXT", "context.campaign", 140),
@@ -159,8 +167,25 @@ EDGE_TYPES: tuple[EdgeType, ...] = (
     EdgeType("USED", "used", "used by", True, 0,
              ("IDENTITY", "PERSON", "GROUP"),
              ("MALWARE", "TOOL", "INFRA", "SERVICE"), False),
+    # LURE and INFRA widen the source set rather than minting a near-
+    # duplicate DELIVERED_TO: "this pretext was aimed at that victim" and
+    # "this actor aimed at that victim" are the same relation with
+    # different subjects (docs/19 §3.4).
     EdgeType("TARGETED", "targeted", "was targeted by", True, 0,
-             ("IDENTITY", "GROUP", "CAMPAIGN"), ("VICTIM", "ORGANISATION"), False),
+             ("IDENTITY", "GROUP", "CAMPAIGN", "LURE", "INFRA"),
+             ("VICTIM", "ORGANISATION", "PERSON"), False),
+    # A FALSE identity claim — the opposite of ALIAS_OF/SAME_AS, which
+    # both assert the subjects ARE the same. Nothing existing could carry
+    # "this page claims to be Microsoft".
+    #
+    # is_social_tie=False and default_sign=0 are load-bearing, not
+    # defaults. If impersonation counted as affiliation, the impersonated
+    # brand would become the most central node in every phishing case in
+    # the system and every centrality ranking would be garbage. Invariant
+    # 4's concern arriving via a new edge.
+    EdgeType("IMPERSONATES", "impersonates", "is impersonated by", True, 0,
+             ("IDENTITY", "LURE", "COMMS_ACCOUNT"),
+             ("ORGANISATION", "PERSON", "SERVICE"), False),
     EdgeType("HOSTED_ON", "is hosted on", "hosts", True, 0,
              ("SERVICE", "INFRA", "FORUM"), ("INFRA",), False),
     EdgeType("PART_OF", "is part of", "includes", True, 0,
@@ -269,4 +294,19 @@ SELECTOR_TYPES: tuple[SelectorType, ...] = (
     # would be the cert fingerprint, which this selector is not.
     SelectorType("CODESIGN_CN", "Code-signing subject", False, False, "trim"),
     SelectorType("USER_AGENT", "User agent string", False, False, "trim"),
+    # Social-engineering evidence (docs/19). The theme is invariant 9:
+    # index what the infrastructure proves, not what the victim was shown.
+    #
+    # The certificate public-key hash survives domain rotation, which is
+    # exactly what phishing infrastructure does — so it is the durable
+    # web identifier in the way the domain is not.
+    SelectorType("TLS_SPKI", "TLS public-key hash", True, False, "lower_hex"),
+    SelectorType("SIP_URI", "SIP URI", True, True, "sip_norm"),
+    # Attacker-generated for attacker-sent mail, so it identifies the KIT,
+    # not the sender. A pivot, never an identity — weak on purpose.
+    SelectorType("EMAIL_MSGID", "Email Message-ID", False, False, "msgid_norm"),
+    # The standard phishing-infra clustering pivot (Shodan-style favicon
+    # hash). Weak: a collision on a stock framework favicon would merge
+    # half the internet. Clustering signal, never auto-merge.
+    SelectorType("FAVICON_MMH3", "Favicon hash", False, False, "trim"),
 )

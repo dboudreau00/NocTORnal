@@ -62,6 +62,43 @@ def test_the_console_never_assigns_html_from_data():
         + "\n".join(f"  app.js:{i}: {line}" for i, line in offenders))
 
 
+#: `.src =` was NOT in `_INNER_HTML_WRITE`, and until the phishing pane
+#: existed nothing in the console set one. That gap was found by an
+#: adversarial pass in 2026-07-26: a single `img.src = row.something`
+#: passed every UI test in this file while pointing the browser at an
+#: attacker-chosen URL — which fetches it, from the analyst's machine,
+#: announcing the investigation (docs/19 §5) and handing over a referer.
+#:
+#: `.src` cannot simply be banned: the capture pane has to show a
+#: screenshot. So it is CONSTRAINED instead — every assignment must be a
+#: same-origin API path built from `/api/v1/`, never a value out of a
+#: response.
+_SRC_WRITE = re.compile(r"\.src\s*=\s*(.+)$")
+_SAFE_SRC = re.compile(r"^[`'\"]/api/v1/")
+
+
+def test_an_image_source_is_always_a_same_origin_api_path():
+    """The console may load a screenshot. It may not load a URL that came
+    out of a response body.
+
+    A phishing capture's `final_url` is attacker-chosen by construction.
+    Assigning it to an `img.src` would make the analyst's browser fetch
+    attacker infrastructure — a drive-by surface, a referer leak, and a
+    notification to the actor that they are under investigation.
+    """
+    offenders = []
+    for i, line in enumerate(_js().splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            continue
+        match = _SRC_WRITE.search(stripped)
+        if match and not _SAFE_SRC.match(match.group(1).strip()):
+            offenders.append((i, stripped))
+    assert not offenders, (
+        "an image source was built from something other than an /api/v1/ "
+        "path:\n" + "\n".join(f"  app.js:{i}: {line}" for i, line in offenders))
+
+
 def test_no_iframe_and_therefore_no_sandbox_question():
     """Invariant 10: "No sandbox attribute combines `allow-scripts` with
     `allow-same-origin`."

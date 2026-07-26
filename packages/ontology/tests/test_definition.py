@@ -4,9 +4,10 @@ from noctornal_ontology.definition import EDGE_TYPES, NODE_TYPES, SELECTOR_TYPES
 
 
 def test_counts_match_seed():
-    assert len(NODE_TYPES) == 26
-    assert len(EDGE_TYPES) == 49
-    assert len(SELECTOR_TYPES) == 49
+    # +LURE (docs/19), +IMPERSONATES, +4 social-engineering selectors.
+    assert len(NODE_TYPES) == 27
+    assert len(EDGE_TYPES) == 50
+    assert len(SELECTOR_TYPES) == 53
 
 
 def test_unique_keys():

@@ -274,17 +274,55 @@ class TestMxidNorm:
 
 
 class TestTelegramIdNorm:
+    """CR3 (2026-07-26): the Bot-API encoding is arithmetic, not textual.
+
+    `chat_id = -(10**12 + channel_id)`. The old implementation dropped the
+    characters "100" from the front, which inverts that only for a
+    ten-digit channel id — and the single test here covered exactly that
+    case, so a wrong function stayed green.
+    """
+
+    # NOT a class attribute: a plain function stored on a class becomes a
+    # bound method, so `self.N(x)` would pass `self` as the argument.
+    N = staticmethod(NORMALISERS["telegram_id_norm"])
+
     def test_user_id_digits(self):
-        assert NORMALISERS["telegram_id_norm"](" 777000 ") == "777000"
+        assert self.N(" 777000 ") == "u:777000"
 
-    def test_bot_api_supergroup_prefix_stripped(self):
-        # same channel via bot export and MTProto scraper must merge
-        assert NORMALISERS["telegram_id_norm"]("-1001234567890") == "1234567890"
+    def test_bot_api_supergroup_decoded_arithmetically(self):
+        assert self.N("-1001234567890") == "c:1234567890"
 
-    def test_basic_group_keeps_namespace(self):
-        # a chat id must never share a norm_value with an unrelated user id
-        assert NORMALISERS["telegram_id_norm"]("-987654321") == "-987654321"
-        assert NORMALISERS["telegram_id_norm"]("-987654321") != NORMALISERS["telegram_id_norm"]("987654321")
+    def test_a_nine_digit_channel_does_not_gain_a_leading_zero(self):
+        """The old string-strip left "0123456789", matching nothing."""
+        assert self.N("-1000123456789") == "c:123456789"
+
+    def test_an_eleven_digit_channel_decodes_at_all(self):
+        """Common since the 64-bit migration. "-1012345678901" does not
+        begin "100" after the sign, so the old strip never fired and the
+        two observations of one channel never met."""
+        assert self.N("-1012345678901") == "c:12345678901"
+
+    def test_a_channel_and_a_user_with_the_same_number_stay_apart(self):
+        """TELEGRAM_ID is is_strong, so a collision here is an auto-merge
+        of a channel and a person onto one actor."""
+        assert self.N("-1001234567890") != self.N("1234567890")
+
+    def test_basic_group_keeps_its_own_namespace(self):
+        assert self.N("-987654321") == "g:987654321"
+        assert self.N("-987654321") != self.N("987654321")
+        assert self.N("-987654321") != self.N("-1000987654321")
+
+    def test_an_explicit_type_prefix_is_honoured(self):
+        """A scraper that KNOWS it recorded an MTProto channel says so, and
+        then meets the Bot-API observation of the same channel."""
+        assert self.N("c:1234567890") == self.N("-1001234567890")
+        assert self.N("C: 1234567890") == "c:1234567890"
+        assert self.N("u:777000") == self.N("777000")
+
+    def test_empty_input_is_empty_not_a_crash(self):
+        assert self.N("") == ""
+        assert self.N("   ") == ""
+        assert self.N("not a number") == ""
 
 
 class TestTlshNorm:
