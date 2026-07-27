@@ -35,8 +35,12 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "apps", "api", "src"))
 
+from _env import load_env_local  # noqa: E402
 from noctornal_api.db import connect  # noqa: E402
 from noctornal_api.ingest import IngestService  # noqa: E402
+from noctornal_api.rawstore import RawBatchStorage, RawStoreError  # noqa: E402
+
+load_env_local()
 
 FEED_NAME = "demo partner feed"
 STEALER_FEED = "demo stealer feed"
@@ -146,7 +150,28 @@ def main() -> int:
         return 0
     clean(conn, owner)
 
-    svc = IngestService(conn)
+    # WITH raw storage, exactly as the API builds it (routers/ingest.py
+    # `_with_raw`). `IngestService(conn)` alone cannot `accept()` anything:
+    # docs/12 requires the raw payload to be persisted BEFORE parsing, so a
+    # service with no store refuses rather than acknowledging bytes it is
+    # about to drop.
+    #
+    # R24 (2026-07-26): this script passed no store, so it raised
+    # IngestError on its first accept() and seeded nothing at all. The
+    # ingest triage queue and the dead-letter pane were therefore empty on
+    # every machine, which reads as "that feature has no data yet" rather
+    # than "the seeder never ran".
+    try:
+        storage = RawBatchStorage()
+    except RawStoreError as exc:
+        print(f"raw ingest storage is not configured, so no batch can be "
+              f"accepted:\n  {exc}\n"
+              f"Start the compose stack and make sure MINIO_ENDPOINT / "
+              f"MINIO_ACCESS_KEY / MINIO_SECRET_KEY are set.", file=sys.stderr)
+        return 2
+    storage.ensure_bucket()
+
+    svc = IngestService(conn, storage)
     partner = svc.authenticate(svc.issue_key(
         name=FEED_NAME, owner_user_id=owner,
         declared_category="RANSOM_LEAK_POST").secret)
