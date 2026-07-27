@@ -90,8 +90,8 @@ HTTP API 15%, analyst UI 25%, adversarial review 15%).
   deliberately database-gated. That is a correct result.)
 - **`release/` is the packaged Alpha release** — README leading with the
   legal status, an analyst MANUAL, INSTALL, and one-shot installers for
-  Windows and Linux/macOS. `scripts/assemble_release.ps1` copies it out to
-  a standalone folder; `release/` is the source of truth.
+  Windows and Linux/macOS. `scripts/package_release.ps1` exports the whole
+  tree to a standalone folder; `release/` is the source of truth.
 
   ⚠ **The count spans TWO roots.** `apps/api/tests` (1079) and
   `packages/ontology` (99). Run both:

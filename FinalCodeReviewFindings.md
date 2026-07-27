@@ -252,7 +252,9 @@ fixes are one to five lines.
 
 ### R1 — The assembled release folder is not standalone · BLOCKER (if handed over alone)
 
-> **✅ FIXED (2026-07-26).** `scripts/package_release.ps1` replaces it — exports the whole tree via `git archive` and verifies the result. `assemble_release.ps1` now states in red that its output cannot install anything.
+> **✅ FIXED (2026-07-26).** `scripts/package_release.ps1` replaces it — exports the whole tree via `git archive` and verifies the result.
+>
+> **DELETED (2026-07-26, same day).** The first fix left `assemble_release.ps1` in place with a loud warning, on the grounds that it could still cut a docs-only bundle. That was the wrong call twice over. Anyone who already has the source already has `release/`, so the bundle has no audience — and both scripts defaulted to the **same destination path**, so the superseded one would silently overwrite a good package with six files that cannot install anything. A warning does not help when the name is the one that sounds correct to run. The script is gone; the reasoning survives here.
 
 `scripts/assemble_release.ps1` copies **only the six files in `release/`**.
 The installers then locate the application by probing for `alembic.ini` in and

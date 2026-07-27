@@ -5,9 +5,13 @@
 
 .DESCRIPTION
     Produces a STANDALONE tree (and optionally a .zip) that a recipient can
-    install from. Replaces scripts/assemble_release.ps1, which copied only
+    install from. Replaced scripts/assemble_release.ps1, which copied only
     the six files in release/ and produced something that could not install
-    anything (release finding R1).
+    anything (release finding R1). That script has since been DELETED, not
+    merely deprecated: it defaulted to this same destination path, so the
+    superseded one could silently overwrite a good package with six files
+    that install nothing -- and its name is the one that sounds correct to
+    run. This is now the only packaging script.
 
     ## Why `git archive` and never a zip of the working tree (R2)
 
