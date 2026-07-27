@@ -317,9 +317,75 @@ So extraction fails if the destination path exceeds roughly 170
 characters. A Downloads or Desktop folder is nowhere near that — the
 first extraction attempt here failed only because the scratchpad used for
 testing has a 178-character base path, which is not a real-world
-location. Extracting to `%TEMP%
-zt` (37 characters) succeeded with all
-294 files.
+location. Extracting to a 37-character path under `%TEMP%` succeeded with
+all files.
+
+---
+
+## 6b) The run that seeded it, and why section 5 was not enough
+
+Everything above verifies **the install**: Python detection, the virtual
+environment, dependencies, secrets, migrations, API boot, login. On
+2026-07-26 the package was installed again and then *used* — the demo
+seeders were run, which section 5 never did — and four defects fell out
+immediately. All four are in `scripts/`. None is in the product, and the
+installer itself needed no change: it ran start to finish untouched,
+migrating a genuinely empty database to head `0052`.
+
+That gap is the lesson. "Does it install and start" and "does it install,
+start, and have anything in it" are different questions, and only the
+first was being asked. A reviewer opening this for the first time asks
+the second.
+
+| | Defect | What the operator saw |
+|---|---|---|
+| R22 | Five scripts never loaded `.env.local`; the R9 fix had landed in `bootstrap.py` alone, and a second, subtly different copy was later written into `seed_deception_demo.py` | `RuntimeError: DATABASE_URL is not set`, with the value plainly present in `.env.local` |
+| R23 | `seed_deception_demo` labelled the BEC exhibit `CLEAR` inside an `AMBER` case, so `core.enforce_tlp_floor()` refused it | The Deception pane had a capture and a call but never its e-mail — on every machine, since the script was written |
+| — | The handler hiding R23 printed *"evidence store unavailable"* for any exception and **exited 0** | An hour spent inspecting MinIO, which was working perfectly |
+| R24 | `seed_feeds_demo` built `IngestService(conn)` with no raw store, so `docs/12`'s raw-before-parse rule refused its first `accept()` | Ingest triage and dead letters empty everywhere — reads as "no data yet", not "the seeder never ran" |
+
+Two things had kept all of this invisible. Every shell used for earlier
+testing already had `DATABASE_URL` exported, so the missing loader never
+fired; and a seed script that fails while printing a reassuring message
+and returning 0 is indistinguishable from one that worked.
+
+A fifth defect surfaced in the packager itself while rebuilding: `bash`
+resolved to `C:\Windows\System32\bash.exe`, the WSL shim, which fails
+without a distribution installed — and because the script had no
+`Invoke-Capture`, its stderr raised `NativeCommandError` under
+`EAP=Stop` and killed the run before any zip was written. An absent
+interpreter now skips that check with a warning instead.
+
+### The guard
+
+`apps/api/tests/test_script_invariants.py`. The suite had 1269 tests and
+not one looked at `scripts/`, because running those scripts needs a
+database, an object store and a seeded case. These parse the source
+instead: a script importing `noctornal_api` must import and **call**
+`load_env_local`, and must not define a second copy of it. Static
+checking is weaker than execution, and it is the check that would
+actually have fired. It failed on its first run against `bootstrap.py`,
+which was reaching the loader through a local alias.
+
+### What the seeded instance contains
+
+2 cases · 21 nodes · 28 edges · 49 assertions · 7 lab samples ·
+3 hypotheses · 1 capture + 1 e-mail + 1 call · 4 ingest batches ·
+3 dead letters (all redacted, none leaking the seeded credentials).
+
+Confirmed through the API rather than by counting rows: `/cases`,
+`/samples` and all three `/cases/{id}/deception/*` endpoints return 200
+with content.
+
+### One thing to be careful about
+
+A folder that has been **installed into** is not a folder to upload. The
+install writes `.venv` and `.env.local` into the package directory, and
+`.env.local` holds the real TOTP KEK and ingest pepper. `git archive`
+cannot ship either, which is the whole argument in section 1 — but that
+protection applies to a freshly packaged tree, not to one somebody has
+since run `install.ps1` in. Package to a **different** destination, or
+re-package before uploading.
 
 ---
 
