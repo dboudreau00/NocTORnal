@@ -33,6 +33,8 @@ from typing import NoReturn
 from urllib.parse import quote
 from uuid import UUID
 
+from _env import env_local_path, load_env_local
+
 # Runnable from a plain checkout: prefer whatever is installed (pip install
 # -e apps/api packages/ontology) and fall back to the in-repo sources, so a
 # missing editable install is not the first thing a new operator hits.
@@ -71,54 +73,11 @@ def _fail(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def _env_local_path() -> Path:
-    return Path(__file__).resolve().parent.parent / ".env.local"
-
-
-def _load_env_local() -> None:
-    """Load `.env.local` into the environment, without overriding it.
-
-    ## R9 (2026-07-26) — why this exists, and why its absence was dangerous
-
-    `bootstrap.py` required DATABASE_URL and NOCTORNAL_TOTP_KEK from the
-    environment and read no env file, while `launch.ps1` and `open-ui.ps1`
-    both self-load `.env.local`. The pattern was already in the repo; this
-    script was the one that lacked it. So every documented "run this in a
-    second terminal" command — the TOTP bypass in INSTALL.md, QUICKSTART's
-    `create-user` / `demo-case` / `demo-network`, and `launch.ps1`'s own
-    on-screen banner — failed in a fresh shell.
-
-    The dangerous half was the remedy the failure printed. The KEK error
-    said "generate 32 random bytes" and never mentioned that an installed
-    system already has THE key in `.env.local`. An operator who followed it
-    during `create-user` sealed the new account's TOTP secret under a
-    throwaway key the API does not hold — and every later login failed as
-    `bad_totp`, indistinguishable from a mistyped code. `reenrol-totp` in
-    the same poisoned shell repeated the damage. The advice actively broke
-    the thing it was meant to fix.
-
-    Existing environment variables WIN: an operator who deliberately
-    exported a DATABASE_URL pointing at staging must not have it silently
-    replaced by a file.
-    """
-    try:
-        # utf-8-SIG: strips a BOM if one is present, and is identical to
-        # utf-8 when it is not. install.ps1 no longer writes one, but a
-        # file edited in Notepad or written by an older install will have
-        # it -- and a BOM on the FIRST line silently mis-names whatever
-        # key is first, which is the kind of failure that presents as
-        # "the KEK is not set" with the KEK plainly sitting in the file.
-        text = _env_local_path().read_text(encoding="utf-8-sig")
-    except OSError:
-        return
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+# `.env.local` loading lives in scripts/_env.py -- see R22 there for why
+# it is a shared module rather than a function copied per script. Called
+# by its real name, not via a local alias: apps/api/tests/
+# test_script_invariants.py verifies that every DB-touching script here
+# actually CALLS it, and an alias makes that property unreadable.
 
 
 def _utf8_output() -> None:
@@ -158,7 +117,7 @@ def _require_kek() -> None:
     # and generating a NEW one here poisons every account this command
     # touches. Say so FIRST; only offer generation when there is genuinely
     # nothing to copy.
-    existing = _env_local_path()
+    existing = env_local_path()
     if existing.exists():
         _fail(
             f"{KEK_ENV} is not set in this shell, but this installation "
@@ -1304,7 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
     _utf8_output()
     # R9: before anything reads the environment. Every documented "run this
     # in a second terminal" command failed in a fresh shell without it.
-    _load_env_local()
+    load_env_local()
     args = _build_parser().parse_args(argv)
     try:
         args.func(args)
