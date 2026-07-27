@@ -10,9 +10,9 @@ did not reconcile), ruff clean. Nothing pushed (no remote configured).
 
 **`release/` is the packaged Alpha release** — a README leading with the
 legal status, an analyst manual, install instructions and one-shot
-installers for Windows and Linux/macOS. `scripts/assemble_release.ps1`
-copies it out to a standalone folder; `release/` is the source of truth
-and the copy is disposable.
+installers for Windows and Linux/macOS. `scripts/package_release.ps1`
+exports the WHOLE tree to a standalone folder via `git archive`;
+`release/` is the source of truth and the copy is disposable.
 
 > **EVERY PHASE HAS NOW HAD AN ADVERSARIAL PASS.** Phases 5 and 8 were the
 > last two, reviewed 2026-07-26: **27 findings survived refutation, nine
