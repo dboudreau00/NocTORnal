@@ -32,22 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "ontol
 os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 
-def _load_env_local() -> None:
-    path = Path(__file__).resolve().parent.parent / ".env.local"
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except OSError:
-        return
-    for line in text.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key and key not in os.environ:
-                os.environ[key] = value.strip().strip('"').strip("'")
+from _env import load_env_local  # noqa: E402
 
-
-_load_env_local()
+load_env_local()
 
 BEC_EML = b"""\
 Received: from mx-edge.latticework-holdings.example (mx-edge.latticework-holdings.example [10.4.0.9]) by mail.latticework-holdings.example with ESMTPS id 7f2a; Fri, 17 Jul 2026 08:14:31 +0000
@@ -90,14 +77,28 @@ def main() -> int:
     from noctornal_api.evidence import EvidenceService, EvidenceStorage
 
     conn = connect()
+    # The case's own label is fetched because the exhibit must carry AT
+    # LEAST it. `core.enforce_tlp_floor()` fires on core.evidence and
+    # refuses anything below the case floor -- an element is protected by
+    # both its own label and its case's, and a CLEAR exhibit inside an
+    # AMBER case would be a hole in that.
+    #
+    # R23 (2026-07-26): this script asked for a hardcoded CLEAR, so the
+    # BEC exhibit was refused on EVERY machine -- demo-case and
+    # demo-network both create their cases at AMBER. The Deception pane
+    # therefore showed a capture and a call but never the e-mail, which is
+    # the row carrying the Received-chain and DKIM reasoning the pane
+    # exists to demonstrate. Reading the floor rather than guessing it
+    # also makes --case work against a RED case.
     row = conn.execute(
-        'SELECT id, owner_user_id FROM core."case" WHERE code = %s',
+        'SELECT id, owner_user_id, classification FROM core."case" '
+        'WHERE code = %s',
         (args.case,)).fetchone()
     if row is None:
         print(f"no case {args.case!r}; run bootstrap.py demo-network first",
               file=sys.stderr)
         return 1
-    case_id, owner = row
+    case_id, owner, floor = row
 
     svc = DeceptionService(conn)
     if svc.captures(case_id, clearance="RED"):
@@ -158,13 +159,18 @@ def main() -> int:
             data=BEC_EML,
             acquired_by=owner,
             acquisition_method="MANUAL_UPLOAD",
-            classification="CLEAR",
+            classification=floor,
             is_hostile_markup=True,
         )
         evidence_id = exhibit.evidence_id
     except Exception as exc:                                  # noqa: BLE001
-        print(f"evidence store unavailable ({type(exc).__name__}); "
-              f"skipping the BEC message", file=sys.stderr)
+        # PRINT THE ACTUAL ERROR. This handler used to report "evidence
+        # store unavailable" for anything at all, and the thing it was
+        # actually catching was a Postgres policy refusal -- so it sent
+        # whoever ran it to look at MinIO, which was working perfectly.
+        # A diagnostic that names the wrong subsystem is worse than none.
+        print(f"could not store the BEC exhibit, skipping the e-mail row:\n"
+              f"  {type(exc).__name__}: {exc}", file=sys.stderr)
         evidence_id = None
 
     if evidence_id is not None:

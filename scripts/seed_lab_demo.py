@@ -34,6 +34,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / "api" / "src"))
 
+from _env import load_env_local  # noqa: E402
+
+load_env_local()
+
 
 def _entropy_bytes(magic: bytes, size: int, alphabet: int) -> bytes:
     """`alphabet` distinct byte values gives roughly log2(alphabet) bits of
