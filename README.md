@@ -2,10 +2,6 @@
 
 # NocTORnal
 
-<img width="544" height="290" alt="Screenshot 2026-07-26 174309" src="https://github.com/user-attachments/assets/0a33d3e3-a547-436a-8c07-b6484482f132" />
-
-
-
 **HUMINT and social network analysis for cybercrime investigation.**
 
 Build the graph of actors, personas, groups and the trust between them —

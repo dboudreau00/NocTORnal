@@ -29,7 +29,10 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "apps", "api", "src"))
 
+from _env import load_env_local  # noqa: E402
 from noctornal_api.db import connect  # noqa: E402
+
+load_env_local()
 
 #: (statement, {evidence-index: stance})
 #: Stance scale: -2 strongly inconsistent .. +2 strongly consistent.
