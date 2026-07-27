@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
 <http://127.0.0.1:8000/ui/>. Full detail in `QUICKSTART.md`.
 
 Sign in with `.venv\Scripts\python scripts\bootstrap.py session --email
-jeffreyturpine@gmail.com` — prints a URL that lands in the UI already
+YourEmail@mail.com` — prints a URL that lands in the UI already
 authenticated. `bootstrap.py` also has `create-user`, `demo-case`,
 `list-users`, `unlock`, `reenrol-totp`, `totp-code`, `totp-diagnose`.
 
