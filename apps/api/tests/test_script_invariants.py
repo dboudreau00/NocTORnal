@@ -44,6 +44,23 @@ def _scripts() -> list[Path]:
     return found
 
 
+def _db_scripts() -> list[Path]:
+    """Only the scripts that touch the API package.
+
+    Selected HERE, at collection, rather than by `pytest.skip` inside the
+    test. CI fails the build on any skip at all -- the gate exists so that
+    a dead Postgres leg cannot present as a green run with 100+ skips --
+    and a permanent, deliberate skip would both break that job and teach
+    everyone to read "N skipped" as normal. A parametrisation that never
+    generates the uninteresting case needs no skip.
+    """
+    found = [p for p in _scripts()
+             if any(m.startswith("noctornal_api")
+                    for m in _imported_modules(_tree(p)))]
+    assert found, "no script imports noctornal_api -- that cannot be right"
+    return found
+
+
 def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
@@ -70,7 +87,7 @@ def _calls_named(tree: ast.Module, name: str) -> bool:
                for n in ast.walk(tree))
 
 
-@pytest.mark.parametrize("path", _scripts(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _db_scripts(), ids=lambda p: p.name)
 def test_db_touching_scripts_load_env_local(path: Path) -> None:
     """A script that connects to the database must first read `.env.local`.
 
@@ -79,9 +96,6 @@ def test_db_touching_scripts_load_env_local(path: Path) -> None:
     confusing kind, naming a variable the operator can plainly see is set.
     """
     tree = _tree(path)
-    if not any(m.startswith("noctornal_api") for m in _imported_modules(tree)):
-        pytest.skip("does not use the API package, so needs no environment")
-
     assert "_env" in _imported_modules(tree), (
         f"{path.name} imports noctornal_api but not scripts/_env.py. Add:\n"
         f"    from _env import load_env_local  # noqa: E402\n"
