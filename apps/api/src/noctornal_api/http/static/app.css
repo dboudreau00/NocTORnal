@@ -996,6 +996,27 @@ select.select { appearance: none; padding-right: 24px; }
 .banner-legal strong { color: var(--alert); }
 .banner-legal .facts { margin-top: 8px; }
 
+/* The proof-of-concept disclaimer. Reuses .banner-legal so it reads as the
+   same class of statement as the sample-policy and retention notices —
+   this is a constraint on use, not a decorative badge, and giving it its
+   own louder styling would have made the genuinely blocking legal notices
+   look quieter by comparison. */
+.poc-notice { margin: 4px 0 16px; }
+.poc-notice code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--surface-3); padding: 1px 4px; border-radius: 3px;
+}
+
+/* The permanent appbar chip. Amber, not red: red is already carrying
+   exposure-PUBLIC and TLP:RED elsewhere in this UI, and a second red that
+   means something different would dilute both. `cursor: help` because the
+   whole message lives in the title attribute. */
+.poc-chip {
+  color: var(--alert); border-color: var(--alert);
+  background: rgba(212, 160, 60, 0.10);
+  font-weight: 600; letter-spacing: 0.04em; cursor: help;
+}
+
 /* Hashes get pasted into other tools, so they are selectable, monospaced
    and never wrapped mid-string. */
 .hash-line {
