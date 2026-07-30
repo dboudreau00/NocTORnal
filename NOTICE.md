@@ -5,7 +5,7 @@ version 3 or later** (AGPL-3.0-or-later). The full text is in
 [`LICENSE`](LICENSE).
 
     NocTORnal — HUMINT / social network analysis for cybercrime investigation
-    Copyright (C) 2026 Jeffrey Turpine
+    Copyright (C) 2026 sYYn
 
     This program is free software: you can redistribute it and/or modify it
     under the terms of the GNU Affero General Public License as published by
