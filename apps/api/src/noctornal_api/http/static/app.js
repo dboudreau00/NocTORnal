@@ -2820,6 +2820,8 @@ function renderInspector() {
     show($('insp-merge-sec'), false);
   }
 
+  show($('insp-actions'), true);
+
   const seq = ++state.inspSeq;
   const base = cpath((sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id);
   loadInto($('insp-assertions'), seq,
@@ -2941,6 +2943,109 @@ function renderTags(box, list, sel) {
   });
   row.appendChild(make);
   box.appendChild(row);
+}
+
+/* ── correcting and retiring the selected element ──────────────────────
+ *
+ * Both endpoints landed 2026-07-30 and neither had a caller. The verbs
+ * (`graph.node.update`, `graph.node.delete`, `graph.edge.update`,
+ * `graph.edge.delete`) were seeded in 0017 and granted in 0021, and
+ * nothing had ever checked them.
+ *
+ * TWO THINGS HERE ARE EASY TO GET WRONG AND ARE DELIBERATE:
+ *
+ * `attrs` is NEVER sent. The endpoint treats it as a WHOLE-OBJECT
+ * REPLACEMENT (`COALESCE(%s::jsonb, attrs)`), so sending a partial object
+ * silently deletes every attribute not in it. Omitting the field entirely
+ * is the only safe thing a label-correction dialogue can do, and editing
+ * attributes needs a real form that starts from the current object.
+ *
+ * The DELETEs REQUIRE a JSON body `{reason}`. A bodyless
+ * `fetch(..., {method:'DELETE'})` returns 422 — the most likely
+ * integration break in this pair, and the reason is not optional because
+ * retiring a hub dissolves every tie it carries and a reviewer six months
+ * later cannot reconstruct why.
+ */
+function wireElementActions() {
+  const edit = $('btn-edit-element');
+  const retire = $('btn-retire-element');
+  if (!edit || !retire) return;
+
+  edit.addEventListener('click', async () => {
+    const sel = state.selection;
+    if (!sel) return;
+    let body;
+    if (sel.kind === 'node') {
+      const n = nodeById(sel.id);
+      const label = window.prompt('Corrected label', n ? n.label : '');
+      if (label === null) return;
+      if (!label.trim()) {
+        banner('Not corrected', 'A label cannot be blank.');
+        return;
+      }
+      body = { label: label.trim() };
+    } else {
+      const e = edgeById(sel.id);
+      const conf = window.prompt(
+        'Confidence — LOW, MODERATE or HIGH', e ? e.confidence : 'LOW');
+      if (conf === null) return;
+      const up = conf.trim().toUpperCase();
+      if (['LOW', 'MODERATE', 'HIGH'].indexOf(up) < 0) {
+        banner('Not corrected', 'Confidence must be LOW, MODERATE or HIGH.');
+        return;
+      }
+      body = { confidence: up };
+    }
+    /* The rationale is the assertion, and the assertion is what makes this
+       a correction rather than an overwrite: the original claim survives,
+       so the sequence of assertions is the history of what this element
+       has been called (invariant 1). */
+    const why = window.prompt('Why? This is recorded as an assertion.');
+    if (why === null) return;
+    body.assertion = { basis: 'DIRECT_OBSERVATION', confidence: 'MODERATE',
+                       rationale: why || null };
+    try {
+      await api(cpath('/graph/' + (sel.kind === 'node' ? 'nodes/' : 'edges/') + sel.id),
+                { method: 'PATCH', json: body });
+      await loadCaseGraph();
+      refreshSociogram();
+      renderInspector();
+    } catch (err) { fail(err); }
+  });
+
+  retire.addEventListener('click', async () => {
+    const sel = state.selection;
+    if (!sel) return;
+    const what = sel.kind === 'node'
+      ? 'Retiring this entity also retires EVERY tie it carries.\n\n'
+      : '';
+    const reason = window.prompt(
+      what + 'Why is this being retired? (required)\n\n' +
+      'Nothing is destroyed — the row, its assertions and its evidence ' +
+      'links remain, and an as-of query into the past still shows it.');
+    if (reason === null) return;
+    if (!reason.trim()) {
+      banner('Not retired', 'A reason is required, exactly as it is for a ' +
+                            'retraction.');
+      return;
+    }
+    try {
+      const out = await api(
+        cpath('/graph/' + (sel.kind === 'node' ? 'nodes/' : 'edges/') + sel.id),
+        { method: 'DELETE', json: { reason: reason.trim() } });
+      /* Report the collateral. Retiring one actor can take six ties with
+         it, and the analyst who clicked once should not have to count the
+         difference on the canvas to find that out (invariant 12). */
+      if (out && out.edges_retired) {
+        banner('Retired', 'That entity carried ' + out.edges_retired +
+               ' tie(s); they were retired with it. Nothing was destroyed.');
+      }
+      state.selection = null;
+      await loadCaseGraph();
+      refreshSociogram();
+      renderInspector();
+    } catch (err) { fail(err); }
+  });
 }
 
 /** The case's tag vocabulary, including the global taxonomy. */
@@ -4261,6 +4366,7 @@ function wire() {
   initInbox();
   initComms();
   initOpsPanes();
+  wireElementActions();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
