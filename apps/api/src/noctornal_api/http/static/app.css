@@ -1020,6 +1020,23 @@ select.select { appearance: none; padding-right: 24px; }
   padding-top: 10px; border-top: 1px solid var(--surface-3);
 }
 .insp-linker select { flex: 1; min-width: 0; }
+.insp-linker { flex-wrap: wrap; }
+
+/* Tag chips. Neutral by design — a tag is an analyst's overlay, not a
+   finding, and colouring it like a TLP marking or a confidence would lend
+   it authority it has not earned. */
+.tag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-chip { display: inline-flex; align-items: center; gap: 5px; }
+.tag-scope {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary); opacity: 0.8;
+}
+.tag-x {
+  border: 0; background: none; cursor: pointer; padding: 0 1px;
+  color: var(--text-secondary); font-size: 13px; line-height: 1;
+}
+.tag-x:hover { color: var(--danger); }
+.tag-x:disabled { opacity: 0.4; cursor: default; }
 
 .poc-chip {
   color: var(--alert); border-color: var(--alert);
