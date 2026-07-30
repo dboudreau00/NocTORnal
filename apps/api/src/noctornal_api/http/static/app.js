@@ -705,6 +705,9 @@ async function openCase(caseId) {
     tlp.textContent = 'TLP:' + rec.classification;
     show(tlp, true);
     show($('btn-cases'), true);
+    show($('btn-case-edit'), true);
+    show($('btn-case-share'), true);
+    show($('btn-case-status'), true);
     show($('hdr-asof'), true);
     show($('view-cases'), false);
     show($('view-workspace'), true);
@@ -2966,6 +2969,82 @@ function renderTags(box, list, sel) {
  * retiring a hub dissolves every tie it carries and a reviewer six months
  * later cannot reconstruct why.
  */
+/* Case lifecycle: correct, share, close.
+ *
+ * `CaseService.update_metadata` and `assign_user_checked` have existed
+ * since Phase 1 with no router, and `POST /status` had a router that
+ * nothing called. So a case could be created from the browser and then
+ * never corrected, shared or closed from it — only through
+ * `scripts/bootstrap.py`, which is not a thing an analyst has.
+ *
+ * CLASSIFICATION IS NOT EDITABLE HERE, and the endpoint refuses to lower
+ * it at all. Raising is safe (every element is read at the stricter of its
+ * own label and the case's, so the case going RED covers everything
+ * inside it); lowering declassifies in one statement everything that was
+ * protected only by the case label, and is not undone by raising it back.
+ * It needs its own verb with step-up, so it is absent rather than
+ * half-offered.
+ */
+function wireCaseActions() {
+  const edit = $('btn-case-edit');
+  const share = $('btn-case-share');
+  const status = $('btn-case-status');
+  if (!edit || !share || !status) return;
+
+  edit.addEventListener('click', async () => {
+    const rec = state.caseRec;
+    if (!rec) return;
+    const title = window.prompt('Case title', rec.title);
+    if (title === null) return;
+    if (!title.trim()) {
+      banner('Not saved', 'A case title cannot be blank.');
+      return;
+    }
+    try {
+      await api('/cases/' + state.caseId,
+                { method: 'PATCH', json: { title: title.trim() } });
+      await openCase(state.caseId);
+    } catch (err) { fail(err); }
+  });
+
+  share.addEventListener('click', async () => {
+    const uid = window.prompt(
+      'User id to assign (iam.app_user.id)\n\n' +
+      'The assignment is CHECKED: an analyst whose clearance or ' +
+      'compartments do not reach this case is refused rather than ' +
+      'written and then silently filtered out of every read.');
+    if (uid === null || !uid.trim()) return;
+    const role = window.prompt(
+      'Case role — ANALYST, REVIEWER, CONTRIBUTOR, READ_ONLY or LIAISON',
+      'ANALYST');
+    if (role === null || !role.trim()) return;
+    try {
+      await api('/cases/' + state.caseId + '/users', {
+        method: 'POST',
+        json: { user_id: uid.trim(), role_key: role.trim().toUpperCase() },
+      });
+      banner('Assigned', role.trim().toUpperCase() + ' granted on this case.');
+    } catch (err) { fail(err); }
+  });
+
+  status.addEventListener('click', async () => {
+    const rec = state.caseRec;
+    if (!rec) return;
+    const next = window.prompt(
+      'Current status: ' + rec.status + '\n\n' +
+      'New status — DRAFT, ACTIVE, DORMANT, CLOSED, ARCHIVED or PURGED.\n' +
+      'The transition table decides what is legal from here.',
+      rec.status === 'ACTIVE' ? 'CLOSED' : 'ACTIVE');
+    if (next === null || !next.trim()) return;
+    try {
+      await api('/cases/' + state.caseId + '/status',
+                { method: 'POST', json: { status: next.trim().toUpperCase() } });
+      await openCase(state.caseId);
+      banner('Status changed', 'This case is now ' + next.trim().toUpperCase() + '.');
+    } catch (err) { fail(err); }
+  });
+}
+
 /* The audit chain, verified on demand.
  *
  * Deliberately a button rather than a load-on-open: this recomputes a
@@ -4437,6 +4516,7 @@ function wire() {
   initOpsPanes();
   wireElementActions();
   wireAuditVerify();
+  wireCaseActions();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
