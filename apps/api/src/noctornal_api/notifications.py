@@ -553,7 +553,29 @@ class NotificationService:
         in-app row would be a queue entry for something that has already
         happened."""
         prefs = self.preferences(n.recipient_id)
-        now = datetime.now(timezone.utc)
+        # THE DATABASE'S CLOCK, not this process's.
+        #
+        # `deliver_after` written here is compared in `transports.due()`
+        # against Postgres `now()`. Taking the base time from
+        # `datetime.now()` puts TWO CLOCKS IN ONE COMPARISON, and they do
+        # not have to agree: the API and the database routinely run on
+        # different hosts, and on a developer machine Docker Desktop's VM
+        # drifts against Windows as a matter of course.
+        #
+        # Measured on this machine 2026-07-30: the host was 3.79 seconds
+        # AHEAD of the container. Every freshly queued non-urgent delivery
+        # was therefore ~4 seconds in the future by the database's
+        # reckoning, so a drain that ran immediately found nothing due --
+        # which is what six notification tests do, and why they failed
+        # everywhere while the code, the schema and the environment were
+        # all innocent.
+        #
+        # In production the same skew silently delays every notification by
+        # the skew; with the sign reversed it releases them early, which
+        # matters because the quiet-hours and digest arithmetic below is
+        # built on this value. One clock, and it has to be the one the
+        # reader uses.
+        now = self._c.execute("SELECT now()").fetchone()[0]
         for channel, pref in prefs.items():
             if channel == IN_APP:
                 self._insert_delivery(n.id, IN_APP, SENT, now, sent_at=now)

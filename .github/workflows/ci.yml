@@ -206,6 +206,35 @@ jobs:
       - name: Tests
         run: pytest apps/api/tests packages/ontology/tests -q
 
+      # docs/09 Phase 0 asks for "a chain verification job" and there was
+      # none -- the audit chain was written by a trigger and never once
+      # recomputed, which makes tamper-evidence a claim rather than a
+      # control. This is that job.
+      #
+      # It runs AFTER the suite so it verifies a chain with real traffic in
+      # it: every audited action the tests performed is in this table.
+      # Verifying an empty chain would pass and prove nothing, so the step
+      # fails if nothing was checked.
+      - name: Audit chain verifies
+        run: |
+          python - <<'PY'
+          import sys
+          from noctornal_api.audit_verify import verify_chain
+          from noctornal_api.db import connect
+
+          report = verify_chain(connect())
+          print(f"checked {report.checked} events, "
+                f"seq {report.first_seq}..{report.last_seq}")
+          if report.checked == 0:
+              print("::error::No audit events to verify. The suite ran "
+                    "without writing any, or the chain was truncated.")
+              sys.exit(1)
+          for b in report.breaks:
+              print(f"::error::audit chain {b.kind} break at seq {b.seq} "
+                    f"({b.action} at {b.occurred_at})")
+          sys.exit(1 if report.breaks else 0)
+          PY
+
       # The suite must not quietly become unit-only because a service died:
       # every _pg test skips without DATABASE_URL, so a broken Postgres
       # service would show as a green run with 100+ skips.
