@@ -190,7 +190,7 @@ class GraphWriteService:
                 cur = self._c.execute(
                     """UPDATE core.node
                           SET label = COALESCE(%s, label),
-                              attrs = COALESCE(%s, attrs),
+                              attrs = COALESCE(%s::jsonb, attrs),
                               updated_at = now()
                         WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
                     (label, Json(attrs) if attrs is not None else None,
@@ -243,7 +243,7 @@ class GraphWriteService:
                           SET weight = COALESCE(%s, weight),
                               confidence = COALESCE(
                                   %s::core.analytic_confidence, confidence),
-                              attrs = COALESCE(%s, attrs),
+                              attrs = COALESCE(%s::jsonb, attrs),
                               updated_at = now()
                         WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
                     (weight, confidence,
