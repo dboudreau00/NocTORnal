@@ -709,6 +709,12 @@ async function openCase(caseId) {
     show($('view-cases'), false);
     show($('view-workspace'), true);
     buildPickers();
+    /* The tag vocabulary, once per case rather than per selection. Not
+       awaited: the inspector's tag chips come from the node's own tags and
+       render without it; only the "apply an existing tag" picker depends
+       on this, and blocking the whole case open on a curation read would
+       be the wrong trade. */
+    loadCaseTags();
     renderInspector();
     /* Presets and the saved layout must land before the first projection
        fetch: the layout seeds node positions, and re-seeding after the fact
@@ -2822,9 +2828,130 @@ function renderInspector() {
     renderAssertions);
   loadInto($('insp-evidence'), seq, () => api(base + '/evidence'),
     renderLinkedEvidence);
+  /* Tags are node-only for now: `core.tag_assignment` can carry an edge or
+     an evidence target too, but the router exposes node assignment alone,
+     so the section is hidden rather than rendered empty against an edge —
+     an empty panel reads as "no tags", not "not supported here". */
+  const tagSec = $('insp-tags-sec');
+  if (tagSec) tagSec.hidden = sel.kind !== 'node';
+
   if (sel.kind === 'node') {
     loadInto($('insp-selectors'), seq, () => api(base + '/selectors'),
       renderSelectors);
+    loadInto($('insp-tags'), seq,
+      () => api(cpath('/curation/nodes/' + sel.id + '/tags')),
+      (box, list) => renderTags(box, list, sel));
+  }
+}
+
+/* Tags on the selected node, plus the controls to add and remove them.
+ *
+ * `state.caseTags` is the case's vocabulary, fetched once per case render
+ * so the picker does not re-query on every selection change. A tag the
+ * node already carries is excluded — assigning twice is idempotent at the
+ * endpoint, but offering it invites a click that appears to do nothing.
+ */
+function renderTags(box, list, sel) {
+  if (!list.length) box.appendChild(el('p', 'empty', 'No tags.'));
+
+  const chips = el('div', 'tag-chips');
+  for (const t of list) {
+    const chip = el('span', 'chip tag-chip');
+    /* namespace:name, because a bare "broker" means different things in
+       different namespaces and the schema keys uniqueness on the pair. */
+    chip.appendChild(el('span', null, t.namespace + ':' + t.name));
+    if (t.scope === 'global') {
+      /* A global tag is shared vocabulary (MITRE ATT&CK and the like).
+         Marked so nobody assumes an unfamiliar one was coined on this
+         case. */
+      chip.appendChild(el('span', 'tag-scope', 'global'));
+    }
+    const drop = el('button', 'tag-x', '×');
+    drop.type = 'button';
+    drop.title = 'Remove this tag from the entity';
+    drop.setAttribute('aria-label', 'Remove tag ' + t.namespace + ':' + t.name);
+    drop.addEventListener('click', async () => {
+      drop.disabled = true;
+      try {
+        await api(cpath('/curation/tags/' + t.id + '/nodes/' + sel.id),
+                  { method: 'DELETE' });
+        renderInspector();
+      } catch (err) { fail(err); drop.disabled = false; }
+    });
+    chip.appendChild(drop);
+    chips.appendChild(chip);
+  }
+  if (list.length) box.appendChild(chips);
+
+  const already = new Set(list.map((t) => t.id));
+  const free = (state.caseTags || []).filter((t) => !already.has(t.id));
+  const row = el('div', 'insp-linker');
+  if (free.length) {
+    const pick = el('select', 'input small');
+    pick.setAttribute('aria-label', 'Tag to apply');
+    pick.appendChild(el('option', null, 'Apply a tag…'));
+    for (const t of free) {
+      const o = el('option', null,
+                   t.namespace + ':' + t.name +
+                   (t.scope === 'global' ? ' (global)' : ''));
+      o.value = t.id;
+      pick.appendChild(o);
+    }
+    const go = el('button', 'btn small', 'Tag');
+    go.type = 'button';
+    go.addEventListener('click', async () => {
+      if (!pick.value) return;
+      go.disabled = true;
+      try {
+        await api(cpath('/curation/tags/' + pick.value + '/nodes'),
+                  { method: 'POST', json: { node_id: sel.id } });
+        renderInspector();
+      } catch (err) { fail(err); go.disabled = false; }
+    });
+    row.appendChild(pick);
+    row.appendChild(go);
+  }
+
+  const make = el('button', 'btn ghost small', 'New tag…');
+  make.type = 'button';
+  make.addEventListener('click', async () => {
+    /* `prompt` rather than a modal: this is one short string, the console
+       has no modal primitive, and inventing one for a tag name would be
+       more surface than the feature is worth. */
+    const raw = window.prompt(
+      'New tag as namespace:name (e.g. role:broker)');
+    if (!raw) return;
+    const at = raw.indexOf(':');
+    if (at < 1 || at === raw.length - 1) {
+      banner('Tag not created',
+             'Use namespace:name — both halves are required, because the ' +
+             'same name means different things in different namespaces.');
+      return;
+    }
+    try {
+      const made = await api(cpath('/curation/tags'), {
+        method: 'POST',
+        json: { namespace: raw.slice(0, at).trim(), name: raw.slice(at + 1).trim() },
+      });
+      await loadCaseTags();
+      await api(cpath('/curation/tags/' + made.id + '/nodes'),
+                { method: 'POST', json: { node_id: sel.id } });
+      renderInspector();
+    } catch (err) { fail(err); }
+  });
+  row.appendChild(make);
+  box.appendChild(row);
+}
+
+/** The case's tag vocabulary, including the global taxonomy. */
+async function loadCaseTags() {
+  try {
+    state.caseTags = await api(cpath('/curation/tags'));
+  } catch (err) {
+    /* A missing vocabulary must not blank the inspector: the chips above
+       come from the node's own tags and render fine without it. Only the
+       picker degrades, and "New tag…" still works. */
+    state.caseTags = [];
   }
 }
 
