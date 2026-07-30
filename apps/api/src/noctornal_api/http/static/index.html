@@ -1796,6 +1796,21 @@
           <p id="insp-label" class="insp-label"></p>
           <p id="insp-sub" class="mono small muted"></p>
 
+          <!-- Correct or retire the selected element. Both were seeded as
+               permissions in 0017 and granted in 0021, and nothing checked
+               either until 2026-07-30 because the service had no update or
+               delete at all — a mistyped label was permanent.
+
+               Retire is NOT delete: it sets `deleted_at`, which every read
+               path already filters on, and leaves the row, its assertions
+               and its evidence links intact. The button says "Retire" for
+               that reason; "Delete" would promise destruction the code
+               deliberately does not do. -->
+          <div id="insp-actions" class="insp-actions" hidden>
+            <button id="btn-edit-element" type="button" class="btn ghost small">Correct…</button>
+            <button id="btn-retire-element" type="button" class="btn ghost small danger-text">Retire…</button>
+          </div>
+
           <section id="insp-metrics-sec" class="insp-sec">
             <div class="insp-sec-head">
               <h3 class="h-sm">Metrics</h3>

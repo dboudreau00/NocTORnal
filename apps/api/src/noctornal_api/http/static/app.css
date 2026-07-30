@@ -1025,6 +1025,13 @@ select.select { appearance: none; padding-right: 24px; }
 /* Tag chips. Neutral by design — a tag is an analyst's overlay, not a
    finding, and colouring it like a TLP marking or a confidence would lend
    it authority it has not earned. */
+/* Correct / Retire, under the selected element's label. Ghost buttons on
+   purpose: these are consequential but not the primary action in the
+   inspector, and a filled button here would compete with the analysis. */
+.insp-actions { display: flex; gap: 6px; margin: 8px 0 4px; }
+.danger-text { color: var(--danger); }
+.danger-text:hover { border-color: var(--danger); }
+
 .tag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag-chip { display: inline-flex; align-items: center; gap: 5px; }
 .tag-scope {
