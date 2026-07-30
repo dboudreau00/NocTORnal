@@ -1225,6 +1225,35 @@
             <button type="button" class="subtab" role="tab"
                     aria-selected="false" tabindex="-1" data-subtab="glass"
                     aria-controls="gov-glass">Break-glass</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="audit"
+                    aria-controls="gov-audit">Audit chain</button>
+          </div>
+
+          <!-- AUDIT CHAIN. docs/09 Phase 0 asks for a "verifiable audit
+               chain"; the chain was written from the start and nothing
+               ever recomputed it until 2026-07-30, which made tamper
+               evidence a claim rather than a control.
+
+               `audit.read` is held by SECURITY_OFFICER alone (0021's
+               separation of duties), so most analysts will see a 403 here
+               and that is correct — this is oversight OF the people who
+               hold cases, not a case surface. -->
+          <div id="gov-audit" class="subpane" hidden>
+            <h2 class="h-sm">Tamper evidence</h2>
+            <p class="help">
+              Every audit row hashes its predecessor and all of its own
+              payload columns. Re-computing that chain is the only way to
+              tell an intact log from an edited one — until somebody asks,
+              the two look identical.
+            </p>
+            <div class="row" style="gap:8px; align-items:center;">
+              <button id="btn-audit-verify" type="button" class="btn">
+                Verify the chain
+              </button>
+              <span class="help">O(n) over every event ever written.</span>
+            </div>
+            <div id="audit-verdict"></div>
           </div>
 
           <!-- RETENTION -->

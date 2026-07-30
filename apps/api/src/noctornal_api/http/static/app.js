@@ -2966,6 +2966,75 @@ function renderTags(box, list, sel) {
  * retiring a hub dissolves every tie it carries and a reviewer six months
  * later cannot reconstruct why.
  */
+/* The audit chain, verified on demand.
+ *
+ * Deliberately a button rather than a load-on-open: this recomputes a
+ * SHA-256 over every audit row ever written, and a panel that did it on
+ * every visit would be a self-inflicted denial of service on the one
+ * surface an officer reaches for during an incident.
+ *
+ * `checked` is reported next to the verdict on purpose. `intact` is true
+ * for an empty window as well as a verified one — "0 events, intact" is
+ * not a pass, and a UI that showed only a green tick would say it was.
+ */
+function wireAuditVerify() {
+  const btn = $('btn-audit-verify');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const box = $('audit-verdict');
+    box.textContent = '';
+    btn.disabled = true;
+    box.appendChild(el('p', 'help', 'recomputing…'));
+    let r;
+    try {
+      r = await api('/audit/verify');
+    } catch (err) {
+      box.textContent = '';
+      /* A 403 here is the expected answer for most accounts, not a
+         malfunction, so it is explained rather than thrown at the banner
+         stack as an error. */
+      if (err instanceof ApiError && err.status === 403) {
+        box.appendChild(el('p', 'help warn',
+          'Your account does not hold audit.read. That verb is granted to ' +
+          'SECURITY_OFFICER alone — the administrator configures, the ' +
+          'officer audits, and neither reads case content by default.'));
+      } else { fail(err); }
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    box.textContent = '';
+
+    const ok = r.intact && r.checked > 0;
+    const head = el('div', 'card');
+    head.appendChild(el('span', 'chip ' + (ok ? 'good' : 'bad'),
+      r.checked === 0 ? 'NOTHING TO CHECK' : (r.intact ? 'INTACT' : 'BROKEN')));
+    head.appendChild(el('p', 'help',
+      r.checked.toLocaleString() + ' event(s) checked' +
+      (r.first_seq ? ' · seq ' + r.first_seq + '–' + r.last_seq : '')));
+    if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    box.appendChild(head);
+
+    if (!r.breaks.length) return;
+    /* Each break names WHICH failure it is, because they point in opposite
+       directions: LINK means a row was removed, FORK means one was
+       inserted or two writers raced, CONTENT means one was edited. */
+    const list = el('div', 'insp-list');
+    for (const b of r.breaks.slice(0, 200)) {
+      const item = el('div', 'sel-item');
+      item.appendChild(el('span', 'chip bad', b.kind));
+      item.appendChild(el('span', 'sel-val',
+        'seq ' + b.seq + ' · ' + b.action + ' · ' + fmtTime(b.occurred_at)));
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+    if (r.breaks.length > 200) {
+      box.appendChild(el('p', 'help', 'showing the first 200 of ' +
+                                      r.breaks.length + '.'));
+    }
+  });
+}
+
 function wireElementActions() {
   const edit = $('btn-edit-element');
   const retire = $('btn-retire-element');
@@ -4367,6 +4436,7 @@ function wire() {
   initComms();
   initOpsPanes();
   wireElementActions();
+  wireAuditVerify();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
