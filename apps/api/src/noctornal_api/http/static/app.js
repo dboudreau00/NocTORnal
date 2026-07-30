@@ -3081,9 +3081,71 @@ async function retractAssertion(assertionId, liveCount) {
   } catch (err) { fail(err); }
 }
 
+/* Attach an exhibit already in this case to the selected node or edge.
+ *
+ * `POST /evidence/{id}/links` has existed since Phase 1 and NOTHING in the
+ * console has ever called it — a 2026-07-26 audit found zero occurrences of
+ * "/links" in this file. The READ side was fine (the panel below is fed by
+ * GET /nodes/{id}/evidence, which joins core.evidence_link), so the panel
+ * was not broken so much as unfillable: an analyst could see linked
+ * exhibits and could never create a link, which is why it read as
+ * permanently empty.
+ *
+ * The picker offers only exhibits from `state.evidence` — this case's own,
+ * already filtered by the caller's clearance on the way in. The server
+ * re-checks the same-case constraint regardless (routers/evidence.py: the
+ * comment there notes core.evidence_link has no same-case CHECK, unlike
+ * core.edge), so this is convenience, never the control.
+ */
+function renderEvidenceLinker(box, sel) {
+  if (!state.evidence.length) return;
+  const already = new Set((state.linkedEvidenceIds || []));
+  const free = state.evidence.filter((e) => !already.has(e.id));
+  if (!free.length) return;
+
+  const row = el('div', 'insp-linker');
+  const pick = el('select', 'input small');
+  pick.setAttribute('aria-label', 'Exhibit to link');
+  pick.appendChild(el('option', null, 'Link an exhibit…'));
+  for (const ev of free) {
+    const o = el('option', null, ev.title);
+    o.value = ev.id;
+    pick.appendChild(o);
+  }
+  const go = el('button', 'btn small', 'Link');
+  go.type = 'button';
+  go.addEventListener('click', async () => {
+    const evidenceId = pick.value;
+    if (!evidenceId) return;
+    go.disabled = true;
+    try {
+      /* `json:`, not `body:` — the api() helper only serialises `o.json`
+         (or `o.form`), and a `body` key is silently ignored, so the POST
+         would have gone out with no payload and come back 422. */
+      await api(cpath('/evidence/' + evidenceId + '/links'), {
+        method: 'POST',
+        json: sel.kind === 'node' ? { node_id: sel.id } : { edge_id: sel.id },
+      });
+      /* Re-render the whole inspector rather than pushing the new row in
+         by hand: the server decides what is visible, and a client that
+         optimistically draws a link it has not read back can show one the
+         caller is not cleared to see. */
+      renderInspector();
+    } catch (err) { fail(err); go.disabled = false; }
+  });
+  row.appendChild(pick);
+  row.appendChild(go);
+  box.appendChild(row);
+}
+
 function renderLinkedEvidence(box, list) {
+  /* Remembered so the picker can exclude what is already attached —
+     core.evidence_link would take the duplicate and the panel would then
+     show the same exhibit twice. */
+  state.linkedEvidenceIds = list.map((e) => e.id);
   if (!list.length) {
     box.appendChild(el('p', 'empty', 'No exhibits linked.'));
+    if (state.selection) renderEvidenceLinker(box, state.selection);
     return;
   }
   for (const ev of list) {
@@ -3104,6 +3166,7 @@ function renderLinkedEvidence(box, list) {
     item.appendChild(jump);
     box.appendChild(item);
   }
+  if (state.selection) renderEvidenceLinker(box, state.selection);
 }
 
 function renderSelectors(box, list) {
