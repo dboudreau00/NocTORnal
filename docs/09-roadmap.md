@@ -1,5 +1,33 @@
 # 09 — Roadmap
 
+> ## ⚠ THIS IS THE PLAN, NOT THE STATUS BOARD
+>
+> **Read [`ROADMAP-REMAINING.md`](../ROADMAP-REMAINING.md) for what is
+> actually built.** The checkboxes below stopped being maintained around
+> Phase 3 and are now wrong in **both** directions, which is worse than
+> being merely out of date — an unticked box here is not evidence of
+> absence, and a ticked one is not evidence of presence.
+>
+> Audited against the code 2026-07-26. What that found:
+>
+> - **Phases 0, 1 and 2 have every box unticked** and are largely built.
+>   "Auth: password + TOTP" is unticked; it is how you log in. "WebSocket
+>   push for graph changes" is unticked; it landed on the 26th.
+> - **Phase 3 has every box ticked** and three of them claim a UI that
+>   does not exist — nothing charts metric history, and neither harmonic
+>   closeness nor eigenvector centrality is rendered anywhere.
+> - **Phase 7 lists three things as unbuilt that shipped**: the
+>   contact-block parser, PGP signature verification, and the
+>   co-participation projection.
+> - **Phase 9** says "The HTTP 202 endpoint itself is not wired"; it is.
+>
+> Boxes have been corrected below where the audit was conclusive, each
+> with a dated note. Where a box is genuinely still open, it is left open.
+> **The `Done when:` lines have NOT been rewritten** — they are the
+> original acceptance criteria and are more useful unedited, including
+> where the build does not meet them (Phase 2's "2,000-node case" is one:
+> the console truncates at 800).
+
 Sequenced so that each phase is independently useful. The ordering
 constraint that matters: **the graph and assertion layer must work end to
 end before collection is switched on.** Pointing a firehose at a half-built
@@ -9,12 +37,16 @@ model produces a landfill you then have to clean by hand.
 
 ## Phase 0 — Foundation (week 1)
 
-- [ ] Monorepo, Docker Compose (Postgres, Redis, MinIO, MailHog)
-- [ ] Alembic wired, `schema.sql` split into initial migrations
-- [ ] Ontology package: single source of truth → generated Py + TS types
-- [ ] Auth: password + TOTP, sessions, Argon2id
-- [ ] RBAC/ABAC gate as one function with full test coverage
-- [ ] Audit log with hash chaining, plus a chain verification job
+- [x] Monorepo, Docker Compose (Postgres, Redis, MinIO, MailHog)
+- [x] Alembic wired, `schema.sql` split into initial migrations
+- [x] Ontology package: single source of truth → generated Py + TS types
+- [x] Auth: password + TOTP, sessions, Argon2id
+- [x] RBAC/ABAC gate as one function with full test coverage
+- [~] Audit log with hash chaining — **the chain is written and
+      nothing ever verifies it.** No verification function, endpoint,
+      CI step or test re-reads `audit.event` and recomputes the hash,
+      so the phase's own "verifiable audit chain" is unmet
+      (audited 2026-07-26). THE LARGEST OPEN GAP IN PHASE 0.
 - [x] CI: lint, test, migration round-trip, ontology drift and source
       hygiene (decision 42). **No typecheck** -- there are no type
       annotations to check against yet.
@@ -26,14 +58,28 @@ appears in a verifiable audit chain.
 
 ## Phase 1 — Graph core (weeks 2–3)
 
-- [ ] Case CRUD with mandatory legal basis and retention
-- [ ] Node/edge CRUD against the ontology, with type validation on edges
-- [ ] Assertion layer — no graph write path exists without one
-- [ ] Selector storage, normalisers per type, exact-match lookup
-- [ ] Evidence upload → MinIO WORM, hashing, custody ledger
-- [ ] Evidence linking to nodes and edges
-- [ ] Tags and node sets
-- [ ] Full-text search over nodes and evidence
+- [~] Case CREATE with mandatory legal basis and retention. **Update
+      and assignment have no router** (`cases.py` `update_metadata`,
+      `assign_user_checked`), and `POST /cases/{id}/status` is never
+      called from the console, so a case cannot be corrected, shared
+      or closed in a browser (audited 2026-07-26).
+- [~] Node/edge CREATE and READ against the ontology, with type
+      validation on edges (DB trigger, 0016). **No update or delete**
+      exists in the service layer -- a mistyped label is permanent
+      (audited 2026-07-26).
+- [x] Assertion layer — no graph write path exists without one
+- [x] Selector storage, normalisers per type, exact-match lookup
+- [x] Evidence upload → MinIO WORM, hashing, custody ledger
+- [~] Evidence linking to nodes and edges — API only. `app.js`
+      contains no `/links` call, so the inspector's "Linked
+      evidence" panel is permanently empty in the browser
+      (audited 2026-07-26).
+- [~] Tags and node sets — **schema, service and five green tests
+      exist; no router, no endpoint, no UI.** The only call sites of
+      `TagService` / `NodeSetService` in the repo are its own tests.
+      Unreachable by any user (audited 2026-07-26).
+- [x] Full-text search over nodes and evidence, filtered by the
+      caller's own clearance in SQL
 
 **Done when:** an analyst can build a case entirely by hand, and every edge
 answers "why do we believe this?" in one click.
@@ -46,15 +92,24 @@ right, and a week of real use will find the places it is not.
 
 ## Phase 2 — Sociogram (weeks 4–5)
 
-- [ ] Projection model and the four presets
-- [ ] Graph API: neighbourhood, path, subgraph, as-of queries
-- [ ] sigma.js canvas with ForceAtlas2 in a worker
+- [x] Projection model and the four presets
+- [x] Graph API: neighbourhood, path, subgraph, as-of queries
+- [~] Canvas with ForceAtlas2 in a worker — **the worker is real**
+      (`layout-worker.js`, hand-written Barnes-Hut, honours pins).
+      **sigma.js is not in the tree and never was**: declined for CSP
+      reasons with no bundler (docs/14). The library name here is
+      historical.
 - [ ] Full visual encoding per `docs/06-interface.md`
-- [ ] Layout persistence and pinning
-- [ ] Inspector panel: entity, assertions, evidence, backlinks
-- [ ] Local metrics (degree, clustering, k-core) live
-- [ ] WebSocket push for graph changes
-- [ ] Command palette
+- [x] Layout persistence and pinning
+- [~] Inspector panel: entity, assertions and evidence are built.
+      **Backlinks are not built at all** — docs/06 defines them as
+      every assertion, document and evidence item referencing an
+      entity; there is no such endpoint and no mention model
+      (audited 2026-07-26).
+- [x] Local metrics (degree, clustering, k-core) live
+- [x] WebSocket push for graph changes — Postgres LISTEN/NOTIFY,
+      one listener per process, socket carries no case content
+- [x] Command palette
 
 **Done when:** a 2,000-node case renders at 60fps and an analyst can find a
 broker visually.
@@ -67,7 +122,10 @@ broker visually.
       database-free, fed by `GraphService.project()`. Run **synchronously in
       the API**, not in a separate worker: see decision 30 for the reasoning
       and the accepted caveat.
-- [x] Global centralities, cached on graph hash — betweenness (exact under
+- [~] Global centralities, cached on graph hash — computed and returned
+      correctly, but **harmonic closeness and eigenvector are not
+      rendered anywhere in the console** (audited 2026-07-26).
+      Betweenness (exact under
       3k nodes, Brandes pivot sampling above), harmonic closeness,
       eigenvector over the positive subgraph. Cache is scoped to the
       caller's visibility (decision 31).
@@ -80,7 +138,11 @@ broker visually.
       dyads (a pair carrying both a vouch and an accusation)
 - [x] Metric panel with rank, percentile and approximation flags
 - [x] Trust decay at projection time (docs/03), never mutating stored weight
-- [x] Per-node metric history, so a rising betweenness trend is visible
+- [~] Per-node metric history — endpoint, whitelist, visibility scoping
+      and `node_metric` rows all exist and are tested. **Nothing in the
+      UI calls it.** `app.js` makes exactly two analytics requests and
+      neither is the history one, so no trend is visible to anyone not
+      using `curl` (audited 2026-07-26).
 
 **Done when:** the tool answers "who holds this network together" with
 something better than degree count. — **Met.** On `OP-LATTICEWORK-26`
@@ -201,16 +263,21 @@ silent breakage, and triage is a pleasant hour rather than a grim one.
 - [x] **`comms.platform` reference seeded** (15 platforms), durable-selector
       mapping enforced by `normalise()`. Tox → first 64 hex; Telegram →
       numeric id, never `@username`; SimpleX → no identifier, said out loud.
-- [ ] Contact-block parser with role attribution and the service stoplist.
+- [x] **Contact-block parser with role attribution and the service
+      stoplist.** Shipped; reachable in the Comms pane.
 - [x] **`CLAIMED` / `OBSERVED` / `CONFIRMED`**, and CONFIRMED must state its
-      method. PGP signature verification itself is NOT built.
+      method. **PGP signature verification IS now built** (delegated to
+      `gpg`, three outcome classes, with an unverified queue) — this
+      line said otherwise until 2026-07-26.
 - [x] **Device fingerprints against DEVICE nodes**, reported as a LEAD and
       never as a merge.
 - [x] **Conversation and participant model with mandatory provenance
       class**, and a CHECK requiring an authority for anything not obtained
       by being a party or from an open room.
 - [x] **Minimisation** that drops bodies and keeps the contact graph.
-- [ ] Co-participation projection into the sociogram.
+- [x] **Co-participation projection into the sociogram.** Shipped, with
+      Newman weighting. See docs/16 C13: it MANUFACTURES ties, including
+      for third parties, which is a live confirm-externally item.
 
 **DECIDED (2026-07-25): message-level capture.** See decision 35. Metadata
 would have been cheaper, but content is what a disclosure obligation and a
@@ -262,8 +329,12 @@ absolute sense.
 - [x] **`noct_sk_` key issuance**, HMAC-with-pepper storage (not Argon2),
       mandatory capped expiry, rotation overlap, IP allowlist, and
       write-only scopes enforced by a CHECK (invariant 11).
-- [x] **Raw-persist-before-parse** and idempotency dedupe. The HTTP 202
-      endpoint itself is not wired; `accept()` is.
+- [x] **Raw-persist-before-parse** and idempotency dedupe. **The HTTP 202
+      endpoint IS wired** (`routers/ingest.py`), and `rawstore.py` makes
+      raw-before-parse real rather than aspirational — a service built
+      without a raw store REFUSES to accept rather than acknowledging
+      bytes it would drop. This line said the endpoint was unwired until
+      2026-07-26.
 - [x] **Format detection by sniffing**, never by declared Content-Type.
 - [x] **Category classifier** where structure beats the declaration, with
       the confidence kept so a correction is visible as one.

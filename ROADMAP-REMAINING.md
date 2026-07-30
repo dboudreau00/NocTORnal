@@ -3,10 +3,19 @@
 Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0045`, **1206 tests passing, 0 skipped**
-(run BOTH `apps/api/tests` and `packages/ontology` — earlier handoffs
-quoted a single figure and the next session spent time working out why it
-did not reconcile), ruff clean. Nothing pushed (no remote configured).
+**State:** branch `deception-and-release-hardening`, Alembic head `0052`,
+**1284 tests passing, 0 skipped** (run BOTH `apps/api/tests` and
+`packages/ontology` — earlier handoffs quoted a single figure and the next
+session spent time working out why it did not reconcile), ruff clean,
+source hygiene clean.
+
+> **This header said `0045` / 1206 tests until 2026-07-26, when it was
+> seven migrations and 78 tests behind.** Everything in this file predates
+> the deception subsystem (0046–0050), the Telegram re-key (0051), the
+> TRUNCATE guards (0052) and an 18-finding code review. Treat any
+> unqualified claim below as *as-of the 26th* unless it carries a later
+> date — and see "Verified gaps the scoreboard misses" for what a
+> code-level audit found that the percentages do not show.
 
 **`release/` is the packaged Alpha release** — a README leading with the
 legal status, an analyst manual, install instructions and one-shot
@@ -28,7 +37,7 @@ exports the WHOLE tree to a standalone folder via `git archive`;
 > **The most important files in the repo are
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) and
 > [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md).** Every
-> phase is built. Four of them cannot lawfully be operated until somebody
+> phase is built. Five of them cannot lawfully be operated until somebody
 > outside this codebase makes a decision. docs/16 is that list organised
 > the way the code is; **docs/18 is the same list organised the way a
 > review is** — every question, its option set, the consequence of each,
@@ -68,7 +77,7 @@ regressed — the measure got honest.**
 | 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
 | 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
 | 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. **The UI is complete**: merge and its reversal live in the inspector (with the merge history and a per-merge Reverse), and Lifecycle, ACH and Report landed 2026-07-26. What remains is model work and a hostile review of the phase as a whole. |
-| 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. What is left is the Telegram id-collision model change (F1 / docs/16 D8) and optional niceties: detached signatures, and a keyserver-free way to obtain a vendor key. |
+| 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
@@ -102,10 +111,59 @@ Three things the number still hides:
 
 ---
 
+## Verified gaps the scoreboard misses
+
+Added 2026-07-26 after a code-level audit that checked **call sites**
+rather than existence. Every row below was confirmed by direct search, and
+every one sits inside a phase this file scores at 88–100%.
+
+The scoreboard's own definition of the UI dimension is *"reachable and
+usable in the browser, not only by `curl`"*. These are the places that
+test is failing while the row shows ✅ — a service with tests and no
+caller scores 45% of a phase and delivers nothing.
+
+| Gap | Phase | Verified by |
+|---|---|---|
+| **Tags and node sets are a dead subsystem.** Schema (0009), `TagService` + `NodeSetService` (`curation.py`) and five green tests exist. There is **no router file, no endpoint, no UI**. Repo-wide, the only call sites are in `test_curation_pg.py`. An analyst cannot tag anything, from the browser or from `curl`. | 1 (100%) | `grep -rn "TagService\|NodeSetService"` → definitions + tests only |
+| **Nothing ever verifies the audit chain.** The chain is written well — 0013 hashes every payload column under an advisory lock. Nothing re-reads `audit.event` and recomputes it: no function, no endpoint, no CI step, no test. Phase 0's own exit criterion is *"every action appears in a **verifiable** audit chain."* | 0 (100%) | no `verify_chain`/recompute anywhere; no audit route in `http/app.py` |
+| **Node and edge "CRUD" is create-and-read only.** No `update_node`, `delete_node`, `update_edge` or `delete_edge` in the service layer. A mistyped label is permanent. | 1 (100%) | `grep -rn "def update_node\|def delete_node\|def update_edge\|def delete_edge"` → empty |
+| **The sociogram cannot show a 2,000-node case.** `NODE_PAGE = 800` and the canvas prints `TRUNCATED at 800 nodes`. Phase 2's exit criterion is *"a 2,000-node case renders at 60fps."* The API would serve it; the console never asks. | 2 (100%) | `app.js:84`, `app.js:871`, `app.js:1099` |
+| **Metric history and evidence linking are API-only.** `app.js` contains **zero** occurrences of `metrics/history` or `/links`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3, 1 | `grep -c "metrics/history\|/links" app.js` → 0 |
+| **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision, but `docs/09-roadmap.md` still names the library. | 2 | `grep -rli sigma` → no files |
+
+**None of this is a regression.** It is the same lesson this file already
+records twice: a green suite either side of a contract that neither side
+asserts. The measure got honest once when UI was added to the weighting;
+it needs to get honest again about *reachability*, because "service +
+tests exist" is what several ✅s are currently reporting.
+
+**What I did not re-verify.** A first-pass audit also flagged the Phase 4
+collection read path (`collect.document` and `collect.watch_hit` written
+by the collector and read by nothing), a suspected key mismatch in the
+co-participation renderer, and detail in Phases 5/6/9. The adversarial
+stage that would have refuted or confirmed those did not complete. They
+are **unverified leads, not findings**, and are recorded here as such
+rather than being either dropped or dressed up.
+
+---
+
 ## 🔴 Before anything else: the legal register
 
-`docs/16-legal-and-external.md` holds **4 BLOCKING items, 7 determinations
-and 10 things to confirm externally.** The four blockers, compressed:
+`docs/16-legal-and-external.md` holds **5 BLOCKING items, 8 determinations
+and 13 things to confirm externally.**
+
+> **Corrected 2026-07-26.** This line said "4 / 7 / 10" and was wrong on
+> all three counts. The undercount that mattered was the blockers:
+> **L5 — active web capture authority** shipped with the deception
+> subsystem and was enforced in the schema, announced in README,
+> SECURITY.md, ARCHITECTURE.md and docs/19 — and recorded in neither
+> docs/16 nor the counsel pack in docs/18. Both documents a lawyer
+> actually reads said four. A reviewer working from that pack would have
+> cleared the platform without being asked whether entering input into a
+> phishing page is authorised. L5 and A5 now exist in both, each carrying
+> a note that an earlier review did not cover them.
+
+The five blockers, compressed:
 
 | | What | Why it blocks |
 |---|---|---|
@@ -113,8 +171,9 @@ and 10 things to confirm externally.** The four blockers, compressed:
 | **L2** | Stealer-log lawful basis, victim notification, real retention | Holding data about thousands of uninvolved people. 90 days is a placeholder. |
 | **L3** | Persona operation authority | The software will drive an account into a forum. Whether you may is not a software question. |
 | **L4** | Interception law and consent | Message capture. `provenance_class` records *which* kind; the authority is external. |
+| **L5** | Active web capture authority | Fetching attacker infrastructure discloses the investigation; **entering any input into a phishing page, including canary credentials, may constitute unauthorised access.** The schema refuses to record a submission without a written authority reference. Nothing is automated. |
 
-The ten **CONFIRM EXTERNALLY** items include evidence-authenticity standards
+The thirteen **CONFIRM EXTERNALLY** items include evidence-authenticity standards
 (reasoned from the rule text, not from a practitioner), MinIO COMPLIANCE
 semantics on your actual object store, and the platform durable-identifier
 mappings — which change, and where a stale mapping produces confident false
