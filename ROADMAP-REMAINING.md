@@ -122,14 +122,40 @@ usable in the browser, not only by `curl`"*. These are the places that
 test is failing while the row shows ✅ — a service with tests and no
 caller scores 45% of a phase and delivers nothing.
 
-| Gap | Phase | Verified by |
+| Gap | Phase | Status |
 |---|---|---|
-| **Tags and node sets are a dead subsystem.** Schema (0009), `TagService` + `NodeSetService` (`curation.py`) and five green tests exist. There is **no router file, no endpoint, no UI**. Repo-wide, the only call sites are in `test_curation_pg.py`. An analyst cannot tag anything, from the browser or from `curl`. | 1 (100%) | `grep -rn "TagService\|NodeSetService"` → definitions + tests only |
-| **Nothing ever verifies the audit chain.** The chain is written well — 0013 hashes every payload column under an advisory lock. Nothing re-reads `audit.event` and recomputes it: no function, no endpoint, no CI step, no test. Phase 0's own exit criterion is *"every action appears in a **verifiable** audit chain."* | 0 (100%) | no `verify_chain`/recompute anywhere; no audit route in `http/app.py` |
-| **Node and edge "CRUD" is create-and-read only.** No `update_node`, `delete_node`, `update_edge` or `delete_edge` in the service layer. A mistyped label is permanent. | 1 (100%) | `grep -rn "def update_node\|def delete_node\|def update_edge\|def delete_edge"` → empty |
-| **The sociogram cannot show a 2,000-node case.** `NODE_PAGE = 800` and the canvas prints `TRUNCATED at 800 nodes`. Phase 2's exit criterion is *"a 2,000-node case renders at 60fps."* The API would serve it; the console never asks. | 2 (100%) | `app.js:84`, `app.js:871`, `app.js:1099` |
-| **Metric history and evidence linking are API-only.** `app.js` contains **zero** occurrences of `metrics/history` or `/links`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3, 1 | `grep -c "metrics/history\|/links" app.js` → 0 |
-| **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision, but `docs/09-roadmap.md` still names the library. | 2 | `grep -rli sigma` → no files |
+| **Tags and node sets are a dead subsystem.** Schema (0009), `TagService` + `NodeSetService` and five green tests; no router, no endpoint, no UI. The only call sites were its own tests. | 1 | ✅ **CLOSED 2026-07-30.** `routers/curation.py`, 10 endpoints, `curation.manage` (0053); tag chips, apply, remove and create in the inspector. Verified endpoint and browser. |
+| **Nothing ever verifies the audit chain.** Phase 0's exit criterion is *"every action appears in a **verifiable** audit chain"* and nothing ever recomputed it. | 0 | ✅ **CLOSED 2026-07-30.** `audit_verify.py` + `GET /audit/verify` + a CI step that runs after the suite. Proven to FAIL correctly: an in-place edit is one CONTENT break, a deleted row one LINK break. |
+| **Node and edge "CRUD" is create-and-read only.** A mistyped label was permanent. | 1 | ✅ **CLOSED 2026-07-30.** `update_node` / `update_edge` / `soft_delete_node` / `soft_delete_edge`, each assertion-backed, retiring via `deleted_at` (never `valid_to` — that is temporal validity and using it would rewrite the past). Service + router. **No UI yet.** |
+| **Case metadata, assignment and closure had no router.** A case could not be corrected, shared or closed from a browser. | 1 | ✅ **CLOSED 2026-07-30** at the API. **No UI yet.** Lowering a case's classification is deliberately REFUSED — it declassifies everything protected only by the case label, in one statement, under a verb described as "edit metadata". It needs its own verb. |
+| **The sociogram could not show a 2,000-node case.** Hard-capped at 800 while the API served 5,000. | 2 | ✅ **CLOSED 2026-07-30.** Analyst-raisable 800 → 2000 → 5000 from inside the truncation notice. The warning stays at every ceiling. |
+| **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
+| **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
+| **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
+
+### Found while closing them
+
+- **Notifications were queued on the wrong clock.** `deliver_after` came
+  from `datetime.now()` and is compared against Postgres `now()` — two
+  clocks in one comparison. The host here was **3.79s ahead** of the
+  container, so every non-urgent delivery was ~4s in the future by the
+  reader's reckoning and an immediate drain found nothing. In production
+  the API and database routinely sit on different hosts, so the same skew
+  silently delays or prematurely releases every notification. Fixed:
+  the base time now comes from the database.
+- **`NodeSetService.add_member` destroyed notes.** `SET note =
+  EXCLUDED.note` meant re-adding a member without a note wrote NULL over
+  it — a double-click away, on the one field in a working set that cannot
+  be reconstructed from the graph.
+- **`core.tag_assignment` had no key and no unique index** (0054), and
+  **`core.edge` had no `deleted_by`** while `core.node` has had one since
+  0005 (0053).
+- **The audit chain has 67 genuine FORKs** on the development database —
+  two rows claiming one predecessor, which is the condition 0013's
+  advisory lock exists to prevent. Not fixed; worth a look.
+- **`seq` order is not chain order.** The first verifier assumed it was
+  and reported 68 breaks on honest history — the exact failure a
+  tamper-evidence tool must never have.
 
 **None of this is a regression.** It is the same lesson this file already
 records twice: a green suite either side of a contract that neither side
