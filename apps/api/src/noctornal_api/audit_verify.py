@@ -43,17 +43,54 @@ verify_pg.py` guards the coupling: it writes real events and asserts the
 chain verifies, so any future edit to the trigger that this file does not
 match turns the suite red rather than silently reporting corruption.
 
-## The two checks are separate on purpose
+## The checks are separate on purpose
 
-A chain can break in two distinct ways and they mean different things:
+A chain can break in distinct ways and they mean different things:
 
-- **LINK** — a row's stored `prev_hash` is not its predecessor's
-  `row_hash`. That is a row *removed*, *inserted* or *re-ordered*.
 - **CONTENT** — a row's `row_hash` is not what its own columns hash to,
   using the `prev_hash` it stores. That is a row *edited in place*.
+- **LINK** — a row's `prev_hash` names a `row_hash` that no row has. That
+  is a predecessor *removed*.
+- **FORK** — two or more rows claim the SAME predecessor. That is a row
+  *inserted*, or two writers that raced.
 
 Reporting them as one boolean would lose exactly the information an
 investigator needs first.
+
+## `seq` ORDER IS NOT CHAIN ORDER, and assuming it was made this verifier
+## report 68 breaks on an honest database
+
+The first version of this module checked the link by comparing each row's
+`prev_hash` to `LAG(row_hash) OVER (ORDER BY seq)`. That is wrong, and it
+is wrong in the most damaging direction available to a tamper-evidence
+tool: it accused intact history.
+
+`audit.event.seq` is a `bigserial`. Its value comes from `nextval()` when
+the row is constructed, which happens **before** the BEFORE-INSERT trigger
+runs and therefore before `audit.chain_hash()` takes its advisory lock. So
+two concurrent writers can be handed seq 7445 and 7446, then acquire the
+lock in the opposite order — and the row holding the LOWER seq chains off
+the row holding the HIGHER one. Nothing is corrupt; the linked list is
+perfectly sound; the numbering simply does not follow it.
+
+Observed on the development database: 60,181 rows, 68 reported "breaks",
+every one of them a pair of adjacent AUTH_FAILED rows whose seq order and
+chain order disagreed. Had this shipped, the first person to run it would
+have been told the audit trail was tampered with, and the second would
+have learned to ignore the tool.
+
+So the link is now verified as what it actually is — **a linked list** —
+by following `prev_hash` to a real `row_hash` rather than to a positional
+neighbour. `seq` is used only for reporting and windowing.
+
+## What a FORK means, and why it is reported rather than hidden
+
+A genuine fork — two rows sharing one predecessor — is what 0013's own
+comment says the advisory lock exists to prevent. Seeing one means either
+an inserted row, or that some historical writes were made on a path where
+the lock did not serialise them. It is surfaced as its own category
+instead of being folded into LINK, because "somebody added a row" and
+"somebody deleted a row" send an investigator in opposite directions.
 """
 from __future__ import annotations
 
@@ -93,7 +130,7 @@ class ChainBreak:
     seq: int
     occurred_at: datetime
     action: str
-    kind: str            # 'LINK' | 'CONTENT' | 'LINK+CONTENT'
+    kind: str            # LINK / FORK / CONTENT, '+'-joined when several
     actor_id: UUID | None
     case_id: UUID | None
 
@@ -141,11 +178,11 @@ def verify_chain(
     a clock adjustment must not be able to reorder the verification.
     """
     where = "WHERE e.seq > %(since)s" if since_seq is not None else ""
-    # ORDER BY seq DESC + limit, then re-order ascending, so `limit` means
-    # "the most recent N" rather than "the oldest N".
-    window = "ORDER BY e.seq DESC LIMIT %(limit)s" if limit is not None else \
-             "ORDER BY e.seq"
+    window = "ORDER BY e.seq DESC LIMIT %(limit)s" if limit is not None else              "ORDER BY e.seq"
 
+    # The link is verified as a LINKED LIST, never by seq adjacency -- see
+    # the module docstring. `known` is every row_hash in the window;
+    # `claims` counts how many rows name each predecessor.
     sql = f"""
     WITH windowed AS (
         SELECT e.seq, e.occurred_at, e.actor_id, e.actor_kind, e.action,
@@ -155,19 +192,46 @@ def verify_chain(
           FROM audit.event e
           {where}
           {window}
-    ), linked AS (
-        SELECT w.*,
-               LAG(w.row_hash) OVER (ORDER BY w.seq) AS predecessor_hash,
-               ROW_NUMBER() OVER (ORDER BY w.seq)    AS rn
-          FROM windowed w
+    ), hashes AS (
+        -- THE WHOLE TABLE, not the window. This is what makes a windowed
+        -- run exact rather than approximate: the oldest row in any window
+        -- has a predecessor OUTSIDE it, and looking only inside the window
+        -- would report that row as an orphan every single time -- a false
+        -- accusation on every `limit` run, which is worse than the missed
+        -- detection it was meant to avoid.
+        --
+        -- DISTINCT so the LEFT JOIN matches at most once. Two rows sharing
+        -- a row_hash would otherwise duplicate output rows; a SHA-256
+        -- collision is not a practical concern, but two byte-identical
+        -- audit rows are (the same action, same payload, same microsecond).
+        SELECT DISTINCT row_hash FROM audit.event
+    ), claims AS (
+        -- Also whole-table: a fork is a fork whether or not both claimants
+        -- fall inside the window being reported.
+        SELECT prev_hash, COUNT(*) AS claimants
+          FROM audit.event WHERE prev_hash IS NOT NULL
+         GROUP BY prev_hash
     )
-    SELECT seq, occurred_at, action, actor_id, case_id,
-           -- The first row in the window has no loaded predecessor, so its
-           -- link is NOT asserted -- see the docstring. rn = 1 exempts it.
-           (rn > 1 AND prev_hash IS DISTINCT FROM predecessor_hash) AS link_broken,
-           (row_hash IS DISTINCT FROM recomputed)                   AS content_broken
-      FROM linked
-     ORDER BY seq
+    -- LEFT JOINs, not correlated subqueries. The first version used
+    -- `NOT EXISTS (SELECT ... FROM windowed p WHERE p.row_hash = ...)`,
+    -- which Postgres evaluates per row: on the 60,181-row development
+    -- table that did not finish inside two minutes. As joins the planner
+    -- hashes each side once and the same check runs in well under a
+    -- second.
+    SELECT w.seq, w.occurred_at, w.action, w.actor_id, w.case_id,
+           -- ORPHAN: names a predecessor that is not in the window at all.
+           -- The genesis row (prev_hash NULL) is exempt by construction.
+           (w.prev_hash IS NOT NULL AND h.row_hash IS NULL) AS link_broken,
+           -- FORK: this row's predecessor is claimed by more than one row.
+           -- Both claimants are reported; which one is the intruder is not
+           -- something this can decide, and pretending otherwise would be
+           -- worse than naming both.
+           COALESCE(c.claimants > 1, false) AS forked,
+           (w.row_hash IS DISTINCT FROM w.recomputed) AS content_broken
+      FROM windowed w
+      LEFT JOIN hashes h ON h.row_hash = w.prev_hash
+      LEFT JOIN claims c ON c.prev_hash = w.prev_hash
+     ORDER BY w.seq
     """
     params: dict = {}
     if since_seq is not None:
@@ -177,11 +241,17 @@ def verify_chain(
 
     rows = conn.execute(sql, params).fetchall()
     breaks: list[ChainBreak] = []
-    for seq, occurred_at, action, actor_id, case_id, link, content in rows:
-        if not link and not content:
+    for seq, occurred_at, action, actor_id, case_id, link, fork, content in rows:
+        if not (link or fork or content):
             continue
-        kind = "LINK+CONTENT" if (link and content) else (
-            "LINK" if link else "CONTENT")
+        parts = []
+        if link:
+            parts.append("LINK")
+        if fork:
+            parts.append("FORK")
+        if content:
+            parts.append("CONTENT")
+        kind = "+".join(parts)
         breaks.append(ChainBreak(
             seq=seq, occurred_at=occurred_at, action=action, kind=kind,
             actor_id=actor_id, case_id=case_id))

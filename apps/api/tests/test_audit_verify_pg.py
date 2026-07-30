@@ -48,13 +48,23 @@ def tamperable():
         conn.close()
 
 
-def _seed(conn, n: int = 6) -> None:
-    """Write real audit rows through the trigger, so the chain is genuine.
+def _seed(conn, n: int = 6) -> int:
+    """Write real audit rows through the trigger; return the seq to verify FROM.
 
     Hand-inserting `row_hash` would test the verifier against the
     verifier's own idea of the hash, which is circular. These go in as
     plain INSERTs and `audit.chain_hash()` computes the chain.
+
+    THE RETURNED WATERMARK MATTERS. These tests must verify only the rows
+    they wrote, never the whole table, because the table is shared with
+    every other suite and accumulates real history. The development
+    database currently carries 67 pre-existing FORK anomalies (two rows
+    claiming one predecessor) from concurrent writes; asserting `intact`
+    over all 60,000 rows would fail for reasons that have nothing to do
+    with the code under test, and "fix the test by loosening the
+    assertion" is how a real finding gets buried.
     """
+    start = conn.execute("SELECT COALESCE(MAX(seq), 0) FROM audit.event").fetchone()[0]
     for i in range(n):
         conn.execute(
             """INSERT INTO audit.event
@@ -62,13 +72,14 @@ def _seed(conn, n: int = 6) -> None:
                VALUES ('USER', %s, 'SUCCESS', %s::jsonb)""",
             (f"TEST_EVENT_{i}", '{"seeded": true, "n": %d}' % i),
         )
+    return start
 
 
 def test_untouched_chain_verifies(tamperable):
     from noctornal_api.audit_verify import verify_chain
 
-    _seed(tamperable)
-    report = verify_chain(tamperable)
+    since = _seed(tamperable)
+    report = verify_chain(tamperable, since_seq=since)
     assert report.checked > 0, "nothing was checked; the assertion below is vacuous"
     assert report.intact, [b.kind for b in report.breaks]
 
@@ -77,13 +88,13 @@ def test_in_place_edit_is_a_CONTENT_break(tamperable):
     """A row edited in place must be caught by the hash recompute."""
     from noctornal_api.audit_verify import verify_chain
 
-    _seed(tamperable)
+    since = _seed(tamperable)
     tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     tamperable.execute(
         """UPDATE audit.event SET action = 'NOTHING_HAPPENED'
             WHERE seq = (SELECT max(seq) - 2 FROM audit.event)""")
 
-    report = verify_chain(tamperable)
+    report = verify_chain(tamperable, since_seq=since)
     assert not report.intact
     kinds = [b.kind for b in report.breaks]
     # CONTENT only: the row's own hash no longer matches its columns, but
@@ -97,13 +108,13 @@ def test_deleted_row_is_a_LINK_break(tamperable):
     """A row removed from the middle must break the link, not the content."""
     from noctornal_api.audit_verify import verify_chain
 
-    _seed(tamperable)
+    since = _seed(tamperable)
     tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     tamperable.execute(
         """DELETE FROM audit.event
             WHERE seq = (SELECT max(seq) - 2 FROM audit.event)""")
 
-    report = verify_chain(tamperable)
+    report = verify_chain(tamperable, since_seq=since)
     assert not report.intact
     kinds = [b.kind for b in report.breaks]
     # Exactly one: the SUCCESSOR of the deleted row, whose stored prev_hash
@@ -120,8 +131,8 @@ def test_windowed_run_reports_that_it_is_windowed(tamperable):
     """
     from noctornal_api.audit_verify import verify_chain
 
-    _seed(tamperable, n=10)
-    full = verify_chain(tamperable)
+    since = _seed(tamperable, n=10)
+    full = verify_chain(tamperable, since_seq=since)
     windowed = verify_chain(tamperable, limit=3)
 
     assert windowed.checked == 3
