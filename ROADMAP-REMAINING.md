@@ -3,11 +3,21 @@
 Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
-**State:** branch `deception-and-release-hardening`, Alembic head `0052`,
-**1284 tests passing, 0 skipped** (run BOTH `apps/api/tests` and
+**State (2026-07-30):** branch `deception-and-release-hardening`, Alembic
+head `0054`, **1388 passing / 1 failing** (run BOTH `apps/api/tests` and
 `packages/ontology` — earlier handoffs quoted a single figure and the next
 session spent time working out why it did not reconcile), ruff clean,
 source hygiene clean.
+
+> **The one failure is `test_ratelimit_redis::test_redis_and_python_agree_
+> request_for_request`, and it is not fixed on purpose.** It compares a
+> Redis-backed GCRA against an in-process one over thirty iterations, so
+> the Redis side pays thirty network round trips the local side does not;
+> with a 0.05s emission that drift crosses a boundary at iteration 23. The
+> algorithms agree — every single-backend test passes. Widening the
+> tolerance would turn it green while destroying the only interesting
+> thing it checks. The fix is an injected clock so neither backend pays for
+> the transport; the mechanism is written up in the test's own docstring.
 
 > **This header said `0045` / 1206 tests until 2026-07-26, when it was
 > seven migrations and 78 tests behind.** Everything in this file predates
@@ -125,9 +135,9 @@ caller scores 45% of a phase and delivers nothing.
 | Gap | Phase | Status |
 |---|---|---|
 | **Tags and node sets are a dead subsystem.** Schema (0009), `TagService` + `NodeSetService` and five green tests; no router, no endpoint, no UI. The only call sites were its own tests. | 1 | ✅ **CLOSED 2026-07-30.** `routers/curation.py`, 10 endpoints, `curation.manage` (0053); tag chips, apply, remove and create in the inspector. Verified endpoint and browser. |
-| **Nothing ever verifies the audit chain.** Phase 0's exit criterion is *"every action appears in a **verifiable** audit chain"* and nothing ever recomputed it. | 0 | ✅ **CLOSED 2026-07-30.** `audit_verify.py` + `GET /audit/verify` + a CI step that runs after the suite. Proven to FAIL correctly: an in-place edit is one CONTENT break, a deleted row one LINK break. **No UI** — `app.js` never calls it. Defensible for an oversight function CI runs and an officer can `curl`, but by this file's own UI test it is not on screen. |
-| **Node and edge "CRUD" is create-and-read only.** A mistyped label was permanent. | 1 | ✅ **CLOSED 2026-07-30.** `update_node` / `update_edge` / `soft_delete_node` / `soft_delete_edge`, each assertion-backed, retiring via `deleted_at` (never `valid_to` — that is temporal validity and using it would rewrite the past). Service + router. **No UI yet.** |
-| **Case metadata, assignment and closure had no router.** A case could not be corrected, shared or closed from a browser. | 1 | ✅ **CLOSED 2026-07-30** at the API. **No UI yet.** Lowering a case's classification is deliberately REFUSED — it declassifies everything protected only by the case label, in one statement, under a verb described as "edit metadata". It needs its own verb. |
+| **Nothing ever verifies the audit chain.** Phase 0's exit criterion is *"every action appears in a **verifiable** audit chain"* and nothing ever recomputed it. | 0 | ✅ **CLOSED 2026-07-30.** `audit_verify.py` + `GET /audit/verify` + a CI step that runs after the suite. Proven to FAIL correctly: an in-place edit is one CONTENT break, a deleted row one LINK break. **UI added the same day**: Governance → Audit chain, button-driven (it is an O(n) SHA-256 over every event, so load-on-open would be a self-inflicted DoS on the surface an officer reaches for during an incident). A 403 is explained rather than bannered — `audit.read` is SECURITY_OFFICER's alone, so most accounts are refused and that is the design working. |
+| **Node and edge "CRUD" is create-and-read only.** A mistyped label was permanent. | 1 | ✅ **CLOSED 2026-07-30.** `update_node` / `update_edge` / `soft_delete_node` / `soft_delete_edge`, each assertion-backed, retiring via `deleted_at` (never `valid_to` — that is temporal validity and using it would rewrite the past). Service + router, **and a UI** (2026-07-30): Correct… / Retire… on the selected element, with the tie cascade reported in a banner. |
+| **Case metadata, assignment and closure had no router.** A case could not be corrected, shared or closed from a browser. | 1 | ✅ **CLOSED 2026-07-30**, API **and UI** — Case… / Share… / Status… in the appbar. Lowering a case's classification is deliberately REFUSED — it declassifies everything protected only by the case label, in one statement, under a verb described as "edit metadata". It needs its own verb. |
 | **The sociogram could not show a 2,000-node case.** Hard-capped at 800 while the API served 5,000. | 2 | ✅ **CLOSED 2026-07-30.** Analyst-raisable 800 → 2000 → 5000 from inside the truncation notice. The warning stays at every ceiling. |
 | **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
 | **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
