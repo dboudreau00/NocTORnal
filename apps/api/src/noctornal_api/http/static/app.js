@@ -81,7 +81,24 @@ const HUE_BY_TYPE = {
 const HUE_BY_CATEGORY = { ACTOR: 'actor-group', ARTEFACT: 'artefact-infra',
                           CONTEXT: 'context' };
 
-const NODE_PAGE = 800;      // sociogram page size; beyond this, filter first
+/* Sociogram page size. 800 is the DEFAULT, not the ceiling.
+ *
+ * docs/09 Phase 2's exit criterion is "a 2,000-node case renders at 60fps",
+ * and a 2026-07-26 audit found the console could not put a 2,000-node case
+ * on the canvas at all: it asked for 800 and printed "TRUNCATED", while
+ * `routers/graphview.py` defaults to 2000 and accepts up to 5000. The
+ * client was the only constraint, and the criterion was unmeetable through
+ * the UI.
+ *
+ * Raised by the analyst rather than by default, because the cost is real:
+ * layout is a hand-written Barnes-Hut FA2 in a worker, and 5,000 nodes is
+ * a different experience from 800 on a laptop. Defaulting to 2000 would
+ * have made the common case worse to satisfy a benchmark. The steps are
+ * offered where the truncation is reported, so the choice appears exactly
+ * when it is relevant.
+ */
+const NODE_PAGE = 800;
+const NODE_PAGE_STEPS = [800, 2000, 5000];   // 5000 is the server's own cap
 
 /* ── state ────────────────────────────────────────────────────────────── */
 
@@ -109,6 +126,11 @@ const state = {
           as_of: null },
   projMeta: null,            // the `projection` object the API echoed back
   projTruncated: false,
+  /* The sociogram node ceiling in force right now. Starts at the
+     default and is raised by the analyst from the truncation notice;
+     never lowered automatically, because silently shrinking a view
+     somebody widened on purpose is how a picture becomes a lie. */
+  nodeLimit: NODE_PAGE,
   withheld: null,
   gnodes: [],                // projection nodes
   gedges: [],                // projection edges
@@ -868,7 +890,7 @@ async function refreshSociogram() {
   const seq = ++state.graphSeq;
   const q = projQuery();
   const gq = new URLSearchParams(q);
-  gq.set('limit', String(NODE_PAGE));
+  gq.set('limit', String(state.nodeLimit));
   let g;
   try {
     g = await api(cpath('/graph?' + gq.toString()));
@@ -1096,8 +1118,29 @@ function renderReadout() {
   }
   if (state.projTruncated) {
     box.appendChild(el('span', 'rd-warn',
-      '  │  TRUNCATED at ' + NODE_PAGE + ' nodes — narrow the projection ' +
+      '  │  TRUNCATED at ' + state.nodeLimit + ' nodes — narrow the projection ' +
       'before reading anything off this picture'));
+    /* The way OUT of the truncation, offered where the truncation is
+       reported. Until 2026-07-26 this notice was a dead end: the console
+       was hard-capped at 800 while the API served up to 5,000, so an
+       analyst told to "narrow the projection" had no alternative even when
+       the whole case would have fitted.
+       The warning stays regardless — raising the ceiling and still hitting
+       it is exactly when somebody most needs to know the picture is
+       partial. */
+    const next = NODE_PAGE_STEPS.find(function (n) { return n > state.nodeLimit; });
+    if (next) {
+      const more = el('button', 'btn ghost small', 'show up to ' + next);
+      more.type = 'button';
+      more.title = 'Re-fetch with a higher node ceiling. Layout is a ' +
+                   'force-directed simulation; larger projections take ' +
+                   'longer to settle.';
+      more.addEventListener('click', function () {
+        state.nodeLimit = next;
+        refreshSociogram();
+      });
+      box.appendChild(more);
+    }
   }
   /* docs/14 U2. Without this an analyst cannot tell a sparse network from a
      censored one, and reads structure off a picture they believe is
