@@ -95,6 +95,16 @@
     <button id="btn-palette" type="button" class="btn ghost small"
             aria-keyshortcuts="Control+K Meta+K"
             aria-label="Open the command palette">⌘K</button>
+    <!-- Case lifecycle. `case.update`, `case.grant` and `case.close` were
+         seeded in 0017 and granted in 0021, and until 2026-07-30 a case
+         could not be corrected, shared or closed from a browser at all —
+         only through scripts/bootstrap.py. -->
+    <button id="btn-case-edit" type="button" class="btn ghost small"
+            hidden title="Correct this case's title or summary">Case…</button>
+    <button id="btn-case-share" type="button" class="btn ghost small"
+            hidden title="Assign another analyst to this case">Share…</button>
+    <button id="btn-case-status" type="button" class="btn ghost small"
+            hidden title="Move this case through its lifecycle">Status…</button>
     <button id="btn-cases" type="button" class="btn ghost" hidden>All cases</button>
     <span class="hdr-user">
       <span class="muted small">analyst</span>
