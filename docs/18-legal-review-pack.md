@@ -68,6 +68,24 @@ pressure.
 | **Decide** | (1) Interception law: capturing a conversation a persona is a party to is legally distinct from capturing one it is not, and both vary by jurisdiction. (2) One-party vs two-party consent. (3) Whether content of **uninvolved third parties in a group channel** is retainable, and for how long. |
 | **Determination** | |
 
+### A5. Active web capture of attacker infrastructure  *(docs/16 L5)*
+
+> **This entry was missing from this pack until 2026-07-26.** The
+> capability shipped with the deception subsystem, and the constraint was
+> written into the schema and into README, SECURITY.md, ARCHITECTURE.md
+> and docs/19 — but neither this pack nor docs/16 carried it, so a reviewer
+> working from A1–A4 would have cleared the platform without ever being
+> asked the question below. Flagged here rather than quietly inserted: if
+> an earlier version of this pack has already been reviewed, **this item
+> was not covered by that review.**
+
+| | |
+|---|---|
+| **Capability blocked** | Nothing is blocked outright. Two things are gated: any non-passive capture needs an egress profile, and recording that input was submitted to a phishing page needs a written authority reference. |
+| **What the software does** | `deception.capture` carries `submitted_input boolean` with the CHECK `capture_submission_needs_authority`, which refuses the row unless `submission_authority_ref` is present (`0048_deception_capture.py:135`); `capture_active_needs_egress_profile` refuses a non-passive method with no egress profile. **No credential submission is automated** — there is a column recording that a human did it under authority, and no code that does it. |
+| **Decide** | (1) That fetching attacker-controlled infrastructure is authorised at all — an attributable fetch discloses the investigation to the kit operator. (2) Separately and more seriously: whether **entering any input into a phishing page — including canary or fabricated credentials — is covered.** That may constitute unauthorised access and may be an offence under computer-misuse statutes in several jurisdictions. (3) Whether a captured page rendering a **targeted person's own data** is retainable on case terms or falls under A2's regime. |
+| **Determination** | |
+
 ---
 
 ## Section B — operator determinations. A default nobody chose becomes policy

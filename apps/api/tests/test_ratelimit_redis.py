@@ -81,6 +81,30 @@ def test_redis_and_python_agree_request_for_request(backend, key):
 
     Timing is kept away from the boundaries deliberately: this asserts the
     two implementations agree, not that either can resolve a microsecond.
+
+    ## KNOWN TO FAIL ON A SLOW OR LOADED REDIS LINK (2026-07-30)
+
+    It fails deterministically on this development machine, diverging at
+    iteration 23 of 30, and the assertion is NOT the thing to loosen.
+
+    The two backends are not measured over the same timeline. Every
+    `backend.measure` is a round trip to Redis; every `local.measure` is a
+    function call. Thirty iterations therefore accumulate thirty round
+    trips of extra elapsed time on the Redis side only, and with
+    `emission = 0.05s` a few tens of milliseconds of drift is enough to
+    put one implementation on the far side of a boundary the other has not
+    reached. Windows' ~15.6ms timer granularity coarsens `time.sleep(0.12)`
+    on top of that.
+
+    So the failure says the HARNESS cannot compare them fairly here, not
+    that the implementations disagree — the algorithm is identical and the
+    single-backend tests above all pass. Widening the tolerance would make
+    it green while destroying what it checks, which is agreement at the
+    boundary; the boundary is the only interesting part.
+
+    Fixing it properly means driving both backends from an injected clock
+    rather than wall time, so neither pays for the transport. That is a
+    real change to `ratelimit.py`'s shape and is not attempted here.
     """
     from noctornal_api.ratelimit import InProcessBackend
 

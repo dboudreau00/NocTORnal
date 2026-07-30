@@ -24,11 +24,13 @@ from noctornal_api.http.limits import build_limiter, install_rate_limit_middlewa
 from noctornal_api.http.routers import (
     ach,
     analytics,
+    audit,
     approvals,
     auth,
     cases,
     collection,
     comms,
+    curation,
     deception,
     evidence,
     governance,
@@ -142,6 +144,10 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     for router in (auth.router, cases.router, graph.router,
+                   # Oversight, not case access: `audit.read` is held by
+                   # SECURITY_OFFICER alone, and the chain had no verifier
+                   # at all until 2026-07-26.
+                   audit.router,
                    evidence.router, search.router, read.router,
                    graphview.router, analytics.router,
                    proposals.router, merges.router,
@@ -151,6 +157,9 @@ def create_app() -> FastAPI:
                    comms.router, comms.global_router,
                    governance.router, governance.break_glass_router,
                    collection.router, ingest.router,
+                   # Tags and node sets: schema and service since
+                   # 0009, no router until 2026-07-26.
+                   curation.router,
                    # Phishing / vishing / BEC evidence (docs/19).
                    deception.router,
                    # The change-hint socket. Carries no case content by

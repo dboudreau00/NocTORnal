@@ -87,10 +87,35 @@ class NodeSetService:
         ).fetchone()[0]
 
     def add_member(self, set_id: UUID, node_id: UUID, *, note: str | None = None) -> None:
+        """Add a node to a set, or update its note.
+
+        `COALESCE(EXCLUDED.note, existing)` — an OMITTED note leaves the
+        existing one alone.
+
+        This used to be a bare `SET note = EXCLUDED.note`, which meant
+        re-adding a member without a note wrote NULL over whatever the
+        analyst had written there. Adding a node to a set is the kind of
+        thing people do twice — a double-click, a drag repeated because the
+        first one did not look like it registered, a bulk add that overlaps
+        an existing set — and the note is the ONE thing in a working set
+        that cannot be reconstructed from the graph. Every other column is
+        derivable; "why is this actor in my shortlist" is not.
+
+        To CLEAR a note deliberately, pass an empty string: `''` is not
+        NULL, so it survives the COALESCE and overwrites. That keeps
+        "leave it alone" and "remove it" distinguishable, which a single
+        nullable parameter otherwise cannot express.
+
+        Found 2026-07-26 while writing the router, which was working around
+        it by re-reading the current note and passing it back. Fixed here
+        instead: a workaround in one caller leaves every other caller —
+        a worker, a script, a future endpoint — still destroying notes.
+        """
         self._c.execute(
             """INSERT INTO core.node_set_member (set_id, node_id, note)
                VALUES (%s, %s, %s)
-               ON CONFLICT (set_id, node_id) DO UPDATE SET note = EXCLUDED.note""",
+               ON CONFLICT (set_id, node_id) DO UPDATE
+                   SET note = COALESCE(EXCLUDED.note, core.node_set_member.note)""",
             (set_id, node_id, note),
         )
 

@@ -81,7 +81,24 @@ const HUE_BY_TYPE = {
 const HUE_BY_CATEGORY = { ACTOR: 'actor-group', ARTEFACT: 'artefact-infra',
                           CONTEXT: 'context' };
 
-const NODE_PAGE = 800;      // sociogram page size; beyond this, filter first
+/* Sociogram page size. 800 is the DEFAULT, not the ceiling.
+ *
+ * docs/09 Phase 2's exit criterion is "a 2,000-node case renders at 60fps",
+ * and a 2026-07-26 audit found the console could not put a 2,000-node case
+ * on the canvas at all: it asked for 800 and printed "TRUNCATED", while
+ * `routers/graphview.py` defaults to 2000 and accepts up to 5000. The
+ * client was the only constraint, and the criterion was unmeetable through
+ * the UI.
+ *
+ * Raised by the analyst rather than by default, because the cost is real:
+ * layout is a hand-written Barnes-Hut FA2 in a worker, and 5,000 nodes is
+ * a different experience from 800 on a laptop. Defaulting to 2000 would
+ * have made the common case worse to satisfy a benchmark. The steps are
+ * offered where the truncation is reported, so the choice appears exactly
+ * when it is relevant.
+ */
+const NODE_PAGE = 800;
+const NODE_PAGE_STEPS = [800, 2000, 5000];   // 5000 is the server's own cap
 
 /* ── state ────────────────────────────────────────────────────────────── */
 
@@ -109,6 +126,11 @@ const state = {
           as_of: null },
   projMeta: null,            // the `projection` object the API echoed back
   projTruncated: false,
+  /* The sociogram node ceiling in force right now. Starts at the
+     default and is raised by the analyst from the truncation notice;
+     never lowered automatically, because silently shrinking a view
+     somebody widened on purpose is how a picture becomes a lie. */
+  nodeLimit: NODE_PAGE,
   withheld: null,
   gnodes: [],                // projection nodes
   gedges: [],                // projection edges
@@ -683,10 +705,19 @@ async function openCase(caseId) {
     tlp.textContent = 'TLP:' + rec.classification;
     show(tlp, true);
     show($('btn-cases'), true);
+    show($('btn-case-edit'), true);
+    show($('btn-case-share'), true);
+    show($('btn-case-status'), true);
     show($('hdr-asof'), true);
     show($('view-cases'), false);
     show($('view-workspace'), true);
     buildPickers();
+    /* The tag vocabulary, once per case rather than per selection. Not
+       awaited: the inspector's tag chips come from the node's own tags and
+       render without it; only the "apply an existing tag" picker depends
+       on this, and blocking the whole case open on a curation read would
+       be the wrong trade. */
+    loadCaseTags();
     renderInspector();
     /* Presets and the saved layout must land before the first projection
        fetch: the layout seeds node positions, and re-seeding after the fact
@@ -868,7 +899,7 @@ async function refreshSociogram() {
   const seq = ++state.graphSeq;
   const q = projQuery();
   const gq = new URLSearchParams(q);
-  gq.set('limit', String(NODE_PAGE));
+  gq.set('limit', String(state.nodeLimit));
   let g;
   try {
     g = await api(cpath('/graph?' + gq.toString()));
@@ -1096,8 +1127,29 @@ function renderReadout() {
   }
   if (state.projTruncated) {
     box.appendChild(el('span', 'rd-warn',
-      '  │  TRUNCATED at ' + NODE_PAGE + ' nodes — narrow the projection ' +
+      '  │  TRUNCATED at ' + state.nodeLimit + ' nodes — narrow the projection ' +
       'before reading anything off this picture'));
+    /* The way OUT of the truncation, offered where the truncation is
+       reported. Until 2026-07-26 this notice was a dead end: the console
+       was hard-capped at 800 while the API served up to 5,000, so an
+       analyst told to "narrow the projection" had no alternative even when
+       the whole case would have fitted.
+       The warning stays regardless — raising the ceiling and still hitting
+       it is exactly when somebody most needs to know the picture is
+       partial. */
+    const next = NODE_PAGE_STEPS.find(function (n) { return n > state.nodeLimit; });
+    if (next) {
+      const more = el('button', 'btn ghost small', 'show up to ' + next);
+      more.type = 'button';
+      more.title = 'Re-fetch with a higher node ceiling. Layout is a ' +
+                   'force-directed simulation; larger projections take ' +
+                   'longer to settle.';
+      more.addEventListener('click', function () {
+        state.nodeLimit = next;
+        refreshSociogram();
+      });
+      box.appendChild(more);
+    }
   }
   /* docs/14 U2. Without this an analyst cannot tell a sparse network from a
      censored one, and reads structure off a picture they believe is
@@ -2771,6 +2823,8 @@ function renderInspector() {
     show($('insp-merge-sec'), false);
   }
 
+  show($('insp-actions'), true);
+
   const seq = ++state.inspSeq;
   const base = cpath((sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id);
   loadInto($('insp-assertions'), seq,
@@ -2779,9 +2833,378 @@ function renderInspector() {
     renderAssertions);
   loadInto($('insp-evidence'), seq, () => api(base + '/evidence'),
     renderLinkedEvidence);
+  /* Tags are node-only for now: `core.tag_assignment` can carry an edge or
+     an evidence target too, but the router exposes node assignment alone,
+     so the section is hidden rather than rendered empty against an edge —
+     an empty panel reads as "no tags", not "not supported here". */
+  const tagSec = $('insp-tags-sec');
+  if (tagSec) tagSec.hidden = sel.kind !== 'node';
+
   if (sel.kind === 'node') {
     loadInto($('insp-selectors'), seq, () => api(base + '/selectors'),
       renderSelectors);
+    loadInto($('insp-tags'), seq,
+      () => api(cpath('/curation/nodes/' + sel.id + '/tags')),
+      (box, list) => renderTags(box, list, sel));
+  }
+}
+
+/* Tags on the selected node, plus the controls to add and remove them.
+ *
+ * `state.caseTags` is the case's vocabulary, fetched once per case render
+ * so the picker does not re-query on every selection change. A tag the
+ * node already carries is excluded — assigning twice is idempotent at the
+ * endpoint, but offering it invites a click that appears to do nothing.
+ */
+function renderTags(box, list, sel) {
+  if (!list.length) box.appendChild(el('p', 'empty', 'No tags.'));
+
+  const chips = el('div', 'tag-chips');
+  for (const t of list) {
+    const chip = el('span', 'chip tag-chip');
+    /* namespace:name, because a bare "broker" means different things in
+       different namespaces and the schema keys uniqueness on the pair. */
+    chip.appendChild(el('span', null, t.namespace + ':' + t.name));
+    if (t.scope === 'global') {
+      /* A global tag is shared vocabulary (MITRE ATT&CK and the like).
+         Marked so nobody assumes an unfamiliar one was coined on this
+         case. */
+      chip.appendChild(el('span', 'tag-scope', 'global'));
+    }
+    const drop = el('button', 'tag-x', '×');
+    drop.type = 'button';
+    drop.title = 'Remove this tag from the entity';
+    drop.setAttribute('aria-label', 'Remove tag ' + t.namespace + ':' + t.name);
+    drop.addEventListener('click', async () => {
+      drop.disabled = true;
+      try {
+        await api(cpath('/curation/tags/' + t.id + '/nodes/' + sel.id),
+                  { method: 'DELETE' });
+        renderInspector();
+      } catch (err) { fail(err); drop.disabled = false; }
+    });
+    chip.appendChild(drop);
+    chips.appendChild(chip);
+  }
+  if (list.length) box.appendChild(chips);
+
+  const already = new Set(list.map((t) => t.id));
+  const free = (state.caseTags || []).filter((t) => !already.has(t.id));
+  const row = el('div', 'insp-linker');
+  if (free.length) {
+    const pick = el('select', 'input small');
+    pick.setAttribute('aria-label', 'Tag to apply');
+    pick.appendChild(el('option', null, 'Apply a tag…'));
+    for (const t of free) {
+      const o = el('option', null,
+                   t.namespace + ':' + t.name +
+                   (t.scope === 'global' ? ' (global)' : ''));
+      o.value = t.id;
+      pick.appendChild(o);
+    }
+    const go = el('button', 'btn small', 'Tag');
+    go.type = 'button';
+    go.addEventListener('click', async () => {
+      if (!pick.value) return;
+      go.disabled = true;
+      try {
+        await api(cpath('/curation/tags/' + pick.value + '/nodes'),
+                  { method: 'POST', json: { node_id: sel.id } });
+        renderInspector();
+      } catch (err) { fail(err); go.disabled = false; }
+    });
+    row.appendChild(pick);
+    row.appendChild(go);
+  }
+
+  const make = el('button', 'btn ghost small', 'New tag…');
+  make.type = 'button';
+  make.addEventListener('click', async () => {
+    /* `prompt` rather than a modal: this is one short string, the console
+       has no modal primitive, and inventing one for a tag name would be
+       more surface than the feature is worth. */
+    const raw = window.prompt(
+      'New tag as namespace:name (e.g. role:broker)');
+    if (!raw) return;
+    const at = raw.indexOf(':');
+    if (at < 1 || at === raw.length - 1) {
+      banner('Tag not created',
+             'Use namespace:name — both halves are required, because the ' +
+             'same name means different things in different namespaces.');
+      return;
+    }
+    try {
+      const made = await api(cpath('/curation/tags'), {
+        method: 'POST',
+        json: { namespace: raw.slice(0, at).trim(), name: raw.slice(at + 1).trim() },
+      });
+      await loadCaseTags();
+      await api(cpath('/curation/tags/' + made.id + '/nodes'),
+                { method: 'POST', json: { node_id: sel.id } });
+      renderInspector();
+    } catch (err) { fail(err); }
+  });
+  row.appendChild(make);
+  box.appendChild(row);
+}
+
+/* ── correcting and retiring the selected element ──────────────────────
+ *
+ * Both endpoints landed 2026-07-30 and neither had a caller. The verbs
+ * (`graph.node.update`, `graph.node.delete`, `graph.edge.update`,
+ * `graph.edge.delete`) were seeded in 0017 and granted in 0021, and
+ * nothing had ever checked them.
+ *
+ * TWO THINGS HERE ARE EASY TO GET WRONG AND ARE DELIBERATE:
+ *
+ * `attrs` is NEVER sent. The endpoint treats it as a WHOLE-OBJECT
+ * REPLACEMENT (`COALESCE(%s::jsonb, attrs)`), so sending a partial object
+ * silently deletes every attribute not in it. Omitting the field entirely
+ * is the only safe thing a label-correction dialogue can do, and editing
+ * attributes needs a real form that starts from the current object.
+ *
+ * The DELETEs REQUIRE a JSON body `{reason}`. A bodyless
+ * `fetch(..., {method:'DELETE'})` returns 422 — the most likely
+ * integration break in this pair, and the reason is not optional because
+ * retiring a hub dissolves every tie it carries and a reviewer six months
+ * later cannot reconstruct why.
+ */
+/* Case lifecycle: correct, share, close.
+ *
+ * `CaseService.update_metadata` and `assign_user_checked` have existed
+ * since Phase 1 with no router, and `POST /status` had a router that
+ * nothing called. So a case could be created from the browser and then
+ * never corrected, shared or closed from it — only through
+ * `scripts/bootstrap.py`, which is not a thing an analyst has.
+ *
+ * CLASSIFICATION IS NOT EDITABLE HERE, and the endpoint refuses to lower
+ * it at all. Raising is safe (every element is read at the stricter of its
+ * own label and the case's, so the case going RED covers everything
+ * inside it); lowering declassifies in one statement everything that was
+ * protected only by the case label, and is not undone by raising it back.
+ * It needs its own verb with step-up, so it is absent rather than
+ * half-offered.
+ */
+function wireCaseActions() {
+  const edit = $('btn-case-edit');
+  const share = $('btn-case-share');
+  const status = $('btn-case-status');
+  if (!edit || !share || !status) return;
+
+  edit.addEventListener('click', async () => {
+    const rec = state.caseRec;
+    if (!rec) return;
+    const title = window.prompt('Case title', rec.title);
+    if (title === null) return;
+    if (!title.trim()) {
+      banner('Not saved', 'A case title cannot be blank.');
+      return;
+    }
+    try {
+      await api('/cases/' + state.caseId,
+                { method: 'PATCH', json: { title: title.trim() } });
+      await openCase(state.caseId);
+    } catch (err) { fail(err); }
+  });
+
+  share.addEventListener('click', async () => {
+    const uid = window.prompt(
+      'User id to assign (iam.app_user.id)\n\n' +
+      'The assignment is CHECKED: an analyst whose clearance or ' +
+      'compartments do not reach this case is refused rather than ' +
+      'written and then silently filtered out of every read.');
+    if (uid === null || !uid.trim()) return;
+    const role = window.prompt(
+      'Case role — ANALYST, REVIEWER, CONTRIBUTOR, READ_ONLY or LIAISON',
+      'ANALYST');
+    if (role === null || !role.trim()) return;
+    try {
+      await api('/cases/' + state.caseId + '/users', {
+        method: 'POST',
+        json: { user_id: uid.trim(), role_key: role.trim().toUpperCase() },
+      });
+      banner('Assigned', role.trim().toUpperCase() + ' granted on this case.');
+    } catch (err) { fail(err); }
+  });
+
+  status.addEventListener('click', async () => {
+    const rec = state.caseRec;
+    if (!rec) return;
+    const next = window.prompt(
+      'Current status: ' + rec.status + '\n\n' +
+      'New status — DRAFT, ACTIVE, DORMANT, CLOSED, ARCHIVED or PURGED.\n' +
+      'The transition table decides what is legal from here.',
+      rec.status === 'ACTIVE' ? 'CLOSED' : 'ACTIVE');
+    if (next === null || !next.trim()) return;
+    try {
+      await api('/cases/' + state.caseId + '/status',
+                { method: 'POST', json: { status: next.trim().toUpperCase() } });
+      await openCase(state.caseId);
+      banner('Status changed', 'This case is now ' + next.trim().toUpperCase() + '.');
+    } catch (err) { fail(err); }
+  });
+}
+
+/* The audit chain, verified on demand.
+ *
+ * Deliberately a button rather than a load-on-open: this recomputes a
+ * SHA-256 over every audit row ever written, and a panel that did it on
+ * every visit would be a self-inflicted denial of service on the one
+ * surface an officer reaches for during an incident.
+ *
+ * `checked` is reported next to the verdict on purpose. `intact` is true
+ * for an empty window as well as a verified one — "0 events, intact" is
+ * not a pass, and a UI that showed only a green tick would say it was.
+ */
+function wireAuditVerify() {
+  const btn = $('btn-audit-verify');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const box = $('audit-verdict');
+    box.textContent = '';
+    btn.disabled = true;
+    box.appendChild(el('p', 'help', 'recomputing…'));
+    let r;
+    try {
+      r = await api('/audit/verify');
+    } catch (err) {
+      box.textContent = '';
+      /* A 403 here is the expected answer for most accounts, not a
+         malfunction, so it is explained rather than thrown at the banner
+         stack as an error. */
+      if (err instanceof ApiError && err.status === 403) {
+        box.appendChild(el('p', 'help warn',
+          'Your account does not hold audit.read. That verb is granted to ' +
+          'SECURITY_OFFICER alone — the administrator configures, the ' +
+          'officer audits, and neither reads case content by default.'));
+      } else { fail(err); }
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    box.textContent = '';
+
+    const ok = r.intact && r.checked > 0;
+    const head = el('div', 'card');
+    head.appendChild(el('span', 'chip ' + (ok ? 'good' : 'bad'),
+      r.checked === 0 ? 'NOTHING TO CHECK' : (r.intact ? 'INTACT' : 'BROKEN')));
+    head.appendChild(el('p', 'help',
+      r.checked.toLocaleString() + ' event(s) checked' +
+      (r.first_seq ? ' · seq ' + r.first_seq + '–' + r.last_seq : '')));
+    if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    box.appendChild(head);
+
+    if (!r.breaks.length) return;
+    /* Each break names WHICH failure it is, because they point in opposite
+       directions: LINK means a row was removed, FORK means one was
+       inserted or two writers raced, CONTENT means one was edited. */
+    const list = el('div', 'insp-list');
+    for (const b of r.breaks.slice(0, 200)) {
+      const item = el('div', 'sel-item');
+      item.appendChild(el('span', 'chip bad', b.kind));
+      item.appendChild(el('span', 'sel-val',
+        'seq ' + b.seq + ' · ' + b.action + ' · ' + fmtTime(b.occurred_at)));
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+    if (r.breaks.length > 200) {
+      box.appendChild(el('p', 'help', 'showing the first 200 of ' +
+                                      r.breaks.length + '.'));
+    }
+  });
+}
+
+function wireElementActions() {
+  const edit = $('btn-edit-element');
+  const retire = $('btn-retire-element');
+  if (!edit || !retire) return;
+
+  edit.addEventListener('click', async () => {
+    const sel = state.selection;
+    if (!sel) return;
+    let body;
+    if (sel.kind === 'node') {
+      const n = nodeById(sel.id);
+      const label = window.prompt('Corrected label', n ? n.label : '');
+      if (label === null) return;
+      if (!label.trim()) {
+        banner('Not corrected', 'A label cannot be blank.');
+        return;
+      }
+      body = { label: label.trim() };
+    } else {
+      const e = edgeById(sel.id);
+      const conf = window.prompt(
+        'Confidence — LOW, MODERATE or HIGH', e ? e.confidence : 'LOW');
+      if (conf === null) return;
+      const up = conf.trim().toUpperCase();
+      if (['LOW', 'MODERATE', 'HIGH'].indexOf(up) < 0) {
+        banner('Not corrected', 'Confidence must be LOW, MODERATE or HIGH.');
+        return;
+      }
+      body = { confidence: up };
+    }
+    /* The rationale is the assertion, and the assertion is what makes this
+       a correction rather than an overwrite: the original claim survives,
+       so the sequence of assertions is the history of what this element
+       has been called (invariant 1). */
+    const why = window.prompt('Why? This is recorded as an assertion.');
+    if (why === null) return;
+    body.assertion = { basis: 'DIRECT_OBSERVATION', confidence: 'MODERATE',
+                       rationale: why || null };
+    try {
+      await api(cpath('/graph/' + (sel.kind === 'node' ? 'nodes/' : 'edges/') + sel.id),
+                { method: 'PATCH', json: body });
+      await loadCaseGraph();
+      refreshSociogram();
+      renderInspector();
+    } catch (err) { fail(err); }
+  });
+
+  retire.addEventListener('click', async () => {
+    const sel = state.selection;
+    if (!sel) return;
+    const what = sel.kind === 'node'
+      ? 'Retiring this entity also retires EVERY tie it carries.\n\n'
+      : '';
+    const reason = window.prompt(
+      what + 'Why is this being retired? (required)\n\n' +
+      'Nothing is destroyed — the row, its assertions and its evidence ' +
+      'links remain, and an as-of query into the past still shows it.');
+    if (reason === null) return;
+    if (!reason.trim()) {
+      banner('Not retired', 'A reason is required, exactly as it is for a ' +
+                            'retraction.');
+      return;
+    }
+    try {
+      const out = await api(
+        cpath('/graph/' + (sel.kind === 'node' ? 'nodes/' : 'edges/') + sel.id),
+        { method: 'DELETE', json: { reason: reason.trim() } });
+      /* Report the collateral. Retiring one actor can take six ties with
+         it, and the analyst who clicked once should not have to count the
+         difference on the canvas to find that out (invariant 12). */
+      if (out && out.edges_retired) {
+        banner('Retired', 'That entity carried ' + out.edges_retired +
+               ' tie(s); they were retired with it. Nothing was destroyed.');
+      }
+      state.selection = null;
+      await loadCaseGraph();
+      refreshSociogram();
+      renderInspector();
+    } catch (err) { fail(err); }
+  });
+}
+
+/** The case's tag vocabulary, including the global taxonomy. */
+async function loadCaseTags() {
+  try {
+    state.caseTags = await api(cpath('/curation/tags'));
+  } catch (err) {
+    /* A missing vocabulary must not blank the inspector: the chips above
+       come from the node's own tags and render fine without it. Only the
+       picker degrades, and "New tag…" still works. */
+    state.caseTags = [];
   }
 }
 
@@ -3038,9 +3461,71 @@ async function retractAssertion(assertionId, liveCount) {
   } catch (err) { fail(err); }
 }
 
+/* Attach an exhibit already in this case to the selected node or edge.
+ *
+ * `POST /evidence/{id}/links` has existed since Phase 1 and NOTHING in the
+ * console has ever called it — a 2026-07-26 audit found zero occurrences of
+ * "/links" in this file. The READ side was fine (the panel below is fed by
+ * GET /nodes/{id}/evidence, which joins core.evidence_link), so the panel
+ * was not broken so much as unfillable: an analyst could see linked
+ * exhibits and could never create a link, which is why it read as
+ * permanently empty.
+ *
+ * The picker offers only exhibits from `state.evidence` — this case's own,
+ * already filtered by the caller's clearance on the way in. The server
+ * re-checks the same-case constraint regardless (routers/evidence.py: the
+ * comment there notes core.evidence_link has no same-case CHECK, unlike
+ * core.edge), so this is convenience, never the control.
+ */
+function renderEvidenceLinker(box, sel) {
+  if (!state.evidence.length) return;
+  const already = new Set((state.linkedEvidenceIds || []));
+  const free = state.evidence.filter((e) => !already.has(e.id));
+  if (!free.length) return;
+
+  const row = el('div', 'insp-linker');
+  const pick = el('select', 'input small');
+  pick.setAttribute('aria-label', 'Exhibit to link');
+  pick.appendChild(el('option', null, 'Link an exhibit…'));
+  for (const ev of free) {
+    const o = el('option', null, ev.title);
+    o.value = ev.id;
+    pick.appendChild(o);
+  }
+  const go = el('button', 'btn small', 'Link');
+  go.type = 'button';
+  go.addEventListener('click', async () => {
+    const evidenceId = pick.value;
+    if (!evidenceId) return;
+    go.disabled = true;
+    try {
+      /* `json:`, not `body:` — the api() helper only serialises `o.json`
+         (or `o.form`), and a `body` key is silently ignored, so the POST
+         would have gone out with no payload and come back 422. */
+      await api(cpath('/evidence/' + evidenceId + '/links'), {
+        method: 'POST',
+        json: sel.kind === 'node' ? { node_id: sel.id } : { edge_id: sel.id },
+      });
+      /* Re-render the whole inspector rather than pushing the new row in
+         by hand: the server decides what is visible, and a client that
+         optimistically draws a link it has not read back can show one the
+         caller is not cleared to see. */
+      renderInspector();
+    } catch (err) { fail(err); go.disabled = false; }
+  });
+  row.appendChild(pick);
+  row.appendChild(go);
+  box.appendChild(row);
+}
+
 function renderLinkedEvidence(box, list) {
+  /* Remembered so the picker can exclude what is already attached —
+     core.evidence_link would take the duplicate and the panel would then
+     show the same exhibit twice. */
+  state.linkedEvidenceIds = list.map((e) => e.id);
   if (!list.length) {
     box.appendChild(el('p', 'empty', 'No exhibits linked.'));
+    if (state.selection) renderEvidenceLinker(box, state.selection);
     return;
   }
   for (const ev of list) {
@@ -3061,6 +3546,7 @@ function renderLinkedEvidence(box, list) {
     item.appendChild(jump);
     box.appendChild(item);
   }
+  if (state.selection) renderEvidenceLinker(box, state.selection);
 }
 
 function renderSelectors(box, list) {
@@ -4028,6 +4514,9 @@ function wire() {
   initInbox();
   initComms();
   initOpsPanes();
+  wireElementActions();
+  wireAuditVerify();
+  wireCaseActions();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
