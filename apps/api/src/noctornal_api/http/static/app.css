@@ -1011,6 +1011,16 @@ select.select { appearance: none; padding-right: 24px; }
    exposure-PUBLIC and TLP:RED elsewhere in this UI, and a second red that
    means something different would dilute both. `cursor: help` because the
    whole message lives in the title attribute. */
+/* The exhibit linker in the inspector. Sits under the linked-evidence list
+   and stays narrow: the inspector rail is 360px and the exhibit titles in
+   the select are frequently long, so the select takes the slack and the
+   button keeps its intrinsic width. */
+.insp-linker {
+  display: flex; gap: 6px; align-items: center; margin-top: 10px;
+  padding-top: 10px; border-top: 1px solid var(--surface-3);
+}
+.insp-linker select { flex: 1; min-width: 0; }
+
 .poc-chip {
   color: var(--alert); border-color: var(--alert);
   background: rgba(212, 160, 60, 0.10);
