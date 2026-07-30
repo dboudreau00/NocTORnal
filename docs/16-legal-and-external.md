@@ -120,6 +120,55 @@ decision 35.
 
 ---
 
+### L5 — Active web capture of attacker infrastructure
+
+**Built:** the deception subsystem (`deception.py`, Alembic 0048–0050),
+per docs/19.
+
+**Added to this register 2026-07-26, late.** It was written up in
+docs/19 §6, README, SECURITY.md and ARCHITECTURE.md when the deception
+work landed, and enforced in the schema the same day — but it was never
+added *here*, and so it was also missing from the counsel pack in
+docs/18, which carried A1–A4 only. Every user-facing document said five
+blocking items while the two documents a lawyer actually reads said four.
+The drift ran in the dangerous direction: the review pack under-reported.
+Recorded plainly because a register that quietly omits an item is worse
+than no register.
+
+Fetching a phishing page is an **outbound interaction with attacker
+infrastructure**. Two distinct exposures:
+
+**Must be settled, with counsel:**
+
+1. **That fetching attacker infrastructure is authorised at all.** An
+   attributable fetch discloses the investigation to the operator of the
+   kit. The software half is a required egress profile for any non-passive
+   capture method (`capture_active_needs_egress_profile`); whether the
+   fetch may be made is not a software question.
+2. **Submitting anything to the page is a different act entirely, and
+   needs its own authority.** Entering credentials — *including canary or
+   fabricated ones* — to observe what the kit does may constitute
+   unauthorised access and may be an offence under computer-misuse
+   statutes in several jurisdictions. `deception.capture` carries
+   `submitted_input boolean` and the CHECK
+   `capture_submission_needs_authority`, which refuses the row unless
+   `submission_authority_ref` is present
+   (`db/migrations/versions/0048_deception_capture.py:135`).
+3. Whether a captured page containing **third-party victim data** — a
+   credential-harvest page may render a targeted person's name or address
+   — is retainable on the same terms as the rest of the case, or falls
+   under L2's regime instead.
+
+As with L1 in Phase 8: the software is built and refuses to operate the
+gated part until a human records the authority. **That refusal is the
+feature, not an unfinished edge** — and, exactly as with L1, it records a
+declaration it cannot verify.
+
+**No credential submission is automated.** There is a column to record
+that a human did it under authority, and no code that does it.
+
+---
+
 ## 🟠 DETERMINATION
 
 ### D1 — Dual control on merge defaults to OFF
@@ -176,8 +225,23 @@ just access.
 
 ### D8 — Telegram channel and user ids can share one durable value
 
-Added 2026-07-25. **This is a known, unresolved correctness defect that is
-reported rather than fixed, and it needs a decision.**
+> **✅ RESOLVED 2026-07-26 by option (b)+(c).** `telegram_id_norm` now
+> namespaces every id — `u:` user, `c:` channel/supergroup, `g:` basic
+> group — and **accepts an explicit prefix from a caller that knows the
+> entity type**, which is option (c) for any collector able to supply it,
+> with `u:` assumed otherwise. Migration
+> `0051_telegram_norm_arithmetic.py` re-keys the stored selectors, and it
+> re-derives from `raw_value` rather than rewriting `norm_value` in
+> place — an earlier draft did the latter and would have stamped
+> already-stripped channel ids as `u:`, recreating the exact collision it
+> was removing. It carries a pre-flight that raises on a would-be
+> collision rather than merging rows.
+>
+> The original text is kept below because the *reasoning* is still the
+> record of why a normaliser cannot disambiguate alone.
+
+Added 2026-07-25. **This was a known correctness defect that was
+reported rather than fixed, and it needed a decision.**
 
 `noctornal_ontology.telegram_id_norm` strips the Bot-API `-100` prefix so
 that the two encodings of one supergroup collapse onto each other. Its own
