@@ -849,6 +849,13 @@ class RunResult:
     items_new: int = 0
     watch_hits: int = 0
     error: str | None = None
+    #: Things the run could not do while otherwise succeeding -- the same
+    #: idea as `lab.sample.triage_gaps`. A watch whose regex will not
+    #: compile is the case this exists for: it matches nothing, for ever,
+    #: and without this the run is indistinguishable from one where the
+    #: pattern simply did not fire. `default_factory`, because a mutable
+    #: default on a dataclass is shared by every instance.
+    warnings: list[str] = field(default_factory=list)
 
 
 class CollectionService:
@@ -961,22 +968,62 @@ class CollectionService:
             result.error = message
             return result
 
-        result.items_seen = len(fetched.items)
-        for item in fetched.items:
-            if self._store_document(source_id, run_id, watch_id, item,
-                                    classification=source[3]):
-                result.items_new += 1
-        result.watch_hits = self._match_watches(source_id, run_id,
-                                                fetched.items)
+        # Everything after the fetch is inside a handler for the same reason
+        # `analytics_runs` CR9 is: the run row was INSERTed 'RUNNING' on an
+        # autocommit connection, so it is already committed and survives
+        # whatever unwinds above it. The handler here covered `fetch` only,
+        # so a failure in `_store_document` or `_match_watches` -- a NUL
+        # byte in a post, a jsonb adaptation error, a dropped connection
+        # mid-loop -- left the row at RUNNING for ever.
+        #
+        # That is not merely untidy. `due_sources` and the health rollup
+        # read RUNNING as "in flight", so the stranded row reads as a
+        # collector that is still working, and the operator watching the
+        # Feeds pane sees activity rather than a fault. The index
+        # `(status) WHERE status IN ('QUEUED','RUNNING')` exists precisely
+        # to make that set cheap to find, and nothing was keeping it true.
+        #
+        # Re-raised, not swallowed: a fetch failure is an expected outcome
+        # (the site is down) and returns a result; a failure to persist
+        # what was fetched is a defect, and the caller must not be told the
+        # poll succeeded.
+        try:
+            result.items_seen = len(fetched.items)
+            for item in fetched.items:
+                if self._store_document(source_id, run_id, watch_id, item,
+                                        classification=source[3]):
+                    result.items_new += 1
+            result.watch_hits, result.warnings = self._match_watches(
+                source_id, run_id, fetched.items)
+        except Exception as exc:  # noqa: BLE001 - re-raised below
+            self._c.execute(
+                """UPDATE collect.collection_run
+                      SET status = 'FAILED', finished_at = now(),
+                          error_class = %s, error_detail = %s
+                    WHERE id = %s""",
+                (type(exc).__name__,
+                 f"persist: {redact(str(exc))[:2000]}", run_id))
+            self._record_failure(source_id, type(exc).__name__)
+            self._reschedule(source_id)
+            raise
 
+        # PARTIAL is the honest status when the fetch worked and something
+        # inside it could not be evaluated. It already exists in the
+        # `run_status` enum and nothing was ever writing it -- so a run
+        # carrying a dead watch reported OK, which is the whole finding.
         self._c.execute(
             """UPDATE collect.collection_run
-                  SET status = 'OK', finished_at = now(), items_seen = %s,
+                  SET status = %s, finished_at = now(), items_seen = %s,
                       items_new = %s, http_status = %s, etag = %s,
-                      last_modified = %s
+                      last_modified = %s,
+                      error_class = %s, error_detail = %s
                 WHERE id = %s""",
-            (result.items_seen, result.items_new, fetched.http_status,
-             fetched.etag, fetched.last_modified, run_id))
+            ("PARTIAL" if result.warnings else "OK",
+             result.items_seen, result.items_new, fetched.http_status,
+             fetched.etag, fetched.last_modified,
+             "WatchPatternError" if result.warnings else None,
+             "; ".join(result.warnings)[:2000] or None,
+             run_id))
         self._c.execute(
             """UPDATE collect.source
                   SET last_ok_at = now(), consecutive_failures = 0,
@@ -1021,7 +1068,7 @@ class CollectionService:
         return True
 
     def _match_watches(self, source_id: UUID, run_id: UUID,
-                       items: list[Item]) -> int:
+                       items: list[Item]) -> tuple[int, list[str]]:
         """Keyword, selector and regex matching into `watch_hit`.
 
         Suppression is applied HERE rather than at notification time,
@@ -1029,6 +1076,9 @@ class CollectionService:
         into one with a running count -- and a suppression that happens
         after the row is written is a suppression that still filled the
         table.
+
+        Returns the hit count AND anything that could not be evaluated.
+        See the `re.error` handler below for why the second half matters.
         """
         watches = self._c.execute(
             """SELECT id, case_id, keywords, selector_watch, regexes,
@@ -1036,6 +1086,10 @@ class CollectionService:
                  FROM collect.watch
                 WHERE source_id = %s AND is_active""", (source_id,)).fetchall()
         hits = 0
+        # Keyed so one broken pattern reports once, not once per item: a
+        # feed of 200 posts would otherwise produce 200 identical lines and
+        # the signal would be lost in its own volume.
+        broken: dict[tuple[UUID, str], str] = {}
         for watch in watches:
             (watch_id, _case_id, keywords, selectors, regexes, priority,
              suppress) = watch
@@ -1052,9 +1106,26 @@ class CollectionService:
                     try:
                         if pattern and re.search(pattern, haystack, re.I):
                             matched.append(f"regex:{pattern}")
-                    except re.error:
+                    except re.error as exc:
                         # A watch with a broken pattern must not stop the
-                        # other watches from matching.
+                        # other watches from matching -- but `continue`
+                        # alone made it SILENT, and that is the worse half
+                        # of the problem.
+                        #
+                        # A watch is a standing tasking. There is no create
+                        # endpoint that could have validated the pattern,
+                        # so the first time anybody learns it will not
+                        # compile is here, at match time, on every run, for
+                        # ever. Swallowed, the watch is indistinguishable
+                        # from one that is working and has not fired yet --
+                        # which is precisely the reading an analyst takes
+                        # from a quiet watch on a live source, and the run
+                        # still reported OK.
+                        #
+                        # `redact` because an operator watching for a
+                        # leaked credential puts that credential in the
+                        # pattern, and this string is about to be stored.
+                        broken[(watch_id, pattern)] = redact(str(exc))[:200]
                         continue
                 if not matched:
                     continue
@@ -1081,7 +1152,11 @@ class CollectionService:
             self._c.execute(
                 "UPDATE collect.watch SET last_hit_at = now() "
                 "WHERE source_id = %s", (source_id,))
-        return hits
+        return hits, [
+            f"watch {wid} has a regex that will not compile and therefore "
+            f"matches nothing: {reason} (pattern {redact(pat)[:120]!r})"
+            for (wid, pat), reason in broken.items()
+        ]
 
     def _suppressed(self, watch_id: UUID, thread: str | None,
                     window_s: int | None) -> bool:

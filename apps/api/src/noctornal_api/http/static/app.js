@@ -5810,6 +5810,14 @@ function dueRow(s) {
         { method: 'POST', json: {} });
       card.appendChild(el('p', body.error ? 'form-error' : 'form-ok',
         body.error || (body.items_new + ' new of ' + body.items_seen + ' seen')));
+      /* A poll can succeed and still not have done everything it was asked
+         to. A watch whose regex will not compile matches nothing, for
+         ever, and reads exactly like a watch that has not fired — so the
+         one moment somebody is looking at this source is the moment to
+         say so. */
+      for (const w of (body.warnings || [])) {
+        card.appendChild(el('p', 'why bad', w));
+      }
       loadSources();
     } catch (err) { fail(err); } finally { run.disabled = false; }
   });
@@ -5847,7 +5855,13 @@ function runRow(r) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', r.source_name || r.source_id));
-  head.appendChild(el('span', 'chip ' + (r.status === 'OK' ? 'ok' : 'bad'),
+  /* PARTIAL is neither. The run fetched and stored everything it found
+     and could not evaluate something — a dead watch pattern. Painting it
+     'bad' alongside genuine failures buries it; painting it 'ok' is what
+     the code did before PARTIAL was ever written, and is how a dead watch
+     stayed invisible. `error_detail` below carries the reason. */
+  head.appendChild(el('span', 'chip ' + (
+    r.status === 'OK' ? 'ok' : r.status === 'PARTIAL' ? 'warn' : 'bad'),
     r.status));
   card.appendChild(head);
   const facts = el('div', 'facts');
@@ -7025,8 +7039,31 @@ function authChip(name, result) {
     wrap.appendChild(chip);
     return wrap;
   }
-  wrap.appendChild(el('span',
-    'chip ' + (result === 'PASS' ? 'good' : 'bad'), result));
+  /* "Not PASS" is three different facts and this painted all of them red.
+     TEMPERROR means the receiving MTA could not COMPLETE the check — a DNS
+     timeout at delivery time. PERMERROR means the published record is
+     malformed. NONE means the domain publishes no policy at all. None of
+     those is the mail failing authentication, and showing them as FAIL is
+     the same error the gaps mechanism exists to prevent, made on screen:
+     an inconclusive check reported as an adverse finding. An analyst who
+     believes DKIM failed has an attribution; the truth is that nobody
+     knows. Only FAIL and SOFTFAIL are adverse. */
+  const adverse = result === 'FAIL' || result === 'SOFTFAIL';
+  const inconclusive = result === 'TEMPERROR' || result === 'PERMERROR';
+  const chip = el('span',
+    'chip ' + (result === 'PASS' ? 'good' : adverse ? 'bad'
+      : inconclusive ? 'warn' : 'subtle'),
+    result);
+  chip.title = result === 'PASS'
+    ? name + ' passed.'
+    : adverse
+      ? name + ' FAILED — the check ran and the message did not pass.'
+      : inconclusive
+        ? name + ' could not be completed by the receiving MTA (' + result
+          + '). This is not a failure and not a pass: it is unknown.'
+        : name + ' returned ' + result + ' — no policy or no verdict. '
+          + 'An absence, not a failure.';
+  wrap.appendChild(chip);
   return wrap;
 }
 
@@ -7119,7 +7156,19 @@ async function openDeceptionEmail(id) {
       name.dir = 'ltr';
       p.appendChild(name);
       p.appendChild(el('span', 'muted small', a.media_type || '?'));
-      p.appendChild(el('span', 'muted small', humanBytes(a.byte_size)));
+      /* A NULL size means the part could not be decoded, and `humanBytes`
+         renders that as a bare em-dash — which sits one column away from a
+         real "0 B" and reads the same at a glance. Say it in words. The
+         reason is in the parse gaps above. */
+      if (a.byte_size === null || a.byte_size === undefined) {
+        const unknown = el('span', 'chip warn', 'size unknown');
+        unknown.title = 'This part could not be decoded, so its size and '
+          + 'hash were never established. It is NOT an empty attachment — '
+          + 'see the parse gaps.';
+        p.appendChild(unknown);
+      } else {
+        p.appendChild(el('span', 'muted small', humanBytes(a.byte_size)));
+      }
       p.appendChild(el('span', 'chip subtle',
         a.sample_id ? 'in the lab' : 'metadata only'));
       attBox.appendChild(p);
@@ -7855,12 +7904,29 @@ function sampleActions(s) {
       return;
     }
     rejBtn.disabled = true;
+    /* Read the checkbox ONCE, before the await. What is reported has to be
+       what was actually sent — reading it again afterwards would report a
+       destruction or a preservation on the strength of where the pointer
+       happened to be when the response landed. */
+    const purged = !keepBox.checked;
     try {
       await api('/samples/' + encodeURIComponent(s.id) + '/reject', {
         method: 'POST',
-        json: { reason: reason.value.trim(), purge_bytes: !keepBox.checked },
+        json: { reason: reason.value.trim(), purge_bytes: purged },
       });
-      setMsg(msg, 'Rejected. The row stays; the bytes are gone.');
+      /* This line said "the bytes are gone" unconditionally, INCLUDING the
+         run where the analyst had ticked Keep — the one path that exists
+         precisely because somebody has been ordered to preserve the
+         material. Telling them it was destroyed is the worst available
+         wrong answer: it invites a spoliation report for a destruction
+         that did not happen, and it is the only record the analyst sees,
+         because the row itself does not display whether the object
+         survived. The service refuses rather than half-doing either, so
+         on success the request and the outcome agree. */
+      setMsg(msg, purged
+        ? 'Rejected. The row stays; the bytes and the data key are gone.'
+        : 'Rejected, and the bytes were KEPT — the rejection and its reason '
+          + 'are recorded, the material is still in the store under the hold.');
       msg.className = 'msg ok';
       await loadSamples();
       await openSample(s.id);
