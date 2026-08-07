@@ -69,7 +69,7 @@ from noctornal_api.http.deps import (
     require,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}/curation", tags=["curation"])
@@ -295,7 +295,7 @@ def create_tag(
         # 409, not the 400 the global CurationError handler would give: a
         # duplicate is a state conflict, not a malformed request, and a
         # client that wants "create or reuse" needs to tell them apart.
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {"id": str(tag_id), "namespace": namespace, "name": name,
             "colour": body.colour, "external_id": body.external_id,
             "scope": "case"}

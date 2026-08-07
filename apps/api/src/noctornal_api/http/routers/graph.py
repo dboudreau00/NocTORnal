@@ -41,7 +41,7 @@ from noctornal_api.http.deps import (
     require,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}", tags=["graph"])
@@ -231,7 +231,7 @@ def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> 
             node_id=node_id, edge_id=edge_id,
         )
     except GraphWriteError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return IdOut(id=str(aid))
 
 
@@ -297,7 +297,7 @@ def retract_assertion(
     except GraphWriteError as exc:
         # Already retracted, or gone. Saying so is better than a silent
         # 204 that leaves a burned source live in the projection.
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id, detail)

@@ -51,7 +51,7 @@ from noctornal_api.http.deps import (
     require_step_up,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.ingest import (
     AuthorisationRequired,
@@ -283,7 +283,7 @@ async def submit(
             key, raw, content_type=request.headers.get("content-type"),
             idempotency_key=idempotency_key)
     except IngestError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {
         "batch_id": str(result.batch_id),
         "accepted": result.accepted,
@@ -338,7 +338,7 @@ def issue_key(
             ip_allowlist=body.ip_allowlist or None,
             ttl=timedelta(days=body.ttl_days))
     except IngestError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {
         "id": str(issued.id), "key_id": issued.key_id,
         "secret": issued.token,
@@ -363,7 +363,7 @@ def revoke_key(
         IngestService(conn).revoke_key(
             key_row_id, actor_id=user.user_id, reason=body.reason)
     except IngestError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(key_row_id), "revoked": True}
 
 
@@ -434,13 +434,13 @@ def parse_batch(
             "would mark the batch PARSED with zero records, which is a "
             "silent loss (invariant 12).") from exc
     except IngestError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     try:
         result = svc.parse_batch(
             batch_id, raw=raw, case_id=body.case_id,
             parser_version=body.parser_version)
     except IngestError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {
         "batch_id": str(batch_id), "records": result.records,
         "dead_letters": result.dead, "duplicates": result.duplicates,
@@ -535,7 +535,7 @@ def replay(
             dead_letter_id, actor_id=user.user_id, repaired=body.repaired,
             case_id=body.case_id)
     except IngestError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {"dead_letter_id": str(dead_letter_id),
             "record_id": str(record_id),
             "notice": ("The original fragment is retained. A repair that "
@@ -709,7 +709,7 @@ def rescore(
     try:
         score = IngestService(conn).score_record(record_id)
     except IngestError as exc:
-        raise Problem(404, "Not found", str(exc)) from exc
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
     return {"record_id": str(record_id), "priority": score}
 
 
@@ -819,7 +819,7 @@ def grant_pii_authorisation(
             legal_basis=body.legal_basis,
             duration=timedelta(days=body.duration_days))
     except IngestError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(auth_id), "granted_to": str(body.granted_to),
             "expires_in_days": body.duration_days,
             "notice": L2_NOTICE}
@@ -860,14 +860,14 @@ def reveal_credential(
             credential_id, actor_id=user.user_id, case_id=body.case_id,
             reason=body.reason)
     except AuthorisationRequired as exc:
-        raise Problem(451, "Unavailable for legal reasons", str(exc)) from exc
+        raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from exc
     except CaseMismatch as exc:
         raise Problem(404, "Not found",
                       "no such credential in this case") from exc
     except IngestError as exc:
         if "no such credential" in str(exc):
-            raise Problem(404, "Not found", str(exc)) from exc
-        raise Problem(409, "Conflict", str(exc)) from exc
+            raise Problem(404, "Not found", safe_detail(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {"credential_id": str(credential_id), "value": value,
             "notice": ("This reveal is audited against you and the "
                        "authorisation that permitted it. " + L2_NOTICE)}
@@ -929,9 +929,9 @@ def search_by_fingerprint(
         rows = [r for r in rows
                 if r.get("case_id") is None or str(r["case_id"]) in allowed]
     except AuthorisationRequired as exc:
-        raise Problem(451, "Unavailable for legal reasons", str(exc)) from exc
+        raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from exc
     except IngestError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"matches": rows, "count": len(rows),
             "note": ("Exact-match only, by construction (decision 52). "
                      "An empty result means this exact value is not in the "

@@ -62,7 +62,7 @@ from noctornal_api.http.deps import (
     get_conn,
     require_global,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.retention import PurgeResult, RetentionError, RetentionService
 
@@ -194,7 +194,7 @@ def confirm_rule(
             category, retain_days=body.retain_days,
             rationale=body.rationale, confirmed_by=user.user_id)
     except RetentionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"category": rule.category, "retain_days": rule.retain_days,
             "rationale": rule.rationale, "confirmed_by": str(user.user_id),
             "is_placeholder": rule.is_placeholder}
@@ -282,7 +282,7 @@ def purge(
             actor_id=user.user_id, authority=body.authority,
             case_id=body.case_id, dry_run=body.dry_run)
     except RetentionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return _purge_response(result, dry_run=body.dry_run)
 
 
@@ -343,7 +343,7 @@ def purge_out_of_schedule(
             approval_request_id=body.approval_request_id,
             case_id=body.case_id, evidence_ids=body.evidence_ids)
     except RetentionError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return _purge_response(result, dry_run=False)
 
 
@@ -433,7 +433,7 @@ def legal_hold(
             body.evidence_id, actor_id=user.user_id, on=body.on,
             reason=body.reason)
     except RetentionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"evidence_id": str(body.evidence_id),
             "case_id": str(case_id), "legal_hold": body.on}
 
@@ -503,7 +503,7 @@ def invoke(
             permissions=body.permissions or None,
             duration=timedelta(hours=body.duration_hours))
     except BreakGlassError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {**_grant(grant),
             "notice": ("Every action taken under this grant is audited "
                        "against it, a security officer who is not you must "
@@ -552,7 +552,7 @@ def review(
             grant_id, reviewer_id=user.user_id, outcome=body.outcome,
             note=body.note)
     except BreakGlassError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return _grant(grant)
 
 
@@ -572,7 +572,7 @@ def revoke(
         return _grant(BreakGlassService(conn).revoke(
             grant_id, actor_id=user.user_id))
     except BreakGlassError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 @break_glass_router.get("/mine", response_model=dict)
