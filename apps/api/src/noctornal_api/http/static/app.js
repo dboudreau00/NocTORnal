@@ -2993,7 +2993,7 @@ function wireCaseActions() {
 
   edit.addEventListener('click', async () => {
     const rec = state.caseRec;
-    if (!rec) return;
+    if (!rec || !state.caseId) return;
     const title = window.prompt('Case title', rec.title);
     if (title === null) return;
     if (!title.trim()) {
@@ -3008,6 +3008,10 @@ function wireCaseActions() {
   });
 
   share.addEventListener('click', async () => {
+    /* `state.caseId` is null on the case LIST, and these buttons live in the
+       appbar, which the list does not hide. Without this the request went to
+       /cases/null/users and came back as an unexplained 422. */
+    if (!state.caseId) return;
     const uid = window.prompt(
       'User id to assign (iam.app_user.id)\n\n' +
       'The assignment is CHECKED: an analyst whose clearance or ' +
@@ -3029,7 +3033,7 @@ function wireCaseActions() {
 
   status.addEventListener('click', async () => {
     const rec = state.caseRec;
-    if (!rec) return;
+    if (!rec || !state.caseId) return;
     const next = window.prompt(
       'Current status: ' + rec.status + '\n\n' +
       'New status — DRAFT, ACTIVE, DORMANT, CLOSED, ARCHIVED or PURGED.\n' +
@@ -3188,9 +3192,19 @@ function wireElementActions() {
       ? 'Retiring this entity also retires EVERY tie it carries.\n\n'
       : '';
     const reason = window.prompt(
+      /* SAY WHAT IT ACTUALLY DOES. The first version of this promised
+         "an as-of query into the past still shows it", which is false:
+         `projections.py` filters `deleted_at IS NULL` unconditionally, with
+         no as_of interaction at all, so a retirement leaves EVERY view
+         including the historical ones. That is precisely the difference
+         from `valid_to`, and telling an analyst the opposite would have
+         them retire things believing the record of last week survives on
+         screen. It survives in the TABLE; it does not survive in a view. */
       what + 'Why is this being retired? (required)\n\n' +
       'Nothing is destroyed — the row, its assertions and its evidence ' +
-      'links remain, and an as-of query into the past still shows it.');
+      'links all remain, and clearing the flag brings it back. But it ' +
+      'leaves every view, including as-of queries into the past. To say ' +
+      'instead "this stopped being true in March", set valid_to.');
     if (reason === null) return;
     if (!reason.trim()) {
       banner('Not retired', 'A reason is required, exactly as it is for a ' +

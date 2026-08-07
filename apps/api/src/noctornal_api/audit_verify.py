@@ -197,12 +197,16 @@ def verify_chain(
 ) -> ChainReport:
     """Recompute the chain and return every row that does not verify.
 
-    `limit` checks only the most recent N rows. The CONTENT check is exact
-    for any window, but be aware of what a windowed LINK check can and
-    cannot see: the oldest row in the window has no predecessor loaded, so
-    its own `prev_hash` is not compared to anything. A deletion straddling
-    the window boundary is therefore invisible to a windowed run and
-    visible to a full one. The endpoint says so.
+    `limit` checks only the most recent N rows, and every check is EXACT
+    for the rows it reports: the predecessor and fork lookups run over the
+    whole table, not the window, so a windowed run cannot produce a false
+    orphan at its own boundary. What a window does not tell you is whether
+    rows outside it verify.
+
+    (An earlier version built those lookups from the window and therefore
+    DID have a boundary blind spot — worse, it accused the oldest row in
+    every windowed run. Both are gone; the docstring is kept honest because
+    a stale caveat teaches people to discount the accurate ones.)
 
     Ordering is by `seq`, the chain's own order, never by `occurred_at` —
     a clock adjustment must not be able to reorder the verification.
