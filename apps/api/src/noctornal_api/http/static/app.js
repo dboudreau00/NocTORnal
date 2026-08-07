@@ -3075,12 +3075,20 @@ function wireAuditVerify() {
       box.textContent = '';
       /* A 403 here is the expected answer for most accounts, not a
          malfunction, so it is explained rather than thrown at the banner
-         stack as an error. */
+         stack as an error.
+         THROUGH `refusalText`, which puts the SERVER's detail first. The
+         first version of this asserted "your account does not hold
+         audit.read" — a guess about the caller, and exactly the mistake
+         `refusalText` exists to stop: three strings in this file once
+         told the holder of a permission that they did not hold it,
+         because the real refusal was a stale step-up. An inactive account
+         403s the same way here. The written context is kept after it,
+         because WHY the verb is scarce is worth saying. */
       if (err instanceof ApiError && err.status === 403) {
-        box.appendChild(el('p', 'help warn',
-          'Your account does not hold audit.read. That verb is granted to ' +
-          'SECURITY_OFFICER alone — the administrator configures, the ' +
-          'officer audits, and neither reads case content by default.'));
+        box.appendChild(el('p', 'help warn', refusalText(err,
+          'audit.read is granted to SECURITY_OFFICER alone — the ' +
+          'administrator configures, the officer audits, and neither ' +
+          'reads case content by default.')));
       } else { fail(err); }
       btn.disabled = false;
       return;
