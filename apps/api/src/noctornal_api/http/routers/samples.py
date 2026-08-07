@@ -46,7 +46,7 @@ from noctornal_api.http.deps import (
     require_step_up,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.samples import (
     MAX_SAMPLE_BYTES,
@@ -225,9 +225,9 @@ async def submit(
     except PolicyNotDeclared as exc:
         # 451: the refusal is legal, not technical, and a 400 would send
         # somebody looking at their upload.
-        raise Problem(451, "Unavailable for legal reasons", str(exc)) from exc
+        raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from exc
     except SampleError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 @router.get("", response_model=dict)
@@ -313,7 +313,7 @@ def download(
             # 404, not 409: "this sample exists but is not yours" is itself
             # a disclosure about a compartmented case.
             raise Problem(404, "Not found", "no such sample") from exc
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return Response(
         content=blob, media_type="application/octet-stream",
         headers={
@@ -377,7 +377,7 @@ def reject(
                                       reason=body.reason,
                                       purge_bytes=body.purge_bytes))
     except SampleError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 class AssignBody(BaseModel):
@@ -394,7 +394,7 @@ def assign(
         return _out(_svc(conn).assign(sample_id, analyst_id=body.analyst_id,
                                       actor_id=user.user_id))
     except SampleError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 class AnalysisBody(BaseModel):
@@ -427,7 +427,7 @@ def record_analysis(
             narrative=body.narrative, tool=body.tool,
             tool_version=body.tool_version)
     except SampleError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(analysis_id)}
 
 
@@ -460,7 +460,7 @@ def request_detonation(
             exposure_level=body.exposure_level,
             authorised_by=body.authorised_by, note=body.note)
     except SampleError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(det_id),
             "submitted": False,
             "notice": "Recorded only. No sandbox integration exists; nothing "

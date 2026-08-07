@@ -684,6 +684,51 @@ def test_a_grant_cannot_be_born_already_dead(conn, client):
     assert _assignment_count(conn, case_id, analyst_id) == 1
 
 
+def test_an_expiry_with_no_offset_is_refused_and_not_guessed(conn, client):
+    """`2027-03-14T17:00:00` is valid ISO 8601 with no offset.
+
+    Pydantic parses it into a NAIVE datetime, and the past-expiry check
+    compared it to an aware `_now()`:
+
+        TypeError: can't compare offset-naive and offset-aware datetimes
+
+    Nothing caught it, so the most ordinary client mistake there is was a
+    500 on an access-control path. Found 2026-08-07; the existing
+    `test_a_grant_cannot_be_born_already_dead` never reached it because
+    every timestamp it sends is already `tzinfo=timezone.utc`.
+
+    A 400 rather than an assumed UTC. This value decides the instant
+    somebody LOSES access to a case, and a grant meant to end at 17:00
+    local read as 17:00Z is up to thirteen hours of unintended access with
+    nothing in the response saying which reading was taken.
+    """
+    _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+    analyst_id, _, _ = _make_user(conn, clearance="AMBER")
+
+    naive = (datetime.now(timezone.utc) + timedelta(days=30)
+             ).replace(tzinfo=None).isoformat()
+    assert not naive.endswith("Z") and "+" not in naive
+
+    r = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
+                    json={"user_id": str(analyst_id), "role_key": "ANALYST",
+                          "expires_at": naive})
+    assert r.status_code == 400, (
+        f"a naive expires_at gave {r.status_code}, not a refusal: {r.text}")
+    assert "offset" in r.json()["detail"].lower()
+    assert _assignment_count(conn, case_id, analyst_id) == 0
+
+    # And an offset-carrying one that is NOT UTC still works, so the fix
+    # did not quietly narrow the accepted input to Z.
+    plus_one = (datetime.now(timezone(timedelta(hours=1)))
+                + timedelta(days=30)).isoformat()
+    ok = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
+                     json={"user_id": str(analyst_id), "role_key": "ANALYST",
+                           "expires_at": plus_one})
+    assert ok.status_code == 200, ok.text
+
+
 def test_the_owner_cannot_be_regraded_out_of_their_own_case(conn, client):
     """`revoke_user` refuses to strip the owner; nothing stopped you
     achieving the same thing by regrading them to READ_ONLY, which locks
@@ -980,3 +1025,48 @@ def test_every_case_route_needs_a_session(client):
     assert client.get(f"/api/v1/cases/{case_id}/users").status_code == 401
     assert client.post(f"/api/v1/cases/{case_id}/users", json={}).status_code == 401
     assert client.post(f"/api/v1/cases/{case_id}/status", json={}).status_code == 401
+
+
+# --- retention may be extended, never shortened --------------------------
+#
+# Found by an adversarial pass on 2026-08-07. `retention.py` selects
+# evidence for destruction with `c.retention_until <= today`, and
+# `evidence.purge` is dual-controlled (decision 44). Backdating this field
+# under `case.update` therefore let ONE person schedule the destruction
+# that TWO are required to authorise -- and the audit trail would record a
+# metadata edit rather than a destruction.
+
+def _open_case(conn, client):
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    return token, _create_case(client, token)
+
+
+def _retention_of(client, token, case_id) -> str:
+    r = client.get(f"/api/v1/cases/{case_id}", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    return r.json()["retention_until"]
+
+
+def test_retention_cannot_be_shortened(conn, client):
+    token, case_id = _open_case(conn, client)
+    before = _retention_of(client, token, case_id)
+
+    r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
+                     json={"retention_until": "2026-01-01"})
+    assert r.status_code == 400, r.text
+    assert "dual-controlled" in r.text
+    assert _retention_of(client, token, case_id) == before, "the date moved anyway"
+
+
+def test_retention_can_still_be_extended(conn, client):
+    """The refusal must be about SHORTENING, not a blanket block.
+
+    Without this the test above passes against an endpoint that refuses
+    every retention edit, which would be a worse product and a green suite.
+    """
+    token, case_id = _open_case(conn, client)
+    r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
+                     json={"retention_until": "2099-12-31"})
+    assert r.status_code == 200, r.text
+    assert _retention_of(client, token, case_id) == "2099-12-31"

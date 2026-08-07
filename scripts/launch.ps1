@@ -296,9 +296,24 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
 
+        # `$null -ne`, not `IsNullOrWhiteSpace`. GetEnvironmentVariable
+        # returns $null when the variable does not exist and "" when it
+        # exists and is empty -- and a variable that is DEFINED AND EMPTY
+        # is a deliberate choice the file must not overrule.
+        #
+        # Treating empty as absent meant an operator who blanked a
+        # variable to turn something OFF had the file's value put straight
+        # back. `SMTP_ALLOW_PLAINTEXT=` is the case that matters: emptied
+        # to stop plaintext SMTP, silently re-enabled on the next launch.
+        # `db.py` and `scripts/_env.py` both make this distinction on
+        # purpose; the launchers were undoing it.
         $current = [System.Environment]::GetEnvironmentVariable($name, 'Process')
-        if (-not [string]::IsNullOrWhiteSpace($current)) {
-            Write-Detail "$name already set in the environment - file value ignored"
+        if ($null -ne $current) {
+            if ($current -eq '') {
+                Write-Detail "$name is set but EMPTY in the environment - file value ignored (clear the variable entirely if that was not deliberate)"
+            } else {
+                Write-Detail "$name already set in the environment - file value ignored"
+            }
             continue
         }
         [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
@@ -383,10 +398,24 @@ $defaults = [ordered]@{
 }
 
 foreach ($name in $defaults.Keys) {
+    # Same "defined, not merely non-empty" rule as the .env.local loader
+    # above. Found by the test written for that one, which is the point of
+    # having written it: this is a SECOND implementation of the same rule
+    # in the same file, and it disagreed.
+    #
+    # It matters most for DATABASE_URL. `db.py` distinguishes set-but-empty
+    # from unset precisely so a blanked DSN produces a refusal instead of
+    # a silent default -- and this quietly replaced it with the local
+    # development stack, which is the one outcome an operator who blanked
+    # it was trying to prevent. `REDIS_URL=` is the other: emptied to force
+    # per-process metering, restored to localhost here.
     $current = [System.Environment]::GetEnvironmentVariable($name, 'Process')
-    if ([string]::IsNullOrWhiteSpace($current)) {
+    if ($null -eq $current) {
         [System.Environment]::SetEnvironmentVariable($name, $defaults[$name], 'Process')
         Write-Detail "$name set to the local development default"
+    }
+    elseif ($current -eq '') {
+        Write-Detail "$name is set but EMPTY - left that way, no default applied"
     }
     else {
         Write-Detail "$name kept from the environment"

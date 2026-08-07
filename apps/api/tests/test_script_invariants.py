@@ -121,3 +121,84 @@ def test_no_second_copy_of_the_env_loader(path: Path) -> None:
     assert "_load_env_local" not in defined and "load_env_local" not in defined, (
         f"{path.name} defines its own .env.local loader. There is exactly "
         f"one, in scripts/_env.py; import it instead.")
+
+
+# ---------------------------------------------------------------------------
+# The installers and launchers, 2026-08-07
+# ---------------------------------------------------------------------------
+#
+# Same reasoning as the header: nothing executes these, because executing
+# them installs a stack. Static checks are weaker than a run and are the
+# checks that would have fired.
+
+REPO = Path(__file__).resolve().parents[3]
+INSTALLERS = (REPO / "release" / "install.ps1", REPO / "release" / "install.sh")
+LAUNCHERS = (REPO / "scripts" / "launch.ps1", REPO / "scripts" / "launch.sh")
+
+
+@pytest.mark.parametrize("path", INSTALLERS, ids=lambda p: p.name)
+def test_a_generated_secret_is_checked_before_it_is_written(path: Path):
+    """An unchecked subprocess produces an EMPTY secret in `.env.local`.
+
+    Both installers took the output of `python -c "...urandom(32)..."` on
+    trust. A broken venv, a missing DLL, an interpreter that dies on
+    import: the variable is empty, the file is written with
+    `NOCTORNAL_TOTP_KEK=`, and the installer announces "fresh random keys".
+
+    The failure then LATCHES. Every later run takes the "already exists -
+    left untouched" branch, so a recipient whose first run half-failed is
+    permanently installed with an empty key and is told twice that it
+    worked. Refusing BEFORE the write leaves no file, so re-running fixes
+    it.
+
+    In PowerShell this is the more dangerous of the two: `& cmd` does not
+    stop the script on failure at all, where `set -euo pipefail` catches
+    the non-zero exit in sh.
+    """
+    src = path.read_text(encoding="utf-8")
+    assert "32" in src and ("not 32" in src or "-ne 32" in src), (
+        f"{path.name} does not check that the generated TOTP key is "
+        f"exactly 32 bytes -- envelope.py refuses anything else, but not "
+        f"until run time, in a different program")
+    # And it must refuse rather than warn: the write is the latch.
+    assert "stop_with" in src or "Stop-With" in src
+
+
+@pytest.mark.parametrize("path", LAUNCHERS, ids=lambda p: p.name)
+def test_a_set_but_empty_variable_is_not_treated_as_unset(path: Path):
+    """`SMTP_ALLOW_PLAINTEXT=` is a deliberate act, not an absence.
+
+    Both launchers loaded `.env.local` over any variable that was empty,
+    so an operator who blanked one to turn something OFF had the file's
+    value put straight back on the next launch. `db.py` and
+    `scripts/_env.py` both distinguish "set but empty" from "not set" on
+    purpose -- `_env.py`'s docstring names this exact scenario -- and the
+    launchers were undoing it two directories away.
+
+    sh needs `${!name+x}` (defined) rather than `${!name:-}` (non-empty);
+    PowerShell needs `$null -ne` rather than `IsNullOrWhiteSpace`, because
+    GetEnvironmentVariable returns "" for a defined-empty variable and
+    $null only for a missing one.
+    """
+    src = path.read_text(encoding="utf-8")
+    # BOTH implementations, in both files. Each launcher applies this rule
+    # twice -- once loading `.env.local`, once applying the development
+    # defaults -- and when this test was first written the two disagreed
+    # inside the same file. That is the cheapest lens in the roadmap:
+    # diff two implementations of one rule against each other.
+    if path.suffix == ".sh":
+        assert src.count("${!name+x}") >= 2, (
+            "launch.sh still tests a variable with `:-` somewhere, so a "
+            "deliberately emptied variable is overwritten -- by "
+            ".env.local, or by the development defaults, or both")
+    else:
+        assert "$null -ne $current" in src, (
+            "launch.ps1's .env.local loader uses IsNullOrWhiteSpace, which "
+            "cannot tell a defined-empty variable from a missing one")
+        assert "$null -eq $current" in src, (
+            "launch.ps1's defaults loop has the same gap: a blanked "
+            "DATABASE_URL is silently replaced with the dev-stack DSN")
+        assert "IsNullOrWhiteSpace($current)" not in src
+    # Whichever it is, the empty case has to SAY something -- silently
+    # honouring it is how nobody noticed the old behaviour either.
+    assert "EMPTY" in src

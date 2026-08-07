@@ -3,16 +3,39 @@
 Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
-**State:** `main`, Alembic head `0045`, **1206 tests passing, 0 skipped**
-(run BOTH `apps/api/tests` and `packages/ontology` — earlier handoffs
-quoted a single figure and the next session spent time working out why it
-did not reconcile), ruff clean. Nothing pushed (no remote configured).
+**State (2026-08-07):** branch `deception-and-release-hardening`, Alembic
+head `0055`, **1444 passing, 0 failing, 0 skipped** (run BOTH
+`apps/api/tests` and `packages/ontology` — earlier handoffs quoted a single
+figure and the next session spent time working out why it did not
+reconcile), ruff clean, source hygiene clean across 273 files. The full
+migration chain round-trips `head → base → head` on a scratch database
+with the extensions installed, which is what CI checks.
+
+> **`test_ratelimit_redis::test_redis_and_python_agree_request_for_request`
+> is TIMING-SENSITIVE and fails intermittently — it passed on the run
+> above and failed on the two before it, diverging at a different
+> iteration each time. Not fixed on purpose.** It compares a
+> Redis-backed GCRA against an in-process one over thirty iterations, so
+> the Redis side pays thirty network round trips the local side does not;
+> with a 0.05s emission that drift crosses a boundary at iteration 23. The
+> algorithms agree — every single-backend test passes. Widening the
+> tolerance would turn it green while destroying the only interesting
+> thing it checks. The fix is an injected clock so neither backend pays for
+> the transport; the mechanism is written up in the test's own docstring.
+
+> **This header said `0045` / 1206 tests until 2026-07-26, when it was
+> seven migrations and 78 tests behind.** Everything in this file predates
+> the deception subsystem (0046–0050), the Telegram re-key (0051), the
+> TRUNCATE guards (0052) and an 18-finding code review. Treat any
+> unqualified claim below as *as-of the 26th* unless it carries a later
+> date — and see "Verified gaps the scoreboard misses" for what a
+> code-level audit found that the percentages do not show.
 
 **`release/` is the packaged Alpha release** — a README leading with the
 legal status, an analyst manual, install instructions and one-shot
-installers for Windows and Linux/macOS. `scripts/assemble_release.ps1`
-copies it out to a standalone folder; `release/` is the source of truth
-and the copy is disposable.
+installers for Windows and Linux/macOS. `scripts/package_release.ps1`
+exports the WHOLE tree to a standalone folder via `git archive`;
+`release/` is the source of truth and the copy is disposable.
 
 > **EVERY PHASE HAS NOW HAD AN ADVERSARIAL PASS.** Phases 5 and 8 were the
 > last two, reviewed 2026-07-26: **27 findings survived refutation, nine
@@ -28,7 +51,7 @@ and the copy is disposable.
 > **The most important files in the repo are
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) and
 > [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md).** Every
-> phase is built. Four of them cannot lawfully be operated until somebody
+> phase is built. Five of them cannot lawfully be operated until somebody
 > outside this codebase makes a decision. docs/16 is that list organised
 > the way the code is; **docs/18 is the same list organised the way a
 > review is** — every question, its option set, the consequence of each,
@@ -68,7 +91,7 @@ regressed — the measure got honest.**
 | 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
 | 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
 | 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. **The UI is complete**: merge and its reversal live in the inspector (with the merge history and a per-merge Reverse), and Lifecycle, ACH and Report landed 2026-07-26. What remains is model work and a hostile review of the phase as a whole. |
-| 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. What is left is the Telegram id-collision model change (F1 / docs/16 D8) and optional niceties: detached signatures, and a keyserver-free way to obtain a vendor key. |
+| 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
@@ -102,10 +125,176 @@ Three things the number still hides:
 
 ---
 
+## Verified gaps the scoreboard misses
+
+Added 2026-07-26 after a code-level audit that checked **call sites**
+rather than existence. Every row below was confirmed by direct search, and
+every one sits inside a phase this file scores at 88–100%.
+
+The scoreboard's own definition of the UI dimension is *"reachable and
+usable in the browser, not only by `curl`"*. These are the places that
+test is failing while the row shows ✅ — a service with tests and no
+caller scores 45% of a phase and delivers nothing.
+
+| Gap | Phase | Status |
+|---|---|---|
+| **Tags and node sets are a dead subsystem.** Schema (0009), `TagService` + `NodeSetService` and five green tests; no router, no endpoint, no UI. The only call sites were its own tests. | 1 | ✅ **CLOSED 2026-07-30.** `routers/curation.py`, 10 endpoints, `curation.manage` (0053); tag chips, apply, remove and create in the inspector. Verified endpoint and browser. |
+| **Nothing ever verifies the audit chain.** Phase 0's exit criterion is *"every action appears in a **verifiable** audit chain"* and nothing ever recomputed it. | 0 | ✅ **CLOSED 2026-07-30.** `audit_verify.py` + `GET /audit/verify` + a CI step that runs after the suite. Proven to FAIL correctly: an in-place edit is one CONTENT break, a deleted row one LINK break. **UI added the same day**: Governance → Audit chain, button-driven (it is an O(n) SHA-256 over every event, so load-on-open would be a self-inflicted DoS on the surface an officer reaches for during an incident). A 403 is explained rather than bannered — `audit.read` is SECURITY_OFFICER's alone, so most accounts are refused and that is the design working. |
+| **Node and edge "CRUD" is create-and-read only.** A mistyped label was permanent. | 1 | ✅ **CLOSED 2026-07-30.** `update_node` / `update_edge` / `soft_delete_node` / `soft_delete_edge`, each assertion-backed, retiring via `deleted_at` (never `valid_to` — that is temporal validity and using it would rewrite the past). Service + router, **and a UI** (2026-07-30): Correct… / Retire… on the selected element, with the tie cascade reported in a banner. |
+| **Case metadata, assignment and closure had no router.** A case could not be corrected, shared or closed from a browser. | 1 | ✅ **CLOSED 2026-07-30**, API **and UI** — Case… / Share… / Status… in the appbar. Lowering a case's classification is deliberately REFUSED — it declassifies everything protected only by the case label, in one statement, under a verb described as "edit metadata". It needs its own verb. |
+| **The sociogram could not show a 2,000-node case.** Hard-capped at 800 while the API served 5,000. | 2 | ✅ **CLOSED 2026-07-30.** Analyst-raisable 800 → 2000 → 5000 from inside the truncation notice. The warning stays at every ceiling. |
+| **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
+| **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
+| **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
+
+### The 2026-08-07 error-handling audit
+
+A second pass, 34 agents, scoped to *what happens when this fails*:
+**22 confirmed after refutation.** Six were fixed on the day of the audit —
+the purge that never touched the object store, `safe_detail` unwrapping
+only one level, the 71 rule-1 leak sites, the audit-verify 403 asserting a
+role fact, a purge response that could read as a destruction, and CI
+failing on chain forks.
+
+The pattern worth naming: **most are a failure that is reported as the
+wrong thing**, not a crash.
+
+**Eight more were closed later the same day**, each with a regression test
+confirmed to fail against the commit before it:
+
+| | Where | What | |
+|---|---|---|---|
+| CRITICAL | `app.js` | Sample rejection reported "the bytes are gone" even when the analyst ticked *Keep* — the LEGAL HOLD path, reached because somebody has been ordered to preserve the material. Also: the service now REFUSES to record `bytes_purged: true` with no store attached, which was the third instance of that exact defect (`retention._purge_evidence`, `ingest._with_raw`, here). | ✅ |
+| HIGH | `collection.py` | A run that failed after the fetch stayed RUNNING for ever. The row is INSERTed on an autocommit connection so it survives the unwind, and `(status) WHERE status IN ('QUEUED','RUNNING')` is read as "in flight". Same defect `analytics_runs` CR9 fixed, in a second service. | ✅ |
+| HIGH | `collection.py` | A watch with an invalid regex was silently dead for ever. The run is now `PARTIAL` — a status that already existed in the enum and was never written by anything. | ✅ |
+| HIGH | `deception.py` | An attachment that could not be decoded was recorded as a genuine zero-byte attachment. A forwarded mail carried as an attachment (`message/rfc822`, the standard thread-hijack BEC shape) hits it every time. Both columns are nullable; "unknown" was always representable. | ✅ |
+| HIGH | `deception.py` | An unreadable `Authentication-Results` header was reported as no header being present — *with* the reassurance that "their absence is not a failure". And on screen every non-PASS verdict was painted as a failure, so a DKIM `TEMPERROR` (a DNS timeout at the receiving MTA) read as an adverse attribution against the sender. | ✅ |
+| HIGH | `graphview.py` | A failed path recompute was swallowed, leaving the previous projection's verdict on screen. The false-negative direction is the dangerous one: an earlier NOT CONNECTED survived into a projection that would have connected the two. Connectivity is now explicitly UNKNOWN, a third state. | ✅ |
+| MEDIUM | `install.*` | Wrote `.env.local` from unchecked subprocess output, so a failed key generation produced an empty secret — and the failure LATCHED, because every later run reports "already exists, left untouched". | ✅ |
+| MEDIUM | `launch.*` | Treated a set-but-empty variable as unset, defeating the `db.py` distinction. The test written for it found a SECOND implementation of the same rule in the same file, with the same gap — the defaults loop, where a blanked `DATABASE_URL` was replaced by the dev-stack DSN. | ✅ |
+
+**Still open:**
+
+| | Where | What |
+|---|---|---|
+| MEDIUM | various | A four-eyes request that reached nobody returns 201; three notification writes have no `try` at all; one transient failure hides the ingest quarantine for the session; a failed deception load leaves the previous case's rows on screen. |
+
+`EvidenceStorage.delete()` exists but **has never been exercised against a
+live COMPLIANCE lock** — the expected outcome is a refusal recorded as
+STORAGE_LOCKED, and that path has no integration test.
+
+### Open findings from the 2026-08-07 hostile pass
+
+33 agents over that day's diff: **17 confirmed after refutation, 11
+refuted.** Nine were fixed the same day (the retirement cascade writing
+past the caller's clearance, `/audit/verify` answering BROKEN on
+untampered history, retention backdating around dual control, the
+expiry-nulling upsert, an invented Admiralty grading, a stale tag
+vocabulary, a prompt that stated the opposite of what the endpoint does, a
+CSP-blocked inline style, and a seeder that could not finish).
+
+These survived refutation. **Five of the seven were closed later the same
+day** (migration **0055**), each with a regression test confirmed to fail
+against the commit before it:
+
+| | Where | What | |
+|---|---|---|---|
+| HIGH | `merges.py` | `unmerge` cleared `deleted_at` on every recorded edge unconditionally, so reversing an old merge resurrected edges retired for unrelated reasons afterwards — with `deleted_by` still naming the analyst who retired them. **0055** records at merge time which edges the merge itself deleted; the backfill reconstructs that decision exactly for existing rows rather than defaulting them, because a `DEFAULT false` would have stopped an old merge restoring its own self-loop, which is the opposite defect. Pre-existing, and reachable only since retirement got a caller. | ✅ |
+| MEDIUM | `curation.py` | `TagService.assign` had no `ON CONFLICT` against 0054's indexes. The conflict target has to restate the partial index's predicate — 0054 created four partial indexes deliberately, and a partial index is not usable as a conflict target without its `WHERE`. | ✅ |
+| MEDIUM | `cases.py` | A naive (offset-less) `expires_at` 500d on `TypeError`. Refused with a 400 rather than assumed to be UTC: this decides when somebody LOSES access to a case, and 17:00 local read as 17:00Z is thirteen hours of unintended access with nothing saying which reading was taken. | ✅ |
+| LOW | `curation.py` | `merged_into_id` was filtered in `list_tags`' count but not in `list_sets`, `list_members` or `_visible_node`. Merged-away members are now returned under `merged_away` rather than folded into `withheld` — a merge is not a clearance fact, and the ids have to stay reachable or the entry can never be removed. | ✅ |
+| LOW | `graph.py` | Eight sites (not the two originally reported) raised `GraphWriteError(str(exc))`, putting constraint names and offending column VALUES into the message. `safe_detail` already covered the HTTP boundary; the message itself is now clean, so logs, stored columns and scripts are too. The cause chain is preserved. | ✅ |
+
+**Still open:**
+
+| | Where | What |
+|---|---|---|
+| MEDIUM | `audit_verify.py` | A row inserted with `prev_hash NULL` passes every check — the genesis row is exempt by construction, so a second "genesis" is invisible. The chain has no anchor saying which row is first. |
+| MEDIUM | `cases.py` | Raising a case's classification can strand its owner above their own clearance, and there is no route back — lowering is refused by design. |
+
+### The migration round-trip is only proven on an EMPTY database
+
+Verified 2026-08-07. `alembic downgrade base` → `upgrade head` passes on a
+freshly migrated database, which is the contract CI checks and it holds.
+Run the same round-trip against a database **with data in it** and it
+fails:
+
+```
+ForeignKeyViolation: update or delete on table "role" violates foreign key
+constraint "case_assignment_role_key_fkey"
+DETAIL: Key (key)=(CASE_OWNER) is still referenced from case_assignment.
+```
+
+`0017.downgrade()` does `DELETE FROM iam.role WHERE key IN (…)`, and
+`iam.case_assignment.role_key REFERENCES role(key)` **without**
+`ON DELETE CASCADE` — unlike `iam.role_permission` two lines above it in
+0012, which has one. So the seed cannot be unwound on any deployment that
+has ever assigned a case.
+
+Not fixed, and arguably not worth fixing: downgrading past 0017 unwinds
+the entire ontology and role seed, which on a live database is data
+destruction rather than a rollback. But CONVENTIONS.md says "every
+migration must be reversible", CI proves that only for the empty case, and
+the difference is exactly the kind of thing somebody discovers during an
+incident. Recorded rather than left to be rediscovered.
+
+### Found while closing them
+
+- **Notifications were queued on the wrong clock.** `deliver_after` came
+  from `datetime.now()` and is compared against Postgres `now()` — two
+  clocks in one comparison. The host here was **3.79s ahead** of the
+  container, so every non-urgent delivery was ~4s in the future by the
+  reader's reckoning and an immediate drain found nothing. In production
+  the API and database routinely sit on different hosts, so the same skew
+  silently delays or prematurely releases every notification. Fixed:
+  the base time now comes from the database.
+- **`NodeSetService.add_member` destroyed notes.** `SET note =
+  EXCLUDED.note` meant re-adding a member without a note wrote NULL over
+  it — a double-click away, on the one field in a working set that cannot
+  be reconstructed from the graph.
+- **`core.tag_assignment` had no key and no unique index** (0054), and
+  **`core.edge` had no `deleted_by`** while `core.node` has had one since
+  0005 (0053).
+- **The audit chain has 67 genuine FORKs** on the development database —
+  two rows claiming one predecessor, which is the condition 0013's
+  advisory lock exists to prevent. Not fixed; worth a look.
+- **`seq` order is not chain order.** The first verifier assumed it was
+  and reported 68 breaks on honest history — the exact failure a
+  tamper-evidence tool must never have.
+
+**None of this is a regression.** It is the same lesson this file already
+records twice: a green suite either side of a contract that neither side
+asserts. The measure got honest once when UI was added to the weighting;
+it needs to get honest again about *reachability*, because "service +
+tests exist" is what several ✅s are currently reporting.
+
+**What I did not re-verify.** A first-pass audit also flagged the Phase 4
+collection read path (`collect.document` and `collect.watch_hit` written
+by the collector and read by nothing), a suspected key mismatch in the
+co-participation renderer, and detail in Phases 5/6/9. The adversarial
+stage that would have refuted or confirmed those did not complete. They
+are **unverified leads, not findings**, and are recorded here as such
+rather than being either dropped or dressed up.
+
+---
+
 ## 🔴 Before anything else: the legal register
 
-`docs/16-legal-and-external.md` holds **4 BLOCKING items, 7 determinations
-and 10 things to confirm externally.** The four blockers, compressed:
+`docs/16-legal-and-external.md` holds **5 BLOCKING items, 8 determinations
+and 13 things to confirm externally.**
+
+> **Corrected 2026-07-26.** This line said "4 / 7 / 10" and was wrong on
+> all three counts. The undercount that mattered was the blockers:
+> **L5 — active web capture authority** shipped with the deception
+> subsystem and was enforced in the schema, announced in README,
+> SECURITY.md, ARCHITECTURE.md and docs/19 — and recorded in neither
+> docs/16 nor the counsel pack in docs/18. Both documents a lawyer
+> actually reads said four. A reviewer working from that pack would have
+> cleared the platform without being asked whether entering input into a
+> phishing page is authorised. L5 and A5 now exist in both, each carrying
+> a note that an earlier review did not cover them.
+
+The five blockers, compressed:
 
 | | What | Why it blocks |
 |---|---|---|
@@ -113,8 +302,9 @@ and 10 things to confirm externally.** The four blockers, compressed:
 | **L2** | Stealer-log lawful basis, victim notification, real retention | Holding data about thousands of uninvolved people. 90 days is a placeholder. |
 | **L3** | Persona operation authority | The software will drive an account into a forum. Whether you may is not a software question. |
 | **L4** | Interception law and consent | Message capture. `provenance_class` records *which* kind; the authority is external. |
+| **L5** | Active web capture authority | Fetching attacker infrastructure discloses the investigation; **entering any input into a phishing page, including canary credentials, may constitute unauthorised access.** The schema refuses to record a submission without a written authority reference. Nothing is automated. |
 
-The ten **CONFIRM EXTERNALLY** items include evidence-authenticity standards
+The thirteen **CONFIRM EXTERNALLY** items include evidence-authenticity standards
 (reasoned from the rule text, not from a practitioner), MinIO COMPLIANCE
 semantics on your actual object store, and the platform durable-identifier
 mappings — which change, and where a stale mapping produces confident false

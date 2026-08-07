@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.projections import (
     PRESETS,
     GraphService,
@@ -82,7 +82,7 @@ def projected_graph(
         # each pay for two aggregates to answer a question nobody asked.
         withheld = svc.withheld(p)
     except ProjectionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {
         "projection": sub.projection,
         "truncated": sub.truncated,
@@ -172,7 +172,7 @@ def metrics(
     try:
         return _svc(conn, user).metrics(p)
     except ProjectionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 # --- saved layout -------------------------------------------------------

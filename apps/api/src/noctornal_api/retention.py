@@ -329,6 +329,28 @@ class RetentionService:
                         "deleted. The record says destroyed; the object store "
                         "disagrees. See docs/16 C2 before telling anybody "
                         "the bytes are gone.")
+                if outcome == STORAGE_NA:
+                    # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
+                    # has to be told. `RetentionService(conn)` takes
+                    # `storage=None` and the HTTP routers construct it that
+                    # way, so every purge through the API marks the rows
+                    # purged and never reaches the bytes. The tombstone
+                    # records NOT_APPLICABLE, which is honest, but the
+                    # RESPONSE said `evidence_purged: N`, `storage_locked:
+                    # 0` and nothing else -- which reads as "destroyed, no
+                    # problems" to anyone who is not reading tombstones.
+                    #
+                    # This is the same class of lie the LOCKED branch below
+                    # already guards against, and the more dangerous one:
+                    # LOCKED at least says the store disagreed. This said
+                    # nothing.
+                    result.warnings.append(
+                        "evidence rows are marked purged but NO OBJECT "
+                        "STORE WAS CONFIGURED for this purge, so the bytes "
+                        "were never touched. The record says destroyed; "
+                        "nothing asked the object store. Do not report this "
+                        "as a destruction.")
+
                 result.tombstones.append(self._tombstone(
                     case_id=case_id, object_type="evidence",
                     ids=evidence_ids, authority=authority, actor_id=actor_id,
@@ -465,8 +487,39 @@ class RetentionService:
         self._c.execute(
             "UPDATE core.evidence SET purged_at = now() WHERE id = ANY(%s)",
             (ids,))
-        if self._storage is None:
-            return STORAGE_NA
+        if self._storage is None and ids:
+            # REFUSE. NOT_APPLICABLE is a lie for evidence.
+            # (`and ids`: with nothing to destroy there is nothing to
+            # lie about, and the caller already guards on a non-empty
+            # list — but a refusal for a no-op would be its own small
+            # confusion.)
+            #
+            # `core.evidence.storage_key` is NOT NULL and `EvidenceService
+            # .ingest` writes the bytes before inserting the row, so every
+            # exhibit HAS an object and the question always applies. This
+            # branch used to `return STORAGE_NA`, and because both
+            # governance routers construct `RetentionService(conn)` with no
+            # storage, that was 100% of production purges: rows marked
+            # `purged_at`, exhibit gone from every read path, bytes intact
+            # in MinIO, and the tombstone — the record designed to outlive
+            # the data — asserting the object store was not applicable.
+            #
+            # NOT_APPLICABLE remains correct for documents, ingest records
+            # and dead letters further down, whose content is nulled in the
+            # database and never had an object. That is why the wrong value
+            # did not look wrong.
+            #
+            # Refusing rather than degrading follows `ingest.py:_with_raw`,
+            # which 503s when the raw store is missing instead of accepting
+            # bytes it will drop. `rawstore.py`'s docstring records that
+            # exact bug being found and fixed once on the ingest side; this
+            # is the same shape on the destructive side, where the cost is
+            # a false record of destruction rather than lost intake.
+            raise RetentionError(
+                "no evidence object store is configured, so the exhibit "
+                "bytes cannot be destroyed. Refusing rather than marking "
+                "the rows purged and writing a tombstone that says the "
+                "material is gone while it is still in the bucket.")
         outcome = STORAGE_DELETED
         for (key,) in rows:
             try:
