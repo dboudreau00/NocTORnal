@@ -980,3 +980,48 @@ def test_every_case_route_needs_a_session(client):
     assert client.get(f"/api/v1/cases/{case_id}/users").status_code == 401
     assert client.post(f"/api/v1/cases/{case_id}/users", json={}).status_code == 401
     assert client.post(f"/api/v1/cases/{case_id}/status", json={}).status_code == 401
+
+
+# --- retention may be extended, never shortened --------------------------
+#
+# Found by an adversarial pass on 2026-08-07. `retention.py` selects
+# evidence for destruction with `c.retention_until <= today`, and
+# `evidence.purge` is dual-controlled (decision 44). Backdating this field
+# under `case.update` therefore let ONE person schedule the destruction
+# that TWO are required to authorise -- and the audit trail would record a
+# metadata edit rather than a destruction.
+
+def _open_case(conn, client):
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    return token, _create_case(client, token)
+
+
+def _retention_of(client, token, case_id) -> str:
+    r = client.get(f"/api/v1/cases/{case_id}", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    return r.json()["retention_until"]
+
+
+def test_retention_cannot_be_shortened(conn, client):
+    token, case_id = _open_case(conn, client)
+    before = _retention_of(client, token, case_id)
+
+    r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
+                     json={"retention_until": "2026-01-01"})
+    assert r.status_code == 400, r.text
+    assert "dual-controlled" in r.text
+    assert _retention_of(client, token, case_id) == before, "the date moved anyway"
+
+
+def test_retention_can_still_be_extended(conn, client):
+    """The refusal must be about SHORTENING, not a blanket block.
+
+    Without this the test above passes against an endpoint that refuses
+    every retention edit, which would be a worse product and a green suite.
+    """
+    token, case_id = _open_case(conn, client)
+    r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
+                     json={"retention_until": "2099-12-31"})
+    assert r.status_code == 200, r.text
+    assert _retention_of(client, token, case_id) == "2099-12-31"
