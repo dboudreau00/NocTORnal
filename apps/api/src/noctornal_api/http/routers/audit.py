@@ -74,11 +74,19 @@ def verify(
         # as a pass. An empty audit table is a legitimately intact chain
         # and also evidence of nothing.
         "windowed": limit is not None,
+        # The caveat DESCRIBES THE ACTUAL BLIND SPOT, which is not the one
+        # it originally claimed. It said a windowed run "cannot see a
+        # deletion that straddles the window boundary" -- that was true of
+        # the first implementation, and stopped being true when `hashes`
+        # and `claims` were widened to the whole table. Leaving it would
+        # have had an officer distrust a result that is in fact exact, and
+        # a caveat nobody can reproduce is how the honest ones stop being
+        # read.
         "caveat": (
-            "A windowed run cannot see a deletion that straddles the "
-            "window boundary: the oldest row checked has no loaded "
-            "predecessor, so its link is not asserted. Run without `limit` "
-            "for a complete answer."
+            "Windowed: LINK, FORK and CONTENT are each exact for the rows "
+            "reported, because the predecessor lookup covers the whole "
+            "table. What a window cannot tell you is whether rows OUTSIDE "
+            "it verify — run without `limit` for that."
         ) if limit is not None else None,
         # Forks are NOT tampering -- see ChainReport.intact. Reported so an
         # officer knows the chain is not linearisable, which weakens the

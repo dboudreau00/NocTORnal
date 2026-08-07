@@ -4,13 +4,15 @@ Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
 **State (2026-07-30):** branch `deception-and-release-hardening`, Alembic
-head `0054`, **1388 passing / 1 failing** (run BOTH `apps/api/tests` and
+head `0054`, **1397 passing, 0 failing** (run BOTH `apps/api/tests` and
 `packages/ontology` — earlier handoffs quoted a single figure and the next
 session spent time working out why it did not reconcile), ruff clean,
 source hygiene clean.
 
-> **The one failure is `test_ratelimit_redis::test_redis_and_python_agree_
-> request_for_request`, and it is not fixed on purpose.** It compares a
+> **`test_ratelimit_redis::test_redis_and_python_agree_request_for_request`
+> is TIMING-SENSITIVE and fails intermittently — it passed on the run
+> above and failed on the two before it, diverging at a different
+> iteration each time. Not fixed on purpose.** It compares a
 > Redis-backed GCRA against an in-process one over thirty iterations, so
 > the Redis side pays thirty network round trips the local side does not;
 > with a 0.05s emission that drift crosses a boundary at iteration 23. The
@@ -142,6 +144,28 @@ caller scores 45% of a phase and delivers nothing.
 | **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
 | **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
 | **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
+
+### Open findings from the 2026-08-07 hostile pass
+
+33 agents over that day's diff: **17 confirmed after refutation, 11
+refuted.** Nine were fixed the same day (the retirement cascade writing
+past the caller's clearance, `/audit/verify` answering BROKEN on
+untampered history, retention backdating around dual control, the
+expiry-nulling upsert, an invented Admiralty grading, a stale tag
+vocabulary, a prompt that stated the opposite of what the endpoint does, a
+CSP-blocked inline style, and a seeder that could not finish).
+
+These survived refutation and are **NOT fixed**:
+
+| | Where | What |
+|---|---|---|
+| HIGH | `merges.py:223` | `unmerge` clears `deleted_at` on every recorded edge unconditionally, so reversing an old merge resurrects edges that were retired for unrelated reasons afterwards. Pre-existing; interacts with the retirement work only because retirement now has a caller. |
+| MEDIUM | `audit_verify.py` | A row inserted with `prev_hash NULL` passes every check — the genesis row is exempt by construction, so a second "genesis" is invisible. The chain has no anchor saying which row is first. |
+| MEDIUM | `curation.py` | `TagService.assign` has no `ON CONFLICT`, and 0054 added the unique index it would need. Two concurrent assigns now 500 instead of one being a no-op. The router pre-checks, which handles the double-click and not the race. |
+| MEDIUM | `cases.py` | A naive (offset-less) `expires_at` 500s rather than being validated. |
+| MEDIUM | `cases.py` | Raising a case's classification can strand its owner above their own clearance, and there is no route back — lowering is refused by design. |
+| LOW | `curation.py` | `merged_into_id` is filtered in `list_tags`' count but not in `list_sets`, `list_members` or `_visible_node_count`, so a merged-away node still counts. |
+| LOW | `graph.py` | Pre-existing: `_add_assertion` and `retract_assertion` re-raise `str(exc)` from psycopg, putting constraint names and column values into client responses, which `errors.py` rule 1 forbids. The new endpoints avoid it by not catching. |
 
 ### The migration round-trip is only proven on an EMPTY database
 
