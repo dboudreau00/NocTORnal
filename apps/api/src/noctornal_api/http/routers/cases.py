@@ -392,10 +392,32 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     if case is None:
         raise Problem(404, "Not found", "case does not exist")
 
-    if body.expires_at is not None and body.expires_at <= _now():
-        raise Problem(400, "Invalid request",
-                      "expires_at is in the past — that grant would be "
-                      "expired before it was written")
+    if body.expires_at is not None:
+        # An offset is REQUIRED, and the absence of one is a 400 rather
+        # than an assumption.
+        #
+        # `2027-03-14T17:00:00` is valid ISO 8601 and Pydantic parses it
+        # into a naive datetime. Comparing that to the aware `_now()`
+        # raises `TypeError: can't compare offset-naive and offset-aware
+        # datetimes`, which nothing catches — so the most ordinary
+        # possible client mistake was a 500 on an access-control path.
+        #
+        # Defaulting it to UTC would be worse than refusing. This value
+        # decides the instant somebody LOSES access to a case; a grant
+        # meant to end at 17:00 local, silently read as 17:00Z, is up to
+        # thirteen hours of unintended access on either side, and nothing
+        # in the response would say which reading was taken.
+        if body.expires_at.utcoffset() is None:
+            raise Problem(
+                400, "Invalid request",
+                "expires_at has no UTC offset. This decides the moment "
+                "someone loses access to a case, so it is not guessed: "
+                "send an offset-aware timestamp such as "
+                "2027-03-14T17:00:00Z or 2027-03-14T17:00:00+01:00.")
+        if body.expires_at <= _now():
+            raise Problem(400, "Invalid request",
+                          "expires_at is in the past — that grant would be "
+                          "expired before it was written")
 
     role = conn.execute(
         """SELECT r.key,

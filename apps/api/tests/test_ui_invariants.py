@@ -417,3 +417,38 @@ def test_a_partial_collection_run_is_not_painted_as_a_success_or_a_failure():
     start = js.index("function runRow(")
     body = js[start:js.index("\nfunction ", start + 10)]
     assert "PARTIAL" in body, "runRow cannot show a partially-completed run"
+
+
+def test_a_failed_path_recompute_does_not_keep_asserting_connectivity():
+    """`reapplyFocus` runs on every projection change and every scrubber
+    settle. Its path branch swallowed the error and cleared only the
+    highlight, leaving `state.focus.connected` and `.hops` holding the
+    verdict computed under the PREVIOUS projection -- which the focus flag
+    then printed against the new one.
+
+    The false-negative direction is the dangerous one: an earlier NOT
+    CONNECTED survives into a projection that would have connected the two,
+    and "are these two linked" is the question the control exists to
+    answer.
+
+    The ego branch immediately above it already did this correctly, which
+    is what makes it a slip rather than a design.
+    """
+    js = _js()
+    start = js.index("async function reapplyFocus(")
+    body = js[start:js.index("\n/* \u2500\u2500 timeline scrubber", start)]
+    tail = body[body.index("/* path focus */"):]
+    assert "state.focus.connected = null" in tail, (
+        "a failed path recompute leaves the previous projection's verdict "
+        "in place")
+    assert "fail(err)" in tail, "and says nothing to the analyst"
+
+
+def test_the_focus_flag_distinguishes_unknown_from_not_connected():
+    """Invariant 12 in the one place it decides an attribution: `false` is
+    a finding about the graph, `null` is the absence of one."""
+    js = _js()
+    start = js.index("function renderFocusFlag(")
+    body = js[start:js.index("\n/** Double-click", start)]
+    assert "state.focus.connected === null" in body
+    assert "UNKNOWN" in body

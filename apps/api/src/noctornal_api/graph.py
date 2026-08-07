@@ -27,6 +27,32 @@ class GraphWriteError(Exception):
     ontology/endpoint rejection, or the invariant-1 trigger)."""
 
 
+def _write_error(exc: psycopg.Error) -> GraphWriteError:
+    """Wrap a database failure without copying its text into the message.
+
+    Eight sites in this module raised `GraphWriteError(str(exc))`, and
+    `str()` on a psycopg error is the full server message: the constraint
+    name, which describes the schema, and the `DETAIL:` line, which echoes
+    the offending column VALUE. On a real deployment that value is case
+    data -- a node label, an analyst's real name, a selector.
+
+    `errors.safe_detail` walks `__cause__` and replaces this at the HTTP
+    boundary, so client responses were already covered by the time this
+    was written. What it does not cover is every OTHER reader of the
+    string: a log line, a stored `error_detail` column, a `str(exc)` in a
+    script, a future caller who has no idea the message is tainted. The
+    text should not be in the message in the first place.
+
+    The exception CLASS is kept, because `UniqueViolation` and
+    `ForeignKeyViolation` are genuinely different problems and neither
+    name discloses anything about the data. `raise ... from exc` at every
+    call site keeps the real error on `__cause__`, so a developer still
+    gets the whole thing in a traceback and `safe_detail` still finds it.
+    """
+    return GraphWriteError(
+        f"the database refused this write ({type(exc).__name__})")
+
+
 #: ICD-203 analytic confidence, mirroring the `core.analytic_confidence`
 #: enum (0002). Checked in Python before the UPDATE only so the caller gets
 #: a readable error instead of a psycopg InvalidTextRepresentation; the DB
@@ -86,7 +112,7 @@ class GraphWriteService:
                 self._insert_assertion(case_id, assertion, node_id=node_id)
             return node_id
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     # -- edges -----------------------------------------------------------
     def create_edge(
@@ -137,7 +163,7 @@ class GraphWriteService:
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     # -- correcting and retiring -----------------------------------------
     #
@@ -204,7 +230,7 @@ class GraphWriteService:
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     def update_edge(
         self,
@@ -258,7 +284,7 @@ class GraphWriteService:
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     def soft_delete_node(
         self,
@@ -321,7 +347,7 @@ class GraphWriteService:
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     def _refuse_if_ties_above_clearance(
         self, node_id: UUID, case_id: UUID,
@@ -398,7 +424,7 @@ class GraphWriteService:
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     # -- further assertions on an existing element -----------------------
     def add_assertion(
@@ -420,7 +446,7 @@ class GraphWriteService:
                     case_id, assertion, node_id=node_id, edge_id=edge_id
                 )
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     def retract_assertion(
         self, assertion_id: UUID, *, retracted_by: UUID, reason: str, at: datetime
@@ -446,7 +472,7 @@ class GraphWriteService:
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
-            raise GraphWriteError(str(exc)) from exc
+            raise _write_error(exc) from exc
 
     # -- internal --------------------------------------------------------
     def _insert_assertion(
