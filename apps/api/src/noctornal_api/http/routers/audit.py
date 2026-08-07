@@ -57,9 +57,12 @@ def verify(
     verification is an O(n) SHA-256 over every audit row ever written, and
     it is not something anyone needs to run in a loop.
 
-    The response distinguishes the two ways a chain breaks — LINK (a row
-    removed, inserted or reordered) and CONTENT (a row edited in place) —
-    because they point an investigator in different directions.
+    The response distinguishes LINK (a predecessor removed) from CONTENT
+    (a row edited in place), because they point an investigator in
+    different directions — and reports FORKS separately from both, because
+    they are an artefact of concurrent writers rather than evidence of
+    tampering, and counting them as breaks made this answer BROKEN on
+    untampered history.
     """
     report = verify_chain(conn, limit=limit)
     return {
@@ -77,6 +80,17 @@ def verify(
             "predecessor, so its link is not asserted. Run without `limit` "
             "for a complete answer."
         ) if limit is not None else None,
+        # Forks are NOT tampering -- see ChainReport.intact. Reported so an
+        # officer knows the chain is not linearisable, which weakens the
+        # guarantee, without being told the log was edited.
+        "forks": len(report.forks),
+        "fork_note": (
+            "Rows sharing a predecessor. Produced by concurrent writers, not "
+            "by editing: `seq` is drawn before the chaining trigger takes its "
+            "lock, so two writers can chain off one tail. Worth knowing (the "
+            "chain cannot be fully linearised) but it is not evidence of "
+            "tampering."
+        ) if report.forks else None,
         "breaks": [
             {
                 "seq": b.seq,

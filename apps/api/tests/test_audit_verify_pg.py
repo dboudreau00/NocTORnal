@@ -155,3 +155,79 @@ def test_empty_window_is_not_reported_as_a_pass(tamperable):
     assert report.intact          # documented behaviour...
     assert report.first_seq is None   # ...and the tell that it is vacuous
     assert report.last_seq is None
+
+
+def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
+    """Add a second row claiming the newest row's predecessor.
+
+    The twin's `row_hash` is computed with the SAME expression the trigger
+    uses, imported from the module under test rather than re-typed, so the
+    fork is LINK-clean and CONTENT-clean: the only thing wrong with it is
+    that two rows now claim one predecessor. A hand-invented hash would be
+    flagged CONTENT and the test would prove nothing about forks — which
+    is exactly what the first version of this did.
+    """
+    from noctornal_api.audit_verify import _HASH_EXPR
+
+    conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    conn.execute(
+        """INSERT INTO audit.event
+               (actor_kind, action, outcome, detail, prev_hash, row_hash)
+           SELECT 'USER', %s, 'SUCCESS', '{}'::jsonb, e.prev_hash, decode('00','hex')
+             FROM audit.event e
+            WHERE e.seq = (SELECT max(seq) FROM audit.event)""",
+        (action,))
+    conn.execute(
+        f"""UPDATE audit.event AS e SET row_hash = {_HASH_EXPR}
+             WHERE e.seq = (SELECT max(seq) FROM audit.event)""")
+
+
+def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
+    """Two rows sharing a predecessor must not make the chain "broken".
+
+    This is the case that fires on real history. `seq` is drawn from
+    `nextval()` before the chaining trigger takes its advisory lock, so
+    concurrent writers can chain off the same tail; the development
+    database carries 67 such forks in 60,181 rows, none of them tampering.
+
+    Counting them as breaks made `/audit/verify` answer BROKEN on
+    untouched history — the one answer a tamper-evidence tool cannot
+    afford, and the SECOND time this module made that mistake (the first
+    was assuming `seq` order was chain order). Hence a named test.
+    """
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=4)
+    _forge_clean_fork(tamperable)
+
+    report = verify_chain(tamperable, since_seq=since)
+    assert report.forks, "the fork was not detected at all"
+    assert [f.kind for f in report.forks] == ["FORK", "FORK"], \
+        "both claimants must be named — which one is the intruder is not " \
+        "something the verifier can decide"
+    # THE POINT: no tampering was found, so the chain is not "broken".
+    assert not report.breaks, [b.kind for b in report.breaks]
+    assert report.intact, "a fork must not be reported as tampering"
+
+
+def test_a_fork_does_not_mask_real_tampering(tamperable):
+    """Separating forks out must not create a hiding place.
+
+    Without this, "forks are not breaks" could be implemented by dropping
+    any row that forks — and an attacker who forked a row they also edited
+    would be invisible.
+    """
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=4)
+    tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    tamperable.execute(
+        """UPDATE audit.event SET action = 'EDITED_AND_FORKED'
+            WHERE seq = (SELECT max(seq) FROM audit.event)""")
+    _forge_clean_fork(tamperable, action="FORKED_TWIN_2")
+
+    report = verify_chain(tamperable, since_seq=since)
+    assert report.forks, "the fork was lost"
+    assert any(b.kind == "CONTENT" for b in report.breaks), \
+        "the edited row was masked by its own fork"
+    assert not report.intact
