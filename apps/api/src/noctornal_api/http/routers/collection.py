@@ -146,6 +146,11 @@ def run_once(
         "items_new": result.items_new,
         "watch_hits": result.watch_hits,
         "error": result.error,
+        # What the run could not do while otherwise succeeding. A watch
+        # whose regex will not compile matches nothing for ever, and until
+        # 2026-08-07 that was swallowed: the run reported OK and the watch
+        # looked like one that simply had not fired.
+        "warnings": result.warnings,
         "notice": L3_NOTICE,
     }
 

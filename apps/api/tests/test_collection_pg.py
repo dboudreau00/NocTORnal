@@ -473,7 +473,101 @@ def test_a_broken_regex_does_not_stop_the_other_watches(conn):
 
     svc = CollectionService(conn, adapters={
         "rss": StubAdapter(result=FetchResult(items=parse_rss(FEED)))})
-    assert svc.run_once(source_id, actor_id=actor).watch_hits == 1
+    result = svc.run_once(source_id, actor_id=actor)
+    assert result.watch_hits == 1
+
+    # Added 2026-08-07. Everything above this line passed while the broken
+    # watch was ALSO silent -- `except re.error: continue` and nothing
+    # else. This test is where that should have been caught and was not:
+    # it asserted the isolation and never asked whether the typo was ever
+    # reported to anyone.
+    assert result.warnings, "a watch that can never match must say so"
+    assert "[unclosed" in result.warnings[0]
+    assert str(result.run_id)  # the row below is this run
+
+    status, detail = conn.execute(
+        "SELECT status, error_detail FROM collect.collection_run "
+        " WHERE id = %s", (result.run_id,)).fetchone()
+    # Not OK. The fetch and the store both worked, and a standing tasking
+    # on this source is dead -- PARTIAL is the only status that is true.
+    assert status == "PARTIAL", f"a run with a dead watch reported {status}"
+    assert "will not compile" in detail
+
+
+def test_one_broken_pattern_is_reported_once_not_once_per_item(conn):
+    """A 200-post feed must not produce 200 identical warnings.
+
+    The signal is "this watch is dead", and it is stored in a text column
+    on the run. Repeating it per item both truncates the column and buries
+    the one fact worth reading.
+    """
+    from noctornal_api.collection import (CollectionService, FetchResult,
+                                          Item)
+
+    actor = _user(conn)
+    source_id = _source(conn)
+    case_id = _case(conn, actor)
+    conn.execute(
+        """INSERT INTO collect.watch
+               (case_id, source_id, name, target_kind, target_ref, regexes,
+                owner_user_id)
+           VALUES (%s, %s, 'broken', 'FORUM', 'b', ARRAY['(unclosed'], %s)""",
+        (case_id, source_id, actor))
+
+    items = [Item(external_id=f"many-{i}", title="t", body="b")
+             for i in range(25)]
+    svc = CollectionService(conn, adapters={
+        "rss": StubAdapter(result=FetchResult(items=items))})
+    result = svc.run_once(source_id, actor_id=actor)
+    assert result.items_seen == 25
+    assert len(result.warnings) == 1, result.warnings
+
+
+def test_a_failure_after_the_fetch_does_not_strand_the_run_at_RUNNING(conn):
+    """The run row is INSERTed 'RUNNING' on an AUTOCOMMIT connection.
+
+    So it is already committed before the work starts, and survives
+    whatever unwinds above it. The handler covered `adapter.fetch` only --
+    a failure in `_store_document` or `_match_watches` left the row at
+    RUNNING for ever.
+
+    That is the same defect `analytics_runs` CR9 fixed for
+    `analytics.metric_run`, in a second service, and it matters more here:
+    `(status) WHERE status IN ('QUEUED','RUNNING')` is an indexed set the
+    scheduler and the health rollup both read as "in flight", so a
+    stranded row reads as a collector that is still working.
+    """
+    from noctornal_api.collection import (CollectionService, FetchResult,
+                                          Item)
+
+    actor = _user(conn)
+    source_id = _source(conn)
+    svc = CollectionService(conn, adapters={
+        "rss": StubAdapter(result=FetchResult(
+            items=[Item(external_id="boom", title="t", body="b")]))})
+
+    boom = RuntimeError("storage went away mid-loop")
+
+    def explode(*_a, **_k):
+        raise boom
+
+    svc._store_document = explode  # noqa: SLF001 - that is the region under test
+
+    with pytest.raises(RuntimeError):
+        svc.run_once(source_id, actor_id=actor)
+
+    status, klass, detail = conn.execute(
+        """SELECT status, error_class, error_detail
+             FROM collect.collection_run
+            WHERE source_id = %s ORDER BY started_at DESC LIMIT 1""",
+        (source_id,)).fetchone()
+    assert status == "FAILED", f"stranded at {status}"
+    assert klass == "RuntimeError"
+    assert detail.startswith("persist: ")
+    assert conn.execute(
+        "SELECT count(*) FROM collect.collection_run "
+        " WHERE source_id = %s AND status = 'RUNNING'", (source_id,)
+    ).fetchone()[0] == 0
 
 
 def test_repeated_hits_on_one_thread_are_suppressed(conn):
