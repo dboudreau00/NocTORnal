@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import CurrentUser, current_user, get_conn, require_global
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.notifications import (
     KINDS,
@@ -172,7 +172,7 @@ def set_preference(
         return PreferenceOut(**vars(
             NotificationService(conn).set_preference(user.user_id, channel, **fields)))
     except NotificationError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 class DrainOut(BaseModel):

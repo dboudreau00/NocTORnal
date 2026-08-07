@@ -35,7 +35,7 @@ from noctornal_api.http.deps import (
     require_step_up,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 from noctornal_api.reports import (
@@ -86,7 +86,7 @@ def _target_within_ceiling(conn: psycopg.Connection, user: CurrentUser,
     try:
         requested = tlp_from_name(target_tlp)
     except AccessResolutionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return min(requested, ceiling).name
 
 
@@ -123,7 +123,7 @@ def build(
             # a ceiling of RED does not read anybody into anything.
             compartments=user_ceiling(conn, user.user_id)[1])
     except ReportError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
     _audit(conn, case_id, user.user_id, "REPORT_GENERATED", {
         # Both, because "asked for RED, got AMBER" is the interesting line
@@ -196,7 +196,7 @@ def release(
             case_id, target_tlp=effective_tlp, generated_by=user.user_id,
             compartments=user_ceiling(conn, user.user_id)[1])
     except ReportError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
     decision = check_egress(report, destination,
                             destination_ceiling=body.destination_ceiling)

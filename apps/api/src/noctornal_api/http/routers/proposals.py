@@ -30,7 +30,7 @@ from noctornal_api.http.deps import (
     get_conn,
     require,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.proposals import (
     STATE_PROPOSED,
@@ -131,7 +131,7 @@ def capture(
             classification=body.classification,
         )
     except ExtractionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
     conn.execute(
         """INSERT INTO audit.event
@@ -188,7 +188,7 @@ def accept(
             proposal_id, reviewed_by=user.user_id, note=body.note,
             classification=body.classification))
     except ProposalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 @router.post("/{proposal_id}/reject", response_model=ProposalOut)
@@ -204,7 +204,7 @@ def reject(
         return _out(ProposalReview(conn).reject(
             proposal_id, reviewed_by=user.user_id, note=body.note))
     except ProposalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 @router.post("/{proposal_id}/defer", response_model=ProposalOut)
@@ -220,4 +220,4 @@ def defer(
         return _out(ProposalReview(conn).defer(
             proposal_id, reviewed_by=user.user_id, note=body.note))
     except ProposalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
