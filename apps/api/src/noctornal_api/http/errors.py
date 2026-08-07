@@ -75,6 +75,41 @@ _CONSTRAINT_MESSAGES = {
 }
 
 
+def _db_cause(exc: Exception, depth: int = 8) -> psycopg.Error | None:
+    """The psycopg error underneath `exc`, however deeply it is wrapped.
+
+    WALKS THE CHAIN. This used to look exactly one level down
+    (`exc.__cause__`), which was enough for a service that wraps psycopg
+    directly and wrong the moment one service wraps another.
+
+    `proposals.py:327` does exactly that:
+
+        except GraphWriteError as exc:
+            raise ProposalError(f"could not apply proposal: {exc}") from exc
+
+    so accepting a proposal produced ProposalError -> GraphWriteError ->
+    psycopg. The one-level check found a GraphWriteError, concluded there
+    was no database cause, and returned `str(exc)` — which by then had the
+    raw PQ text interpolated into it twice over. Reproduced against the
+    live database: one level sanitised correctly, two levels returned
+    `... violates foreign key constraint "node_case_id_fkey" DETAIL: Key
+    (case_id)=(…)`.
+
+    Bounded and cycle-guarded: an exception chain is not guaranteed
+    acyclic, and this runs on the error path where a hang is least
+    affordable.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and depth > 0 and id(cur) not in seen:
+        if isinstance(cur, psycopg.Error):
+            return cur
+        seen.add(id(cur))
+        cur = cur.__cause__
+        depth -= 1
+    return None
+
+
 def safe_detail(exc: Exception) -> str:
     """A client-safe message for a service error, with a correlation id when
     the underlying cause was a database error.
@@ -97,9 +132,7 @@ def safe_detail(exc: Exception) -> str:
     DB-wrapped ones are replaced, and their raw text is logged against the
     correlation id that goes back to the caller.
     """
-    cause = exc.__cause__ if isinstance(exc.__cause__, psycopg.Error) else None
-    if cause is None and isinstance(exc, psycopg.Error):
-        cause = exc
+    cause = _db_cause(exc)
     if cause is None:
         # Raised by our own code with an authored message — safe to return.
         return str(exc)

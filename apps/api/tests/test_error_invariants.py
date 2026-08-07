@@ -85,3 +85,67 @@ def test_the_sanitiser_is_actually_imported_where_it_is_used() -> None:
             if not imported:
                 missing.append(path.name)
     assert not missing, f"call safe_detail without importing it: {missing}"
+
+
+# --- safe_detail must unwrap however deep the chain goes -----------------
+
+def test_safe_detail_unwraps_a_nested_service_chain():
+    """One level was not enough, and the gap was reachable.
+
+    `proposals.py:327` wraps a GraphWriteError:
+
+        except GraphWriteError as exc:
+            raise ProposalError(f"could not apply proposal: {exc}") from exc
+
+    so accepting a proposal produced ProposalError -> GraphWriteError ->
+    psycopg. The original one-level check found a GraphWriteError, decided
+    there was no database cause, and returned `str(exc)` — which by then
+    had the raw PQ text interpolated into it twice.
+    """
+    import psycopg
+
+    from noctornal_api.graph import GraphWriteError
+    from noctornal_api.http.errors import safe_detail
+
+    db = psycopg.errors.ForeignKeyViolation(
+        'insert or update on table "node" violates foreign key constraint '
+        '"node_case_id_fkey"\nDETAIL:  Key (case_id)=(secret-uuid) is not '
+        'present in table "case".')
+
+    one = GraphWriteError(str(db))
+    one.__cause__ = db
+    two = Exception(f"could not apply proposal: {one}")
+    two.__cause__ = one
+    three = Exception(f"outer: {two}")
+    three.__cause__ = two
+
+    for depth, exc in (("one", one), ("two", two), ("three", three)):
+        detail = safe_detail(exc)
+        assert "node_case_id_fkey" not in detail, f"{depth}: constraint leaked"
+        assert "secret-uuid" not in detail, f"{depth}: column VALUE leaked"
+        assert "DETAIL" not in detail, f"{depth}: DETAIL line leaked"
+        assert "ref " in detail, f"{depth}: no correlation id to find the log by"
+
+
+def test_safe_detail_leaves_an_authored_message_alone():
+    """Only DB-wrapped errors are replaced.
+
+    Without this the sanitiser could be "fixed" by returning a fixed string
+    for everything, which would erase every useful refusal the services
+    write by hand.
+    """
+    from noctornal_api.graph import GraphWriteError
+    from noctornal_api.http.errors import safe_detail
+
+    assert safe_detail(GraphWriteError("label cannot be blank")) == \
+        "label cannot be blank"
+
+
+def test_safe_detail_terminates_on_a_cyclic_chain():
+    """`__cause__` is not guaranteed acyclic, and this runs on the error
+    path where a hang is least affordable."""
+    from noctornal_api.http.errors import safe_detail
+
+    a, b = Exception("a"), Exception("b")
+    a.__cause__, b.__cause__ = b, a
+    assert safe_detail(a) == "a"
