@@ -39,6 +39,7 @@ from noctornal_api.http.deps import (
     check_writable_labels,
     get_conn,
     require,
+    user_ceiling,
 )
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
@@ -678,8 +679,14 @@ def soft_delete_node(
 
     at = datetime.now(timezone.utc)
     with conn.transaction():
+        # The caller's OWN ceiling, so the cascade cannot retire a tie
+        # they are not cleared to see. `require(...)` gated the case and
+        # `_gate_for_change` gated this node; neither says anything about
+        # the edges hanging off it.
+        clearance, compartments = user_ceiling(conn, user.user_id)
         edges_retired = GraphWriteService(conn).soft_delete_node(
-            node_id, case_id=case_id, deleted_by=user.user_id, at=at)
+            node_id, case_id=case_id, deleted_by=user.user_id, at=at,
+            clearance=clearance.name, compartments=compartments)
         _audit_change(conn, user, case_id, action="NODE_SOFT_DELETED",
                       object_type="node", object_id=node_id,
                       detail={"reason": body.reason, "label": label,

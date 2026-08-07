@@ -143,6 +143,32 @@ caller scores 45% of a phase and delivers nothing.
 | **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
 | **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
 
+### The migration round-trip is only proven on an EMPTY database
+
+Verified 2026-08-07. `alembic downgrade base` → `upgrade head` passes on a
+freshly migrated database, which is the contract CI checks and it holds.
+Run the same round-trip against a database **with data in it** and it
+fails:
+
+```
+ForeignKeyViolation: update or delete on table "role" violates foreign key
+constraint "case_assignment_role_key_fkey"
+DETAIL: Key (key)=(CASE_OWNER) is still referenced from case_assignment.
+```
+
+`0017.downgrade()` does `DELETE FROM iam.role WHERE key IN (…)`, and
+`iam.case_assignment.role_key REFERENCES role(key)` **without**
+`ON DELETE CASCADE` — unlike `iam.role_permission` two lines above it in
+0012, which has one. So the seed cannot be unwound on any deployment that
+has ever assigned a case.
+
+Not fixed, and arguably not worth fixing: downgrading past 0017 unwinds
+the entire ontology and role seed, which on a live database is data
+destruction rather than a rollback. But CONVENTIONS.md says "every
+migration must be reversible", CI proves that only for the empty case, and
+the difference is exactly the kind of thing somebody discovers during an
+incident. Recorded rather than left to be rediscovered.
+
 ### Found while closing them
 
 - **Notifications were queued on the wrong clock.** `deliver_after` came

@@ -213,7 +213,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 52 Alembic migrations
+6. applies all 54 Alembic migrations
 7. offers to create your first account, printing the password **once** with a QR code to scan
 8. starts the API and opens the console
 
@@ -576,7 +576,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             annotated reference schema
-│   └── migrations/versions/   52 Alembic revisions
+│   └── migrations/versions/   54 Alembic revisions
 ├── docs/                      00–19, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
