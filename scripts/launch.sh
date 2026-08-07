@@ -216,8 +216,21 @@ if [ -f "$ENV_LOCAL" ]; then
     value="${value#\"}"; value="${value%\"}"
     value="${value#\'}"; value="${value%\'}"
 
-    if [ -n "${!name:-}" ]; then
-      detail "$name already set in the environment - file value ignored"
+    # `+x`, not `:-`. A variable that is DEFINED AND EMPTY is a deliberate
+    # choice and the file must not overrule it.
+    #
+    # `[ -n "${!name:-}" ]` treated empty as absent, so an operator who
+    # blanked a variable to turn something OFF had the file's value put
+    # straight back. `SMTP_ALLOW_PLAINTEXT=` is the case that matters:
+    # emptied to stop plaintext SMTP, and silently re-enabled on the next
+    # launch. `db.py` and `scripts/_env.py` both make this distinction
+    # deliberately; the launchers were undoing it.
+    if [ -n "${!name+x}" ]; then
+      if [ -z "${!name}" ]; then
+        detail "$name is set but EMPTY in the environment - file value ignored (blank it back if that was not deliberate)"
+      else
+        detail "$name already set in the environment - file value ignored"
+      fi
       continue
     fi
     export "$name=$value"
@@ -277,9 +290,20 @@ step 'Setting the service connection details'
 # or Vault instead.
 set_default() {
   local name="$1" value="$2"
-  if [ -z "${!name:-}" ]; then
+  # Same "defined, not merely non-empty" rule as the .env.local loader
+  # above -- a SECOND implementation of it in the same file, which
+  # disagreed with the first until 2026-08-07.
+  #
+  # It matters most for DATABASE_URL. `db.py` distinguishes set-but-empty
+  # from unset precisely so a blanked DSN produces a refusal instead of a
+  # silent default, and this quietly replaced it with the local
+  # development stack -- the one outcome an operator who blanked it was
+  # trying to prevent.
+  if [ -z "${!name+x}" ]; then
     export "$name=$value"
     detail "$name set to the local development default"
+  elif [ -z "${!name}" ]; then
+    detail "$name is set but EMPTY - left that way, no default applied"
   else
     detail "$name kept from the environment"
   fi

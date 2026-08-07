@@ -332,6 +332,91 @@ def test_a_header_containing_a_newline_cannot_forge_a_second_field():
         assert "\r" not in value and "\n" not in value
 
 
+def test_an_undecodable_attachment_is_not_recorded_as_an_empty_one():
+    """0 bytes is a claim about the MESSAGE; a decode failure is a claim
+    about the PARSER. Recording the second as the first invents a finding.
+
+    Found 2026-08-07. `payload = b""` in the exception handler gave
+    `byte_size: 0` and `sha256: NULL`, which is exactly what a genuinely
+    empty attachment produces — so the two were indistinguishable in the
+    database and on screen. An analyst triaging a phish reads a 0-byte
+    attachment as a decoy and moves on. The payload may have been a
+    loader.
+
+    Both columns are nullable. "Unknown" was always representable and was
+    simply not being used.
+    """
+    # A forwarded mail carried AS an attachment. `message/rfc822` makes the
+    # part's payload a list, so `is_multipart()` is true and
+    # `get_payload(decode=True)` returns None — no exception, just None,
+    # which the `or b""` then turned into a confident zero.
+    #
+    # Not a contrived input: "FW: invoice" with the original attached is
+    # the standard shape of a thread-hijack BEC, which is the exact
+    # material this module exists to parse.
+    bad = (b"From: a@b.example\r\n"
+           b"Subject: FW: invoice\r\n"
+           b"MIME-Version: 1.0\r\n"
+           b'Content-Type: multipart/mixed; boundary="B"\r\n\r\n'
+           b"--B\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n"
+           b"--B\r\n"
+           b"Content-Type: message/rfc822\r\n"
+           b'Content-Disposition: attachment; filename="original.eml"\r\n\r\n'
+           b"From: victim@corp.example\r\n"
+           b"Subject: invoice 4471\r\n\r\n"
+           b"pay this\r\n"
+           b"--B--\r\n")
+    parsed = parse_eml(bad)
+    assert parsed.attachments, "the attachment must still be recorded"
+    att = next(a for a in parsed.attachments
+               if a["filename"] == "original.eml")
+    # The whole point: NOT 0.
+    assert att["byte_size"] is None, (
+        "an attachment that could not be decoded was recorded as a real "
+        f"zero-byte attachment: {att}")
+    assert att["sha256"] is None
+    assert any(g["step"] == "attachment_decode" for g in parsed.gaps), \
+        "and nothing said why"
+
+
+def test_a_genuinely_empty_attachment_is_still_zero_not_unknown():
+    """The other half. If NULL meant both, the fix would have destroyed
+    the distinction it exists to create."""
+    empty = (b"From: a@b.example\r\n"
+             b"Subject: x\r\n"
+             b"MIME-Version: 1.0\r\n"
+             b'Content-Type: multipart/mixed; boundary="B"\r\n\r\n'
+             b"--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n"
+             b"--B\r\n"
+             b"Content-Type: application/octet-stream\r\n"
+             b'Content-Disposition: attachment; filename="nothing.bin"\r\n\r\n'
+             b"\r\n--B--\r\n")
+    parsed = parse_eml(empty)
+    att = next(a for a in parsed.attachments
+               if a["filename"] == "nothing.bin")
+    assert att["byte_size"] == 0, att
+    assert not any(g["step"] == "attachment_decode" for g in parsed.gaps)
+
+
+def test_an_inconclusive_auth_result_is_not_a_failure():
+    """TEMPERROR is the receiving MTA saying "I could not complete this".
+
+    It is neither a pass nor a fail, and the parser must carry the
+    distinction through so the UI can too — `authChip` painted everything
+    that was not PASS red, which turns a DNS timeout at delivery time into
+    an adverse attribution against the sender.
+    """
+    msg = (b"From: a@b.example\r\n"
+           b"Subject: x\r\n"
+           b"Authentication-Results: mx.corp.example; dkim=temperror "
+           b"header.d=acme.example; spf=none\r\n\r\nbody\r\n")
+    parsed = parse_eml(msg)
+    assert parsed.dkim_result == "TEMPERROR"
+    assert parsed.spf_result == "NONE"
+    # A non-PASS never carries a domain — that claim is the attacker's.
+    assert parsed.dkim_domain is None
+
+
 # --- defanging -----------------------------------------------------------
 
 def test_urls_are_defanged_in_the_authority_only():

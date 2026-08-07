@@ -235,6 +235,29 @@ class CaseService:
 
     # -- internal --------------------------------------------------------
     def _grant(self, case_id, user_id, role_key, granted_by, expires_at=None):
+        """Grant or re-grant a case role.
+
+        `COALESCE` ON `expires_at`: AN OMITTED EXPIRY PRESERVES THE EXISTING
+        TIME-BOX rather than removing it.
+
+        This was `expires_at = EXCLUDED.expires_at`, so re-granting somebody
+        without naming an expiry wrote NULL over theirs and silently turned
+        a time-boxed assignment into a permanent one. The two ways in are
+        ordinary: changing a colleague's role from ANALYST to REVIEWER, and
+        re-running a grant that appeared not to take. Neither reads as
+        "remove the expiry", and nothing in the response said it had
+        happened — the access simply stopped ending.
+
+        The asymmetry is deliberate. Silently KEEPING a limit fails safe:
+        the assignment expires, somebody notices, they re-grant. Silently
+        REMOVING one fails open and is invisible until an audit asks why a
+        secondment from March still reads the case in November.
+
+        The cost is that this path cannot clear an expiry at all. That is
+        the right trade for now — removing a time limit is a deliberate act
+        and deserves its own verb rather than being the accidental effect of
+        omitting a field.
+        """
         self._c.execute(
             """INSERT INTO iam.case_assignment
                    (case_id, user_id, role_key, granted_by, expires_at)
@@ -242,7 +265,9 @@ class CaseService:
                ON CONFLICT (case_id, user_id)
                    DO UPDATE SET role_key = EXCLUDED.role_key,
                                  granted_by = EXCLUDED.granted_by,
-                                 expires_at = EXCLUDED.expires_at,
+                                 expires_at = COALESCE(
+                                     EXCLUDED.expires_at,
+                                     iam.case_assignment.expires_at),
                                  granted_at = now()""",
             (case_id, user_id, role_key, granted_by, expires_at),
         )

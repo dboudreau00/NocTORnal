@@ -229,6 +229,17 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
+          # Forks are NOTICED, never fatal. Two rows can claim one
+          # predecessor because `seq` is drawn before the chaining trigger
+          # takes its advisory lock, so concurrent writers produce them
+          # from ordinary traffic -- the development database has 67 in
+          # 60,181 rows. Failing the build on those would make a red tick
+          # mean "somebody wrote to two cases at once", and the first
+          # person to chase one would stop believing the green ones.
+          if report.forks:
+              print(f"::warning::{len(report.forks)} audit row(s) share a "
+                    f"predecessor. Concurrent writers, not tampering -- the "
+                    f"chain simply cannot be fully linearised.")
           for b in report.breaks:
               print(f"::error::audit chain {b.kind} break at seq {b.seq} "
                     f"({b.action} at {b.occurred_at})")

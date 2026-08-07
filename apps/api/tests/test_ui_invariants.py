@@ -355,3 +355,100 @@ def test_the_shortcut_sheet_does_not_hijack_typing():
     guard = js[start:start + 500]
     assert "isContentEditable" in guard
     assert "'TEXTAREA'" in guard and "'INPUT'" in guard
+
+
+# ---------------------------------------------------------------------------
+# Invariant 12 on screen: a failure must not be reported as a finding
+# ---------------------------------------------------------------------------
+#
+# Added 2026-08-07. Three defects in one family shipped under a green suite,
+# all of them in the UI layer, all invisible to an API test: the console
+# said something confident about the DATA when the truth was that the code
+# had failed or had not been told. Static, for the reason at the top of this
+# file -- there is no build step and no browser here, and a check that reads
+# the source is the one check that runs.
+
+
+def test_a_rejection_does_not_claim_a_destruction_it_did_not_perform():
+    """`purge_bytes: false` is the LEGAL HOLD path.
+
+    An analyst reaches it because somebody has been ordered to preserve the
+    material. Telling them "the bytes are gone" is the worst available wrong
+    answer: it invites a spoliation report for a destruction that did not
+    happen, and it was the only feedback the screen gave, because the sample
+    row does not display whether the object survived.
+    """
+    js = _js()
+    start = js.index("/* --- reject */")
+    body = js[start:start + 3000]
+    assert "purge_bytes" in body
+    # The message has to depend on what was actually sent.
+    assert re.search(r"setMsg\(msg,\s*purged\s*\?", body), (
+        "the rejection message is unconditional -- it reports the same "
+        "outcome whether or not the bytes were destroyed")
+    assert "were KEPT" in body, "the preserve case must say so in words"
+
+
+def test_an_inconclusive_auth_result_is_not_painted_as_a_failure():
+    """TEMPERROR/PERMERROR are the receiving MTA saying it could not
+    complete the check; NONE means no policy is published.
+
+    `authChip` mapped every non-PASS to the danger colour, which turns a DNS
+    timeout at delivery time into an adverse attribution against a sender.
+    That is the same conflation `ParsedEmail.gaps` exists to prevent, made
+    on screen instead of in the database.
+    """
+    js = _js()
+    start = js.index("function authChip(")
+    body = js[start:js.index("\nfunction ", start + 10)]
+    assert "TEMPERROR" in body and "PERMERROR" in body, (
+        "authChip does not distinguish an inconclusive check from a failed "
+        "one")
+    assert not re.search(r"===\s*'PASS'\s*\?\s*'good'\s*:\s*'bad'", body), (
+        "every non-PASS result is still painted as a failure")
+
+
+def test_a_partial_collection_run_is_not_painted_as_a_success_or_a_failure():
+    """PARTIAL means the poll worked and something inside it could not be
+    evaluated -- a watch whose regex will not compile, which matches nothing
+    for ever. Painted 'ok' it is invisible, which is how it stayed hidden;
+    painted 'bad' it is buried among real fetch failures."""
+    js = _js()
+    start = js.index("function runRow(")
+    body = js[start:js.index("\nfunction ", start + 10)]
+    assert "PARTIAL" in body, "runRow cannot show a partially-completed run"
+
+
+def test_a_failed_path_recompute_does_not_keep_asserting_connectivity():
+    """`reapplyFocus` runs on every projection change and every scrubber
+    settle. Its path branch swallowed the error and cleared only the
+    highlight, leaving `state.focus.connected` and `.hops` holding the
+    verdict computed under the PREVIOUS projection -- which the focus flag
+    then printed against the new one.
+
+    The false-negative direction is the dangerous one: an earlier NOT
+    CONNECTED survives into a projection that would have connected the two,
+    and "are these two linked" is the question the control exists to
+    answer.
+
+    The ego branch immediately above it already did this correctly, which
+    is what makes it a slip rather than a design.
+    """
+    js = _js()
+    start = js.index("async function reapplyFocus(")
+    body = js[start:js.index("\n/* \u2500\u2500 timeline scrubber", start)]
+    tail = body[body.index("/* path focus */"):]
+    assert "state.focus.connected = null" in tail, (
+        "a failed path recompute leaves the previous projection's verdict "
+        "in place")
+    assert "fail(err)" in tail, "and says nothing to the analyst"
+
+
+def test_the_focus_flag_distinguishes_unknown_from_not_connected():
+    """Invariant 12 in the one place it decides an attribution: `false` is
+    a finding about the graph, `null` is the absence of one."""
+    js = _js()
+    start = js.index("function renderFocusFlag(")
+    body = js[start:js.index("\n/** Double-click", start)]
+    assert "state.focus.connected === null" in body
+    assert "UNKNOWN" in body

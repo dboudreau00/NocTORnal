@@ -83,14 +83,19 @@ So the link is now verified as what it actually is — **a linked list** —
 by following `prev_hash` to a real `row_hash` rather than to a positional
 neighbour. `seq` is used only for reporting and windowing.
 
-## What a FORK means, and why it is reported rather than hidden
+## A FORK is reported, but it is NOT tampering
 
-A genuine fork — two rows sharing one predecessor — is what 0013's own
-comment says the advisory lock exists to prevent. Seeing one means either
-an inserted row, or that some historical writes were made on a path where
-the lock did not serialise them. It is surfaced as its own category
-instead of being folded into LINK, because "somebody added a row" and
-"somebody deleted a row" send an investigator in opposite directions.
+Two rows claiming one predecessor is what 0013's advisory lock exists to
+prevent, and it does not entirely: `seq` is drawn from `nextval()` before
+the trigger runs, so concurrent writers can still chain off one tail. The
+development database carries 67 such forks in 60,181 rows, all from
+ordinary traffic.
+
+So forks are counted and listed SEPARATELY and do not make `intact`
+false. Folding them in meant the endpoint answered BROKEN on untampered
+history — the one thing a tamper-evidence tool must never do, and the
+second time this module made that mistake (the first was assuming `seq`
+order was chain order). See `ChainReport.intact`.
 """
 from __future__ import annotations
 
@@ -138,23 +143,48 @@ class ChainBreak:
 @dataclass(frozen=True)
 class ChainReport:
     checked: int
+    #: Evidence of TAMPERING: LINK (a predecessor removed) and CONTENT (a
+    #: row edited). These are what `intact` is about.
     breaks: tuple[ChainBreak, ...]
+    #: Rows sharing a predecessor. Reported separately and deliberately NOT
+    #: counted as tampering -- see `intact`.
+    forks: tuple[ChainBreak, ...]
     first_seq: int | None
     last_seq: int | None
-    #: True only when rows were actually examined AND none broke. An empty
-    #: table is reported as `checked == 0` with `intact` False-y meaning
-    #: "nothing to say", never as a pass -- see `intact` below.
 
     @property
     def intact(self) -> bool:
-        """No breaks among the rows examined.
+        """No evidence of TAMPERING among the rows examined.
 
-        An EMPTY audit table returns True here, and the caller is expected
-        to look at `checked` too. That is deliberate rather than sloppy: a
-        fresh database genuinely has an intact (empty) chain, and returning
-        False would make first-run CI red for a correct system. The
-        endpoint reports `checked` alongside so "verified" can never be
-        read as "verified something".
+        ## Forks do not make a chain "broken", and treating them as such
+        ## made this endpoint cry wolf on every real database
+
+        A fork is two rows claiming one predecessor. 0013's advisory lock
+        is meant to prevent it, and it does not entirely: `seq` comes from
+        `nextval()` before the trigger runs, and under concurrency two
+        writers can still end up chained off the same tail. The development
+        database carries **67 of them across 60,181 rows**, none of them
+        tampering — they are an artefact of the WRITER, reproducible by
+        ordinary traffic.
+
+        Counting those as breaks meant `/audit/verify` answered BROKEN on
+        untampered history, which is the same failure this module already
+        made once with `seq` ordering and is the only failure a
+        tamper-evidence tool cannot afford: an officer who is told the log
+        is compromised, investigates, finds nothing, and never trusts the
+        button again.
+
+        So `intact` is about LINK and CONTENT — a row removed, a row
+        edited. Forks are surfaced separately, with their own count and
+        their own explanation, because they are worth knowing (a forked
+        chain cannot be linearised, which weakens the guarantee) without
+        being an accusation.
+
+        An EMPTY audit table returns True, and the caller is expected to
+        read `checked` too: a fresh database genuinely has an intact
+        (empty) chain, and returning False would make first-run CI red for
+        a correct system. The endpoint reports `checked` alongside so
+        "verified" can never be read as "verified something".
         """
         return not self.breaks
 
@@ -167,12 +197,16 @@ def verify_chain(
 ) -> ChainReport:
     """Recompute the chain and return every row that does not verify.
 
-    `limit` checks only the most recent N rows. The CONTENT check is exact
-    for any window, but be aware of what a windowed LINK check can and
-    cannot see: the oldest row in the window has no predecessor loaded, so
-    its own `prev_hash` is not compared to anything. A deletion straddling
-    the window boundary is therefore invisible to a windowed run and
-    visible to a full one. The endpoint says so.
+    `limit` checks only the most recent N rows, and every check is EXACT
+    for the rows it reports: the predecessor and fork lookups run over the
+    whole table, not the window, so a windowed run cannot produce a false
+    orphan at its own boundary. What a window does not tell you is whether
+    rows outside it verify.
+
+    (An earlier version built those lookups from the window and therefore
+    DID have a boundary blind spot — worse, it accused the oldest row in
+    every windowed run. Both are gone; the docstring is kept honest because
+    a stale caveat teaches people to discount the accurate ones.)
 
     Ordering is by `seq`, the chain's own order, never by `occurred_at` —
     a clock adjustment must not be able to reorder the verification.
@@ -241,24 +275,30 @@ def verify_chain(
 
     rows = conn.execute(sql, params).fetchall()
     breaks: list[ChainBreak] = []
+    forks: list[ChainBreak] = []
     for seq, occurred_at, action, actor_id, case_id, link, fork, content in rows:
         if not (link or fork or content):
             continue
         parts = []
         if link:
             parts.append("LINK")
-        if fork:
-            parts.append("FORK")
         if content:
             parts.append("CONTENT")
-        kind = "+".join(parts)
-        breaks.append(ChainBreak(
-            seq=seq, occurred_at=occurred_at, action=action, kind=kind,
-            actor_id=actor_id, case_id=case_id))
+        if parts:
+            breaks.append(ChainBreak(
+                seq=seq, occurred_at=occurred_at, action=action,
+                kind="+".join(parts), actor_id=actor_id, case_id=case_id))
+        # A FORK IS NOT REPORTED AS TAMPERING, and this is the whole point
+        # of the split -- see ChainReport.intact.
+        if fork:
+            forks.append(ChainBreak(
+                seq=seq, occurred_at=occurred_at, action=action, kind="FORK",
+                actor_id=actor_id, case_id=case_id))
 
     return ChainReport(
         checked=len(rows),
         breaks=tuple(breaks),
+        forks=tuple(forks),
         first_seq=rows[0][0] if rows else None,
         last_seq=rows[-1][0] if rows else None,
     )

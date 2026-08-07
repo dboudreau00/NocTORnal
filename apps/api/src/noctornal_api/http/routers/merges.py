@@ -38,7 +38,7 @@ from noctornal_api.http.deps import (
     require,
     require_step_up,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.approvals import (
     ApprovalError,
     ApprovalService,
@@ -153,7 +153,7 @@ def merge(
             target_node_id=body.target_node_id, merged_by=user.user_id,
             reason=body.reason, basis_selector_id=body.basis_selector_id))
     except MergeError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
@@ -193,9 +193,9 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
                 target_node_id=target_node_id, merged_by=user.user_id,
                 reason=reason, basis_selector_id=basis_selector_id)
     except ApprovalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except MergeError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
     # Outside the transaction on purpose: this is a convenience join between
     # the approval and its consequence, and failing to record it must not
@@ -220,4 +220,4 @@ def reverse(
         return _out(MergeService(conn).unmerge(
             merge_id, reversed_by=user.user_id, reason=body.reason))
     except MergeError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc

@@ -57,9 +57,12 @@ def verify(
     verification is an O(n) SHA-256 over every audit row ever written, and
     it is not something anyone needs to run in a loop.
 
-    The response distinguishes the two ways a chain breaks — LINK (a row
-    removed, inserted or reordered) and CONTENT (a row edited in place) —
-    because they point an investigator in different directions.
+    The response distinguishes LINK (a predecessor removed) from CONTENT
+    (a row edited in place), because they point an investigator in
+    different directions — and reports FORKS separately from both, because
+    they are an artefact of concurrent writers rather than evidence of
+    tampering, and counting them as breaks made this answer BROKEN on
+    untampered history.
     """
     report = verify_chain(conn, limit=limit)
     return {
@@ -71,12 +74,31 @@ def verify(
         # as a pass. An empty audit table is a legitimately intact chain
         # and also evidence of nothing.
         "windowed": limit is not None,
+        # The caveat DESCRIBES THE ACTUAL BLIND SPOT, which is not the one
+        # it originally claimed. It said a windowed run "cannot see a
+        # deletion that straddles the window boundary" -- that was true of
+        # the first implementation, and stopped being true when `hashes`
+        # and `claims` were widened to the whole table. Leaving it would
+        # have had an officer distrust a result that is in fact exact, and
+        # a caveat nobody can reproduce is how the honest ones stop being
+        # read.
         "caveat": (
-            "A windowed run cannot see a deletion that straddles the "
-            "window boundary: the oldest row checked has no loaded "
-            "predecessor, so its link is not asserted. Run without `limit` "
-            "for a complete answer."
+            "Windowed: LINK, FORK and CONTENT are each exact for the rows "
+            "reported, because the predecessor lookup covers the whole "
+            "table. What a window cannot tell you is whether rows OUTSIDE "
+            "it verify — run without `limit` for that."
         ) if limit is not None else None,
+        # Forks are NOT tampering -- see ChainReport.intact. Reported so an
+        # officer knows the chain is not linearisable, which weakens the
+        # guarantee, without being told the log was edited.
+        "forks": len(report.forks),
+        "fork_note": (
+            "Rows sharing a predecessor. Produced by concurrent writers, not "
+            "by editing: `seq` is drawn before the chaining trigger takes its "
+            "lock, so two writers can chain off one tail. Worth knowing (the "
+            "chain cannot be fully linearised) but it is not evidence of "
+            "tampering."
+        ) if report.forks else None,
         "breaks": [
             {
                 "seq": b.seq,

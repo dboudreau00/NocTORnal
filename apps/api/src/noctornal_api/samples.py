@@ -702,7 +702,23 @@ class SampleService:
                 "purge_bytes=False to record the rejection and keep the "
                 "bytes.")
 
-        if purge_bytes and self._storage is not None:
+        if purge_bytes:
+            # Refusing rather than proceeding, for the same reason
+            # `retention._purge_evidence` and `ingest._with_raw` do: the
+            # row about to be written says `bytes_purged: true` in an
+            # APPEND-ONLY ledger. Writing that without a store is not a
+            # missing side effect, it is a false record of a destruction
+            # -- and the one an auditor asking "was this destroyed" will
+            # be shown. The state machine is still testable with a fake;
+            # what is refused is claiming a destruction with nothing at
+            # all behind it.
+            if self._storage is None:
+                raise SampleError(
+                    "the sample store is not configured, so the bytes "
+                    "cannot be destroyed and recording this rejection "
+                    "would claim a destruction that did not happen. Fix "
+                    "the store, or call this with purge_bytes=False to "
+                    "record the rejection while the material stays put.")
             self._storage.delete(
                 self._c.execute(
                     "SELECT storage_key FROM lab.sample WHERE id = %s",

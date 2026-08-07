@@ -73,7 +73,7 @@ from noctornal_api.http.deps import (
     get_conn,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}/deception", tags=["deception"])
@@ -239,9 +239,9 @@ def create_capture(
             note=body.note,
         )
     except DeceptionError as exc:
-        raise Problem(422, "Capture refused", str(exc)) from exc
+        raise Problem(422, "Capture refused", safe_detail(exc)) from exc
     except ValueError as exc:
-        raise Problem(422, "Invalid field", str(exc)) from exc
+        raise Problem(422, "Invalid field", safe_detail(exc)) from exc
     return {"id": str(capture_id)}
 
 
@@ -343,7 +343,7 @@ def capture_screenshot(
         data = EvidenceService(conn, EvidenceStorage()).view(
             UUID(evidence_id), user.user_id)
     except IntegrityError as exc:
-        raise Problem(409, "Integrity failure", str(exc)) from exc
+        raise Problem(409, "Integrity failure", safe_detail(exc)) from exc
 
     media_type = raster_type_of(data)
     if media_type is None:
@@ -415,7 +415,7 @@ async def upload_email(
             display_name_impersonates=display_name_impersonates,
             classification=classification)
     except DeceptionError as exc:
-        raise Problem(422, "Not recorded", str(exc)) from exc
+        raise Problem(422, "Not recorded", safe_detail(exc)) from exc
     return {"id": str(message_id), "evidence_id": str(result.evidence_id),
             "parse_gaps": parsed.gaps,
             "from_replyto_divergent": parsed.from_replyto_divergent,
@@ -525,9 +525,9 @@ def create_call(
             classification=body.classification,
             compartments=frozenset(body.compartments), **payload)
     except DeceptionError as exc:
-        raise Problem(422, "Call refused", str(exc)) from exc
+        raise Problem(422, "Call refused", safe_detail(exc)) from exc
     except ValueError as exc:
-        raise Problem(422, "Invalid field", str(exc)) from exc
+        raise Problem(422, "Invalid field", safe_detail(exc)) from exc
     return {"id": str(call_id)}
 
 
