@@ -233,6 +233,33 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
 
     access_lost: list[dict] = []
     classification = body.classification
+    # RETENTION MAY BE EXTENDED, NEVER SHORTENED HERE.
+    #
+    # `retention.py:201` selects evidence for destruction with
+    # `c.retention_until <= today`, and `evidence.purge` is registered as an
+    # unconditional DUAL-CONTROL operation (decision 44). So a caller
+    # holding only `case.update` — which ANALYST does not have but any
+    # CASE_OWNER does, on a verb described in the seed as "Edit case
+    # metadata" — could set this date into the past and have the next purge
+    # run destroy the case's evidence with ONE signature instead of two.
+    #
+    # That is not a retention edit, it is the four-eyes gate walked around,
+    # and the audit trail would show a metadata change rather than a
+    # destruction. Same shape as the classification rule above and refused
+    # the same way: shortening a retention period is a real operation, it
+    # just needs its own verb with step-up and a second authoriser, and that
+    # verb does not exist yet.
+    if (body.retention_until is not None
+            and body.retention_until < current.retention_until):
+        raise Problem(
+            400, "Invalid request",
+            f"refusing to shorten retention from {current.retention_until} "
+            f"to {body.retention_until}. Evidence is selected for "
+            f"destruction by this date, and destruction is dual-controlled "
+            f"— moving the date earlier under `case.update` would let one "
+            f"person schedule what two are required to authorise. "
+            f"Extending it is allowed.")
+
     if classification is not None:
         if classification not in Tlp.__members__:
             # Validated here rather than letting it reach the tlp enum
@@ -365,10 +392,32 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     if case is None:
         raise Problem(404, "Not found", "case does not exist")
 
-    if body.expires_at is not None and body.expires_at <= _now():
-        raise Problem(400, "Invalid request",
-                      "expires_at is in the past — that grant would be "
-                      "expired before it was written")
+    if body.expires_at is not None:
+        # An offset is REQUIRED, and the absence of one is a 400 rather
+        # than an assumption.
+        #
+        # `2027-03-14T17:00:00` is valid ISO 8601 and Pydantic parses it
+        # into a naive datetime. Comparing that to the aware `_now()`
+        # raises `TypeError: can't compare offset-naive and offset-aware
+        # datetimes`, which nothing catches — so the most ordinary
+        # possible client mistake was a 500 on an access-control path.
+        #
+        # Defaulting it to UTC would be worse than refusing. This value
+        # decides the instant somebody LOSES access to a case; a grant
+        # meant to end at 17:00 local, silently read as 17:00Z, is up to
+        # thirteen hours of unintended access on either side, and nothing
+        # in the response would say which reading was taken.
+        if body.expires_at.utcoffset() is None:
+            raise Problem(
+                400, "Invalid request",
+                "expires_at has no UTC offset. This decides the moment "
+                "someone loses access to a case, so it is not guessed: "
+                "send an offset-aware timestamp such as "
+                "2027-03-14T17:00:00Z or 2027-03-14T17:00:00+01:00.")
+        if body.expires_at <= _now():
+            raise Problem(400, "Invalid request",
+                          "expires_at is in the past — that grant would be "
+                          "expired before it was written")
 
     role = conn.execute(
         """SELECT r.key,

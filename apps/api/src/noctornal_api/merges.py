@@ -137,8 +137,8 @@ class MergeService:
                     self._c.execute(
                         """INSERT INTO core.node_merge_edge
                                (merge_id, edge_id, original_src_node_id,
-                                original_dst_node_id)
-                           VALUES (%s, %s, %s, %s)""",
+                                original_dst_node_id, deleted_by_merge)
+                           VALUES (%s, %s, %s, %s, true)""",
                         (merge_id, edge_id, esrc, edst))
                     self._c.execute(
                         "UPDATE core.edge SET deleted_at = %s WHERE id = %s",
@@ -213,19 +213,42 @@ class MergeService:
         now = datetime.now(timezone.utc)
         with self._c.transaction():
             rows = self._c.execute(
-                """SELECT edge_id, original_src_node_id, original_dst_node_id
+                """SELECT edge_id, original_src_node_id, original_dst_node_id,
+                          deleted_by_merge
                      FROM core.node_merge_edge WHERE merge_id = %s""",
                 (merge_id,),
             ).fetchall()
-            for edge_id, osrc, odst in rows:
-                # Restores endpoints AND undoes the soft-delete applied to a
-                # tie that had collapsed into a self-loop.
-                self._c.execute(
-                    """UPDATE core.edge
-                          SET src_node_id = %s, dst_node_id = %s,
-                              deleted_at = NULL, updated_at = %s
-                        WHERE id = %s""",
-                    (osrc, odst, now, edge_id))
+            for edge_id, osrc, odst, deleted_by_merge in rows:
+                # Restores the endpoints, and undoes the soft-delete ONLY on
+                # the ties this merge deleted -- the ones that collapsed
+                # into a self-loop.
+                #
+                # `deleted_at = NULL` used to be unconditional. Every edge
+                # here was live when the merge ran (`merge` selects
+                # `WHERE deleted_at IS NULL`), so an edge that is deleted
+                # NOW and was not deleted by the merge was retired
+                # afterwards, deliberately, for a reason of its own. The
+                # reversal was overwriting that: reversing a month-old
+                # merge put back edges an analyst had retired in the
+                # meantime, silently, leaving `deleted_by` still naming the
+                # person who retired them. Invariant 5 -- history is
+                # superseded, never overwritten -- and a fact in the graph
+                # with no assertion behind it.
+                if deleted_by_merge:
+                    self._c.execute(
+                        """UPDATE core.edge
+                              SET src_node_id = %s, dst_node_id = %s,
+                                  deleted_at = NULL, deleted_by = NULL,
+                                  updated_at = %s
+                            WHERE id = %s""",
+                        (osrc, odst, now, edge_id))
+                else:
+                    self._c.execute(
+                        """UPDATE core.edge
+                              SET src_node_id = %s, dst_node_id = %s,
+                                  updated_at = %s
+                            WHERE id = %s""",
+                        (osrc, odst, now, edge_id))
 
             self._c.execute(
                 """UPDATE core.node
@@ -243,6 +266,12 @@ class MergeService:
                 "source_node_id": str(record.source_node_id),
                 "target_node_id": str(record.target_node_id),
                 "edges_restored": len(rows),
+                # Broken out because they are different acts. Repointing is
+                # the reversal doing its job; bringing an edge back from
+                # soft-deletion puts a tie back into the graph, and an
+                # auditor asking "where did this edge come from" needs the
+                # count to lead them here.
+                "edges_undeleted": sum(1 for r in rows if r[3]),
                 "reason": reason.strip(),
             })
             src = self._node(record.case_id, record.source_node_id, "source")

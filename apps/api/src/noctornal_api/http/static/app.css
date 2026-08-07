@@ -1029,6 +1029,12 @@ select.select { appearance: none; padding-right: 24px; }
    purpose: these are consequential but not the primary action in the
    inspector, and a filled button here would compete with the analysis. */
 .insp-actions { display: flex; gap: 6px; margin: 8px 0 4px; }
+
+/* The audit pane's button row. A class, not a `style=` attribute: the UI
+   ships `style-src 'self'` with no 'unsafe-inline', so an inline style is
+   silently dropped by the browser and the row loses its spacing with
+   nothing in the console to say why. */
+.audit-actions { gap: 8px; align-items: center; }
 .danger-text { color: var(--danger); }
 .danger-text:hover { border-color: var(--danger); }
 

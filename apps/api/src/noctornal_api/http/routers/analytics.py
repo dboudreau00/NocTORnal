@@ -21,7 +21,7 @@ from noctornal_api.analytics import (
 )
 from noctornal_api.analytics_runs import AnalyticsRunService
 from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.projections import PRESETS, Projection, ProjectionError
 
@@ -90,9 +90,9 @@ def suite(
     try:
         return _svc(conn, user).suite(p, params, force=force).as_response()
     except ProjectionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     except AnalyticsError as exc:
-        raise Problem(422, "Cannot compute", str(exc)) from exc
+        raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
 
 
 @router.get("/key-player", response_model=dict,
@@ -124,9 +124,9 @@ def key_player(
         return _svc(conn, user).key_player(
             p, params, n_remove=n, force=force).as_response()
     except ProjectionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     except AnalyticsError as exc:
-        raise Problem(422, "Cannot compute", str(exc)) from exc
+        raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
 
 
 @router.get("/history/{node_id}", response_model=dict)

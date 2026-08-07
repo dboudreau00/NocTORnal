@@ -1213,13 +1213,25 @@ function renderFocusFlag() {
     flag.title = 'Only this neighbourhood is on screen. The metrics panel still ' +
       'reports numbers for the whole projection, not for this subgraph.';
   } else {
+    /* Three states, not two. `null` is "the recompute failed, so nobody
+       knows" — distinct from `false`, which is a real finding about the
+       graph. Collapsing them is how a failure becomes an assertion. */
+    const verdict = state.focus.connected === null
+      ? ' · CONNECTIVITY UNKNOWN — the recompute failed'
+      : state.focus.connected
+        ? ' · ' + state.focus.hops + ' hops'
+        : ' · NOT CONNECTED in this projection';
     text.textContent = 'FOCUS · path ' + labelOf(state.focus.src) + ' → ' +
-      labelOf(state.focus.dst) +
-      (state.focus.connected ? ' · ' + state.focus.hops + ' hops'
-                             : ' · NOT CONNECTED in this projection');
-    flag.title = 'Shortest path, treated as undirected. The path endpoint does ' +
-      'not take an as-of parameter, so the path is traced against the latest ' +
-      'state of the projection even when the scrubber is in the past.';
+      labelOf(state.focus.dst) + verdict;
+    flag.title = state.focus.connected === null
+      ? 'The path could not be recomputed for this projection. Whether '
+        + 'these two are connected is UNKNOWN — this is NOT a finding that '
+        + 'they are unconnected. Change the projection, or press Escape and '
+        + 'shift-click them again.'
+      : 'Shortest path, treated as undirected. The path endpoint does '
+        + 'not take an as-of parameter, so the path is traced against the '
+        + 'latest state of the projection even when the scrubber is in the '
+        + 'past.';
   }
   show(flag, true);
 }
@@ -1343,9 +1355,30 @@ async function reapplyFocus(seq, q) {
     state.focus.hops = out.hops;
     state.focus.connected = !!out.connected;
     state.pathIds = out.connected ? (out.path || []) : [];
-  } catch (_err) {
+  } catch (err) {
     if (seq !== state.graphSeq) return;
+    /* This swallowed the error and cleared only the highlight, leaving
+       `state.focus.connected` and `.hops` holding the verdict from the
+       PREVIOUS projection — which `renderFocusFlag` then kept printing
+       against the new one. So after a failed recompute the flag went on
+       asserting "· 3 hops" for a projection where nothing had computed a
+       path, and the canvas showed no path at all: two contradictory
+       claims, neither of them labelled.
+
+       The inverse is worse. If the earlier answer was NOT CONNECTED and
+       the new projection would have connected them, the flag kept saying
+       NOT CONNECTED — a false negative on the one question the control
+       exists to answer.
+
+       Connectivity is now explicitly UNKNOWN, which is a third state and
+       the honest one. The focus itself is KEPT (unlike the ego branch,
+       which drops it): the two endpoints are still in the projection, the
+       analyst chose them, and throwing that away on a transient 500 costs
+       them the selection for no reason. */
+    state.focus.connected = null;
+    state.focus.hops = null;
     state.pathIds = null;
+    fail(err);
   }
   setRendered(state.gnodes, state.gedges, { keepView: true });
 }
@@ -2993,7 +3026,7 @@ function wireCaseActions() {
 
   edit.addEventListener('click', async () => {
     const rec = state.caseRec;
-    if (!rec) return;
+    if (!rec || !state.caseId) return;
     const title = window.prompt('Case title', rec.title);
     if (title === null) return;
     if (!title.trim()) {
@@ -3008,6 +3041,10 @@ function wireCaseActions() {
   });
 
   share.addEventListener('click', async () => {
+    /* `state.caseId` is null on the case LIST, and these buttons live in the
+       appbar, which the list does not hide. Without this the request went to
+       /cases/null/users and came back as an unexplained 422. */
+    if (!state.caseId) return;
     const uid = window.prompt(
       'User id to assign (iam.app_user.id)\n\n' +
       'The assignment is CHECKED: an analyst whose clearance or ' +
@@ -3029,7 +3066,7 @@ function wireCaseActions() {
 
   status.addEventListener('click', async () => {
     const rec = state.caseRec;
-    if (!rec) return;
+    if (!rec || !state.caseId) return;
     const next = window.prompt(
       'Current status: ' + rec.status + '\n\n' +
       'New status — DRAFT, ACTIVE, DORMANT, CLOSED, ARCHIVED or PURGED.\n' +
@@ -3071,12 +3108,20 @@ function wireAuditVerify() {
       box.textContent = '';
       /* A 403 here is the expected answer for most accounts, not a
          malfunction, so it is explained rather than thrown at the banner
-         stack as an error. */
+         stack as an error.
+         THROUGH `refusalText`, which puts the SERVER's detail first. The
+         first version of this asserted "your account does not hold
+         audit.read" — a guess about the caller, and exactly the mistake
+         `refusalText` exists to stop: three strings in this file once
+         told the holder of a permission that they did not hold it,
+         because the real refusal was a stale step-up. An inactive account
+         403s the same way here. The written context is kept after it,
+         because WHY the verb is scarce is worth saying. */
       if (err instanceof ApiError && err.status === 403) {
-        box.appendChild(el('p', 'help warn',
-          'Your account does not hold audit.read. That verb is granted to ' +
-          'SECURITY_OFFICER alone — the administrator configures, the ' +
-          'officer audits, and neither reads case content by default.'));
+        box.appendChild(el('p', 'help warn', refusalText(err,
+          'audit.read is granted to SECURITY_OFFICER alone — the ' +
+          'administrator configures, the officer audits, and neither ' +
+          'reads case content by default.')));
       } else { fail(err); }
       btn.disabled = false;
       return;
@@ -3092,6 +3137,15 @@ function wireAuditVerify() {
       r.checked.toLocaleString() + ' event(s) checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + '–' + r.last_seq : '')));
     if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    /* Forks are shown as a SEPARATE, quieter line and never as a break.
+       They come from concurrent writers, not from editing, and a real
+       database has them: counting them as tampering made this panel answer
+       BROKEN on untouched history, which is the one answer a tamper-
+       evidence tool cannot afford to get wrong twice. */
+    if (r.forks) {
+      head.appendChild(el('p', 'help',
+        r.forks + ' row(s) share a predecessor. ' + (r.fork_note || '')));
+    }
     box.appendChild(head);
 
     if (!r.breaks.length) return;
@@ -3150,8 +3204,19 @@ function wireElementActions() {
        has been called (invariant 1). */
     const why = window.prompt('Why? This is recorded as an assertion.');
     if (why === null) return;
-    body.assertion = { basis: 'DIRECT_OBSERVATION', confidence: 'MODERATE',
-                       rationale: why || null };
+    /* ONLY the rationale. Everything else is left to the server's defaults
+       — basis DIRECT_OBSERVATION, reliability F, credibility 6,
+       confidence LOW — because those are the "not graded" values and the
+       analyst has not graded anything.
+       The first version of this sent `confidence: 'MODERATE'`, which the
+       analyst never said. In a system whose entire premise is that nothing
+       is a fact and every claim carries its Admiralty grading, inventing a
+       grade on the analyst's behalf is not a small liberty: it launders an
+       untyped edit into a MODERATE-confidence assertion that a reviewer
+       six months later reads as somebody's considered judgement. If a
+       correction should be gradable, the dialogue has to ASK — which is a
+       real form, not two more prompts. */
+    body.assertion = { rationale: why || null };
     try {
       await api(cpath('/graph/' + (sel.kind === 'node' ? 'nodes/' : 'edges/') + sel.id),
                 { method: 'PATCH', json: body });
@@ -3168,9 +3233,19 @@ function wireElementActions() {
       ? 'Retiring this entity also retires EVERY tie it carries.\n\n'
       : '';
     const reason = window.prompt(
+      /* SAY WHAT IT ACTUALLY DOES. The first version of this promised
+         "an as-of query into the past still shows it", which is false:
+         `projections.py` filters `deleted_at IS NULL` unconditionally, with
+         no as_of interaction at all, so a retirement leaves EVERY view
+         including the historical ones. That is precisely the difference
+         from `valid_to`, and telling an analyst the opposite would have
+         them retire things believing the record of last week survives on
+         screen. It survives in the TABLE; it does not survive in a view. */
       what + 'Why is this being retired? (required)\n\n' +
       'Nothing is destroyed — the row, its assertions and its evidence ' +
-      'links remain, and an as-of query into the past still shows it.');
+      'links all remain, and clearing the flag brings it back. But it ' +
+      'leaves every view, including as-of queries into the past. To say ' +
+      'instead "this stopped being true in March", set valid_to.');
     if (reason === null) return;
     if (!reason.trim()) {
       banner('Not retired', 'A reason is required, exactly as it is for a ' +
@@ -3196,16 +3271,38 @@ function wireElementActions() {
   });
 }
 
-/** The case's tag vocabulary, including the global taxonomy. */
+/** The case's tag vocabulary, including the global taxonomy.
+ *
+ * CLEARED FIRST, AND GUARDED ON THE CASE IT WAS FETCHED FOR. This is not
+ * awaited by `openCase` — blocking a case open on a curation read would be
+ * the wrong trade — which leaves two ways for the picker to offer another
+ * case's tags:
+ *
+ *   1. between opening case B and its vocabulary arriving, `state.caseTags`
+ *      still held case A's;
+ *   2. two case opens in quick succession can resolve out of order, so A's
+ *      slower response lands last and wins.
+ *
+ * Neither could cause a cross-case WRITE — the router re-checks the tag
+ * against the path's case and 404s — but the console would be offering an
+ * analyst a vocabulary from a case they may have just left, and (1) is
+ * indefinite if the second fetch fails. The same `Seq` guard the sociogram
+ * and the inspector already use fixes both.
+ */
 async function loadCaseTags() {
+  state.caseTags = [];
+  const forCase = state.caseId;
+  let tags;
   try {
-    state.caseTags = await api(cpath('/curation/tags'));
+    tags = await api(cpath('/curation/tags'));
   } catch (err) {
     /* A missing vocabulary must not blank the inspector: the chips above
        come from the node's own tags and render fine without it. Only the
        picker degrades, and "New tag…" still works. */
-    state.caseTags = [];
+    return;
   }
+  if (state.caseId !== forCase) return;   // a newer case won the race
+  state.caseTags = tags;
 }
 
 /** The metrics panel. Every number arrives with its rank, and the projection
@@ -5746,6 +5843,14 @@ function dueRow(s) {
         { method: 'POST', json: {} });
       card.appendChild(el('p', body.error ? 'form-error' : 'form-ok',
         body.error || (body.items_new + ' new of ' + body.items_seen + ' seen')));
+      /* A poll can succeed and still not have done everything it was asked
+         to. A watch whose regex will not compile matches nothing, for
+         ever, and reads exactly like a watch that has not fired — so the
+         one moment somebody is looking at this source is the moment to
+         say so. */
+      for (const w of (body.warnings || [])) {
+        card.appendChild(el('p', 'why bad', w));
+      }
       loadSources();
     } catch (err) { fail(err); } finally { run.disabled = false; }
   });
@@ -5783,7 +5888,13 @@ function runRow(r) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', r.source_name || r.source_id));
-  head.appendChild(el('span', 'chip ' + (r.status === 'OK' ? 'ok' : 'bad'),
+  /* PARTIAL is neither. The run fetched and stored everything it found
+     and could not evaluate something — a dead watch pattern. Painting it
+     'bad' alongside genuine failures buries it; painting it 'ok' is what
+     the code did before PARTIAL was ever written, and is how a dead watch
+     stayed invisible. `error_detail` below carries the reason. */
+  head.appendChild(el('span', 'chip ' + (
+    r.status === 'OK' ? 'ok' : r.status === 'PARTIAL' ? 'warn' : 'bad'),
     r.status));
   card.appendChild(head);
   const facts = el('div', 'facts');
@@ -6961,8 +7072,31 @@ function authChip(name, result) {
     wrap.appendChild(chip);
     return wrap;
   }
-  wrap.appendChild(el('span',
-    'chip ' + (result === 'PASS' ? 'good' : 'bad'), result));
+  /* "Not PASS" is three different facts and this painted all of them red.
+     TEMPERROR means the receiving MTA could not COMPLETE the check — a DNS
+     timeout at delivery time. PERMERROR means the published record is
+     malformed. NONE means the domain publishes no policy at all. None of
+     those is the mail failing authentication, and showing them as FAIL is
+     the same error the gaps mechanism exists to prevent, made on screen:
+     an inconclusive check reported as an adverse finding. An analyst who
+     believes DKIM failed has an attribution; the truth is that nobody
+     knows. Only FAIL and SOFTFAIL are adverse. */
+  const adverse = result === 'FAIL' || result === 'SOFTFAIL';
+  const inconclusive = result === 'TEMPERROR' || result === 'PERMERROR';
+  const chip = el('span',
+    'chip ' + (result === 'PASS' ? 'good' : adverse ? 'bad'
+      : inconclusive ? 'warn' : 'subtle'),
+    result);
+  chip.title = result === 'PASS'
+    ? name + ' passed.'
+    : adverse
+      ? name + ' FAILED — the check ran and the message did not pass.'
+      : inconclusive
+        ? name + ' could not be completed by the receiving MTA (' + result
+          + '). This is not a failure and not a pass: it is unknown.'
+        : name + ' returned ' + result + ' — no policy or no verdict. '
+          + 'An absence, not a failure.';
+  wrap.appendChild(chip);
   return wrap;
 }
 
@@ -7055,7 +7189,19 @@ async function openDeceptionEmail(id) {
       name.dir = 'ltr';
       p.appendChild(name);
       p.appendChild(el('span', 'muted small', a.media_type || '?'));
-      p.appendChild(el('span', 'muted small', humanBytes(a.byte_size)));
+      /* A NULL size means the part could not be decoded, and `humanBytes`
+         renders that as a bare em-dash — which sits one column away from a
+         real "0 B" and reads the same at a glance. Say it in words. The
+         reason is in the parse gaps above. */
+      if (a.byte_size === null || a.byte_size === undefined) {
+        const unknown = el('span', 'chip warn', 'size unknown');
+        unknown.title = 'This part could not be decoded, so its size and '
+          + 'hash were never established. It is NOT an empty attachment — '
+          + 'see the parse gaps.';
+        p.appendChild(unknown);
+      } else {
+        p.appendChild(el('span', 'muted small', humanBytes(a.byte_size)));
+      }
       p.appendChild(el('span', 'chip subtle',
         a.sample_id ? 'in the lab' : 'metadata only'));
       attBox.appendChild(p);
@@ -7791,12 +7937,29 @@ function sampleActions(s) {
       return;
     }
     rejBtn.disabled = true;
+    /* Read the checkbox ONCE, before the await. What is reported has to be
+       what was actually sent — reading it again afterwards would report a
+       destruction or a preservation on the strength of where the pointer
+       happened to be when the response landed. */
+    const purged = !keepBox.checked;
     try {
       await api('/samples/' + encodeURIComponent(s.id) + '/reject', {
         method: 'POST',
-        json: { reason: reason.value.trim(), purge_bytes: !keepBox.checked },
+        json: { reason: reason.value.trim(), purge_bytes: purged },
       });
-      setMsg(msg, 'Rejected. The row stays; the bytes are gone.');
+      /* This line said "the bytes are gone" unconditionally, INCLUDING the
+         run where the analyst had ticked Keep — the one path that exists
+         precisely because somebody has been ordered to preserve the
+         material. Telling them it was destroyed is the worst available
+         wrong answer: it invites a spoliation report for a destruction
+         that did not happen, and it is the only record the analyst sees,
+         because the row itself does not display whether the object
+         survived. The service refuses rather than half-doing either, so
+         on success the request and the outcome agree. */
+      setMsg(msg, purged
+        ? 'Rejected. The row stays; the bytes and the data key are gone.'
+        : 'Rejected, and the bytes were KEPT — the rejection and its reason '
+          + 'are recorded, the material is still in the store under the hold.');
       msg.className = 'msg ok';
       await loadSamples();
       await openSample(s.id);

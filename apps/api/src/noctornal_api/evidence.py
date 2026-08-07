@@ -95,6 +95,29 @@ class EvidenceStorage:
             retention=Retention(COMPLIANCE, retain_until),
         )
 
+    def delete(self, key: str) -> None:
+        """Attempt to remove the object. RAISES if the store refuses.
+
+        THIS CLASS HAD NO `delete` AT ALL until 2026-08-07, and nothing
+        else in the repository removed an evidence object either — only
+        `SampleStorage` could. `RetentionService` has always looped over
+        `self._storage.delete(key)`, and every production caller
+        constructed it with `storage=None`, so `_purge_evidence` took its
+        `return STORAGE_NA` branch and the bytes were never touched. The
+        row was marked `purged_at`, the exhibit vanished from every read
+        path, and the tombstone — the record that is supposed to outlive
+        the data — recorded NOT_APPLICABLE.
+
+        **The refusal is not swallowed here.** Evidence is written under a
+        COMPLIANCE-mode object lock, so a delete before `retain_until` is
+        expected to fail and that failure is the honest answer: the caller
+        records STORAGE_LOCKED and warns that the object store disagrees
+        with the database. Catching it here would turn "the bytes are
+        still there" into silence, which is the whole defect this method
+        exists to end.
+        """
+        self._client.remove_object(self._bucket, key)
+
     def get(self, key: str) -> bytes:
         resp = self._client.get_object(self._bucket, key)
         try:

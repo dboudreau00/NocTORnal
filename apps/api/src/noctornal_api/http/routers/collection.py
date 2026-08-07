@@ -49,7 +49,7 @@ from noctornal_api.collection import (
     PersonaVault,
 )
 from noctornal_api.http.deps import CurrentUser, get_conn, require_global
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/collection", tags=["collection"])
@@ -137,15 +137,20 @@ def run_once(
     except PersonaUnavailable as exc:
         # 409 rather than 403: the caller is allowed, the persona is not
         # usable -- suspended, burnt, or cooling down.
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except CollectionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {
         "run_id": str(result.run_id),
         "items_seen": result.items_seen,
         "items_new": result.items_new,
         "watch_hits": result.watch_hits,
         "error": result.error,
+        # What the run could not do while otherwise succeeding. A watch
+        # whose regex will not compile matches nothing for ever, and until
+        # 2026-08-07 that was swallowed: the run reported OK and the watch
+        # looked like one that simply had not fired.
+        "warnings": result.warnings,
         "notice": L3_NOTICE,
     }
 
@@ -214,7 +219,7 @@ def set_persona_status(
             persona_id, body.status, actor_id=user.user_id,
             reason=body.reason)
     except CollectionError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"persona_id": str(persona_id), "status": body.status}
 
 

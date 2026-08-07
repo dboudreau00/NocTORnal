@@ -93,6 +93,16 @@ def conn():
         # Same shape on core.node: a merged-away node points at its survivor.
         c.execute(f"UPDATE core.node SET merged_into_id = NULL "
                   f" WHERE case_id IN {csub}")
+        # The merge RECORD, not just the pointer. `node_merge` holds
+        # `source_node_id` AND `target_node_id`, both plain `REFERENCES
+        # node(id)` with no cascade, so clearing `merged_into_id` above
+        # leaves the node still referenced and `DELETE FROM core.node`
+        # fails on `node_merge_target_node_id_fkey`. `node_merge_edge`
+        # goes first: it references `node_merge(id)`, `edge(id)` and both
+        # endpoint nodes.
+        c.execute(f"""DELETE FROM core.node_merge_edge WHERE merge_id IN
+                      (SELECT id FROM core.node_merge WHERE case_id IN {csub})""")
+        c.execute(f"DELETE FROM core.node_merge WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
@@ -1235,3 +1245,112 @@ def test_an_assignment_reports_its_actor_by_durable_id(client, owner, conn):
     # The display name is not served here; a name in this field would be a
     # snapshot that silently goes stale.
     assert "Curation" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# The 2026-08-07 pass: a merged-away node is not a member, and a
+# double-assign is not a 500
+# ---------------------------------------------------------------------------
+
+def _merge(conn, case_id, source_id, target_id, actor_id):
+    """Merge through the real service, so the node carries `merged_into_id`
+    exactly as an analyst's merge would leave it."""
+    from noctornal_api.merges import MergeService
+    MergeService(conn).merge(
+        case_id=case_id, source_node_id=source_id, target_node_id=target_id,
+        merged_by=actor_id, reason="same actor")
+
+
+def test_a_merged_away_node_is_listed_separately_not_counted_as_a_member(
+        conn, client):
+    """`list_tags` filtered `merged_into_id IS NULL` and `list_sets` and
+    `list_members` did not, so the losing side of a merge went on counting
+    towards a working set that no graph read path would return.
+
+    It is broken out rather than folded into `withheld`, which means "you
+    may not see this" -- a merge is not a clearance fact, and reporting it
+    as one tells an analyst they lack access to their own set. The ids are
+    returned so the entry can be REMOVED: `_node_for_write` passes
+    `require_live=False` on the removal paths precisely so these can be
+    cleared, and hiding them outright leaves the overlay accumulating rows
+    nobody can reach.
+    """
+    owner_id, owner_email, owner_secret = _make_user(
+        conn, global_roles=("CASE_OWNER",), clearance="RED")
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+
+    keep = _node(client, owner, case_id, "keep-me")
+    doomed = _node(client, owner, case_id, "merged-away")
+    set_id = _set(client, owner, case_id)
+    for node_id in (keep, doomed):
+        r = client.post(
+            f"/api/v1/cases/{case_id}/curation/sets/{set_id}/members",
+            headers=_auth(owner), json={"node_id": node_id})
+        # 201 on create, 200 when it updates an existing membership.
+        assert r.status_code in (200, 201), r.text
+
+    listed = client.get(
+        f"/api/v1/cases/{case_id}/curation/sets/{set_id}/members",
+        headers=_auth(owner)).json()
+    assert len(listed["members"]) == 2
+    assert listed["merged_away"] == []
+
+    _merge(conn, case_id, doomed, keep, owner_id)
+
+    after = client.get(
+        f"/api/v1/cases/{case_id}/curation/sets/{set_id}/members",
+        headers=_auth(owner)).json()
+    assert [m["node_id"] for m in after["members"]] == [keep], (
+        "the losing side of a merge is still listed as a live member")
+    assert after["withheld"] == 0, "a merge is not a clearance refusal"
+    assert len(after["merged_away"]) == 1
+    assert after["merged_away"][0]["node_id"] == doomed
+    assert after["merged_away"][0]["merged_into_id"] == keep
+
+    # And the set list agrees with it, which it did not before.
+    sets = client.get(f"/api/v1/cases/{case_id}/curation/sets",
+                      headers=_auth(owner)).json()
+    row = next(s for s in sets if s["id"] == set_id)
+    assert row["visible_member_count"] == 1, row
+
+    # The stale entry can still be cleared, which is the reason the ids
+    # are returned at all.
+    gone = client.delete(
+        f"/api/v1/cases/{case_id}/curation/sets/{set_id}/members/{doomed}",
+        headers=_auth(owner))
+    assert gone.status_code in (200, 204), gone.text
+
+
+def test_assigning_the_same_tag_twice_is_a_no_op_not_a_conflict(conn, client):
+    """0054 gave `tag_assignment` the unique index, and `TagService.assign`
+    was never given the matching `ON CONFLICT`.
+
+    The router pre-checks, which handles the double-click and not the race:
+    two concurrent requests both SELECT, both find nothing, and the second
+    INSERT raises. This asserts the SERVICE is idempotent, so the pre-check
+    is an optimisation rather than the only thing standing between a
+    double-click and a 500.
+
+    The conflict target has to restate the index's WHERE clause -- 0054
+    created four PARTIAL indexes on purpose, and a partial index is not
+    usable as a conflict target without its predicate.
+    """
+    from noctornal_api.curation import TagService
+
+    owner_id, owner_email, owner_secret = _make_user(
+        conn, global_roles=("CASE_OWNER",), clearance="RED")
+    owner = _login(client, owner_email, owner_secret)
+    case_id = _create_case(client, owner)
+    node_id = _node(client, owner, case_id, "twice-tagged")
+    tag_id = _tag(client, owner, case_id)
+
+    svc = TagService(conn)
+    from uuid import UUID
+    svc.assign(UUID(tag_id), assigned_by=owner_id, node_id=UUID(node_id))
+    svc.assign(UUID(tag_id), assigned_by=owner_id, node_id=UUID(node_id))
+
+    assert conn.execute(
+        "SELECT count(*) FROM core.tag_assignment "
+        " WHERE tag_id = %s AND node_id = %s", (tag_id, node_id)
+    ).fetchone()[0] == 1

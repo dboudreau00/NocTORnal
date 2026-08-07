@@ -48,10 +48,29 @@ class TagService:
     ) -> None:
         if sum(x is not None for x in (node_id, edge_id, evidence_id)) != 1:
             raise CurationError("exactly one of node_id / edge_id / evidence_id required")
+        # Idempotent, now that 0054 has given each target type a unique
+        # index to conflict against. Without this the router's pre-check
+        # was the only guard, and a pre-check handles the double-click and
+        # not the race: two concurrent assigns both SELECT, both find
+        # nothing, and the second INSERT is a 500 where the correct answer
+        # is "already tagged, nothing to do".
+        #
+        # The predicate is RESTATED. 0054 deliberately created four PARTIAL
+        # indexes rather than one composite, because three of the four
+        # target columns are NULL on every row and NULL is not equal to
+        # itself — so a composite index would have permitted unlimited
+        # duplicates. A partial index is only usable as a conflict target
+        # when its WHERE clause is repeated here; omit it and Postgres
+        # answers "no unique or exclusion constraint matching".
+        target = ("node_id" if node_id is not None
+                  else "edge_id" if edge_id is not None
+                  else "evidence_id")
         self._c.execute(
-            """INSERT INTO core.tag_assignment
-                   (tag_id, node_id, edge_id, evidence_id, assigned_by)
-               VALUES (%s, %s, %s, %s, %s)""",
+            f"""INSERT INTO core.tag_assignment
+                    (tag_id, node_id, edge_id, evidence_id, assigned_by)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (tag_id, {target}) WHERE {target} IS NOT NULL
+                DO NOTHING""",
             (tag_id, node_id, edge_id, evidence_id, assigned_by),
         )
 
