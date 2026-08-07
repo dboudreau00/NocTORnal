@@ -3,11 +3,13 @@
 Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
-**State (2026-07-30):** branch `deception-and-release-hardening`, Alembic
-head `0054`, **1424 passing, 0 failing** (run BOTH `apps/api/tests` and
-`packages/ontology` — earlier handoffs quoted a single figure and the next
-session spent time working out why it did not reconcile), ruff clean,
-source hygiene clean.
+**State (2026-08-07):** branch `deception-and-release-hardening`, Alembic
+head `0055`, **1444 passing, 0 failing, 0 skipped** (run BOTH
+`apps/api/tests` and `packages/ontology` — earlier handoffs quoted a single
+figure and the next session spent time working out why it did not
+reconcile), ruff clean, source hygiene clean across 273 files. The full
+migration chain round-trips `head → base → head` on a scratch database
+with the extensions installed, which is what CI checks.
 
 > **`test_ratelimit_redis::test_redis_and_python_agree_request_for_request`
 > is TIMING-SENSITIVE and fails intermittently — it passed on the run
@@ -145,33 +147,41 @@ caller scores 45% of a phase and delivers nothing.
 | **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
 | **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
 
-### Open findings from the 2026-08-07 error-handling audit
+### The 2026-08-07 error-handling audit
 
 A second pass, 34 agents, scoped to *what happens when this fails*:
-**22 confirmed after refutation.** Six were fixed the same day — the
-purge that never touched the object store, `safe_detail` unwrapping only
-one level, the 71 rule-1 leak sites, the audit-verify 403 asserting a
+**22 confirmed after refutation.** Six were fixed on the day of the audit —
+the purge that never touched the object store, `safe_detail` unwrapping
+only one level, the 71 rule-1 leak sites, the audit-verify 403 asserting a
 role fact, a purge response that could read as a destruction, and CI
 failing on chain forks.
 
-The rest are recorded rather than fixed. The pattern worth naming: **most
-are a failure that is reported as the wrong thing**, not a crash.
+The pattern worth naming: **most are a failure that is reported as the
+wrong thing**, not a crash.
+
+**Eight more were closed later the same day**, each with a regression test
+confirmed to fail against the commit before it:
+
+| | Where | What | |
+|---|---|---|---|
+| CRITICAL | `app.js` | Sample rejection reported "the bytes are gone" even when the analyst ticked *Keep* — the LEGAL HOLD path, reached because somebody has been ordered to preserve the material. Also: the service now REFUSES to record `bytes_purged: true` with no store attached, which was the third instance of that exact defect (`retention._purge_evidence`, `ingest._with_raw`, here). | ✅ |
+| HIGH | `collection.py` | A run that failed after the fetch stayed RUNNING for ever. The row is INSERTed on an autocommit connection so it survives the unwind, and `(status) WHERE status IN ('QUEUED','RUNNING')` is read as "in flight". Same defect `analytics_runs` CR9 fixed, in a second service. | ✅ |
+| HIGH | `collection.py` | A watch with an invalid regex was silently dead for ever. The run is now `PARTIAL` — a status that already existed in the enum and was never written by anything. | ✅ |
+| HIGH | `deception.py` | An attachment that could not be decoded was recorded as a genuine zero-byte attachment. A forwarded mail carried as an attachment (`message/rfc822`, the standard thread-hijack BEC shape) hits it every time. Both columns are nullable; "unknown" was always representable. | ✅ |
+| HIGH | `deception.py` | An unreadable `Authentication-Results` header was reported as no header being present — *with* the reassurance that "their absence is not a failure". And on screen every non-PASS verdict was painted as a failure, so a DKIM `TEMPERROR` (a DNS timeout at the receiving MTA) read as an adverse attribution against the sender. | ✅ |
+| HIGH | `graphview.py` | A failed path recompute was swallowed, leaving the previous projection's verdict on screen. The false-negative direction is the dangerous one: an earlier NOT CONNECTED survived into a projection that would have connected the two. Connectivity is now explicitly UNKNOWN, a third state. | ✅ |
+| MEDIUM | `install.*` | Wrote `.env.local` from unchecked subprocess output, so a failed key generation produced an empty secret — and the failure LATCHED, because every later run reports "already exists, left untouched". | ✅ |
+| MEDIUM | `launch.*` | Treated a set-but-empty variable as unset, defeating the `db.py` distinction. The test written for it found a SECOND implementation of the same rule in the same file, with the same gap — the defaults loop, where a blanked `DATABASE_URL` was replaced by the dev-stack DSN. | ✅ |
+
+**Still open:**
 
 | | Where | What |
 |---|---|---|
-| CRITICAL | `app.js` | Sample rejection reports "the bytes are gone" even when the analyst chose to keep them. |
-| HIGH | `collection.py` | A run that fails after the fetch is stranded at RUNNING for ever. |
-| HIGH | `collection.py` | A watch with an invalid regex is silently dead for ever — no row, no banner, no log. |
-| HIGH | `deception.py` | An attachment whose payload cannot be decoded is recorded as a genuine zero-byte attachment. |
-| HIGH | `deception.py` | Failing to READ a mail's authentication headers is reported as the mail FAILING authentication. |
-| HIGH | `graphview.py` | A failed path recompute is swallowed and the UI keeps asserting connectivity. |
 | MEDIUM | various | A four-eyes request that reached nobody returns 201; three notification writes have no `try` at all; one transient failure hides the ingest quarantine for the session; a failed deception load leaves the previous case's rows on screen. |
-| MEDIUM | `install.ps1` | Writes `.env.local` from unchecked subprocess output, so a failed key generation produces an empty secret. |
-| MEDIUM | `launch.*` | Treat a set-but-empty variable as unset, defeating the `db.py` distinction added earlier today. |
 
-`EvidenceStorage.delete()` now exists but **has never been exercised
-against a live COMPLIANCE lock** — the expected outcome is a refusal
-recorded as STORAGE_LOCKED, and that path has no integration test.
+`EvidenceStorage.delete()` exists but **has never been exercised against a
+live COMPLIANCE lock** — the expected outcome is a refusal recorded as
+STORAGE_LOCKED, and that path has no integration test.
 
 ### Open findings from the 2026-08-07 hostile pass
 
@@ -183,17 +193,24 @@ expiry-nulling upsert, an invented Admiralty grading, a stale tag
 vocabulary, a prompt that stated the opposite of what the endpoint does, a
 CSP-blocked inline style, and a seeder that could not finish).
 
-These survived refutation and are **NOT fixed**:
+These survived refutation. **Five of the seven were closed later the same
+day** (migration **0055**), each with a regression test confirmed to fail
+against the commit before it:
+
+| | Where | What | |
+|---|---|---|---|
+| HIGH | `merges.py` | `unmerge` cleared `deleted_at` on every recorded edge unconditionally, so reversing an old merge resurrected edges retired for unrelated reasons afterwards — with `deleted_by` still naming the analyst who retired them. **0055** records at merge time which edges the merge itself deleted; the backfill reconstructs that decision exactly for existing rows rather than defaulting them, because a `DEFAULT false` would have stopped an old merge restoring its own self-loop, which is the opposite defect. Pre-existing, and reachable only since retirement got a caller. | ✅ |
+| MEDIUM | `curation.py` | `TagService.assign` had no `ON CONFLICT` against 0054's indexes. The conflict target has to restate the partial index's predicate — 0054 created four partial indexes deliberately, and a partial index is not usable as a conflict target without its `WHERE`. | ✅ |
+| MEDIUM | `cases.py` | A naive (offset-less) `expires_at` 500d on `TypeError`. Refused with a 400 rather than assumed to be UTC: this decides when somebody LOSES access to a case, and 17:00 local read as 17:00Z is thirteen hours of unintended access with nothing saying which reading was taken. | ✅ |
+| LOW | `curation.py` | `merged_into_id` was filtered in `list_tags`' count but not in `list_sets`, `list_members` or `_visible_node`. Merged-away members are now returned under `merged_away` rather than folded into `withheld` — a merge is not a clearance fact, and the ids have to stay reachable or the entry can never be removed. | ✅ |
+| LOW | `graph.py` | Eight sites (not the two originally reported) raised `GraphWriteError(str(exc))`, putting constraint names and offending column VALUES into the message. `safe_detail` already covered the HTTP boundary; the message itself is now clean, so logs, stored columns and scripts are too. The cause chain is preserved. | ✅ |
+
+**Still open:**
 
 | | Where | What |
 |---|---|---|
-| HIGH | `merges.py:223` | `unmerge` clears `deleted_at` on every recorded edge unconditionally, so reversing an old merge resurrects edges that were retired for unrelated reasons afterwards. Pre-existing; interacts with the retirement work only because retirement now has a caller. |
 | MEDIUM | `audit_verify.py` | A row inserted with `prev_hash NULL` passes every check — the genesis row is exempt by construction, so a second "genesis" is invisible. The chain has no anchor saying which row is first. |
-| MEDIUM | `curation.py` | `TagService.assign` has no `ON CONFLICT`, and 0054 added the unique index it would need. Two concurrent assigns now 500 instead of one being a no-op. The router pre-checks, which handles the double-click and not the race. |
-| MEDIUM | `cases.py` | A naive (offset-less) `expires_at` 500s rather than being validated. |
 | MEDIUM | `cases.py` | Raising a case's classification can strand its owner above their own clearance, and there is no route back — lowering is refused by design. |
-| LOW | `curation.py` | `merged_into_id` is filtered in `list_tags`' count but not in `list_sets`, `list_members` or `_visible_node_count`, so a merged-away node still counts. |
-| LOW | `graph.py` | Pre-existing: `_add_assertion` and `retract_assertion` re-raise `str(exc)` from psycopg, putting constraint names and column values into client responses, which `errors.py` rule 1 forbids. The new endpoints avoid it by not catching. |
 
 ### The migration round-trip is only proven on an EMPTY database
 
