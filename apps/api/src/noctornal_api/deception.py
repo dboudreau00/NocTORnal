@@ -460,10 +460,16 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
             out.gaps.append({"step": "date", "reason": f"unparseable: {raw_date[:120]}"})
 
     # -- authentication results -----------------------------------------
+    auth_unreadable: str | None = None
     try:
         auth_headers = msg.get_all("Authentication-Results") or []
-    except Exception:                                         # noqa: BLE001
-        auth_headers = []
+    except Exception as exc:                                  # noqa: BLE001
+        # NOT the same as having none, and the `else` branch below said it
+        # was: "no Authentication-Results header ... so their absence is
+        # not a failure" is a reassurance, and it was being given for a
+        # message whose headers we could not read. A defect in the parser
+        # was reported as a fact about the mail.
+        auth_headers, auth_unreadable = [], f"{type(exc).__name__}: {exc}"
     if auth_headers:
         # ONLY THE FIRST HEADER IS EVIDENCE. The rest are recorded and not
         # believed.
@@ -500,6 +506,14 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
                           "in auth_results_raw and are attacker-writable — "
                           "a message carrying a second one is suspicious in "
                           "itself."})
+    elif auth_unreadable is not None:
+        out.gaps.append({
+            "step": "authentication_results",
+            "reason": "the Authentication-Results header(s) could not be "
+                      f"READ ({auth_unreadable}). Whether this message was "
+                      "authenticated is UNKNOWN — this is a parser failure, "
+                      "not a finding about the message, and it must not be "
+                      "read as one. Re-parse from the stored exhibit."})
     else:
         out.gaps.append({
             "step": "authentication_results",
@@ -640,15 +654,46 @@ def _walk_parts(msg: EmailMessage, out: ParsedEmail) -> None:
             continue
 
         if disposition == "attachment" or (filename and ctype != "text/plain"):
+            # An attachment we could not decode is NOT a zero-byte
+            # attachment, and this recorded it as one.
+            #
+            # `payload = b""` on failure gave `byte_size: 0` and
+            # `sha256: NULL` — which is a statement about the MESSAGE ("the
+            # attacker attached an empty file", itself a finding worth
+            # noting) standing in for a statement about the PARSER ("the
+            # base64 was malformed and nobody knows what this was"). An
+            # analyst triaging a phish reads a 0-byte attachment as a decoy
+            # or a delivery failure and moves on; the actual payload may
+            # have been a loader.
+            #
+            # Both columns are nullable, so "unknown" is representable and
+            # was simply not being used. This is the module's own stated
+            # rule from `ParsedEmail` — a NULL result reads as "it did not
+            # pass", a recorded gap reads as "nobody checked" — applied to
+            # the one field where it had been forgotten.
+            decode_failed = None
             try:
-                payload = part.get_payload(decode=True) or b""
-            except Exception:                                 # noqa: BLE001
-                payload = b""
+                payload = part.get_payload(decode=True)
+            except Exception as exc:                          # noqa: BLE001
+                payload, decode_failed = None, f"{type(exc).__name__}: {exc}"
+            if decode_failed is not None or payload is None:
+                why = decode_failed or (
+                    "get_payload returned None -- a malformed transfer "
+                    "encoding, or a nested multipart")
+                out.gaps.append({
+                    "step": "attachment_decode",
+                    "reason": (
+                        f"{filename!r}: the payload could not be decoded "
+                        f"({why}), so its size and hash are UNKNOWN. They "
+                        "are recorded as NULL rather than zero: this is "
+                        "NOT an empty attachment.")})
             out.attachments.append({
                 "filename": filename,
                 "media_type": ctype or None,
-                "byte_size": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest() if payload else None,
+                # NULL, not 0. See above.
+                "byte_size": len(payload) if payload is not None else None,
+                "sha256": (hashlib.sha256(payload).hexdigest()
+                           if payload is not None else None),
                 "is_inline": False,
                 "content_id": part.get("Content-ID"),
             })

@@ -410,6 +410,49 @@ def test_a_rejection_has_to_say_why(conn, svc):
         svc.reject(s.id, actor_id=alice, reason="   ")
 
 
+def test_a_rejection_with_no_store_refuses_rather_than_claiming_destruction(
+        conn, store):
+    """`bytes_purged: true` with nothing behind it is a FALSE record.
+
+    Found 2026-08-07, and it is the third instance of one shape: a
+    destruction that reports success while the object store was never
+    touched (`retention._purge_evidence`, `ingest._with_raw`, here). The
+    row goes into `lab.sample_access`, which raises on DELETE — so an
+    auditor asking "was this destroyed" is shown a permanent yes for a
+    destruction that never happened.
+
+    The state machine is still testable without MinIO; what is refused is
+    the specific combination of "destroy the bytes" and "there is nowhere
+    to destroy them from".
+    """
+    from noctornal_api.samples import REJECTED, SampleError, SampleService
+
+    alice = _user(conn)
+    # Submit WITH a store so there is a real object, then reject without.
+    s = SampleService(conn, store).submit(_unique("nostore"),
+                                          submitted_by=alice)
+    storeless = SampleService(conn)
+
+    with pytest.raises(SampleError, match="not configured"):
+        storeless.reject(s.id, actor_id=alice, reason="prohibited")
+
+    # The refusal is total: no state change, and above all no access row
+    # asserting a destruction.
+    assert conn.execute("SELECT state FROM lab.sample WHERE id = %s",
+                        (s.id,)).fetchone()[0] != REJECTED
+    assert store.objects, "the bytes are still there, which is the point"
+    assert conn.execute(
+        "SELECT count(*) FROM lab.sample_access "
+        " WHERE sample_id = %s AND action = 'REJECTED'", (s.id,)
+    ).fetchone()[0] == 0
+
+    # purge_bytes=False is the documented way through, and still works.
+    kept = storeless.reject(s.id, actor_id=alice, reason="prohibited",
+                            purge_bytes=False)
+    assert kept.state == REJECTED
+    assert store.objects
+
+
 def test_the_database_refuses_a_rejected_row_with_no_reason(conn, svc):
     import psycopg
     alice = _user(conn)
