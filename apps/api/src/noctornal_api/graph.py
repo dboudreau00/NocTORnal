@@ -267,6 +267,8 @@ class GraphWriteService:
         case_id: UUID,
         deleted_by: UUID,
         at: datetime,
+        clearance: str,
+        compartments: frozenset[str] | list[str],
     ) -> int:
         """Retire a node and every live edge touching it. Returns the edge count.
 
@@ -288,7 +290,14 @@ class GraphWriteService:
         the canvas, and counted by anything reading `core.edge` directly.
         Retiring them explicitly keeps the table honest rather than relying
         on every future reader to re-derive the same exclusion.
+
+        **And it is refused outright if any of those ties is above the
+        caller's clearance** — see `_refuse_if_ties_above_clearance`. The
+        router gates the NODE; without this the cascade wrote past the
+        caller's ceiling and then reported the count back to them.
         """
+        self._refuse_if_ties_above_clearance(
+            node_id, case_id, clearance, compartments)
         try:
             with self._c.transaction():
                 cur = self._c.execute(
@@ -313,6 +322,57 @@ class GraphWriteService:
             raise
         except psycopg.Error as exc:
             raise GraphWriteError(str(exc)) from exc
+
+    def _refuse_if_ties_above_clearance(
+        self, node_id: UUID, case_id: UUID,
+        clearance: str, compartments: frozenset[str] | list[str],
+    ) -> None:
+        """Refuse the retirement if this node carries a tie the caller
+        cannot see. Called BEFORE anything is written.
+
+        ## Why refusing beats the two obvious alternatives
+
+        The router gates the NODE properly — `_gate_for_change` runs
+        `authorize_object` against the node's own classification and
+        compartments. The cascade below did not, so an AMBER-cleared
+        analyst retiring a node also retired every RED edge touching it,
+        and the returned `edges_retired` count then told them how many RED
+        edges existed. Two defects in one statement: a write past the
+        caller's clearance, and a counting oracle over material they are
+        refused elsewhere by design.
+
+        RETIRING ONLY THE VISIBLE EDGES would fix the disclosure and leave
+        a live edge pointing at a retired node — invisible on the canvas
+        (the projection constrains edges to the visible node set) but live
+        in the table to anyone cleared for it, which is worse than either
+        honest outcome.
+
+        NOT REPORTING THE COUNT would close the oracle and leave the
+        unauthorised write, which is the more serious half.
+
+        So the operation is refused. The refusal does disclose one bit —
+        that a tie above the caller's clearance exists — and that is
+        deliberate: it is the same disclosure the console's withheld-material
+        notice already makes on purpose (docs/14 U2), on the same reasoning.
+        An analyst who cannot tell a sparse network from a censored one
+        reads structure off a picture they believe is complete; an analyst
+        whose retirement silently failed to remove half a node's ties is in
+        the same position.
+        """
+        blocked = self._c.execute(
+            """SELECT count(*) FROM core.edge
+                WHERE case_id = %s AND deleted_at IS NULL
+                  AND (src_node_id = %s OR dst_node_id = %s)
+                  AND NOT (classification <= %s::core.tlp
+                           AND compartments <@ %s)""",
+            (case_id, node_id, node_id, clearance, list(compartments)),
+        ).fetchone()[0]
+        if blocked:
+            raise GraphWriteError(
+                "this entity carries ties that are above your clearance or "
+                "outside your compartments. Retiring it would remove them "
+                "too, so the whole operation is refused rather than done "
+                "half-way. Someone cleared for those ties has to do it.")
 
     def soft_delete_edge(
         self,

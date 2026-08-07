@@ -69,6 +69,11 @@ _HEAD = ("spectre lynx null vector cipher ghost quiet ember rust cobalt onyx "
 _TAIL = ("lynx wolf crane heron finch adder viper koi ram stoat marten otter "
          "shrike raven owl kite merlin hobby gannet skua tern auk grebe").split()
 
+#: Compartments the seeded estate needs. One name, used both to read the
+#: owner in (below) and to label OP-HALCYON-25 — two literals would drift
+#: and the case would silently lose its compartment.
+DEMO_COMPARTMENTS = ["STEALER-2026"]
+
 CREWS = [
     ("Meridian crew", 18), ("Bastion crew", 15), ("Tessera crew", 13),
     ("Oblique crew", 11), ("Candor crew", 9), ("Umbra crew", 7),
@@ -118,6 +123,29 @@ def main() -> int:
     g = GraphWriteService(conn)
     sel = SelectorStore(conn)
 
+    # The compartmented case cannot be created unless its OWNER is read into
+    # the compartment — `CaseService.create` refuses outright, and it is
+    # right to: a case whose own owner cannot see it is a case nobody can
+    # work. Without this the seeder died half-way on a fresh machine, having
+    # already committed the first two cases (the connection is autocommit),
+    # which left a partial estate that the "already seeded" guard below then
+    # refused to finish.
+    #
+    # Granted rather than skipped, because the compartment is one of the
+    # things worth SEEING in a demo — and said out loud, because widening an
+    # account's access is not something a seed script should do quietly.
+    have = conn.execute(
+        "SELECT compartments FROM iam.app_user WHERE id = %s",
+        (owner,)).fetchone()[0] or []
+    missing = [c for c in DEMO_COMPARTMENTS if c not in have]
+    if missing:
+        conn.execute(
+            "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
+            (sorted(set(have) | set(missing)), owner))
+        print(f"  READ {args.owner_email} INTO {', '.join(missing)} — this "
+              f"widens that account's access and is why the compartmented "
+              f"case can exist at all.")
+
     def assertion(rationale: str, *, basis: str = "DIRECT_OBSERVATION",
                   conf: str = "MODERATE", rel: str = "C", cred: str = "3",
                   observed: datetime | None = None) -> AssertionInput:
@@ -141,7 +169,7 @@ def main() -> int:
          "hand — the ACH matrix is on this one.", "GREEN", "ACTIVE", []),
         ("OP-HALCYON-25", "Operation Halcyon",
          "Prior year. Dormant pending a disclosure decision.",
-         "RED", "DORMANT", ["STEALER-2026"]),
+         "RED", "DORMANT", DEMO_COMPARTMENTS),
         ("OP-SANDPIPER-26", "Operation Sandpiper",
          "Closed. Retained for the appeal window.", "AMBER", "CLOSED", []),
         ("OP-WHEATEAR-26", "Operation Wheatear",
