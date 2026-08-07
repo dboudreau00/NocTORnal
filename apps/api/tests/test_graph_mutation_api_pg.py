@@ -875,3 +875,70 @@ def test_classification_is_not_editable_through_a_correction(conn, client):
         (a,)).fetchone()
     assert row[0] == "AMBER", "the label must be unchanged"
     assert list(row[1] or []) == []
+
+
+# --- the cascade must not reach past the caller's clearance --------------
+#
+# Found by an adversarial pass on 2026-08-07, in code written the same day.
+# `_gate_for_change` gates the NODE against its own labels (the CR7 rule),
+# and the cascade to incident edges had no gate at all — so an AMBER-cleared
+# analyst retiring a node also retired every RED edge touching it, and the
+# returned `edges_retired` count then told them how many RED edges existed.
+#
+# Two defects in one statement: a write past the caller's ceiling, and a
+# counting oracle over material they are refused everywhere else.
+
+def test_retiring_is_refused_when_a_tie_is_above_the_callers_clearance(
+        conn, client):
+    """AMBER analyst, AMBER case, one RED edge. Nothing may happen."""
+    _uid, token = _owner(conn, client, clearance="AMBER")
+    case_id = _create_case(client, token)
+    a = _new_node(client, token, case_id, "visible-a")
+    b = _new_node(client, token, case_id, "visible-b")
+    # A RED edge inside an AMBER case: legal (the floor trigger only forbids
+    # going BELOW the case), and invisible to this caller.
+    # `WHERE id`, not `WHERE src_node_id`: `_new_edge` returns the EDGE id,
+    # and matching it against a node column silently updates nothing --
+    # which made the first version of this test pass against an endpoint
+    # that had refused nothing at all.
+    conn.execute(
+        "UPDATE core.edge SET classification = 'RED' WHERE id = %s",
+        (_new_edge(client, token, case_id, a, b),))
+
+    r = _retire(client, token, case_id, "nodes", a)
+    assert r.status_code >= 400, r.text
+    # The refusal must not name a count -- that is the oracle it closes.
+    assert "how many" not in r.text.lower()
+
+    # AND NOTHING WAS DONE. A half-completed retirement would be worse than
+    # either outcome: the node gone from the canvas with its RED tie still
+    # live in the table.
+    assert _node_row(conn, a)[2] is None, "node was retired anyway"
+    live = conn.execute(
+        "SELECT count(*) FROM core.edge WHERE deleted_at IS NULL "
+        " AND (src_node_id = %s OR dst_node_id = %s)", (a, a)).fetchone()[0]
+    assert live == 1, "the RED tie was retired by an AMBER caller"
+
+
+def test_a_cleared_caller_can_still_retire_the_same_node(conn, client):
+    """The refusal must be about CLEARANCE, not a blanket block.
+
+    Without this the test above passes against a `soft_delete_node` that
+    refuses everything, which would be a worse product and a green suite.
+    """
+    _uid, token = _owner(conn, client, clearance="RED")
+    case_id = _create_case(client, token)
+    a = _new_node(client, token, case_id, "red-a")
+    b = _new_node(client, token, case_id, "red-b")
+    # `WHERE id`, not `WHERE src_node_id`: `_new_edge` returns the EDGE id,
+    # and matching it against a node column silently updates nothing --
+    # which made the first version of this test pass against an endpoint
+    # that had refused nothing at all.
+    conn.execute(
+        "UPDATE core.edge SET classification = 'RED' WHERE id = %s",
+        (_new_edge(client, token, case_id, a, b),))
+
+    r = _retire(client, token, case_id, "nodes", a)
+    assert r.status_code == 200, r.text
+    assert r.json()["edges_retired"] == 1
+    assert _node_row(conn, a)[2] is not None

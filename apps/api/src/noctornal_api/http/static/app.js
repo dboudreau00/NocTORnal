@@ -3150,8 +3150,19 @@ function wireElementActions() {
        has been called (invariant 1). */
     const why = window.prompt('Why? This is recorded as an assertion.');
     if (why === null) return;
-    body.assertion = { basis: 'DIRECT_OBSERVATION', confidence: 'MODERATE',
-                       rationale: why || null };
+    /* ONLY the rationale. Everything else is left to the server's defaults
+       — basis DIRECT_OBSERVATION, reliability F, credibility 6,
+       confidence LOW — because those are the "not graded" values and the
+       analyst has not graded anything.
+       The first version of this sent `confidence: 'MODERATE'`, which the
+       analyst never said. In a system whose entire premise is that nothing
+       is a fact and every claim carries its Admiralty grading, inventing a
+       grade on the analyst's behalf is not a small liberty: it launders an
+       untyped edit into a MODERATE-confidence assertion that a reviewer
+       six months later reads as somebody's considered judgement. If a
+       correction should be gradable, the dialogue has to ASK — which is a
+       real form, not two more prompts. */
+    body.assertion = { rationale: why || null };
     try {
       await api(cpath('/graph/' + (sel.kind === 'node' ? 'nodes/' : 'edges/') + sel.id),
                 { method: 'PATCH', json: body });
@@ -3196,16 +3207,38 @@ function wireElementActions() {
   });
 }
 
-/** The case's tag vocabulary, including the global taxonomy. */
+/** The case's tag vocabulary, including the global taxonomy.
+ *
+ * CLEARED FIRST, AND GUARDED ON THE CASE IT WAS FETCHED FOR. This is not
+ * awaited by `openCase` — blocking a case open on a curation read would be
+ * the wrong trade — which leaves two ways for the picker to offer another
+ * case's tags:
+ *
+ *   1. between opening case B and its vocabulary arriving, `state.caseTags`
+ *      still held case A's;
+ *   2. two case opens in quick succession can resolve out of order, so A's
+ *      slower response lands last and wins.
+ *
+ * Neither could cause a cross-case WRITE — the router re-checks the tag
+ * against the path's case and 404s — but the console would be offering an
+ * analyst a vocabulary from a case they may have just left, and (1) is
+ * indefinite if the second fetch fails. The same `Seq` guard the sociogram
+ * and the inspector already use fixes both.
+ */
 async function loadCaseTags() {
+  state.caseTags = [];
+  const forCase = state.caseId;
+  let tags;
   try {
-    state.caseTags = await api(cpath('/curation/tags'));
+    tags = await api(cpath('/curation/tags'));
   } catch (err) {
     /* A missing vocabulary must not blank the inspector: the chips above
        come from the node's own tags and render fine without it. Only the
        picker degrades, and "New tag…" still works. */
-    state.caseTags = [];
+    return;
   }
+  if (state.caseId !== forCase) return;   // a newer case won the race
+  state.caseTags = tags;
 }
 
 /** The metrics panel. Every number arrives with its rank, and the projection
