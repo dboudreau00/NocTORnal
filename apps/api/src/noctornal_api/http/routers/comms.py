@@ -59,7 +59,7 @@ from noctornal_api.http.deps import (
     require_global,
     user_ceiling,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.pgp import PgpError, PgpService, verifier_version
 
@@ -150,7 +150,7 @@ def normalise_preview(
     try:
         result = normalise(platform_key, observed)
     except CommsError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"platform_key": platform_key, "observed": observed,
             "durable_value": result.durable, "note": result.note,
             "coverage": coverage_note(platform_key)}
@@ -216,7 +216,7 @@ def bind(
             co_declaration_ref=body.co_declaration_ref,
             classification=body.classification, compartments=compartments)
     except CommsError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 @router.get("/correlate", response_model=dict,
@@ -240,7 +240,7 @@ def correlate(
                             compartments=compartments).correlate(
             platform_key=platform_key, observed=observed, case_id=case_id)
     except CommsError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     result = normalise(platform_key, observed)
     return {"durable_value": result.durable, "note": result.note,
             "matches": hits,
@@ -330,7 +330,7 @@ def parse_contact_block(
             classification=body.classification, compartments=compartments,
             visible_case_ids=_visible_cases(conn, user, case_id))
     except ContactBlockError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 @router.get("/contact-blocks/{block_id}", response_model=dict)
@@ -408,7 +408,7 @@ def add_global_stoplist_entry(
             selector_type=body.selector_type, service_name=body.service_name,
             note=body.note)
     except ContactBlockError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {"id": str(entry_id), "scope": "GLOBAL"}
 
 
@@ -428,7 +428,7 @@ def retire_global_stoplist_entry(
             # a retired stoplist entry silently stops flagging its escrow.
             scope="GLOBAL")
     except ContactBlockError as exc:
-        raise Problem(404, "Not found", str(exc)) from exc
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
     return {"id": str(entry_id), "retired": True}
 
 
@@ -458,7 +458,7 @@ def add_case_stoplist_entry(
             selector_type=body.selector_type, service_name=body.service_name,
             note=body.note, case_id=case_id)
     except ContactBlockError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {"id": str(entry_id), "scope": "CASE"}
 
 
@@ -498,7 +498,7 @@ def verify(
             channel_binding_id=body.channel_binding_id,
             contact_block_id=body.contact_block_id, note=body.note)
     except PgpError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 @router.get("/pgp", response_model=dict)
@@ -584,7 +584,7 @@ def open_conversation(
             legal_authority=body.legal_authority,
             classification=body.classification, compartments=compartments)
     except CommsError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(conv_id),
             "notice": ("docs/16 L4 is BLOCKING and unresolved: interception "
                        "law, one-party versus two-party consent, and the "
@@ -657,7 +657,7 @@ def minimise(
         dropped = CommsService(conn).minimise(
             conversation_id, actor_id=user.user_id, authority=body.authority)
     except CommsError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"conversation_id": str(conversation_id), "bodies_dropped": dropped,
             "retained": "participants, timing and the contact graph"}
 
@@ -719,4 +719,4 @@ def co_participation(
             provenance_classes=tuple(provenance_class),
             since=since, until=until))
     except CoParticipationError as exc:
-        raise Problem(400, "Invalid request", str(exc)) from exc
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc

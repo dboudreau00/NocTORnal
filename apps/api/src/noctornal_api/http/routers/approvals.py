@@ -35,7 +35,7 @@ from noctornal_api.http.deps import (
     require,
     require_step_up,
 )
-from noctornal_api.http.errors import Problem
+from noctornal_api.http.errors import Problem, safe_detail
 
 router = APIRouter(prefix="/cases/{case_id}/approvals", tags=["approvals"])
 
@@ -133,7 +133,7 @@ def raise_request(
             operation=body.operation, case_id=case_id, payload=body.payload,
             justification=body.justification, requested_by=user.user_id))
     except ApprovalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 @router.post("/{request_id}/decide", response_model=ApprovalOut)
@@ -178,7 +178,7 @@ def decide(
         return _out(svc.decide(request_id, decided_by=user.user_id,
                                approve=body.approve, note=body.note))
     except ApprovalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 @router.post("/{request_id}/withdraw", response_model=ApprovalOut)
@@ -192,7 +192,7 @@ def withdraw(
     try:
         return _out(ApprovalService(conn).withdraw(request_id, actor_id=user.user_id))
     except ApprovalError as exc:
-        raise Problem(409, "Conflict", str(exc)) from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
 
 class PolicyBody(BaseModel):

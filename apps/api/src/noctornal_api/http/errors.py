@@ -75,9 +75,28 @@ _CONSTRAINT_MESSAGES = {
 }
 
 
-def _safe_detail(exc: Exception) -> str:
+def safe_detail(exc: Exception) -> str:
     """A client-safe message for a service error, with a correlation id when
-    the underlying cause was a database error."""
+    the underlying cause was a database error.
+
+    PUBLIC, and every router that turns a service error into a `Problem`
+    must use it instead of `str(exc)`.
+
+    Rule 1 at the top of this file was enforced only for exceptions that
+    reached the registered handlers below. A router that CAUGHT a service
+    error and re-raised `Problem(400, ..., str(exc))` bypassed all of it —
+    and 74 sites across 13 routers did exactly that. Six services
+    (`cases`, `graph`, `proposals`, `retention`, `samples`,
+    `contact_blocks`) wrap psycopg errors as `XError(str(exc)) from exc`,
+    so the raw PQ text — constraint names, the offending column VALUES,
+    PL/pgSQL function names and line numbers — was already inside the
+    message the router then handed to the client.
+
+    Authored messages pass through untouched: when `__cause__` is not a
+    psycopg error this returns `str(exc)` exactly as before. Only the
+    DB-wrapped ones are replaced, and their raw text is logged against the
+    correlation id that goes back to the caller.
+    """
     cause = exc.__cause__ if isinstance(exc.__cause__, psycopg.Error) else None
     if cause is None and isinstance(exc, psycopg.Error):
         cause = exc
@@ -123,7 +142,7 @@ def install_error_handlers(app) -> None:
     @app.exception_handler(SelectorError)
     @app.exception_handler(GraphWriteError)
     async def _bad_request(_: Request, exc: Exception):
-        return problem_response(400, "Invalid request", _safe_detail(exc))
+        return problem_response(400, "Invalid request", safe_detail(exc))
 
     @app.exception_handler(IntegrityError)
     async def _integrity(_: Request, exc: Exception):
@@ -132,7 +151,7 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(EvidenceError)
     async def _evidence(_: Request, exc: Exception):
-        return problem_response(400, "Evidence error", _safe_detail(exc))
+        return problem_response(400, "Evidence error", safe_detail(exc))
 
     @app.exception_handler(AccessResolutionError)
     async def _access_resolution(_: Request, exc: Exception):
