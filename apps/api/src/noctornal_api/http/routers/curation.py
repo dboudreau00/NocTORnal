@@ -209,10 +209,17 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
 def _visible_node(conn: psycopg.Connection, case_id: UUID, node_id: UUID,
                   clearance: str, compartments: list[str]) -> bool:
     """Read-path visibility, matching `read.py`: in this case, not
-    soft-deleted, and within the caller's own ceiling."""
+    soft-deleted, not merged away, and within the caller's own ceiling.
+
+    `merged_into_id IS NULL` was missing, so this called a node visible
+    that no graph read path will return — the losing side of a merge. Any
+    caller acting on that answer offers the analyst an entity they cannot
+    open.
+    """
     return conn.execute(
         """SELECT 1 FROM core.node
             WHERE id = %s AND case_id = %s AND deleted_at IS NULL
+              AND merged_into_id IS NULL
               AND classification <= %s::core.tlp AND compartments <@ %s""",
         (node_id, case_id, clearance, compartments),
     ).fetchone() is not None
@@ -544,6 +551,13 @@ def list_sets(
                                 WHERE n.id = m.node_id
                                   AND n.case_id = %(case_id)s
                                   AND n.deleted_at IS NULL
+                                  -- `list_tags` above has always had this
+                                  -- and this did not, so a node merged
+                                  -- away still counted towards a set's
+                                  -- size. Every graph read path filters
+                                  -- it; a count that does not is a count
+                                  -- of rows the analyst cannot open.
+                                  AND n.merged_into_id IS NULL
                                   AND n.classification <= %(clearance)s::core.tlp
                                   AND n.compartments <@ %(compartments)s)
             WHERE s.case_id = %(case_id)s
@@ -672,9 +686,38 @@ def list_members(
             WHERE m.set_id = %s
               AND n.case_id = %s
               AND n.deleted_at IS NULL
+              AND n.merged_into_id IS NULL
               AND n.classification <= %s::core.tlp
               AND n.compartments <@ %s
             ORDER BY n.label""",
+        (set_id, case_id, clearance, compartments),
+    ).fetchall()
+    # Merged-away members are listed SEPARATELY rather than folded into
+    # `withheld`.
+    #
+    # `withheld` means "you may not see this", and a merge is not a
+    # clearance fact — putting them there would tell an analyst they lack
+    # access to their own working set. But leaving them in `members` was
+    # wrong too: every graph read path filters `merged_into_id IS NULL`, so
+    # the set was counting rows the analyst could not open.
+    #
+    # Ids only, no labels. Enough to render "merged into X — remove?" and
+    # to call the removal endpoint, which is the point: `_node_for_write`
+    # passes `require_live=False` on the removal paths precisely so these
+    # can be cleared, and hiding them outright would leave the overlay
+    # accumulating entries no one can reach. The label predicates still
+    # apply, so a merged-away node above the caller's ceiling stays in
+    # `withheld` where it belongs.
+    merged = conn.execute(
+        """SELECT n.id, n.merged_into_id
+             FROM core.node_set_member m
+             JOIN core.node n ON n.id = m.node_id
+            WHERE m.set_id = %s
+              AND n.case_id = %s
+              AND n.deleted_at IS NULL
+              AND n.merged_into_id IS NOT NULL
+              AND n.classification <= %s::core.tlp
+              AND n.compartments <@ %s""",
         (set_id, case_id, clearance, compartments),
     ).fetchall()
     # A separate count rather than a flag on the rows above: the invisible
@@ -689,5 +732,8 @@ def list_members(
          "classification": r[3], "note": r[4]}
         for r in rows
     ]
+    merged_away = [{"node_id": str(r[0]), "merged_into_id": str(r[1])}
+                   for r in merged]
     return {"set_id": str(set_id), "members": members,
-            "withheld": total - len(members)}
+            "merged_away": merged_away,
+            "withheld": total - len(members) - len(merged_away)}

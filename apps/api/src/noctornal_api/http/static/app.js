@@ -1213,13 +1213,25 @@ function renderFocusFlag() {
     flag.title = 'Only this neighbourhood is on screen. The metrics panel still ' +
       'reports numbers for the whole projection, not for this subgraph.';
   } else {
+    /* Three states, not two. `null` is "the recompute failed, so nobody
+       knows" — distinct from `false`, which is a real finding about the
+       graph. Collapsing them is how a failure becomes an assertion. */
+    const verdict = state.focus.connected === null
+      ? ' · CONNECTIVITY UNKNOWN — the recompute failed'
+      : state.focus.connected
+        ? ' · ' + state.focus.hops + ' hops'
+        : ' · NOT CONNECTED in this projection';
     text.textContent = 'FOCUS · path ' + labelOf(state.focus.src) + ' → ' +
-      labelOf(state.focus.dst) +
-      (state.focus.connected ? ' · ' + state.focus.hops + ' hops'
-                             : ' · NOT CONNECTED in this projection');
-    flag.title = 'Shortest path, treated as undirected. The path endpoint does ' +
-      'not take an as-of parameter, so the path is traced against the latest ' +
-      'state of the projection even when the scrubber is in the past.';
+      labelOf(state.focus.dst) + verdict;
+    flag.title = state.focus.connected === null
+      ? 'The path could not be recomputed for this projection. Whether '
+        + 'these two are connected is UNKNOWN — this is NOT a finding that '
+        + 'they are unconnected. Change the projection, or press Escape and '
+        + 'shift-click them again.'
+      : 'Shortest path, treated as undirected. The path endpoint does '
+        + 'not take an as-of parameter, so the path is traced against the '
+        + 'latest state of the projection even when the scrubber is in the '
+        + 'past.';
   }
   show(flag, true);
 }
@@ -1343,9 +1355,30 @@ async function reapplyFocus(seq, q) {
     state.focus.hops = out.hops;
     state.focus.connected = !!out.connected;
     state.pathIds = out.connected ? (out.path || []) : [];
-  } catch (_err) {
+  } catch (err) {
     if (seq !== state.graphSeq) return;
+    /* This swallowed the error and cleared only the highlight, leaving
+       `state.focus.connected` and `.hops` holding the verdict from the
+       PREVIOUS projection — which `renderFocusFlag` then kept printing
+       against the new one. So after a failed recompute the flag went on
+       asserting "· 3 hops" for a projection where nothing had computed a
+       path, and the canvas showed no path at all: two contradictory
+       claims, neither of them labelled.
+
+       The inverse is worse. If the earlier answer was NOT CONNECTED and
+       the new projection would have connected them, the flag kept saying
+       NOT CONNECTED — a false negative on the one question the control
+       exists to answer.
+
+       Connectivity is now explicitly UNKNOWN, which is a third state and
+       the honest one. The focus itself is KEPT (unlike the ego branch,
+       which drops it): the two endpoints are still in the projection, the
+       analyst chose them, and throwing that away on a transient 500 costs
+       them the selection for no reason. */
+    state.focus.connected = null;
+    state.focus.hops = null;
     state.pathIds = null;
+    fail(err);
   }
   setRendered(state.gnodes, state.gedges, { keepView: true });
 }

@@ -186,6 +186,92 @@ def test_a_reversed_merge_stays_in_the_history(conn, world):
     assert history[0].reason == "same fingerprint"
 
 
+def test_reversing_a_merge_does_not_resurrect_an_unrelated_retirement(
+        conn, world):
+    """`unmerge` cleared `deleted_at` on EVERY recorded edge.
+
+    Found 2026-08-07. `merge` only ever selects live edges
+    (`WHERE deleted_at IS NULL`) and only ever soft-deletes the ties that
+    would collapse into a self-loop -- so an edge that is deleted at
+    reversal time and was not deleted BY the merge was retired afterwards,
+    deliberately, for a reason of its own. The reversal overwrote that:
+
+        Monday    merge, twelve edges repointed, one self-loop retired
+        Tuesday   an analyst retires edge #4 -- a mis-keyed import
+        Wednesday somebody reverses Monday's merge; edge #4 is back
+
+    with nothing recording the resurrection and `deleted_by` still naming
+    the analyst who retired it. Invariant 5 says history is superseded and
+    never overwritten, and this put a tie into the graph with no assertion
+    behind it.
+
+    Pre-existing, and REACHABLE only since edge retirement got a caller --
+    before that nothing but a merge could set `deleted_at` on an edge, so
+    clearing it unconditionally was accidentally correct.
+    """
+    from datetime import datetime, timezone
+
+    from noctornal_api.graph import GraphWriteService
+
+    case_id, uid, ids, edges = world
+    svc = _svc(conn)
+    rec = svc.merge(case_id=case_id, source_node_id=ids["alpha_alt"],
+                    target_node_id=ids["alpha"], merged_by=uid,
+                    reason="same fingerprint")
+
+    # `between` ran alpha_alt -> alpha, so the merge collapsed it.
+    assert _edge(conn, edges["between"])[2] is not None
+    # `alt_w` was repointed and is live.
+    assert _edge(conn, edges["alt_w"])[2] is None
+
+    # Now retire it for an unrelated reason, the way an analyst would.
+    GraphWriteService(conn).soft_delete_edge(
+        edges["alt_w"], case_id=case_id, deleted_by=uid,
+        at=datetime.now(timezone.utc))
+    assert _edge(conn, edges["alt_w"])[2] is not None
+
+    svc.unmerge(rec.id, reversed_by=uid, reason="coincidence after all")
+
+    # The self-loop comes back: the merge deleted it, the reversal undoes it.
+    between = _edge(conn, edges["between"])
+    assert between[2] is None, "the merge's own deletion must be reversed"
+    assert between[0] == ids["alpha_alt"] and between[1] == ids["alpha"]
+
+    # The analyst's retirement stands. Endpoints restored, still retired.
+    alt_w = _edge(conn, edges["alt_w"])
+    assert alt_w[2] is not None, (
+        "reversing the merge resurrected an edge that was retired for an "
+        "unrelated reason afterwards")
+    assert alt_w[0] == ids["alpha_alt"], "endpoints are still restored"
+    assert conn.execute(
+        "SELECT deleted_by FROM core.edge WHERE id = %s",
+        (edges["alt_w"],)).fetchone()[0] == uid, (
+        "and the person who retired it is still on the row")
+
+
+def test_the_reversal_audit_counts_the_resurrections_separately(conn, world):
+    """Repointing is the reversal doing its job. Bringing an edge back from
+    soft-deletion puts a tie into the graph, and an auditor asking where an
+    edge came from needs that number to lead them here."""
+    import json
+
+    case_id, uid, ids, _edges = world
+    svc = _svc(conn)
+    rec = svc.merge(case_id=case_id, source_node_id=ids["alpha_alt"],
+                    target_node_id=ids["alpha"], merged_by=uid, reason="x")
+    svc.unmerge(rec.id, reversed_by=uid, reason="y")
+
+    detail = conn.execute(
+        """SELECT detail FROM audit.event
+            WHERE action = 'NODE_UNMERGED' AND case_id = %s
+            ORDER BY occurred_at DESC LIMIT 1""", (case_id,)).fetchone()[0]
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    # Three edges touch alpha_alt; exactly one of them was the self-loop.
+    assert detail["edges_restored"] == 2
+    assert detail["edges_undeleted"] == 1
+
+
 def test_a_merge_cannot_be_reversed_twice(conn, world):
     from noctornal_api.merges import MergeError
     case_id, uid, ids, _edges = world
