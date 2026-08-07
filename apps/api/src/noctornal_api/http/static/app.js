@@ -3092,6 +3092,15 @@ function wireAuditVerify() {
       r.checked.toLocaleString() + ' event(s) checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + '–' + r.last_seq : '')));
     if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    /* Forks are shown as a SEPARATE, quieter line and never as a break.
+       They come from concurrent writers, not from editing, and a real
+       database has them: counting them as tampering made this panel answer
+       BROKEN on untouched history, which is the one answer a tamper-
+       evidence tool cannot afford to get wrong twice. */
+    if (r.forks) {
+      head.appendChild(el('p', 'help',
+        r.forks + ' row(s) share a predecessor. ' + (r.fork_note || '')));
+    }
     box.appendChild(head);
 
     if (!r.breaks.length) return;
