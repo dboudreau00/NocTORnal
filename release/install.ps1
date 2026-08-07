@@ -258,8 +258,40 @@ $EnvLocal = Join-Path $RepoRoot '.env.local'
 if (Test-Path $EnvLocal) {
     Write-Good '.env.local already exists - left untouched'
 } else {
+    # The output of these is CHECKED before anything is written.
+    #
+    # It used to be taken on trust. If the subprocess failed -- a broken
+    # venv, a missing DLL, an interpreter that dies on import -- PowerShell
+    # left the variable empty, the file was written with
+    # `NOCTORNAL_TOTP_KEK=` and the installer announced "wrote .env.local
+    # with fresh random keys". That claim was false.
+    #
+    # And the failure LATCHES. Every later run takes the
+    # `Test-Path $EnvLocal` branch and reports ".env.local already exists -
+    # left untouched", so a recipient whose first run half-failed is
+    # permanently installed with an empty key and is told twice that it
+    # worked. Refusing before the write leaves no file, so re-running is
+    # the fix.
     $kek    = & $VenvPython -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kek)) {
+        Stop-With 'Could not generate the TOTP key-encryption key.' `
+            "The Python in the virtual environment exited $LASTEXITCODE and produced nothing. Run `"$VenvPython -c 'import base64'`" to see the real error, then re-run this installer."
+    }
+    # Length, not just presence. `envelope.py` requires exactly 32 bytes
+    # and refuses anything else at RUN time -- which is a refusal the
+    # recipient meets much later, in a different program, with no
+    # connection back to here.
+    $kekBytes = 0
+    try { $kekBytes = [Convert]::FromBase64String($kek).Length } catch { $kekBytes = 0 }
+    if ($kekBytes -ne 32) {
+        Stop-With "The generated TOTP key is $kekBytes bytes, not 32." `
+            'This is a defect in the installer or a damaged Python. Nothing was written; report this with the line above.'
+    }
     $pepper = & $VenvPython -c "import secrets; print(secrets.token_urlsafe(32))"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pepper)) {
+        Stop-With 'Could not generate the ingest pepper.' `
+            'The Python in the virtual environment produced nothing. Nothing was written; re-run this installer.'
+    }
     # R9 (2026-07-26): the SERVICE CONFIG is persisted too, not just the
     # secrets. It used to be exported into the installer's own shell and
     # lost the moment that shell exited, so every documented "run this in

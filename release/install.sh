@@ -234,8 +234,38 @@ ENV_LOCAL="$REPO_ROOT/.env.local"
 if [[ -f "$ENV_LOCAL" ]]; then
   good '.env.local already exists - left untouched'
 else
+  # CHECKED before anything is written. `set -euo pipefail` already stops
+  # the script if the interpreter EXITS non-zero, which covers most of it
+  # -- but not an interpreter that exits 0 and prints nothing, and not one
+  # that prints a warning to stdout ahead of the value. Either way the
+  # file would be written with an empty or malformed key while the
+  # installer announced fresh random keys.
+  #
+  # And the failure LATCHES: every later run takes the `-f "$ENV_LOCAL"`
+  # branch and reports "left untouched", so a half-failed first install is
+  # permanent and is reported as a success twice. Refusing before the write
+  # leaves no file, so re-running is the fix. install.ps1 carries the same
+  # checks, where they matter more -- `& cmd` there does not stop the
+  # script at all.
   KEK="$("$VENV_PY" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
   PEPPER="$("$VENV_PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  # Length, not just presence: envelope.py requires exactly 32 bytes and
+  # refuses anything else at RUN time, which the recipient meets much
+  # later, in a different program, with no connection back to here.
+  KEK_BYTES="$(printf '%s' "$KEK" | "$VENV_PY" -c \
+    'import base64,sys; print(len(base64.b64decode(sys.stdin.read().strip())))' \
+    2>/dev/null || printf '0')"
+  if [[ -z "$KEK" || "$KEK_BYTES" != "32" ]]; then
+    stop_with "The generated TOTP key is ${KEK_BYTES:-0} bytes, not 32." \
+"The Python in the virtual environment did not produce a usable key.
+Run \"$VENV_PY -c 'import base64, os'\" to see the real error.
+Nothing was written, so re-running this installer is safe."
+  fi
+  if [[ -z "$PEPPER" ]]; then
+    stop_with 'Could not generate the ingest pepper.' \
+"The Python in the virtual environment produced nothing.
+Nothing was written, so re-running this installer is safe."
+  fi
   # R9: the SERVICE CONFIG is persisted too, not just the secrets. These
   # used to be exported into this script's own shell and lost when it
   # exited, so every documented "second terminal" command failed for a
