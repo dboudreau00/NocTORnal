@@ -4,7 +4,7 @@ Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
 **State (2026-07-30):** branch `deception-and-release-hardening`, Alembic
-head `0054`, **1397 passing, 0 failing** (run BOTH `apps/api/tests` and
+head `0054`, **1424 passing, 0 failing** (run BOTH `apps/api/tests` and
 `packages/ontology` — earlier handoffs quoted a single figure and the next
 session spent time working out why it did not reconcile), ruff clean,
 source hygiene clean.
@@ -144,6 +144,34 @@ caller scores 45% of a phase and delivers nothing.
 | **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
 | **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
 | **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
+
+### Open findings from the 2026-08-07 error-handling audit
+
+A second pass, 34 agents, scoped to *what happens when this fails*:
+**22 confirmed after refutation.** Six were fixed the same day — the
+purge that never touched the object store, `safe_detail` unwrapping only
+one level, the 71 rule-1 leak sites, the audit-verify 403 asserting a
+role fact, a purge response that could read as a destruction, and CI
+failing on chain forks.
+
+The rest are recorded rather than fixed. The pattern worth naming: **most
+are a failure that is reported as the wrong thing**, not a crash.
+
+| | Where | What |
+|---|---|---|
+| CRITICAL | `app.js` | Sample rejection reports "the bytes are gone" even when the analyst chose to keep them. |
+| HIGH | `collection.py` | A run that fails after the fetch is stranded at RUNNING for ever. |
+| HIGH | `collection.py` | A watch with an invalid regex is silently dead for ever — no row, no banner, no log. |
+| HIGH | `deception.py` | An attachment whose payload cannot be decoded is recorded as a genuine zero-byte attachment. |
+| HIGH | `deception.py` | Failing to READ a mail's authentication headers is reported as the mail FAILING authentication. |
+| HIGH | `graphview.py` | A failed path recompute is swallowed and the UI keeps asserting connectivity. |
+| MEDIUM | various | A four-eyes request that reached nobody returns 201; three notification writes have no `try` at all; one transient failure hides the ingest quarantine for the session; a failed deception load leaves the previous case's rows on screen. |
+| MEDIUM | `install.ps1` | Writes `.env.local` from unchecked subprocess output, so a failed key generation produces an empty secret. |
+| MEDIUM | `launch.*` | Treat a set-but-empty variable as unset, defeating the `db.py` distinction added earlier today. |
+
+`EvidenceStorage.delete()` now exists but **has never been exercised
+against a live COMPLIANCE lock** — the expected outcome is a refusal
+recorded as STORAGE_LOCKED, and that path has no integration test.
 
 ### Open findings from the 2026-08-07 hostile pass
 
