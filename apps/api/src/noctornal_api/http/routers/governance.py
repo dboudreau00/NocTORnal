@@ -64,6 +64,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.evidence import EvidenceError, EvidenceStorage
 from noctornal_api.retention import PurgeResult, RetentionError, RetentionService
 
 router = APIRouter(prefix="/retention", tags=["governance"])
@@ -263,6 +264,34 @@ class PurgeBody(BaseModel):
     dry_run: bool = True
 
 
+def _purger(conn: psycopg.Connection) -> RetentionService:
+    """A `RetentionService` that can actually reach the exhibit bytes.
+
+    Built per request like every other service here, and it REFUSES rather
+    than degrading — the same shape as `ingest.py:_with_raw`, for the
+    mirror-image reason. There, accepting bytes with no raw store means
+    telling a partner their submission landed when it was dropped. Here,
+    purging with no object store means telling a court the material was
+    destroyed while it sits in the bucket.
+
+    Both routers below used to construct `RetentionService(conn)` with no
+    storage at all, which was 100% of production purges: `_purge_evidence`
+    took its `storage is None` branch, the rows were marked purged, and
+    the tombstone recorded NOT_APPLICABLE. `EvidenceStorage` had no
+    `delete()` to call even if one had been passed.
+    """
+    try:
+        storage = EvidenceStorage()
+    except (EvidenceError, ValueError, KeyError) as exc:
+        raise Problem(
+            503, "Storage unavailable",
+            "the evidence object store is not configured, so a purge "
+            "cannot destroy the exhibit bytes. Refusing rather than "
+            "marking the rows purged and recording a destruction that did "
+            "not happen. Set MINIO_ENDPOINT / MINIO_ACCESS_KEY / "
+            "MINIO_SECRET_KEY / EVIDENCE_BUCKET.") from exc
+    return RetentionService(conn, storage)
+
 @router.post("/purge", response_model=dict,
              dependencies=[Depends(rate_limit("retention.destroy"))])
 def purge(
@@ -278,7 +307,7 @@ def purge(
     """
     _case_scoped(conn, user, body.case_id, "retention.purge")
     try:
-        result = RetentionService(conn).purge_due(
+        result = _purger(conn).purge_due(
             actor_id=user.user_id, authority=body.authority,
             case_id=body.case_id, dry_run=body.dry_run)
     except RetentionError as exc:
@@ -338,7 +367,7 @@ def purge_out_of_schedule(
             f"destruction would leave the other case with no record that "
             f"it happened.")
     try:
-        result = RetentionService(conn).purge_out_of_schedule(
+        result = _purger(conn).purge_out_of_schedule(
             actor_id=user.user_id, authority=body.authority,
             approval_request_id=body.approval_request_id,
             case_id=body.case_id, evidence_ids=body.evidence_ids)
