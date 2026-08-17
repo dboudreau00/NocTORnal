@@ -21,6 +21,9 @@ APP_JS = STATIC / "app.js"
 INDEX = STATIC / "index.html"
 APP_CSS = STATIC / "app.css"
 
+#: The service package, for the cross-file key contracts below.
+SRC = STATIC.parents[1]
+
 
 def _js() -> str:
     return APP_JS.read_text(encoding="utf-8")
@@ -220,12 +223,40 @@ def test_labels_are_sanitised_at_the_boundary_not_at_each_render_site():
     the canvas, the entity table, the palette, the inspector, the ACH
     matrix, every analytics summary. A per-site fix is a fix that one site
     will always be missing.
+
+    This docstring named "every analytics summary" from the day it was
+    written, and the assertions below covered the two graph paths only. The
+    analytics suite went to `state` raw and drew eight sets of unsanitised
+    names -- `removal_set`, `top_betweenness_set`, `cut_vertices`,
+    `bridges`, `triads[].nodes`, `dyads` and the two table paths. A claim in
+    a docstring is not a check, and this is the file where that costs the
+    most: analytics is the pane that NAMES the people an analyst is about to
+    act on.
     """
     js = _js()
     assert "function withSafeLabel" in js
     assert "nodes.map(withSafeLabel)" in js, "the entity list is unsanitised"
     assert "(g.nodes || []).map(withSafeLabel)" in js, \
         "the sociogram projection is unsanitised"
+    assert "function safeLabelsDeep" in js, (
+        "nested payloads have no boundary sanitiser, so a label more than "
+        "one level down is drawn raw")
+    assert "state.analytics = safeLabelsDeep(" in js, \
+        "the analytics suite is unsanitised"
+    assert "state.analyticsKpp = safeLabelsDeep(" in js, \
+        "the key-player result is unsanitised"
+
+
+def test_the_deep_label_sanitiser_covers_the_pair_keys_too():
+    """`bridges` and `dyads` carry `source_label`/`target_label` rather than
+    `label`, so a sanitiser keyed on `label` alone would de-fang the triads
+    and leave the bridges raw -- which is the per-site gap in miniature,
+    inside the very helper written to close it."""
+    js = _js()
+    start = js.index("const _LABEL_KEYS")
+    decl = js[start:js.index("\n", start)]
+    for key in ("label", "source_label", "target_label"):
+        assert f"'{key}'" in decl, f"the deep sanitiser ignores `{key}`"
 
 
 def test_the_dead_letter_fragment_is_made_visible_too():
@@ -319,17 +350,40 @@ def test_every_pane_is_reachable_from_the_rail():
     assert panes <= tabs, f"panes with no rail tab: {sorted(panes - tabs)}"
 
 
-@pytest.mark.parametrize("element_id", sorted({
-    # Ids app.js addresses by name. A typo in either file is a silent no-op
-    # at boot -- $() returns null and the listener is never attached, so
-    # the button simply does nothing when clicked, with no error anywhere.
-    "smp-policy", "smp-state", "smp-refresh", "smp-counts", "smp-list",
-    "smp-empty", "smp-detail", "smp-detail-title", "smp-detail-body",
-    "smp-close", "smp-file", "smp-case", "smp-class", "smp-note",
-    "smp-submit", "smp-submit-msg", "smp-origin", "samples-badge",
-    "busy", "keys-scrim", "keys-close", "keys-palette",
-}))
+#: Every id app.js looks up by literal name. DERIVED, not listed: the
+#: hand-maintained version of this set covered twenty-two ids out of the
+#: two hundred and ninety-six that exist, all of them from one pane, so a
+#: typo anywhere else was checked by nothing. A curated list of the places
+#: somebody remembered to check is not a check.
+_ADDRESSED = re.compile(r"\$\('([A-Za-z][\w-]*)'\)")
+
+#: `renderList(listId, emptyId, ...)` resolves both of its first two
+#: arguments with `$()` INSIDE the helper, so a typo in either is invisible
+#: to the scan above while failing in exactly the same way.
+_RENDER_LIST = re.compile(
+    r"renderList\(\s*'([A-Za-z][\w-]*)'\s*,\s*'([A-Za-z][\w-]*)'")
+
+#: Ids app.js CREATES for itself (`node.id = 'x'`). These legitimately do
+#: not appear in index.html -- `inbox-prefs-msg` is built when the
+#: preferences pane renders -- so requiring the markup to declare them
+#: would be a false accusation.
+_RUNTIME_MADE = re.compile(r"\.id = '([A-Za-z][\w-]*)'")
+
+
+def _static_ids() -> list[str]:
+    js = _js()
+    addressed = set(_ADDRESSED.findall(js))
+    for list_id, empty_id in _RENDER_LIST.findall(js):
+        addressed.add(list_id)
+        addressed.add(empty_id)
+    return sorted(addressed - set(_RUNTIME_MADE.findall(js)))
+
+
+@pytest.mark.parametrize("element_id", _static_ids())
 def test_element_ids_exist(element_id: str):
+    """A typo in either file is a silent no-op at boot -- $() returns null
+    and the listener is never attached, so the button simply does nothing
+    when clicked, with no error anywhere."""
     assert f'id="{element_id}"' in _html(), (
         f"app.js addresses #{element_id} and index.html does not define it")
 
@@ -452,3 +506,235 @@ def test_the_focus_flag_distinguishes_unknown_from_not_connected():
     body = js[start:js.index("\n/** Double-click", start)]
     assert "state.focus.connected === null" in body
     assert "UNKNOWN" in body
+
+
+# ---------------------------------------------------------------------------
+# Cross-file key contracts: a green suite either side of a contract that
+# neither side asserts
+# ---------------------------------------------------------------------------
+
+def _copart_loader() -> str:
+    """The co-participation loader.
+
+    Anchored on `loadCoParticipation`, which exists in every version of this
+    file, rather than on the renderer added when the defect was fixed. A
+    test anchored on the fix fails with "substring not found" against the
+    broken code -- which is a test that cannot state what is wrong, only
+    that something is.
+    """
+    js = _js()
+    start = js.index("async function loadCoParticipation(")
+    return js[start:js.index("\n/* --- Report", start)]
+
+
+def test_the_co_participation_pane_reads_the_keys_the_service_emits():
+    """This pane rendered the literal string "undefined — undefined" on
+    every row, under 1444 passing tests, for as long as it has existed.
+
+    It read `t.source`/`t.a` for the endpoints and the service emits
+    `src`/`dst`; it read `t.rooms` and the service emits
+    `shared_conversations`. Both sides were internally consistent and both
+    were tested -- `test_coparticipation_pg.py` asserts the SERVER key and
+    the UI tests asserted element ids. Nothing asserted the contract
+    BETWEEN them, so the defect sat in the gap where neither suite looked.
+
+    Text-level by necessity (there is no browser here), which is enough:
+    it fails the moment either side renames a key without the other.
+    """
+    service = (SRC / "coparticipation.py").read_text(encoding="utf-8")
+    for key in ("src", "dst", "weight", "shared_conversations",
+                "inference_method", "nodes", "coverage", "reading"):
+        assert f'"{key}"' in service, (
+            f"the pane reads `{key}` and coparticipation.py no longer "
+            f"emits it -- the pane will render undefined, not fail")
+
+
+def test_the_co_participation_pane_does_not_read_keys_that_never_existed():
+    """The specific dead keys, named so a refactor cannot quietly restore
+    them. `body.ties` never existed either -- it was a fallback in front of
+    the real key, which is what made the bug survive review."""
+    pane = _copart_loader()
+    for dead in ("t.source", "t.target", "t.a", "t.b", "t.rooms",
+                 "t.weighting", "body.warnings", "body.ties"):
+        # Word-bounded, not substring: `t.a` occurs inside
+        # `host.appendChild`, and a check that fails on its own test file is
+        # a check nobody keeps.
+        assert not re.search(rf"\b{re.escape(dead)}\b", pane), (
+            f"the co-participation pane reads `{dead}`, which the service "
+            f"has never emitted")
+
+
+def test_the_co_participation_cap_reports_itself():
+    """`coparticipation.py`: "a cap that silently drops data is worse than
+    no cap, because the output looks complete." The browser dropped the
+    entire coverage block, so the one cap the module refuses to apply
+    silently was, on screen, silent.
+
+    Scans the whole file, not the loader: the coverage block is rendered by
+    a helper the loader calls, and where it lives is not the contract."""
+    js = _js()
+    assert "cov.oversized" in js or "coverage.oversized" in js, (
+        "the oversized-room exclusions are not rendered anywhere")
+    assert "participants_excluded_not_visible" in js, (
+        "a network made smaller by the caller's clearance does not say so")
+
+
+def test_the_co_participation_labels_go_through_the_bidi_guard():
+    """A HANDLE vertex's label is a string the subject chose on a forum. A
+    right-to-left override in it reorders the two names either side of the
+    dash, so the tie reads backwards while the DOM says otherwise."""
+    pane = _copart_loader()
+    assert "visibleText(" in pane, (
+        "co-participation renders attacker-chosen handles raw")
+
+
+def test_a_failed_deception_load_clears_the_previous_case_rows():
+    """All three deception panes reported the error into the COUNTS span and
+    returned before the render, so the list kept whatever it last held.
+
+    Open Deception on case A, switch to case B, get a 403 -- and case A's
+    defanged attacker URLs, BEC subject lines and spoofed caller IDs sit
+    under case B's header and its TLP chip. The 403 is the likely path, not
+    the rare one: all three endpoints gate on `evidence.read`.
+    """
+    js = _js()
+    assert "function deceptionLoadFailed(" in js, (
+        "the three deception loaders no longer share a failure path, so "
+        "one of them is the one somebody forgot")
+    start = js.index("function deceptionLoadFailed(")
+    body = js[start:js.index("\nasync function", start)]
+    assert "renderList(" in body, "the stale rows are not cleared"
+    assert "refusalText(" in body, "a refusal is not named"
+    assert ".counts).textContent = ''" in body, (
+        "a stale count survives a failed load")
+
+    # And every loader actually routes its catch through it.
+    for loader in ("loadCaptures", "loadDeceptionEmails", "loadDeceptionCalls"):
+        s = js.index(f"async function {loader}(")
+        fn = js[s:js.index("\n}", s)]
+        assert "deceptionLoadFailed(" in fn, (
+            f"{loader} still reports a failure without clearing the list")
+
+
+def test_the_ingest_quarantine_latches_only_on_a_permission_refusal():
+    """The latch exists for a good reason -- `ingest.manage` is SYS_ADMIN
+    only, and re-probing hums AUTHZ_DENIED into the one signal a security
+    officer reads for probing -- but it was keyed on "anything that is not a
+    step-up expiry".
+
+    That swept in a network drop (ApiError status 0), a 502, a 503 and a
+    429. One blip hid the section for the rest of the session with no
+    message at all, which reports a transport failure as a permission fact
+    and reports it by making the evidence disappear.
+    """
+    js = _js()
+    start = js.index("async function loadQuarantine(")
+    body = js[start:js.index("\n/* --- dead letters", start)]
+    assert "err.status === 403" in body, (
+        "the quarantine latch is not keyed on the 403 it was written for")
+    assert "if (!stepUp) state.quarantineVisible = false;" not in body, (
+        "the old catch-all predicate is back: every transient failure "
+        "latches the pane off for the session")
+    # A transient failure must say the queue is UNKNOWN, not empty.
+    assert "not known to be" in body, (
+        "a failed read leaves the section reading as 'nothing unattached', "
+        "which is a claim about the data")
+
+
+# ---------------------------------------------------------------------------
+# Metric history — Phase 3's "visible" trend
+# ---------------------------------------------------------------------------
+
+def _history_js() -> str:
+    js = _js()
+    start = js.index("async function loadMetricHistory(")
+    return js[start:js.index("\nfunction renderKeyPlayer(", start)]
+
+
+def test_the_trend_calls_the_endpoint_that_exists():
+    """ROADMAP-REMAINING.md named this route `metrics/history` until
+    2026-08-10. The real path is `analytics/history/{node_id}`, so anyone
+    grepping the string the roadmap gave them found nothing and concluded
+    the endpoint had never been built."""
+    js = _js()
+    assert "'/analytics/history/'" in js, (
+        "nothing calls the metric-history endpoint")
+    assert "metrics/history" not in js, (
+        "the roadmap's wrong path has been copied into the client")
+
+
+def test_the_trend_never_shares_a_promise_all_with_the_suite():
+    """A `Promise.all` over endpoints with different permissions is wrong:
+    the first 403 rejects the lot, so a caller holding four permissions of
+    five sees an empty pane claiming they hold none. Here it would be worse
+    -- the suite has already rendered, and a trend failure would blank it.
+    """
+    body = _history_js()
+    assert "Promise.all" not in body, (
+        "the trend was folded into a Promise.all, so its failure can blank "
+        "a table that loaded successfully")
+
+
+def test_a_refused_trend_is_not_reported_as_an_empty_one():
+    """"No history" and "you may not see the history" are different facts
+    and an analyst acts on them differently. The 200-with-no-rows case has
+    its own wording, and neither borrows the other's."""
+    body = _history_js()
+    assert "err.status === 403" in body, "the refusal is not distinguished"
+    assert "refusalText(" in body, "the refusal is not named"
+    js = _js()
+    start = js.index("function renderMetricHistory(")
+    render = js[start:js.index("\nfunction histRow(", start)]
+    assert "at least two runs" in render, (
+        "an authorised-but-empty series does not say what it means")
+
+
+def test_the_trend_is_drawn_oldest_first():
+    """`analytics_runs` orders `started_at DESC` -- newest first. A
+    left-to-right time axis has to reverse it, and getting that backwards
+    silently INVERTS every trend on screen: rising reads as falling, on the
+    one chart whose whole purpose is to show a direction."""
+    body = _history_js()
+    assert ".slice().reverse()" in body, (
+        "the series is charted in API order, so the time axis runs "
+        "backwards and every trend is inverted")
+
+
+def test_an_unrenderable_value_is_not_drawn_as_a_position():
+    """A guard, and deliberately not called gap handling.
+
+    `analytics_runs` writes no row when a metric is undefined for a node
+    (`if value is None: continue`), and `node_metric.value` is NOT NULL --
+    so an undefined run is ABSENT from the series rather than null, and
+    absent cannot be told from "no run happened" at this endpoint. The line
+    spans it. The pane says so in its help text instead of implying the
+    axis is continuous, which is the assertion below.
+
+    The `pen` break still matters: if a value ever arrives unrenderable, it
+    must not be drawn as a position.
+    """
+    body = _history_js()
+    assert "pen = false" in body, (
+        "an unrenderable value would be drawn at some position anyway")
+    html = _html()
+    start = html.index("Trend &mdash; one actor across past runs")
+    # Whitespace-normalised: the source wraps prose at 72 columns, so any
+    # phrase long enough to be worth asserting on is split by a newline and
+    # an indent. A test that cannot survive re-wrapping is a test that gets
+    # deleted the first time somebody reflows the file.
+    help_text = re.sub(r"\s+", " ", html[start:html.index("</p>", start)])
+    assert "does not appear here at all" in help_text, (
+        "the pane does not disclose that a run with no defined value for "
+        "this actor is invisible to it, so a straight segment reads as "
+        "'nothing changed' when it may be 'not measured'")
+
+
+def test_the_trend_canvas_has_an_accessible_twin():
+    """The canvas is `aria-hidden`, like the density strip. That is only
+    honest if everything it shows also exists as text -- otherwise the
+    trend is information that exists solely in pixels."""
+    html = _html()
+    assert 'id="an-hist-chart"' in html and 'aria-hidden="true"' in html
+    assert 'id="an-hist-body"' in html, "no table twin for the chart"
+    js = _js()
+    assert "function histRow(" in js, "the table twin has no row renderer"

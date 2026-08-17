@@ -156,6 +156,14 @@ const state = {
      per projection -- changing either invalidates them. */
   analytics: null,
   analyticsKpp: null,
+  /* Metric history is per-node and, unlike the suite, NOT per-projection:
+     the series spans every completed run in the case. So a projection
+     change does not invalidate it — but a case change does, and so does
+     picking a different actor. */
+  analyticsHistory: null,
+  analyticsHistoryNode: null,
+  analyticsHistoryLabel: '',
+  analyticsHistoryMetric: 'betweenness',
 
   /* metrics */
   metrics: null,
@@ -320,6 +328,40 @@ function withSafeLabel(row) {
   const safe = visibleText(row.label);
   if (safe === row.label) return row;
   return Object.assign({}, row, { label: safe, label_raw: row.label });
+}
+
+/** Every key that carries a human-chosen name in an analytics response. */
+const _LABEL_KEYS = new Set(['label', 'source_label', 'target_label']);
+
+/** `withSafeLabel` for a NESTED payload.
+ *
+ *  The analytics suite buries names several levels down — `removal_set[]`,
+ *  `top_betweenness_set[]`, `cut_vertices[]`, `bridges[]`,
+ *  `triads[].nodes[]`, `dyads[]` — and the flat helper above cannot reach
+ *  any of them, so the pane drew eight sets of raw labels while the graph
+ *  and search paths were de-fanged.
+ *
+ *  Applied at the boundary rather than at each draw, for the reason the
+ *  console has already learned twice: there are two dozen sites that render
+ *  a node label and one of them will always be the one somebody forgot.
+ */
+function safeLabelsDeep(value) {
+  if (Array.isArray(value)) return value.map(safeLabelsDeep);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const key of Object.keys(value)) {
+    const v = value[key];
+    if (_LABEL_KEYS.has(key) && typeof v === 'string') {
+      const safe = visibleText(v);
+      out[key] = safe;
+      /* Keep the original under `_raw`, as withSafeLabel does: the exact
+         bytes matter when the question is what the subject actually wrote. */
+      if (safe !== v) out[key + '_raw'] = v;
+    } else {
+      out[key] = safeLabelsDeep(v);
+    }
+  }
+  return out;
 }
 function setMsg(node, text) {
   node.textContent = text || '';
@@ -686,6 +728,11 @@ async function openCase(caseId) {
      numbers into this one would be worse than showing none. */
   state.analytics = null;
   state.analyticsKpp = null;
+  /* The trend names ONE actor. Left standing across a case switch it would
+     chart case A's person under case B's header. */
+  state.analyticsHistory = null;
+  state.analyticsHistoryNode = null;
+  state.analyticsHistoryLabel = '';
   state.triage = [];
   state.triageCounts = {};
   state.triageIndex = 0;
@@ -755,6 +802,9 @@ function selectTab(name) {
     show($('pane-' + tab.dataset.tab), on);
   }
   if (name === 'graph') { resizeGraph(); resizeDensity(); }
+  /* A canvas in a hidden pane has clientWidth 0, so it has to be sized on
+     the way in or the trend draws into nothing and reads as "no data". */
+  if (name === 'analytics') resizeHistory();
   if (name === 'triage') loadTriage();
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
@@ -4689,7 +4739,18 @@ function wire() {
     renderInspector();
   });
 
-  window.addEventListener('resize', () => { resizeDensity(); });
+  /* Re-chart on a metric change, but only when an actor has been picked:
+     firing a fetch for the empty selection would spend a request to render
+     the same "pick an actor" line. */
+  $('an-hist-metric').addEventListener('change', () => {
+    state.analyticsHistoryMetric = $('an-hist-metric').value;
+    if (state.analyticsHistoryNode) {
+      loadMetricHistory(state.analyticsHistoryNode,
+                        state.analyticsHistoryLabel);
+    }
+  });
+
+  window.addEventListener('resize', () => { resizeDensity(); resizeHistory(); });
 }
 
 /* A token handed over in the URL fragment (#token=...) is adopted and the
@@ -5132,7 +5193,11 @@ async function runAnalysis() {
        and is cached against its own removal-set size. A failure of the
        expensive one must not blank the cheap one. */
     const suite = await api(cpath('/analytics?' + q.toString()));
-    state.analytics = suite;
+    /* De-fang at the boundary. Analytics is the pane that NAMES people —
+       "removing these three would disconnect the network" — so a label
+       carrying a right-to-left override here renames the person an analyst
+       is about to act on. */
+    state.analytics = safeLabelsDeep(suite);
     let kpp = null;
     try {
       kpp = await api(cpath('/analytics/key-player?' + kq.toString()));
@@ -5140,7 +5205,7 @@ async function runAnalysis() {
       kpp = { error: err instanceof ApiError ? err.detail || err.title
                                              : 'the request failed' };
     }
-    state.analyticsKpp = kpp;
+    state.analyticsKpp = safeLabelsDeep(kpp);
     renderAnalytics();
     /* computed_at_ms is how long the ORIGINAL run took, so on a cache hit
        it describes that run, not this response. Saying "served from cache
@@ -5266,6 +5331,18 @@ function renderAnalyticsTable(a) {
     tr.appendChild(el('td', null,
       n.community === null || n.community === undefined
         ? '—' : String(n.community)));
+    /* Its own control rather than a second meaning for the row click: the
+       row already means "show me this actor in the graph", and one gesture
+       that does two things is one an analyst learns to distrust. */
+    const trend = el('td');
+    const trendBtn = el('button', 'btn ghost small', 'Trend');
+    trendBtn.type = 'button';
+    trendBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      loadMetricHistory(n.id, n.label);
+    });
+    trend.appendChild(trendBtn);
+    tr.appendChild(trend);
     tr.addEventListener('click', () => {
       selectTab('graph');
       selectNode(n.id);
@@ -5291,6 +5368,228 @@ function rankCell(value, rank, percentile, total) {
       ? '' : ' · p' + num(percentile, 0)));
   td.appendChild(meta);
   return td;
+}
+
+/* ── metric history ────────────────────────────────────────────────────
+ *
+ * Phase 3's checklist calls a rising betweenness trend "visible". It has
+ * been visible to `curl` since the endpoint was built: nothing in this file
+ * called it.
+ *
+ * Four things this pane must not do, each of which the console has already
+ * learned the hard way:
+ *
+ *  1. It never joins the suite in a `Promise.all`. The suite needs
+ *     `analytics.run` and so does this, but a failure here must not blank a
+ *     table that already rendered.
+ *  2. A 403 is not an empty state. "No history" and "you may not see the
+ *     history" are different facts and an analyst acts on them differently.
+ *  3. A GAP IS NOT A ZERO — and the harder half of that is what this
+ *     CANNOT show. `analytics_runs` skips the row entirely when a metric
+ *     is undefined for a node (`if value is None: continue` — the
+ *     constraint of an isolate), and `node_metric.value` is NOT NULL. So
+ *     an undefined run is not a null in the series, it is ABSENT, and
+ *     absent is indistinguishable from "no run happened" at this endpoint.
+ *     The line therefore spans it, and the help text says so rather than
+ *     letting the reader assume the axis is continuous. The `pen` break
+ *     below still guards a null, because a value the client cannot render
+ *     must not be drawn as a position — but it is a guard, not the
+ *     mechanism, and calling it the mechanism would be the same confident
+ *     wrong claim this pane is here to avoid.
+ *  4. The series arrives NEWEST FIRST. A left-to-right time axis has to
+ *     reverse it, and getting that backwards silently inverts every trend
+ *     on screen — rising reads as falling.
+ */
+const histCanvas = $('an-hist-chart');
+const histCtx = histCanvas.getContext('2d');
+
+async function loadMetricHistory(nodeId, label) {
+  if (!state.caseId || !nodeId) return;
+  state.analyticsHistoryNode = nodeId;
+  state.analyticsHistoryLabel = label || '';
+  const metric = $('an-hist-metric').value;
+  state.analyticsHistoryMetric = metric;
+  $('an-hist-who').textContent = 'loading ' + metric.replace(/_/g, ' ')
+    + ' for ' + visibleText(state.analyticsHistoryLabel) + '…';
+  try {
+    const q = new URLSearchParams({ metric: metric, limit: '50' });
+    const body = await api(
+      cpath('/analytics/history/' + encodeURIComponent(nodeId))
+      + '?' + q.toString());
+    state.analyticsHistory = body;
+    renderMetricHistory();
+  } catch (err) {
+    /* Own try/catch, own surface. `#an-results`, `#an-status` and the
+       actors table are deliberately untouched. */
+    state.analyticsHistory = null;
+    renderList('an-hist-body', 'an-hist-empty', [], histRow);
+    drawHistory();
+    $('an-hist-who').textContent = '';
+    if (err instanceof ApiError
+        && (err.status === 403 || err.status === 404 || err.status === 400)) {
+      $('an-hist-empty').textContent = refusalText(
+        err, 'Metric history needs analytics.run on this case.');
+      return;
+    }
+    $('an-hist-empty').textContent = refusalText(
+      err, 'The trend could not be read. It is not known to be empty.');
+  }
+}
+
+function renderMetricHistory() {
+  const body = state.analyticsHistory;
+  const series = (body && body.series) || [];
+  renderList('an-hist-body', 'an-hist-empty', series, histRow);
+  if (!series.length) {
+    /* A legitimate 200 with nothing in it, which is its OWN fact and not
+       the refusal above: the actor is visible, the metric is valid, and no
+       completed run at this clearance has recorded it. */
+    $('an-hist-empty').textContent =
+      'No completed run has recorded this metric for this actor at your '
+      + 'visibility. A trend needs at least two runs.';
+  }
+  $('an-hist-who').textContent = series.length
+    ? visibleText(state.analyticsHistoryLabel) + ' · '
+      + series.length + ' run' + (series.length === 1 ? '' : 's')
+    : visibleText(state.analyticsHistoryLabel);
+  drawHistory();
+}
+
+function histRow(p) {
+  const tr = el('tr');
+  tr.appendChild(el('td', null, fmtTime(p.at)));
+  const val = el('td', null, metricNum(p.value, 4));
+  if (p.is_approximate) {
+    const chip = el('span', 'chip small warn', 'approx');
+    chip.title = 'Computed with sampling (betweenness pivots), so this '
+               + 'value is an estimate and small movements between two '
+               + 'approximate runs may be sampling noise rather than change.';
+    val.appendChild(document.createTextNode(' '));
+    val.appendChild(chip);
+  }
+  tr.appendChild(val);
+  tr.appendChild(el('td', null,
+    p.rank === null || p.rank === undefined
+      ? '—' : ordinal(p.rank) + ' of ' + (p.node_count || '?')));
+  tr.appendChild(el('td', null,
+    p.percentile === null || p.percentile === undefined
+      ? '—' : 'p' + num(p.percentile, 0)));
+  /* The preset is per-point and not per-chart on purpose: weights are not
+     comparable across parameters, so two points from different presets are
+     two different measurements and the row has to say so. */
+  const params = p.params || {};
+  const preset = el('td', null, p.preset || '—');
+  if (params.decay_half_life_months) {
+    preset.appendChild(el('span', 'muted small',
+      '  decay ' + params.decay_half_life_months + 'mo'));
+  }
+  tr.appendChild(preset);
+  return tr;
+}
+
+function resizeHistory() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
+  if (!w || !h) return;
+  histCanvas.width = Math.round(w * dpr);
+  histCanvas.height = Math.round(h * dpr);
+  histCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawHistory();
+}
+
+/** The trend, drawn rather than styled — same reason as the density strip:
+ *  the CSP leaves no inline style to place a point with. */
+function drawHistory() {
+  const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
+  if (!w || !h) return;
+  histCtx.clearRect(0, 0, w, h);
+  histCtx.fillStyle = PAINT.surface2 || '#1E2432';
+  histCtx.fillRect(0, 0, w, h);
+
+  const baseline = () => {
+    histCtx.strokeStyle = PAINT.hairline || '#303849';
+    histCtx.lineWidth = 1;
+    histCtx.beginPath();
+    histCtx.moveTo(0, h - 0.5);
+    histCtx.lineTo(w, h - 0.5);
+    histCtx.stroke();
+  };
+
+  const body = state.analyticsHistory;
+  const raw = (body && body.series) || [];
+  if (raw.length < 1) { baseline(); return; }
+
+  /* Oldest on the LEFT. The API orders newest first. */
+  const pts = raw.slice().reverse();
+
+  const pad = { l: 8, r: 8, t: 10, b: 14 };
+  const iw = Math.max(1, w - pad.l - pad.r);
+  const ih = Math.max(1, h - pad.t - pad.b);
+
+  const times = pts.map((p) => Date.parse(p.at))
+    .filter((t) => Number.isFinite(t));
+  const tMin = Math.min.apply(null, times);
+  const tMax = Math.max.apply(null, times);
+  const defined = pts.filter(
+    (p) => typeof p.value === 'number' && Number.isFinite(p.value));
+  if (!defined.length) { baseline(); return; }
+  const vals = defined.map((p) => p.value);
+  let vMin = Math.min.apply(null, vals);
+  let vMax = Math.max.apply(null, vals);
+  /* A flat series is a real finding — "this actor has not moved" — so it
+     draws as a flat line down the middle rather than dividing by zero. */
+  if (vMax - vMin < 1e-12) { vMin -= 0.5; vMax += 0.5; }
+
+  const x = (p, i) => {
+    if (tMax > tMin) {
+      const t = Date.parse(p.at);
+      if (Number.isFinite(t)) {
+        return pad.l + ((t - tMin) / (tMax - tMin)) * iw;
+      }
+    }
+    return pad.l + (pts.length === 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
+  };
+  const y = (v) => pad.t + ih - ((v - vMin) / (vMax - vMin)) * ih;
+
+  baseline();
+
+  /* The path. `pen` breaks it if a value is ever unrenderable; see the
+     note above for why that is a guard and not gap handling. */
+  histCtx.strokeStyle = PAINT.accent || '#6EA8FE';
+  histCtx.lineWidth = 2;
+  histCtx.beginPath();
+  let pen = false;
+  pts.forEach((p, i) => {
+    const ok = typeof p.value === 'number' && Number.isFinite(p.value);
+    if (!ok) { pen = false; return; }
+    const px = x(p, i), py = y(p.value);
+    if (pen) histCtx.lineTo(px, py); else histCtx.moveTo(px, py);
+    pen = true;
+  });
+  histCtx.stroke();
+
+  /* Points. An approximate run is marked, because two approximate values
+     can differ by sampling alone and that must not read as movement. */
+  pts.forEach((p, i) => {
+    const ok = typeof p.value === 'number' && Number.isFinite(p.value);
+    if (!ok) return;
+    histCtx.fillStyle = p.is_approximate
+      ? (PAINT.alert || '#E0674A') : (PAINT.accent || '#6EA8FE');
+    histCtx.beginPath();
+    histCtx.arc(x(p, i), y(p.value), p.is_approximate ? 3.5 : 2.5,
+                0, Math.PI * 2);
+    histCtx.fill();
+  });
+
+  /* Ends only. A crowded axis is unreadable at this height, and the table
+     below carries every exact value anyway. */
+  histCtx.fillStyle = PAINT.dim || '#8A93A6';
+  histCtx.font = PAINT.monoFont || '10px monospace';
+  histCtx.textBaseline = 'alphabetic';
+  histCtx.textAlign = 'left';
+  histCtx.fillText(num(vMax, 3), pad.l, pad.t - 1);
+  histCtx.textAlign = 'right';
+  histCtx.fillText(num(vMin, 3), w - pad.r, h - 2);
 }
 
 function renderKeyPlayer() {
@@ -5666,14 +5965,39 @@ async function loadQuarantine() {
     renderList('ing-quarantine-list', 'ing-quarantine-empty',
       body.records, ingestRow);
   } catch (err) {
-    show(box, false);
-    /* Remember the refusal so the next queue load does not repeat it.
-       A step-up expiry is NOT remembered as a permanent refusal: that one
-       is recoverable, and latching it would hide the section for the rest
-       of the session from somebody who does hold the permission. */
+    /* Latch ONLY on the refusal this was written for.
+       `ingest.manage` is SYS_ADMIN-only, so for every other role this 403s
+       for the whole session, and re-probing would hum AUTHZ_DENIED into the
+       one signal a security officer reads for probing. That is a DURABLE
+       fact about the caller, so remembering it is right.
+
+       Nothing else is durable. The predicate used to be "anything that is
+       not a step-up expiry", which swept in a network drop (ApiError with
+       status 0), a 502, a 503 and a 429 — one blip and the section was gone
+       for the rest of the session, with `show(box, false)` as the only
+       trace. That reports a transport failure as a permission fact, and it
+       reports it by making the evidence disappear. */
+    if (err instanceof ApiError && err.status === 403) {
+      show(box, false);
+      state.quarantineVisible = false;
+      return;
+    }
+    /* A step-up expiry is recoverable and stays unlatched, as before. */
     const stepUp = err instanceof ApiError
       && /re-authentication/i.test(err.detail || '');
-    if (!stepUp) state.quarantineVisible = false;
+    if (stepUp) {
+      show(box, false);
+      return;
+    }
+    /* Everything else: the caller may well hold the permission and we do
+       not know what is in there. Say so rather than hiding it — an empty
+       section reads as "nothing unattached", which is a claim about the
+       data we are in no position to make. */
+    show(box, true);
+    renderList('ing-quarantine-list', 'ing-quarantine-empty', [], ingestRow);
+    $('ing-quarantine-empty').textContent = refusalText(
+      err, 'The unattached queue could not be read. It is not known to be '
+      + 'empty — reopen this tab to retry.');
   }
 }
 
@@ -6555,37 +6879,109 @@ async function loadUnverified() {
   }
 }
 
+/* Co-participation coverage: what was left OUT of the network.
+ *
+ * `coparticipation.py` states the rule this renders — "a cap that silently
+ * drops data is worse than no cap, because the output looks complete" —
+ * and then reports every exclusion so the analyst can tell a sparse network
+ * from a filtered one. The browser dropped all of it: it read
+ * `body.warnings`, a key the service has never emitted. So the one cap the
+ * module refuses to apply silently was, on screen, silent.
+ *
+ * Rendered even when nothing was excluded. "Nothing was excluded" is a
+ * finding about the network; a blank space is not.
+ */
+function renderCoParticipationCoverage(body) {
+  const host = $('comms-copart-coverage');
+  clear(host);
+  const cov = body && body.coverage;
+  if (!cov) return;
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('rooms seen', cov.conversations_seen));
+  facts.appendChild(fact('projected', cov.conversations_projected));
+  facts.appendChild(fact('too small', cov.conversations_too_small));
+  facts.appendChild(fact('oversized', cov.conversations_oversized,
+    cov.conversations_oversized ? 'warn' : ''));
+  facts.appendChild(fact('excluded: incidental',
+    cov.participants_excluded_incidental));
+  facts.appendChild(fact('excluded: unresolved',
+    cov.participants_excluded_unresolved));
+  /* Not-visible is a CLEARANCE fact, not a data-quality one: the network is
+     smaller because of who is asking. Kept distinct for that reason. */
+  facts.appendChild(fact('excluded: not visible to you',
+    cov.participants_excluded_not_visible,
+    cov.participants_excluded_not_visible ? 'warn' : ''));
+  host.appendChild(facts);
+
+  for (const room of cov.oversized || []) {
+    host.appendChild(el('p', 'help warn',
+      'Room ' + visibleText(room.conversation_id)
+      + ' on ' + visibleText(room.platform)
+      + ' excluded: ' + room.participants + ' participants ('
+      + room.projectable_participants + ' projectable)'
+      + (room.provenance_class
+        ? ' · ' + visibleText(room.provenance_class) : '')));
+  }
+  if (cov.note) host.appendChild(el('p', 'help', cov.note));
+  if (body.reading) host.appendChild(el('p', 'help', body.reading));
+}
+
 async function loadCoParticipation() {
   if (!state.caseId) return;
   try {
     const body = await api(cpath('/comms/co-participation'));
-    const ties = body.ties || body.edges || [];
+    const ties = body.edges || [];
+    /* An edge carries vertex KEYS (`node:<uuid>` / `handle:<h>`), never a
+       label — so the map is not decoration. Without it this pane cannot
+       name anybody, which is how it came to render "undefined — undefined"
+       on every row while looking populated.
+
+       `visibleText` is mandatory and not defensive habit: a HANDLE vertex's
+       label is a string the subject chose on a forum. A right-to-left
+       override in it reorders the two names either side of the dash, so the
+       tie reads backwards while the DOM says otherwise. */
+    const labels = new Map();
+    for (const n of body.nodes || []) {
+      labels.set(n.key, visibleText(n.label || n.key));
+    }
+    const name = (key) => labels.get(key) || visibleText(key);
+    const weighting = (body.projection || {}).weighting;
     renderList('comms-copart', 'comms-copart-empty', ties, (t) => {
       const card = el('div', 'card row-card compact');
       const head = el('div', 'row-head');
       const w = Number(t.weight || 0);
       head.appendChild(el('span', 'score', w.toFixed(2)));
       head.appendChild(el('span', 'row-title',
-        (t.source_label || t.source || t.a) + ' — '
-        + (t.target_label || t.target || t.b)));
+        name(t.src) + ' — ' + name(t.dst)));
       /* Invariant 4: an inferred edge stays visually distinct and never
          silently becomes an asserted one. */
       head.appendChild(el('span', 'chip warn', 'inferred'));
       card.appendChild(head);
       const facts = el('div', 'facts');
-      if (t.rooms !== undefined) facts.appendChild(fact('rooms', t.rooms));
-      if (t.weighting) facts.appendChild(fact('weighting', t.weighting));
+      facts.appendChild(fact('shared rooms', t.shared_conversations));
+      if (t.inference_method) {
+        facts.appendChild(fact('method', t.inference_method));
+      }
       card.appendChild(facts);
       return card;
     });
+    /* Weighting is a property of the RUN, not of a tie, and the service
+       says weights are not comparable across parameters — so it is stated
+       once for the network rather than repeated on every row. */
     $('comms-copart-count').textContent = ties.length
-      ? ties.length + ' inferred tie(s)' : '';
-    for (const w of body.warnings || []) {
-      $('comms-copart').appendChild(el('p', 'help warn', w));
-    }
+      ? ties.length + ' inferred tie(s)'
+        + (weighting ? ' · ' + weighting + ' weighting' : '')
+      : '';
+    renderCoParticipationCoverage(body);
   } catch (err) {
     if (err instanceof ApiError && (err.status === 403 || err.status === 400)) {
       renderList('comms-copart', 'comms-copart-empty', [], () => el('div'));
+      /* The count and the coverage block describe the PREVIOUS successful
+         load. Left standing under a refusal they attribute one case's
+         network to another — and a refusal is not an empty state. */
+      $('comms-copart-count').textContent = '';
+      clear($('comms-copart-coverage'));
       $('comms-copart-empty').textContent = refusalText(
         err, 'Co-participation needs comms.read on the case.');
       return;
@@ -6828,13 +7224,43 @@ function dcpUrl(value) {
   return copyable(span, shown, 'the defanged URL');
 }
 
+/* A failed deception load must not leave the previous case's rows on
+ * screen.
+ *
+ * All three of these panes reported the error into the COUNTS span and
+ * returned before the render, so the list kept whatever it last held. Open
+ * Deception on case A, switch to case B, get a 403 — and case A's defanged
+ * attacker URLs, BEC subject lines and spoofed caller IDs sit under case
+ * B's header and its TLP chip. The 403 is the likely path, not the rare
+ * one: all three endpoints gate on `evidence.read`.
+ *
+ * There is no third state to invent here, unlike the graph's UNKNOWN: an
+ * empty list plus a named refusal already says "not known", whereas the
+ * previous case's rows say "these are case B's captures".
+ */
+function deceptionLoadFailed(err, ids, rowFn, need) {
+  /* Clear BEFORE reporting. Reporting first and returning is exactly how
+     the stale rows survived. */
+  renderList(ids.list, ids.empty, [], rowFn);
+  $(ids.empty).textContent = refusalText(err, need);
+  /* A stale "12 captures" is the same lie in miniature. */
+  $(ids.counts).textContent = '';
+  /* The open detail card belongs to a row that is no longer on screen. */
+  if (ids.detail) show($(ids.detail), false);
+  inlineProblem($(ids.counts), err);
+}
+
 async function loadCaptures() {
   if (!state.caseId) return;
   let data;
   try {
     data = await api(cpath('/deception/captures'));
   } catch (err) {
-    inlineProblem($('dcp-cap-counts'), err);
+    deceptionLoadFailed(err, {
+      list: 'dcp-cap-list', empty: 'dcp-cap-empty',
+      counts: 'dcp-cap-counts', detail: 'dcp-cap-detail',
+    }, captureRow, 'Reading deception captures needs evidence.read on this '
+      + 'case.');
     return;
   }
   const rows = data.captures || [];
@@ -6995,7 +7421,11 @@ async function loadDeceptionEmails() {
     data = await api(cpath('/deception/emails')
       + ($('dcp-divergent').checked ? '?divergent_only=true' : ''));
   } catch (err) {
-    inlineProblem($('dcp-eml-counts'), err);
+    deceptionLoadFailed(err, {
+      list: 'dcp-eml-list', empty: 'dcp-eml-empty',
+      counts: 'dcp-eml-counts', detail: 'dcp-eml-detail',
+    }, emailRow, 'Reading deception messages needs evidence.read on this '
+      + 'case.');
     return;
   }
   const rows = data.emails || [];
@@ -7216,7 +7646,11 @@ async function loadDeceptionCalls() {
   try {
     data = await api(cpath('/deception/calls'));
   } catch (err) {
-    inlineProblem($('dcp-call-counts'), err);
+    /* No detail card for calls; the other two have one. */
+    deceptionLoadFailed(err, {
+      list: 'dcp-call-list', empty: 'dcp-call-empty',
+      counts: 'dcp-call-counts', detail: null,
+    }, callRow, 'Reading deception calls needs evidence.read on this case.');
     return;
   }
   const rows = data.calls || [];

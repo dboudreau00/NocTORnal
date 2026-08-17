@@ -646,9 +646,65 @@
                     <th scope="col">Constraint</th>
                     <th scope="col">Eff. size</th>
                     <th scope="col">Community</th>
+                    <th scope="col">Trend</th>
                   </tr>
                 </thead>
                 <tbody id="an-body"></tbody>
+              </table>
+            </div>
+
+            <h3 class="h3">Trend &mdash; one actor across past runs</h3>
+            <p class="help">
+              A rising betweenness is a claim about a PERSON, so it is worth
+              being exact about what this shows: every completed run in this
+              case that <strong>recorded</strong> the metric, at your
+              visibility, oldest on the left. Runs use different parameters,
+              and Newman-style weights are not comparable across them
+              &mdash; the preset is printed against each point for that
+              reason.
+              <strong>A run in which this actor had no defined value does
+              not appear here at all</strong> (an isolate has no constraint
+              to measure), and this endpoint cannot tell that apart from no
+              run having happened &mdash; so the line spans such a period
+              rather than breaking, and a long straight segment is not
+              evidence that nothing changed.
+            </p>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Metric</span>
+                <select id="an-hist-metric" class="select">
+                  <option value="betweenness">Betweenness</option>
+                  <option value="harmonic_closeness">Harmonic closeness</option>
+                  <option value="eigenvector">Eigenvector</option>
+                  <option value="constraint">Constraint</option>
+                  <option value="effective_size">Effective size</option>
+                  <option value="efficiency">Efficiency</option>
+                  <option value="hierarchy">Hierarchy</option>
+                </select>
+              </label>
+              <span id="an-hist-who" class="muted small"></span>
+            </div>
+            <!-- aria-hidden like #tl-density: the canvas is a picture of the
+                 table below it, and a screen reader should read the table. -->
+            <canvas id="an-hist-chart" class="hist-chart" aria-hidden="true">
+            </canvas>
+            <p id="an-hist-empty" class="empty">
+              Pick an actor in the table above to chart it.</p>
+            <div class="scroll-x">
+              <table class="table">
+                <caption class="sr-only">
+                  Metric history for the selected actor: every recorded run,
+                  newest first, with its value, rank and parameters.</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Run</th>
+                    <th scope="col">Value</th>
+                    <th scope="col">Rank</th>
+                    <th scope="col">Percentile</th>
+                    <th scope="col">Preset</th>
+                  </tr>
+                </thead>
+                <tbody id="an-hist-body"></tbody>
               </table>
             </div>
 
@@ -889,6 +945,11 @@
           <div id="comms-copart"></div>
           <p id="comms-copart-empty" class="empty">
             No co-participation computed for this case.</p>
+          <!-- Coverage sits OUTSIDE #comms-copart because renderList clears
+               that container: an exclusion report appended into the list is
+               erased by the next load, and a cap that reports itself only
+               sometimes is the silent cap this projection refuses to be. -->
+          <div id="comms-copart-coverage"></div>
         </section>
 
         <!-- FEEDS (Phases 9 and 4). Material arriving from outside: what a

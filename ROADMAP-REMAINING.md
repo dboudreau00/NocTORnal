@@ -3,8 +3,48 @@
 Regenerated 2026-07-26. `docs/09-roadmap.md` is the plan; this is the
 honest delta between that plan and the build.
 
-**State (2026-08-07):** branch `deception-and-release-hardening`, Alembic
-head `0055`, **1444 passing, 0 failing, 0 skipped** (run BOTH
+> **Corrected 2026-08-10 by a read-only audit of the CODE behind each row.
+> Six of this file's own claims were wrong**, and every one of them was
+> wrong in the direction that makes the build look better understood than
+> it was:
+>
+> 1. The metric-history endpoint was named `metrics/history`. It is
+>    `GET /analytics/history/{node_id}`, so the string this file handed
+>    the reader finds nothing and reads as "never built".
+> 2. Phase 6's gap listed **WebAuthn** (a deliberate absence stated in
+>    four documents — SECURITY.md says reporting it is not a finding) and
+>    **timeline replay** (built, and part of Phase 2). Both struck.
+> 3. Phase 6's "**The UI is complete**" was false: approvals have no
+>    analyst surface, so Merge is unreachable from the browser under dual
+>    control.
+> 4. The 0017 downgrade names one foreign key; there are five, plus a
+>    second instance in 0031. Now closed as deliberate, with
+>    `CONVENTIONS.md` corrected rather than the migration.
+> 5. The 67 forks and "`seq` order is not chain order" are recorded as two
+>    observations. They are **one defect** with one root cause.
+> 6. Two entries filed under "unverified leads" were both real, and one
+>    was worse than the lead said.
+>
+> The pattern is the one this file already names about the code, turned on
+> the file itself: *a claim nobody checked*. It now has one — the document
+> links are asserted by `test_doc_invariants.py`, after `docs/17` (cited
+> seventeen times, including by SECURITY.md as the first thing an external
+> researcher should read) spent three days absent from the tree with a
+> fully green suite.
+
+**State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
+head `0055`, **1794 passing, 0 failing, 0 skipped** on a live stack —
+Postgres, Redis, MinIO and Mailpit up, both pytest roots, 4m36s. The rise
+from 1444 is ~350 NEW tests, not new code under test: the element-id
+invariant became derived (22 hand-listed ids → 297), plus
+`test_doc_invariants.py` and the contract tests carried by this session's
+fixes. **This is the first run in this file's history that was executed
+rather than inherited from a handoff** — every earlier figure here was
+copied forward. The flaky `test_ratelimit_redis` PASSED on this run; it is
+intermittent, so that is not evidence it is fixed, and it stays on the
+list below.
+
+**Superseded (2026-08-07):** 1444 passing, 0 failing, 0 skipped (run BOTH
 `apps/api/tests` and `packages/ontology` — earlier handoffs quoted a single
 figure and the next session spent time working out why it did not
 reconcile), ruff clean, source hygiene clean across 273 files. The full
@@ -90,7 +130,7 @@ regressed — the measure got honest.**
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
 | 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
-| 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ◐ | WebAuthn, timeline replay, the assumptions register. **The UI is complete**: merge and its reversal live in the inspector (with the merge history and a per-merge Reverse), and Lifecycle, ACH and Report landed 2026-07-26. What remains is model work and a hostile review of the phase as a whole. |
+| 6 — Tradecraft | **88%** | ◐ | ✅ | ◐ | ◐ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. **"The UI is complete" was wrong**: approvals have no analyst surface at all — the one `approvals` reference in `app.js` is a button that switches tab — so `runMerge()` cannot obtain the `approval_request_id` its own 409 demands, and under dual control Merge is unreachable from the browser. ACH stance and the dual-control policy toggle have no surface either. What remains is the assumptions register, those three surfaces, and a hostile review of the phase as a whole. |
 | 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
@@ -108,8 +148,11 @@ Unweighted mean across the ten phases. The +11 came from three things:
 Three things the number still hides:
 
 1. **UI is no longer the gap at all.** Every phase has a pane, the console
-   updates live, and there is a keyboard map. What is left on that axis is
-   metric-history charting.
+   updates live, and there is a keyboard map. ~~What is left on that axis is
+   metric-history charting.~~ **Metric-history charting landed 2026-08-10.**
+   What is left on that axis is Phase 6: approvals have no analyst surface
+   at all, which makes Merge unreachable from the browser whenever dual
+   control is on — see the corrected Phase 6 row.
 2. **Completion is not lawfulness.** A phase at 100% here may still be
    unlawful to operate. Phase 8 is now at 80% and **must not be switched
    on** until L1 is settled — see the register below. That is not a
@@ -144,7 +187,7 @@ caller scores 45% of a phase and delivers nothing.
 | **Case metadata, assignment and closure had no router.** A case could not be corrected, shared or closed from a browser. | 1 | ✅ **CLOSED 2026-07-30**, API **and UI** — Case… / Share… / Status… in the appbar. Lowering a case's classification is deliberately REFUSED — it declassifies everything protected only by the case label, in one statement, under a verb described as "edit metadata". It needs its own verb. |
 | **The sociogram could not show a 2,000-node case.** Hard-capped at 800 while the API served 5,000. | 2 | ✅ **CLOSED 2026-07-30.** Analyst-raisable 800 → 2000 → 5000 from inside the truncation notice. The warning stays at every ceiling. |
 | **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
-| **Metric history is API-only.** `app.js` still contains zero calls to `metrics/history`. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. | 3 | ⬜ **STILL OPEN.** |
+| **Metric history is API-only.** Phase 3's checklist calls a rising betweenness trend *"visible"*; it was visible to `curl`. **The route is `GET /analytics/history/{node_id}` (`routers/analytics.py`), NOT `metrics/history`** — this file said the latter until 2026-08-10, so anyone grepping the string it gave them concluded the endpoint had never been built. | 3 | ✅ **CLOSED 2026-08-10.** A Trend control per actor row, charting every completed run at the caller's visibility: canvas (the CSP leaves no inline style to place a point with), `aria-hidden`, with a table twin carrying every exact value so nothing exists only in pixels. The series is reversed before charting — the API orders newest-first and charting it as it arrives inverts every trend. **A known limit, disclosed in the pane rather than papered over:** `analytics_runs` writes no row when a metric is undefined for a node and `node_metric.value` is NOT NULL, so an undefined run is ABSENT from the series, not null — and absent cannot be told from "no run happened" at this endpoint. The line spans such a period, and the help text says a long straight segment is not evidence that nothing changed. (An earlier draft of this row claimed the path *breaks* across those runs. It does not and cannot; the break is a guard against an unrenderable value. Corrected before the claim shipped.) Approximate runs are marked in both views; the preset is printed per POINT, since weights are not comparable across parameters. **Verified in the browser 2026-08-10** — the chart rises left-to-right for a rising series (pixel-sampled: left y=70, right y=9), confirming the reversal. |
 | **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
 
 ### The 2026-08-07 error-handling audit
@@ -177,7 +220,15 @@ confirmed to fail against the commit before it:
 
 | | Where | What |
 |---|---|---|
-| MEDIUM | various | A four-eyes request that reached nobody returns 201; three notification writes have no `try` at all; one transient failure hides the ingest quarantine for the session; a failed deception load leaves the previous case's rows on screen. |
+| MEDIUM | `approvals.py`, `break_glass.py` | A four-eyes request that reached nobody returns 201 — `notify_events.approval_requested` counts reach and returns it, and the caller throws the count away; `ApprovalOut` has no field for it and approvals have no UI, so the 201 is the only signal that exists. And exactly three notification writes have no `try`: `approvals.request`, `approvals.decide` and `break_glass._alert`, each on an autocommit connection AFTER the primary write has committed, so a notify failure turns a completed action into a 500 the router reports as failure. (`merges.py`'s two are inside a transaction on purpose and are correct as they stand.) |
+
+**Closed 2026-08-10** — the two client-side members of that group, each
+with a regression test confirmed to fail against the commit before it:
+
+| | Where | What | |
+|---|---|---|---|
+| MEDIUM | `app.js` | The ingest quarantine latched off **for the session** on any error, not the `ingest.manage` 403 it was written for. A network drop (`ApiError` status 0), a 502, a 503 or a 429 all hid the section until reload with no message at all — a transport failure reported as a permission fact, and reported by making the evidence disappear. It now latches on 403 alone, and a failed read says the queue is *not known to be empty*, because "Nothing unattached" is a claim about the data. | ✅ |
+| MEDIUM | `app.js` | All three deception panes reported the error into the counts span and returned before the render, so the list kept the PREVIOUS case's rows — case A's defanged attacker URLs, BEC subject lines and spoofed caller IDs under case B's header and TLP chip. The 403 is the likely path there, not the rare one: all three endpoints gate on `evidence.read`. | ✅ |
 
 `EvidenceStorage.delete()` exists but **has never been exercised against a
 live COMPLIANCE lock** — the expected outcome is a refusal recorded as
@@ -238,6 +289,20 @@ migration must be reversible", CI proves that only for the empty case, and
 the difference is exactly the kind of thing somebody discovers during an
 incident. Recorded rather than left to be rediscovered.
 
+> **CLOSED AS DELIBERATE, 2026-08-10 — the document was wrong, not the
+> migration.** Two corrections to the paragraph above. First, it is not one
+> foreign key: there are **five** into the seeded rows
+> (`iam.case_assignment.role_key` and `iam.user_role.role_key` among them),
+> with a second instance of the same shape in `0031`. Fixing "the" FK would
+> have moved the failure one constraint to the right and looked like
+> progress. Second, the refusal is the DESIGNED behaviour — adding
+> `ON DELETE CASCADE` to make the downgrade pass would silently delete
+> graph and authorization data to make a rollback succeed, straight through
+> the soft-delete-only invariant. **`CONVENTIONS.md` has been corrected**
+> to say reversible-on-an-empty-database, which is what CI proves and what
+> the migrations actually promise. If you need to go back past 0017 on a
+> live database, restore a backup.
+
 ### Found while closing them
 
 - **Notifications were queued on the wrong clock.** `deliver_after` came
@@ -262,6 +327,25 @@ incident. Recorded rather than left to be rediscovered.
   and reported 68 breaks on honest history — the exact failure a
   tamper-evidence tool must never have.
 
+> **These two are ONE defect, diagnosed 2026-08-10.** The advisory lock is
+> correct and is not the problem. The tail selector under it is:
+> `SELECT row_hash INTO prev FROM audit.event ORDER BY seq DESC LIMIT 1`
+> takes the highest `seq`, and `seq` is a sequence — allocated at INSERT,
+> out of order under concurrency, and never rolled back. So the writer
+> picks a predecessor by an ordering that is not the chain's, two
+> transactions choose the same one, and the fork the lock exists to
+> prevent is manufactured by the lock's own critical section. That is also
+> exactly why `seq` order is not chain order: the same wrong ordering,
+> observed from the reading end. Reproducible with two uvicorn workers, so
+> it is not an artefact of concurrent test runs.
+>
+> This matters more than its severity suggests: FORK is the only detector
+> for a fabricated audit row, and it is currently switched off in the
+> verifier's `intact` verdict *because the writer produces forks*. Fixing
+> the writer is the precondition for re-arming the detector. **The same
+> defect is unfixed in `core.custody_chain_hash()`, which has no verifier
+> of any kind** and whose docstring invokes FRE 902(13)–(14).
+
 **None of this is a regression.** It is the same lesson this file already
 records twice: a green suite either side of a contract that neither side
 asserts. The measure got honest once when UI was added to the weighting;
@@ -275,6 +359,81 @@ co-participation renderer, and detail in Phases 5/6/9. The adversarial
 stage that would have refuted or confirmed those did not complete. They
 are **unverified leads, not findings**, and are recorded here as such
 rather than being either dropped or dressed up.
+
+> **RESOLVED 2026-08-10. Both leads were CONFIRMED, and one was worse than
+> the lead said.**
+>
+> - **The co-participation renderer.** Not "renders nothing": it rendered
+>   the literal string `undefined — undefined` on every row, with a
+>   correct weight and a correct *inferred* chip beside it, so the pane
+>   looked populated and was unreadable. It read `t.source`/`t.a` and the
+>   service emits `src`/`dst`; it read `t.rooms` and the service emits
+>   `shared_conversations`; it read `body.warnings`, which the service has
+>   never emitted, so the whole `coverage` block was dropped — and that
+>   block is where the oversized-room exclusions are reported. The module
+>   says "a cap that silently drops data is worse than no cap, because the
+>   output looks complete"; in the browser the cap was silent. **FIXED
+>   2026-08-10** with four contract tests, one of which asserts the JSON
+>   keys across the two files — the check whose absence let it ship, since
+>   both sides were individually tested and internally consistent.
+> - **The Phase 4 collection read path.** Confirmed and larger than
+>   described: no endpoint, no UI, no search reach. `SearchService` covers
+>   `core.node` and `core.evidence` only, and `collect.document`'s GIN
+>   index is used by no query in the tree. The lifecycle columns prove the
+>   intent was never finished — `notified_at`, `suppressed`,
+>   `acknowledged_by`, `acknowledged_at` and a partial index for the
+>   unnotified set, none of them written or read by anything, and a
+>   `triage_state` column with a supporting index and zero references in
+>   `apps/api/src`. An analyst sees the integer `watch_hits` on a run card
+>   and cannot open one of them. **STILL OPEN** — it needs a service read
+>   method, two routers, a subtab and a renderer, and no migration.
+>   Related: `CollectionService.run_once` never calls `ProposalStore`, so
+>   `collection.py`'s own docstring claim that everything an adapter
+>   produces "reaches the graph only through the proposal queue a human
+>   works" is false for the collector.
+
+### Found off-roadmap, 2026-08-10
+
+A ten-agent read-only sweep over the items above turned up things that
+were on no list. The first is the most serious finding currently open.
+
+**🔴 Break-glass does not raise anything, and its review control counts
+nothing.** Verified directly, not inherited from the sweep:
+
+- `break_glass.py` states the guarantee — *"It raises a user's effective
+  clearance for one case, for a few hours, with everything above
+  recorded."* Nothing implements it. `stores.py` resolves clearance with
+  `SELECT tlp_clearance, compartments FROM iam.app_user`, and outside
+  `break_glass.py` itself the only mention of the table anywhere in
+  `apps/api/src` is a comment in `deps.py` about step-up. So the grant row
+  is written, audited and reviewable, and the analyst's effective
+  clearance is exactly what it was before they invoked it.
+- `record_use()` is defined at `break_glass.py:261` and its only callers
+  in the tree are two lines of `test_governance_pg.py`. `action_count` is
+  published to the security officer's review queue
+  (`routers/governance.py:489`) and is therefore **structurally always
+  zero** — the officer reviews "what was done under this grant" against a
+  number that cannot be anything else.
+
+Either wire it or withdraw the claim; the middle position is the one that
+misleads. Withdrawing is about an hour's work — strike the elevation
+sentence, drop `action_count` from the response — and wiring it touches
+the single `AccessContext` construction site. **It is not a defect that a
+green suite could have caught: the service does what its tests say, and
+the tests never asserted that anything reads the grant.**
+
+**Reported by the sweep and NOT individually re-verified** — recorded as
+leads in the same spirit as the section above, so they are neither
+dropped nor dressed up as findings:
+
+| Where | Lead |
+|---|---|
+| `merges.py` | A merge that collides with `edge_uniq_active` is said to return 500 rather than 409 — and the commonest real merge, two records sharing a tie to a third party, is exactly the collision case. |
+| `retention.py` | `storage_locked` is said to report the batch size rather than the refusal count, on an irreversible destruction record. |
+| `merges.py` | `edges_repointed` is said to count merge-deletions as moves. |
+| `routers/cases.py` | No transfer-ownership endpoint exists, while the refusal text for lowering a classification tells the operator to use one. |
+| `routers/collection.py` | The collection endpoints are said to do no clearance or compartment filtering at all — which any new documents endpoint must not copy, since `collect.document.classification` defaults to AMBER. |
+| `notify_events.py` | Three registered notification kinds (`PROPOSAL_QUEUED`, `EVIDENCE_INTEGRITY_ALARM`, `CASE_REVIEW_DUE`) are said to have no producer. |
 
 ---
 
