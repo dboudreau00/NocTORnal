@@ -97,7 +97,21 @@ See `docs/02-architecture.md` for the reasoning. Summary:
 
 ## Conventions
 
-- Migrations: Alembic, one concern per migration, always reversible.
+- Migrations: Alembic, one concern per migration, reversible on an EMPTY
+  database — which is the contract CI proves, by round-tripping
+  `head → base → head` before the suite runs.
+  **Reversible does not mean reversible on a database with data in it, and
+  it is not meant to.** Downgrading past `0017` unwinds the ontology and
+  role seed, and five foreign keys into those seeded rows have no
+  `ON DELETE CASCADE` — `iam.case_assignment.role_key` and
+  `iam.user_role.role_key` among them, with a second instance in `0031`.
+  So the downgrade stops with a foreign-key violation on any deployment
+  that has ever assigned a case or a role. That refusal is the DESIGNED
+  behaviour: cascading it would silently delete graph and authorization
+  data to make a rollback succeed, which is data destruction wearing a
+  rollback's name, and it would drive straight through the soft-delete-only
+  invariant. If you need to go back past 0017 on a live database, restore a
+  backup — do not make the downgrade "work".
 - IDs: UUIDv7 generated app-side so they sort by creation time.
 - Times: `timestamptz`, UTC in the database, rendered in the user's zone.
 - Money and weights: `numeric`, never float.
