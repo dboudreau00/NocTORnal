@@ -77,16 +77,20 @@ installers for Windows and Linux/macOS. `scripts/package_release.ps1`
 exports the WHOLE tree to a standalone folder via `git archive`;
 `release/` is the source of truth and the copy is disposable.
 
-> **EVERY PHASE HAS NOW HAD AN ADVERSARIAL PASS.** Phases 5 and 8 were the
-> last two, reviewed 2026-07-26: **27 findings survived refutation, nine
-> CRITICAL, all now fixed with regressions** (docs/17 F19). Phase 8 had
-> 673 green tests and shipped a security control that did not exist — its
-> "encrypted archive" was a plain ZIP — and its download endpoint applied
-> no label check of any kind.
+> **EVERY PHASE HAS NOW HAD AN ADVERSARIAL PASS — Phase 6 was the last,
+> reviewed 2026-08-10.** Phases 5 and 8 were reviewed 2026-07-26: 27
+> findings survived refutation, nine CRITICAL, all fixed with regressions
+> (docs/17 F19). Phase 8 had 673 green tests and shipped a security
+> control that did not exist — its "encrypted archive" was a plain ZIP —
+> and its download endpoint applied no label check of any kind.
 >
-> Six passes, six times a real defect, four times a critical one, every
-> time under a fully green suite. Treat an unreviewed change as unknown
-> rather than fine.
+> **Seven passes, seven times a real defect, every time under a fully
+> green suite.** Phase 6's produced nine, one of them in a pane written
+> an hour earlier by the same session, in the exact defect class that
+> pane existed to fix. Treat an unreviewed change as unknown rather than
+> fine — and treat a JUST-reviewed one the same way, because the
+> 2026-07-25 pass found that most of its findings were in the previous
+> pass's fixes, and this one found a defect in its own session's work.
 
 > **The most important files in the repo are
 > [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) and
@@ -130,7 +134,7 @@ regressed — the measure got honest.**
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | **85%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **The READ PATH landed 2026-08-10** and was the largest gap in this phase: `collect.document` and `collect.watch_hit` were written by the collector from the day the phase shipped and read by NOTHING — no endpoint, no UI, no search reach — so a watch could fire 400 times and an analyst saw the integer 400 with nothing to open. Three routes (documents, watch-hits, acknowledge), a Feeds → **Collected** subtab, and no migration: every column already existed, including the `notified_at`/`suppressed`/`acknowledged_by`/`acknowledged_at` lifecycle set that nothing had ever written or read. Still open at the service: `run_once` never raises proposals, so `collection.py`'s claim that collected material "reaches the graph only through the proposal queue a human works" remains false for the collector. |
 | 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
-| 6 — Tradecraft | **88%** | ◐ | ✅ | ◐ | ◐ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. What remains is the assumptions register, the ACH-stance and dual-control-policy surfaces, and the hostile review of the phase as a whole. |
+| 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ✅ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. What remains is the assumptions register, the ACH-stance and dual-control-policy surfaces, and the hostile review of the phase as a whole. |
 | 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
@@ -412,6 +416,42 @@ rather than being either dropped or dressed up.
 >   `collection.py`'s own docstring claim that everything an adapter
 >   produces "reaches the graph only through the proposal queue a human
 >   works" is false for the collector.
+
+### The Phase 6 hostile pass, 2026-08-10 — every phase has now had one
+
+Five reviewers with distinct lenses over `merges.py`, `retention.py`,
+`approvals.py`, `break_glass.py` and the cross-layer key contracts, each
+finding then put through an independent refutation round. **25 candidates,
+9 confirmed, 3 refuted** (the rest folded into duplicates). The pattern
+held for the seventh time: a real defect, under a fully green suite.
+
+**The one that was mine.** The dual-control pane committed an hour earlier
+sent `operation: 'MERGE'`; the server's catalogue key is `node.merge`. The
+raise 400s, and the Execute-merge button — comparing against the *same*
+wrong string — could never appear. Both halves internally consistent and
+wrong together: **the exact defect the co-participation pane shipped,
+reappearing in the pane written after it.** Fixed the same day, the key is
+now a named constant, and `test_ui_invariants.py` asserts it against
+`approvals.py`'s catalogue. That is the third time this codebase has
+proved its own lesson — *a green suite either side of a contract that
+neither side asserts.*
+
+**Still open, in severity order:**
+
+| | Where | What |
+|---|---|---|
+| HIGH | `merges.py` | **`unmerge` blind-writes recorded endpoints over an edge a LATER live merge now owns**, and reports success. 0055 stopped a reversal resurrecting edges an *analyst* retired afterwards; a later *merge* moving the same edge is the same class and is still overwritten. Reversal is LIFO-only and nothing enforces or hints at it — the panel lists every merge with an identical Reverse button. Verified live (rolled back): reverse-earlier-first leaves a tie asserting `B→C` when the evidence says `A→C`, with `edges_restored: 1` and the banner "Every tie is back at its original endpoints". |
+| HIGH | `retention.py` | **A dry-run purge returns all-zero counts.** It computes the sweep and returns before any counter is assigned, so the preview cannot distinguish "nothing is due" from "N exhibits are about to be destroyed" — on the one control whose entire purpose is to be read before an irreversible action. |
+| HIGH | `retention.py` | **`collect.document.retain_until` is never written by anything**, so the document retention sweep is structurally dead — and the purge `UPDATE` would abort on a NOT NULL column if it ever did fire. |
+| HIGH | `merges.py` | A merge colliding with `edge_uniq_active` returns **500 "Internal error", not 409** — and the commonest real merge, two records sharing a tie to a third party, is exactly the collision case. Reproduced live. |
+| HIGH | `approvals.py` | **A refused `consume` records nothing.** The `APPROVAL_CONSUME_REFUSED` audit row is INSERTed inside the transaction the `ApprovalError` then rolls back, on both production paths — so a replayed or expired approval leaves no trace of having been refused. |
+| MEDIUM | `retention.py` | `storage_locked` reports the **batch size**, not the refusal count, and a bare `except Exception` collapses every storage error to `LOCKED_UNTIL_RETENTION` while `STORAGE_FAILED` is dead code. Written into an append-only tombstone. |
+| MEDIUM | `merges.py` | `edges_repointed` **counts the tie the merge DELETED as a tie that moved** — in the API response, the audit detail, the case-owner notification ("re-pointed N relationships") and the UI. |
+| LOW | `governance.py` | `purge_out_of_schedule` counts **duplicated exhibit ids as separate destructions** in the tombstone: the membership check de-duplicates, the service is handed the raw list. |
+
+Refuted, and recorded so nobody re-reports them: the `purge_due` 500-object
+truncation, dead letters being unreachable by HTTP purge, and evidence
+objects being deleted inside a transaction that can roll back.
 
 ### Found off-roadmap, 2026-08-10
 

@@ -4935,7 +4935,10 @@ async function runMerge() {
         await api(cpath('/approvals'), {
           method: 'POST',
           json: {
-            operation: 'MERGE',
+            /* The server's catalogue key, NOT a display name. `approvals.py`
+               keys OPERATIONS by 'node.merge'; sending 'MERGE' 400s with
+               "unknown operation". */
+            operation: MERGE_OPERATION,
             payload: { source_node_id: sel.id, target_node_id: targetId,
                        reason: reason.trim(), basis_selector_id: null },
             justification: reason.trim(),
@@ -4958,6 +4961,19 @@ async function runMerge() {
     else fail(err);
   }
 }
+
+/** The server's catalogue key for a merge approval.
+ *
+ *  Named once because it is a CONTRACT, not a label. The first version of
+ *  this pane sent the string 'MERGE', which `approvals.py` rejects with
+ *  "unknown operation" -- so raising a request 400'd and the Execute-merge
+ *  button, which compared against the same wrong string, could never
+ *  appear. Both halves were internally consistent and wrong together:
+ *  exactly the defect the co-participation pane shipped, in the pane
+ *  written after it. Asserted against `approvals.py` in
+ *  `test_ui_invariants.py`.
+ */
+const MERGE_OPERATION = 'node.merge';
 
 /* --- Dual control ------------------------------------------------------
  *
@@ -5088,7 +5104,7 @@ function approvalRow(a) {
      is the whole point of the surface. Without it the analyst holds a
      signature and still has no way to spend it. */
   if (a.state === 'APPROVED' && !a.consumed_at && !a.is_expired
-      && a.operation === 'MERGE') {
+      && a.operation === MERGE_OPERATION) {
     const run = el('button', 'btn small', 'Execute merge');
     run.type = 'button';
     run.addEventListener('click', async () => {
