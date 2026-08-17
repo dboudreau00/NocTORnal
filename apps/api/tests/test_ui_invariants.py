@@ -738,3 +738,31 @@ def test_the_trend_canvas_has_an_accessible_twin():
     assert 'id="an-hist-body"' in html, "no table twin for the chart"
     js = _js()
     assert "function histRow(" in js, "the table twin has no row renderer"
+
+
+def test_the_approvals_pane_uses_the_servers_operation_key():
+    """The first version of the dual-control pane sent the operation as
+    `'MERGE'`. `approvals.py` keys its catalogue by `'node.merge'` and
+    answers anything else with "unknown operation", so raising a request
+    400'd -- and the Execute-merge button, which compared `a.operation`
+    against the SAME wrong string, could never appear.
+
+    Both halves of the pane were internally consistent and wrong
+    together. That is precisely the defect the co-participation pane
+    shipped, reappearing in the pane written after it, which is why the
+    key is now a named constant with this test behind it.
+    """
+    js = _js()
+    service = (SRC / "approvals.py").read_text(encoding="utf-8")
+
+    match = re.search(r"const MERGE_OPERATION = '([^']+)'", js)
+    assert match, "the merge operation key is inlined again rather than named"
+    key = match.group(1)
+    assert f'"{key}": Operation(' in service, (
+        f"app.js raises approvals for operation {key!r} and approvals.py's "
+        f"OPERATIONS catalogue has no such key -- the request 400s")
+
+    start = js.index("async function loadApprovals(")
+    pane = js[start:js.index("\nasync function reverseMerge(", start)]
+    assert "'MERGE'" not in pane, (
+        "a display-style operation string is back in the approvals pane")
