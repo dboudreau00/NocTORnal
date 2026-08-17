@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -47,6 +48,8 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api import notify_events
+
+log = logging.getLogger(__name__)
 
 PENDING = "PENDING"
 APPROVED = "APPROVED"
@@ -372,6 +375,33 @@ class ApprovalService:
         audit row says which condition failed, because that is the
         difference between "somebody tried to replay an approval" and
         "somebody's approval timed out".
+
+        ## The row is written on its OWN connection, and has to be
+
+        Both production callers invoke `consume()` inside
+        `with conn.transaction():` and catch `ApprovalError` OUTSIDE that
+        block -- the dual-control merge endpoint and the out-of-schedule
+        evidence purge, and both are structured that way deliberately, so
+        a refused consume destroys nothing.
+
+        The consequence was that this INSERT went in on the same
+        connection and was rolled back by the very exception it was
+        written to explain. `audit.event` contained ZERO
+        APPROVAL_CONSUME_REFUSED rows in production no matter how many
+        replay or payload-substitution attempts occurred: the single
+        detection signal for the attack this module exists to stop --
+        get a signature for merging two obvious spam bots, then execute
+        the two nodes the case turns on -- was generated and immediately
+        destroyed.
+
+        The suite could not see it. `test_approvals_pg.py` calls
+        `consume()` directly on the autocommit fixture connection with no
+        enclosing transaction, so the row survives there and only there.
+
+        A second connection is the same technique `collection.py` uses to
+        keep a RUNNING row alive across an unwind. If it cannot be opened,
+        the refusal still stands: failing to record an attempt must never
+        become a way to make the attempt succeed.
         """
         row = self._c.execute(
             """SELECT state, requested_by, operation, case_id, payload_hash,
@@ -394,18 +424,40 @@ class ApprovalService:
             reason = "payload_mismatch"
         else:
             reason = "unknown"
-        self._c.execute(
-            """INSERT INTO audit.event
-                   (actor_id, actor_kind, action, object_type, object_id,
-                    case_id, outcome, detail)
-               VALUES (%s, 'USER', 'APPROVAL_CONSUME_REFUSED', 'approval_request',
-                       %s, %s, 'DENIED', %s)""",
-            (actor_id, request_id, case_id,
-             Json({"reason": reason, "operation": operation})))
+        self._audit_refusal_out_of_band(request_id, actor_id, operation,
+                                        case_id, reason)
         return ApprovalError(
             "this approval cannot be used for this operation: it may have "
             "expired, already been used, belong to someone else, or have "
             "been granted for different parameters")
+
+    def _audit_refusal_out_of_band(self, request_id, actor_id, operation,
+                                   case_id, reason: str) -> None:
+        """Record the refusal on a connection the caller cannot roll back.
+
+        See `_explain_consume_failure` for why. The chaining trigger owns
+        `prev_hash`/`row_hash`, so a row written here links into the same
+        chain as every other event -- there is no second ledger.
+        """
+        from noctornal_api.db import connect
+
+        try:
+            with connect() as side:
+                side.execute(
+                    """INSERT INTO audit.event
+                           (actor_id, actor_kind, action, object_type,
+                            object_id, case_id, outcome, detail)
+                       VALUES (%s, 'USER', 'APPROVAL_CONSUME_REFUSED',
+                               'approval_request', %s, %s, 'DENIED', %s)""",
+                    (actor_id, request_id, case_id,
+                     Json({"reason": reason, "operation": operation})))
+        except Exception:  # noqa: BLE001
+            # The refusal stands regardless. Losing the record of an
+            # attempt must never become a way to make the attempt succeed,
+            # and raising here would convert a denied consume into a 500
+            # that reads as a server fault rather than as a refusal.
+            log.exception(
+                "could not record APPROVAL_CONSUME_REFUSED for %s", request_id)
 
     def _audit(self, record: ApprovalRequest, action: str, actor_id: UUID,
                detail: dict) -> None:

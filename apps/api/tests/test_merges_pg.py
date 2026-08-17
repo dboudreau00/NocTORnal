@@ -105,7 +105,16 @@ def test_a_merge_repoints_edges_and_hides_the_losing_node(conn, world):
     rec = _svc(conn).merge(case_id=case_id, source_node_id=ids["alpha_alt"],
                            target_node_id=ids["alpha"], merged_by=uid,
                            reason="same PGP fingerprint on both handles")
-    assert rec.is_live and rec.edges_repointed == 2
+    # ONE tie moved (alpha_alt -> witness). The tie BETWEEN the two was
+    # destroyed, not moved: it would have become a self-loop.
+    #
+    # This assertion said `edges_repointed == 2` until 2026-08-10, which
+    # was asserting the defect -- the record, the audit row, the case
+    # owner's notification ("re-pointed 2 relationships") and the UI all
+    # described a destruction as a move.
+    assert rec.is_live
+    assert rec.edges_repointed == 1
+    assert rec.edges_self_loop_deleted == 1
     # The tie alpha_alt -> witness now runs from alpha.
     src, dst, deleted = _edge(conn, edges["alt_w"])
     assert src == ids["alpha"] and dst == ids["witness"] and deleted is None
@@ -390,3 +399,104 @@ def test_both_the_merge_and_its_reversal_are_audited(conn, world):
             WHERE case_id = %s AND object_type = 'node_merge'
             ORDER BY seq""", (case_id,)).fetchall()]
     assert actions == ["NODE_MERGED", "NODE_UNMERGED"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 hostile pass, 2026-08-10
+# ---------------------------------------------------------------------------
+
+def test_reversing_out_of_order_is_refused_rather_than_corrupting(conn, world):
+    """`unmerge` writes an edge's RECORDED originals over wherever that
+    edge is now. If a later merge has since moved the same edge, those
+    originals are stale, and writing them yanks the tie out from under a
+    merge that is still live.
+
+    Before this refusal, reversing the earlier merge first left the graph
+    asserting a relationship that never existed -- while the response said
+    `edges_restored: 1` and the UI banner said "Every tie is back at its
+    original endpoints and the entity has returned to the graph."
+
+    0055 closed the `deleted_at` half of exactly this (a reversal
+    resurrecting edges an ANALYST retired in between). A later MERGE
+    moving the edge is the same class and was still overwritten.
+    """
+    from noctornal_api.merges import MergeError
+
+    case_id, uid, ids, edges = world
+    svc = _svc(conn)
+    m1 = svc.merge(case_id=case_id, source_node_id=ids["alpha_alt"],
+                   target_node_id=ids["alpha"], merged_by=uid,
+                   reason="same PGP fingerprint on both handles")
+    # A second merge that moves the SAME edge (alpha -> witness).
+    m2 = svc.merge(case_id=case_id, source_node_id=ids["alpha"],
+                   target_node_id=ids["witness"], merged_by=uid,
+                   reason="and both are the witness account")
+
+    with pytest.raises(MergeError) as exc:
+        svc.unmerge(m1.id, reversed_by=uid, reason="the first call was wrong")
+    assert str(m2.id) in str(exc.value), "the blocking merge is not named"
+    assert "Reverse the later merge first" in str(exc.value)
+
+    # LIFO order is allowed and restores exactly.
+    svc.unmerge(m2.id, reversed_by=uid, reason="undo the second")
+    svc.unmerge(m1.id, reversed_by=uid, reason="then the first")
+    src, dst, deleted = _edge(conn, edges["alt_w"])
+    assert (src, dst, deleted) == (ids["alpha_alt"], ids["witness"], None)
+
+
+def test_two_unrelated_merges_do_not_constrain_each_others_order(conn, world):
+    """The refusal is scoped to merges that share an EDGE, not to merges in
+    general. Blocking every earlier merge would make the panel's Reverse
+    buttons lie in the opposite direction."""
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+
+    case_id, uid, ids, edges = world
+    g = GraphWriteService(conn)
+    a = AssertionInput(basis="DIRECT_OBSERVATION", created_by=uid)
+    lone = {k: g.create_node(case_id=case_id, node_type="IDENTITY", label=k,
+                             created_by=uid, assertion=a)
+            for k in ("delta", "delta_alt")}
+    svc = _svc(conn)
+    m1 = svc.merge(case_id=case_id, source_node_id=ids["alpha_alt"],
+                   target_node_id=ids["alpha"], merged_by=uid,
+                   reason="same PGP fingerprint on both handles")
+    svc.merge(case_id=case_id, source_node_id=lone["delta_alt"],
+              target_node_id=lone["delta"], merged_by=uid,
+              reason="unrelated pair, shares no edge with the first merge")
+    # No shared edge, so the earlier merge is still reversible.
+    assert svc.unmerge(m1.id, reversed_by=uid,
+                       reason="allowed").reversed_at is not None
+
+
+def test_a_colliding_merge_is_a_conflict_not_an_internal_error(conn, world):
+    """`edge_uniq_active` refuses when both entities already hold a live tie
+    of the same type, same `valid_from`, to the same third party -- which is
+    the topology that most often PROVES two personas are one actor, so it is
+    the commonest real merge rather than an edge case.
+
+    The bare UPDATE let the UniqueViolation reach the catch-all handler, so
+    the flagship operation of the product failed as "Internal error:
+    unexpected failure (ref ...)" -- unactionable, and indexed as a bug in
+    the product rather than as a decision for the analyst.
+
+    The suite could not catch it: the fixture gives the two personas
+    DIFFERENT edge types, so they cannot collide.
+    """
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    from noctornal_api.merges import MergeError
+
+    case_id, uid, ids, edges = world
+    g = GraphWriteService(conn)
+    a = AssertionInput(basis="DIRECT_OBSERVATION", created_by=uid)
+    # Give alpha_alt the SAME edge type to the same third party as alpha.
+    g.create_edge(case_id=case_id, edge_type="VOUCHED_FOR",
+                  src_node_id=ids["alpha_alt"], dst_node_id=ids["witness"],
+                  created_by=uid, assertion=a)
+
+    with pytest.raises(MergeError) as exc:
+        _svc(conn).merge(case_id=case_id, source_node_id=ids["alpha_alt"],
+                         target_node_id=ids["alpha"], merged_by=uid,
+                         reason="same operator behind both handles")
+    msg = str(exc.value)
+    assert "VOUCHED_FOR" in msg, "the message does not name the colliding tie"
+    assert "Retire one" in msg, "the message gives the analyst nothing to do"

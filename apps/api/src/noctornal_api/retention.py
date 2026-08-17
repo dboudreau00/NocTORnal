@@ -63,6 +63,39 @@ STORAGE_LOCKED = "LOCKED_UNTIL_RETENTION"
 STORAGE_FAILED = "FAILED"
 STORAGE_NA = "NOT_APPLICABLE"
 
+#: What an object store says when a retention lock refuses a delete. The S3
+#: vendors do not agree on the code, so the match is deliberately loose --
+#: but it is a match rather than a catch-all, because
+#: LOCKED_UNTIL_RETENTION is a specific claim ("the object is under a
+#: retention lock") and a connection reset is not that claim.
+_RETENTION_REFUSAL_CODES = frozenset({
+    "AccessDenied", "MethodNotAllowed", "InvalidRequest",
+    "RetentionPeriodNotMet", "ObjectLockConfigurationNotFoundError",
+})
+
+
+def _is_retention_refusal(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    if code in _RETENTION_REFUSAL_CODES:
+        return True
+    # Some clients carry the reason only in the message.
+    text = str(exc).lower()
+    return "retention" in text or "object lock" in text or "worm" in text
+
+
+@dataclass(frozen=True)
+class _StorageOutcome:
+    """Per-object counts, not one verdict for a batch.
+
+    `outcome` keeps the single string the tombstone column takes, and the
+    counts are what the caller reports -- so a partial refusal stops being
+    indistinguishable from a total one.
+    """
+    outcome: str
+    deleted: int = 0
+    locked: int = 0
+    failed: int = 0
+
 
 class RetentionError(Exception):
     pass
@@ -112,7 +145,16 @@ class PurgeResult:
     records_purged: int = 0
     dead_letters_purged: int = 0
     held_back: int = 0
+    #: Objects the store REFUSED because of a retention lock. This is the
+    #: refusal count; it used to be the batch size, so one refusal in a
+    #: hundred and a hundred refusals wrote the same number into an
+    #: append-only tombstone.
     storage_locked: int = 0
+    #: Objects that failed to delete for a reason that is NOT a retention
+    #: lock. Previously collapsed into `storage_locked` by a bare
+    #: `except Exception`, which turned "the store did not answer" into the
+    #: specific and defensible claim "the object is under a lock".
+    storage_failed: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -211,19 +253,27 @@ class RetentionService:
                 held=bool(row[3] or row[5]),
                 hold_reason=row[4] or ("case-level legal hold" if row[5] else None)))
 
-        documents = self._c.execute(
-            """SELECT d.id, d.retain_until, d.legal_hold, d.category
-                 FROM collect.document d
-                WHERE d.purged_at IS NULL AND d.retain_until IS NOT NULL
-                  AND d.retain_until <= %s
-                ORDER BY d.retain_until LIMIT %s""",
-            (now, limit)).fetchall()
-        for row in documents:
-            items.append(DueItem(
-                object_type="document", object_id=row[0], case_id=None,
-                deadline=row[1], rule=f"retention_rule[{row[3]}]",
-                held=bool(row[2]),
-                hold_reason="document-level legal hold" if row[2] else None))
+        # `collect.document` has NO case_id -- a document hangs off a source
+        # and is material in however many cases cite it. So a case-scoped
+        # sweep must not touch documents AT ALL: the query took no case
+        # filter, so `purge_due(case_id=X)` counted and would have destroyed
+        # deployment-wide documents and written the tombstone under case X.
+        # That is precisely the cross-case destruction the out-of-schedule
+        # router refuses by name, arriving through the scheduled path.
+        if case_id is None:
+            documents = self._c.execute(
+                """SELECT d.id, d.retain_until, d.legal_hold, d.category
+                     FROM collect.document d
+                    WHERE d.purged_at IS NULL AND d.retain_until IS NOT NULL
+                      AND d.retain_until <= %s
+                    ORDER BY d.retain_until LIMIT %s""",
+                (now, limit)).fetchall()
+            for row in documents:
+                items.append(DueItem(
+                    object_type="document", object_id=row[0], case_id=None,
+                    deadline=row[1], rule=f"retention_rule[{row[3]}]",
+                    held=bool(row[2]),
+                    hold_reason="document-level legal hold" if row[2] else None))
 
         # Ingest. docs/17 F17(a): `ingest.record.retain_until` has carried a
         # clock since migration 0033 and `ingest.dead_letter.retain_until`
@@ -301,12 +351,37 @@ class RetentionService:
                     f"shipped by migration 0032 ({rule.retain_days} days) and "
                     f"has never been confirmed by a human. See docs/16 D3.")
 
+        # THE DOCUMENT SWEEP IS STRUCTURALLY DEAD, and a purge that reports
+        # `documents_purged: 0` without saying so is reporting a gap in the
+        # wiring as a fact about the data.
+        #
+        # `due()` gates documents on `retain_until IS NOT NULL`, and nothing
+        # in this repository ever writes that column -- neither collector
+        # insert sets it, and `effective_deadline`, the function that would
+        # compute it, has no production caller. So every collected document
+        # is outside retention forever, regardless of its case's clock or
+        # any category rule.
+        #
+        # Deliberately NOT fixed by deriving a deadline here. That would arm
+        # a destruction path over every document already collected, all of
+        # them instantly past a retention they were never assigned, on the
+        # one code path whose mistakes are irreversible. Wiring
+        # `retain_until` at insert -- and deciding what clock a document
+        # inherits -- is a policy decision, not a follow-up commit.
+        unclocked = self._c.execute(
+            "SELECT count(*) FROM collect.document "
+            "WHERE purged_at IS NULL AND retain_until IS NULL").fetchone()[0]
+        if unclocked:
+            result.warnings.append(
+                f"{unclocked} collected document(s) have no retention clock "
+                f"set, so they are invisible to this sweep and can never "
+                f"expire. `documents_purged` below counts only documents "
+                f"that HAVE a clock -- it is not evidence that the collect "
+                f"layer is clean. Nothing writes `retain_until` today.")
+
         items = self.due(case_id=case_id, as_of=as_of)
         actionable = [i for i in items if not i.held]
         result.held_back = len(items) - len(actionable)
-
-        if dry_run or not actionable:
-            return result
 
         evidence_ids = [i.object_id for i in actionable
                         if i.object_type == "evidence"]
@@ -317,18 +392,56 @@ class RetentionService:
         dead_ids = [i.object_id for i in actionable
                     if i.object_type == "dead_letter"]
 
+        if dry_run:
+            # THE COUNTS ARE THE WHOLE POINT OF A DRY RUN. This used to
+            # return here with every counter still at zero, having done the
+            # full sweep and thrown the answer away -- so a preview of a
+            # case with twelve exhibits about to be destroyed was
+            # byte-identical to a preview of a case with nothing due, and
+            # the pane rendered both as "Nothing would be destroyed."
+            #
+            # `held_back` was the only non-zero number a dry run could
+            # produce, which made it worse than silent: the sole figure on
+            # screen counted the items being SPARED.
+            #
+            # This is the control whose entire purpose is to be read before
+            # an irreversible action, and `dry_run` defaults to TRUE
+            # precisely because the router treats destruction-by-default as
+            # the thing to design against.
+            result.evidence_purged = len(evidence_ids)
+            result.documents_purged = len(document_ids)
+            result.records_purged = len(record_ids)
+            result.dead_letters_purged = len(dead_ids)
+            return result
+        if not actionable:
+            return result
+
         with self._c.transaction():
             if evidence_ids:
-                outcome = self._purge_evidence(evidence_ids)
+                storage = self._purge_evidence(evidence_ids)
+                outcome = storage.outcome
                 result.evidence_purged = len(evidence_ids)
                 if outcome == STORAGE_LOCKED:
-                    result.storage_locked = len(evidence_ids)
+                    # The REFUSAL count, not the batch size.
+                    result.storage_locked = storage.locked
                     result.warnings.append(
-                        "evidence rows are marked purged but the objects are "
-                        "under COMPLIANCE-mode object lock and could not be "
-                        "deleted. The record says destroyed; the object store "
-                        "disagrees. See docs/16 C2 before telling anybody "
-                        "the bytes are gone.")
+                        f"{storage.locked} of {len(evidence_ids)} evidence "
+                        f"rows are marked purged but their objects are under "
+                        f"a retention lock and could not be deleted. The "
+                        f"record says destroyed; the object store disagrees. "
+                        f"See docs/16 C2 before telling anybody the bytes "
+                        f"are gone.")
+                if outcome == STORAGE_FAILED:
+                    # Distinct from LOCKED on purpose: a lock is a lawful
+                    # refusal that will expire, a failure is a store that
+                    # did not answer and may destroy the bytes on retry.
+                    result.storage_failed = storage.failed
+                    result.warnings.append(
+                        f"{storage.failed} of {len(evidence_ids)} evidence "
+                        f"objects could not be deleted, and NOT because of a "
+                        f"retention lock. The rows are marked purged. The "
+                        f"bytes may still be there; do not report this as a "
+                        f"completed destruction.")
                 if outcome == STORAGE_NA:
                     # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
                     # has to be told. `RetentionService(conn)` takes
@@ -361,9 +474,23 @@ class RetentionService:
                 # is what lets a later question about coverage be answered
                 # ("we held 40 documents from that source and destroyed
                 # them on this date") without holding the documents.
+                # `body_text` is NOT NULL (0011), so `SET body_text = NULL`
+                # aborts the whole purge transaction with a constraint
+                # violation. It never fired: nothing writes
+                # `collect.document.retain_until`, so no document has ever
+                # been due, so this statement had never once run against a
+                # row. The document sweep was dead in two independent ways
+                # and the second was hidden behind the first.
+                #
+                # Emptied rather than nulled. The ROW survives on purpose --
+                # it is what lets "we held 40 documents from that source and
+                # destroyed them on this date" be answered without holding
+                # them -- and `purged_at` is what marks it destroyed, so the
+                # empty string is not standing in for "no content", it is
+                # the content being gone.
                 self._c.execute(
                     """UPDATE collect.document
-                          SET purged_at = now(), body_text = NULL,
+                          SET purged_at = now(), body_text = '',
                               body_html_key = NULL, search_tsv = NULL,
                               embedding = NULL
                         WHERE id = ANY(%s)""",
@@ -456,23 +583,26 @@ class RetentionService:
                     approval_request_id, actor_id=actor_id,
                     operation="evidence.purge", case_id=case_id,
                     payload=payload)
-                outcome = self._purge_evidence(evidence_ids)
+                storage = self._purge_evidence(evidence_ids)
                 result.evidence_purged = len(evidence_ids)
-                if outcome == STORAGE_LOCKED:
-                    result.storage_locked = len(evidence_ids)
+                # Refusal counts, not the batch size -- and on the one path
+                # that writes an out-of-schedule tombstone, which is the
+                # most consequential record this module produces.
+                result.storage_locked = storage.locked
+                result.storage_failed = storage.failed
                 result.tombstones.append(self._tombstone(
                     case_id=case_id, object_type="evidence",
                     ids=evidence_ids, authority=authority, actor_id=actor_id,
                     rule="out-of-schedule",
                     approval_request_id=approval_request_id,
-                    storage_outcome=outcome))
+                    storage_outcome=storage.outcome))
         except ApprovalError as exc:
             raise RetentionError(str(exc)) from exc
         return result
 
     # -- internals ---------------------------------------------------------
 
-    def _purge_evidence(self, ids: list[UUID]) -> str:
+    def _purge_evidence(self, ids: list[UUID]) -> "_StorageOutcome":
         """Mark the rows and try the object store.
 
         The row is marked either way. If the object cannot go, that is the
@@ -520,13 +650,36 @@ class RetentionService:
                 "bytes cannot be destroyed. Refusing rather than marking "
                 "the rows purged and writing a tombstone that says the "
                 "material is gone while it is still in the bucket.")
-        outcome = STORAGE_DELETED
+        # COUNTED, not collapsed. This loop used to set a single verdict for
+        # the whole batch and the caller then recorded
+        # `storage_locked = len(evidence_ids)` -- the BATCH SIZE. One refusal
+        # in a hundred wrote "100 objects locked" into an append-only
+        # tombstone, and a hundred refusals wrote the same number, so the
+        # figure could not distinguish them and could not be corrected
+        # afterwards.
+        #
+        # The bare `except Exception` also mapped every failure class to
+        # LOCKED_UNTIL_RETENTION, which is a specific and defensible claim
+        # about a retention lock. A connection reset is not that claim, and
+        # STORAGE_FAILED existed for it and was dead code.
+        deleted = locked = failed = 0
         for (key,) in rows:
             try:
                 self._storage.delete(key)
-            except Exception:  # noqa: BLE001 - the store's refusal IS the answer
-                outcome = STORAGE_LOCKED
-        return outcome
+                deleted += 1
+            except Exception as exc:  # noqa: BLE001 - a refusal IS the answer
+                if _is_retention_refusal(exc):
+                    locked += 1
+                else:
+                    failed += 1
+        if locked:
+            outcome = STORAGE_LOCKED
+        elif failed:
+            outcome = STORAGE_FAILED
+        else:
+            outcome = STORAGE_DELETED
+        return _StorageOutcome(outcome=outcome, deleted=deleted,
+                               locked=locked, failed=failed)
 
     def _tombstone(self, *, case_id: UUID | None, object_type: str,
                    ids: list[UUID], authority: str, actor_id: UUID,
