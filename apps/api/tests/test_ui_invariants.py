@@ -357,6 +357,12 @@ def test_every_pane_is_reachable_from_the_rail():
 #: somebody remembered to check is not a check.
 _ADDRESSED = re.compile(r"\$\('([A-Za-z][\w-]*)'\)")
 
+#: `renderList(listId, emptyId, ...)` resolves both of its first two
+#: arguments with `$()` INSIDE the helper, so a typo in either is invisible
+#: to the scan above while failing in exactly the same way.
+_RENDER_LIST = re.compile(
+    r"renderList\(\s*'([A-Za-z][\w-]*)'\s*,\s*'([A-Za-z][\w-]*)'")
+
 #: Ids app.js CREATES for itself (`node.id = 'x'`). These legitimately do
 #: not appear in index.html -- `inbox-prefs-msg` is built when the
 #: preferences pane renders -- so requiring the markup to declare them
@@ -366,7 +372,11 @@ _RUNTIME_MADE = re.compile(r"\.id = '([A-Za-z][\w-]*)'")
 
 def _static_ids() -> list[str]:
     js = _js()
-    return sorted(set(_ADDRESSED.findall(js)) - set(_RUNTIME_MADE.findall(js)))
+    addressed = set(_ADDRESSED.findall(js))
+    for list_id, empty_id in _RENDER_LIST.findall(js):
+        addressed.add(list_id)
+        addressed.add(empty_id)
+    return sorted(addressed - set(_RUNTIME_MADE.findall(js)))
 
 
 @pytest.mark.parametrize("element_id", _static_ids())
@@ -629,3 +639,85 @@ def test_the_ingest_quarantine_latches_only_on_a_permission_refusal():
     assert "not known to be" in body, (
         "a failed read leaves the section reading as 'nothing unattached', "
         "which is a claim about the data")
+
+
+# ---------------------------------------------------------------------------
+# Metric history — Phase 3's "visible" trend
+# ---------------------------------------------------------------------------
+
+def _history_js() -> str:
+    js = _js()
+    start = js.index("async function loadMetricHistory(")
+    return js[start:js.index("\nfunction renderKeyPlayer(", start)]
+
+
+def test_the_trend_calls_the_endpoint_that_exists():
+    """ROADMAP-REMAINING.md named this route `metrics/history` until
+    2026-08-10. The real path is `analytics/history/{node_id}`, so anyone
+    grepping the string the roadmap gave them found nothing and concluded
+    the endpoint had never been built."""
+    js = _js()
+    assert "'/analytics/history/'" in js, (
+        "nothing calls the metric-history endpoint")
+    assert "metrics/history" not in js, (
+        "the roadmap's wrong path has been copied into the client")
+
+
+def test_the_trend_never_shares_a_promise_all_with_the_suite():
+    """A `Promise.all` over endpoints with different permissions is wrong:
+    the first 403 rejects the lot, so a caller holding four permissions of
+    five sees an empty pane claiming they hold none. Here it would be worse
+    -- the suite has already rendered, and a trend failure would blank it.
+    """
+    body = _history_js()
+    assert "Promise.all" not in body, (
+        "the trend was folded into a Promise.all, so its failure can blank "
+        "a table that loaded successfully")
+
+
+def test_a_refused_trend_is_not_reported_as_an_empty_one():
+    """"No history" and "you may not see the history" are different facts
+    and an analyst acts on them differently. The 200-with-no-rows case has
+    its own wording, and neither borrows the other's."""
+    body = _history_js()
+    assert "err.status === 403" in body, "the refusal is not distinguished"
+    assert "refusalText(" in body, "the refusal is not named"
+    js = _js()
+    start = js.index("function renderMetricHistory(")
+    render = js[start:js.index("\nfunction histRow(", start)]
+    assert "at least two runs" in render, (
+        "an authorised-but-empty series does not say what it means")
+
+
+def test_the_trend_is_drawn_oldest_first():
+    """`analytics_runs` orders `started_at DESC` -- newest first. A
+    left-to-right time axis has to reverse it, and getting that backwards
+    silently INVERTS every trend on screen: rising reads as falling, on the
+    one chart whose whole purpose is to show a direction."""
+    body = _history_js()
+    assert ".slice().reverse()" in body, (
+        "the series is charted in API order, so the time axis runs "
+        "backwards and every trend is inverted")
+
+
+def test_the_trend_does_not_interpolate_across_undefined_runs():
+    """A run where the metric was undefined for this actor -- the constraint
+    of an isolate -- writes NO row, so the series is sparse. Drawing a
+    straight line across the hole invents a measurement, and the invented
+    one sits in the middle of a trend somebody is reading as a claim about
+    a person."""
+    body = _history_js()
+    assert "pen = false" in body, (
+        "the path is not broken across gaps, so an undefined run is drawn "
+        "as a value")
+
+
+def test_the_trend_canvas_has_an_accessible_twin():
+    """The canvas is `aria-hidden`, like the density strip. That is only
+    honest if everything it shows also exists as text -- otherwise the
+    trend is information that exists solely in pixels."""
+    html = _html()
+    assert 'id="an-hist-chart"' in html and 'aria-hidden="true"' in html
+    assert 'id="an-hist-body"' in html, "no table twin for the chart"
+    js = _js()
+    assert "function histRow(" in js, "the table twin has no row renderer"

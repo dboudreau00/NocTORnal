@@ -646,9 +646,60 @@
                     <th scope="col">Constraint</th>
                     <th scope="col">Eff. size</th>
                     <th scope="col">Community</th>
+                    <th scope="col">Trend</th>
                   </tr>
                 </thead>
                 <tbody id="an-body"></tbody>
+              </table>
+            </div>
+
+            <h3 class="h3">Trend &mdash; one actor across past runs</h3>
+            <p class="help">
+              A rising betweenness is a claim about a PERSON, so it is worth
+              being exact about what this shows: every completed run in this
+              case that recorded the metric, at your visibility, oldest on
+              the left. Runs use different parameters, and Newman-style
+              weights are not comparable across them &mdash; the preset is
+              printed against each point for that reason. A gap is a run
+              where the metric was <strong>undefined</strong> for this
+              actor, not a zero, so the line breaks rather than crossing it.
+            </p>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Metric</span>
+                <select id="an-hist-metric" class="select">
+                  <option value="betweenness">Betweenness</option>
+                  <option value="harmonic_closeness">Harmonic closeness</option>
+                  <option value="eigenvector">Eigenvector</option>
+                  <option value="constraint">Constraint</option>
+                  <option value="effective_size">Effective size</option>
+                  <option value="efficiency">Efficiency</option>
+                  <option value="hierarchy">Hierarchy</option>
+                </select>
+              </label>
+              <span id="an-hist-who" class="muted small"></span>
+            </div>
+            <!-- aria-hidden like #tl-density: the canvas is a picture of the
+                 table below it, and a screen reader should read the table. -->
+            <canvas id="an-hist-chart" class="hist-chart" aria-hidden="true">
+            </canvas>
+            <p id="an-hist-empty" class="empty">
+              Pick an actor in the table above to chart it.</p>
+            <div class="scroll-x">
+              <table class="table">
+                <caption class="sr-only">
+                  Metric history for the selected actor: every recorded run,
+                  newest first, with its value, rank and parameters.</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Run</th>
+                    <th scope="col">Value</th>
+                    <th scope="col">Rank</th>
+                    <th scope="col">Percentile</th>
+                    <th scope="col">Preset</th>
+                  </tr>
+                </thead>
+                <tbody id="an-hist-body"></tbody>
               </table>
             </div>
 
