@@ -156,7 +156,10 @@ def create_app() -> FastAPI:
                    ach.router, reports.router,
                    comms.router, comms.global_router,
                    governance.router, governance.break_glass_router,
-                   collection.router, ingest.router,
+                   # `case_router` is the read path: the collector wrote
+                   # collect.document and collect.watch_hit from the start
+                   # and nothing read them until 2026-08-10.
+                   collection.router, collection.case_router, ingest.router,
                    # Tags and node sets: schema and service since
                    # 0009, no router until 2026-07-26.
                    curation.router,

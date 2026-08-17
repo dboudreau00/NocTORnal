@@ -32,6 +32,7 @@ import blake3 as _blake3
 import psycopg
 from minio import Minio
 from minio.commonconfig import COMPLIANCE
+from minio.error import S3Error
 from minio.retention import Retention
 
 from noctornal_api.egress import NEVER_EGRESS
@@ -61,6 +62,40 @@ def _utcnow() -> datetime:
 
 class EvidenceError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class VersionedDeleteResult:
+    """What a versioned delete actually did, per key.
+
+    Three counts rather than a boolean, because "the bytes are gone" and
+    "the store refused" are different facts that a caller has to record
+    differently — and merging them into a single success is precisely how
+    `delete()` came to report destructions it had not performed.
+
+    `versions_seen` includes delete markers; `versions_removed` never
+    does. Removing a marker is tidying up after a keyless delete, not
+    destruction, and counting it as one would restate the original defect
+    in the new method's own numbers.
+    """
+    key: str
+    versions_seen: int
+    versions_removed: int
+    versions_locked: int
+
+    @property
+    def fully_destroyed(self) -> bool:
+        """Every real version is gone. FALSE while anything is locked —
+        this is the value a tombstone may be written from."""
+        return self.versions_locked == 0
+
+    @property
+    def outcome(self) -> str:
+        """Matches `retention.STORAGE_*` vocabulary without importing it
+        (retention imports this module)."""
+        if self.versions_locked:
+            return "LOCKED_UNTIL_RETENTION"
+        return "DESTROYED" if self.versions_removed else "NOTHING_TO_DELETE"
 
 
 class EvidenceStorage:
@@ -115,8 +150,138 @@ class EvidenceStorage:
         with the database. Catching it here would turn "the bytes are
         still there" into silence, which is the whole defect this method
         exists to end.
+
+        ## AND IT DOES NOT DO WHAT IT SAYS. Measured 2026-08-10.
+
+        The evidence bucket is created `--with-lock`, which forces
+        VERSIONING on. `remove_object(bucket, key)` with no `version_id`
+        does not remove anything on a versioned bucket: it inserts a
+        DELETE MARKER and returns success. Reproduced against this stack —
+        an object written under a COMPLIANCE lock, then:
+
+            remove_object(key)      -> returned normally, no exception
+            list(include_version)   -> the real version is STILL THERE
+            get_object(version_id)  -> returned the original bytes
+
+        So the refusal this docstring promises never arrives, because
+        there is nothing to refuse. `RetentionService` records
+        `evidence_purged`, the tombstone — the record that is supposed to
+        outlive the data — says DESTROYED, and the bytes are sitting in
+        the store, retrievable by anyone who can name a version.
+
+        That is the same defect a third time: `retention._purge_evidence`
+        and `ingest._with_raw` both reported a destruction they had not
+        performed, and both were fixed. This one reports it while holding
+        the object.
+
+        `delete_all_versions()` below is the honest version. It is NOT
+        wired in — see its docstring for what has to be decided first.
         """
         self._client.remove_object(self._bucket, key)
+
+    # ---------------------------------------------------------------
+    # NOT WIRED. Nothing calls this, deliberately.
+    # ---------------------------------------------------------------
+    def delete_all_versions(self, key: str) -> "VersionedDeleteResult":
+        """Remove every version of `key`, reporting refusals as refusals.
+
+        **This is written and deliberately NOT ENABLED.** No caller
+        references it; `RetentionService` still calls `delete()`. Enabling
+        it is a decision, not a follow-up commit, because it changes what
+        the system does to evidence and what it records having done:
+
+        1. **It flips production outcomes.** Today a purge under an
+           unexpired COMPLIANCE lock records `evidence_purged` and a
+           tombstone saying DESTROYED. With this wired the same purge
+           records `LOCKED_UNTIL_RETENTION` and warns that the store
+           disagrees with the database. That is correct, and it will make
+           previously-quiet purges start reporting failures — which is the
+           point, and is also an operational change somebody must expect.
+
+        2. **Tombstones already written are wrong and cannot be fixed.**
+           `core.purge_tombstone` is append-only. Every DESTROYED
+           tombstone written for an object that was still locked is a
+           false record that will remain a false record. Enabling this
+           stops new ones; it does not repair old ones, and whether those
+           are reportable is a question for docs/18, not for code.
+
+        3. **It genuinely destroys bytes.** `delete()` never did. The
+           first run of this against a real bucket is the first time this
+           system has actually removed an exhibit, so it wants a dry run
+           and a backup, not a deploy.
+
+        4. **Its integration test creates an object nobody can ever
+           delete.** A COMPLIANCE retention cannot be shortened, lifted or
+           overridden by any credential — that is the entire point of the
+           mode. A test that locks an object for a year has added a year
+           of storage to the bucket, permanently. Use a retention of
+           seconds, and assert the bucket's object-lock configuration
+           before trusting a passing result: against a bucket where
+           locking is off, every assertion here passes for the wrong
+           reason.
+
+        5. **On the shipped configuration this refuses for a YEAR.**
+           `infra/docker-compose.yml` sets a bucket DEFAULT of
+           `GOVERNANCE 365d`, so every object inherits a lock even when
+           `put()` is not given a retention — verified here: an object
+           written with no explicit retention still refused deletion. So
+           wiring this in without also deciding the retention policy turns
+           every purge into `LOCKED_UNTIL_RETENTION` for a year, which is
+           *correct* and is not what an operator expects from "purge".
+           Governance mode can be bypassed by a caller holding
+           `s3:BypassGovernanceRetention`; COMPLIANCE cannot, by anyone.
+           This method deliberately does NOT send the bypass header —
+           acquiring that power silently is not a decision to make in a
+           helper.
+
+        Both branches are verified against a live MinIO: a COMPLIANCE-locked
+        object reports `LOCKED_UNTIL_RETENTION` with its bytes intact, and a
+        versioned object with no lock is removed, both versions, reporting
+        `DESTROYED`.
+
+        The behaviour, once enabled: enumerate every version under the
+        key, delete each by `version_id`, and separate the two outcomes
+        that `delete()` currently merges into silence — bytes actually
+        gone, versus the store refusing because the retention has not
+        expired. A refusal is returned, not raised, because the caller
+        (`_purge_evidence`) has to record it against the tombstone rather
+        than abort a batch; anything that is neither a deletion nor a
+        lock still raises, because an unrecognised storage failure is not
+        an outcome to write down.
+        """
+        removed, locked = 0, 0
+        # `include_version=True` is the whole fix. Without it the listing
+        # hides exactly the versions that survive a keyless delete.
+        versions = [
+            v for v in self._client.list_objects(
+                self._bucket, prefix=key, include_version=True)
+            if v.object_name == key
+        ]
+        for v in versions:
+            if v.is_delete_marker:
+                # A marker left by an earlier keyless delete. Removing it
+                # is not destruction and must not be counted as any.
+                self._client.remove_object(
+                    self._bucket, key, version_id=v.version_id)
+                continue
+            try:
+                self._client.remove_object(
+                    self._bucket, key, version_id=v.version_id)
+                removed += 1
+            except S3Error as exc:
+                # MinIO answers a locked version with AccessDenied. The
+                # code is matched loosely on purpose: the S3 vendors do not
+                # agree on it, and treating an unrecognised refusal as a
+                # successful delete is the failure this method exists to
+                # end. Anything that is not recognisably a refusal raises.
+                if exc.code in ("AccessDenied", "MethodNotAllowed",
+                                "InvalidRequest", "RetentionPeriodNotMet"):
+                    locked += 1
+                else:
+                    raise
+        return VersionedDeleteResult(
+            key=key, versions_seen=len(versions),
+            versions_removed=removed, versions_locked=locked)
 
     def get(self, key: str) -> bytes:
         resp = self._client.get_object(self._bucket, key)

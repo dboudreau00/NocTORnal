@@ -486,7 +486,13 @@ def _grant(g: Grant) -> dict:
         # written, so access was granted invisibly and the officer
         # who must review it could not list it.
         "awaiting_review": g.awaiting_review,
-        "action_count": getattr(g, "action_count", 0),
+        # `action_count` and `used_at` are NOT published. `record_use()` is
+        # the only writer of either and has no caller outside its test, so
+        # both are constant -- zero and NULL -- on every grant that has ever
+        # existed. Publishing a zero to the officer's review queue answers
+        # "was this used?" with a fact about the wiring, and it answers it
+        # in the direction that closes the question. An absent field makes
+        # them ask. See break_glass.py, property 4.
         "reviewed_by": str(g.reviewed_by) if g.reviewed_by else None,
         "reviewed_at": g.reviewed_at.isoformat() if g.reviewed_at else None,
         "review_outcome": getattr(g, "review_outcome", None),
@@ -534,9 +540,17 @@ def invoke(
     except BreakGlassError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {**_grant(grant),
-            "notice": ("Every action taken under this grant is audited "
-                       "against it, a security officer who is not you must "
-                       "review it, and it expires on its own.")}
+            # Says what is true. The previous wording -- "every action taken
+            # under this grant is audited AGAINST IT" -- claimed a link that
+            # does not exist: actions are audited, but nothing attributes
+            # them to the grant, because nothing reads the grant.
+            "notice": ("This grant is recorded, a security officer who is "
+                       "not you must review it, and it expires on its own. "
+                       "It does NOT currently raise your clearance: no "
+                       "access decision reads the grant, so if a case was "
+                       "refused before, it will still be refused. Say so in "
+                       "the incident record rather than assuming the "
+                       "elevation applied.")}
 
 
 @break_glass_router.get("/unreviewed", response_model=dict)

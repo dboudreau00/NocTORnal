@@ -29,6 +29,7 @@ Pure: no database, no app import.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -149,3 +150,73 @@ def test_safe_detail_terminates_on_a_cyclic_chain():
     a, b = Exception("a"), Exception("b")
     a.__cause__, b.__cause__ = b, a
     assert safe_detail(a) == "a"
+
+
+# ---------------------------------------------------------------------------
+# A control must not publish a field that can only ever say one thing
+# ---------------------------------------------------------------------------
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
+
+
+def test_break_glass_publishes_a_use_count_only_if_something_counts_uses():
+    """`action_count` and `used_at` are written by exactly one function,
+    `BreakGlassService.record_use`, and it has no caller outside its own
+    test. Both are therefore constant on every grant that has ever
+    existed: zero, and NULL.
+
+    Publishing that zero to the security officer's review queue answers
+    "was this grant used?" with a fact about the wiring, in the direction
+    that CLOSES the question -- the reviewer sees a number, believes it,
+    and the grant that was never used is exactly the interesting review
+    case the field was added to surface.
+
+    So the two must move together: either something counts uses, or the
+    count is not published. This test fails whichever one is reintroduced
+    without the other.
+    """
+    service = (_SRC / "break_glass.py").read_text(encoding="utf-8")
+    router = (_SRC / "http" / "routers" / "governance.py").read_text(
+        encoding="utf-8")
+
+    published = '"action_count"' in router or '"used_at"' in router
+    # Parsed, not grepped. The reasoning for the withdrawal is written in
+    # break_glass.py's own docstring and NAMES `record_use()` twice, so a
+    # text scan counts the explanation as an implementation -- the same
+    # trap the innerHTML check in the UI suite had to avoid. An AST walk
+    # sees calls and nothing else.
+    counted = any(
+        isinstance(node, ast.Call)
+        and getattr(node.func, "attr", getattr(node.func, "id", None))
+        == "record_use"
+        for node in ast.walk(ast.parse(service)))
+
+    assert published == counted, (
+        "break-glass publishes a use count that nothing increments"
+        if published else
+        "something now records break-glass use, but the API no longer "
+        "publishes it -- republish action_count/used_at")
+
+
+def test_break_glass_does_not_promise_an_elevation_it_does_not_perform():
+    """`invoke()` writes a grant carrying `granted_classification`, audits
+    it, alerts the officer and queues the review -- and no access decision
+    reads that row. Effective clearance comes from `iam.app_user`.
+
+    An analyst who believes the elevation worked stops looking for another
+    way in, at 3am, during the incident the control exists for. So the
+    response says what it does; if the elevation is ever implemented, the
+    grant will be read somewhere outside this module and this test should
+    be updated in the same change.
+    """
+    stores = (_SRC / "stores.py").read_text(encoding="utf-8")
+    deps = (_SRC / "http" / "deps.py").read_text(encoding="utf-8")
+    router = (_SRC / "http" / "routers" / "governance.py").read_text(
+        encoding="utf-8")
+
+    reads_grant = "break_glass" in stores or "iam.break_glass" in deps
+    if not reads_grant:
+        assert "does NOT currently raise your clearance" in router, (
+            "nothing reads the break-glass grant, and the invoke response "
+            "does not say so -- an analyst will believe the elevation "
+            "applied")
