@@ -889,6 +889,11 @@
           <div id="comms-copart"></div>
           <p id="comms-copart-empty" class="empty">
             No co-participation computed for this case.</p>
+          <!-- Coverage sits OUTSIDE #comms-copart because renderList clears
+               that container: an exclusion report appended into the list is
+               erased by the next load, and a cap that reports itself only
+               sometimes is the silent cap this projection refuses to be. -->
+          <div id="comms-copart-coverage"></div>
         </section>
 
         <!-- FEEDS (Phases 9 and 4). Material arriving from outside: what a
