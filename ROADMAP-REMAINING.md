@@ -32,8 +32,19 @@ honest delta between that plan and the build.
 > researcher should read) spent three days absent from the tree with a
 > fully green suite.
 
-**State (2026-08-07):** branch `deception-and-release-hardening`, Alembic
-head `0055`, **1444 passing, 0 failing, 0 skipped** (run BOTH
+**State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
+head `0055`, **1794 passing, 0 failing, 0 skipped** on a live stack —
+Postgres, Redis, MinIO and Mailpit up, both pytest roots, 4m36s. The rise
+from 1444 is ~350 NEW tests, not new code under test: the element-id
+invariant became derived (22 hand-listed ids → 297), plus
+`test_doc_invariants.py` and the contract tests carried by this session's
+fixes. **This is the first run in this file's history that was executed
+rather than inherited from a handoff** — every earlier figure here was
+copied forward. The flaky `test_ratelimit_redis` PASSED on this run; it is
+intermittent, so that is not evidence it is fixed, and it stays on the
+list below.
+
+**Superseded (2026-08-07):** 1444 passing, 0 failing, 0 skipped (run BOTH
 `apps/api/tests` and `packages/ontology` — earlier handoffs quoted a single
 figure and the next session spent time working out why it did not
 reconcile), ruff clean, source hygiene clean across 273 files. The full
@@ -137,8 +148,11 @@ Unweighted mean across the ten phases. The +11 came from three things:
 Three things the number still hides:
 
 1. **UI is no longer the gap at all.** Every phase has a pane, the console
-   updates live, and there is a keyboard map. What is left on that axis is
-   metric-history charting.
+   updates live, and there is a keyboard map. ~~What is left on that axis is
+   metric-history charting.~~ **Metric-history charting landed 2026-08-10.**
+   What is left on that axis is Phase 6: approvals have no analyst surface
+   at all, which makes Merge unreachable from the browser whenever dual
+   control is on — see the corrected Phase 6 row.
 2. **Completion is not lawfulness.** A phase at 100% here may still be
    unlawful to operate. Phase 8 is now at 80% and **must not be switched
    on** until L1 is settled — see the register below. That is not a
@@ -173,7 +187,7 @@ caller scores 45% of a phase and delivers nothing.
 | **Case metadata, assignment and closure had no router.** A case could not be corrected, shared or closed from a browser. | 1 | ✅ **CLOSED 2026-07-30**, API **and UI** — Case… / Share… / Status… in the appbar. Lowering a case's classification is deliberately REFUSED — it declassifies everything protected only by the case label, in one statement, under a verb described as "edit metadata". It needs its own verb. |
 | **The sociogram could not show a 2,000-node case.** Hard-capped at 800 while the API served 5,000. | 2 | ✅ **CLOSED 2026-07-30.** Analyst-raisable 800 → 2000 → 5000 from inside the truncation notice. The warning stays at every ceiling. |
 | **Evidence linking was API-only.** | 1 | ✅ **CLOSED 2026-07-30.** The read path was never broken; there was no way to CREATE a link outside `curl`, so the panel could only ever be empty. |
-| **Metric history is API-only.** `app.js` contains zero calls to it. Phase 3's checklist calls a rising betweenness trend *"visible"*; it is visible to `curl`. **The route is `GET /analytics/history/{node_id}` (`routers/analytics.py`), NOT `metrics/history`** — this file said the latter until 2026-08-10, so anyone grepping the string it gave them concluded the endpoint had never been built. | 3 | ⬜ **STILL OPEN.** |
+| **Metric history is API-only.** Phase 3's checklist calls a rising betweenness trend *"visible"*; it was visible to `curl`. **The route is `GET /analytics/history/{node_id}` (`routers/analytics.py`), NOT `metrics/history`** — this file said the latter until 2026-08-10, so anyone grepping the string it gave them concluded the endpoint had never been built. | 3 | ✅ **CLOSED 2026-08-10.** A Trend control per actor row, charting every completed run at the caller's visibility: canvas (the CSP leaves no inline style to place a point with), `aria-hidden`, with a table twin carrying every exact value so nothing exists only in pixels. The series is reversed before charting — the API orders newest-first and charting it as it arrives inverts every trend. **A known limit, disclosed in the pane rather than papered over:** `analytics_runs` writes no row when a metric is undefined for a node and `node_metric.value` is NOT NULL, so an undefined run is ABSENT from the series, not null — and absent cannot be told from "no run happened" at this endpoint. The line spans such a period, and the help text says a long straight segment is not evidence that nothing changed. (An earlier draft of this row claimed the path *breaks* across those runs. It does not and cannot; the break is a guard against an unrenderable value. Corrected before the claim shipped.) Approximate runs are marked in both views; the preset is printed per POINT, since weights are not comparable across parameters. **Verified in the browser 2026-08-10** — the chart rises left-to-right for a rising series (pixel-sampled: left y=70, right y=9), confirming the reversal. |
 | **`sigma.js` is not in the tree.** Replaced by a hand-written Barnes-Hut worker for CSP reasons — a good decision that `docs/09-roadmap.md` no longer misdescribes. | 2 | ✅ Documented. |
 
 ### The 2026-08-07 error-handling audit
