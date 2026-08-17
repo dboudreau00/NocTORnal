@@ -481,3 +481,47 @@ def test_the_approver_permission_matches_the_operation():
     assert OPERATIONS["node.merge"].permission == "graph.merge"
     assert OPERATIONS["evidence.purge"].permission == "evidence.purge"
     assert OPERATIONS["case.delete"].permission == "case.delete"
+
+
+def test_a_refusal_is_recorded_even_when_the_caller_rolls_back(conn, svc):
+    """The test above calls `consume()` directly on the autocommit fixture
+    connection with no enclosing transaction, so its audit row survives --
+    there, and only there.
+
+    BOTH production callers wrap `consume()` in `with conn.transaction():`
+    and catch ApprovalError OUTSIDE the block, deliberately, so that a
+    refused consume destroys nothing. The refusal row therefore went in on
+    the same connection and was rolled back by the very exception it was
+    written to explain: `audit.event` held ZERO
+    APPROVAL_CONSUME_REFUSED rows in production, however many replay or
+    payload-substitution attempts occurred.
+
+    The single detection signal for the attack this module exists to stop
+    -- take a signature for merging two obvious spam bots, then execute
+    the two nodes the case turns on -- was generated and immediately
+    destroyed. This reproduces the caller's shape.
+    """
+    from noctornal_api.approvals import ApprovalError
+
+    alice, bob = _user(conn), _user(conn)
+    case_id = _case(conn, alice)
+    payload = _payload()
+    req = svc.request(operation="node.merge", case_id=case_id, payload=payload,
+                      justification="j", requested_by=alice)
+    svc.decide(req.id, decided_by=bob, approve=True)
+
+    with pytest.raises(ApprovalError):
+        # Exactly how merges.py and retention.py call it.
+        with conn.transaction():
+            svc.consume(req.id, actor_id=alice, operation="node.merge",
+                        case_id=case_id,
+                        payload=dict(payload, reason="something else"))
+
+    row = conn.execute(
+        """SELECT detail->>'reason', outcome FROM audit.event
+            WHERE object_id = %s AND action = 'APPROVAL_CONSUME_REFUSED'""",
+        (req.id,)).fetchone()
+    assert row is not None, (
+        "the refusal left no trace: a replayed or substituted approval is "
+        "undetectable on every path that can actually reach consume()")
+    assert row == ("payload_mismatch", "DENIED")
