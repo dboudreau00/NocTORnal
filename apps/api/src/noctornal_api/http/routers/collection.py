@@ -48,7 +48,13 @@ from noctornal_api.collection import (
     PersonaUnavailable,
     PersonaVault,
 )
-from noctornal_api.http.deps import CurrentUser, get_conn, require_global
+from noctornal_api.http.deps import (
+    CurrentUser,
+    get_conn,
+    require,
+    require_global,
+    user_ceiling,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
@@ -275,3 +281,97 @@ def runs(
         "note": ("A run with items_seen > 0 and items_new = 0 across "
                  "several polls is usually a parser that stopped matching, "
                  "not a quiet source.")}
+
+
+# ---------------------------------------------------------------------------
+# The read path — what the collector actually collected
+# ---------------------------------------------------------------------------
+#
+# Until 2026-08-10 the only observable trace of a poll was three integers
+# on a run card: items_seen, items_new, watch_hits. A watch could fire four
+# hundred times and the analyst saw the number 400 and could not open one
+# of them. `collect.document` and `collect.watch_hit` were written by the
+# collector and read by nothing.
+
+@router.get("/documents", response_model=dict)
+def documents(
+    source_id: UUID | None = Query(default=None),
+    triage_state: str | None = Query(default=None),
+    limit: int = Query(100, ge=1, le=500),
+    user: CurrentUser = Depends(require_global("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Collected documents, newest first.
+
+    NOT case-scoped: `collect.document` has no `case_id` because a
+    document hangs off a SOURCE, and one forum post is evidence in
+    however many cases cite it. Gated on the global `collection.read` and
+    filtered by classification — which defaults to AMBER and can be
+    higher, so this filter is doing real work rather than being defensive
+    habit.
+    """
+    clearance, _ = user_ceiling(conn, user.user_id)
+    docs = CollectionService(conn).documents(
+        clearance=clearance.name, source_id=source_id,
+        triage_state=triage_state, limit=limit)
+    return {"documents": docs, "count": len(docs),
+            "note": ("Bodies are excerpted to 400 characters; `truncated` "
+                     "says which. Purged documents are omitted entirely "
+                     "rather than returned with an empty body.")}
+
+
+case_router = APIRouter(prefix="/cases/{case_id}/collection",
+                        tags=["collection"])
+
+
+@case_router.get("/watch-hits", response_model=dict)
+def watch_hits(
+    case_id: UUID,
+    unacknowledged_only: bool = Query(default=False),
+    limit: int = Query(100, ge=1, le=500),
+    user: CurrentUser = Depends(require("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """What the watches on this case matched.
+
+    Case-scoped, because `collect.watch` carries `case_id` even though the
+    document it matched does not.
+
+    Suppressed hits are INCLUDED, carrying their reason. Hiding them would
+    make a watch that is drowning in one recurring thread look like a
+    watch that is quiet, and those need opposite responses.
+    """
+    clearance, _ = user_ceiling(conn, user.user_id)
+    hits = CollectionService(conn).watch_hits(
+        case_id, clearance=clearance.name,
+        unacknowledged_only=unacknowledged_only, limit=limit)
+    return {"hits": hits, "count": len(hits),
+            "unacknowledged": sum(1 for h in hits if not h["acknowledged_at"]),
+            "note": ("Unacknowledged first, then by score. A suppressed hit "
+                     "is shown with its reason: alert hygiene is not the "
+                     "same as nothing happening.")}
+
+
+# No dedicated rate limit: this is an idempotent single-row UPDATE behind a
+# case-scoped permission, and inventing a LIMITS key for it would add a
+# meter nobody tuned. The global request limiter still applies.
+@case_router.post("/watch-hits/{hit_id}/acknowledge", response_model=dict)
+def acknowledge_watch_hit(
+    case_id: UUID,
+    hit_id: UUID,
+    user: CurrentUser = Depends(require("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Record that somebody looked at this hit.
+
+    Idempotent and it does not re-stamp: `acknowledged_at` is set once,
+    because rewriting when somebody FIRST saw a hit destroys the only
+    evidence of how long it sat unread.
+    """
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        result = CollectionService(conn).acknowledge_hit(
+            hit_id, user_id=user.user_id, clearance=clearance.name)
+    except CollectionError as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    return result
