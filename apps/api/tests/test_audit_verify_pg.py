@@ -231,3 +231,131 @@ def test_a_fork_does_not_mask_real_tampering(tamperable):
     assert any(b.kind == "CONTENT" for b in report.breaks), \
         "the edited row was masked by its own fork"
     assert not report.intact
+
+
+# ---------------------------------------------------------------------------
+# The anchor: where does the chain START?
+# ---------------------------------------------------------------------------
+
+def _forge_second_genesis(conn, action="SECOND_GENESIS") -> None:
+    """Insert a row claiming to be the chain's first.
+
+    LINK-clean and CONTENT-clean by construction: the hash input for a
+    NULL-predecessor row is the literal string 'GENESIS', so a forgery
+    computed with the module's own `_HASH_EXPR` recomputes exactly. Before
+    the anchor check existed this row was not merely unreported as
+    tampering -- it was dropped from the report entirely, and `intact`
+    stayed True.
+    """
+    from noctornal_api.audit_verify import _HASH_EXPR
+
+    conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    conn.execute(
+        f"""INSERT INTO audit.event
+                (actor_kind, action, outcome, detail, prev_hash, row_hash)
+            SELECT 'USER', %s, 'SUCCESS', '{{}}'::jsonb, NULL, {_HASH_EXPR}
+              FROM (SELECT NULL::bytea AS prev_hash, now() AS occurred_at,
+                           NULL::uuid AS actor_id, 'USER' AS actor_kind,
+                           %s AS action, NULL::text AS object_type,
+                           NULL::uuid AS object_id, NULL::uuid AS case_id,
+                           'SUCCESS' AS outcome, '{{}}'::jsonb AS detail,
+                           NULL::bytea AS ip_hash,
+                           NULL::uuid AS session_id) e""",
+        (action, action))
+    conn.execute("ALTER TABLE audit.event ENABLE TRIGGER USER")
+
+
+def test_a_second_genesis_is_reported_as_tampering(tamperable):
+    """A row with `prev_hash NULL` passed every check: LINK exempts it by
+    construction, FORK filters `prev_hash IS NOT NULL` (and a NULL never
+    equals a NULL in the join anyway), and CONTENT blesses it because the
+    hash input for such a row is the literal 'GENESIS'.
+
+    That is the shape of a TRUNCATION -- delete the first k rows,
+    re-anchor row k+1 -- and it is the one thing no relative check can
+    see, because every surviving row still agrees with its predecessor.
+
+    Unlike a fork this is not reachable by honest traffic: 0013 writes a
+    NULL predecessor only into an empty table, under the advisory lock,
+    and no application code writes prev_hash. So it counts as tampering.
+    """
+    from noctornal_api.audit_verify import verify_chain
+
+    before = verify_chain(tamperable)
+    assert before.genesis_count == 1, (
+        f"this database has {before.genesis_count} genesis rows before the "
+        f"test forges one; the assertion below would not mean what it says")
+    assert before.intact
+
+    _forge_second_genesis(tamperable)
+
+    after = verify_chain(tamperable)
+    assert after.genesis_count == 2
+    assert not after.intact, "a second genesis is invisible"
+    assert {b.kind for b in after.breaks} == {"GENESIS"}
+    assert len(after.breaks) == 2, (
+        "both claimants must be named -- which one is the intruder is not "
+        "something this can decide")
+
+
+def test_the_anchor_is_checked_over_the_whole_table_not_the_window(tamperable):
+    """The true genesis is almost never inside a `limit` window. Computing
+    the anchor from the window would answer "no genesis" on every windowed
+    run -- the false accusation this module has already made twice."""
+    from noctornal_api.audit_verify import verify_chain
+
+    _seed(tamperable)
+    windowed = verify_chain(tamperable, limit=2)
+    assert windowed.checked == 2
+    assert windowed.genesis_count == 1, (
+        "the anchor was computed from the window, so a windowed run "
+        "reports a chain with no first row")
+    assert windowed.intact
+
+
+# ---------------------------------------------------------------------------
+# The writer: the claims the fork split rests on
+# ---------------------------------------------------------------------------
+
+def test_the_chaining_lock_serialises_concurrent_writers(tamperable):
+    """`ChainReport.intact` excludes forks, and the reason given for years
+    was that ordinary concurrency produces them -- `seq` is drawn before
+    the trigger takes its lock, so two writers chain off one tail.
+
+    It does not. With one transaction holding the xact advisory lock
+    mid-INSERT, a second connection's INSERT blocks until commit. If this
+    ever stops being true, the fork explanation becomes correct again and
+    the docstring in `audit_verify.py` must be changed back.
+    """
+    import psycopg
+
+    from noctornal_api.db import dsn
+
+    ins = ("INSERT INTO audit.event (actor_kind, action, outcome, detail) "
+           "VALUES ('SYSTEM','LOCKTEST','SUCCESS','{}'::jsonb)")
+    tamperable.execute(ins)          # holds the lock; rolled back by fixture
+
+    other = psycopg.connect(dsn())
+    try:
+        other.execute("SET statement_timeout = '1200ms'")
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            other.execute(ins)
+    finally:
+        other.rollback()
+        other.close()
+
+
+def test_a_multi_row_insert_does_not_fork_the_chain(tamperable):
+    """The other half of the same claim. A BEFORE INSERT trigger firing
+    once per row could plausibly hand every row of one statement the same
+    tail -- it does not, because each row is inserted before the next
+    row's trigger runs."""
+    tamperable.execute(
+        "INSERT INTO audit.event (actor_kind, action, outcome, detail) "
+        "SELECT 'SYSTEM', 'MULTIROW_' || g, 'SUCCESS', '{}'::jsonb "
+        "FROM generate_series(1,3) g")
+    distinct = tamperable.execute(
+        "SELECT count(DISTINCT prev_hash) FROM audit.event "
+        "WHERE action LIKE 'MULTIROW_%'").fetchone()[0]
+    assert distinct == 3, (
+        "a multi-row insert chained every row off the same predecessor")
