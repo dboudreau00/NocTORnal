@@ -657,12 +657,17 @@
             <p class="help">
               A rising betweenness is a claim about a PERSON, so it is worth
               being exact about what this shows: every completed run in this
-              case that recorded the metric, at your visibility, oldest on
-              the left. Runs use different parameters, and Newman-style
-              weights are not comparable across them &mdash; the preset is
-              printed against each point for that reason. A gap is a run
-              where the metric was <strong>undefined</strong> for this
-              actor, not a zero, so the line breaks rather than crossing it.
+              case that <strong>recorded</strong> the metric, at your
+              visibility, oldest on the left. Runs use different parameters,
+              and Newman-style weights are not comparable across them
+              &mdash; the preset is printed against each point for that
+              reason.
+              <strong>A run in which this actor had no defined value does
+              not appear here at all</strong> (an isolate has no constraint
+              to measure), and this endpoint cannot tell that apart from no
+              run having happened &mdash; so the line spans such a period
+              rather than breaking, and a long straight segment is not
+              evidence that nothing changed.
             </p>
             <div class="pane-head">
               <label class="field inline">

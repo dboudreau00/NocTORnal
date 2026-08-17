@@ -5384,11 +5384,18 @@ function rankCell(value, rank, percentile, total) {
  *     table that already rendered.
  *  2. A 403 is not an empty state. "No history" and "you may not see the
  *     history" are different facts and an analyst acts on them differently.
- *  3. A GAP IS NOT A ZERO. A run where the metric was undefined for this
- *     actor — the constraint of an isolate, say — writes no row at all, so
- *     the series is sparse. Drawing a straight line across it invents a
- *     measurement, and the invented one sits in the middle of a trend
- *     somebody is reading as a claim about a person. The path breaks.
+ *  3. A GAP IS NOT A ZERO — and the harder half of that is what this
+ *     CANNOT show. `analytics_runs` skips the row entirely when a metric
+ *     is undefined for a node (`if value is None: continue` — the
+ *     constraint of an isolate), and `node_metric.value` is NOT NULL. So
+ *     an undefined run is not a null in the series, it is ABSENT, and
+ *     absent is indistinguishable from "no run happened" at this endpoint.
+ *     The line therefore spans it, and the help text says so rather than
+ *     letting the reader assume the axis is continuous. The `pen` break
+ *     below still guards a null, because a value the client cannot render
+ *     must not be drawn as a position — but it is a guard, not the
+ *     mechanism, and calling it the mechanism would be the same confident
+ *     wrong claim this pane is here to avoid.
  *  4. The series arrives NEWEST FIRST. A left-to-right time axis has to
  *     reverse it, and getting that backwards silently inverts every trend
  *     on screen — rising reads as falling.
@@ -5546,7 +5553,8 @@ function drawHistory() {
 
   baseline();
 
-  /* The path, broken across undefined runs. */
+  /* The path. `pen` breaks it if a value is ever unrenderable; see the
+     note above for why that is a guard and not gap handling. */
   histCtx.strokeStyle = PAINT.accent || '#6EA8FE';
   histCtx.lineWidth = 2;
   histCtx.beginPath();
