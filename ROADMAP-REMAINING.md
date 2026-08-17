@@ -327,24 +327,45 @@ incident. Recorded rather than left to be rediscovered.
   and reported 68 breaks on honest history — the exact failure a
   tamper-evidence tool must never have.
 
-> **These two are ONE defect, diagnosed 2026-08-10.** The advisory lock is
-> correct and is not the problem. The tail selector under it is:
-> `SELECT row_hash INTO prev FROM audit.event ORDER BY seq DESC LIMIT 1`
-> takes the highest `seq`, and `seq` is a sequence — allocated at INSERT,
-> out of order under concurrency, and never rolled back. So the writer
-> picks a predecessor by an ordering that is not the chain's, two
-> transactions choose the same one, and the fork the lock exists to
-> prevent is manufactured by the lock's own critical section. That is also
-> exactly why `seq` order is not chain order: the same wrong ordering,
-> observed from the reading end. Reproducible with two uvicorn workers, so
-> it is not an artefact of concurrent test runs.
+> **REFUTED 2026-08-10, and no migration was written.** An earlier draft
+> of this entry blamed the tail selector — `ORDER BY seq DESC LIMIT 1`
+> picking a predecessor by an ordering that is not the chain's — and
+> proposed migration 0056 to fix it. **Three experiments say the writer is
+> sound, so 0056 was NOT written.** Rewriting the hottest write path in
+> the system (every audited action across 28 modules) on an unreproduced
+> premise would have been the more dangerous act:
 >
-> This matters more than its severity suggests: FORK is the only detector
-> for a fabricated audit row, and it is currently switched off in the
-> verifier's `intact` verdict *because the writer produces forks*. Fixing
-> the writer is the precondition for re-arming the detector. **The same
-> defect is unfixed in `core.custody_chain_hash()`, which has no verifier
-> of any kind** and whose docstring invokes FRE 902(13)–(14).
+> | Experiment | Result |
+> |---|---|
+> | Two connections, one holding the xact advisory lock mid-INSERT | The second **blocked** for a full 2.5s `statement_timeout`. Concurrency is serialised. |
+> | `INSERT … SELECT` over three rows in one statement | **Three DISTINCT predecessors.** The BEFORE trigger sees rows already inserted by its own statement. |
+> | The live development database | 3,947 rows, **one** genesis, **zero** forks. |
+>
+> No production code writes `prev_hash` or `row_hash` — the trigger owns
+> both — and all three triggers are enabled. The 67 forks were most likely
+> the same artefact as the 68 "breaks" this module reported before its
+> `seq`-ordering bug was fixed: counted by a verifier that was itself
+> wrong. Two of those experiments now ship as tests, so if the property
+> ever stops holding, the old explanation becomes correct again and the
+> docstring says to change it back.
+>
+> **What was real, and IS fixed:** the chain had no anchor. A row inserted
+> with `prev_hash NULL` passed every check — LINK exempts it by
+> construction, FORK filters `prev_hash IS NOT NULL`, and CONTENT
+> *blesses* it because the hash input for such a row is the literal string
+> `GENESIS`. Demonstrated against the old verifier: forging a second
+> "first row" left it reporting **`intact=True, breaks=0, forks=0`**. That
+> is the shape of a truncation, and the one thing no relative check can
+> see. `verify_chain` now counts genesis rows whole-table (never
+> windowed), reports `GENESIS` / `NO_GENESIS` as tampering, and publishes
+> `genesis_count`. **The fork split is kept** — a fork still is not proof
+> of editing and legacy databases may carry real ones in an append-only
+> table — but it is no longer explained away as normal concurrency, so one
+> now deserves investigation.
+>
+> Still open: the same missing anchor in `core.custody_chain_hash()`,
+> which has no verifier of any kind and whose docstring invokes
+> FRE 902(13)–(14).
 
 **None of this is a regression.** It is the same lesson this file already
 records twice: a green suite either side of a contract that neither side

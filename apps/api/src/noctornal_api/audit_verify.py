@@ -133,9 +133,15 @@ public.digest(
 class ChainBreak:
     """One row that does not verify."""
     seq: int
-    occurred_at: datetime
+    #: None only for NO_GENESIS, which is a finding about a row that is
+    #: NOT THERE and therefore has no timestamp to report.
+    occurred_at: datetime | None
     action: str
-    kind: str            # LINK / FORK / CONTENT, '+'-joined when several
+    #: LINK / FORK / CONTENT, '+'-joined when several. Plus the two
+    #: whole-chain findings, which describe the chain rather than a row:
+    #: GENESIS (more than one row claims to be first) and NO_GENESIS (a
+    #: non-empty chain has no first row).
+    kind: str
     actor_id: UUID | None
     case_id: UUID | None
 
@@ -151,6 +157,10 @@ class ChainReport:
     forks: tuple[ChainBreak, ...]
     first_seq: int | None
     last_seq: int | None
+    #: How many rows claim to be the chain's first. Surfaced even when it
+    #: is 1 -- like `checked` -- so a caller can tell "anchored" from
+    #: "nobody looked", which a bare `intact` cannot express.
+    genesis_count: int = 0
 
     @property
     def intact(self) -> bool:
@@ -159,13 +169,42 @@ class ChainReport:
         ## Forks do not make a chain "broken", and treating them as such
         ## made this endpoint cry wolf on every real database
 
-        A fork is two rows claiming one predecessor. 0013's advisory lock
-        is meant to prevent it, and it does not entirely: `seq` comes from
-        `nextval()` before the trigger runs, and under concurrency two
-        writers can still end up chained off the same tail. The development
-        database carries **67 of them across 60,181 rows**, none of them
-        tampering — they are an artefact of the WRITER, reproducible by
-        ordinary traffic.
+        A fork is two rows claiming one predecessor.
+
+        > **THIS PARAGRAPH WAS WRONG AND IS CORRECTED (2026-08-10).** It
+        > said the advisory lock "does not entirely" prevent forks, that
+        > `seq` coming from `nextval()` before the trigger lets two writers
+        > chain off the same tail, and that the 67 forks on the development
+        > database were "an artefact of the WRITER, reproducible by
+        > ordinary traffic". Three experiments say otherwise:
+        >
+        > - **Concurrency is serialised.** With one transaction holding the
+        >   xact advisory lock mid-INSERT, a second connection's INSERT
+        >   blocks until it is released — measured, it sat on the lock for
+        >   a full 2.5s `statement_timeout` rather than proceeding.
+        > - **A multi-row INSERT does not fork.** `INSERT … SELECT` over
+        >   three rows produced three DISTINCT predecessors: the BEFORE
+        >   trigger fires per row and sees the rows already inserted by its
+        >   own statement.
+        > - **The chain is clean.** 3,947 rows, one genesis, zero forks.
+        >
+        > No production code writes `prev_hash` or `row_hash` — the trigger
+        > owns both — and all three triggers are enabled. So a fork is NOT
+        > known to be reachable by ordinary traffic, and the 67 were most
+        > likely the same artefact as the 68 "breaks" this module reported
+        > before the `seq`-ordering bug was fixed, counted by a verifier
+        > that was itself wrong.
+        >
+        > **The split below is kept anyway, deliberately.** A fork still is
+        > not proof of tampering, legacy databases may carry real ones that
+        > cannot be cleaned up (the table is append-only), and re-arming it
+        > into `intact` on a deployment that has them recreates exactly the
+        > cry-wolf failure described below. What changes is the standing of
+        > a fork: it is no longer explained away as normal. **On a chain
+        > written by this code a fork should not occur, so one deserves
+        > investigation** rather than the reassurance this docstring used
+        > to offer. Re-arming it is a decision for a deployment that has
+        > verified its own history, not a default.
 
         Counting those as breaks meant `/audit/verify` answered BROKEN on
         untampered history, which is the same failure this module already
@@ -276,6 +315,49 @@ def verify_chain(
     rows = conn.execute(sql, params).fetchall()
     breaks: list[ChainBreak] = []
     forks: list[ChainBreak] = []
+
+    # ── the anchor ────────────────────────────────────────────────────
+    #
+    # Every check above is RELATIVE: it asks whether each row agrees with
+    # its predecessor. None of them asks where the chain STARTS, and the
+    # LINK check exempts a NULL predecessor by construction -- so a row
+    # inserted with `prev_hash NULL` is an unlinked island that passes
+    # every test, and the CONTENT check actively blesses it, because the
+    # hash input for such a row is the literal string 'GENESIS' (see
+    # `_HASH_EXPR`). The fork check cannot see it either: it filters
+    # `prev_hash IS NOT NULL`, and SQL NULL never equals NULL in the join.
+    #
+    # Two rows claiming to be first is therefore invisible today, and that
+    # is the shape of a truncation: delete the first k rows, re-genesis row
+    # k+1, and the chain reports INTACT with history simply starting later.
+    #
+    # This is queried over the WHOLE table and reported at REPORT level,
+    # never per-row, for the same reason `hashes` and `claims` are
+    # whole-table: the true genesis is almost never inside a `limit`
+    # window, so a windowed check would answer "no genesis" on every
+    # windowed run -- the false accusation this module has already made
+    # twice and cannot afford a third time.
+    genesis = conn.execute(
+        "SELECT seq, occurred_at, action, actor_id, case_id "
+        "FROM audit.event WHERE prev_hash IS NULL ORDER BY seq").fetchall()
+    total = conn.execute("SELECT count(*) FROM audit.event").fetchone()[0]
+
+    if total and not genesis:
+        # The first row is gone. Nothing else can detect this: every
+        # surviving row still links to a real predecessor.
+        breaks.append(ChainBreak(
+            seq=0, occurred_at=None, action="(chain has no first row)",
+            kind="NO_GENESIS", actor_id=None, case_id=None))
+    elif len(genesis) > 1:
+        # Unlike a fork, this is NOT reachable by honest traffic: 0013
+        # writes a NULL predecessor only into an empty table, under the
+        # advisory lock, and no application code writes prev_hash at all.
+        # So it goes in `breaks` and turns `intact` False.
+        for g_seq, g_at, g_action, g_actor, g_case in genesis:
+            breaks.append(ChainBreak(
+                seq=g_seq, occurred_at=g_at, action=g_action,
+                kind="GENESIS", actor_id=g_actor, case_id=g_case))
+
     for seq, occurred_at, action, actor_id, case_id, link, fork, content in rows:
         if not (link or fork or content):
             continue
@@ -301,4 +383,5 @@ def verify_chain(
         forks=tuple(forks),
         first_seq=rows[0][0] if rows else None,
         last_seq=rows[-1][0] if rows else None,
+        genesis_count=len(genesis),
     )
