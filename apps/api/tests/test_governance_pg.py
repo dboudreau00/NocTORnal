@@ -609,3 +609,212 @@ def test_break_glass_does_not_cross_a_compartment(conn):
     assert "compartment" in source.lower(), (
         "the omission must be documented where somebody will read it")
     assert "granted_compartments" not in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 hostile pass, 2026-08-10
+# ---------------------------------------------------------------------------
+
+def test_a_dry_run_reports_what_would_be_destroyed(conn):
+    """A dry run used to return every counter at zero. It did the full
+    sweep and threw the answer away, so a preview of a case with exhibits
+    about to be destroyed was byte-identical to a preview of a case with
+    nothing due -- and the pane rendered both as "Nothing would be
+    destroyed."
+
+    `held_back` was the only non-zero number it could produce, which made
+    it worse than silent: the one figure on screen counted the items being
+    SPARED. This is the control whose entire purpose is to be read before
+    an irreversible action.
+    """
+    from noctornal_api.retention import RetentionService
+
+    uid = _user(conn)
+    case_id = _case(conn, uid, retention=date(2020, 1, 1))
+    ev = _evidence(conn, case_id, uid)
+
+    dry = RetentionService(conn).purge_due(
+        case_id=case_id, actor_id=uid, authority="test", dry_run=True)
+    assert dry.evidence_purged == 1, (
+        "the dry run reports nothing is due while an exhibit is about to "
+        "be destroyed")
+    # And it really was a preview.
+    still = conn.execute(
+        "SELECT purged_at FROM core.evidence WHERE id = %s", (ev,)).fetchone()
+    assert still[0] is None, "the dry run destroyed something"
+
+
+def test_a_case_scoped_sweep_does_not_reach_documents(conn):
+    """`collect.document` has NO case_id -- a document hangs off a source
+    and is material in however many cases cite it. The document query took
+    no case filter, so `purge_due(case_id=X)` counted deployment-wide
+    documents and would have written the tombstone under case X.
+
+    That is the cross-case destruction the out-of-schedule router refuses
+    by name, arriving through the scheduled path.
+    """
+    from noctornal_api.retention import RetentionService
+
+    uid = _user(conn)
+    case_id = _case(conn, uid, retention=date(2020, 1, 1))
+    # A document that IS due, so the assertion is not vacuous: with no due
+    # document the sweep returns none either way and the test proves
+    # nothing. This is the row that used to be swept up by a case it has
+    # no relationship to.
+    src = conn.execute(
+        """INSERT INTO collect.source
+               (kind, name, base_url, default_reliability, poll_interval_s,
+                jitter_pct, max_rps, parser_key, classification)
+           VALUES ('RSS', %s, 'https://forum.test/f', 'C', 300, 10, 1,
+                   'rss', 'AMBER') RETURNING id""",
+        (f"gov-src-{uuid4().hex[:6]}",)).fetchone()[0]
+    conn.execute(
+        """INSERT INTO collect.document
+               (source_id, external_id, body_text, content_sha256,
+                retain_until)
+           VALUES (%s, %s, 'x', decode(md5('x'),'hex'), '2020-01-01')""",
+        (src, uuid4().hex))
+
+    # try/finally, not cleanup-after-assertions. The first version cleaned
+    # up on the last line, so when it was run against the unfixed code and
+    # failed -- which is the whole point of a regression test -- it left a
+    # due document behind, and the next unscoped `purge_due` in the suite
+    # inherited it. A test that only tidies up when it passes is a test
+    # that poisons the run it was written to protect.
+    try:
+        scoped = RetentionService(conn).due(case_id=case_id)
+        assert not [i for i in scoped if i.object_type == "document"], (
+            "a case-scoped sweep picked up a document, which belongs to no "
+            "case -- the tombstone would be written under a case that has "
+            "no relationship to it")
+        # Deployment-wide it IS due, so the assertion above cannot pass
+        # merely because the document is invisible everywhere.
+        everywhere = RetentionService(conn).due()
+        assert [i for i in everywhere if i.object_type == "document"], (
+            "the document is invisible even to an unscoped sweep, so this "
+            "test would pass for the wrong reason")
+    finally:
+        conn.execute("DELETE FROM collect.document WHERE source_id = %s",
+                     (src,))
+        conn.execute("DELETE FROM collect.source WHERE id = %s", (src,))
+
+
+def test_the_dead_document_clock_is_reported_rather_than_shown_as_zero(conn):
+    """Nothing writes `collect.document.retain_until`, so every collected
+    document is outside retention forever. Reporting `documents_purged: 0`
+    without saying so reports a gap in the wiring as a fact about the data.
+
+    Deliberately not fixed by deriving a deadline: that would arm a
+    destruction path over every document already collected, all of them
+    instantly past a retention they were never assigned.
+    """
+    from noctornal_api.retention import RetentionService
+
+    uid = _user(conn)
+    case_id = _case(conn, uid, retention=date(2020, 1, 1))
+    total = conn.execute(
+        "SELECT count(*) FROM collect.document "
+        "WHERE purged_at IS NULL AND retain_until IS NULL").fetchone()[0]
+    result = RetentionService(conn).purge_due(
+        case_id=case_id, actor_id=uid, authority="test", dry_run=True)
+    if total:
+        assert any("no retention clock" in w for w in result.warnings), (
+            "documents with no clock are silently invisible to the sweep")
+
+
+def test_a_partial_storage_refusal_counts_refusals_not_the_batch(conn):
+    """`storage_locked` was `len(evidence_ids)` -- the batch size. One
+    refusal in a hundred and a hundred refusals wrote the same number into
+    an append-only tombstone, so the figure could not distinguish them and
+    could never be corrected."""
+    from noctornal_api.retention import RetentionService
+
+    class _PartlyLocked:
+        """Refuses the first object with a retention lock, deletes the rest."""
+
+        def __init__(self):
+            self.seen = 0
+
+        def delete(self, key):
+            self.seen += 1
+            if self.seen == 1:
+                raise RuntimeError("object is under a retention lock")
+
+    uid = _user(conn)
+    case_id = _case(conn, uid, retention=date(2020, 1, 1))
+    for _ in range(3):
+        _evidence(conn, case_id, uid)
+
+    svc = RetentionService(conn, storage=_PartlyLocked())
+    result = svc.purge_due(case_id=case_id, actor_id=uid,
+                           authority="test", dry_run=False)
+    assert result.evidence_purged == 3
+    assert result.storage_locked == 1, (
+        f"reported {result.storage_locked} locked objects for one refusal "
+        f"out of three")
+
+
+def test_a_storage_failure_is_not_reported_as_a_retention_lock(conn):
+    """A bare `except Exception` mapped every failure class to
+    LOCKED_UNTIL_RETENTION, which is a specific and defensible claim about
+    a retention lock. A connection reset is not that claim, and
+    STORAGE_FAILED existed for it and was dead code."""
+    from noctornal_api.retention import RetentionService
+
+    class _Broken:
+        def delete(self, key):
+            raise RuntimeError("connection reset by peer")
+
+    uid = _user(conn)
+    case_id = _case(conn, uid, retention=date(2020, 1, 1))
+    _evidence(conn, case_id, uid)
+
+    result = RetentionService(conn, storage=_Broken()).purge_due(
+        case_id=case_id, actor_id=uid, authority="test", dry_run=False)
+    assert result.storage_failed == 1
+    assert result.storage_locked == 0, (
+        "a transport failure was recorded as a retention lock")
+
+
+def test_purging_a_document_does_not_abort_on_a_not_null_column(conn):
+    """`body_text` is NOT NULL (0011) and the purge set it to NULL, so the
+    statement aborts the whole transaction with a constraint violation.
+
+    It had never once run against a row: nothing writes
+    `collect.document.retain_until`, so no document has ever been due. The
+    document sweep was dead in two independent ways and the second was
+    hidden behind the first -- which is why fixing only the visible half
+    would have turned a silent no-op into a purge that fails outright the
+    first time somebody wires the clock.
+    """
+    from noctornal_api.retention import RetentionService
+
+    uid = _user(conn)
+    src = conn.execute(
+        """INSERT INTO collect.source
+               (kind, name, base_url, default_reliability, poll_interval_s,
+                jitter_pct, max_rps, parser_key, classification)
+           VALUES ('RSS', %s, 'https://forum.test/f', 'C', 300, 10, 1,
+                   'rss', 'AMBER') RETURNING id""",
+        (f"gov-src-{uuid4().hex[:6]}",)).fetchone()[0]
+    doc = conn.execute(
+        """INSERT INTO collect.document
+               (source_id, external_id, body_text, content_sha256,
+                retain_until)
+           VALUES (%s, %s, 'sensitive body', decode(md5('x'),'hex'),
+                   '2020-01-01')
+           RETURNING id""",
+        (src, uuid4().hex)).fetchone()[0]
+    try:
+        result = RetentionService(conn).purge_due(
+            actor_id=uid, authority="retention schedule", dry_run=False)
+        assert result.documents_purged >= 1
+        row = conn.execute(
+            "SELECT purged_at, body_text FROM collect.document WHERE id = %s",
+            (doc,)).fetchone()
+        assert row[0] is not None, "the document was not marked purged"
+        assert row[1] == "", "the body survived the purge"
+    finally:
+        conn.execute("DELETE FROM collect.document WHERE source_id = %s",
+                     (src,))
+        conn.execute("DELETE FROM collect.source WHERE id = %s", (src,))

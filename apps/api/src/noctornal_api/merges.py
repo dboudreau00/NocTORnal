@@ -59,7 +59,14 @@ class MergeRecord:
     reversed_at: datetime | None
     reversed_by: UUID | None
     reversal_reason: str | None
+    #: Ties MOVED to the target. Excludes ties between the two entities,
+    #: which a merge destroys rather than moves -- counting those here made
+    #: the record disagree with its own audit row and told a case owner
+    #: that a relationship survived somewhere else.
     edges_repointed: int = 0
+    #: Ties BETWEEN the two entities, soft-deleted by the merge. Restored
+    #: by a reversal, which is why they are recorded at all.
+    edges_self_loop_deleted: int = 0
 
     @property
     def is_live(self) -> bool:
@@ -119,13 +126,21 @@ class MergeService:
             # Record BEFORE moving: after the update nothing in core.edge
             # remembers the original endpoints.
             edges = self._c.execute(
-                """SELECT id, src_node_id, dst_node_id FROM core.edge
+                """SELECT id, src_node_id, dst_node_id, edge_type
+                     FROM core.edge
                     WHERE case_id = %s AND deleted_at IS NULL
                       AND (src_node_id = %s OR dst_node_id = %s)""",
                 (case_id, source_node_id, source_node_id),
             ).fetchall()
-            moved = 0
-            for edge_id, esrc, edst in edges:
+            # Counted apart, because they are different things that happened
+            # to the graph. `moved` used to be one number covering both, so
+            # a merge whose only effect was DELETING the tie between the two
+            # entities reported "re-pointed 1 relationship" to the audit
+            # log, the case owner's notification and the UI banner. That is
+            # a destruction described as a move.
+            repointed = 0
+            self_loops_deleted = 0
+            for edge_id, esrc, edst, etype in edges:
                 new_src = target_node_id if esrc == source_node_id else esrc
                 new_dst = target_node_id if edst == source_node_id else edst
                 if new_src == new_dst:
@@ -143,7 +158,7 @@ class MergeService:
                     self._c.execute(
                         "UPDATE core.edge SET deleted_at = %s WHERE id = %s",
                         (now, edge_id))
-                    moved += 1
+                    self_loops_deleted += 1
                     continue
                 self._c.execute(
                     """INSERT INTO core.node_merge_edge
@@ -151,12 +166,38 @@ class MergeService:
                             original_dst_node_id)
                        VALUES (%s, %s, %s, %s)""",
                     (merge_id, edge_id, esrc, edst))
-                self._c.execute(
-                    """UPDATE core.edge SET src_node_id = %s, dst_node_id = %s,
-                              updated_at = %s
-                        WHERE id = %s""",
-                    (new_src, new_dst, now, edge_id))
-                moved += 1
+                try:
+                    self._c.execute(
+                        """UPDATE core.edge
+                              SET src_node_id = %s, dst_node_id = %s,
+                                  updated_at = %s
+                            WHERE id = %s""",
+                        (new_src, new_dst, now, edge_id))
+                except psycopg.errors.UniqueViolation as exc:
+                    # `edge_uniq_active` refused because BOTH entities
+                    # already hold a live tie of this type, with the same
+                    # `valid_from`, to the same third party -- and two
+                    # personas sharing contacts is the topology that most
+                    # often PROVES they are one actor, so this is not an
+                    # edge case, it is the commonest real merge.
+                    #
+                    # The database is right to refuse; folding one into the
+                    # other would create a duplicate active edge. What was
+                    # wrong is that the bare UPDATE let a UniqueViolation
+                    # reach the catch-all handler, so the flagship operation
+                    # of the product failed as "Internal error: unexpected
+                    # failure (ref ...)" -- unactionable, and indexed as a
+                    # bug in the product rather than a decision for the
+                    # analyst.
+                    other = target_node_id if esrc == source_node_id else esrc
+                    raise MergeError(
+                        f"both entities already have a live {etype} tie to "
+                        f"the same third party ({other}), so merging them "
+                        f"would create a duplicate relationship. Retire one "
+                        f"of the two ties, or give it a validity interval, "
+                        f"and merge again."
+                    ) from exc
+                repointed += 1
 
             self._c.execute(
                 """UPDATE core.node
@@ -170,7 +211,11 @@ class MergeService:
                 "source_label": src["label"],
                 "target_node_id": str(target_node_id),
                 "target_label": dst["label"],
-                "edges_repointed": moved,
+                "edges_repointed": repointed,
+                # A tie BETWEEN the two entities is destroyed, not moved.
+                # Folded into `edges_repointed` it read as a relationship
+                # that survived the merge somewhere else.
+                "edges_self_loop_deleted": self_loops_deleted,
                 "reason": reason.strip(),
                 "basis_selector_id": str(basis_selector_id)
                 if basis_selector_id else None,
@@ -183,7 +228,8 @@ class MergeService:
             notify_events.merge_performed(
                 self._c, case_id=case_id, merge_id=merge_id,
                 source_label=src["label"], target_label=dst["label"],
-                edges_repointed=moved, reason=reason.strip(),
+                edges_repointed=repointed,
+                self_loops_deleted=self_loops_deleted, reason=reason.strip(),
                 actor_id=merged_by,
                 # The body names both nodes, so the notification is at least
                 # as classified as the more restricted of them.
@@ -201,6 +247,29 @@ class MergeService:
         Reversal is a RESTORE, not a re-derivation. Working out where an
         edge "should" go after the fact is guesswork, and guesswork is what
         made the merge wrong in the first place.
+
+        ## Reversal is LIFO, and that is now ENFORCED rather than assumed
+
+        A restore writes an edge's recorded originals over wherever that
+        edge is NOW. If a later merge has since moved the same edge, those
+        recorded originals are stale, and writing them yanks the tie out
+        from under a merge that is still live -- leaving the graph
+        asserting a relationship that never existed, while the response,
+        the audit row, the owner's notification and the UI banner all say
+        every tie is back at its original endpoints.
+
+        0055 closed the `deleted_at` half of exactly this: reversing an old
+        merge used to resurrect edges an ANALYST had retired in the
+        meantime. A later MERGE moving the same edge is the same class of
+        "something happened in between" and was still overwritten
+        unconditionally, in both branches.
+
+        So a merge whose edges a later live merge also recorded is refused,
+        naming the merge to reverse first. The check is scoped to the
+        OVERLAPPING edges rather than to merges in general: two unrelated
+        merges in one case do not constrain each other's order, and
+        refusing those would make the panel's Reverse buttons lie in the
+        opposite direction.
         """
         if not reason or not reason.strip():
             raise MergeError("a reversal must say why")
@@ -209,6 +278,29 @@ class MergeService:
             raise MergeError(f"merge {merge_id} not found")
         if not record.is_live:
             raise MergeError("this merge has already been reversed")
+
+        blocker = self._c.execute(
+            """SELECT m2.id, m2.merged_at, count(*) AS shared
+                 FROM core.node_merge_edge mine
+                 JOIN core.node_merge_edge theirs
+                      ON theirs.edge_id = mine.edge_id
+                     AND theirs.merge_id <> mine.merge_id
+                 JOIN core.node_merge m2 ON m2.id = theirs.merge_id
+                WHERE mine.merge_id = %s
+                  AND m2.reversed_at IS NULL
+                  AND m2.merged_at > %s
+                GROUP BY m2.id, m2.merged_at
+                ORDER BY m2.merged_at DESC
+                LIMIT 1""",
+            (merge_id, record.merged_at),
+        ).fetchone()
+        if blocker is not None:
+            raise MergeError(
+                f"a later merge ({blocker[0]}) is still live and moved "
+                f"{blocker[2]} of the same relationship(s). Reversing this "
+                f"one first would write their old endpoints over ties that "
+                f"merge now owns, and the graph would assert a relationship "
+                f"that never existed. Reverse the later merge first.")
 
         now = datetime.now(timezone.utc)
         with self._c.transaction():
@@ -294,8 +386,13 @@ class MergeService:
             """SELECT m.id, m.case_id, m.source_node_id, m.target_node_id,
                       m.reason, m.merged_at, m.merged_by, m.reversed_at,
                       m.reversed_by, m.reversal_reason,
+                      -- Repointed ONLY. A tie between the two entities is
+                      -- destroyed by the merge, not moved, and counting it
+                      -- here made the record disagree with its own audit row.
                       (SELECT count(*) FROM core.node_merge_edge e
-                        WHERE e.merge_id = m.id)
+                        WHERE e.merge_id = m.id AND NOT e.deleted_by_merge),
+                      (SELECT count(*) FROM core.node_merge_edge e
+                        WHERE e.merge_id = m.id AND e.deleted_by_merge)
                  FROM core.node_merge m
                 WHERE m.case_id = %s
                 ORDER BY m.merged_at DESC LIMIT %s""",
@@ -308,8 +405,13 @@ class MergeService:
             """SELECT m.id, m.case_id, m.source_node_id, m.target_node_id,
                       m.reason, m.merged_at, m.merged_by, m.reversed_at,
                       m.reversed_by, m.reversal_reason,
+                      -- Repointed ONLY. A tie between the two entities is
+                      -- destroyed by the merge, not moved, and counting it
+                      -- here made the record disagree with its own audit row.
                       (SELECT count(*) FROM core.node_merge_edge e
-                        WHERE e.merge_id = m.id)
+                        WHERE e.merge_id = m.id AND NOT e.deleted_by_merge),
+                      (SELECT count(*) FROM core.node_merge_edge e
+                        WHERE e.merge_id = m.id AND e.deleted_by_merge)
                  FROM core.node_merge m WHERE m.id = %s""",
             (merge_id,),
         ).fetchone()
@@ -367,4 +469,5 @@ def _record(r) -> MergeRecord:
         id=r[0], case_id=r[1], source_node_id=r[2], target_node_id=r[3],
         reason=r[4], merged_at=r[5], merged_by=r[6], reversed_at=r[7],
         reversed_by=r[8], reversal_reason=r[9], edges_repointed=r[10],
+        edges_self_loop_deleted=r[11],
     )
