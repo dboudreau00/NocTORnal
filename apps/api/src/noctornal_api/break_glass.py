@@ -29,10 +29,21 @@ a role with a dramatic name.
 that overrides quiet hours (decision 46). Somebody's evening is interrupted
 on purpose.
 
-**4. Use is counted, not just grant.** `used_at` and `action_count` exist
-because "was it used" and "was it granted" are different questions, and
-the interesting review case is the grant that was never used -- which
-usually means the analyst found another way, and the emergency was not one.
+**4. Use is counted, not just grant -- AS A DESIGN, NOT AS SHIPPED.**
+`used_at` and `action_count` exist because "was it used" and "was it
+granted" are different questions, and the interesting review case is the
+grant that was never used -- which usually means the analyst found another
+way, and the emergency was not one.
+
+> **NOT WIRED (recorded 2026-08-10).** `record_use()` below is the only
+> thing that writes either column, and it has no caller outside its own
+> test. So `action_count` is **structurally zero on every grant** and
+> `used_at` is always NULL. An officer who reads them as "this grant was
+> never used" is reading a fact about the wiring, not about the analyst.
+> They are therefore NOT published in the API response -- a zero that
+> cannot be anything else is worse than an absent field, because it
+> answers the question. Restoring them means calling `record_use()` from
+> the access path and republishing the fields together, in that order.
 
 **5. Review is mandatory and its absence is visible.** `unreviewed()` is
 the queue. An expired grant with no review is an open item forever; it does
@@ -42,8 +53,30 @@ formality.
 ## What break-glass does NOT do here
 
 It does not grant a permission the user could not otherwise be given, and
-it does not cross a compartment. It raises a user's *effective clearance*
-for one case, for a few hours, with everything above recorded.
+it does not cross a compartment.
+
+> **AND IT DOES NOT CURRENTLY RAISE ANYTHING. Corrected 2026-08-10; this
+> paragraph used to say it "raises a user's *effective clearance* for one
+> case, for a few hours".** It does not. `invoke()` writes a grant row
+> carrying `granted_classification` and `granted_permissions`, audits it,
+> alerts the security officer and queues it for review -- and **no access
+> decision anywhere reads that row.** Effective clearance is resolved by
+> `PgAccessContextStore` straight from `iam.app_user.tlp_clearance`, and
+> outside this module the string `break_glass` appears in `apps/api/src`
+> only in a comment in `deps.py` about step-up. So an analyst who invokes
+> break-glass in an emergency gets a loud, audited, reviewable record and
+> exactly the access they already had.
+>
+> The claim is withdrawn rather than implemented because a wrong statement
+> about an emergency control is the more urgent half: an analyst who
+> believes the elevation worked stops looking for another way in, at 3am,
+> during the incident the control exists for. Implementing it is a
+> deliberate change to the single `AccessContext` construction site and
+> should be made on purpose, not to make a docstring true.
+>
+> **Nothing about the grant, the audit trail, the alert or the review
+> queue is affected by this correction** -- those all work, and they are
+> the parts docs/05 calls the safety. What is missing is the access.
 
 Compartments are deliberately excluded: a compartment is need-to-know, and
 "there is an emergency" is not knowledge of the need. If somebody genuinely
