@@ -805,7 +805,7 @@ function selectTab(name) {
   /* A canvas in a hidden pane has clientWidth 0, so it has to be sized on
      the way in or the trend draws into nothing and reads as "no data". */
   if (name === 'analytics') resizeHistory();
-  if (name === 'triage') loadTriage();
+  if (name === 'triage') { loadTriage(); loadApprovals(); }
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
   if (name === 'comms') {
@@ -4692,6 +4692,8 @@ function wire() {
     state.triageIndex = 0;
     loadTriage();
   });
+  $('apr-refresh').addEventListener('click', loadApprovals);
+  $('apr-state').addEventListener('change', loadApprovals);
   document.addEventListener('keydown', onTriageKey);
   $('an-run').addEventListener('click', runAnalysis);
   /* Changing a parameter invalidates what is on screen. Blank it rather
@@ -4912,9 +4914,203 @@ async function runMerge() {
            '". Reverse it from the entity resolution panel if this was wrong.',
            'info');
   } catch (err) {
+    /* Dual control is a refusal with a NEXT STEP, not a fault. The router
+       answers 409 when the case has the switch on and no approval was
+       supplied -- and before this there was nothing the analyst could do
+       about it from the browser, because raising a request had no
+       surface. Offer to raise it, carrying the SAME reason they just
+       typed: the approver signs the reason, and a merge whose recorded
+       reason is not the one signed off makes the audit log say something
+       nobody agreed to. */
+    if (err instanceof ApiError && err.status === 409
+        && /approval/i.test(err.detail || err.title || '')) {
+      const ask = window.confirm(
+        'This case requires a second signature on merges.\n\n' +
+        'Raise an approval request for merging "' + losing + '" into "' +
+        surviving + '"?\n\nIt will carry the reason you just gave. Somebody '
+        + 'other than you must approve it, and it can then be executed once '
+        + 'from Triage → Dual control.');
+      if (!ask) return;
+      try {
+        await api(cpath('/approvals'), {
+          method: 'POST',
+          json: {
+            operation: 'MERGE',
+            payload: { source_node_id: sel.id, target_node_id: targetId,
+                       reason: reason.trim(), basis_selector_id: null },
+            justification: reason.trim(),
+          },
+        });
+        selectTab('triage');
+        loadApprovals();
+        banner('Approval requested',
+               'Nobody has approved it yet. It is listed under Triage → '
+               + 'Dual control, and you cannot decide your own request.',
+               'info');
+      } catch (raiseErr) {
+        if (raiseErr instanceof ApiError) {
+          inlineProblem($('merge-error'), raiseErr);
+        } else { fail(raiseErr); }
+      }
+      return;
+    }
     if (err instanceof ApiError) inlineProblem($('merge-error'), err);
     else fail(err);
   }
+}
+
+/* --- Dual control ------------------------------------------------------
+ *
+ * Approvals had no analyst surface at all. The notification centre's
+ * "Open approvals" button switched to the Triage tab, which contained
+ * none, and `runMerge` could not supply the `approval_request_id` its own
+ * 409 demands -- so on a case with dual control switched on, Merge was
+ * unreachable from the browser. The control did not make merging
+ * two-person; it made it impossible.
+ *
+ * Requests are listed with their PAYLOAD rather than a summary. An
+ * approval authorises one execution of exact parameters, so an approver
+ * who cannot see the parameters is signing a description of them.
+ */
+async function loadApprovals() {
+  if (!state.caseId) return;
+  const wanted = $('apr-state').value;
+  try {
+    const q = new URLSearchParams({ limit: '100' });
+    if (wanted) q.set('state', wanted);
+    const body = await api(cpath('/approvals') + '?' + q.toString());
+    const rows = body.approvals || [];
+    renderList('apr-list', 'apr-empty', rows, approvalRow);
+    $('apr-counts').textContent = rows.length
+      ? rows.length + ' request(s)' : '';
+    if (!rows.length) {
+      $('apr-empty').textContent = wanted
+        ? 'No ' + wanted.toLowerCase() + ' requests in this case.'
+        : 'No approval requests in this case.';
+    }
+  } catch (err) {
+    renderList('apr-list', 'apr-empty', [], approvalRow);
+    $('apr-counts').textContent = '';
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      $('apr-empty').textContent = refusalText(
+        err, 'Approvals need case.read on this case.');
+      return;
+    }
+    $('apr-empty').textContent = refusalText(
+      err, 'Approvals could not be read. They are not known to be absent.');
+  }
+}
+
+function approvalRow(a) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', a.operation));
+  /* `is_expired` is DERIVED, never stored (0028: no EXPIRED state and no
+     sweeper). A PENDING request past its expiry is not pending in any
+     useful sense, and showing it as PENDING invites somebody to wait for
+     a decision that can no longer be acted on. */
+  const dead = a.state === 'PENDING' && a.is_expired;
+  head.appendChild(el('span', 'chip ' + (
+    a.state === 'APPROVED' ? 'ok'
+      : (a.state === 'REJECTED' || a.state === 'WITHDRAWN') ? 'bad'
+        : dead ? 'warn' : ''), dead ? 'EXPIRED' : a.state));
+  if (a.consumed_at) {
+    const chip = el('span', 'chip small', 'spent');
+    chip.title = 'Already used. An approval authorises ONE execution of '
+               + 'the parameters it was raised over.';
+    head.appendChild(chip);
+  }
+  card.appendChild(head);
+
+  card.appendChild(el('p', null, visibleText(a.justification)));
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('requested', fmtTime(a.requested_at)));
+  facts.appendChild(fact('expires', fmtTime(a.expires_at)));
+  if (a.decided_at) facts.appendChild(fact('decided', fmtTime(a.decided_at)));
+  card.appendChild(facts);
+
+  /* The exact parameters, not a summary of them. */
+  const payload = el('p', 'mono small');
+  payload.textContent = Object.entries(a.payload || {})
+    .map(([k, v]) => k + '=' + visibleText(String(v))).join('  ');
+  card.appendChild(payload);
+  if (a.decision_note) {
+    card.appendChild(el('p', 'help', 'Note: ' + visibleText(a.decision_note)));
+  }
+
+  if (a.state === 'PENDING' && !dead) {
+    const actions = el('div', 'row-actions');
+    for (const [label, approve] of [['Approve', true], ['Reject', false]]) {
+      const b = el('button', 'btn ghost small', label);
+      b.type = 'button';
+      b.addEventListener('click', async () => {
+        const note = window.prompt(
+          label + ' this request?\n\n' + a.operation + '\n' +
+          a.justification + '\n\nA note is recorded with the decision.');
+        if (note === null) return;
+        b.disabled = true;
+        try {
+          await api(cpath('/approvals/' + a.id + '/decide'), {
+            method: 'POST', json: { approve: approve, note: note || null },
+          });
+          loadApprovals();
+        } catch (err) {
+          b.disabled = false;
+          /* The self-approval refusal arrives here, and it is a RULE
+             rather than a fault -- so it is stated, not bannered as an
+             error the analyst did something wrong to cause. */
+          if (err instanceof ApiError) inlineProblem($('apr-counts'), err);
+          else fail(err);
+        }
+      });
+      actions.appendChild(b);
+    }
+    const w = el('button', 'btn ghost small', 'Withdraw');
+    w.type = 'button';
+    w.title = 'For the requester: take back a request nobody has decided.';
+    w.addEventListener('click', async () => {
+      w.disabled = true;
+      try {
+        await api(cpath('/approvals/' + a.id + '/withdraw'), { method: 'POST' });
+        loadApprovals();
+      } catch (err) {
+        w.disabled = false;
+        if (err instanceof ApiError) inlineProblem($('apr-counts'), err);
+        else fail(err);
+      }
+    });
+    actions.appendChild(w);
+    card.appendChild(actions);
+  }
+
+  /* An APPROVED, unspent merge approval is executable from here -- which
+     is the whole point of the surface. Without it the analyst holds a
+     signature and still has no way to spend it. */
+  if (a.state === 'APPROVED' && !a.consumed_at && !a.is_expired
+      && a.operation === 'MERGE') {
+    const run = el('button', 'btn small', 'Execute merge');
+    run.type = 'button';
+    run.addEventListener('click', async () => {
+      run.disabled = true;
+      try {
+        await api(cpath('/merges'), {
+          method: 'POST', json: { approval_request_id: a.id },
+        });
+        invalidateAnalytics();
+        await reloadAll();
+        loadApprovals();
+        banner('Merged under dual control',
+               'The approval is now spent and cannot be reused.', 'info');
+      } catch (err) {
+        run.disabled = false;
+        if (err instanceof ApiError) inlineProblem($('apr-counts'), err);
+        else fail(err);
+      }
+    });
+    card.appendChild(run);
+  }
+  return card;
 }
 
 async function reverseMerge(m) {
@@ -7728,6 +7924,166 @@ function callRow(c) {
 
 /* --- wiring ------------------------------------------------------------ */
 
+/* --- Collected: the Phase 4 read path ----------------------------------
+ *
+ * The collector wrote `collect.document` and `collect.watch_hit` from the
+ * day the phase landed, and nothing read them: no endpoint, no UI, no
+ * search reach. The only trace of a poll an analyst could see was three
+ * integers on a run card, so a watch that fired four hundred times showed
+ * the number 400 and nothing to open.
+ *
+ * Two lists, loaded independently and never in one `Promise.all`: hits are
+ * case-scoped behind `collection.read` ON THE CASE, documents are global
+ * behind the same permission GLOBALLY. Those are different checks and one
+ * can be refused while the other succeeds.
+ */
+async function loadWatchHits() {
+  if (!state.caseId) return;
+  const unack = $('col-hits-unack').checked;
+  try {
+    const q = new URLSearchParams({ limit: '100' });
+    if (unack) q.set('unacknowledged_only', 'true');
+    const body = await api(cpath('/collection/watch-hits') + '?' + q.toString());
+    const hits = body.hits || [];
+    renderList('col-hits-list', 'col-hits-empty', hits, watchHitRow);
+    $('col-hits-counts').textContent = hits.length
+      ? hits.length + ' hit(s), ' + (body.unacknowledged || 0) + ' unread'
+      : '';
+    if (!hits.length) {
+      $('col-hits-empty').textContent = unack
+        ? 'Nothing unacknowledged on this case.'
+        : 'No watch has matched anything on this case yet.';
+    }
+  } catch (err) {
+    renderList('col-hits-list', 'col-hits-empty', [], watchHitRow);
+    $('col-hits-counts').textContent = '';
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      $('col-hits-empty').textContent = refusalText(
+        err, 'Watch hits need collection.read on this case.');
+      return;
+    }
+    $('col-hits-empty').textContent = refusalText(
+      err, 'Watch hits could not be read. They are not known to be absent.');
+  }
+}
+
+function watchHitRow(h) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  if (h.score !== null && h.score !== undefined) {
+    head.appendChild(el('span', 'score' + (h.score >= 0.8 ? ' hot' : ''),
+      Number(h.score).toFixed(2)));
+  }
+  /* A forum title is attacker-chosen text. */
+  head.appendChild(el('span', 'row-title',
+    visibleText(h.title || '(untitled)')));
+  if (!h.acknowledged_at) head.appendChild(el('span', 'chip warn', 'unread'));
+  if (h.suppressed) {
+    const chip = el('span', 'chip', 'suppressed');
+    chip.title = h.suppress_reason || 'suppressed by alert hygiene';
+    head.appendChild(chip);
+  }
+  head.appendChild(el('span', 'chip small', h.classification));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('watch', visibleText(h.watch_name)));
+  facts.appendChild(fact('author', visibleText(h.author_handle)));
+  facts.appendChild(fact('posted', fmtTime(h.posted_at)));
+  facts.appendChild(fact('matched', Object.keys(h.matched_on || {}).join(', ')));
+  card.appendChild(facts);
+
+  if (h.excerpt) card.appendChild(el('p', 'muted small', visibleText(h.excerpt)));
+  /* The URL is DISPLAYED and never linked: fetching attacker
+     infrastructure from an analyst's browser announces the investigation
+     (docs/19) and hands over a referer. Same rule as the capture pane. */
+  if (h.external_url) {
+    card.appendChild(el('p', 'mono small', visibleText(h.external_url)));
+  }
+  if (h.suppressed && h.suppress_reason) {
+    card.appendChild(el('p', 'help', 'Suppressed: ' + h.suppress_reason));
+  }
+
+  if (!h.acknowledged_at) {
+    const ack = el('button', 'btn ghost small', 'Acknowledge');
+    ack.type = 'button';
+    ack.addEventListener('click', async () => {
+      ack.disabled = true;
+      try {
+        await api(cpath('/collection/watch-hits/' + encodeURIComponent(h.id)
+                        + '/acknowledge'), { method: 'POST' });
+        loadWatchHits();
+      } catch (err) { ack.disabled = false; fail(err); }
+    });
+    card.appendChild(ack);
+  } else {
+    card.appendChild(el('p', 'muted small',
+      'Acknowledged ' + fmtTime(h.acknowledged_at)));
+  }
+  return card;
+}
+
+async function loadCollectedDocuments() {
+  const triage = $('col-doc-triage').value;
+  try {
+    const q = new URLSearchParams({ limit: '100' });
+    if (triage) q.set('triage_state', triage);
+    const body = await api('/collection/documents?' + q.toString());
+    const docs = body.documents || [];
+    renderList('col-doc-list', 'col-doc-empty', docs, collectedDocRow);
+    $('col-doc-counts').textContent = docs.length
+      ? docs.length + ' document(s)' : '';
+    if (!docs.length) {
+      $('col-doc-empty').textContent =
+        'Nothing collected yet at your clearance.';
+    }
+  } catch (err) {
+    renderList('col-doc-list', 'col-doc-empty', [], collectedDocRow);
+    $('col-doc-counts').textContent = '';
+    if (err instanceof ApiError && err.status === 403) {
+      $('col-doc-empty').textContent = refusalText(
+        err, 'Collected documents need collection.read.');
+      return;
+    }
+    $('col-doc-empty').textContent = refusalText(
+      err, 'Documents could not be read. They are not known to be absent.');
+  }
+}
+
+function collectedDocRow(d) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(d.title || '(untitled)')));
+  head.appendChild(el('span', 'chip small', d.triage_state));
+  head.appendChild(el('span', 'chip small', d.classification));
+  if (d.is_deleted_upstream) {
+    const chip = el('span', 'chip warn', 'deleted upstream');
+    chip.title = 'Gone from the source since capture. This copy is why '
+               + 'collection persists what it reads.';
+    head.appendChild(chip);
+  }
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('source', visibleText(d.source_name)));
+  facts.appendChild(fact('author', visibleText(d.author_handle)));
+  facts.appendChild(fact('posted', fmtTime(d.posted_at)));
+  if (d.version > 1) facts.appendChild(fact('version', d.version));
+  card.appendChild(facts);
+  if (d.excerpt) {
+    card.appendChild(el('p', 'muted small', visibleText(d.excerpt)));
+  }
+  /* Says the excerpt is an excerpt. Without it a truncated post reads as
+     a short one, and "the thread said nothing more" is a finding. */
+  if (d.truncated) {
+    card.appendChild(el('p', 'help',
+      'Excerpt of ' + d.body_length + ' characters.'));
+  }
+  if (d.external_url) {
+    card.appendChild(el('p', 'mono small', visibleText(d.external_url)));
+  }
+  return card;
+}
+
 let selectFeedsSub = null;
 let selectGovSub = null;
 let selectSamplesSub = null;
@@ -7738,8 +8094,16 @@ function initOpsPanes() {
     if (name === 'queue') loadIngestQueue();
     if (name === 'dead') loadDeadLetters();
     if (name === 'sources') loadSources();
+    /* Documents are NOT loaded on entry. The list is global rather than
+       case-scoped and can be long, and the pane is reached by anyone
+       looking at Sources -- so both lists sit behind their own Load, the
+       way co-participation and the report do. */
     if (name === 'keys') loadKeys();
   });
+  $('col-hits-refresh').addEventListener('click', loadWatchHits);
+  $('col-hits-unack').addEventListener('change', loadWatchHits);
+  $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
+  $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
   selectGovSub = initSubtabs('pane-governance', (name) => {
     if (name === 'retention') loadRetention();
     if (name === 'tombstones') loadTombstones();

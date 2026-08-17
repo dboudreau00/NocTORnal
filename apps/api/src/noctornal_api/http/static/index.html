@@ -582,6 +582,39 @@
 
           <div id="triage-list"></div>
           <p id="triage-empty" class="empty">Nothing awaiting review.</p>
+
+          <!-- DUAL CONTROL. Until 2026-08-10 approvals had no analyst
+               surface at all: the notification centre's "Open approvals"
+               button brought you to this pane, which did not contain any.
+               A merge on a dual-control case needs an approval_request_id
+               and there was no way to obtain one, so Merge was unreachable
+               from the browser whenever the control was switched on. -->
+          <h3 class="h3">Dual control &mdash; approvals</h3>
+          <p class="help">
+            A second signature on the operations a case has put behind one.
+            <strong>You cannot decide your own request</strong>, and an
+            approval is spent when it is used: it authorises one execution
+            of the exact parameters it was raised over, not the operation
+            in general. Rejected and withdrawn requests stay listed &mdash;
+            a request that vanished would hide the fact that somebody once
+            asked.
+          </p>
+          <div class="pane-head">
+            <label class="field inline">
+              <span class="label">Show</span>
+              <select id="apr-state" class="select">
+                <option value="PENDING">Awaiting a decision</option>
+                <option value="">All</option>
+                <option value="APPROVED">Approved</option>
+                <option value="REJECTED">Rejected</option>
+                <option value="WITHDRAWN">Withdrawn</option>
+              </select>
+            </label>
+            <button id="apr-refresh" type="button" class="btn">Load</button>
+            <span id="apr-counts" class="muted small"></span>
+          </div>
+          <div id="apr-list"></div>
+          <p id="apr-empty" class="empty">No approval requests in this case.</p>
         </section>
 
         <!-- ANALYSIS (Phase 3). Every number here is computed against the
@@ -973,8 +1006,66 @@
                     aria-selected="false" tabindex="-1" data-subtab="sources"
                     aria-controls="feeds-sources">Sources</button>
             <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="collected"
+                    aria-controls="feeds-collected">Collected</button>
+            <button type="button" class="subtab" role="tab"
                     aria-selected="false" tabindex="-1" data-subtab="keys"
                     aria-controls="feeds-keys">Keys</button>
+          </div>
+
+          <!-- COLLECTED. The read path for Phase 4: until 2026-08-10 the
+               collector wrote collect.document and collect.watch_hit and
+               nothing read them, so a watch that fired four hundred times
+               showed an analyst the number 400 and nothing to open. -->
+          <div id="feeds-collected" class="subpane" hidden>
+            <h3 class="h3">Watch hits &mdash; what fired on this case</h3>
+            <p class="help">
+              Unacknowledged first, then by score: a hit nobody has looked
+              at outranks a higher-scoring one somebody has already dealt
+              with. <strong>Suppressed hits are shown</strong>, with their
+              reason &mdash; a watch drowning in one recurring thread and a
+              watch that has gone quiet look identical if you hide them,
+              and they need opposite responses.
+            </p>
+            <div class="pane-head">
+              <label class="field inline check">
+                <input id="col-hits-unack" type="checkbox">
+                <span class="label">Unacknowledged only</span>
+              </label>
+              <button id="col-hits-refresh" type="button" class="btn">
+                Load</button>
+              <span id="col-hits-counts" class="muted small"></span>
+            </div>
+            <div id="col-hits-list"></div>
+            <p id="col-hits-empty" class="empty">
+              No watch hits loaded for this case.</p>
+
+            <h3 class="h3">Collected documents</h3>
+            <p class="help">
+              Every source, not just this case: a document hangs off a
+              SOURCE and has no case of its own, so the same forum post is
+              material in however many cases cite it. Bodies are excerpted
+              &mdash; a row marked <em>truncated</em> has more behind it.
+              Purged documents are absent entirely rather than shown empty.
+            </p>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Triage</span>
+                <select id="col-doc-triage" class="select">
+                  <option value="">All</option>
+                  <option value="NEW">New</option>
+                  <option value="TRIAGED">Triaged</option>
+                  <option value="LINKED">Linked</option>
+                  <option value="DISCARDED">Discarded</option>
+                </select>
+              </label>
+              <button id="col-doc-refresh" type="button" class="btn">
+                Load</button>
+              <span id="col-doc-counts" class="muted small"></span>
+            </div>
+            <div id="col-doc-list"></div>
+            <p id="col-doc-empty" class="empty">
+              No collected documents loaded.</p>
           </div>
 
           <!-- INGEST QUEUE -->
