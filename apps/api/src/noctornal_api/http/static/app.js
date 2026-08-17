@@ -7728,6 +7728,166 @@ function callRow(c) {
 
 /* --- wiring ------------------------------------------------------------ */
 
+/* --- Collected: the Phase 4 read path ----------------------------------
+ *
+ * The collector wrote `collect.document` and `collect.watch_hit` from the
+ * day the phase landed, and nothing read them: no endpoint, no UI, no
+ * search reach. The only trace of a poll an analyst could see was three
+ * integers on a run card, so a watch that fired four hundred times showed
+ * the number 400 and nothing to open.
+ *
+ * Two lists, loaded independently and never in one `Promise.all`: hits are
+ * case-scoped behind `collection.read` ON THE CASE, documents are global
+ * behind the same permission GLOBALLY. Those are different checks and one
+ * can be refused while the other succeeds.
+ */
+async function loadWatchHits() {
+  if (!state.caseId) return;
+  const unack = $('col-hits-unack').checked;
+  try {
+    const q = new URLSearchParams({ limit: '100' });
+    if (unack) q.set('unacknowledged_only', 'true');
+    const body = await api(cpath('/collection/watch-hits') + '?' + q.toString());
+    const hits = body.hits || [];
+    renderList('col-hits-list', 'col-hits-empty', hits, watchHitRow);
+    $('col-hits-counts').textContent = hits.length
+      ? hits.length + ' hit(s), ' + (body.unacknowledged || 0) + ' unread'
+      : '';
+    if (!hits.length) {
+      $('col-hits-empty').textContent = unack
+        ? 'Nothing unacknowledged on this case.'
+        : 'No watch has matched anything on this case yet.';
+    }
+  } catch (err) {
+    renderList('col-hits-list', 'col-hits-empty', [], watchHitRow);
+    $('col-hits-counts').textContent = '';
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      $('col-hits-empty').textContent = refusalText(
+        err, 'Watch hits need collection.read on this case.');
+      return;
+    }
+    $('col-hits-empty').textContent = refusalText(
+      err, 'Watch hits could not be read. They are not known to be absent.');
+  }
+}
+
+function watchHitRow(h) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  if (h.score !== null && h.score !== undefined) {
+    head.appendChild(el('span', 'score' + (h.score >= 0.8 ? ' hot' : ''),
+      Number(h.score).toFixed(2)));
+  }
+  /* A forum title is attacker-chosen text. */
+  head.appendChild(el('span', 'row-title',
+    visibleText(h.title || '(untitled)')));
+  if (!h.acknowledged_at) head.appendChild(el('span', 'chip warn', 'unread'));
+  if (h.suppressed) {
+    const chip = el('span', 'chip', 'suppressed');
+    chip.title = h.suppress_reason || 'suppressed by alert hygiene';
+    head.appendChild(chip);
+  }
+  head.appendChild(el('span', 'chip small', h.classification));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('watch', visibleText(h.watch_name)));
+  facts.appendChild(fact('author', visibleText(h.author_handle)));
+  facts.appendChild(fact('posted', fmtTime(h.posted_at)));
+  facts.appendChild(fact('matched', Object.keys(h.matched_on || {}).join(', ')));
+  card.appendChild(facts);
+
+  if (h.excerpt) card.appendChild(el('p', 'muted small', visibleText(h.excerpt)));
+  /* The URL is DISPLAYED and never linked: fetching attacker
+     infrastructure from an analyst's browser announces the investigation
+     (docs/19) and hands over a referer. Same rule as the capture pane. */
+  if (h.external_url) {
+    card.appendChild(el('p', 'mono small', visibleText(h.external_url)));
+  }
+  if (h.suppressed && h.suppress_reason) {
+    card.appendChild(el('p', 'help', 'Suppressed: ' + h.suppress_reason));
+  }
+
+  if (!h.acknowledged_at) {
+    const ack = el('button', 'btn ghost small', 'Acknowledge');
+    ack.type = 'button';
+    ack.addEventListener('click', async () => {
+      ack.disabled = true;
+      try {
+        await api(cpath('/collection/watch-hits/' + encodeURIComponent(h.id)
+                        + '/acknowledge'), { method: 'POST' });
+        loadWatchHits();
+      } catch (err) { ack.disabled = false; fail(err); }
+    });
+    card.appendChild(ack);
+  } else {
+    card.appendChild(el('p', 'muted small',
+      'Acknowledged ' + fmtTime(h.acknowledged_at)));
+  }
+  return card;
+}
+
+async function loadCollectedDocuments() {
+  const triage = $('col-doc-triage').value;
+  try {
+    const q = new URLSearchParams({ limit: '100' });
+    if (triage) q.set('triage_state', triage);
+    const body = await api('/collection/documents?' + q.toString());
+    const docs = body.documents || [];
+    renderList('col-doc-list', 'col-doc-empty', docs, collectedDocRow);
+    $('col-doc-counts').textContent = docs.length
+      ? docs.length + ' document(s)' : '';
+    if (!docs.length) {
+      $('col-doc-empty').textContent =
+        'Nothing collected yet at your clearance.';
+    }
+  } catch (err) {
+    renderList('col-doc-list', 'col-doc-empty', [], collectedDocRow);
+    $('col-doc-counts').textContent = '';
+    if (err instanceof ApiError && err.status === 403) {
+      $('col-doc-empty').textContent = refusalText(
+        err, 'Collected documents need collection.read.');
+      return;
+    }
+    $('col-doc-empty').textContent = refusalText(
+      err, 'Documents could not be read. They are not known to be absent.');
+  }
+}
+
+function collectedDocRow(d) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(d.title || '(untitled)')));
+  head.appendChild(el('span', 'chip small', d.triage_state));
+  head.appendChild(el('span', 'chip small', d.classification));
+  if (d.is_deleted_upstream) {
+    const chip = el('span', 'chip warn', 'deleted upstream');
+    chip.title = 'Gone from the source since capture. This copy is why '
+               + 'collection persists what it reads.';
+    head.appendChild(chip);
+  }
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('source', visibleText(d.source_name)));
+  facts.appendChild(fact('author', visibleText(d.author_handle)));
+  facts.appendChild(fact('posted', fmtTime(d.posted_at)));
+  if (d.version > 1) facts.appendChild(fact('version', d.version));
+  card.appendChild(facts);
+  if (d.excerpt) {
+    card.appendChild(el('p', 'muted small', visibleText(d.excerpt)));
+  }
+  /* Says the excerpt is an excerpt. Without it a truncated post reads as
+     a short one, and "the thread said nothing more" is a finding. */
+  if (d.truncated) {
+    card.appendChild(el('p', 'help',
+      'Excerpt of ' + d.body_length + ' characters.'));
+  }
+  if (d.external_url) {
+    card.appendChild(el('p', 'mono small', visibleText(d.external_url)));
+  }
+  return card;
+}
+
 let selectFeedsSub = null;
 let selectGovSub = null;
 let selectSamplesSub = null;
@@ -7738,8 +7898,16 @@ function initOpsPanes() {
     if (name === 'queue') loadIngestQueue();
     if (name === 'dead') loadDeadLetters();
     if (name === 'sources') loadSources();
+    /* Documents are NOT loaded on entry. The list is global rather than
+       case-scoped and can be long, and the pane is reached by anyone
+       looking at Sources -- so both lists sit behind their own Load, the
+       way co-participation and the report do. */
     if (name === 'keys') loadKeys();
   });
+  $('col-hits-refresh').addEventListener('click', loadWatchHits);
+  $('col-hits-unack').addEventListener('change', loadWatchHits);
+  $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
+  $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
   selectGovSub = initSubtabs('pane-governance', (name) => {
     if (name === 'retention') loadRetention();
     if (name === 'tombstones') loadTombstones();

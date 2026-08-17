@@ -1233,3 +1233,152 @@ class CollectionService:
                  "consecutive_failures": r[4],
                  "note": "configured but never collected from"}
                 for r in rows]
+
+    # ── the read path ──────────────────────────────────────────────────
+    #
+    # Everything above WRITES `collect.document` and `collect.watch_hit`.
+    # Until 2026-08-10 nothing read them back. No endpoint, no UI, and no
+    # search reach -- `SearchService` covers `core.node` and
+    # `core.evidence` only, and `document.search_tsv`'s GIN index was used
+    # by no query in the tree. A watch could fire four hundred times and
+    # the analyst saw the integer 400 on a run card and could not open one
+    # of them.
+    #
+    # That is the tags/node-sets defect one layer up: not a service with
+    # no caller, an entire PHASE with no caller. The lifecycle columns
+    # show the intent was never finished rather than decided against --
+    # `watch_hit` carries `notified_at`, `suppressed`, `acknowledged_by`,
+    # `acknowledged_at` and a partial index for the unnotified set, none
+    # of them written or read by anything.
+    #
+    # Clearance is a PARAMETER here rather than constructor state, unlike
+    # CommsService, because this same class does the collecting and the
+    # collector has no user. A read method that inherited a NULL clearance
+    # from a worker would be a read method that returns everything.
+
+    def documents(self, *, clearance: str,
+                  source_id: UUID | None = None,
+                  triage_state: str | None = None,
+                  since: datetime | None = None,
+                  limit: int = 100) -> list[dict]:
+        """Collected documents, newest first.
+
+        NOT case-scoped, because `collect.document` has no `case_id`: a
+        document hangs off a SOURCE, and the same forum post is evidence
+        in however many cases cite it. So this is gated on the global
+        `collection.read` and filtered by classification, which defaults
+        to AMBER and can be higher.
+
+        `body_text` is excerpted. The full text of a forum thread is not a
+        list-view concern, and an endpoint that returns every body pulls
+        megabytes to render twenty titles.
+
+        Purged documents are excluded outright. `retention` NULLs
+        `body_text` and sets `purged_at`; a row whose text is gone renders
+        as an EMPTY document rather than as a deletion, which is the
+        reported-as-the-wrong-thing shape this codebase keeps finding.
+        """
+        rows = self._c.execute(
+            """SELECT d.id, d.source_id, s.name, d.external_url, d.title,
+                      left(d.body_text, 400), d.author_handle, d.posted_at,
+                      d.captured_at, d.lang, d.version, d.triage_state,
+                      d.classification::text, d.is_deleted_upstream,
+                      length(d.body_text)
+                 FROM collect.document d
+                 JOIN collect.source s ON s.id = d.source_id
+                WHERE d.purged_at IS NULL
+                  AND d.classification <= %s::core.tlp
+                  AND (%s::uuid IS NULL OR d.source_id = %s)
+                  AND (%s::text IS NULL OR d.triage_state = %s)
+                  AND (%s::timestamptz IS NULL OR d.captured_at >= %s)
+                ORDER BY coalesce(d.posted_at, d.captured_at) DESC
+                LIMIT %s""",
+            (clearance, source_id, source_id, triage_state, triage_state,
+             since, since, limit)).fetchall()
+        return [{"id": str(r[0]), "source_id": str(r[1]), "source_name": r[2],
+                 "external_url": r[3], "title": r[4], "excerpt": r[5],
+                 "author_handle": r[6],
+                 "posted_at": r[7].isoformat() if r[7] else None,
+                 "captured_at": r[8].isoformat() if r[8] else None,
+                 "lang": r[9], "version": r[10], "triage_state": r[11],
+                 "classification": r[12], "is_deleted_upstream": r[13],
+                 # So a reader can tell a short post from a truncated one.
+                 "body_length": r[14],
+                 "truncated": (r[14] or 0) > 400}
+                for r in rows]
+
+    def watch_hits(self, case_id: UUID, *, clearance: str,
+                   unacknowledged_only: bool = False,
+                   limit: int = 100) -> list[dict]:
+        """What the watches on this case matched.
+
+        Case-scoped, because `collect.watch` carries `case_id` even though
+        the document it matched does not.
+
+        Unacknowledged first, then by score: a hit nobody has looked at
+        outranks a higher-scoring one somebody has already dealt with.
+
+        A suppressed hit is RETURNED, carrying its reason. Suppression is
+        alert hygiene -- the same thread matching hourly -- and hiding it
+        outright would make a watch that is drowning look like a watch
+        that is quiet, which is exactly the difference an analyst needs.
+        """
+        rows = self._c.execute(
+            """SELECT h.id, h.watch_id, w.name, h.document_id, d.title,
+                      left(d.body_text, 240), d.external_url,
+                      d.author_handle, d.posted_at, h.matched_on, h.score,
+                      h.created_at, h.notified_at, h.suppressed,
+                      h.suppress_reason, h.acknowledged_by,
+                      h.acknowledged_at, d.classification::text
+                 FROM collect.watch_hit h
+                 JOIN collect.watch w ON w.id = h.watch_id
+                 JOIN collect.document d ON d.id = h.document_id
+                WHERE w.case_id = %s
+                  AND d.purged_at IS NULL
+                  AND d.classification <= %s::core.tlp
+                  AND (NOT %s OR h.acknowledged_at IS NULL)
+                ORDER BY (h.acknowledged_at IS NULL) DESC,
+                         h.score DESC NULLS LAST, h.created_at DESC
+                LIMIT %s""",
+            (case_id, clearance, unacknowledged_only, limit)).fetchall()
+        return [{"id": str(r[0]), "watch_id": str(r[1]), "watch_name": r[2],
+                 "document_id": str(r[3]), "title": r[4], "excerpt": r[5],
+                 "external_url": r[6], "author_handle": r[7],
+                 "posted_at": r[8].isoformat() if r[8] else None,
+                 "matched_on": r[9],
+                 "score": float(r[10]) if r[10] is not None else None,
+                 "created_at": r[11].isoformat() if r[11] else None,
+                 "notified_at": r[12].isoformat() if r[12] else None,
+                 "suppressed": r[13], "suppress_reason": r[14],
+                 "acknowledged_by": str(r[15]) if r[15] else None,
+                 "acknowledged_at": r[16].isoformat() if r[16] else None,
+                 "classification": r[17]}
+                for r in rows]
+
+    def acknowledge_hit(self, hit_id: UUID, *, user_id: UUID,
+                        clearance: str) -> dict:
+        """Mark a hit as looked at. Idempotent, and it does not re-stamp.
+
+        `acknowledged_at` is set once. Re-acknowledging would rewrite when
+        somebody FIRST saw it, and that timestamp is the only evidence of
+        how long a hit sat unread.
+
+        The clearance check is inside the UPDATE rather than in a prior
+        SELECT, so there is no window between deciding and writing, and a
+        hit on a document above the caller's clearance is not merely
+        hidden from the list but unacknowledgeable.
+        """
+        row = self._c.execute(
+            """UPDATE collect.watch_hit h
+                  SET acknowledged_by = coalesce(h.acknowledged_by, %s),
+                      acknowledged_at = coalesce(h.acknowledged_at, now())
+                 FROM collect.document d
+                WHERE h.id = %s AND d.id = h.document_id
+                  AND d.classification <= %s::core.tlp
+            RETURNING h.id, h.acknowledged_by, h.acknowledged_at""",
+            (user_id, hit_id, clearance)).fetchone()
+        if row is None:
+            raise CollectionError(
+                "no such watch hit, or it is above your clearance")
+        return {"id": str(row[0]), "acknowledged_by": str(row[1]),
+                "acknowledged_at": row[2].isoformat() if row[2] else None}
