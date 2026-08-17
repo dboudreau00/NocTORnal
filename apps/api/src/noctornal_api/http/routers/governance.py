@@ -370,7 +370,13 @@ def purge_out_of_schedule(
         result = _purger(conn).purge_out_of_schedule(
             actor_id=user.user_id, authority=body.authority,
             approval_request_id=body.approval_request_id,
-            case_id=body.case_id, evidence_ids=body.evidence_ids)
+            # `ids`, NOT `body.evidence_ids`. The membership check above
+            # de-duplicates and the service was then handed the raw list,
+            # where every count is a `len()` of it -- so `[x, x, x]` wrote
+            # object_count 3 into an append-only tombstone for one exhibit.
+            # The purge itself is `id = ANY(...)` and unaffected; it is the
+            # permanent record of how much was destroyed that was wrong.
+            case_id=body.case_id, evidence_ids=ids)
     except RetentionError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return _purge_response(result, dry_run=False)
@@ -389,10 +395,16 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         "held_back": result.held_back,
         # decision 50, reported rather than folded into a boolean.
         "storage_locked": result.storage_locked,
+        # A lock is a lawful refusal that expires; a failure is a store that
+        # did not answer. Collapsing the second into the first turned "we do
+        # not know what happened to the bytes" into the specific claim "the
+        # object is under a retention lock".
+        "storage_failed": result.storage_failed,
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
         "notice": (
-            "DRY RUN -- nothing was destroyed."
+            "DRY RUN -- nothing was destroyed. The counts above are what "
+            "WOULD be destroyed if this ran for real."
             if dry_run else
             "Destruction is irreversible. `storage_locked` counts objects "
             "the store REFUSED to delete: COMPLIANCE-mode object lock can "

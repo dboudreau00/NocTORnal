@@ -45,6 +45,11 @@ def _case(conn: psycopg.Connection, case_id: UUID) -> tuple[str, str, frozenset[
 def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                     source_label: str, target_label: str, edges_repointed: int,
                     reason: str, actor_id: UUID,
+                    #: Ties BETWEEN the two entities, destroyed rather than
+                    #: moved. Folded into `edges_repointed` they read as
+                    #: relationships that survived the merge somewhere else,
+                    #: which is a destruction described as a move.
+                    self_loops_deleted: int = 0,
                     element_classification: str | None = None,
                     element_compartments: frozenset[str] = frozenset()) -> None:
     """docs/01 asks for this one by name: "Merges require `graph.merge` with
@@ -65,7 +70,13 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                  f"relationship(s). Sign in to review it."),
         # Labels here: in-app only, behind the gate.
         body=(f"{source_label!r} was merged into {target_label!r}, moving "
-              f"{edges_repointed} relationship(s).\n\nReason given: {reason}\n\n"
+              f"{edges_repointed} relationship(s)."
+              + (f" A further {self_loops_deleted} relationship(s) BETWEEN "
+                 f"the two were destroyed rather than moved: a tie from an "
+                 f"entity to itself means nothing, so the merge retired it. "
+                 f"Reversing the merge brings it back."
+                 if self_loops_deleted else "")
+              + f"\n\nReason given: {reason}\n\n"
               f"Merging is the operation most likely to quietly corrupt a "
               f"case (docs/01). If this is wrong, it is reversible from the "
               f"entity-resolution panel and the reversal restores every "

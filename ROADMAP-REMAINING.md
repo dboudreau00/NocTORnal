@@ -33,7 +33,7 @@ honest delta between that plan and the build.
 > fully green suite.
 
 **State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
-head `0055`, **1834 passing, 0 failing, 0 skipped** on a live stack —
+head `0055`, **1845 passing, 0 failing, 0 skipped** on a live stack —
 Postgres, Redis, MinIO and Mailpit up, both pytest roots, 4m36s. The rise
 from 1444 is ~350 NEW tests, not new code under test: the element-id
 invariant became derived (22 hand-listed ids → 297), plus
@@ -436,18 +436,26 @@ now a named constant, and `test_ui_invariants.py` asserts it against
 proved its own lesson — *a green suite either side of a contract that
 neither side asserts.*
 
-**Still open, in severity order:**
+**All eight CLOSED 2026-08-10**, each with a regression test confirmed to
+fail against the commit before it:
 
-| | Where | What |
-|---|---|---|
-| HIGH | `merges.py` | **`unmerge` blind-writes recorded endpoints over an edge a LATER live merge now owns**, and reports success. 0055 stopped a reversal resurrecting edges an *analyst* retired afterwards; a later *merge* moving the same edge is the same class and is still overwritten. Reversal is LIFO-only and nothing enforces or hints at it — the panel lists every merge with an identical Reverse button. Verified live (rolled back): reverse-earlier-first leaves a tie asserting `B→C` when the evidence says `A→C`, with `edges_restored: 1` and the banner "Every tie is back at its original endpoints". |
-| HIGH | `retention.py` | **A dry-run purge returns all-zero counts.** It computes the sweep and returns before any counter is assigned, so the preview cannot distinguish "nothing is due" from "N exhibits are about to be destroyed" — on the one control whose entire purpose is to be read before an irreversible action. |
-| HIGH | `retention.py` | **`collect.document.retain_until` is never written by anything**, so the document retention sweep is structurally dead — and the purge `UPDATE` would abort on a NOT NULL column if it ever did fire. |
-| HIGH | `merges.py` | A merge colliding with `edge_uniq_active` returns **500 "Internal error", not 409** — and the commonest real merge, two records sharing a tie to a third party, is exactly the collision case. Reproduced live. |
-| HIGH | `approvals.py` | **A refused `consume` records nothing.** The `APPROVAL_CONSUME_REFUSED` audit row is INSERTed inside the transaction the `ApprovalError` then rolls back, on both production paths — so a replayed or expired approval leaves no trace of having been refused. |
-| MEDIUM | `retention.py` | `storage_locked` reports the **batch size**, not the refusal count, and a bare `except Exception` collapses every storage error to `LOCKED_UNTIL_RETENTION` while `STORAGE_FAILED` is dead code. Written into an append-only tombstone. |
-| MEDIUM | `merges.py` | `edges_repointed` **counts the tie the merge DELETED as a tie that moved** — in the API response, the audit detail, the case-owner notification ("re-pointed N relationships") and the UI. |
-| LOW | `governance.py` | `purge_out_of_schedule` counts **duplicated exhibit ids as separate destructions** in the tombstone: the membership check de-duplicates, the service is handed the raw list. |
+| | Where | What | |
+|---|---|---|---|
+| HIGH | `merges.py` | **`unmerge` blind-wrote recorded endpoints over an edge a LATER live merge now owned**, and reported success. 0055 stopped a reversal resurrecting edges an *analyst* retired afterwards; a later *merge* moving the same edge is the same class and was still overwritten. Verified live (rolled back): reverse-earlier-first left a tie asserting `B→C` when the evidence says `A→C`, with `edges_restored: 1` and the banner "Every tie is back at its original endpoints". Reversal is LIFO and is now ENFORCED — scoped to merges that share an EDGE, because two unrelated merges do not constrain each other's order and blocking those would make the panel's Reverse buttons lie in the other direction. | ✅ |
+| HIGH | `retention.py` | **A dry-run purge returned all-zero counts** — the full sweep computed and the answer thrown away, so a preview of twelve exhibits about to be destroyed was byte-identical to a preview of a case with nothing due, and the pane rendered both as "Nothing would be destroyed". `held_back` was the only non-zero figure it could produce, which counted the items being SPARED. | ✅ |
+| HIGH | `retention.py` | **The document sweep was dead in TWO independent ways, and the second was hidden behind the first.** Nothing writes `collect.document.retain_until`, so no document was ever due — and the purge `UPDATE` set `body_text = NULL` on a NOT NULL column, so the first time it did fire it aborted the whole transaction. Found because the regression test for the first half made the second half run for the first time. The `NULL` is now `''` (the ROW survives on purpose; `purged_at` is what marks it destroyed). The missing clock is **reported as a warning rather than silently fixed**: deriving a deadline here would arm a destruction path over every document already collected, all instantly past a retention they were never assigned. Also fixed: the document query took no case filter, so `purge_due(case_id=X)` swept deployment-wide documents and would have tombstoned them under case X — the cross-case destruction the out-of-schedule router refuses by name, arriving through the scheduled path. | ✅ |
+| HIGH | `merges.py` | A merge colliding with `edge_uniq_active` returned **500 "Internal error", not 409** — and the commonest real merge, two records sharing a tie to a third party, IS the collision case. The suite could not catch it: the fixture gives the two personas different edge types. Now a 409 naming the tie and telling the analyst to retire or interval-bound one of them. | ✅ |
+| HIGH | `approvals.py` | **A refused `consume` recorded nothing.** The `APPROVAL_CONSUME_REFUSED` row was INSERTed inside the transaction the `ApprovalError` then rolled back, on both production paths — so the single detection signal for the attack this module exists to stop (take a signature for merging two obvious spam bots, then execute the two nodes the case turns on) was generated and immediately destroyed. Written on its own connection now, the same technique `collection.py` uses to keep a RUNNING row alive across an unwind. The suite missed it because the existing test calls `consume()` with no enclosing transaction — where the row survives, and only there. | ✅ |
+| MEDIUM | `retention.py` | `storage_locked` reported the **batch size**, so one refusal in a hundred and a hundred refusals wrote the same number into an append-only tombstone. Now the refusal count — and a bare `except Exception` no longer collapses every storage error into `LOCKED_UNTIL_RETENTION`, which is a specific claim about a retention lock that a connection reset is not. `STORAGE_FAILED` was dead code and is now reachable and published. | ✅ |
+| MEDIUM | `merges.py` | `edges_repointed` **counted the tie the merge DELETED as a tie that moved** — in the record, the audit detail, the owner's notification ("re-pointed N relationships") and the UI. Split into `edges_repointed` and `edges_self_loop_deleted` everywhere, including the two count sub-queries that made the record disagree with its own audit row. The existing test asserted the defect (`== 2`) and now asserts the truth. | ✅ |
+| LOW | `governance.py` | `purge_out_of_schedule` counted **duplicated exhibit ids as separate destructions**: the membership check de-duplicated and the service was handed the raw list, so `[x, x, x]` wrote `object_count 3` for one exhibit into an append-only tombstone. | ✅ |
+
+**Found while fixing them:** the first version of the cross-case
+regression test cleaned up on its last line, so when it was run against
+the unfixed code and FAILED — which is the entire point of a regression
+test — it left a due document behind, and the next unscoped `purge_due`
+in the suite inherited it. Cleanup is now in a `finally`. A test that
+only tidies up when it passes poisons the run it was written to protect.
 
 Refuted, and recorded so nobody re-reports them: the `purge_due` 500-object
 truncation, dead letters being unreachable by HTTP purge, and evidence
