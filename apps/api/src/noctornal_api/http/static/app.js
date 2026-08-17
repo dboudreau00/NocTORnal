@@ -321,6 +321,40 @@ function withSafeLabel(row) {
   if (safe === row.label) return row;
   return Object.assign({}, row, { label: safe, label_raw: row.label });
 }
+
+/** Every key that carries a human-chosen name in an analytics response. */
+const _LABEL_KEYS = new Set(['label', 'source_label', 'target_label']);
+
+/** `withSafeLabel` for a NESTED payload.
+ *
+ *  The analytics suite buries names several levels down — `removal_set[]`,
+ *  `top_betweenness_set[]`, `cut_vertices[]`, `bridges[]`,
+ *  `triads[].nodes[]`, `dyads[]` — and the flat helper above cannot reach
+ *  any of them, so the pane drew eight sets of raw labels while the graph
+ *  and search paths were de-fanged.
+ *
+ *  Applied at the boundary rather than at each draw, for the reason the
+ *  console has already learned twice: there are two dozen sites that render
+ *  a node label and one of them will always be the one somebody forgot.
+ */
+function safeLabelsDeep(value) {
+  if (Array.isArray(value)) return value.map(safeLabelsDeep);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const key of Object.keys(value)) {
+    const v = value[key];
+    if (_LABEL_KEYS.has(key) && typeof v === 'string') {
+      const safe = visibleText(v);
+      out[key] = safe;
+      /* Keep the original under `_raw`, as withSafeLabel does: the exact
+         bytes matter when the question is what the subject actually wrote. */
+      if (safe !== v) out[key + '_raw'] = v;
+    } else {
+      out[key] = safeLabelsDeep(v);
+    }
+  }
+  return out;
+}
 function setMsg(node, text) {
   node.textContent = text || '';
   node.hidden = !text;
@@ -5132,7 +5166,11 @@ async function runAnalysis() {
        and is cached against its own removal-set size. A failure of the
        expensive one must not blank the cheap one. */
     const suite = await api(cpath('/analytics?' + q.toString()));
-    state.analytics = suite;
+    /* De-fang at the boundary. Analytics is the pane that NAMES people —
+       "removing these three would disconnect the network" — so a label
+       carrying a right-to-left override here renames the person an analyst
+       is about to act on. */
+    state.analytics = safeLabelsDeep(suite);
     let kpp = null;
     try {
       kpp = await api(cpath('/analytics/key-player?' + kq.toString()));
@@ -5140,7 +5178,7 @@ async function runAnalysis() {
       kpp = { error: err instanceof ApiError ? err.detail || err.title
                                              : 'the request failed' };
     }
-    state.analyticsKpp = kpp;
+    state.analyticsKpp = safeLabelsDeep(kpp);
     renderAnalytics();
     /* computed_at_ms is how long the ORIGINAL run took, so on a cache hit
        it describes that run, not this response. Saying "served from cache
@@ -5666,14 +5704,39 @@ async function loadQuarantine() {
     renderList('ing-quarantine-list', 'ing-quarantine-empty',
       body.records, ingestRow);
   } catch (err) {
-    show(box, false);
-    /* Remember the refusal so the next queue load does not repeat it.
-       A step-up expiry is NOT remembered as a permanent refusal: that one
-       is recoverable, and latching it would hide the section for the rest
-       of the session from somebody who does hold the permission. */
+    /* Latch ONLY on the refusal this was written for.
+       `ingest.manage` is SYS_ADMIN-only, so for every other role this 403s
+       for the whole session, and re-probing would hum AUTHZ_DENIED into the
+       one signal a security officer reads for probing. That is a DURABLE
+       fact about the caller, so remembering it is right.
+
+       Nothing else is durable. The predicate used to be "anything that is
+       not a step-up expiry", which swept in a network drop (ApiError with
+       status 0), a 502, a 503 and a 429 — one blip and the section was gone
+       for the rest of the session, with `show(box, false)` as the only
+       trace. That reports a transport failure as a permission fact, and it
+       reports it by making the evidence disappear. */
+    if (err instanceof ApiError && err.status === 403) {
+      show(box, false);
+      state.quarantineVisible = false;
+      return;
+    }
+    /* A step-up expiry is recoverable and stays unlatched, as before. */
     const stepUp = err instanceof ApiError
       && /re-authentication/i.test(err.detail || '');
-    if (!stepUp) state.quarantineVisible = false;
+    if (stepUp) {
+      show(box, false);
+      return;
+    }
+    /* Everything else: the caller may well hold the permission and we do
+       not know what is in there. Say so rather than hiding it — an empty
+       section reads as "nothing unattached", which is a claim about the
+       data we are in no position to make. */
+    show(box, true);
+    renderList('ing-quarantine-list', 'ing-quarantine-empty', [], ingestRow);
+    $('ing-quarantine-empty').textContent = refusalText(
+      err, 'The unattached queue could not be read. It is not known to be '
+      + 'empty — reopen this tab to retry.');
   }
 }
 
@@ -6555,37 +6618,109 @@ async function loadUnverified() {
   }
 }
 
+/* Co-participation coverage: what was left OUT of the network.
+ *
+ * `coparticipation.py` states the rule this renders — "a cap that silently
+ * drops data is worse than no cap, because the output looks complete" —
+ * and then reports every exclusion so the analyst can tell a sparse network
+ * from a filtered one. The browser dropped all of it: it read
+ * `body.warnings`, a key the service has never emitted. So the one cap the
+ * module refuses to apply silently was, on screen, silent.
+ *
+ * Rendered even when nothing was excluded. "Nothing was excluded" is a
+ * finding about the network; a blank space is not.
+ */
+function renderCoParticipationCoverage(body) {
+  const host = $('comms-copart-coverage');
+  clear(host);
+  const cov = body && body.coverage;
+  if (!cov) return;
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('rooms seen', cov.conversations_seen));
+  facts.appendChild(fact('projected', cov.conversations_projected));
+  facts.appendChild(fact('too small', cov.conversations_too_small));
+  facts.appendChild(fact('oversized', cov.conversations_oversized,
+    cov.conversations_oversized ? 'warn' : ''));
+  facts.appendChild(fact('excluded: incidental',
+    cov.participants_excluded_incidental));
+  facts.appendChild(fact('excluded: unresolved',
+    cov.participants_excluded_unresolved));
+  /* Not-visible is a CLEARANCE fact, not a data-quality one: the network is
+     smaller because of who is asking. Kept distinct for that reason. */
+  facts.appendChild(fact('excluded: not visible to you',
+    cov.participants_excluded_not_visible,
+    cov.participants_excluded_not_visible ? 'warn' : ''));
+  host.appendChild(facts);
+
+  for (const room of cov.oversized || []) {
+    host.appendChild(el('p', 'help warn',
+      'Room ' + visibleText(room.conversation_id)
+      + ' on ' + visibleText(room.platform)
+      + ' excluded: ' + room.participants + ' participants ('
+      + room.projectable_participants + ' projectable)'
+      + (room.provenance_class
+        ? ' · ' + visibleText(room.provenance_class) : '')));
+  }
+  if (cov.note) host.appendChild(el('p', 'help', cov.note));
+  if (body.reading) host.appendChild(el('p', 'help', body.reading));
+}
+
 async function loadCoParticipation() {
   if (!state.caseId) return;
   try {
     const body = await api(cpath('/comms/co-participation'));
-    const ties = body.ties || body.edges || [];
+    const ties = body.edges || [];
+    /* An edge carries vertex KEYS (`node:<uuid>` / `handle:<h>`), never a
+       label — so the map is not decoration. Without it this pane cannot
+       name anybody, which is how it came to render "undefined — undefined"
+       on every row while looking populated.
+
+       `visibleText` is mandatory and not defensive habit: a HANDLE vertex's
+       label is a string the subject chose on a forum. A right-to-left
+       override in it reorders the two names either side of the dash, so the
+       tie reads backwards while the DOM says otherwise. */
+    const labels = new Map();
+    for (const n of body.nodes || []) {
+      labels.set(n.key, visibleText(n.label || n.key));
+    }
+    const name = (key) => labels.get(key) || visibleText(key);
+    const weighting = (body.projection || {}).weighting;
     renderList('comms-copart', 'comms-copart-empty', ties, (t) => {
       const card = el('div', 'card row-card compact');
       const head = el('div', 'row-head');
       const w = Number(t.weight || 0);
       head.appendChild(el('span', 'score', w.toFixed(2)));
       head.appendChild(el('span', 'row-title',
-        (t.source_label || t.source || t.a) + ' — '
-        + (t.target_label || t.target || t.b)));
+        name(t.src) + ' — ' + name(t.dst)));
       /* Invariant 4: an inferred edge stays visually distinct and never
          silently becomes an asserted one. */
       head.appendChild(el('span', 'chip warn', 'inferred'));
       card.appendChild(head);
       const facts = el('div', 'facts');
-      if (t.rooms !== undefined) facts.appendChild(fact('rooms', t.rooms));
-      if (t.weighting) facts.appendChild(fact('weighting', t.weighting));
+      facts.appendChild(fact('shared rooms', t.shared_conversations));
+      if (t.inference_method) {
+        facts.appendChild(fact('method', t.inference_method));
+      }
       card.appendChild(facts);
       return card;
     });
+    /* Weighting is a property of the RUN, not of a tie, and the service
+       says weights are not comparable across parameters — so it is stated
+       once for the network rather than repeated on every row. */
     $('comms-copart-count').textContent = ties.length
-      ? ties.length + ' inferred tie(s)' : '';
-    for (const w of body.warnings || []) {
-      $('comms-copart').appendChild(el('p', 'help warn', w));
-    }
+      ? ties.length + ' inferred tie(s)'
+        + (weighting ? ' · ' + weighting + ' weighting' : '')
+      : '';
+    renderCoParticipationCoverage(body);
   } catch (err) {
     if (err instanceof ApiError && (err.status === 403 || err.status === 400)) {
       renderList('comms-copart', 'comms-copart-empty', [], () => el('div'));
+      /* The count and the coverage block describe the PREVIOUS successful
+         load. Left standing under a refusal they attribute one case's
+         network to another — and a refusal is not an empty state. */
+      $('comms-copart-count').textContent = '';
+      clear($('comms-copart-coverage'));
       $('comms-copart-empty').textContent = refusalText(
         err, 'Co-participation needs comms.read on the case.');
       return;
@@ -6828,13 +6963,43 @@ function dcpUrl(value) {
   return copyable(span, shown, 'the defanged URL');
 }
 
+/* A failed deception load must not leave the previous case's rows on
+ * screen.
+ *
+ * All three of these panes reported the error into the COUNTS span and
+ * returned before the render, so the list kept whatever it last held. Open
+ * Deception on case A, switch to case B, get a 403 — and case A's defanged
+ * attacker URLs, BEC subject lines and spoofed caller IDs sit under case
+ * B's header and its TLP chip. The 403 is the likely path, not the rare
+ * one: all three endpoints gate on `evidence.read`.
+ *
+ * There is no third state to invent here, unlike the graph's UNKNOWN: an
+ * empty list plus a named refusal already says "not known", whereas the
+ * previous case's rows say "these are case B's captures".
+ */
+function deceptionLoadFailed(err, ids, rowFn, need) {
+  /* Clear BEFORE reporting. Reporting first and returning is exactly how
+     the stale rows survived. */
+  renderList(ids.list, ids.empty, [], rowFn);
+  $(ids.empty).textContent = refusalText(err, need);
+  /* A stale "12 captures" is the same lie in miniature. */
+  $(ids.counts).textContent = '';
+  /* The open detail card belongs to a row that is no longer on screen. */
+  if (ids.detail) show($(ids.detail), false);
+  inlineProblem($(ids.counts), err);
+}
+
 async function loadCaptures() {
   if (!state.caseId) return;
   let data;
   try {
     data = await api(cpath('/deception/captures'));
   } catch (err) {
-    inlineProblem($('dcp-cap-counts'), err);
+    deceptionLoadFailed(err, {
+      list: 'dcp-cap-list', empty: 'dcp-cap-empty',
+      counts: 'dcp-cap-counts', detail: 'dcp-cap-detail',
+    }, captureRow, 'Reading deception captures needs evidence.read on this '
+      + 'case.');
     return;
   }
   const rows = data.captures || [];
@@ -6995,7 +7160,11 @@ async function loadDeceptionEmails() {
     data = await api(cpath('/deception/emails')
       + ($('dcp-divergent').checked ? '?divergent_only=true' : ''));
   } catch (err) {
-    inlineProblem($('dcp-eml-counts'), err);
+    deceptionLoadFailed(err, {
+      list: 'dcp-eml-list', empty: 'dcp-eml-empty',
+      counts: 'dcp-eml-counts', detail: 'dcp-eml-detail',
+    }, emailRow, 'Reading deception messages needs evidence.read on this '
+      + 'case.');
     return;
   }
   const rows = data.emails || [];
@@ -7216,7 +7385,11 @@ async function loadDeceptionCalls() {
   try {
     data = await api(cpath('/deception/calls'));
   } catch (err) {
-    inlineProblem($('dcp-call-counts'), err);
+    /* No detail card for calls; the other two have one. */
+    deceptionLoadFailed(err, {
+      list: 'dcp-call-list', empty: 'dcp-call-empty',
+      counts: 'dcp-call-counts', detail: null,
+    }, callRow, 'Reading deception calls needs evidence.read on this case.');
     return;
   }
   const rows = data.calls || [];
