@@ -33,7 +33,7 @@ honest delta between that plan and the build.
 > fully green suite.
 
 **State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
-head `0055`, **1794 passing, 0 failing, 0 skipped** on a live stack —
+head `0055`, **1834 passing, 0 failing, 0 skipped** on a live stack —
 Postgres, Redis, MinIO and Mailpit up, both pytest roots, 4m36s. The rise
 from 1444 is ~350 NEW tests, not new code under test: the element-id
 invariant became derived (22 hand-listed ids → 297), plus
@@ -128,9 +128,9 @@ regressed — the measure got honest.**
 | 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2 — Sociogram | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. **Live push landed 2026-07-26** — Postgres LISTEN/NOTIFY, one listener per process, the socket carrying no case content. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
-| 4 — Collection | **75%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. UI landed 2026-07-25 (Feeds → Sources). All ten F15 service defects fixed at the service, with regressions. |
+| 4 — Collection | **85%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **The READ PATH landed 2026-08-10** and was the largest gap in this phase: `collect.document` and `collect.watch_hit` were written by the collector from the day the phase shipped and read by NOTHING — no endpoint, no UI, no search reach — so a watch could fire 400 times and an analyst saw the integer 400 with nothing to open. Three routes (documents, watch-hits, acknowledge), a Feeds → **Collected** subtab, and no migration: every column already existed, including the `notified_at`/`suppressed`/`acknowledged_by`/`acknowledged_at` lifecycle set that nothing had ever written or read. Still open at the service: `run_once` never raises proposals, so `collection.py`'s claim that collected material "reaches the graph only through the proposal queue a human works" remains false for the collector. |
 | 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
-| 6 — Tradecraft | **88%** | ◐ | ✅ | ◐ | ◐ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. **"The UI is complete" was wrong**: approvals have no analyst surface at all — the one `approvals` reference in `app.js` is a button that switches tab — so `runMerge()` cannot obtain the `approval_request_id` its own 409 demands, and under dual control Merge is unreachable from the browser. ACH stance and the dual-control policy toggle have no surface either. What remains is the assumptions register, those three surfaces, and a hostile review of the phase as a whole. |
+| 6 — Tradecraft | **88%** | ◐ | ✅ | ◐ | ◐ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. What remains is the assumptions register, the ACH-stance and dual-control-policy surfaces, and the hostile review of the phase as a whole. |
 | 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
@@ -327,24 +327,45 @@ incident. Recorded rather than left to be rediscovered.
   and reported 68 breaks on honest history — the exact failure a
   tamper-evidence tool must never have.
 
-> **These two are ONE defect, diagnosed 2026-08-10.** The advisory lock is
-> correct and is not the problem. The tail selector under it is:
-> `SELECT row_hash INTO prev FROM audit.event ORDER BY seq DESC LIMIT 1`
-> takes the highest `seq`, and `seq` is a sequence — allocated at INSERT,
-> out of order under concurrency, and never rolled back. So the writer
-> picks a predecessor by an ordering that is not the chain's, two
-> transactions choose the same one, and the fork the lock exists to
-> prevent is manufactured by the lock's own critical section. That is also
-> exactly why `seq` order is not chain order: the same wrong ordering,
-> observed from the reading end. Reproducible with two uvicorn workers, so
-> it is not an artefact of concurrent test runs.
+> **REFUTED 2026-08-10, and no migration was written.** An earlier draft
+> of this entry blamed the tail selector — `ORDER BY seq DESC LIMIT 1`
+> picking a predecessor by an ordering that is not the chain's — and
+> proposed migration 0056 to fix it. **Three experiments say the writer is
+> sound, so 0056 was NOT written.** Rewriting the hottest write path in
+> the system (every audited action across 28 modules) on an unreproduced
+> premise would have been the more dangerous act:
 >
-> This matters more than its severity suggests: FORK is the only detector
-> for a fabricated audit row, and it is currently switched off in the
-> verifier's `intact` verdict *because the writer produces forks*. Fixing
-> the writer is the precondition for re-arming the detector. **The same
-> defect is unfixed in `core.custody_chain_hash()`, which has no verifier
-> of any kind** and whose docstring invokes FRE 902(13)–(14).
+> | Experiment | Result |
+> |---|---|
+> | Two connections, one holding the xact advisory lock mid-INSERT | The second **blocked** for a full 2.5s `statement_timeout`. Concurrency is serialised. |
+> | `INSERT … SELECT` over three rows in one statement | **Three DISTINCT predecessors.** The BEFORE trigger sees rows already inserted by its own statement. |
+> | The live development database | 3,947 rows, **one** genesis, **zero** forks. |
+>
+> No production code writes `prev_hash` or `row_hash` — the trigger owns
+> both — and all three triggers are enabled. The 67 forks were most likely
+> the same artefact as the 68 "breaks" this module reported before its
+> `seq`-ordering bug was fixed: counted by a verifier that was itself
+> wrong. Two of those experiments now ship as tests, so if the property
+> ever stops holding, the old explanation becomes correct again and the
+> docstring says to change it back.
+>
+> **What was real, and IS fixed:** the chain had no anchor. A row inserted
+> with `prev_hash NULL` passed every check — LINK exempts it by
+> construction, FORK filters `prev_hash IS NOT NULL`, and CONTENT
+> *blesses* it because the hash input for such a row is the literal string
+> `GENESIS`. Demonstrated against the old verifier: forging a second
+> "first row" left it reporting **`intact=True, breaks=0, forks=0`**. That
+> is the shape of a truncation, and the one thing no relative check can
+> see. `verify_chain` now counts genesis rows whole-table (never
+> windowed), reports `GENESIS` / `NO_GENESIS` as tampering, and publishes
+> `genesis_count`. **The fork split is kept** — a fork still is not proof
+> of editing and legacy databases may carry real ones in an append-only
+> table — but it is no longer explained away as normal concurrency, so one
+> now deserves investigation.
+>
+> Still open: the same missing anchor in `core.custody_chain_hash()`,
+> which has no verifier of any kind and whose docstring invokes
+> FRE 902(13)–(14).
 
 **None of this is a regression.** It is the same lesson this file already
 records twice: a green suite either side of a contract that neither side

@@ -93,16 +93,41 @@ def verify(
         # guarantee, without being told the log was edited.
         "forks": len(report.forks),
         "fork_note": (
-            "Rows sharing a predecessor. Produced by concurrent writers, not "
-            "by editing: `seq` is drawn before the chaining trigger takes its "
-            "lock, so two writers can chain off one tail. Worth knowing (the "
-            "chain cannot be fully linearised) but it is not evidence of "
-            "tampering."
+            "Rows sharing a predecessor. Still not evidence of editing, and "
+            "still not counted as tampering — but no longer explained away "
+            "as normal concurrency. Measured on this code, the chaining "
+            "trigger's advisory lock DOES serialise concurrent writers and a "
+            "multi-row insert chains correctly, so a fork is not known to be "
+            "reachable by ordinary traffic. Treat one as worth "
+            "investigating: what it means for certain is that the chain "
+            "cannot be fully linearised."
         ) if report.forks else None,
+        # How many rows claim to be the chain's first. Always reported, like
+        # `checked`: 1 is the answer that says the chain is anchored, and
+        # only an explicit number distinguishes that from "not looked at".
+        "genesis_count": report.genesis_count,
+        "genesis_note": (
+            "More than one row claims to be the first. The chaining trigger "
+            "writes a NULL predecessor only into an EMPTY table, under a "
+            "lock, and no application code writes prev_hash at all — so a "
+            "second one means the trigger was bypassed. Unlike a fork, this "
+            "IS evidence of tampering, and it is the shape a truncation "
+            "leaves: delete the first rows, re-anchor the next one, and "
+            "every other check still passes."
+            if report.genesis_count > 1 else
+            "The chain has no first row, though it has rows. The original "
+            "genesis was removed; every surviving row still links to a real "
+            "predecessor, so no other check can see this."
+        ) if report.genesis_count != 1 and report.checked else None,
         "breaks": [
             {
                 "seq": b.seq,
-                "occurred_at": b.occurred_at.isoformat(),
+                # NO_GENESIS describes a row that is NOT THERE, so it has no
+                # timestamp. Calling .isoformat() on it unconditionally
+                # would 500 the one endpoint an officer reaches for during
+                # an incident -- the same failure break-glass already had.
+                "occurred_at": (b.occurred_at.isoformat()
+                                if b.occurred_at else None),
                 "action": b.action,
                 "kind": b.kind,
                 "actor_id": str(b.actor_id) if b.actor_id else None,
