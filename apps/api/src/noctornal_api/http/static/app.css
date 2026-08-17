@@ -412,6 +412,11 @@ select.select { appearance: none; padding-right: 24px; }
 .tl-head { display: flex; align-items: center; gap: 10px; }
 .tl-current { color: var(--text-primary); margin-left: auto; }
 .tl-density { display: block; width: 100%; height: 24px; }
+/* Metric-history trend. Sized here and drawn in JS for the same reason the
+   density strip is: the CSP leaves no inline style to place a point with.
+   No animation of any kind — a chart that fades in is a chart that can be
+   missing, and this one is read as a claim about a person. */
+.hist-chart { display: block; width: 100%; height: 132px; }
 .tl-labels { display: flex; align-items: baseline; gap: 12px; }
 .tl-labels #tl-note { flex: 1; text-align: center; }
 .tl-labels #tl-max { margin-left: auto; }

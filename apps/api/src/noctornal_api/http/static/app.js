@@ -156,6 +156,14 @@ const state = {
      per projection -- changing either invalidates them. */
   analytics: null,
   analyticsKpp: null,
+  /* Metric history is per-node and, unlike the suite, NOT per-projection:
+     the series spans every completed run in the case. So a projection
+     change does not invalidate it — but a case change does, and so does
+     picking a different actor. */
+  analyticsHistory: null,
+  analyticsHistoryNode: null,
+  analyticsHistoryLabel: '',
+  analyticsHistoryMetric: 'betweenness',
 
   /* metrics */
   metrics: null,
@@ -720,6 +728,11 @@ async function openCase(caseId) {
      numbers into this one would be worse than showing none. */
   state.analytics = null;
   state.analyticsKpp = null;
+  /* The trend names ONE actor. Left standing across a case switch it would
+     chart case A's person under case B's header. */
+  state.analyticsHistory = null;
+  state.analyticsHistoryNode = null;
+  state.analyticsHistoryLabel = '';
   state.triage = [];
   state.triageCounts = {};
   state.triageIndex = 0;
@@ -789,6 +802,9 @@ function selectTab(name) {
     show($('pane-' + tab.dataset.tab), on);
   }
   if (name === 'graph') { resizeGraph(); resizeDensity(); }
+  /* A canvas in a hidden pane has clientWidth 0, so it has to be sized on
+     the way in or the trend draws into nothing and reads as "no data". */
+  if (name === 'analytics') resizeHistory();
   if (name === 'triage') loadTriage();
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
@@ -4723,7 +4739,18 @@ function wire() {
     renderInspector();
   });
 
-  window.addEventListener('resize', () => { resizeDensity(); });
+  /* Re-chart on a metric change, but only when an actor has been picked:
+     firing a fetch for the empty selection would spend a request to render
+     the same "pick an actor" line. */
+  $('an-hist-metric').addEventListener('change', () => {
+    state.analyticsHistoryMetric = $('an-hist-metric').value;
+    if (state.analyticsHistoryNode) {
+      loadMetricHistory(state.analyticsHistoryNode,
+                        state.analyticsHistoryLabel);
+    }
+  });
+
+  window.addEventListener('resize', () => { resizeDensity(); resizeHistory(); });
 }
 
 /* A token handed over in the URL fragment (#token=...) is adopted and the
@@ -5304,6 +5331,18 @@ function renderAnalyticsTable(a) {
     tr.appendChild(el('td', null,
       n.community === null || n.community === undefined
         ? '—' : String(n.community)));
+    /* Its own control rather than a second meaning for the row click: the
+       row already means "show me this actor in the graph", and one gesture
+       that does two things is one an analyst learns to distrust. */
+    const trend = el('td');
+    const trendBtn = el('button', 'btn ghost small', 'Trend');
+    trendBtn.type = 'button';
+    trendBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      loadMetricHistory(n.id, n.label);
+    });
+    trend.appendChild(trendBtn);
+    tr.appendChild(trend);
     tr.addEventListener('click', () => {
       selectTab('graph');
       selectNode(n.id);
@@ -5329,6 +5368,220 @@ function rankCell(value, rank, percentile, total) {
       ? '' : ' · p' + num(percentile, 0)));
   td.appendChild(meta);
   return td;
+}
+
+/* ── metric history ────────────────────────────────────────────────────
+ *
+ * Phase 3's checklist calls a rising betweenness trend "visible". It has
+ * been visible to `curl` since the endpoint was built: nothing in this file
+ * called it.
+ *
+ * Four things this pane must not do, each of which the console has already
+ * learned the hard way:
+ *
+ *  1. It never joins the suite in a `Promise.all`. The suite needs
+ *     `analytics.run` and so does this, but a failure here must not blank a
+ *     table that already rendered.
+ *  2. A 403 is not an empty state. "No history" and "you may not see the
+ *     history" are different facts and an analyst acts on them differently.
+ *  3. A GAP IS NOT A ZERO. A run where the metric was undefined for this
+ *     actor — the constraint of an isolate, say — writes no row at all, so
+ *     the series is sparse. Drawing a straight line across it invents a
+ *     measurement, and the invented one sits in the middle of a trend
+ *     somebody is reading as a claim about a person. The path breaks.
+ *  4. The series arrives NEWEST FIRST. A left-to-right time axis has to
+ *     reverse it, and getting that backwards silently inverts every trend
+ *     on screen — rising reads as falling.
+ */
+const histCanvas = $('an-hist-chart');
+const histCtx = histCanvas.getContext('2d');
+
+async function loadMetricHistory(nodeId, label) {
+  if (!state.caseId || !nodeId) return;
+  state.analyticsHistoryNode = nodeId;
+  state.analyticsHistoryLabel = label || '';
+  const metric = $('an-hist-metric').value;
+  state.analyticsHistoryMetric = metric;
+  $('an-hist-who').textContent = 'loading ' + metric.replace(/_/g, ' ')
+    + ' for ' + visibleText(state.analyticsHistoryLabel) + '…';
+  try {
+    const q = new URLSearchParams({ metric: metric, limit: '50' });
+    const body = await api(
+      cpath('/analytics/history/' + encodeURIComponent(nodeId))
+      + '?' + q.toString());
+    state.analyticsHistory = body;
+    renderMetricHistory();
+  } catch (err) {
+    /* Own try/catch, own surface. `#an-results`, `#an-status` and the
+       actors table are deliberately untouched. */
+    state.analyticsHistory = null;
+    renderList('an-hist-body', 'an-hist-empty', [], histRow);
+    drawHistory();
+    $('an-hist-who').textContent = '';
+    if (err instanceof ApiError
+        && (err.status === 403 || err.status === 404 || err.status === 400)) {
+      $('an-hist-empty').textContent = refusalText(
+        err, 'Metric history needs analytics.run on this case.');
+      return;
+    }
+    $('an-hist-empty').textContent = refusalText(
+      err, 'The trend could not be read. It is not known to be empty.');
+  }
+}
+
+function renderMetricHistory() {
+  const body = state.analyticsHistory;
+  const series = (body && body.series) || [];
+  renderList('an-hist-body', 'an-hist-empty', series, histRow);
+  if (!series.length) {
+    /* A legitimate 200 with nothing in it, which is its OWN fact and not
+       the refusal above: the actor is visible, the metric is valid, and no
+       completed run at this clearance has recorded it. */
+    $('an-hist-empty').textContent =
+      'No completed run has recorded this metric for this actor at your '
+      + 'visibility. A trend needs at least two runs.';
+  }
+  $('an-hist-who').textContent = series.length
+    ? visibleText(state.analyticsHistoryLabel) + ' · '
+      + series.length + ' run' + (series.length === 1 ? '' : 's')
+    : visibleText(state.analyticsHistoryLabel);
+  drawHistory();
+}
+
+function histRow(p) {
+  const tr = el('tr');
+  tr.appendChild(el('td', null, fmtTime(p.at)));
+  const val = el('td', null, metricNum(p.value, 4));
+  if (p.is_approximate) {
+    const chip = el('span', 'chip small warn', 'approx');
+    chip.title = 'Computed with sampling (betweenness pivots), so this '
+               + 'value is an estimate and small movements between two '
+               + 'approximate runs may be sampling noise rather than change.';
+    val.appendChild(document.createTextNode(' '));
+    val.appendChild(chip);
+  }
+  tr.appendChild(val);
+  tr.appendChild(el('td', null,
+    p.rank === null || p.rank === undefined
+      ? '—' : ordinal(p.rank) + ' of ' + (p.node_count || '?')));
+  tr.appendChild(el('td', null,
+    p.percentile === null || p.percentile === undefined
+      ? '—' : 'p' + num(p.percentile, 0)));
+  /* The preset is per-point and not per-chart on purpose: weights are not
+     comparable across parameters, so two points from different presets are
+     two different measurements and the row has to say so. */
+  const params = p.params || {};
+  const preset = el('td', null, p.preset || '—');
+  if (params.decay_half_life_months) {
+    preset.appendChild(el('span', 'muted small',
+      '  decay ' + params.decay_half_life_months + 'mo'));
+  }
+  tr.appendChild(preset);
+  return tr;
+}
+
+function resizeHistory() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
+  if (!w || !h) return;
+  histCanvas.width = Math.round(w * dpr);
+  histCanvas.height = Math.round(h * dpr);
+  histCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawHistory();
+}
+
+/** The trend, drawn rather than styled — same reason as the density strip:
+ *  the CSP leaves no inline style to place a point with. */
+function drawHistory() {
+  const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
+  if (!w || !h) return;
+  histCtx.clearRect(0, 0, w, h);
+  histCtx.fillStyle = PAINT.surface2 || '#1E2432';
+  histCtx.fillRect(0, 0, w, h);
+
+  const baseline = () => {
+    histCtx.strokeStyle = PAINT.hairline || '#303849';
+    histCtx.lineWidth = 1;
+    histCtx.beginPath();
+    histCtx.moveTo(0, h - 0.5);
+    histCtx.lineTo(w, h - 0.5);
+    histCtx.stroke();
+  };
+
+  const body = state.analyticsHistory;
+  const raw = (body && body.series) || [];
+  if (raw.length < 1) { baseline(); return; }
+
+  /* Oldest on the LEFT. The API orders newest first. */
+  const pts = raw.slice().reverse();
+
+  const pad = { l: 8, r: 8, t: 10, b: 14 };
+  const iw = Math.max(1, w - pad.l - pad.r);
+  const ih = Math.max(1, h - pad.t - pad.b);
+
+  const times = pts.map((p) => Date.parse(p.at))
+    .filter((t) => Number.isFinite(t));
+  const tMin = Math.min.apply(null, times);
+  const tMax = Math.max.apply(null, times);
+  const defined = pts.filter(
+    (p) => typeof p.value === 'number' && Number.isFinite(p.value));
+  if (!defined.length) { baseline(); return; }
+  const vals = defined.map((p) => p.value);
+  let vMin = Math.min.apply(null, vals);
+  let vMax = Math.max.apply(null, vals);
+  /* A flat series is a real finding — "this actor has not moved" — so it
+     draws as a flat line down the middle rather than dividing by zero. */
+  if (vMax - vMin < 1e-12) { vMin -= 0.5; vMax += 0.5; }
+
+  const x = (p, i) => {
+    if (tMax > tMin) {
+      const t = Date.parse(p.at);
+      if (Number.isFinite(t)) {
+        return pad.l + ((t - tMin) / (tMax - tMin)) * iw;
+      }
+    }
+    return pad.l + (pts.length === 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
+  };
+  const y = (v) => pad.t + ih - ((v - vMin) / (vMax - vMin)) * ih;
+
+  baseline();
+
+  /* The path, broken across undefined runs. */
+  histCtx.strokeStyle = PAINT.accent || '#6EA8FE';
+  histCtx.lineWidth = 2;
+  histCtx.beginPath();
+  let pen = false;
+  pts.forEach((p, i) => {
+    const ok = typeof p.value === 'number' && Number.isFinite(p.value);
+    if (!ok) { pen = false; return; }
+    const px = x(p, i), py = y(p.value);
+    if (pen) histCtx.lineTo(px, py); else histCtx.moveTo(px, py);
+    pen = true;
+  });
+  histCtx.stroke();
+
+  /* Points. An approximate run is marked, because two approximate values
+     can differ by sampling alone and that must not read as movement. */
+  pts.forEach((p, i) => {
+    const ok = typeof p.value === 'number' && Number.isFinite(p.value);
+    if (!ok) return;
+    histCtx.fillStyle = p.is_approximate
+      ? (PAINT.alert || '#E0674A') : (PAINT.accent || '#6EA8FE');
+    histCtx.beginPath();
+    histCtx.arc(x(p, i), y(p.value), p.is_approximate ? 3.5 : 2.5,
+                0, Math.PI * 2);
+    histCtx.fill();
+  });
+
+  /* Ends only. A crowded axis is unreadable at this height, and the table
+     below carries every exact value anyway. */
+  histCtx.fillStyle = PAINT.dim || '#8A93A6';
+  histCtx.font = PAINT.monoFont || '10px monospace';
+  histCtx.textBaseline = 'alphabetic';
+  histCtx.textAlign = 'left';
+  histCtx.fillText(num(vMax, 3), pad.l, pad.t - 1);
+  histCtx.textAlign = 'right';
+  histCtx.fillText(num(vMin, 3), w - pad.r, h - 2);
 }
 
 function renderKeyPlayer() {
