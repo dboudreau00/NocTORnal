@@ -700,16 +700,33 @@ def test_the_trend_is_drawn_oldest_first():
         "backwards and every trend is inverted")
 
 
-def test_the_trend_does_not_interpolate_across_undefined_runs():
-    """A run where the metric was undefined for this actor -- the constraint
-    of an isolate -- writes NO row, so the series is sparse. Drawing a
-    straight line across the hole invents a measurement, and the invented
-    one sits in the middle of a trend somebody is reading as a claim about
-    a person."""
+def test_an_unrenderable_value_is_not_drawn_as_a_position():
+    """A guard, and deliberately not called gap handling.
+
+    `analytics_runs` writes no row when a metric is undefined for a node
+    (`if value is None: continue`), and `node_metric.value` is NOT NULL --
+    so an undefined run is ABSENT from the series rather than null, and
+    absent cannot be told from "no run happened" at this endpoint. The line
+    spans it. The pane says so in its help text instead of implying the
+    axis is continuous, which is the assertion below.
+
+    The `pen` break still matters: if a value ever arrives unrenderable, it
+    must not be drawn as a position.
+    """
     body = _history_js()
     assert "pen = false" in body, (
-        "the path is not broken across gaps, so an undefined run is drawn "
-        "as a value")
+        "an unrenderable value would be drawn at some position anyway")
+    html = _html()
+    start = html.index("Trend &mdash; one actor across past runs")
+    # Whitespace-normalised: the source wraps prose at 72 columns, so any
+    # phrase long enough to be worth asserting on is split by a newline and
+    # an indent. A test that cannot survive re-wrapping is a test that gets
+    # deleted the first time somebody reflows the file.
+    help_text = re.sub(r"\s+", " ", html[start:html.index("</p>", start)])
+    assert "does not appear here at all" in help_text, (
+        "the pane does not disclose that a run with no defined value for "
+        "this actor is invisible to it, so a straight segment reads as "
+        "'nothing changed' when it may be 'not measured'")
 
 
 def test_the_trend_canvas_has_an_accessible_twin():
