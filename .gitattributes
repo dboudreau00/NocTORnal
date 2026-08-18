@@ -28,3 +28,15 @@ apps/api/tests/fixtures/pgp/** -text
 # machine nobody has prepared, so it cannot depend on the person who
 # cloned it having configured core.autocrlf correctly.
 *.sh text eol=lf
+
+# The packaged release is a BUILD ARTIFACT that lives in the repo, so
+# `git archive` would put the previous copy inside the new one -- and the
+# next regeneration would nest that, doubling the file every time.
+#
+# It has not happened yet only because the zip was first built before it
+# was itself committed. Excluding it from the export closes the trap
+# before somebody runs package_release.ps1 twice and wonders why the
+# download is 5MB.
+# (quoted: gitattributes splits on whitespace, and this path has spaces --
+# unquoted it parsed as three patterns and silently did nothing.)
+"NocTORnal - Alpha Release.zip" export-ignore

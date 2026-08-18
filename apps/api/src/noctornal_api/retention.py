@@ -155,6 +155,11 @@ class PurgeResult:
     #: `except Exception`, which turned "the store did not answer" into the
     #: specific and defensible claim "the object is under a lock".
     storage_failed: int = 0
+    #: Objects the store confirmed it removed. Reported so the three add up
+    #: to what was attempted: without it an operator reading
+    #: `evidence_purged: 100, storage_locked: 3` cannot tell whether the
+    #: other 97 went or were never tried.
+    storage_deleted: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -421,6 +426,7 @@ class RetentionService:
                 storage = self._purge_evidence(evidence_ids)
                 outcome = storage.outcome
                 result.evidence_purged = len(evidence_ids)
+                result.storage_deleted = storage.deleted
                 if outcome == STORAGE_LOCKED:
                     # The REFUSAL count, not the batch size.
                     result.storage_locked = storage.locked
@@ -590,6 +596,7 @@ class RetentionService:
                 # most consequential record this module produces.
                 result.storage_locked = storage.locked
                 result.storage_failed = storage.failed
+                result.storage_deleted = storage.deleted
                 result.tombstones.append(self._tombstone(
                     case_id=case_id, object_type="evidence",
                     ids=evidence_ids, authority=authority, actor_id=actor_id,
