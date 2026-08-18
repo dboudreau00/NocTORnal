@@ -138,11 +138,14 @@ broker visually.
       dyads (a pair carrying both a vouch and an accusation)
 - [x] Metric panel with rank, percentile and approximation flags
 - [x] Trust decay at projection time (docs/03), never mutating stored weight
-- [~] Per-node metric history — endpoint, whitelist, visibility scoping
-      and `node_metric` rows all exist and are tested. **Nothing in the
-      UI calls it.** `app.js` makes exactly two analytics requests and
-      neither is the history one, so no trend is visible to anyone not
-      using `curl` (audited 2026-07-26).
+- [x] Per-node metric history — endpoint, whitelist, visibility scoping
+      and `node_metric` rows all exist and are tested, and the **Trend**
+      control on each actor row charts them (2026-08-10). Was `[~]` with
+      "Nothing in the UI calls it" from 2026-07-26 until then. The chart
+      discloses what it cannot show: a run in which an actor had no
+      defined value is ABSENT from the series rather than null, and this
+      endpoint cannot tell that apart from no run having happened, so a
+      long straight segment is not evidence that nothing changed.
 
 **Done when:** the tool answers "who holds this network together" with
 something better than degree count. — **Met.** On `OP-LATTICEWORK-26`
@@ -160,8 +163,11 @@ Deliberately NOT built, and why:
 - **Cohesive blocking, CONCOR, regular equivalence, correspondence
   analysis.** docs/03 lists them; none is needed to answer the phase's
   question, and each is a large piece of work.
-- **Change-point detection and metric time series in the UI.** The history
-  endpoint exists and is tested; nothing charts it yet.
+- **Change-point detection.** ~~Metric time series in the UI~~ landed
+  2026-08-10 (Analysis → Trend). Detecting a CHANGE POINT in that series
+  automatically is the part still not done, and it is the harder half: a
+  trend an analyst reads is a prompt, and a trend the tool calls a change
+  is a finding.
 - **Per-case trust-decay default.** The half-life is a request parameter
   stored on the projection; `core."case"` has no column for a default.
 

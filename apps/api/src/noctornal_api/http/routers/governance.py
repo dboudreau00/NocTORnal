@@ -400,6 +400,10 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         # not know what happened to the bytes" into the specific claim "the
         # object is under a retention lock".
         "storage_failed": result.storage_failed,
+        # So the three account for the batch: an operator reading
+        # `evidence_purged: 100, storage_locked: 3` cannot otherwise
+        # tell whether the other 97 went or were never tried.
+        "storage_deleted": result.storage_deleted,
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
         "notice": (
