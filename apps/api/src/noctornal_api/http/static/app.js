@@ -1568,12 +1568,12 @@ function drawDensity() {
   const w = tlCanvas.clientWidth, h = tlCanvas.clientHeight;
   if (!w || !h) return;
   tlCtx.clearRect(0, 0, w, h);
-  tlCtx.fillStyle = PAINT.surface2 || '#1E2432';
+  tlCtx.fillStyle = PAINT.surface2 || '#2D2030';
   tlCtx.fillRect(0, 0, w, h);
 
   const span = state.timeSpan;
   if (!span || span.max <= span.min) {
-    tlCtx.strokeStyle = PAINT.hairline || '#303849';
+    tlCtx.strokeStyle = PAINT.hairline || '#463549';
     tlCtx.lineWidth = 1;
     tlCtx.beginPath();
     tlCtx.moveTo(0, h - 0.5);
@@ -1592,13 +1592,13 @@ function drawDensity() {
   let peak = 0;
   for (const c of counts) if (c > peak) peak = c;
   const bw = w / buckets;
-  tlCtx.fillStyle = PAINT.accentDim || '#2F6B66';
+  tlCtx.fillStyle = PAINT.accentDim || '#2E7168';
   for (let i = 0; i < buckets; i += 1) {
     if (!counts[i]) continue;
     const bh = Math.max(2, (counts[i] / peak) * (h - 4));
     tlCtx.fillRect(i * bw + 0.5, h - bh, Math.max(1, bw - 1), bh);
   }
-  tlCtx.strokeStyle = PAINT.hairline || '#303849';
+  tlCtx.strokeStyle = PAINT.hairline || '#463549';
   tlCtx.lineWidth = 1;
   tlCtx.beginPath();
   tlCtx.moveTo(0, h - 0.5);
@@ -1607,7 +1607,7 @@ function drawDensity() {
 
   const x = (posFromAsOf() / 1000) * w;
   tlCtx.strokeStyle = state.proj.as_of ? (PAINT.alert || '#D4A03C')
-                                      : (PAINT.accent || '#4EA8A0');
+                                      : (PAINT.accent || '#4FC1AF');
   tlCtx.lineWidth = 2;
   tlCtx.beginPath();
   tlCtx.moveTo(clamp(x, 1, w - 1), 0);
@@ -2092,7 +2092,7 @@ function edgeHidden(e) {
 function draw() {
   const g = state.graph;
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  ctx.fillStyle = PAINT.void || '#080B12';
+  ctx.fillStyle = PAINT.void || '#140C13';
   ctx.fillRect(0, 0, w, h);
   if (!g) return;
   syncScreen();
@@ -5715,11 +5715,11 @@ function drawHistory() {
   const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
   if (!w || !h) return;
   histCtx.clearRect(0, 0, w, h);
-  histCtx.fillStyle = PAINT.surface2 || '#1E2432';
+  histCtx.fillStyle = PAINT.surface2 || '#2D2030';
   histCtx.fillRect(0, 0, w, h);
 
   const baseline = () => {
-    histCtx.strokeStyle = PAINT.hairline || '#303849';
+    histCtx.strokeStyle = PAINT.hairline || '#463549';
     histCtx.lineWidth = 1;
     histCtx.beginPath();
     histCtx.moveTo(0, h - 0.5);
@@ -5767,7 +5767,7 @@ function drawHistory() {
 
   /* The path. `pen` breaks it if a value is ever unrenderable; see the
      note above for why that is a guard and not gap handling. */
-  histCtx.strokeStyle = PAINT.accent || '#6EA8FE';
+  histCtx.strokeStyle = PAINT.accent || '#4FC1AF';
   histCtx.lineWidth = 2;
   histCtx.beginPath();
   let pen = false;
@@ -5786,7 +5786,7 @@ function drawHistory() {
     const ok = typeof p.value === 'number' && Number.isFinite(p.value);
     if (!ok) return;
     histCtx.fillStyle = p.is_approximate
-      ? (PAINT.alert || '#E0674A') : (PAINT.accent || '#6EA8FE');
+      ? (PAINT.alert || '#D4A03C') : (PAINT.accent || '#4FC1AF');
     histCtx.beginPath();
     histCtx.arc(x(p, i), y(p.value), p.is_approximate ? 3.5 : 2.5,
                 0, Math.PI * 2);
@@ -5795,7 +5795,7 @@ function drawHistory() {
 
   /* Ends only. A crowded axis is unreadable at this height, and the table
      below carries every exact value anyway. */
-  histCtx.fillStyle = PAINT.dim || '#8A93A6';
+  histCtx.fillStyle = PAINT.dim || '#7E6D7C';
   histCtx.font = PAINT.monoFont || '10px monospace';
   histCtx.textBaseline = 'alphabetic';
   histCtx.textAlign = 'left';
