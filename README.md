@@ -27,28 +27,7 @@ phone number in it is fiction.</sub>
 
 ---
 
-> ## ⚠ READ THIS FIRST — capability is not authorisation
->
-> **This software is unaudited, has never been operated against real
-> targets, and is not certified for evidential use. Nothing in it grants
-> permission to do what it makes possible.**
->
-> Every capability here was built to a specification, not to a legal
-> authority. The build refuses several operations until an operator
-> *declares* a policy — and **a declaration is a string this software
-> stores, not a fact it verifies.** A false or absent declaration produces
-> a working system and an unlawful deployment, and the difference is
-> invisible from inside the code.
->
-> **If you are the person who has to sign this off, go straight to
-> [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md)** — the
-> register reorganised as a decision document: every question, its option
-> set, the consequence of each choice, what the build does while it waits,
-> and a row to write the answer in.
->
-> **Nothing here is legal advice.** It is an inventory of the places where
-> legal advice is required, written by the people who built the code so the
-> assumptions do not live only in their heads.
+
 
 ### Five blocking items, none of them a software problem
 
@@ -60,11 +39,7 @@ phone number in it is fiction.</sub>
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
 | **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and — separately — that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
 
-Plus **eight operator determinations** and **thirteen factual claims that
-came from documentation or reasoning rather than an authoritative source**
-— including platform identifier mappings, which change, and where a stale
-mapping produces *confident false attribution* rather than a visible
-error. See [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).
+
 
 ---
 
