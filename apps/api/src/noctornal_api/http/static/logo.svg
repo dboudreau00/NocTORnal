@@ -39,7 +39,7 @@
       <circle cx="41" cy="26" r="21" fill="#000"/>
     </mask>
   </defs>
-  <circle cx="32" cy="32" r="23" fill="#4FB3A9" mask="url(#crescent-bite)"/>
+  <circle cx="32" cy="32" r="23" fill="#4FC1AF" mask="url(#crescent-bite)"/>
 
   <!-- The network along the crescent's inner edge. Drawn over the moon,
        so the ties read as structure rather than decoration. -->

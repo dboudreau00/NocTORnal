@@ -1,0 +1,125 @@
+/* NocTORnal theme — "Mulberry Nocturne".
+   The console's entire visual identity, in one file. app.css holds
+   structure and behaviour; nothing in it may name a colour that is not a
+   token defined here. Swap this file and the console reskins without a
+   single structural edit — that is the contract, and test_ui_invariants
+   holds app.css to it.
+
+   ## Why these colours
+
+   Every dark console looks the same because every dark console is
+   BLUE-shifted: GitHub's #0D1117, Discord's slate, VS Code's neutral
+   graphite — cold grounds with a blue or purple accent. This one is
+   WINE-shifted: black-plum surfaces a few degrees into red, porcelain
+   text warmed to match, an oxidised-verdigris accent. Nocturnal, not
+   "dark mode".
+
+   ## What this file may NOT change
+
+   Colour carries MEANING in this console (docs/06), and the meaning
+   layer is not a theme:
+   - sign-positive / sign-negative / sign-neutral — a vouch is green and
+     an accusation is red in every theme, forever.
+   - --alert vs --accent must stay far apart in hue: the metric-history
+     chart draws its line in accent and marks APPROXIMATE runs in alert,
+     and a theme that lets them converge erases a data distinction.
+   - The seven node-type hues must stay mutually distinct AND distinct
+     from the sign colours on the canvas.
+   - Confidence is opacity, never hue.
+
+   The alpha variants (--*-soft) exist because the CSP forbids inline
+   styles: a component that wants "12% of danger" cannot compute it, so
+   the theme provides it. */
+
+:root {
+  /* Surfaces — black-plum, warm. The canvas (--void) is the darkest
+     surface in the app and chrome recedes above it. */
+  --void: #140C13;
+  --surface-0: #1A1119;
+  --surface-1: #231824;
+  --surface-2: #2D2030;
+  --surface-3: #3B2B3E;
+  --hairline: #463549;
+
+  /* Text — porcelain, warmed to sit on plum rather than blue-grey. */
+  --text-primary: #F1E9EA;
+  --text-secondary: #B5A3B1;
+  --text-tertiary: #7E6D7C;
+
+  /* Single chrome accent — verdigris: oxidised copper against dark wine.
+     Used sparingly (focus, selection, the trend line, the playhead). */
+  --accent: #4FC1AF;
+  --accent-dim: #2E7168;
+  --accent-glow: rgba(79, 193, 175, 0.16);
+
+  /* Semantic — signal only, never decoration. Hues are LOAD-BEARING. */
+  --sign-positive: #3E9C6B;
+  --sign-negative: #C05A4E;
+  --sign-neutral: #74687A;
+  --alert: #D4A03C;
+  --alert-soft: rgba(212, 160, 60, 0.10);
+  --danger: #C0473C;
+  --danger-soft: rgba(192, 71, 60, 0.12);
+
+  /* Node type hues — unchanged from the cool theme on purpose: they are
+     identification colours an analyst has already learned, and they read
+     as well on plum as they did on slate. */
+  --actor-persona: #6E8FD4;
+  --actor-person: #9B7FD4;
+  --actor-group: #D48A5C;
+  --artefact-infra: #5CA8C4;
+  --artefact-finance: #C4A85C;
+  --artefact-malware: #C46E8A;
+  --context: #7F8A9B;
+
+  /* Confidence encodes as opacity, not hue. */
+  --conf-high: 1;
+  --conf-moderate: 0.72;
+  --conf-low: 0.45;
+
+  /* Overlay scrim — warmed to match the ground; a blue scrim over plum
+     reads as a rendering bug. */
+  --scrim: rgba(12, 6, 11, 0.66);
+
+  /* docs/06 names Söhne / Inter / JetBrains Mono. Nothing is fetched — a
+     webfont would breach the CSP and leak a request — so these are system
+     stacks that degrade to the closest local grotesk and the local mono. */
+  --ui: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
+          "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas,
+          monospace;
+
+  color-scheme: dark;
+}
+
+/* ── theme-level treatments ──────────────────────────────────────────
+   These live here rather than app.css because they are LOOK, not
+   structure: a different theme would make different choices. */
+
+/* Text selection stays in the accent family — the one chrome colour —
+   never in amber, which would make every selection look like a warning. */
+::selection { background: rgba(79, 193, 175, 0.28); color: var(--text-primary); }
+
+/* Scrollbars in the ground's own family. The default UA scrollbar is the
+   single most "stock dark theme" element on any page. */
+* { scrollbar-width: thin; scrollbar-color: var(--surface-3) var(--surface-0); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--surface-0); }
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3); border-radius: 5px;
+  border: 2px solid var(--surface-0);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--hairline); }
+
+/* A faint key-light from the top of the workspace: enough that the plum
+   reads as a lit room rather than a flat fill, never enough to change
+   any contrast measurement below it (≤2 lightness steps).
+   Fixed attachment so scrolling content does not drag the light. */
+body {
+  background:
+    radial-gradient(120% 90% at 50% -10%,
+      rgba(241, 233, 234, 0.028), rgba(241, 233, 234, 0) 60%),
+    var(--surface-0);
+  background-attachment: fixed;
+}
