@@ -6,6 +6,7 @@
 <meta name="referrer" content="no-referrer">
 <title>NocTORnal — analyst console</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -19,27 +20,7 @@
 <main id="view-login" class="login-view">
   <form id="login-form" class="card login-card" novalidate>
     <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
-    <p class="eyebrow">NocTORnal</p>
     <h1 class="h-lg">Analyst sign-in</h1>
-    <p class="muted">Case material is TLP-classified. Access is logged against your
-      user id, and every graph write you make is attributed to it.</p>
-
-    <!-- The disclaimer belongs BEFORE the credentials, not after the fact.
-         Somebody evaluating this should know what it is while deciding
-         whether to put anything into it, and the login screen is the only
-         moment guaranteed to be seen. Matches .banner-legal, which the
-         sample and retention panes already use for the same purpose. -->
-    <div class="banner-legal poc-notice">
-      <strong>Proof of concept — alpha, unaudited.</strong>
-      This build has had no third-party security audit and no penetration
-      test. It is for evaluation against <em>synthetic or consented</em>
-      material only.
-      <div class="facts">Five legal items (L1–L5 in
-        <code>docs/16</code>) are <strong>blocking</strong> and are decisions
-        for counsel, not settings in this software. Sample handling (L1) and
-        stealer-log data (L2) must not be switched on until they are closed.
-        Several subsystems are newly wired and lightly exercised.</div>
-    </div>
 
     <label class="field">
       <span class="label">Work email</span>
