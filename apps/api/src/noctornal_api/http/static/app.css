@@ -1007,11 +1007,7 @@ select.select { appearance: none; padding-right: 24px; }
 .tag-x:hover { color: var(--danger); }
 .tag-x:disabled { opacity: 0.4; cursor: default; }
 
-.poc-chip {
-  color: var(--alert); border-color: var(--alert);
-  background: rgba(212, 160, 60, 0.10);
-  font-weight: 600; letter-spacing: 0.04em; cursor: help;
-}
+
 
 /* Hashes get pasted into other tools, so they are selectable, monospaced
    and never wrapped mid-string. */
