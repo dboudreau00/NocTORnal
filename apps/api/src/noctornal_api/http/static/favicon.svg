@@ -24,7 +24,7 @@
   </defs>
 
   <rect width="64" height="64" rx="12" fill="#14181B"/>
-  <circle cx="31" cy="33" r="23" fill="#4FB3A9" mask="url(#bite)"/>
+  <circle cx="31" cy="33" r="23" fill="#4FC1AF" mask="url(#bite)"/>
 
   <g fill="none" stroke="#14181B" stroke-width="3" stroke-linecap="round">
     <path d="M18 22 L14 35"/>

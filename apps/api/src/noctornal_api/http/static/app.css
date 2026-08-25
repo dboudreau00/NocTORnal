@@ -4,57 +4,11 @@
    2. Colour carries MEANING only (node type, edge sign, confidence, TLP).
       Buttons, panels, borders and tabs stay strictly neutral. */
 
-:root {
-  /* Surfaces — cool slate, blue-shifted, low chroma */
-  --void: #080B12;
-  --surface-0: #0E121B;
-  --surface-1: #151A26;
-  --surface-2: #1E2432;
-  --surface-3: #2A3141;
-  --hairline: #303849;
-
-  /* Text */
-  --text-primary: #E4E8F0;
-  --text-secondary: #98A2B8;
-  --text-tertiary: #626C82;
-
-  /* Single chrome accent — desaturated cyan-teal, used sparingly */
-  --accent: #4EA8A0;
-  --accent-dim: #2F6B66;
-  --accent-glow: rgba(78, 168, 160, 0.18);
-
-  /* Semantic — signal only, never decoration */
-  --sign-positive: #3E9C6B;
-  --sign-negative: #C05A4E;
-  --sign-neutral: #6B7690;
-  --alert: #D4A03C;
-  --danger: #C0473C;
-
-  /* Node type hues */
-  --actor-persona: #6E8FD4;
-  --actor-person: #9B7FD4;
-  --actor-group: #D48A5C;
-  --artefact-infra: #5CA8C4;
-  --artefact-finance: #C4A85C;
-  --artefact-malware: #C46E8A;
-  --context: #7F8A9B;
-
-  /* Confidence encodes as opacity, not hue */
-  --conf-high: 1;
-  --conf-moderate: 0.72;
-  --conf-low: 0.45;
-
-  /* docs/06 names Söhne / Inter / JetBrains Mono. Nothing is fetched — a
-     webfont would breach the CSP and leak a request — so these are system
-     stacks that degrade to the closest local grotesk and the local mono. */
-  --ui: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-        "Helvetica Neue", Arial, "Noto Sans", sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
-          "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas,
-          monospace;
-
-  color-scheme: dark;
-}
+/* TOKENS LIVE IN theme.css — the visual identity is a separate file so a
+   reskin never touches structure. Nothing below this line may name a raw
+   colour: every colour goes through a var() defined by the theme, and the
+   one place that had a stealth hex (a var() fallback for a token that was
+   never defined, so the fallback WAS the colour) is fixed for that reason. */
 
 *, *::before, *::after { box-sizing: border-box; }
 
@@ -528,7 +482,7 @@ select.select { appearance: none; padding-right: 24px; }
 /* ── command palette ───────────────────────────────────────────────── */
 .palette-scrim {
   position: fixed; inset: 0; z-index: 80;
-  background: rgba(4, 6, 10, 0.62);
+  background: var(--scrim);
   display: flex; justify-content: center; align-items: flex-start;
   padding: 10vh 16px 16px;
 }
@@ -1006,11 +960,8 @@ select.select { appearance: none; padding-right: 24px; }
    this is a constraint on use, not a decorative badge, and giving it its
    own louder styling would have made the genuinely blocking legal notices
    look quieter by comparison. */
-.poc-notice { margin: 4px 0 16px; }
-.poc-notice code {
-  font-family: var(--mono); font-size: 11px;
-  background: var(--surface-3); padding: 1px 4px; border-radius: 3px;
-}
+
+
 
 /* The permanent appbar chip. Amber, not red: red is already carrying
    exposure-PUBLIC and TLP:RED elsewhere in this UI, and a second red that
@@ -1056,11 +1007,7 @@ select.select { appearance: none; padding-right: 24px; }
 .tag-x:hover { color: var(--danger); }
 .tag-x:disabled { opacity: 0.4; cursor: default; }
 
-.poc-chip {
-  color: var(--alert); border-color: var(--alert);
-  background: rgba(212, 160, 60, 0.10);
-  font-weight: 600; letter-spacing: 0.04em; cursor: help;
-}
+
 
 /* Hashes get pasted into other tools, so they are selectable, monospaced
    and never wrapped mid-string. */
@@ -1333,7 +1280,7 @@ select.select { appearance: none; padding-right: 24px; }
    reads as a specimen rather than as part of the console's own chrome. */
 .capture-shot {
   display: block; max-width: 100%; height: auto; margin: 8px 0;
-  border: 1px solid var(--border, #2A3244); border-radius: 3px;
+  border: 1px solid var(--hairline); border-radius: 3px;
   background: var(--surface-2);
 }
 

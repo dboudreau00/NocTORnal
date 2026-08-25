@@ -6,6 +6,7 @@
 <meta name="referrer" content="no-referrer">
 <title>NocTORnal — analyst console</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -19,27 +20,7 @@
 <main id="view-login" class="login-view">
   <form id="login-form" class="card login-card" novalidate>
     <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
-    <p class="eyebrow">NocTORnal</p>
     <h1 class="h-lg">Analyst sign-in</h1>
-    <p class="muted">Case material is TLP-classified. Access is logged against your
-      user id, and every graph write you make is attributed to it.</p>
-
-    <!-- The disclaimer belongs BEFORE the credentials, not after the fact.
-         Somebody evaluating this should know what it is while deciding
-         whether to put anything into it, and the login screen is the only
-         moment guaranteed to be seen. Matches .banner-legal, which the
-         sample and retention panes already use for the same purpose. -->
-    <div class="banner-legal poc-notice">
-      <strong>Proof of concept — alpha, unaudited.</strong>
-      This build has had no third-party security audit and no penetration
-      test. It is for evaluation against <em>synthetic or consented</em>
-      material only.
-      <div class="facts">Five legal items (L1–L5 in
-        <code>docs/16</code>) are <strong>blocking</strong> and are decisions
-        for counsel, not settings in this software. Sample handling (L1) and
-        stealer-log data (L2) must not be switched on until they are closed.
-        Several subsystems are newly wired and lightly exercised.</div>
-    </div>
 
     <label class="field">
       <span class="label">Work email</span>
@@ -75,14 +56,7 @@
     <span class="appbar-sep" aria-hidden="true"></span>
     <span id="hdr-case" class="hdr-case">No case selected</span>
     <span id="hdr-tlp" class="chip" hidden></span>
-    <!-- Permanent, and deliberately not dismissible. The full disclaimer is
-         on the sign-in card, which is seen once; this is what remains
-         visible while somebody is actually working, and it is the thing
-         that has to be true in any screenshot that leaves the building.
-         `title` carries the detail so the chip itself stays small in a
-         dense appbar. -->
-    <span class="chip poc-chip" role="note"
-          title="Proof of concept. Alpha, unaudited, no penetration test. Evaluation against synthetic or consented material only. Five blocking legal items (L1-L5, docs/16) are decisions for counsel: sample handling and stealer-log data must not be switched on until they are closed.">ALPHA · POC</span>
+
     <span class="spacer"></span>
     <span id="hdr-asof" class="hdr-asof mono" hidden>as-of: now</span>
     <!-- Whether another analyst's changes will arrive without a refresh.
