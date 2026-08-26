@@ -33,7 +33,7 @@ honest delta between that plan and the build.
 > fully green suite.
 
 **State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
-head `0055`, **1845 passing, 0 failing, 0 skipped** on a live stack —
+head `0055`, **1890 passing, 0 failing, 0 skipped** on a live stack —
 Postgres, Redis, MinIO and Mailpit up, both pytest roots, 4m36s. The rise
 from 1444 is ~350 NEW tests, not new code under test: the element-id
 invariant became derived (22 hand-listed ids → 297), plus
@@ -460,6 +460,65 @@ only tidies up when it passes poisons the run it was written to protect.
 Refuted, and recorded so nobody re-reports them: the `purge_due` 500-object
 truncation, dead letters being unreachable by HTTP purge, and evidence
 objects being deleted inside a transaction that can roll back.
+
+### Added 2026-08-25: analyst administration and the first-run door
+
+Two absences the roadmap never listed because they predate its habit of
+listing absences: creating an analyst required a shell on the server with
+`DATABASE_URL` and the KEK exported, and there was NO surface for
+deactivation, clearance, roles, unlock or TOTP re-enrolment at all.
+
+- **`iam_admin.py` + `/admin/users`** — behind `user.manage` (SYS_ADMIN,
+  step-up, both already in the seed; no migration). Create with one-shot
+  credentials (never retrievable afterwards, no endpoint returns an
+  existing secret), activate/deactivate (revokes sessions), clearance,
+  global roles, unlock, TOTP re-enrol. Three refusals keep an admin from
+  locking the building: self-deactivation, the last active SYS_ADMIN, the
+  last active SECURITY_OFFICER (break-glass refuses to grant without one).
+  Lowering clearance below an OWNED case is refused — the mirror of the
+  raise `cases.py` refuses.
+- **`/setup/first-admin`** — the one unauthenticated write in the system,
+  gated on `iam.app_user` being EMPTY under an advisory lock, counting
+  every row active or not (a deployment with one deactivated account is
+  locked out, not fresh). The login view offers first-run setup while the
+  door is open; it closes permanently at one account.
+- **Admin rail pane + first-run card**; `start.cmd` double-click launcher;
+  QUICKSTART rewritten around the browser path.
+
+**Reviewed the same day, before it shipped.** Four hostile lenses over the
+new surface, each finding put through refutation: **18 candidates, 11
+confirmed, 1 refuted.** All eleven are fixed. The two that mattered:
+
+- **The new e2e tests would have failed every CI build, blaming
+  Postgres.** Two tests skipped on exact complements of one boolean, so
+  exactly one skipped on every run — and `ci.yml`'s "No tests were
+  skipped" gate fails the build on any skip, printing *"The Postgres or
+  MinIO leg is not running."* A developer would have debugged healthy
+  service containers, and the tempting fix (loosening the gate) would
+  restore the 100+ silent skips it exists to catch. This codebase's own
+  signature defect, wearing a test's clothes. Now one branching test with
+  no skip, which on a fresh database exercises *both* the open door and
+  the refusal. **Suite: 1890 passing, 0 skipped.**
+- **The last-admin guard was an unlocked check-then-write.** Two admins
+  deactivating the last two SYS_ADMINs at the same instant each saw the
+  other still active, each passed, and the deployment landed with zero
+  user-managers — the exact state the guard exists to prevent, two clicks
+  apart. `pg_advisory_xact_lock` now spans the check and the write, with a
+  test that a second connection genuinely blocks.
+
+Also fixed: a deputy could be stranded below a case they deputise (the
+owner half was covered, the deputy half was not — and `cases.py` checks
+both at creation for the same reason); role changes on a nonexistent user
+500'd on grant and answered a false 200 "revoked" on revoke, now 404 both;
+TOTP re-enrolment left the *stolen device's* sessions valid while the UI
+promised the old authenticator "stops working immediately"; the grantable
+role list carried six of the seed's eleven, so a deployment could not
+staff its own collection surface from the panel that exists to avoid the
+shell — and the UI's two pickers then drifted from the widened server
+list, caught by a new three-way contract test; credential-minting routes
+are metered with the existing recovery-codes limiter; and `setup.py`'s
+docstring claimed the status probe was rate-limited when it was not — now
+it is.
 
 ### Found off-roadmap, 2026-08-10
 

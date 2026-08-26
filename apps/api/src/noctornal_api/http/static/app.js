@@ -164,6 +164,9 @@ const state = {
   analyticsHistoryNode: null,
   analyticsHistoryLabel: '',
   analyticsHistoryMetric: 'betweenness',
+  /* The caller's own user id, from /admin/users, so the pane can grey out
+     self-footguns the server refuses anyway. */
+  adminYou: null,
 
   /* metrics */
   metrics: null,
@@ -806,6 +809,7 @@ function selectTab(name) {
      the way in or the trend draws into nothing and reads as "no data". */
   if (name === 'analytics') resizeHistory();
   if (name === 'triage') { loadTriage(); loadApprovals(); }
+  if (name === 'admin') loadAdminUsers();
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
   if (name === 'comms') {
@@ -4661,6 +4665,8 @@ function wire() {
   initInbox();
   initComms();
   initOpsPanes();
+  initAdmin();
+  initSetup();
   wireElementActions();
   wireAuditVerify();
   wireCaseActions();
@@ -8100,6 +8106,203 @@ function collectedDocRow(d) {
   return card;
 }
 
+/** The roles this panel may grant — the SAME set as
+ *  `iam_admin.GRANTABLE_ROLES`, which the server enforces.
+ *
+ *  Named once because it is a contract, not a menu: the server widened
+ *  its allowlist to ten and the two pickers here still offered six, so a
+ *  deployment could not staff its own collection surface from the panel
+ *  that exists so nobody has to shell into the server. SERVICE is
+ *  deliberately absent on both sides — it is a machine identity.
+ *  Asserted against the Python set by `test_ui_invariants.py`.
+ */
+const GRANTABLE_ROLES = ['ANALYST', 'CASE_OWNER', 'COLLECTOR', 'CONTRIBUTOR',
+                         'LIAISON', 'MALWARE_ANALYST', 'READ_ONLY',
+                         'REVIEWER', 'SECURITY_OFFICER', 'SYS_ADMIN'];
+
+/* --- Admin: analyst accounts -------------------------------------------
+ *
+ * Behind `user.manage` (SYS_ADMIN, step-up) — the server refuses, this
+ * pane only explains. Two rules carried from the rest of the console:
+ * a 403 is not an empty state, and credentials render exactly once.
+ */
+async function loadAdminUsers() {
+  try {
+    const body = await api('/admin/users');
+    state.adminYou = body.you;
+    renderList('adm-list', 'adm-empty', body.users || [], adminUserRow);
+    $('adm-counts').textContent = body.count
+      ? body.count + ' account(s), '
+        + (body.users || []).filter((u) => u.is_active).length + ' active'
+      : '';
+  } catch (err) {
+    renderList('adm-list', 'adm-empty', [], adminUserRow);
+    $('adm-counts').textContent = '';
+    if (err instanceof ApiError && err.status === 403) {
+      $('adm-empty').textContent = refusalText(
+        err, 'Managing accounts needs user.manage (SYS_ADMIN), and it is '
+        + 'step-up: sign in again if your re-challenge has expired.');
+      return;
+    }
+    $('adm-empty').textContent = refusalText(
+      err, 'Accounts could not be read. They are not known to be absent.');
+  }
+}
+
+async function adminAct(path, opts, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const body = await api(path, opts);
+    await loadAdminUsers();
+    return body;
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    /* The refusals here are RULES (last SYS_ADMIN, own account, stranded
+       owner), so they surface as statements, not error banners. */
+    if (err instanceof ApiError) inlineProblem($('adm-counts'), err);
+    else fail(err);
+    return null;
+  }
+}
+
+function adminUserRow(u) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title',
+    visibleText(u.display_name) + ' — ' + visibleText(u.email)));
+  head.appendChild(el('span', 'chip tlp-' + u.tlp_clearance, u.tlp_clearance));
+  if (!u.is_active) head.appendChild(el('span', 'chip bad', 'DEACTIVATED'));
+  if (u.locked_until) {
+    const chip = el('span', 'chip warn', 'LOCKED');
+    chip.title = 'Locked until ' + fmtTime(u.locked_until) + ' after '
+               + u.failed_logins + ' failed logins.';
+    head.appendChild(chip);
+  }
+  if (!u.totp_enrolled) head.appendChild(el('span', 'chip warn', 'no TOTP'));
+  if (u.id === state.adminYou) head.appendChild(el('span', 'chip flag', 'you'));
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('roles', (u.roles || []).join(', ') || 'none'));
+  facts.appendChild(fact('last login', u.last_login_at
+    ? fmtTime(u.last_login_at) : 'never'));
+  facts.appendChild(fact('created', fmtTime(u.created_at)));
+  card.appendChild(facts);
+
+  const actions = el('div', 'row-actions');
+  const act = (label, path, opts, title) => {
+    const b = el('button', 'btn ghost small', label);
+    b.type = 'button';
+    if (title) b.title = title;
+    b.addEventListener('click', () => adminAct(path, opts, b));
+    actions.appendChild(b);
+    return b;
+  };
+
+  if (u.is_active) {
+    const d = act('Deactivate', '/admin/users/' + u.id + '/deactivate',
+                  { method: 'POST' },
+                  'Revokes their sessions. The account and its history '
+                  + 'remain, and every past action stays attributed.');
+    if (u.id === state.adminYou) {
+      /* The server refuses this anyway; disabling it here keeps the
+         refusal from reading like a fault. */
+      d.disabled = true;
+      d.title = 'You cannot deactivate your own account.';
+    }
+  } else {
+    act('Reactivate', '/admin/users/' + u.id + '/reactivate',
+        { method: 'POST' });
+  }
+  if (u.locked_until) {
+    act('Unlock', '/admin/users/' + u.id + '/unlock', { method: 'POST' });
+  }
+  const totpBtn = el('button', 'btn ghost small', 'Re-enrol TOTP');
+  totpBtn.type = 'button';
+  totpBtn.title = 'Issues a NEW secret; the old authenticator stops '
+                + 'working immediately. For the analyst whose phone is gone.';
+  totpBtn.addEventListener('click', async () => {
+    if (!window.confirm('Issue a new TOTP secret for ' + u.email + '?\n\n'
+        + 'Their current authenticator stops working the moment this is '
+        + 'done, and the new secret is shown once.')) return;
+    const creds = await adminAct('/admin/users/' + u.id + '/totp',
+                                 { method: 'POST' }, totpBtn);
+    if (creds) renderOneTimeCreds($('adm-creds'), creds);
+  });
+  actions.appendChild(totpBtn);
+
+  /* Clearance and role edits: small selects beside their verbs, because a
+     wrong pick plus an eager handler is an authz change nobody meant.
+     Nothing fires until its button is pressed. */
+  const clr = el('select', 'select');
+  for (const c of ['CLEAR', 'GREEN', 'AMBER', 'RED']) {
+    const o = el('option', null, c); o.value = c;
+    if (c === u.tlp_clearance) o.selected = true;
+    clr.appendChild(o);
+  }
+  actions.appendChild(clr);
+  const setClr = el('button', 'btn ghost small', 'Set clearance');
+  setClr.type = 'button';
+  setClr.title = 'Their ceiling everywhere. Lowering below a case they own '
+               + 'is refused — transfer or close those cases first.';
+  setClr.addEventListener('click', () => adminAct(
+    '/admin/users/' + u.id + '/clearance',
+    { method: 'POST', json: { clearance: clr.value } }, setClr));
+  actions.appendChild(setClr);
+
+  const roleSel = el('select', 'select');
+  for (const r of GRANTABLE_ROLES) {
+    if ((u.roles || []).includes(r)) continue;
+    roleSel.appendChild(el('option', null, r));
+  }
+  if (roleSel.options.length) {
+    actions.appendChild(roleSel);
+    const g = el('button', 'btn ghost small', 'Grant role');
+    g.type = 'button';
+    g.addEventListener('click', () => adminAct(
+      '/admin/users/' + u.id + '/roles',
+      { method: 'POST', json: { role: roleSel.value } }, g));
+    actions.appendChild(g);
+  }
+  for (const r of u.roles || []) {
+    const b = el('button', 'btn ghost small', 'Revoke ' + r);
+    b.type = 'button';
+    b.addEventListener('click', () => adminAct(
+      '/admin/users/' + u.id + '/roles/' + encodeURIComponent(r),
+      { method: 'DELETE' }, b));
+    actions.appendChild(b);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function initAdmin() {
+  $('adm-refresh').addEventListener('click', loadAdminUsers);
+  $('adm-create').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setMsg($('adm-create-error'), '');
+    $('adm-create-btn').disabled = true;
+    try {
+      const roles = [...$('adm-roles').selectedOptions].map((o) => o.value);
+      const creds = await api('/admin/users', {
+        method: 'POST',
+        json: { email: $('adm-email').value.trim(),
+                display_name: $('adm-name').value.trim(),
+                clearance: $('adm-clearance').value, roles: roles },
+      });
+      renderOneTimeCreds($('adm-creds'), creds);
+      $('adm-email').value = ''; $('adm-name').value = '';
+      await loadAdminUsers();
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setMsg($('adm-create-error'), err.detail || err.title);
+      } else { fail(err); }
+    } finally {
+      $('adm-create-btn').disabled = false;
+    }
+  });
+}
+
 let selectFeedsSub = null;
 let selectGovSub = null;
 let selectSamplesSub = null;
@@ -9051,6 +9254,81 @@ async function boot() {
   show($('view-app'), false);
   show($('view-login'), true);
   $('login-email').focus();
+  probeFirstRun();
+}
+
+/* --- first run ---------------------------------------------------------
+ *
+ * While `iam.app_user` is empty the server's /setup/first-admin door is
+ * open, and asking a brand-new operator to shell into the box and run
+ * bootstrap.py before they can even sign in is how evaluations end. The
+ * card is convenience only: the emptiness gate lives server-side, under
+ * an advisory lock, so nothing here is load-bearing for safety.
+ */
+async function probeFirstRun() {
+  let body;
+  try {
+    body = await api('/setup/status');
+  } catch (_err) {
+    return; // the sign-in form is the right fallback for every failure
+  }
+  if (!body.needs_setup) return;
+  show($('login-form'), false);
+  show($('setup-form'), true);
+  $('setup-email').focus();
+}
+
+function credRow(label, value) {
+  const row = el('div', 'field');
+  row.appendChild(el('span', 'label', label));
+  const v = el('span', 'mono', value);
+  row.appendChild(copyable(v, value, label));
+  return row;
+}
+
+/** One-time credential block. Everything in it is ALSO selectable text —
+ *  a copy button that fails (clipboard permissions, remote desktop) must
+ *  never leave the secret unreachable. */
+function renderOneTimeCreds(box, creds) {
+  clear(box);
+  const card = el('div', 'card stack');
+  card.appendChild(el('p', 'req', 'shown once — not recoverable'));
+  if (creds.password) card.appendChild(credRow('Password', creds.password));
+  card.appendChild(credRow('TOTP secret (base32)', creds.totp_secret));
+  card.appendChild(credRow('Enrolment URI', creds.otpauth_uri));
+  if (creds.notice) card.appendChild(el('p', 'help', creds.notice));
+  box.appendChild(card);
+}
+
+function initSetup() {
+  $('setup-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setMsg($('setup-error'), '');
+    $('setup-submit').disabled = true;
+    try {
+      const creds = await api('/setup/first-admin', {
+        method: 'POST',
+        json: { email: $('setup-email').value.trim(),
+                display_name: $('setup-name').value.trim() },
+      });
+      show($('setup-form'), false);
+      renderOneTimeCreds($('setup-creds'), creds);
+      show($('setup-done'), true);
+      $('login-email').value = creds.email;
+    } catch (err) {
+      $('setup-submit').disabled = false;
+      if (err instanceof ApiError) setMsg($('setup-error'), err.detail || err.title);
+      else setMsg($('setup-error'), 'The request did not complete.');
+    }
+  });
+  $('setup-continue').addEventListener('click', () => {
+    /* The secrets leave the DOM the moment the operator says they are
+       saved: this screen can sit on a wall-facing monitor. */
+    clear($('setup-creds'));
+    show($('setup-done'), false);
+    show($('login-form'), true);
+    $('login-password').focus();
+  });
 }
 
 boot();
