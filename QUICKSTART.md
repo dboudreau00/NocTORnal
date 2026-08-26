@@ -32,7 +32,23 @@ workstation regardless.)
 
 ## 2. Create your account (first run only)
 
-In a second terminal, from the repo root:
+**The easy way:** open <http://127.0.0.1:8000/ui/>. While no account
+exists, the sign-in screen offers **First-run setup** instead — enter an
+email and a display name, and it creates the administrator (SYS_ADMIN +
+SECURITY_OFFICER + CASE_OWNER + ANALYST, clearance RED) and shows the
+password and TOTP secret **once**. Put the secret in any authenticator app
+(Aegis, 1Password, Google Authenticator), then sign in below it. That door
+closes permanently the moment the first account exists; every later
+account is created from **Admin** in the rail, or with `bootstrap.py`.
+
+Once you are in, the **Admin** tab (rail, bottom group) creates further
+analysts, grants and revokes global roles, sets clearance, unlocks
+accounts after failed logins, and re-issues a TOTP secret for an analyst
+whose phone is gone. It needs `user.manage` — SYS_ADMIN holds it, and it
+is step-up, so a stale session is re-challenged.
+
+**The shell way** (works even with accounts present), in a second
+terminal from the repo root:
 
 ```bash
 .venv\Scripts\python scripts\bootstrap.py create-user --email you@example.com --name "Your Name"
