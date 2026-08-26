@@ -766,3 +766,50 @@ def test_the_approvals_pane_uses_the_servers_operation_key():
     pane = js[start:js.index("\nasync function reverseMerge(", start)]
     assert "'MERGE'" not in pane, (
         "a display-style operation string is back in the approvals pane")
+
+
+def test_the_admin_pane_offers_exactly_the_roles_the_server_grants():
+    """Three lists had to agree and two drifted: `GRANTABLE_ROLES` in
+    `iam_admin.py` (which the server enforces), the create form's picker
+    in index.html, and the per-row grant dropdown in app.js.
+
+    The server's list was widened to ten roles and both pickers still
+    offered six, so COLLECTOR was grantable by `curl` and unreachable
+    from the panel whose entire purpose is that nobody needs `curl`. A
+    role offered but refused, or refused but offered, is the same
+    cross-file contract defect the co-participation pane shipped.
+    """
+    import ast
+
+    src = (SRC / "iam_admin.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    server = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(getattr(t, "id", None) == "GRANTABLE_ROLES"
+                        for t in node.targets)):
+            # frozenset({...})
+            server = {
+                el.value for el in node.value.args[0].elts
+                if isinstance(el, ast.Constant)
+            }
+    assert server, "GRANTABLE_ROLES not found in iam_admin.py"
+
+    js = _js()
+    match = re.search(r"const GRANTABLE_ROLES = \[(.*?)\];", js, re.S)
+    assert match, "app.js no longer names the grantable roles once"
+    ui = set(re.findall(r"'([A-Z_]+)'", match.group(1)))
+    assert ui == server, (
+        f"app.js and iam_admin.py disagree: only in JS {ui - server}, "
+        f"only in Python {server - ui}")
+
+    html = _html()
+    start = html.index('id="adm-roles"')
+    picker = html[start:html.index("</select>", start)]
+    form = set(re.findall(r"<option[^>]*>([A-Z_]+)</option>", picker))
+    assert form == server, (
+        f"the create form's picker disagrees with the server: only in HTML "
+        f"{form - server}, only in Python {server - form}")
+
+    # SERVICE is a machine identity and must not be offered anywhere.
+    assert "SERVICE" not in server and "SERVICE" not in ui

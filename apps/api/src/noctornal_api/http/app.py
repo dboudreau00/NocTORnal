@@ -23,6 +23,7 @@ from noctornal_api.http.errors import install_error_handlers, problem_response
 from noctornal_api.http.limits import build_limiter, install_rate_limit_middleware
 from noctornal_api.http.routers import (
     ach,
+    admin,
     analytics,
     audit,
     approvals,
@@ -45,6 +46,7 @@ from noctornal_api.http.routers import (
     reports,
     samples,
     search,
+    setup,
 )
 
 API_PREFIX = "/api/v1"
@@ -143,7 +145,12 @@ def create_app() -> FastAPI:
         # No version: an unauthenticated caller does not need the build.
         return {"status": "ok"}
 
-    for router in (auth.router, cases.router, graph.router,
+    for router in (auth.router,
+                   # The first-run door (open only while iam.app_user is
+                   # empty) and the analyst-admin surface behind
+                   # user.manage.
+                   setup.router, admin.router,
+                   cases.router, graph.router,
                    # Oversight, not case access: `audit.read` is held by
                    # SECURITY_OFFICER alone, and the chain had no verifier
                    # at all until 2026-07-26.
