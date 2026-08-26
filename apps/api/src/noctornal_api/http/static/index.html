@@ -45,6 +45,37 @@
     <p id="login-error" class="form-error" role="alert" hidden></p>
     <button id="login-submit" type="submit" class="btn primary">Sign in</button>
   </form>
+
+  <!-- FIRST RUN. Shown instead of sign-in while iam.app_user is empty —
+       the server enforces the same emptiness gate under a lock, so this
+       card is convenience, not the control. -->
+  <form id="setup-form" class="card login-card" hidden novalidate>
+    <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
+    <h1 class="h-lg">First-run setup</h1>
+    <p class="muted">No accounts exist yet. Create the administrator —
+      this door closes permanently once the first account exists.</p>
+    <label class="field">
+      <span class="label">Work email</span>
+      <input id="setup-email" type="email" autocomplete="off" required
+             spellcheck="false">
+    </label>
+    <label class="field">
+      <span class="label">Display name</span>
+      <input id="setup-name" type="text" autocomplete="off" required>
+    </label>
+    <p id="setup-error" class="form-error" role="alert" hidden></p>
+    <button id="setup-submit" type="submit" class="btn primary">
+      Create administrator</button>
+  </form>
+
+  <div id="setup-done" class="card login-card" hidden>
+    <h1 class="h-md">Save these now</h1>
+    <p class="muted">Shown once and not recoverable. Add the secret to your
+      authenticator app before continuing.</p>
+    <div id="setup-creds" class="stack"></div>
+    <button id="setup-continue" type="button" class="btn primary">
+      I saved them — go to sign-in</button>
+  </div>
 </main>
 
 <!-- ────────────────────────────── APP ────────────────────────────── -->
@@ -262,6 +293,13 @@
                 title="Retention, legal holds, purge record, break-glass">
           <span class="rail-glyph" aria-hidden="true">&#x25F4;</span>
           <span class="rail-cap">Lifecycle</span>
+        </button>
+        <button id="tab-admin" type="button" class="tab rail-btn"
+                role="tab" aria-controls="pane-admin" aria-selected="false"
+                tabindex="-1" data-tab="admin"
+                title="Analyst accounts: create, roles, clearance, unlock">
+          <span class="rail-glyph" aria-hidden="true">&#x2699;</span>
+          <span class="rail-cap">Admin</span>
         </button>
         <button id="tab-samples" type="button" class="tab rail-btn danger-tab"
                 role="tab" aria-controls="pane-samples" aria-selected="false"
@@ -1504,6 +1542,66 @@
              The download control is deliberately not a link. It is a POST to
              a separate origin behind step-up, and it is styled as the
              dangerous act it is. -->
+        <!-- ADMIN. Analyst accounts, behind user.manage (SYS_ADMIN,
+             step-up). Credentials render once and are never retrievable;
+             the pane says so wherever it shows one. -->
+        <section id="pane-admin" class="pane" role="tabpanel"
+                 aria-labelledby="tab-admin" tabindex="-1" hidden>
+          <h2 class="h-sm">Create analyst</h2>
+          <form id="adm-create" class="card row-form" novalidate>
+            <label class="field grow">
+              <span class="label">Work email</span>
+              <input id="adm-email" type="email" required spellcheck="false"
+                     autocomplete="off">
+            </label>
+            <label class="field grow">
+              <span class="label">Display name</span>
+              <input id="adm-name" type="text" required autocomplete="off">
+            </label>
+            <label class="field">
+              <span class="label">Clearance</span>
+              <select id="adm-clearance" class="select">
+                <option>GREEN</option>
+                <option selected>AMBER</option>
+                <option>RED</option>
+                <option>CLEAR</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="label">Roles</span>
+              <!-- Must match iam_admin.GRANTABLE_ROLES exactly; asserted
+                   by test_ui_invariants. The server widened its allowlist
+                   to ten roles while these two pickers still offered six,
+                   so COLLECTOR was grantable by curl and unreachable from
+                   the panel that exists to avoid curl. -->
+              <select id="adm-roles" class="select" multiple size="4">
+                <option selected>ANALYST</option>
+                <option>CASE_OWNER</option>
+                <option>COLLECTOR</option>
+                <option>CONTRIBUTOR</option>
+                <option>LIAISON</option>
+                <option>MALWARE_ANALYST</option>
+                <option>READ_ONLY</option>
+                <option>REVIEWER</option>
+                <option>SECURITY_OFFICER</option>
+                <option>SYS_ADMIN</option>
+              </select>
+            </label>
+            <button id="adm-create-btn" type="submit" class="btn primary">
+              Create</button>
+          </form>
+          <p id="adm-create-error" class="form-error" role="alert" hidden></p>
+          <div id="adm-creds"></div>
+
+          <h2 class="h-sm">Accounts</h2>
+          <div class="pane-head">
+            <button id="adm-refresh" type="button" class="btn">Refresh</button>
+            <span id="adm-counts" class="muted small"></span>
+          </div>
+          <div id="adm-list"></div>
+          <p id="adm-empty" class="empty">No accounts loaded.</p>
+        </section>
+
         <section id="pane-samples" class="pane" role="tabpanel"
                  aria-labelledby="tab-samples" tabindex="-1" hidden>
 
