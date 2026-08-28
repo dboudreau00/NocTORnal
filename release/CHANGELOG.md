@@ -1,5 +1,83 @@
 # Changelog
 
+## Alpha 2 — 2026-08-25
+
+Second packaged release. **Still not audited, and still not lawful to
+operate against real material until the five blocking items in
+[docs/16](../docs/16-legal-and-external.md) are settled by somebody
+outside this codebase.** No amount of code closes them.
+
+### New
+
+- **Analyst administration.** Creating an account used to require a shell
+  on the server with `DATABASE_URL` and the TOTP key exported. There is
+  now an **Admin** pane: create analysts with one-shot credentials, grant
+  and revoke global roles, set clearance, deactivate (which revokes their
+  sessions), unlock after failed logins, and re-issue a TOTP secret for
+  the analyst whose phone is gone. Behind `user.manage` — SYS_ADMIN only,
+  step-up enforced.
+- **First-run setup in the browser.** A fresh install offers setup on the
+  sign-in screen instead of demanding the CLI. The door is gated on the
+  user table being empty, under an advisory lock, and closes permanently
+  at the first account.
+- **Phase 4's read path.** `collect.document` and `collect.watch_hit`
+  were written by the collector from the day the phase landed and read by
+  nothing. A watch could fire four hundred times and an analyst saw the
+  integer. Feeds -> **Collected** now lists documents and watch hits,
+  with acknowledgement.
+- **Dual-control approvals have a surface.** Before this, a case with
+  dual control on merges could not be merged from the browser at all: the
+  endpoint demanded an `approval_request_id` nothing could produce.
+- **Metric-history trend chart** (Analysis -> Trend), the last UI gap in
+  Phase 3.
+- **New theme.** Wine-shifted "Mulberry Nocturne" palette; tokens live in
+  `theme.css` so a reskin never touches structure.
+- `start.cmd` for double-click launching on Windows.
+
+### Fixed
+
+- **Every phase has now had an adversarial review** -- Phase 6 was the
+  last. Nine findings, all closed, including `unmerge` writing recorded
+  endpoints over an edge a later live merge owned (reversal is now
+  LIFO-enforced), a dry-run purge that reported all-zero counts so the
+  preview could not distinguish "nothing due" from "twelve exhibits about
+  to be destroyed", and a refused approval whose audit row was rolled
+  back by the transaction that refused it.
+- **The audit chain had no anchor.** A forged "first row" passed every
+  check and left `/audit/verify` answering INTACT. Now reported.
+- **Break-glass no longer claims an elevation it does not perform.** It
+  never raised effective clearance; the claim is withdrawn rather than
+  implemented, because an analyst who believes it worked stops looking
+  for another way in during the incident it exists for.
+- Four analyst panes that reported a failure as a fact about the case,
+  including co-participation rendering "undefined -- undefined" on every
+  row under a fully green suite.
+
+### Still not in it
+
+- The five blocking legal items (docs/16 L1-L5). Sample handling and
+  stealer-log data must not be switched on until they are settled.
+- No security audit and no penetration test.
+- XenForo / MyBB / Telegram collection adapters; document embeddings; a
+  collection scheduler process.
+- Fuzzy hashing, YARA and sandbox detonation. Each absence is recorded on
+  the sample row with its reason.
+- Deferred hardening: session IP/UA binding, RLS under a non-owner
+  database role, DNS-rebinding-proof SSRF protection, login timing
+  equalisation.
+- WebAuthn -- deliberate; TOTP is the floor.
+- CONCOR; the assumptions register.
+
+### Verification at release
+
+| | |
+|---|---|
+| Tests | 1891 passing, 0 failing, 0 skipped, across `apps/api/tests` and `packages/ontology` |
+| Lint | ruff clean |
+| Database | Alembic head 0055 |
+| Adversarial passes | 9, each of which found a real defect |
+
+
 ## Alpha 1 — 2026-07-26
 
 First packaged release. **Not audited; not lawful to operate against real
