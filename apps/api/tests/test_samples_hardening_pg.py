@@ -73,14 +73,31 @@ def test_the_archive_cannot_be_opened_without_the_password():
         zf.read(zf.namelist()[0])
 
 
-def test_a_wrong_password_is_refused():
+def test_a_wrong_password_never_yields_the_payload():
     """The 12-byte header's last byte is the high byte of the CRC, which is
     how a reader recognises a wrong password. Getting that field wrong
-    produces an archive that 'works' and silently yields garbage."""
+    produces an archive that 'works' and silently yields garbage.
+
+    That check is ONE BYTE, so a wrong password slips past it about once
+    in 256 and the read then fails inside zlib instead of raising "Bad
+    password". This test used to assert only the RuntimeError, which made
+    it fail roughly one run in 350 -- measured here at 0.28% over 5,000
+    trials against a theoretical 0.39%. A test that reddens CI at random
+    teaches people to re-run CI.
+
+    So it asserts the property that is actually guaranteed and is the one
+    that matters: a wrong password NEVER returns the plaintext. Refused
+    outright or decoded to garbage are both correct; handing back the
+    payload would be the security defect, and that is what is checked.
+    """
     zf = _open(archive(PAYLOAD, "ab" * 32))
     zf.setpassword(b"not-the-password")
-    with pytest.raises(RuntimeError, match="[Bb]ad password"):
-        zf.read(zf.namelist()[0])
+    try:
+        data = zf.read(zf.namelist()[0])
+    except Exception:
+        return  # refused, or garbage that would not decompress
+    assert data != PAYLOAD, (
+        "a wrong password returned the real bytes")
 
 
 def test_the_right_password_returns_the_exact_bytes():
