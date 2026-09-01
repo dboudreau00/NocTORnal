@@ -241,6 +241,48 @@ class PgAccessResolver:
         user_clearance = tlp_from_name(user[0])
         user_compartments = frozenset(user[1] or [])
 
+        # Break-glass (docs/05, break_glass.py). A live, unrevoked grant for
+        # this user that names a classification raises the caller's
+        # effective clearance to that level -- for THIS case, or for every
+        # case if the grant was global (case_id NULL). Compartments are
+        # deliberately not widened: need-to-know is a read-in with a name
+        # on it, not an eight-hour bypass.
+        #
+        # A use is recorded only when the grant is what makes the access
+        # possible (base < object <= granted). An analyst reading a CLEAR
+        # node under an AMBER grant has not USED the grant, and counting it
+        # would tell the reviewing officer the emergency was busier than it
+        # was. The connection is autocommit, so the count survives whatever
+        # the request does next.
+        #
+        # A grant whose classification does not parse is ignored, not
+        # fatal: failing closed here means "no raise", not "every request
+        # from this user 403s until an officer revokes the row".
+        grant = self._c.execute(
+            """SELECT id, granted_classification
+                 FROM iam.break_glass
+                WHERE user_id = %s
+                  AND revoked_at IS NULL
+                  AND expires_at > now()
+                  AND granted_classification IS NOT NULL
+                  AND (case_id IS NULL OR case_id = %s)
+                ORDER BY expires_at DESC
+                LIMIT 1""",
+            (user_id, case_id),
+        ).fetchone()
+        if grant is not None:
+            try:
+                granted = tlp_from_name(grant[1])
+                needed = tlp_from_name(object_classification)
+            except AccessResolutionError:
+                granted = None
+            if granted is not None and granted > user_clearance:
+                if user_clearance < needed <= granted:
+                    from noctornal_api.break_glass import BreakGlassService
+                    BreakGlassService(self._c).record_use(
+                        grant[0], action=permission_key, case_id=case_id)
+                user_clearance = granted
+
         assignment = self._c.execute(
             """SELECT role_key, (expires_at IS NULL OR expires_at > now()) AS unexpired
                  FROM iam.case_assignment WHERE case_id = %s AND user_id = %s""",

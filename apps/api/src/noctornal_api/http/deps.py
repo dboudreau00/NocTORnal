@@ -304,4 +304,35 @@ def user_ceiling(conn: psycopg.Connection, user_id: UUID) -> tuple[Tlp, frozense
     ).fetchone()
     if row is None:
         raise Problem(401, "Unauthenticated", "unknown user")
-    return tlp_from_name(row[0]), frozenset(row[1] or [])
+    clearance, held = tlp_from_name(row[0]), frozenset(row[1] or [])
+
+    # This ceiling has no case in hand -- it is what search, comms, samples
+    # and some forty other sites use to decide what NOT to show. A
+    # case-scoped break-glass grant therefore cannot apply here: raising it
+    # would widen the caller's view of every OTHER case for the life of the
+    # grant. Only a global grant (case_id NULL) raises this ceiling. The
+    # case-scoped raise lives in PgAccessResolver.resolve(), which is the
+    # gate every case-scoped read and write passes through.
+    #
+    # Honest consequence: an analyst under a case-scoped AMBER grant can
+    # OPEN an AMBER exhibit on that case, but a case-wide search filtered
+    # by this ceiling will not LIST it. Stated here rather than papered
+    # over; the fix is a case_id parameter on this function and forty call
+    # sites, which is a change to make on purpose.
+    g = conn.execute(
+        """SELECT granted_classification FROM iam.break_glass
+            WHERE user_id = %s AND case_id IS NULL
+              AND revoked_at IS NULL AND expires_at > now()
+              AND granted_classification IS NOT NULL
+            ORDER BY expires_at DESC LIMIT 1""",
+        (user_id,),
+    ).fetchone()
+    if g is not None:
+        from noctornal_api.security.access import AccessResolutionError
+        try:
+            granted = tlp_from_name(g[0])
+        except AccessResolutionError:
+            granted = None
+        if granted is not None and granted > clearance:
+            clearance = granted
+    return clearance, held

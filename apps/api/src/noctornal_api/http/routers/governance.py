@@ -502,13 +502,15 @@ def _grant(g: Grant) -> dict:
         # written, so access was granted invisibly and the officer
         # who must review it could not list it.
         "awaiting_review": g.awaiting_review,
-        # `action_count` and `used_at` are NOT published. `record_use()` is
-        # the only writer of either and has no caller outside its test, so
-        # both are constant -- zero and NULL -- on every grant that has ever
-        # existed. Publishing a zero to the officer's review queue answers
-        # "was this used?" with a fact about the wiring, and it answers it
-        # in the direction that closes the question. An absent field makes
-        # them ask. See break_glass.py, property 4.
+        # Published again from 2026-09-01: the access path now calls
+        # `record_use()` whenever a grant is what made an access possible,
+        # so these answer "was it used?" with a fact about the analyst.
+        # Between 2026-08-10 and then they were withheld on purpose -- both
+        # were structurally zero, and a zero that cannot be anything else
+        # answers the question in the wrong direction. See break_glass.py,
+        # property 4.
+        "used_at": g.used_at.isoformat() if g.used_at else None,
+        "action_count": g.action_count,
         "reviewed_by": str(g.reviewed_by) if g.reviewed_by else None,
         "reviewed_at": g.reviewed_at.isoformat() if g.reviewed_at else None,
         "review_outcome": getattr(g, "review_outcome", None),
@@ -556,17 +558,18 @@ def invoke(
     except BreakGlassError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {**_grant(grant),
-            # Says what is true. The previous wording -- "every action taken
-            # under this grant is audited AGAINST IT" -- claimed a link that
-            # does not exist: actions are audited, but nothing attributes
-            # them to the grant, because nothing reads the grant.
+            # Says what is true, which changed on 2026-09-01: the access
+            # gate reads the grant now. The notice still names the one
+            # limit an analyst could trip over at 3am.
             "notice": ("This grant is recorded, a security officer who is "
                        "not you must review it, and it expires on its own. "
-                       "It does NOT currently raise your clearance: no "
-                       "access decision reads the grant, so if a case was "
-                       "refused before, it will still be refused. Say so in "
-                       "the incident record rather than assuming the "
-                       "elevation applied.")}
+                       "If it names a classification, your clearance is "
+                       "raised to that level on the case it names (or on "
+                       "every case, if it names none) until it expires, and "
+                       "every access it makes possible is counted against "
+                       "it. It does not read you into any compartment. A "
+                       "case-scoped grant opens exhibits on that case; it "
+                       "does not widen search across other cases.")}
 
 
 @break_glass_router.get("/unreviewed", response_model=dict)
