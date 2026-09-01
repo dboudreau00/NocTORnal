@@ -1,9 +1,13 @@
-/* NocTORnal theme — "Mulberry Nocturne".
+/* NocTORnal theme — "Mulberry Nocturne", second cut.
    The console's entire visual identity, in one file. app.css holds
    structure and behaviour; nothing in it may name a colour that is not a
    token defined here. Swap this file and the console reskins without a
-   single structural edit — that is the contract, and test_ui_invariants
-   holds app.css to it.
+   single structural edit — that is the contract, and
+   test_theme_contract.py now actually enforces it. (The previous version
+   of this comment claimed test_ui_invariants held app.css to the rule. It
+   did not. Nine raw rgba() literals had accumulated in app.css and twelve
+   hard-coded hexes in app.js behind `||` fallbacks, so a theme swap left
+   parts of the old palette behind. The claim is now backed by a test.)
 
    ## Why these colours
 
@@ -14,6 +18,17 @@
    text warmed to match, an oxidised-verdigris accent. Nocturnal, not
    "dark mode".
 
+   ## Elevation is LIGHT, not paint
+
+   The first cut built depth from a ladder of five opaque greys, which is
+   why it read flat: an opaque step looks like a different object, not a
+   nearer one. This cut keeps the ladder for the few surfaces that must be
+   opaque (anything a canvas paints, anything scrolled content passes
+   under) and expresses everything else as a translucent white WASH over
+   the ground, with a 1px white hairline. That is what makes a panel read
+   as lit rather than filled, and it is the single largest visual change
+   here.
+
    ## What this file may NOT change
 
    Colour carries MEANING in this console (docs/06), and the meaning
@@ -23,63 +38,186 @@
    - --alert vs --accent must stay far apart in hue: the metric-history
      chart draws its line in accent and marks APPROXIMATE runs in alert,
      and a theme that lets them converge erases a data distinction.
+     Measured gap: 137 degrees.
    - The seven node-type hues must stay mutually distinct AND distinct
-     from the sign colours on the canvas.
+     from the sign colours on the canvas. Measured with CIEDE2000 against
+     --void, the closest pair is 15.8 (was 12.0). Note this was NOT free:
+     the reference palette this cut is based on scored 10.5 — worse than
+     what it replaced — because it pushed `context` toward a saturated
+     blue. `context` is deliberately near-neutral so that it reads as
+     "not an actor" rather than as a dim actor.
    - Confidence is opacity, never hue.
 
-   The alpha variants (--*-soft) exist because the CSP forbids inline
-   styles: a component that wants "12% of danger" cannot compute it, so
-   the theme provides it. */
+   The alpha variants (--*-soft, --*-wash) exist because the CSP forbids
+   inline styles: a component that wants "12% of danger" cannot compute
+   it, so the theme provides it. */
 
 :root {
-  /* Surfaces — black-plum, warm. The canvas (--void) is the darkest
-     surface in the app and chrome recedes above it. */
-  --void: #140C13;
-  --surface-0: #1A1119;
-  --surface-1: #231824;
-  --surface-2: #2D2030;
-  --surface-3: #3B2B3E;
-  --hairline: #463549;
+  /* ── surfaces ──────────────────────────────────────────────────────
+     OPAQUE, and deliberately so. These are the surfaces a <canvas> fills
+     (the sociogram ground, the timeline track) and the ones that scrolled
+     content passes underneath (sticky table headers). A translucent value
+     here would let rows ghost through a header. Everything else in the
+     app should reach for a --wash-* instead. */
+  --void: #140C13;        /* the canvas: darkest thing in the app */
+  --surface-0: #1A1017;   /* app ground */
+  --surface-1: #21151F;   /* rail, app bar, inspector ground */
+  --surface-2: #2D2030;   /* raised: inputs, buttons, sticky headers */
+  --surface-3: #3A2A3C;   /* hover / selected row */
 
-  /* Text — porcelain, warmed to sit on plum rather than blue-grey. */
+  /* ── glass ─────────────────────────────────────────────────────────
+     The elevation system. A card is a wash over whatever it sits on plus
+     a hairline, so nesting a card inside a panel reads as two sheets of
+     lit glass rather than two flat fills. */
+  --wash-1: rgba(255, 255, 255, 0.03);   /* card fill */
+  --wash-2: rgba(255, 255, 255, 0.045);  /* raised card fill */
+  --wash-3: rgba(255, 255, 255, 0.07);   /* hover fill */
+  --hairline: rgba(255, 255, 255, 0.10);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  /* The boundary of anything you can TYPE IN or PRESS. Deliberately much
+     brighter than --hairline, which is decorative: WCAG 1.4.11 asks for
+     3:1 on the edge that identifies a control, and --hairline measures
+     1.48:1 against the card a field sits on. This measures 3.30:1. It
+     cannot be solved with a fill -- the ground is near-black, so a
+     recessed field reaches only 1.18:1 no matter how dark it goes. */
+  --field-edge: rgba(255, 255, 255, 0.34);
+
+  /* ── text ──────────────────────────────────────────────────────────
+     Porcelain, warmed to sit on plum rather than blue-grey. Three tiers
+     and no more: a fourth "faint" tier was drafted and cut because no
+     value for it cleared 3:1 on the raised surfaces where it would have
+     been used (best case 3.16 on the ground, 2.26 on --surface-3). A tier
+     that cannot carry text is not a text tier.
+     Ratios on --surface-0: 15.56 / 8.21 / 4.52. Tertiary clears AA body
+     text for the first time — it was 3.79 and used for real labels. */
   --text-primary: #F1E9EA;
-  --text-secondary: #B5A3B1;
-  --text-tertiary: #7E6D7C;
+  --text-secondary: #B9A8AE;
+  --text-tertiary: #8A7885;
 
-  /* Single chrome accent — verdigris: oxidised copper against dark wine.
-     Used sparingly (focus, selection, the trend line, the playhead). */
+  /* ── accent ────────────────────────────────────────────────────────
+     Verdigris: oxidised copper against dark wine. Used sparingly — focus,
+     selection, the active rail tab, the trend line, the playhead.
+     --accent-soft is the text colour to use ON an accent wash; --accent
+     itself on a 12% accent fill is too low-contrast to read. */
   --accent: #4FC1AF;
-  --accent-dim: #2E7168;
+  --accent-soft: #8FD9CC;
+  --accent-dim: #2C7B6E;
   --accent-glow: rgba(79, 193, 175, 0.16);
+  --accent-wash: rgba(79, 193, 175, 0.12);
+  --accent-edge: rgba(79, 193, 175, 0.35);
 
-  /* Semantic — signal only, never decoration. Hues are LOAD-BEARING. */
-  --sign-positive: #3E9C6B;
-  --sign-negative: #C05A4E;
-  --sign-neutral: #74687A;
-  --alert: #D4A03C;
-  --alert-soft: rgba(212, 160, 60, 0.10);
-  --danger: #C0473C;
-  --danger-soft: rgba(192, 71, 60, 0.12);
+  /* ── semantic ──────────────────────────────────────────────────────
+     Signal only, never decoration. Hues are LOAD-BEARING. Every one of
+     these is brighter than the first cut, which is a contrast fix rather
+     than a style choice: on --surface-0 they went 5.42 -> 7.19 (positive),
+     4.23 -> 5.23 (negative) and 3.70 -> 5.23 (danger). The old danger
+     sat below 4.5:1 while being the colour that says "this destroys
+     something". */
+  --sign-positive: #4FB477;
+  --sign-negative: #D8636B;
+  --sign-neutral: #8A7C90;
+  --alert: #E0A458;
+  --alert-soft: rgba(224, 164, 88, 0.12);
+  --alert-edge: rgba(224, 164, 88, 0.30);
+  --danger: #E0574F;
+  --danger-soft: rgba(224, 87, 79, 0.12);
+  --danger-edge: rgba(224, 87, 79, 0.32);
+  --positive-soft: rgba(79, 180, 119, 0.14);
+  --positive-glow: rgba(79, 180, 119, 0.18);
+  --malware-soft: rgba(217, 123, 168, 0.08);
+  /* A second, lighter amber wash. --alert-soft is the fill for a chip that
+     IS the warning; this is the fill for a long legal notice that merely
+     carries one, and at 12% a paragraph-sized block of it shouts. */
+  --alert-wash: rgba(224, 164, 88, 0.07);
+  /* The frosted app bar. Its own token because it is --surface-1 at 82%
+     and a theme that changed --surface-1 without changing this would
+     leave a bar in the previous theme's colour. */
+  --appbar-bg: rgba(33, 21, 31, 0.82);
+  --accent-wash-strong: rgba(79, 193, 175, 0.20);
+  /* Faintest divider in the system: rows inside an already-bordered card,
+     where --hairline would draw a grid. */
+  --hairline-soft: rgba(255, 255, 255, 0.055);
+  /* OPAQUE, and not a hairline. The <canvas> baselines under the timeline
+     density strip and the metric histogram were drawn in --hairline, which
+     measures 1.36:1 against the chart ground -- and measured 1.37:1 in the
+     previous palette too, so this is a long-standing invisible gridline
+     rather than something this reskin broke. A scale mark has to be
+     visible to be a scale mark. */
+  --chart-grid: #5E4A60;
 
-  /* Node type hues — unchanged from the cool theme on purpose: they are
-     identification colours an analyst has already learned, and they read
-     as well on plum as they did on slate. */
-  --actor-persona: #6E8FD4;
-  --actor-person: #9B7FD4;
-  --actor-group: #D48A5C;
-  --artefact-infra: #5CA8C4;
-  --artefact-finance: #C4A85C;
-  --artefact-malware: #C46E8A;
-  --context: #7F8A9B;
+  /* ── node type hues ────────────────────────────────────────────────
+     Identification colours an analyst has already learned. Brightened for
+     contrast on --void (minimum 5.66:1) but held apart perceptually:
+     `context` is pulled to near-neutral and `artefact-finance` cooled
+     toward true gold, which is what lifts the closest pair from 10.5 to
+     15.8 CIEDE2000. */
+  --actor-persona: #6E93C8;
+  --actor-person: #9B7BD4;
+  --actor-group: #E08A4B;
+  --artefact-infra: #52B3C9;
+  --artefact-finance: #CFBF6A;
+  --artefact-malware: #D97BA8;
+  --context: #95909B;
 
-  /* Confidence encodes as opacity, not hue. */
+  /* Confidence encodes as opacity, not hue. The floor is 0.58, not
+     0.45: at 0.45 the lowest step composited to 3.84:1 against the card
+     it sits on, and any element that ALSO carried a dim colour landed at
+     1.83:1. The three steps stay obviously distinct (13.7 / 8.0 / 5.3
+     against a card) while the quietest one stays readable. */
   --conf-high: 1;
-  --conf-moderate: 0.72;
-  --conf-low: 0.45;
+  --conf-moderate: 0.74;
+  --conf-low: 0.58;
 
   /* Overlay scrim — warmed to match the ground; a blue scrim over plum
      reads as a rendering bug. */
-  --scrim: rgba(12, 6, 11, 0.66);
+  --scrim: rgba(12, 6, 11, 0.72);
+
+  /* ── shape ─────────────────────────────────────────────────────────
+     A real scale, because the first cut had six ad-hoc radii between 3px
+     and 10px and 3px is what makes an interface look a decade old. Small
+     is for things drawn INSIDE another rounded box, where a large radius
+     fights its parent. */
+  /* Structural constants. These were hardcoded in three places each,
+     which is the other half of why "swap theme.css" did not reskin the
+     console: the shell's proportions were not themeable at all. */
+  --rail-w: 64px;
+  --rail-tile: 56px;
+  --insp-w: 380px;
+  --appbar-h: 44px;
+
+  --r-sm: 4px;
+  --r-ctl: 8px;
+  --r-card: 12px;
+  --r-panel: 14px;
+  --r-pill: 999px;
+
+  /* ── spacing ───────────────────────────────────────────────────────
+     A 4px grid. app.css had 6px, 7px and 9px paddings sitting next to
+     8px ones with nothing distinguishing them. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-6: 24px;
+
+  /* ── depth ─────────────────────────────────────────────────────────
+     The inset highlight is the top edge catching the key light; the drop
+     is a wide, very soft, very dark shadow. Both are needed: the drop
+     alone reads as a sticker, the highlight alone reads as flat. */
+  --shadow-glass:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+    0 12px 32px -18px rgba(0, 0, 0, 0.9);
+  --shadow-lift: 0 18px 44px -24px rgba(0, 0, 0, 0.95);
+  --shadow-pop:
+    0 24px 60px -20px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+
+  /* ── motion ────────────────────────────────────────────────────────
+     Only ever applied to compositor-safe properties (opacity, transform)
+     and to colour, which test_ui_invariants checks. Every duration is
+     collapsed by the reduced-motion block in app.css. */
+  --motion-fast: 120ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
 
   /* docs/06 names Söhne / Inter / JetBrains Mono. Nothing is fetched — a
      webfont would breach the CSP and leak a request — so these are system
@@ -101,25 +239,27 @@
    never in amber, which would make every selection look like a warning. */
 ::selection { background: rgba(79, 193, 175, 0.28); color: var(--text-primary); }
 
-/* Scrollbars in the ground's own family. The default UA scrollbar is the
-   single most "stock dark theme" element on any page. */
-* { scrollbar-width: thin; scrollbar-color: var(--surface-3) var(--surface-0); }
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: var(--surface-0); }
+/* Scrollbars in the ground's own family, and thin. The default UA
+   scrollbar is the single most "stock dark theme" element on any page. */
+* { scrollbar-width: thin; scrollbar-color: var(--hairline-strong) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--surface-3); border-radius: 5px;
-  border: 2px solid var(--surface-0);
+  background: var(--hairline-strong); border-radius: var(--r-pill);
+  border: 2px solid transparent; background-clip: content-box;
 }
-::-webkit-scrollbar-thumb:hover { background: var(--hairline); }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.26); }
+::-webkit-scrollbar-corner { background: transparent; }
 
 /* A faint key-light from the top of the workspace: enough that the plum
    reads as a lit room rather than a flat fill, never enough to change
-   any contrast measurement below it (≤2 lightness steps).
+   any contrast measurement below it (<=2 lightness steps).
    Fixed attachment so scrolling content does not drag the light. */
 body {
   background:
     radial-gradient(120% 90% at 50% -10%,
-      rgba(241, 233, 234, 0.028), rgba(241, 233, 234, 0) 60%),
+      rgba(241, 233, 234, 0.035), rgba(241, 233, 234, 0) 58%),
+    linear-gradient(180deg, #1F141C 0%, var(--surface-0) 42%),
     var(--surface-0);
   background-attachment: fixed;
 }
