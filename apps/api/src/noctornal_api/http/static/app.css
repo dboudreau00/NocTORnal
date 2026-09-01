@@ -282,7 +282,19 @@ select.select { appearance: none; padding-right: 24px; }
             min-width: 0; flex-shrink: 1; }
 .hdr-asof { color: var(--text-secondary); white-space: nowrap; }
 .hdr-asof.past { color: var(--alert); }
-.spacer { flex: 1; }
+.spacer { flex: 1 1 auto; }
+
+/* Nothing in the bar may wrap. The bar is a fixed-height row of controls
+   whose combined width exceeds the viewport on a narrow window, and a flex
+   item's default `flex-shrink: 1` let the BUTTONS absorb that pressure --
+   "All cases" and "Log out" broke onto two lines inside a 44px row.
+   It never tripped an overflow check, because wrapping is what a flex row
+   does INSTEAD of overflowing. The case identifier is the one thing here
+   that can lose characters gracefully, so it is the only item allowed to
+   shrink; everything else holds its width. */
+.appbar > * { flex: none; }
+.appbar .btn, .appbar .chip, .hdr-user, .hdr-asof { white-space: nowrap; }
+.hdr-case { flex: 0 1 auto; }
 
 /* The palette affordance. Bordered rather than ghost: it is the primary
    way to navigate this console and it competes for attention with nothing
@@ -303,12 +315,29 @@ select.select { appearance: none; padding-right: 24px; }
   background: var(--wash-1);
 }
 
-/* Who you are signed in as, as one object rather than two loose spans. */
+/* Who you are signed in as, as one object rather than two loose spans.
+   `/auth/me` returns a user_id and nothing else -- no display name, no
+   email -- so this pill can only show a UUID. Unconstrained that is 326px,
+   a THIRD of the whole bar, and it was what pushed the row into overflow
+   once the buttons stopped wrapping. Truncated it reads like a short
+   commit hash, which is the convention for exactly this situation. The
+   full value stays available to a mouse via the title attribute and to a
+   screen reader via the text itself. */
 .hdr-user {
   padding: 3px var(--s-2) 3px 5px; border-radius: var(--r-pill);
   border: 1px solid var(--hairline); background: var(--wash-1);
-  flex: none;
+  flex: none; min-width: 0;
 }
+.hdr-user code {
+  max-width: 13ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The last line of defence. Whatever the case buttons and the identifier
+   add up to, the BAR scrolls -- the page never does. A console that scrolls
+   sideways moves the canvas out from under the pointer. */
+.appbar { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.appbar::-webkit-scrollbar { height: 0; }
 .hdr-user::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent-dim); flex: none;
@@ -317,7 +346,7 @@ select.select { appearance: none; padding-right: 24px; }
 /* Under ~1100px the label goes and the control becomes the icon plus the
    key cap, which is still self-explanatory and buys back ~52px in the row
    that runs out of space first. */
-@media (max-width: 1100px) {
+@media (max-width: 1250px) {
   .appbar-search-label { display: none; }
 }
 .hdr-user { display: flex; align-items: center; gap: 6px;
