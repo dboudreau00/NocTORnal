@@ -1,8 +1,12 @@
 /* NocTORnal analyst console — docs/06-interface.md.
-   Two rules drive everything here:
-   1. The CANVAS is the darkest surface; chrome is a lighter slate that recedes.
+   Three rules drive everything here:
+   1. The CANVAS is the darkest surface; chrome is a lighter plum that recedes.
    2. Colour carries MEANING only (node type, edge sign, confidence, TLP).
-      Buttons, panels, borders and tabs stay strictly neutral. */
+      Buttons, panels, borders and tabs stay strictly neutral.
+   3. Elevation is LIGHT, not paint: a raised surface is a translucent
+      white wash plus a hairline over whatever it sits on, never a
+      different opaque grey. Opaque steps are reserved for the surfaces a
+      canvas fills and the ones scrolled content passes under. */
 
 /* TOKENS LIVE IN theme.css — the visual identity is a separate file so a
    reskin never touches structure. Nothing below this line may name a raw
@@ -48,24 +52,28 @@ p { margin: 0; }
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
-/* Focus is visible on every control, always. */
+/* Focus is visible on every control, always. The offset is what makes
+   the ring legible on a control that already has an accent-tinted fill --
+   without it the ring and the fill merge into one soft edge. */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  border-radius: var(--r-sm);
 }
 
 .skip-link {
   position: absolute; left: 8px; top: -40px; z-index: 60;
   background: var(--surface-2); color: var(--text-primary);
-  padding: 6px 10px; border: 1px solid var(--hairline); border-radius: 4px;
+  padding: var(--s-2) var(--s-3); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-ctl); box-shadow: var(--shadow-lift);
 }
 .skip-link:focus { top: 8px; }
 
 .kbd {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0;
   border: 1px solid var(--hairline); border-bottom-width: 2px;
-  border-radius: 3px; padding: 0 4px; color: var(--text-secondary);
-  background: var(--surface-2); white-space: nowrap;
+  border-radius: var(--r-sm); padding: 1px 5px; color: var(--text-secondary);
+  background: var(--wash-3); white-space: nowrap;
 }
 
 /* ── banners ───────────────────────────────────────────────────────── */
@@ -75,11 +83,12 @@ p { margin: 0; }
   display: flex; flex-direction: column; gap: 6px;
 }
 .banner {
-  display: flex; gap: 10px; align-items: flex-start;
+  display: flex; gap: var(--s-3); align-items: flex-start;
   background: var(--surface-2);
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--hairline-strong);
   border-left: 3px solid var(--danger);
-  border-radius: 4px; padding: 10px 12px;
+  border-radius: var(--r-card); padding: var(--s-3) var(--s-4);
+  box-shadow: var(--shadow-lift);
 }
 .banner.warn { border-left-color: var(--alert); }
 .banner-text { flex: 1; min-width: 0; }
@@ -89,33 +98,57 @@ p { margin: 0; }
 .banner-close {
   background: none; border: 1px solid transparent; color: var(--text-secondary);
   font-size: 15px; line-height: 1; cursor: pointer; padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-sm);
+  transition: background-color var(--motion-fast) var(--ease-out),
+              color var(--motion-fast) var(--ease-out);
 }
-.banner-close:hover { background: var(--surface-3); color: var(--text-primary); }
+.banner-close:hover { background: var(--wash-3); color: var(--text-primary); }
 
 /* ── controls ──────────────────────────────────────────────────────── */
 .btn {
-  font: inherit; color: var(--text-primary);
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
-  border-radius: 4px; padding: 6px 12px; cursor: pointer;
+  font: inherit; color: var(--text-secondary);
+  background: var(--wash-1);
+  border: 1px solid var(--field-edge);
+  border-radius: var(--r-ctl); padding: 7px 13px; cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out),
+              color var(--motion-fast) var(--ease-out);
 }
-.btn:hover { background: var(--surface-3); }
-.btn:active { background: var(--surface-1); }
-.btn.primary { border-color: var(--accent-dim); }
-.btn.primary:hover { background: var(--surface-3); border-color: var(--accent); }
-.btn.ghost { background: transparent; }
-.btn.ghost:hover { background: var(--surface-2); }
-.btn.small { padding: 3px 8px; font-size: 12px; }
-.btn[disabled] { opacity: 0.5; cursor: default; }
-.btn[aria-pressed="true"] { border-color: var(--accent-dim); }
+.btn:hover { background: var(--wash-3); border-color: var(--text-tertiary);
+             color: var(--text-primary); }
+.btn:active { background: var(--wash-1); }
+/* The primary action is the one place chrome is allowed to carry accent
+   as a FILL. The label is --accent-soft, not --accent: accent on a 12%
+   accent wash measures under 4.5:1, and this is the button that submits. */
+.btn.primary {
+  background: var(--accent-wash); border-color: var(--accent-edge);
+  color: var(--accent-soft); font-weight: 600;
+}
+.btn.primary:hover {
+  background: var(--accent-wash-strong); border-color: var(--accent);
+  color: var(--accent-soft);
+}
+.btn.ghost { background: transparent; border-color: transparent; }
+.btn.ghost:hover { background: var(--wash-3); border-color: var(--field-edge); }
+.btn.small { padding: 4px 9px; font-size: 12px; border-radius: var(--r-sm); }
+.btn[disabled] { opacity: 0.45; cursor: default; }
+.btn[disabled]:hover { background: var(--wash-1); border-color: var(--field-edge);
+                       color: var(--text-secondary); }
+.btn[aria-pressed="true"] {
+  background: var(--accent-wash); border-color: var(--accent-edge);
+  color: var(--accent-soft);
+}
 
 input, select, textarea {
   font: inherit; color: var(--text-primary);
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
-  border-radius: 4px; padding: 6px 8px; width: 100%;
+  background: var(--wash-1);
+  border: 1px solid var(--field-edge);
+  border-radius: var(--r-ctl); padding: 7px 10px; width: 100%;
+  transition: background-color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out);
 }
+input:hover, select:hover, textarea:hover { border-color: var(--text-tertiary); }
+input:focus, select:focus, textarea:focus { background: var(--wash-2); }
 input.mono, textarea.mono { font-family: var(--mono); }
 textarea { resize: vertical; }
 input[type="file"] { padding: 4px; }
@@ -145,14 +178,20 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .form-ok {
   font-size: 12px; color: var(--text-secondary);
-  border-left: 2px solid var(--sign-positive); padding-left: 8px;
+  border-left: 2px solid var(--sign-positive);
+  background: var(--positive-soft);
+  padding: var(--s-2) var(--s-3); border-radius: 0 var(--r-sm) var(--r-sm) 0;
   overflow-wrap: anywhere;
 }
 
+/* A card is a sheet of lit glass over whatever it sits on -- a wash and a
+   hairline, never an opaque fill. That is what lets a card inside a panel
+   inside the ground read as three depths instead of three greys. */
 .card {
-  background: var(--surface-1);
+  background: var(--wash-1);
   border: 1px solid var(--hairline);
-  border-radius: 6px; padding: 16px;
+  border-radius: var(--r-card); padding: var(--s-4);
+  box-shadow: var(--shadow-glass);
 }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 .narrow { max-width: 620px; }
@@ -163,19 +202,22 @@ select.select { appearance: none; padding-right: 24px; }
 
 /* ── chips ─────────────────────────────────────────────────────────── */
 .chip {
-  display: inline-block; font-size: 11px; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 3px;
-  border: 1px solid var(--hairline); color: var(--text-secondary);
+  display: inline-block; font-size: 10px; letter-spacing: 0.06em;
+  padding: 2px 8px; border-radius: var(--r-pill);
+  border: 1px solid var(--hairline); background: var(--wash-1);
+  color: var(--text-secondary);
   font-family: var(--mono); white-space: nowrap;
 }
 .tlp-CLEAR { color: var(--text-secondary); }
 .tlp-GREEN { color: var(--sign-positive); border-color: var(--sign-positive); }
 .tlp-AMBER { color: var(--alert); border-color: var(--alert); }
+.tlp-AMBER { background: var(--alert-soft); border-color: var(--alert-edge); }
 .tlp-AMBER_STRICT { color: var(--alert); border-color: var(--alert);
-                    background: rgba(212, 160, 60, 0.1); font-weight: 600; }
+                    background: var(--alert-soft); font-weight: 600; }
 .tlp-RED { color: var(--danger); border-color: var(--danger);
-           background: rgba(192, 71, 60, 0.12); font-weight: 600; }
-.chip.flag { color: var(--accent); border-color: var(--accent-dim); }
+           background: var(--danger-soft); font-weight: 600; }
+.chip.flag { color: var(--accent-soft); border-color: var(--accent-edge);
+             background: var(--accent-wash); }
 .chip.stale { color: var(--text-tertiary); }
 .chip.bad { color: var(--danger); border-color: var(--danger); }
 
@@ -198,24 +240,46 @@ select.select { appearance: none; padding-right: 24px; }
 
 /* ── login ─────────────────────────────────────────────────────────── */
 .login-view {
-  min-height: 100vh; display: grid; place-items: center; padding: 24px;
+  min-height: 100vh; min-height: 100dvh;
+  display: grid; place-items: center; padding: var(--s-6);
 }
-.login-card { width: min(400px, 100%); display: flex; flex-direction: column;
-              gap: 14px; }
+.login-card {
+  width: min(400px, 100%); display: flex; flex-direction: column;
+  gap: var(--s-4); padding: var(--s-6); border-radius: var(--r-panel);
+  background: var(--wash-2); box-shadow: var(--shadow-pop);
+}
+.login-mark { align-self: center; }
 
 /* ── app shell ─────────────────────────────────────────────────────── */
-.app { height: 100vh; display: grid; grid-template-rows: 40px 1fr; }
+.app {
+  height: 100vh; height: 100dvh;
+  display: grid; grid-template-rows: var(--appbar-h) 1fr;
+}
 
+/* Translucent rather than opaque, with a blur: the app bar is the one
+   piece of chrome that content scrolls under, and a frosted bar reads as
+   "in front of" rather than "on top of". The fallback is the same colour
+   at full opacity, which is what a browser without backdrop-filter gets. */
 .appbar {
-  display: flex; align-items: center; gap: 10px; padding: 0 12px;
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 0 var(--s-3);
   background: var(--surface-1);
   border-bottom: 1px solid var(--hairline);
-  min-width: 0;
+  min-width: 0; position: relative; z-index: 20;
 }
-.brand { font-size: 13px; font-weight: 600; letter-spacing: 0.06em; }
-.appbar-sep { width: 1px; height: 18px; background: var(--hairline); }
+@supports (backdrop-filter: blur(1px)) {
+  .appbar { background: var(--appbar-bg); backdrop-filter: blur(18px); }
+}
+.brand { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+.appbar-sep { width: 1px; height: 16px; background: var(--hairline); }
+/* `min-width: 0` is what actually lets this ellipsise: a grid/flex item
+   defaults to min-content width, so without it the case id refused to
+   shrink and pushed the whole bar wider than the viewport -- which is how
+   a fixed-height bar became the one thing that scrolled the page
+   sideways. */
 .hdr-case { font-size: 12px; color: var(--text-secondary); font-family: var(--mono);
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            min-width: 0; flex-shrink: 1; }
 .hdr-asof { color: var(--text-secondary); white-space: nowrap; }
 .hdr-asof.past { color: var(--alert); }
 .spacer { flex: 1; }
@@ -235,40 +299,58 @@ select.select { appearance: none; padding-right: 24px; }
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th {
-  text-align: left; font-size: 11px; letter-spacing: 0.06em;
+  text-align: left; font-size: 10px; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--text-tertiary); font-weight: 600;
-  padding: 6px 8px; border-bottom: 1px solid var(--hairline);
+  font-family: var(--mono);
+  padding: var(--s-2) var(--s-3); border-bottom: 1px solid var(--hairline);
 }
 .table td {
-  padding: 6px 8px; border-bottom: 1px solid var(--hairline);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--hairline-soft);
   vertical-align: middle;
 }
-.table tbody tr:hover { background: var(--surface-2); }
-.table tbody tr.selected { background: var(--surface-3); }
+.table tbody tr { transition: background-color var(--motion-fast) var(--ease-out); }
+.table tbody tr:hover { background: var(--wash-2); }
+.table tbody tr.selected {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
 .table tbody tr[tabindex] { cursor: pointer; }
 .table .num { font-family: var(--mono); font-size: 12px; }
 
 /* ── workspace: rail | canvas | inspector (docs/06 layout) ─────────── */
 .workspace {
   height: 100%; min-height: 0;
-  display: grid; grid-template-columns: 56px minmax(0, 1fr) 360px;
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--insp-w);
 }
 
+/* `overflow-y: auto`, not `hidden`. There are seventeen rail tabs; on a
+   short viewport the last of them used to be silently unreachable -- the
+   rail clipped them and offered no way to scroll to them. */
 .rail {
   background: var(--surface-1); border-right: 1px solid var(--hairline);
-  display: flex; flex-direction: column; align-items: stretch;
-  padding: 6px 0; gap: 2px; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center;
+  padding: var(--s-2) var(--s-1); gap: 2px;
+  overflow-y: auto; overflow-x: hidden; scrollbar-width: none;
 }
+.rail::-webkit-scrollbar { width: 0; height: 0; }
 .rail-gap { flex: 1; }
+/* Rounded tiles rather than full-bleed bars. A tile that does not touch
+   its neighbours makes the selected one readable at a glance, which a
+   stack of seventeen edge-to-edge bars never was. */
 .rail-btn {
   font: inherit; background: none; border: 0;
-  border-left: 2px solid transparent;
-  color: var(--text-secondary); cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 8px 2px;
+  color: var(--text-tertiary); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 3px;
+  width: var(--rail-tile); min-height: 50px; padding: var(--s-2) 2px;
+  border-radius: var(--r-ctl); flex: none;
+  transition: background-color var(--motion-fast) var(--ease-out),
+              color var(--motion-fast) var(--ease-out);
 }
-.rail-btn:hover { color: var(--text-primary); background: var(--surface-2); }
-.rail-glyph { font-size: 16px; line-height: 1; }
+.rail-btn:hover { color: var(--text-primary); background: var(--wash-3); }
+.rail-glyph { font-size: 17px; line-height: 1; }
 /* Clipped rather than allowed to overflow. The rail is a fixed narrow
    column and a caption that does not fit used to run out of it and over
    the pane -- "HYPOTHESES" did exactly that. Ellipsis rather than wrap
@@ -279,8 +361,17 @@ select.select { appearance: none; padding-right: 24px; }
   white-space: nowrap; display: block;
 }
 .rail-btn[aria-selected="true"] {
-  color: var(--text-primary); background: var(--surface-2);
-  border-left-color: var(--accent);
+  color: var(--text-primary); background: var(--accent-wash);
+}
+.rail-btn[aria-selected="true"] .rail-glyph { color: var(--accent); }
+/* The active marker is a short rounded bar pinned to the rail edge, not a
+   full-height border: a border on a tile that has a radius reads as a
+   drawing error. */
+.rail-btn[aria-selected="true"]::before {
+  content: ""; position: absolute; left: -4px; top: 50%;
+  width: 2px; height: 22px; margin-top: -11px;
+  border-radius: 0 var(--r-pill) var(--r-pill) 0;
+  background: var(--accent);
 }
 
 .work-main { min-width: 0; min-height: 0; position: relative; }
@@ -299,8 +390,8 @@ select.select { appearance: none; padding-right: 24px; }
 
 /* ── projection controls ───────────────────────────────────────────── */
 .proj-bar {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 7px 12px; background: var(--surface-1);
+  display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap;
+  padding: var(--s-2) var(--s-4); background: var(--wash-1);
   border-bottom: 1px solid var(--hairline);
 }
 .proj-grp { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -312,9 +403,9 @@ select.select { appearance: none; padding-right: 24px; }
   border-left: 2px solid var(--hairline); padding-left: 8px;
 }
 .focus-flag {
-  display: flex; align-items: center; gap: 8px;
-  border: 1px solid var(--accent-dim); border-radius: 4px;
-  padding: 2px 4px 2px 8px; background: var(--accent-glow);
+  display: flex; align-items: center; gap: var(--s-2);
+  border: 1px solid var(--accent-edge); border-radius: var(--r-pill);
+  padding: 2px 4px 2px var(--s-3); background: var(--accent-wash);
 }
 .focus-text { font-size: 11px; color: var(--text-primary);
               font-family: var(--mono); }
@@ -331,8 +422,8 @@ select.select { appearance: none; padding-right: 24px; }
 }
 
 .graph-bar {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 7px 12px; background: var(--surface-1);
+  display: flex; flex-direction: column; gap: var(--s-1);
+  padding: var(--s-2) var(--s-4); background: var(--wash-1);
   border-top: 1px solid var(--hairline);
 }
 .legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -347,7 +438,7 @@ select.select { appearance: none; padding-right: 24px; }
 .line.inf { border-top-style: dashed; border-top-color: var(--text-secondary); }
 .ring { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
         margin-right: 5px; border: 1.5px solid var(--text-tertiary); }
-.ring.sel { border-color: var(--accent); }
+.ring.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
 .ring.pin { border-style: dotted; border-color: var(--text-secondary); }
 .ring.prop { border-style: dashed; border-color: var(--alert); }
 
@@ -360,8 +451,9 @@ select.select { appearance: none; padding-right: 24px; }
 
 /* ── timeline scrubber (the signature element) ─────────────────────── */
 .scrubber {
-  background: var(--surface-1); border-top: 1px solid var(--hairline);
-  padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 3px;
+  background: var(--wash-1); border-top: 1px solid var(--hairline);
+  padding: var(--s-2) var(--s-4) var(--s-3);
+  display: flex; flex-direction: column; gap: var(--s-1);
 }
 .tl-head { display: flex; align-items: center; gap: 10px; }
 .tl-current { color: var(--text-primary); margin-left: auto; }
@@ -379,10 +471,12 @@ select.select { appearance: none; padding-right: 24px; }
 /* ── evidence ──────────────────────────────────────────────────────── */
 .ev-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .ev-item {
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: 5px; padding: 10px 12px;
+  background: var(--wash-1); border: 1px solid var(--hairline);
+  border-radius: var(--r-card); padding: var(--s-3) var(--s-4);
+  transition: border-color var(--motion-fast) var(--ease-out);
 }
-.ev-item.focused { border-color: var(--accent-dim); }
+.ev-item:hover { border-color: var(--hairline-strong); }
+.ev-item.focused { border-color: var(--accent-edge); background: var(--accent-wash); }
 .ev-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .ev-title { font-weight: 600; }
 .ev-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px;
@@ -405,19 +499,22 @@ select.select { appearance: none; padding-right: 24px; }
 .hit-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .hit {
   display: flex; justify-content: space-between; gap: 10px; text-align: left;
-  font: inherit; color: var(--text-primary); background: var(--surface-1);
-  border: 1px solid var(--hairline); border-radius: 4px; padding: 6px 8px;
-  cursor: pointer;
+  font: inherit; color: var(--text-primary); background: var(--wash-1);
+  border: 1px solid var(--hairline); border-radius: var(--r-ctl);
+  padding: var(--s-2) var(--s-3); cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out);
 }
-.hit:hover { background: var(--surface-2); }
+.hit:hover { background: var(--wash-3); border-color: var(--hairline-strong); }
 .hit .rank { color: var(--text-tertiary); font-family: var(--mono);
              font-size: 11px; }
 
 /* ── assertion fieldset ────────────────────────────────────────────── */
 .assertion {
-  border: 1px solid var(--hairline); border-radius: 5px; padding: 12px;
-  margin: 0; display: flex; flex-direction: column; gap: 12px;
-  background: var(--surface-2);
+  border: 1px solid var(--hairline); border-radius: var(--r-card);
+  padding: var(--s-4);
+  margin: 0; display: flex; flex-direction: column; gap: var(--s-3);
+  background: var(--wash-2);
 }
 .assertion legend { font-size: 11px; letter-spacing: 0.08em;
                     text-transform: uppercase; color: var(--text-secondary);
@@ -428,15 +525,21 @@ select.select { appearance: none; padding-right: 24px; }
 /* ── inspector ─────────────────────────────────────────────────────── */
 .inspector {
   background: var(--surface-1); border-left: 1px solid var(--hairline);
-  overflow: auto; padding: 14px; min-width: 0;
+  overflow: auto; padding: var(--s-3); min-width: 0;
 }
 .insp-heading { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
                 color: var(--text-tertiary); font-weight: 600; }
 .insp-empty { margin-top: 14px; color: var(--text-tertiary); font-size: 12px; }
 .insp-id { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 6px; }
 .insp-label { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
-.insp-sec { margin-top: 18px; border-top: 1px solid var(--hairline);
-            padding-top: 10px; }
+/* Each inspector section is its own glass card. The previous version
+   separated them with a hairline and 18px of air, which made a scrolled
+   inspector read as one undifferentiated column of text. */
+.insp-sec {
+  margin-top: var(--s-3); border: 1px solid var(--hairline);
+  border-radius: var(--r-card); background: var(--wash-1);
+  padding: var(--s-3); box-shadow: var(--shadow-glass);
+}
 .insp-sec-head { display: flex; justify-content: space-between;
                  align-items: center; gap: 8px; }
 .insp-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
@@ -453,15 +556,16 @@ select.select { appearance: none; padding-right: 24px; }
 .metric-note { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; }
 
 .assert {
-  background: var(--surface-2); border: 1px solid var(--hairline);
-  border-radius: 5px; padding: 8px 10px;
+  background: var(--wash-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl); padding: var(--s-2) var(--s-3);
 }
 .assert.dead { border-style: dashed; opacity: 0.62; }
 .assert-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .assert-basis { font-weight: 600; font-size: 12px; }
 .grading {
   font-family: var(--mono); font-size: 12px; font-weight: 600;
-  border: 1px solid var(--hairline); border-radius: 3px; padding: 0 5px;
+  border: 1px solid var(--hairline); border-radius: var(--r-sm);
+  padding: 0 6px; background: var(--wash-2);
   color: var(--text-primary); cursor: help;
 }
 /* Confidence: opacity, plus a word — never colour alone. */
@@ -475,8 +579,8 @@ select.select { appearance: none; padding-right: 24px; }
 .assert-rationale.none { color: var(--text-tertiary); font-style: italic; }
 .assert-meta { margin-top: 6px; font-size: 11px; color: var(--text-tertiary);
                font-family: var(--mono); overflow-wrap: anywhere; }
-.sel-item { background: var(--surface-2); border: 1px solid var(--hairline);
-            border-radius: 5px; padding: 8px 10px; }
+.sel-item { background: var(--wash-2); border: 1px solid var(--hairline);
+            border-radius: var(--r-ctl); padding: var(--s-2) var(--s-3); }
 .sel-val { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 
 /* ── command palette ───────────────────────────────────────────────── */
@@ -488,24 +592,24 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .palette {
   width: min(620px, 100%); max-height: 70vh;
-  background: var(--surface-2); border: 1px solid var(--hairline);
-  border-radius: 8px; padding: 10px;
-  display: flex; flex-direction: column; gap: 8px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  background: var(--surface-2); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-panel); padding: var(--s-3);
+  display: flex; flex-direction: column; gap: var(--s-2);
+  box-shadow: var(--shadow-pop);
 }
-.pal-input { background: var(--surface-1); font-size: 15px; padding: 9px 10px; }
+.pal-input { background: var(--wash-1); font-size: 15px; padding: 10px 12px; }
 .pal-list {
   list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0;
   display: flex; flex-direction: column; gap: 2px;
 }
 .pal-opt {
   display: flex; align-items: baseline; gap: 10px;
-  padding: 6px 8px; border-radius: 4px; cursor: pointer;
-  border: 1px solid transparent;
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-ctl);
+  cursor: pointer; border: 1px solid transparent;
 }
-.pal-opt:hover { background: var(--surface-3); }
+.pal-opt:hover { background: var(--wash-3); }
 .pal-opt[aria-selected="true"] {
-  background: var(--surface-3); border-color: var(--accent-dim);
+  background: var(--accent-wash); border-color: var(--accent-edge);
 }
 .pal-kind {
   font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
@@ -558,8 +662,8 @@ select.select { appearance: none; padding-right: 24px; }
    allowed to mean, so it reads louder than a note. */
 .an-flag {
   font-size: 12px; line-height: 1.5; margin: 6px 0;
-  padding: 8px 10px; border-radius: 4px;
-  border-left: 3px solid var(--hairline); background: var(--surface-1);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-ctl);
+  border-left: 3px solid var(--hairline); background: var(--wash-1);
   color: var(--text-secondary);
 }
 .an-flag-warn { border-left-color: var(--alert); color: var(--text-primary); }
@@ -578,26 +682,103 @@ select.select { appearance: none; padding-right: 24px; }
 #an-body tr { cursor: pointer; }
 #pane-analytics .chip.small { font-size: 10px; margin-left: 6px; }
 
+/* ── the responsive story ───────────────────────────────────────────
+   Written against the two axes that actually fail, which are not the two
+   you would guess.
+
+   WIDTH is the easy one: the inspector narrows, then stacks under the
+   canvas. HEIGHT is the one that broke things, and there was not a single
+   height query in the file. The rail is a column of SEVENTEEN tabs; at
+   ~50px per tile it needs 900px of vertical room, which no laptop has.
+   It used to `overflow: hidden` and simply amputate the last few tabs
+   with no way to reach them. It now scrolls, and on a short viewport it
+   drops the captions and tightens to icons so that more of it fits before
+   scrolling is needed at all. */
+
+/* Roomy desktops get the inspector back. */
+@media (min-width: 1500px) {
+  :root { --insp-w: 420px; }
+}
+
+@media (max-width: 1300px) {
+  :root { --insp-w: 330px; }
+}
+
 @media (max-width: 1180px) {
-  .workspace { grid-template-columns: 56px minmax(0, 1fr) 300px; }
+  :root { --insp-w: 300px; }
   .cases-view { grid-template-columns: minmax(0, 1fr); }
   .search-cols { grid-template-columns: 1fr; }
 }
 
+/* Below this the inspector stops being a column and becomes a drawer
+   under the canvas. The rail keeps its full width: the tiles are
+   --rail-tile wide, and a rail narrower than its own tiles clips them —
+   which is what the previous 48px value did. */
 @media (max-width: 900px) {
   .workspace {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: var(--rail-w) minmax(0, 1fr);
     grid-template-rows: minmax(220px, 1fr) minmax(0, 44%);
   }
   .rail { grid-row: 1 / span 2; }
   .inspector { border-left: 0; border-top: 1px solid var(--hairline); }
-  .rail-cap { display: none; }
   .proj-grp.push { margin-left: 0; }
-  /* The other half of the same problem: once the controls wrap onto four
-     or five lines they can claim most of a short pane. Cap them and let
-     them scroll, so the space they take stops growing and the canvas keeps
-     the room its floor asks for. */
+  /* Once the controls wrap onto four or five lines they can claim most of
+     a short pane. Cap them and let them scroll, so the space they take
+     stops growing and the canvas keeps the room its floor asks for. */
   .proj-bar { max-height: 38%; overflow-y: auto; }
+}
+
+/* Phone-width and split-screen. The rail becomes icon-only, which is the
+   first point at which dropping the captions costs less than the space
+   they take. */
+@media (max-width: 700px) {
+  :root { --rail-w: 52px; --rail-tile: 46px; }
+  .rail-cap { display: none; }
+  .rail-btn { min-height: 44px; }
+  .cases-view { padding: var(--s-3); }
+  .pane { padding: var(--s-3); }
+  .appbar { gap: var(--s-2); padding: 0 var(--s-2); }
+}
+
+/* ── height, the axis that actually breaks ─────────────────────────── */
+
+/* A laptop at 100% zoom, or any window under ~820px tall, cannot show
+   seventeen captioned tiles. Icons only, and the rail stops being the
+   thing that decides how tall the app is. */
+@media (max-height: 820px) {
+  .rail-cap { display: none; }
+  .rail-btn { min-height: 42px; gap: 0; }
+}
+
+/* Deep zoom (200%) and short split-screens. Everything that was allowed
+   to be a fixed height gives way, and nothing is allowed to clip
+   silently: the two panes that used `overflow: hidden` get a scroll
+   fallback instead. */
+@media (max-height: 620px) {
+  :root { --appbar-h: 38px; }
+  .rail-btn { min-height: 36px; }
+  .rail-glyph { font-size: 15px; }
+  .scrubber { padding: var(--s-1) var(--s-3) var(--s-2); }
+  .tl-density { height: 18px; }
+  .graph-bar { padding: var(--s-1) var(--s-3); }
+  .pane-graph { grid-template-rows: auto minmax(140px, 1fr) auto auto; }
+}
+
+/* The stacked layout puts the inspector inside `.main`, which is
+   `overflow: hidden` — so at 900px the inspector's own bottom was being
+   clipped with no scrollbar. It scrolls itself; the shell must not also
+   try to contain it. */
+@media (max-width: 900px) {
+  .main { overflow: auto; }
+}
+
+/* Coarse pointers need 44x44 regardless of how much room there is. This
+   is the one rule allowed to cost vertical space on a short screen,
+   because a target you cannot hit is worse than one you must scroll to. */
+@media (pointer: coarse) {
+  .rail-btn { min-height: 44px; }
+  .btn { padding: 10px 14px; }
+  .btn.small { padding: 7px 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -613,12 +794,15 @@ select.select { appearance: none; padding-right: 24px; }
 
 .triage-card {
   border: 1px solid var(--hairline); border-left: 3px solid var(--hairline);
-  border-radius: 4px; padding: 10px 12px; margin-bottom: 8px;
-  background: var(--surface-1); cursor: pointer;
+  border-radius: var(--r-card); padding: var(--s-3) var(--s-4);
+  margin-bottom: var(--s-2);
+  background: var(--wash-1); cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out);
 }
 /* The keyboard cursor has to be obvious: J/K navigation is useless if you
    cannot see where you are. */
-.triage-card.on { border-left-color: var(--accent); background: var(--surface-2); }
+.triage-card.on { border-left-color: var(--accent); background: var(--accent-wash); }
 .triage-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .triage-label { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .triage-why { margin: 6px 0 2px; font-size: 12px; line-height: 1.55;
@@ -628,7 +812,7 @@ select.select { appearance: none; padding-right: 24px; }
 /* Work waiting, visible from any tab. */
 .rail-badge {
   position: absolute; top: 4px; right: 6px; min-width: 15px;
-  padding: 0 4px; border-radius: 8px; background: var(--accent);
+  padding: 0 4px; border-radius: var(--r-pill); background: var(--accent);
   color: var(--void); font-size: 10px; font-weight: 700;
   line-height: 15px; text-align: center;
 }
@@ -668,7 +852,7 @@ select.select { appearance: none; padding-right: 24px; }
 .preview {
   background: var(--surface-2); border: 1px solid var(--hairline);
   border-left: 3px solid var(--alert);
-  border-radius: 4px; padding: 8px 10px;
+  border-radius: var(--r-ctl); padding: 8px 10px;
 }
 .preview-row { display: flex; align-items: baseline; gap: 8px; }
 .preview .label { font-size: 11px; color: var(--text-tertiary);
@@ -680,7 +864,7 @@ select.select { appearance: none; padding-right: 24px; }
 
 .pill {
   font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
-  padding: 1px 6px; border: 1px solid var(--hairline); border-radius: 10px;
+  padding: 1px 6px; border: 1px solid var(--hairline); border-radius: var(--r-pill);
   color: var(--text-tertiary); white-space: nowrap;
 }
 .pill.ok { color: var(--sign-positive); border-color: var(--sign-positive); }
@@ -773,12 +957,12 @@ select.select { appearance: none; padding-right: 24px; }
 .fragment {
   margin: 8px 0 0; padding: 8px; max-height: 11em; overflow: auto;
   background: var(--surface-3); border: 1px solid var(--hairline);
-  border-radius: 3px; font-size: 11px; white-space: pre-wrap;
+  border-radius: var(--r-sm); font-size: 11px; white-space: pre-wrap;
   overflow-wrap: anywhere; color: var(--text-secondary);
 }
 
 .cred-box {
-  margin-top: 8px; padding: 8px; border-radius: 3px;
+  margin-top: 8px; padding: 8px; border-radius: var(--r-sm);
   background: var(--surface-3); border: 1px solid var(--alert);
 }
 
@@ -829,7 +1013,9 @@ select.select { appearance: none; padding-right: 24px; }
 .st-n  { color: var(--text-tertiary); }
 .st-s  { color: var(--text-secondary); }
 .st-ss { color: var(--sign-positive); }
-.st-none { color: var(--text-tertiary); opacity: 0.45; }
+/* Same trap as .chip.conf-LOW: tertiary at 45% composited to 1.83:1.
+   Tertiary already reads as "absent"; it does not need the alpha too. */
+.st-none { color: var(--text-tertiary); }
 
 /* Evidence consistent with every hypothesis. Kept in the record and
    excluded from the ranking — dimmed rather than hidden, because
@@ -893,8 +1079,8 @@ select.select { appearance: none; padding-right: 24px; }
    defeat here. */
 .filename-quarantine {
   display: flex; align-items: baseline; gap: 8px; margin: 6px 0 0;
-  padding: 4px 8px; border-radius: 3px;
-  background: rgba(196, 110, 138, 0.07);
+  padding: var(--s-1) var(--s-2); border-radius: var(--r-sm);
+  background: var(--malware-soft);
   border: 1px dashed var(--artefact-malware);
   font-size: 12px; overflow-wrap: anywhere;
 }
@@ -905,7 +1091,7 @@ select.select { appearance: none; padding-right: 24px; }
    relation to each other. */
 .meter { display: inline-flex; align-items: center; gap: 6px; }
 .meter-bar {
-  display: inline-block; width: 64px; height: 5px; border-radius: 3px;
+  display: inline-block; width: 64px; height: 5px; border-radius: var(--r-pill);
   background: var(--surface-3); overflow: hidden;
 }
 .meter-fill {
@@ -933,7 +1119,10 @@ select.select { appearance: none; padding-right: 24px; }
                border-color: var(--artefact-malware); }
 .chip.conf-HIGH { color: var(--sign-positive); border-color: var(--sign-positive); }
 .chip.conf-MODERATE { color: var(--alert); border-color: var(--alert); }
-.chip.conf-LOW { color: var(--text-tertiary); }
+/* NOT --text-tertiary. `.conf-LOW` already applies opacity to this same
+   element, and a dim colour under a dim alpha composited to 1.83:1. The
+   opacity alone carries the encoding. */
+.chip.conf-LOW { color: var(--text-primary); }
 
 /* Exposure. The one control in the Lab that decides whether an operation
    survives contact with its subject, so the levels are coloured by
@@ -943,13 +1132,13 @@ select.select { appearance: none; padding-right: 24px; }
 .chip.exposure-VENDOR { color: var(--alert); border-color: var(--alert); }
 .chip.exposure-PUBLIC {
   color: var(--danger); border-color: var(--danger);
-  background: rgba(192, 71, 60, 0.12); font-weight: 600;
+  background: var(--danger-soft); font-weight: 600;
 }
 
 .banner-legal {
   display: block; border-left: 3px solid var(--alert);
-  background: rgba(212, 160, 60, 0.06); padding: 12px 14px;
-  border-radius: 4px; margin-bottom: 14px; font-size: 12px;
+  background: var(--alert-wash); padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-ctl); margin-bottom: var(--s-4); font-size: 12px;
   line-height: 1.6; color: var(--text-secondary);
 }
 .banner-legal strong { color: var(--alert); }
@@ -1023,9 +1212,9 @@ select.select { appearance: none; padding-right: 24px; }
 .btn.tiny.is-ok { color: var(--sign-positive); border-color: var(--sign-positive); }
 .btn.subtle { background: transparent; color: var(--text-tertiary); }
 .btn.subtle:hover { color: var(--text-primary); background: var(--surface-2); }
-.btn.danger { color: var(--danger); border-color: var(--sign-negative); }
+.btn.danger { color: var(--danger); border-color: var(--danger-edge); }
 .btn.danger:hover:not([disabled]) {
-  background: rgba(192, 71, 60, 0.12); border-color: var(--danger);
+  background: var(--danger-soft); border-color: var(--danger);
 }
 
 .card.sub { background: var(--surface-0); padding: 12px 14px; margin-top: 10px; }
@@ -1043,7 +1232,7 @@ select.select { appearance: none; padding-right: 24px; }
 .why.gaps { border-left-color: var(--alert); color: var(--alert); }
 .selectable { user-select: all; }
 .is-highlighted {
-  outline: 1px solid var(--alert); outline-offset: 3px; border-radius: 3px;
+  outline: 1px solid var(--alert); outline-offset: 3px; border-radius: var(--r-sm);
 }
 
 /* The custody ledger as a spine. Chronology is the point of a chain of
@@ -1200,7 +1389,7 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .live-live {
   background: var(--sign-positive);
-  box-shadow: 0 0 0 2px rgba(62, 156, 107, 0.16);
+  box-shadow: 0 0 0 2px var(--positive-glow);
 }
 .live-connecting {
   background: var(--alert);
@@ -1261,7 +1450,7 @@ select.select { appearance: none; padding-right: 24px; }
 .hop-row {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
   margin: 0; padding: 4px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--hairline-soft);
 }
 .hop-row:last-child { border-bottom: 0; }
 
@@ -1280,7 +1469,7 @@ select.select { appearance: none; padding-right: 24px; }
    reads as a specimen rather than as part of the console's own chrome. */
 .capture-shot {
   display: block; max-width: 100%; height: auto; margin: 8px 0;
-  border: 1px solid var(--hairline); border-radius: 3px;
+  border: 1px solid var(--hairline); border-radius: var(--r-sm);
   background: var(--surface-2);
 }
 
@@ -1308,7 +1497,7 @@ select.select { appearance: none; padding-right: 24px; }
 .copy-btn {
   flex: none; border: 0; background: none; cursor: pointer;
   color: var(--text-tertiary); font-size: 12px; line-height: 1;
-  padding: 1px 3px; border-radius: 3px; opacity: 0;
+  padding: 1px 3px; border-radius: var(--r-sm); opacity: 0;
   transition: opacity 90ms ease, color 90ms ease, background-color 90ms ease;
 }
 .copyable:hover .copy-btn,
