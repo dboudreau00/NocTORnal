@@ -1572,12 +1572,12 @@ function drawDensity() {
   const w = tlCanvas.clientWidth, h = tlCanvas.clientHeight;
   if (!w || !h) return;
   tlCtx.clearRect(0, 0, w, h);
-  tlCtx.fillStyle = PAINT.surface2 || '#2D2030';
+  tlCtx.fillStyle = PAINT.surface2;
   tlCtx.fillRect(0, 0, w, h);
 
   const span = state.timeSpan;
   if (!span || span.max <= span.min) {
-    tlCtx.strokeStyle = PAINT.hairline || '#463549';
+    tlCtx.strokeStyle = PAINT.grid;
     tlCtx.lineWidth = 1;
     tlCtx.beginPath();
     tlCtx.moveTo(0, h - 0.5);
@@ -1596,13 +1596,13 @@ function drawDensity() {
   let peak = 0;
   for (const c of counts) if (c > peak) peak = c;
   const bw = w / buckets;
-  tlCtx.fillStyle = PAINT.accentDim || '#2E7168';
+  tlCtx.fillStyle = PAINT.accentDim;
   for (let i = 0; i < buckets; i += 1) {
     if (!counts[i]) continue;
     const bh = Math.max(2, (counts[i] / peak) * (h - 4));
     tlCtx.fillRect(i * bw + 0.5, h - bh, Math.max(1, bw - 1), bh);
   }
-  tlCtx.strokeStyle = PAINT.hairline || '#463549';
+  tlCtx.strokeStyle = PAINT.grid;
   tlCtx.lineWidth = 1;
   tlCtx.beginPath();
   tlCtx.moveTo(0, h - 0.5);
@@ -1610,8 +1610,7 @@ function drawDensity() {
   tlCtx.stroke();
 
   const x = (posFromAsOf() / 1000) * w;
-  tlCtx.strokeStyle = state.proj.as_of ? (PAINT.alert || '#D4A03C')
-                                      : (PAINT.accent || '#4FC1AF');
+  tlCtx.strokeStyle = state.proj.as_of ? PAINT.alert : PAINT.accent;
   tlCtx.lineWidth = 2;
   tlCtx.beginPath();
   tlCtx.moveTo(clamp(x, 1, w - 1), 0);
@@ -1642,10 +1641,33 @@ const cssVar = (name) =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 const PAINT = {};
+
+/* Painters below read PAINT directly and carry NO literal fallback. A
+   token that does not resolve must be a visible, reported fault -- not a
+   silent reversion to whichever palette happened to be hard-coded at the
+   call site. `cssVar` returns '' for an undefined custom property, so an
+   empty string here is the whole signal. */
+function paintIsComplete() {
+  const missing = [];
+  for (const [k, v] of Object.entries(PAINT)) {
+    if (typeof v === 'string' && v === '') missing.push(k);
+  }
+  for (const [k, v] of Object.entries(PAINT.hues || {})) {
+    if (v === '') missing.push('hues.' + k);
+  }
+  if (missing.length) {
+    console.error('theme tokens did not resolve: ' + missing.join(', ') +
+                  ' -- the canvas will paint with the browser default, '
+                  + 'which is the intended loud failure.');
+  }
+  return missing.length === 0;
+}
+
 function loadPaint() {
   PAINT.void = cssVar('--void');
   PAINT.surface2 = cssVar('--surface-2');
   PAINT.hairline = cssVar('--hairline');
+  PAINT.grid = cssVar('--chart-grid');
   PAINT.pos = cssVar('--sign-positive');
   PAINT.neg = cssVar('--sign-negative');
   PAINT.neu = cssVar('--sign-neutral');
@@ -1664,6 +1686,7 @@ function loadPaint() {
                    'context']) {
     PAINT.hues[h] = cssVar('--' + h);
   }
+  paintIsComplete();
 }
 
 /** Swap what the canvas is showing. Positions survive: a node already on
@@ -2096,7 +2119,7 @@ function edgeHidden(e) {
 function draw() {
   const g = state.graph;
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  ctx.fillStyle = PAINT.void || '#140C13';
+  ctx.fillStyle = PAINT.void;
   ctx.fillRect(0, 0, w, h);
   if (!g) return;
   syncScreen();
@@ -4195,7 +4218,9 @@ function initPalette() {
 
   /* macOS reads ⌘; everywhere else that glyph is noise. */
   const mac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
-  $('btn-palette').textContent = mac ? '⌘K' : 'Ctrl K';
+  /* The KEY CAP, not the button: the button also holds an icon and a
+     label, and assigning textContent to it would delete both. */
+  $('palette-key').textContent = mac ? '⌘K' : 'Ctrl K';
   $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
@@ -5721,11 +5746,11 @@ function drawHistory() {
   const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
   if (!w || !h) return;
   histCtx.clearRect(0, 0, w, h);
-  histCtx.fillStyle = PAINT.surface2 || '#2D2030';
+  histCtx.fillStyle = PAINT.surface2;
   histCtx.fillRect(0, 0, w, h);
 
   const baseline = () => {
-    histCtx.strokeStyle = PAINT.hairline || '#463549';
+    histCtx.strokeStyle = PAINT.grid;
     histCtx.lineWidth = 1;
     histCtx.beginPath();
     histCtx.moveTo(0, h - 0.5);
@@ -5773,7 +5798,7 @@ function drawHistory() {
 
   /* The path. `pen` breaks it if a value is ever unrenderable; see the
      note above for why that is a guard and not gap handling. */
-  histCtx.strokeStyle = PAINT.accent || '#4FC1AF';
+  histCtx.strokeStyle = PAINT.accent;
   histCtx.lineWidth = 2;
   histCtx.beginPath();
   let pen = false;
@@ -5791,8 +5816,7 @@ function drawHistory() {
   pts.forEach((p, i) => {
     const ok = typeof p.value === 'number' && Number.isFinite(p.value);
     if (!ok) return;
-    histCtx.fillStyle = p.is_approximate
-      ? (PAINT.alert || '#D4A03C') : (PAINT.accent || '#4FC1AF');
+    histCtx.fillStyle = p.is_approximate ? PAINT.alert : PAINT.accent;
     histCtx.beginPath();
     histCtx.arc(x(p, i), y(p.value), p.is_approximate ? 3.5 : 2.5,
                 0, Math.PI * 2);
@@ -5801,7 +5825,7 @@ function drawHistory() {
 
   /* Ends only. A crowded axis is unreadable at this height, and the table
      below carries every exact value anyway. */
-  histCtx.fillStyle = PAINT.dim || '#7E6D7C';
+  histCtx.fillStyle = PAINT.dim;
   histCtx.font = PAINT.monoFont || '10px monospace';
   histCtx.textBaseline = 'alphabetic';
   histCtx.textAlign = 'left';

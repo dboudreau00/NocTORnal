@@ -23,12 +23,18 @@ written or read by anything before this.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
 
 from test_collection_pg import _case, _source, _user  # noqa: E402
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+pytestmark = pytest.mark.skipif(
+    not DATABASE_URL, reason="DATABASE_URL not set; collection tests are gated"
+)
 
 
 @pytest.fixture
