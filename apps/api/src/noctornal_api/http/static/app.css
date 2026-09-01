@@ -283,6 +283,43 @@ select.select { appearance: none; padding-right: 24px; }
 .hdr-asof { color: var(--text-secondary); white-space: nowrap; }
 .hdr-asof.past { color: var(--alert); }
 .spacer { flex: 1; }
+
+/* The palette affordance. Bordered rather than ghost: it is the primary
+   way to navigate this console and it competes for attention with nothing
+   else in the bar. */
+.appbar-search {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 4px 5px 4px var(--s-2); border-radius: var(--r-pill);
+  color: var(--text-tertiary); flex: none;
+}
+.appbar-search:hover { color: var(--text-primary); }
+.appbar-search svg { width: 13px; height: 13px; flex: none; }
+.appbar-search-label { font-size: 12px; }
+
+/* The case identifier reads as an identifier: mono, on its own quiet
+   ground, so it separates from the wordmark beside it. */
+.hdr-case {
+  padding: 3px var(--s-2); border-radius: var(--r-sm);
+  background: var(--wash-1);
+}
+
+/* Who you are signed in as, as one object rather than two loose spans. */
+.hdr-user {
+  padding: 3px var(--s-2) 3px 5px; border-radius: var(--r-pill);
+  border: 1px solid var(--hairline); background: var(--wash-1);
+  flex: none;
+}
+.hdr-user::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-dim); flex: none;
+}
+
+/* Under ~1100px the label goes and the control becomes the icon plus the
+   key cap, which is still self-explanatory and buys back ~52px in the row
+   that runs out of space first. */
+@media (max-width: 1100px) {
+  .appbar-search-label { display: none; }
+}
 .hdr-user { display: flex; align-items: center; gap: 6px;
             color: var(--text-tertiary); }
 .hdr-user code { color: var(--text-secondary); }
@@ -350,7 +387,12 @@ select.select { appearance: none; padding-right: 24px; }
               color var(--motion-fast) var(--ease-out);
 }
 .rail-btn:hover { color: var(--text-primary); background: var(--wash-3); }
-.rail-glyph { font-size: 17px; line-height: 1; }
+/* The rail carries inline SVG rather than Unicode dingbats: a dingbat is
+   drawn by whichever fallback font the OS picks, so its weight and optical
+   size varied per machine, and two of the seventeen (U+2751, U+25E9) have
+   no coverage in the stock Windows UI font and rendered as tofu. */
+.rail-glyph { display: block; line-height: 0; }
+.rail-glyph svg { width: 18px; height: 18px; display: block; }
 /* Clipped rather than allowed to overflow. The rail is a fixed narrow
    column and a caption that does not fit used to run out of it and over
    the pane -- "HYPOTHESES" did exactly that. Ellipsis rather than wrap
@@ -757,7 +799,7 @@ select.select { appearance: none; padding-right: 24px; }
 @media (max-height: 620px) {
   :root { --appbar-h: 38px; }
   .rail-btn { min-height: 36px; }
-  .rail-glyph { font-size: 15px; }
+  .rail-glyph svg { width: 16px; height: 16px; }
   .scrubber { padding: var(--s-1) var(--s-3) var(--s-2); }
   .tl-density { height: 18px; }
   .graph-bar { padding: var(--s-1) var(--s-3); }
