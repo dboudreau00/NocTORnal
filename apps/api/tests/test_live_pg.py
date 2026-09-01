@@ -23,7 +23,7 @@ import json
 import os
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date
 from uuid import uuid4
 
 import pytest
@@ -316,9 +316,3 @@ def test_a_burst_is_coalesced(conn):
     js = (Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
           / "http" / "static" / "app.js").read_text(encoding="utf-8")
     assert "_refetchSoon = debounce(" in js
-
-
-def test_timedelta_import_is_used_or_absent():
-    """Guard against the unused-import drift ruff would catch anyway —
-    kept because this file grew several helpers that came and went."""
-    assert timedelta is not None

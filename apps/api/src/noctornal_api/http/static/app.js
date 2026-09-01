@@ -8036,7 +8036,15 @@ function watchHitRow(h) {
   facts.appendChild(fact('watch', visibleText(h.watch_name)));
   facts.appendChild(fact('author', visibleText(h.author_handle)));
   facts.appendChild(fact('posted', fmtTime(h.posted_at)));
-  facts.appendChild(fact('matched', Object.keys(h.matched_on || {}).join(', ')));
+  // The collector writes matched_on as a LIST of reasons ("regex:...",
+  // "selector:..."). This rendered Object.keys() of it, which on a list is
+  // its indices -- so every real hit said it fired on "0" or "0, 1". The
+  // read-path test fixture had fabricated a dict, and both sides were
+  // green. A dict is still accepted for any legacy row; a list renders as
+  // the reasons themselves.
+  const why = Array.isArray(h.matched_on)
+    ? h.matched_on : Object.keys(h.matched_on || {});
+  facts.appendChild(fact('matched', why.join(', ')));
   card.appendChild(facts);
 
   if (h.excerpt) card.appendChild(el('p', 'muted small', visibleText(h.excerpt)));
