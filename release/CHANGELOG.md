@@ -1,5 +1,88 @@
 # Changelog
 
+## Alpha 3 — 2026-09-01
+
+Interface release. **Still not audited, and still not lawful to operate
+against real material until the five blocking items in
+[docs/16](../docs/16-legal-and-external.md) are settled by somebody
+outside this codebase.** Nothing in this release touches those.
+
+### The console was reskinned
+
+Elevation now comes from LIGHT rather than paint: a translucent wash and a
+hairline over a gradient ground, instead of a ladder of five opaque greys.
+That is what makes a panel read as lit rather than filled, and it is the
+single largest visual change here. It brings a radius scale (4/8/12/14 and
+a pill), a 4px spacing scale, a shadow scale and motion tokens — the first
+cut had six ad-hoc radii between 3px and 10px, which is what made the
+console look a decade older than it is.
+
+The seventeen rail tabs moved from Unicode dingbats to inline SVG. That is
+not only cosmetic: a dingbat is drawn by whichever font the OS falls back
+to, so the rail's weight and optical size varied per machine, and two of
+the seventeen (U+2751, U+25E9) have no coverage in the stock Windows UI
+font and rendered as empty boxes.
+
+### The theme contract is now enforced
+
+`theme.css` has claimed since it was written that app.css names no colour
+outside the token file. That claim was false, and the test it named as the
+enforcer did not exist. Nine raw `rgba()` literals had accumulated in
+app.css and twelve hard-coded hexes in app.js, four of them duplicating
+tokens the theme already defined and nothing used.
+
+The app.js case was the worse one. The canvas painters read a token and
+fell back to a literal — `PAINT.surface2 || '#2D2030'` — and `cssVar()`
+returns `''` for a token that does not resolve. `''` is falsy, so a renamed
+token did not fail: it silently painted the PREVIOUS theme onto the canvas
+while the DOM around it painted the new one.
+
+`test_theme_contract.py` (18 tests) now checks all of it: no colour literal
+in either file, no undefined token, no dead token, no radius outside the
+scale, and the colour rules the theme file declares load-bearing.
+
+### Contrast fixes, several of them real defects
+
+- `--text-tertiary` carried real labels at 3.79:1 for the whole of the
+  first cut. It is 4.52:1 and clears AA for the first time.
+- `--danger` sat at 3.70:1 while being the colour that says a thing will be
+  destroyed. Now 4.99:1.
+- `.chip.conf-LOW` and `.st-none` set a dim colour AND inherited a dim
+  opacity, compositing to 1.83:1 — a confidence label nobody could read.
+  Confidence stays encoded as opacity; the floor moved to 0.58.
+- Form controls had no boundary: `--hairline` measures 1.48:1 against the
+  card a field sits on. A dedicated `--field-edge` measures 3.30:1. This
+  cannot be fixed with a fill — the ground is near-black, so a recessed
+  field reaches only 1.18:1 however dark it goes.
+- `--artefact-finance` and `--alert` were 4.4 degrees apart, which violated
+  the theme file's own stated rule that the two must not converge. Now 17.0.
+- The seven node hues are held apart by CIEDE2000 rather than by eye: the
+  closest pair went from 12.0 to 15.8.
+
+### Responsive
+
+Three media queries became ten, including the first height-axis rules in
+the file. Every real failure in this layout was a height failure: the rail
+is a column of seventeen tabs needing ~900px, and it used to `overflow:
+hidden` and simply amputate the last few with no way to reach them.
+
+The app bar no longer wraps its buttons onto two lines, and no longer
+scrolls the page sideways. `#hdr-user` was 326px of that bar — a third of
+it — because `/auth/me` returns a user_id and nothing else, so the pill
+could only render a raw UUID.
+
+### Also
+
+- The read-path Postgres tests are gated on `DATABASE_URL` like every other
+  `*_pg.py` file. Without one they errored in fixture setup rather than
+  skipping, so a healthy local run ended `902 passed, 890 skipped, 11
+  errors`.
+- All sixteen console screenshots re-shot on the new UI, against the
+  documented `OP-SHOWCASE-26` showcase seed. The **Analysis** pane is no
+  longer the empty "Run analysis" prompt it had been in every previous
+  release: brokerage, Burt constraint, effective size, communities and the
+  key-player cut set are computed and shown.
+
 ## Alpha 2 — 2026-08-25
 
 Second packaged release. **Still not audited, and still not lawful to
