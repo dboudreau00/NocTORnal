@@ -4218,7 +4218,9 @@ function initPalette() {
 
   /* macOS reads ⌘; everywhere else that glyph is noise. */
   const mac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
-  $('btn-palette').textContent = mac ? '⌘K' : 'Ctrl K';
+  /* The KEY CAP, not the button: the button also holds an icon and a
+     label, and assigning textContent to it would delete both. */
+  $('palette-key').textContent = mac ? '⌘K' : 'Ctrl K';
   $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
