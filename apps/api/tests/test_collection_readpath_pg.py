@@ -100,7 +100,7 @@ def _hit(conn, watch_id, document_id, *, score=0.5, suppressed=False,
         """INSERT INTO collect.watch_hit
                (watch_id, document_id, matched_on, score, suppressed,
                 suppress_reason)
-           VALUES (%s, %s, '{"keywords":["ransom"]}'::jsonb, %s, %s, %s)
+           VALUES (%s, %s, '["selector:ransom"]'::jsonb, %s, %s, %s)
            RETURNING id""",
         (watch_id, document_id, score, suppressed, reason)).fetchone()[0]
 
@@ -193,7 +193,12 @@ def test_a_watch_hit_can_be_opened(conn):
     assert len(hits) == 1
     assert hits[0]["title"] == "Ransom thread"
     assert hits[0]["watch_name"] == "watch-1"
-    assert hits[0]["matched_on"] == {"keywords": ["ransom"]}
+    # A LIST, because that is what the collector writes (collection.py
+    # `matched.append(f"regex:{pattern}")`, asserted by test_collection_pg).
+    # This fixture fabricated a dict for three weeks, the UI rendered
+    # Object.keys() of whatever arrived, and both were green while every
+    # real hit on screen said it fired on "0, 1".
+    assert hits[0]["matched_on"] == ["selector:ransom"]
     assert hits[0]["external_url"]
 
 

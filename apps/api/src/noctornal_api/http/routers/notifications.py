@@ -180,6 +180,14 @@ class DrainOut(BaseModel):
     redacted: int
     refused: int
     failed: int
+    #: Rows made undeliverable by a clearance or assignment revoked AFTER
+    #: they were queued (transports.revoke_undeliverable). The drain has
+    #: always computed this; the model did not declare it, and pydantic
+    #: drops an undeclared key without a sound -- so the one counter that
+    #: says "these people were NOT told, on purpose" never reached the
+    #: operator who pressed the button. test_ui_invariants holds the model
+    #: to every key the drain returns.
+    revoked: int
 
 
 @router.post("/dispatch", response_model=DrainOut)

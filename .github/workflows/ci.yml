@@ -251,6 +251,13 @@ jobs:
       # service would show as a green run with 100+ skips.
       - name: No tests were skipped
         run: |
+          # pipefail: without it the step's exit status is tee's, so a
+          # pytest FAILURE in this run would pass as long as nothing
+          # skipped. Harmless while the Tests step above runs first and
+          # fails on its own, but a gate that discards the exit code of
+          # the thing it is gating is one edit away from being the only
+          # run -- and then green would mean nothing.
+          set -o pipefail
           pytest apps/api/tests packages/ontology/tests -q -rs 2>&1 | tee /tmp/out
           if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/out; then
             echo "::error::Tests were SKIPPED. The Postgres or MinIO leg is not running."
