@@ -1103,6 +1103,17 @@ select.select { appearance: none; padding-right: 24px; }
    analyst to skip the cheapest work on the screen. Marked as an action
    instead (docs/17 F20). */
 .row-incomplete { border-left: 2px solid var(--alert); }
+
+/* The Inbox's own heading. `.pane-title` has been in the markup
+   since the pane was written and was never defined, so
+   "Notifications" rendered at the browser's default <h2> -- 1.5em
+   bold with a 0.83em margin, a size that exists nowhere else in the
+   console. Every other pane heads itself with .h-md or .h-sm. */
+.pane-title {
+  font-size: 18px; font-weight: 600; margin: 0;
+  color: var(--text-primary);
+}
+
 .row-incomplete .ach-el::after {
   content: " ·"; color: var(--alert); font-weight: 700;
 }

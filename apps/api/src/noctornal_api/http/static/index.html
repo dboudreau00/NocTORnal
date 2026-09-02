@@ -512,37 +512,81 @@
         <!-- INBOX -->
         <section id="pane-inbox" class="pane" role="tabpanel"
                  aria-labelledby="tab-inbox" tabindex="-1" hidden>
-
-          <div class="card">
-            <div class="row space-between">
-              <h2 class="pane-title">Notifications</h2>
-              <button id="inbox-read-all" type="button" class="btn ghost">
-                Mark all read</button>
-            </div>
-            <p class="help">Everything here is filtered by your CURRENT
-              clearance, not the clearance you held when it was written &mdash;
-              so a notification about material you can no longer read
-              disappears rather than lingering. <strong>Email carries a
-              summary and a link, never the detail below</strong>; anything
-              above TLP:AMBER does not leave the platform at all
-              (invariant&nbsp;8).</p>
-            <label class="field inline">
-              <input id="inbox-unread-only" type="checkbox" />
-              <span class="label">Unread only</span>
-            </label>
+          <!-- Two views of the same machinery: what reached YOU, and what the
+               platform tried to send to anyone. The second is the delivery
+               ledger, which notify.delivery has recorded since 0029 and nothing
+               ever rendered. -->
+          <div class="subtabs" role="tablist" aria-label="Notification views">
+            <button type="button" class="subtab" role="tab" aria-selected="true"
+                    data-subtab="notifications"
+                    aria-controls="inbox-notifications">Notifications</button>
+            <button type="button" class="subtab" role="tab" aria-selected="false"
+                    tabindex="-1" data-subtab="deliveries"
+                    aria-controls="inbox-deliveries">Deliveries</button>
           </div>
 
-          <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
-          <div id="inbox-list" class="stack"></div>
+          <div id="inbox-notifications" class="subpane">
 
-          <details class="card">
-            <summary>Delivery preferences</summary>
-            <p class="help">Quiet hours defer, they never drop &mdash; a
-              deferred notification is still queued with a due time. Priority&nbsp;1
-              (an evidence integrity alarm, a break-glass) ignores them, which
-              is the only reason silencing a channel overnight is safe.</p>
-            <div id="inbox-prefs" class="stack"></div>
-          </details>
+
+            <div class="card">
+              <div class="row space-between">
+                <h2 class="pane-title">Notifications</h2>
+                <button id="inbox-read-all" type="button" class="btn ghost">
+                  Mark all read</button>
+              </div>
+              <p class="help">Everything here is filtered by your CURRENT
+                clearance, not the clearance you held when it was written &mdash;
+                so a notification about material you can no longer read
+                disappears rather than lingering. <strong>Email carries a
+                summary and a link, never the detail below</strong>; anything
+                above TLP:AMBER does not leave the platform at all
+                (invariant&nbsp;8).</p>
+              <label class="field inline">
+                <input id="inbox-unread-only" type="checkbox" />
+                <span class="label">Unread only</span>
+              </label>
+            </div>
+
+            <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
+            <div id="inbox-list" class="stack"></div>
+
+            <details class="card">
+              <summary>Delivery preferences</summary>
+              <p class="help">Quiet hours defer, they never drop &mdash; a
+                deferred notification is still queued with a due time. Priority&nbsp;1
+                (an evidence integrity alarm, a break-glass) ignores them, which
+                is the only reason silencing a channel overnight is safe.</p>
+              <div id="inbox-prefs" class="stack"></div>
+            </details>
+        
+          </div>
+
+          <div id="inbox-deliveries" class="subpane" hidden>
+            <div class="card">
+              <h2 class="pane-title">Delivery ledger</h2>
+              <p class="help">Every attempt to send a summary out of the
+                platform, newest first &mdash; kinds, channels, destinations and
+                refusal reasons. <strong>Never subjects or summaries</strong>:
+                the ledger spans every case and every recipient, which is why it
+                needs <code>integration.manage</code> rather than your own
+                clearance. A <em>refused</em> row is the one that explains an
+                absence the recipient did not choose.</p>
+              <div class="row-form">
+                <label class="field">
+                  <span class="label">Kind</span>
+                  <input id="dlv-kind" type="text" spellcheck="false"
+                         autocomplete="off" placeholder="any">
+                </label>
+                <label class="field inline">
+                  <input id="dlv-refused" type="checkbox" />
+                  <span class="label">Refused, failed and revoked only</span>
+                </label>
+                <button id="dlv-reload" type="button" class="btn">Reload</button>
+              </div>
+            </div>
+            <p id="dlv-empty" class="empty" hidden>Nothing sent yet.</p>
+            <div id="dlv-list" class="stack"></div>
+          </div>
         </section>
 
         <section id="pane-triage" class="pane" role="tabpanel"
@@ -1438,6 +1482,32 @@
               <span class="help">O(n) over every event ever written.</span>
             </div>
             <div id="audit-verdict"></div>
+
+            <!-- The OTHER tamper-evident ledger. core.evidence_custody has been
+                 hash-chained since migration 0024, under a docstring that invokes
+                 FRE 902(13)-(14) -- and until 2026-09-02 nothing recomputed it.
+                 The record actually produced to a court was the one nobody
+                 verified. -->
+            <h2 class="h-sm">Chain of custody</h2>
+            <p class="help">
+              The custody ledger is what goes to a court. It is one chain across
+              every exhibit, so naming an exhibit narrows what is <em>reported</em>
+              and not what is checked &mdash; leave it blank for the answer to
+              &ldquo;is this exhibit&rsquo;s history complete&rdquo;.
+            </p>
+            <label class="field">
+              <span class="label">Exhibit id (optional)</span>
+              <input id="custody-evidence-id" type="text" class="mono"
+                     spellcheck="false" autocomplete="off"
+                     placeholder="report one exhibit only">
+            </label>
+            <div class="row audit-actions">
+              <button id="btn-custody-verify" type="button" class="btn">
+                Verify custody
+              </button>
+              <span class="help">O(n) over every custody row ever written.</span>
+            </div>
+            <div id="custody-verdict"></div>
           </div>
 
           <!-- RETENTION -->
@@ -1451,6 +1521,29 @@
             </p>
             <div id="ret-rules"></div>
             <p id="ret-rules-notice" class="help warn" hidden></p>
+
+            <!-- A placeholder rule is a number somebody typed. Confirming one is
+                 how it acquires a name and a reason; the panel that listed the
+                 unconfirmed ones offered no way to do it, so the only route was
+                 curl. -->
+            <form id="ret-confirm" class="card row-form" novalidate>
+              <label class="field">
+                <span class="label">Category</span>
+                <select id="ret-cat" class="select"></select>
+              </label>
+              <label class="field">
+                <span class="label">Retain (days)</span>
+                <input id="ret-days" type="number" min="1" step="1" required>
+              </label>
+              <label class="field grow">
+                <span class="label">Rationale</span>
+                <input id="ret-rationale" type="text" required
+                       placeholder="which rule or statute sets this period, and where">
+              </label>
+              <button id="ret-confirm-btn" type="submit" class="btn primary">
+                Confirm rule</button>
+            </form>
+            <p id="ret-confirm-msg" class="msg" hidden></p>
 
             <h2 class="h-sm">Due for destruction</h2>
             <p class="help">
@@ -1610,6 +1703,21 @@
           </div>
           <div id="adm-list"></div>
           <p id="adm-empty" class="empty">No accounts loaded.</p>
+        
+          <!-- The code-side half of the legal register (docs/16). Every line is
+               a claim about THIS deployment with the evidence beside it, so a
+               "ready" that is only a green tick cannot be mistaken for one that
+               was checked. A probe against a service that is down is a FAILED
+               check with the error as its evidence, never a 500. -->
+          <h2 class="h-sm">Readiness</h2>
+          <p class="help">What the deployment can prove about itself right now.
+            This is the code-side half only: the legal sign-off items (L1&ndash;L5)
+            are not software and nothing here can close them.</p>
+          <div class="row audit-actions">
+            <button id="btn-readiness" type="button" class="btn">Check readiness</button>
+            <span id="rdy-summary" class="help"></span>
+          </div>
+          <div id="rdy-list" class="stack"></div>
         </section>
 
         <section id="pane-samples" class="pane" role="tabpanel"
