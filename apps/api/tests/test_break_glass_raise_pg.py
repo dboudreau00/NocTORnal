@@ -25,7 +25,6 @@ from uuid import uuid4
 
 import pytest
 
-from test_governance_pg import _case, _user  # noqa: E402
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -35,18 +34,75 @@ pytestmark = pytest.mark.skipif(
 os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 
+#: THIS file's own prefix. The first version imported test_governance_pg's
+#: helpers and therefore its `gov-` prefix -- and did no cleanup, on the
+#: reasoning that audit.event names the users and is append-only. Half
+#: right, and it poisoned the shared dev database: every run left its
+#: priority-1 break-glass alerts behind, sixty of them accumulated, and a
+#: later full-suite run failed thirty-five tests in OTHER files with
+#: `notification_actor_id_fkey` when THEIR teardown deleted `gov-` users
+#: still named by these orphans. A distinct prefix means no other file's
+#: teardown can ever trip over this one's rows, and the teardown below
+#: removes everything that is removable.
+PREFIX = "bgr-"
+
+
+def _user(conn, *roles):
+    """A RED-cleared user under this file's prefix; same shape as
+    test_governance_pg._user, different prefix on purpose (see PREFIX)."""
+    from noctornal_api.stores import PgUserStore
+    uid = PgUserStore(conn).create_user(
+        f"{PREFIX}{uuid4().hex[:8]}@noctornal.test", "Officer", "x" * 20)
+    conn.execute("UPDATE iam.app_user SET tlp_clearance = 'RED' WHERE id = %s",
+                 (uid,))
+    for role in roles:
+        conn.execute(
+            "INSERT INTO iam.user_role (user_id, role_key) VALUES (%s, %s)",
+            (uid, role))
+    return uid
+
+
+def _case(conn, owner):
+    from datetime import date, timedelta
+    from noctornal_api.cases import CaseService
+    future = date(2028, 1, 1)
+    return CaseService(conn).create(
+        code=f"OP-BGR-{uuid4().hex[:6]}", title="Break-glass raise",
+        legal_basis="production order", retention_until=future,
+        review_due=future - timedelta(days=1),
+        owner_user_id=owner, created_by=owner)
+
+
 @pytest.fixture
 def conn():
-    """Own connection and teardown. `iam.break_glass` and `audit.event` are
-    append-only ledgers that carry foreign keys to the user, so the user
-    and the case CANNOT be deleted once a grant or an audit row names them
-    (the roadmap's "an append-only ledger outlives its subject" trap).
-    Rows are left with a recognisable prefix instead; this is the same
-    posture test_governance_pg takes."""
+    """Own connection, and a teardown that follows the foreign keys.
+
+    Deliveries before notifications; notifications by recipient, by actor
+    AND by case (a break-glass alert's actor is the analyst, its recipient
+    every officer, and a global grant has no case); grants, sessions and
+    assignments before cases; roles last. Users are NOT deleted:
+    audit.event names them as actor and raises on DELETE -- the
+    "append-only ledger outlives its subject" trap -- so they stay,
+    carrying the prefix, exactly as test_governance_pg leaves its own.
+    """
     from noctornal_api.db import connect
     c = connect()
     yield c
-    c.close()
+    users = f"(SELECT id FROM iam.app_user WHERE email LIKE '{PREFIX}%@noctornal.test')"
+    cases = "(SELECT id FROM core.\"case\" WHERE code LIKE 'OP-BGR-%')"
+    try:
+        c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
+                  f"(SELECT id FROM notify.notification WHERE recipient_id IN {users} "
+                  f"OR actor_id IN {users} OR case_id IN {cases})")
+        c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {users} "
+                  f"OR actor_id IN {users} OR case_id IN {cases}")
+        c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {users}")
+        c.execute(f"DELETE FROM iam.session WHERE user_id IN {users}")
+        c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {cases}")
+        c.execute(f'DELETE FROM core."case" WHERE id IN {cases}')
+        c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {users}")
+    finally:
+        c.close()
 
 
 def _read_role(conn) -> str:
