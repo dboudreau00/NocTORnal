@@ -188,15 +188,12 @@ class DrainOut(BaseModel):
     #: operator who pressed the button. test_ui_invariants holds the model
     #: to every key the drain returns.
     revoked: int
-<<<<<<< ours
-=======
     #: N3 (2026-09-02): one drain does three things. How many case owners
     #: were told a review is due (notify_events.case_reviews_due) and how
     #: many unacknowledged priority-1 notifications were escalated
     #: (notifications.escalate_unacknowledged) in this pass.
     reviews_due: int
     escalated: int
->>>>>>> theirs
 
 
 @router.post("/dispatch", response_model=DrainOut)
