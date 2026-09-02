@@ -829,7 +829,7 @@ function selectTab(name) {
   /* Only the visible subtab loads. Four fetches on tab-open would mean
      three of them are for a panel nobody is looking at, and one of those
      three is a rate-limited search. */
-  if (name === 'ach') loadAch();
+  if (name === 'ach') { loadAch(); loadAssumptions(); }
   if (name === 'feeds' && selectFeedsSub) selectFeedsSub(currentSub('pane-feeds'));
   if (name === 'governance' && selectGovSub) {
     selectGovSub(currentSub('pane-governance'));
@@ -4703,6 +4703,7 @@ function wire() {
   wireCustodyVerify();
   wireRetentionConfirm();
   wireDeliveries();
+  wireAssumptions();
   wireCaseActions();
   initCanvas();
   initPalette();
@@ -6835,6 +6836,135 @@ async function loadLatestAnalysis() {
     : 'Showing the last completed run — not recomputed.');
 }
 
+/* --- the assumptions register ------------------------------------------
+ *
+ * Migration 0056. An assumption is a claim the analysis rests on that
+ * nobody has evidenced, and the reason to write it down is that it becomes
+ * reviewable: the register turns "we all sort of assumed that" into a row
+ * with a name, a date and a status somebody can argue with.
+ *
+ * Only OPEN and CONFIRMED reach the report (`REPORTABLE_STATUSES` in
+ * assumptions.py). This says so on the panel, because an analyst who thinks
+ * a withdrawn assumption still appears will leave it withdrawn rather than
+ * deleting it, and one who thinks the opposite will do the reverse.
+ */
+function wireAssumptions() {
+  const form = $('asm-create');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = $('asm-msg');
+    const statement = $('asm-statement').value.trim();
+    if (!statement) { setMsg(msg, 'Write the assumption first.'); return; }
+    const btn = $('asm-create-btn');
+    btn.disabled = true;
+    setMsg(msg, 'recording…');
+    try {
+      await api(cpath('/assumptions'), {
+        method: 'POST',
+        json: { statement, basis: $('asm-basis').value.trim() || null },
+      });
+    } catch (err) {
+      btn.disabled = false;
+      setMsg(msg, refusalText(err, 'Recording an assumption needs case.update.'));
+      return;
+    }
+    btn.disabled = false;
+    setMsg(msg, '');
+    $('asm-statement').value = '';
+    $('asm-basis').value = '';
+    await loadAssumptions();
+  });
+  $('asm-withdrawn').addEventListener('change', () => loadAssumptions());
+}
+
+async function loadAssumptions() {
+  if (!state.caseId) return;
+  const q = $('asm-withdrawn').checked ? '?include_withdrawn=true' : '';
+  try {
+    const body = await api(cpath('/assumptions' + q));
+    renderList('asm-list', 'asm-empty', body.assumptions, assumptionRow);
+  } catch (err) {
+    clear($('asm-list'));
+    const empty = $('asm-empty');
+    show(empty, true);
+    /* The empty line carries the refusal rather than a banner: "no
+       assumptions recorded" and "you may not read them" are different
+       facts, and on this panel the first one is an accusation. */
+    empty.textContent = refusalText(err, 'Assumptions need case.read.');
+  }
+}
+
+/** One assumption, with the two review verbs beside it.
+ *
+ *  CONFIRMED is not styled as a pass and REFUTED is not styled as a
+ *  failure. A refuted assumption is a GOOD outcome — the register worked,
+ *  somebody checked, and the analysis can be corrected while it still can
+ *  be. What deserves the warning colour is an OPEN one, because that is
+ *  the question still owed an answer.
+ */
+function assumptionRow(a) {
+  const card = el('div', 'card row-card'
+    + (a.status === 'OPEN' ? ' row-incomplete' : ''));
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', a.statement));
+  head.appendChild(el('span', 'chip ' + (a.status === 'OPEN' ? 'warn'
+    : (a.status === 'CONFIRMED' ? 'good' : 'subtle')), a.status));
+  card.appendChild(head);
+  if (a.basis) card.appendChild(el('p', 'why', a.basis));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('recorded', a.made_at));
+  if (a.reviewed_at) facts.appendChild(fact('reviewed', a.reviewed_at));
+  card.appendChild(facts);
+  if (a.review_note) card.appendChild(el('p', 'why', a.review_note));
+
+  /* A withdrawn assumption is out of the analysis and out of the report;
+     re-reviewing it would be a status change with no meaning, so the verbs
+     are not offered. */
+  if (a.status === 'WITHDRAWN') return card;
+  const actions = el('div', 'row-actions');
+  for (const [label, status] of [['Confirm', 'CONFIRMED'],
+                                 ['Refute', 'REFUTED'],
+                                 ['Withdraw', 'WITHDRAWN']]) {
+    if (status === a.status) continue;
+    const b = el('button', 'btn small'
+      + (status === 'WITHDRAWN' ? ' danger' : ''), label);
+    b.type = 'button';
+    b.addEventListener('click', () => reviewAssumption(a, status));
+    actions.appendChild(b);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+/** Change one assumption's status.
+ *
+ *  The note is required for a REFUTED verdict by the service, and asking
+ *  here rather than letting the 400 come back means the analyst types the
+ *  reason once, into a prompt that says what it is for.
+ */
+async function reviewAssumption(a, status) {
+  let note = null;
+  if (status !== 'CONFIRMED') {
+    note = window.prompt(status === 'REFUTED'
+      ? 'What refutes it? This is kept with the assumption.'
+      : 'Why withdraw it? Optional.');
+    /* Cancel is null and an empty string is "typed nothing"; neither should
+       become the string "null" in the record. */
+    if (status === 'REFUTED' && !note) return;
+    if (!note) note = null;
+  }
+  try {
+    await api(cpath('/assumptions/' + encodeURIComponent(a.id)),
+      { method: 'PATCH', json: { status, note } });
+  } catch (err) {
+    setMsg($('asm-msg'), refusalText(err, 'Reviewing needs case.update.'));
+    return;
+  }
+  setMsg($('asm-msg'), '');
+  await loadAssumptions();
+}
+
 /* --- retention --------------------------------------------------------- */
 
 async function loadRetention() {
@@ -8661,6 +8791,9 @@ function initOpsPanes() {
   /* The deliveries view is fetched on selection rather than on sign-in:
      it needs integration.manage, which most accounts do not hold, and a
      403 banner on every login would train people to ignore banners. */
+  initSubtabs('pane-ach', (name) => {
+    if (name === 'assumptions') loadAssumptions();
+  });
   initSubtabs('pane-inbox', (name) => {
     if (name === 'deliveries') loadDeliveries();
   });
