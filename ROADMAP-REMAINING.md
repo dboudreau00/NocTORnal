@@ -132,16 +132,26 @@ regressed — the measure got honest.**
 | 1 — Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2 — Sociogram | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. **Live push landed 2026-07-26** — Postgres LISTEN/NOTIFY, one listener per process, the socket carrying no case content. |
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
-| 4 — Collection | **85%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **The READ PATH landed 2026-08-10** and was the largest gap in this phase: `collect.document` and `collect.watch_hit` were written by the collector from the day the phase shipped and read by NOTHING — no endpoint, no UI, no search reach — so a watch could fire 400 times and an analyst saw the integer 400 with nothing to open. Three routes (documents, watch-hits, acknowledge), a Feeds → **Collected** subtab, and no migration: every column already existed, including the `notified_at`/`suppressed`/`acknowledged_by`/`acknowledged_at` lifecycle set that nothing had ever written or read. Still open at the service: `run_once` never raises proposals, so `collection.py`'s claim that collected material "reaches the graph only through the proposal queue a human works" remains false for the collector. |
-| 5 — Notification | **85%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, escalation of an unacknowledged priority-1, a worker. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
-| 6 — Tradecraft | **88%** | ◐ | ✅ | ✅ | ✅ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. What remains is the assumptions register, the ACH-stance and dual-control-policy surfaces, and the hostile review of the phase as a whole. |
+| 4 — Collection | **90%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **The clearance filter, the write paths and search reach landed 2026-09-02**: the listing endpoints had been handing RED source names to AMBER holders, `suppressed`/`suppress_reason` and `triage_state` were read by the UI and written by nothing, and `SearchService` never reached `collect.document`. `/sources/{id}/run` was also returning a RED source's hostname inside its error string. **The READ PATH landed 2026-08-10** and was the largest gap in this phase: `collect.document` and `collect.watch_hit` were written by the collector from the day the phase shipped and read by NOTHING — no endpoint, no UI, no search reach — so a watch could fire 400 times and an analyst saw the integer 400 with nothing to open. Three routes (documents, watch-hits, acknowledge), a Feeds → **Collected** subtab, and no migration: every column already existed, including the `notified_at`/`suppressed`/`acknowledged_by`/`acknowledged_at` lifecycle set that nothing had ever written or read. `run_once` still never raises proposals; the false docstring claim was corrected on 2026-09-02 rather than the code, and the deliberate not-taken decision is recorded there. |
+| 5 — Notification | **92%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, a worker. **Escalation of an unacknowledged priority-1 landed 2026-09-02**, with the three registered kinds that had no producer (EVIDENCE_INTEGRITY_ALARM, PROPOSAL_QUEUED, CASE_REVIEW_DUE), a read for the delivery ledger that had been write-only since 0029, a `notify_drain.py` cron entry, and an advisory lock so two drains cannot double-raise. The integrity alarm is idempotent while unacknowledged, because on an unrate-limited read path it was otherwise one priority-1 email per request. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
+| 6 — Tradecraft | **95%** | ◐ | ✅ | ✅ | ✅ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. **The assumptions register landed 2026-09-02** — migration 0056, a service, `/cases/{id}/assumptions` under `case.read`/`case.update`, inclusion of OPEN and CONFIRMED statements in the report, and an Assumptions subtab beside ACH. What remains is the ACH-stance and dual-control-policy surfaces. |
 | 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
-### Overall: **~95%** (was ~84% at the start of 2026-07-26)
+### Overall: **92.7%** (was ~84% at the start of 2026-07-26)
 
-Unweighted mean across the ten phases. The +11 came from three things:
+Unweighted mean across the ten phases: 100, 100, 100, 85, 90, 92, 95,
+95, 80, 90.
+
+**Corrected 2026-09-02.** This line read ~95% while the row above it
+meant 90.8%; nobody had recomputed it after the per-phase numbers were
+revised downward in the honesty pass that introduced the four-dimension
+weighting. A summary figure that nothing recomputes is the same defect
+this file catalogues everywhere else, so it is now stated with the
+numbers it is the mean of. The rise to 92.7 is Phases 4, 5 and 6.
+
+The earlier +11 came from three things:
 
 - **Phase 8 from 45% to 80%.** It gained the two dimensions it had none
   of: a hostile review (nine criticals) and a UI, plus the detonation/VM
@@ -367,9 +377,19 @@ incident. Recorded rather than left to be rediscovered.
 > table — but it is no longer explained away as normal concurrency, so one
 > now deserves investigation.
 >
-> Still open: the same missing anchor in `core.custody_chain_hash()`,
-> which has no verifier of any kind and whose docstring invokes
-> FRE 902(13)–(14).
+> **CLOSED 2026-09-02.** `custody_verify.py` ports the audit verifier to
+> `core.evidence_custody`, `GET /audit/custody/verify` exposes it under
+> `audit.read`, CI recomputes it beside the audit chain, and the console
+> has a Verify-custody control in Governance → Audit chain. It checks
+> LINK, CONTENT, FORK and GENESIS across the whole ledger; `evidence_id`
+> narrows what is *reported*, never what is checked, and the scoped
+> answer says so. **What it still cannot see is a TAIL truncation** —
+> deleting the newest rows orphans nothing and needs no rehash, so the
+> ledger still agrees with itself. That is named as the first entry in
+> the module's own "what this cannot see", and the response carries
+> `last_id`, `checked` and `tail_row_hash` so an operator recording them
+> out of band can catch a decrease. A true external anchor is still
+> absent, for both chains.
 
 **None of this is a regression.** It is the same lesson this file already
 records twice: a green suite either side of a contract that neither side
@@ -410,12 +430,22 @@ rather than being either dropped or dressed up.
 >   unnotified set, none of them written or read by anything, and a
 >   `triage_state` column with a supporting index and zero references in
 >   `apps/api/src`. An analyst sees the integer `watch_hits` on a run card
->   and cannot open one of them. **STILL OPEN** — it needs a service read
->   method, two routers, a subtab and a renderer, and no migration.
+>   and cannot open one of them. **CLOSED 2026-08-10** — three routes, a
+>   Feeds → Collected subtab and a renderer, with no migration: every
+>   column already existed. **The rest closed 2026-09-02**: the listing
+>   endpoints now filter on the caller's ceiling (they had been handing
+>   RED source names to AMBER holders), `suppressed`/`suppress_reason`
+>   and `triage_state` finally have writers, and `SearchService` reaches
+>   `collect.document`. The triage write is gated on the document's label
+>   AND its source's, because the read is.
 >   Related: `CollectionService.run_once` never calls `ProposalStore`, so
->   `collection.py`'s own docstring claim that everything an adapter
->   produces "reaches the graph only through the proposal queue a human
->   works" is false for the collector.
+>   `collection.py`'s docstring claim that everything an adapter produces
+>   "reaches the graph only through the proposal queue a human works"
+>   was false for the collector. **The docstring was corrected 2026-09-02**
+>   rather than the code: collected material reaches `collect.document`
+>   and `collect.watch_hit` and nothing else, only MANUAL captures go to
+>   proposals, and wiring the collector into the queue is a design
+>   decision deliberately not taken.
 
 ### The Phase 6 hostile pass, 2026-08-10 — every phase has now had one
 
@@ -525,8 +555,16 @@ it is.
 A ten-agent read-only sweep over the items above turned up things that
 were on no list. The first is the most serious finding currently open.
 
-**🔴 Break-glass does not raise anything, and its review control counts
-nothing.** Verified directly, not inherited from the sweep:
+**✅ Break-glass now raises, and its review control counts. CLOSED
+2026-09-01.** `PgAccessResolver.resolve()` reads a live, unrevoked,
+unexpired grant and raises the caller's effective clearance for the
+case it names; `record_use()` is called from that path, and only when
+the grant is what made the access possible — so `action_count` counts
+accesses the grant actually bought, not invocations. `user_ceiling()`
+honours GLOBAL grants only. `action_count` and `used_at` are published
+again, and `test_error_invariants` now fails if either half is
+reintroduced without the other. **The finding as originally written,
+which was accurate until that date:**
 
 - `break_glass.py` states the guarantee — *"It raises a user's effective
   clearance for one case, for a few hours, with everything above
@@ -739,6 +777,57 @@ one that must not be operated until L1–L4 are settled.
 | Redis isolation | The limiter shares an instance running `allkeys-lru` |
 
 ---
+
+## The completion pass, 2026-09-02
+
+Six groups of work, each in its own worktree against its own cloned
+database, then eighteen adversarial reviews (three lenses × six groups),
+then a fix pass, then six fresh adversaries trying to refute the fixes.
+
+**Every group was refuted on the first pass** — 1 blocker, 6 high, 9
+medium, 1 low. That is the number worth keeping: the implementations were
+individually tested, individually green, and individually wrong in ways
+their own tests could not see. The recurring shape was the one this file
+already names — two internally consistent halves that are wrong together:
+
+- Migration 0057's compartment registry refused to `upgrade()` on any
+  database holding a legacy value its own CHECK could not accept, and the
+  suite manufactured exactly such a value. Its blast radius was
+  under-reported because it was measured by counting tests that FAIL — a
+  method that cannot see a test the new gate made *pass for the wrong
+  reason*, and there was one: the only cover for the read-in ceiling's
+  owner branch had been asserting on a substring the registry refusal also
+  satisfied.
+- The evidence integrity alarm re-fired on every read of a corrupt
+  exhibit, on a route with no rate limit, making any `evidence.read`
+  holder an outbound-email amplifier that then fanned out to every
+  security officer — drowning the system's only tamper alarm.
+- `dispatch_due` became a producer-then-drainer whose output was drained
+  in the same pass, silently converting an existing deferred-delivery test
+  into one that passed only while the new feature did nothing.
+- Strict session binding was enforced on the HTTP path and not on the
+  websocket, which also slid the idle window — so a token refused on
+  every request kept the victim's session alive.
+- `/sources/{id}/run` returned a RED source's hostname in its error
+  string, under a *new* module docstring certifying that route as safe.
+- The purge counted object VERSIONS in a field two docstrings said
+  counted exhibit ROWS, so a partially refused deletion reported bytes
+  destroyed that were still in the bucket.
+- `/analytics/latest` claimed `cached: true` with no hash check, and the
+  console rendered that as "unchanged since the last run" — staleness
+  reported as freshness, on a pane that names people.
+
+All of them are closed. What remains open is recorded above and below.
+
+**Suite non-idempotence, worth knowing before reading a red run.** The
+suite is not order-independent on a REUSED database. `test_retention_ingest_pg
+::test_an_expired_dead_letter_can_be_purged_even_if_it_predates_0040`
+passes alone, passes with its own file, and fails when an earlier test in
+the same session has left a case with expired retention and unpurged
+evidence — the unscoped `purge_due` then demands a storage adapter the
+test does not configure. It is a property of the fixture estate, not a
+defect in the purge. A fresh database, which is what CI builds, does not
+show it.
 
 ## Open questions for the operator
 
