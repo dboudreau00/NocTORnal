@@ -188,6 +188,15 @@ class DrainOut(BaseModel):
     #: operator who pressed the button. test_ui_invariants holds the model
     #: to every key the drain returns.
     revoked: int
+<<<<<<< ours
+=======
+    #: N3 (2026-09-02): one drain does three things. How many case owners
+    #: were told a review is due (notify_events.case_reviews_due) and how
+    #: many unacknowledged priority-1 notifications were escalated
+    #: (notifications.escalate_unacknowledged) in this pass.
+    reviews_due: int
+    escalated: int
+>>>>>>> theirs
 
 
 @router.post("/dispatch", response_model=DrainOut)
@@ -205,7 +214,113 @@ def dispatch(
     silently dies at 3am.
 
     Gated on `integration.manage`, which is step-up, because draining sends
-    real email to real people.
+    real email to real people. A cron entry cannot satisfy step-up;
+    `scripts/notify_drain.py` is the drain for one (N3, 2026-09-02).
     """
     from noctornal_api.transports import dispatch_due
     return DrainOut(**dispatch_due(conn))
+
+
+class DeliveryOut(BaseModel):
+    """One row of the delivery ledger. Names the KIND and never the content:
+    the reader holds `integration.manage`, which is not a case-content
+    permission, and this table is not case-scoped."""
+
+    id: str
+    notification_id: str
+    kind: str
+    channel: str
+    recipient_id: str
+    #: The account email, which an administrator controls. Not the
+    #: preference override -- that is `address`, and the two differing is
+    #: the case an operator most needs to be able to see.
+    recipient: str
+    #: Where it actually went (`delivery.sent_to`, migration 0044). None if
+    #: nothing has left yet, or nothing ever will.
+    address: str | None
+    #: The delivery state: PENDING, SENT, FAILED, REFUSED or SUPPRESSED.
+    outcome: str
+    #: The egress gate's reason code on a REFUSED row, the transport error
+    #: on a FAILED or backed-off one, the suppression reason otherwise.
+    reason: str | None
+    redacted: bool
+    attempts: int
+    #: The last time a transport was tried. None for a row that has never
+    #: been attempted -- queued, deferred, or suppressed at write time.
+    attempted_at: datetime | None
+    #: When the notification behind it was raised.
+    raised_at: datetime
+
+
+#: Outcomes that mean the recipient did NOT get the full summary on this
+#: channel and somebody other than the recipient decided so. PENDING is
+#: excluded: nothing has been decided yet. SUPPRESSED is NOT in this
+#: tuple because it has two writers that mean opposite things, and the SQL
+#: below tells them apart: `NotificationService._queue_deliveries` writes it
+#: at raise time for a channel the recipient turned off or a priority below
+#: their threshold (two such rows per notification, with no attempt
+#: timestamp -- the recipient's own choice, not an absence to explain), and
+#: `transports.revoke_undeliverable` writes it AFTER queueing, stamping
+#: `last_attempt_at`, when a clearance or assignment was revoked -- the one
+#: row that says "deliberately not told", which the filter exists to show.
+#: The first version of this filter took every SUPPRESSED row and buried
+#: each real refusal under the preference rows of every notification.
+_NOT_DELIVERED = ("REFUSED", "FAILED")
+
+
+@router.get("/deliveries", response_model=dict,
+            dependencies=[Depends(rate_limit("request"))])
+def deliveries(
+    kind: str | None = Query(None),
+    refused_only: bool = Query(False),
+    since: datetime | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    _: CurrentUser = Depends(require_global("integration.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Read the delivery ledger back, newest first.
+
+    N4 (2026-09-02). `notify.delivery` has recorded every refusal with a
+    reason since migration 0029 and every destination since 0044, and
+    nothing rendered it: the one table that answers "did the summary leave
+    the building, and where did it go" was write-only. This is the read.
+
+    `refused_only` narrows to REFUSED, FAILED, and the SUPPRESSED rows the
+    system closed after queueing (a revoked clearance or assignment) -- the
+    rows that explain an absence the recipient did not choose. A channel
+    the recipient turned off is not one. `since` and the ordering both use the
+    attempt time when there is one and the notification's own time when
+    there is not, so a suppressed row sorts where it was decided.
+
+    `kind` is not validated against `KINDS`: a kind that has since been
+    unregistered still has rows, and an operator asking about them should
+    get them, not a 400.
+
+    Under `integration.manage` because the ledger spans every case and
+    every recipient. It carries kinds, channels, addresses and reasons --
+    never subjects or summaries.
+    """
+    rows = conn.execute(
+        """SELECT d.id, d.notification_id, n.kind, d.channel, n.recipient_id,
+                  u.email, d.sent_to, d.state, d.detail, d.redacted, d.attempts,
+                  coalesce(d.last_attempt_at, d.sent_at), n.created_at
+             FROM notify.delivery d
+             JOIN notify.notification n ON n.id = d.notification_id
+             JOIN iam.app_user u ON u.id = n.recipient_id
+            WHERE (%(kind)s::text IS NULL OR n.kind = %(kind)s)
+              AND (NOT %(refused_only)s
+                   OR d.state = ANY(%(not_delivered)s)
+                   OR (d.state = 'SUPPRESSED' AND d.last_attempt_at IS NOT NULL))
+              AND (%(since)s::timestamptz IS NULL
+                   OR coalesce(d.last_attempt_at, d.sent_at, n.created_at) >= %(since)s)
+            ORDER BY coalesce(d.last_attempt_at, d.sent_at, n.created_at) DESC,
+                     d.id DESC
+            LIMIT %(limit)s""",
+        {"kind": kind, "refused_only": refused_only,
+         "not_delivered": list(_NOT_DELIVERED), "since": since,
+         "limit": limit}).fetchall()
+    return {"deliveries": [DeliveryOut(
+        id=str(r[0]), notification_id=str(r[1]), kind=r[2], channel=r[3],
+        recipient_id=str(r[4]), recipient=r[5], address=r[6], outcome=r[7],
+        reason=r[8], redacted=r[9], attempts=r[10], attempted_at=r[11],
+        raised_at=r[12]).model_dump(mode="json") for r in rows]}

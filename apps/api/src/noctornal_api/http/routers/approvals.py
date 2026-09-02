@@ -71,9 +71,20 @@ class ApprovalOut(BaseModel):
     #: PENDING but past its expiry. Derived, never stored -- see migration
     #: 0028 on why there is no EXPIRED state and no sweeper.
     is_expired: bool
+    #: N1 (2026-09-02). Populated ONLY on the response to the write that
+    #: produced them (POST "" and POST /decide); on a listing they are None
+    #: because reach is not stored, and None there means "not recorded",
+    #: not "failed". On the write: `approvers_notified` 0 is "nobody could
+    #: be told", None is "the notify write failed"; `requester_notified`
+    #: False is "suppressed", None is "failed". `warnings` spells each of
+    #: those out, because a 201 with a silent zero is the defect this
+    #: exists to fix -- a four-eyes request nobody was told about.
+    approvers_notified: int | None = None
+    requester_notified: bool | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
-def _out(r: ApprovalRequest) -> ApprovalOut:
+def _out(r: ApprovalRequest, *, reach: dict | None = None) -> ApprovalOut:
     return ApprovalOut(
         id=str(r.id), case_id=str(r.case_id) if r.case_id else None,
         operation=r.operation, payload=r.payload, justification=r.justification,
@@ -84,7 +95,37 @@ def _out(r: ApprovalRequest) -> ApprovalOut:
         consumed_at=r.consumed_at,
         result_ref=str(r.result_ref) if r.result_ref else None,
         is_expired=r.is_expired(),
+        **(reach or {}),
     )
+
+
+def _request_reach(r: ApprovalRequest) -> dict:
+    """The reach fields for the response to `request()`, with the warning
+    that turns a silent zero into a sentence the requester will read."""
+    warnings: list[str] = []
+    if r.approvers_notified is None:
+        warnings.append(
+            "the request is recorded but the notification failed; no "
+            "approver has been told -- ask one directly")
+    elif r.approvers_notified == 0:
+        warnings.append(
+            "the request is recorded but no approver was notified: nobody "
+            "else on this case both holds the operation's permission and is "
+            "cleared to read the request -- assign one, or ask directly")
+    return {"approvers_notified": r.approvers_notified, "warnings": warnings}
+
+
+def _decision_reach(r: ApprovalRequest) -> dict:
+    warnings: list[str] = []
+    if r.requester_notified is None:
+        warnings.append(
+            "the decision is recorded but the requester's notification "
+            "failed; tell them yourself")
+    elif not r.requester_notified:
+        warnings.append(
+            "the decision is recorded but the requester was not notified: "
+            "they may no longer be able to read this case")
+    return {"requester_notified": r.requester_notified, "warnings": warnings}
 
 
 @router.get("", response_model=dict)
@@ -129,11 +170,12 @@ def raise_request(
     authorize_object(conn, user, case_id=case_id,
                      permission_key=operation.permission)
     try:
-        return _out(ApprovalService(conn).request(
+        record = ApprovalService(conn).request(
             operation=body.operation, case_id=case_id, payload=body.payload,
-            justification=body.justification, requested_by=user.user_id))
+            justification=body.justification, requested_by=user.user_id)
     except ApprovalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(record, reach=_request_reach(record))
 
 
 @router.post("/{request_id}/decide", response_model=ApprovalOut)
@@ -175,10 +217,11 @@ def decide(
     authorize_object(conn, user, case_id=case_id,
                      permission_key=operation.permission)
     try:
-        return _out(svc.decide(request_id, decided_by=user.user_id,
-                               approve=body.approve, note=body.note))
+        record = svc.decide(request_id, decided_by=user.user_id,
+                            approve=body.approve, note=body.note)
     except ApprovalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(record, reach=_decision_reach(record))
 
 
 @router.post("/{request_id}/withdraw", response_model=ApprovalOut)

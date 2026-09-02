@@ -60,6 +60,7 @@ transaction, but the notification and its DELIVERY are not.
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -74,6 +75,8 @@ from noctornal_api.security.access import (
     Tlp,
     tlp_from_name,
 )
+
+log = logging.getLogger(__name__)
 
 IN_APP = "IN_APP"
 SMTP = "SMTP"
@@ -173,6 +176,13 @@ KINDS: dict[str, Kind] = {
         "Emergency access was used on a case you own, or needs your review"),
     "CASE_REVIEW_DUE": Kind(
         "CASE_REVIEW_DUE", LOW, "A case you own is due for review"),
+    # N3 (2026-09-02). Raised by `escalate_unacknowledged` when a priority-1
+    # notification has sat unacknowledged past the window. URGENT itself,
+    # and the one kind the sweep will never escalate -- or one silence
+    # becomes a chain of escalations about escalations.
+    "ESCALATION": Kind(
+        "ESCALATION", URGENT,
+        "An urgent notification went unacknowledged and was escalated to you"),
 }
 
 # Channel defaults when a user has no preference row. IN_APP takes
@@ -424,6 +434,8 @@ class NotificationService:
         """
         if channel not in _DEFAULTS:
             raise NotificationError(f"unknown channel {channel!r}")
+        if fields.get("enabled") is True:
+            _require_transport(channel)
         current = self.preferences(user_id)[channel]
         if "address" in fields and fields["address"] != current.address:
             self._check_address(user_id, channel, fields["address"],
@@ -605,6 +617,128 @@ class NotificationService:
             (notification_id, channel, state, after, sent_at, detail))
 
 
+def _require_transport(channel: str) -> None:
+    """Refuse to switch on a channel nothing can deliver to.
+
+    N4 (2026-09-02). JIRA has no transport in this build at all, and
+    WEBHOOK has one only once NOCTORNAL_WEBHOOK_URL says where to post.
+    Before this a user could enable either, and `transports.dispatch_due`
+    then reported the impossibility as a retryable transport failure --
+    five attempts, exponential back-off, then FAILED -- for every
+    notification, forever, while the user waited for tickets that were
+    never going to arrive. The delivery ledger filled with a
+    misconfiguration dressed as an outage.
+
+    Only ENABLING is checked. Turning a channel off is always allowed, and
+    editing the other settings of an already-enabled channel is not the
+    moment to discover the URL was unset.
+    """
+    if channel == JIRA:
+        raise NotificationError(
+            "JIRA cannot be enabled: no transport for it exists in this "
+            "build. Enabling it would queue deliveries that fail on every "
+            "drain and are recorded as failures.")
+    if channel == WEBHOOK and not os.environ.get("NOCTORNAL_WEBHOOK_URL"):
+        raise NotificationError(
+            "WEBHOOK cannot be enabled: NOCTORNAL_WEBHOOK_URL is not "
+            "configured, so there is nowhere to post to. Ask an operator to "
+            "set it first.")
+
+
+def escalate_unacknowledged(conn: psycopg.Connection, *,
+                            after: timedelta = timedelta(hours=1)) -> int:
+    """Escalate every priority-1 notification that has sat unacknowledged
+    for longer than `after`. Returns how many ORIGINALS were escalated --
+    each may produce several rows when it goes to the officers.
+
+    N3 (2026-09-02). docs/07 makes acknowledgement "the signal that stops a
+    thing nagging", and until this nothing nagged: an integrity alarm or a
+    break-glass alert its recipient never acknowledged sat in one inbox,
+    which is the one alert that mattered, muted by absence.
+
+    Where it goes:
+
+    - to the OWNER of the case the notification is about, normally;
+    - to every active SECURITY_OFFICER when the owner IS the unresponsive
+      recipient, when the notification concerns no case, or when the owner
+      could not be told (suppressed: inactive, or no longer cleared for
+      their own case) -- an escalation that lands nowhere is the original
+      problem again one level up. The recipient is excluded from the
+      officers: escalating somebody's silence to themselves is noise.
+
+    Idempotent by construction: the row it writes carries
+    `object_type='notification', object_id=<original>` and the SELECT
+    excludes originals that already have one. A notification whose
+    escalation could not be written anywhere is tried again next sweep and
+    not counted -- the count is of silences a human was actually told
+    about.
+
+    ESCALATION rows are never themselves candidates. Otherwise an
+    unacknowledged escalation escalates, and that one escalates, and the
+    outbox fills with a chain about one silence.
+
+    Bounded per sweep so a backlog cannot fan out unboundedly in one drain;
+    the rest is picked up next time.
+
+    Wording lives in `notify_events` (imported here rather than at module
+    level because `notify_events` imports this module).
+    """
+    from noctornal_api import notify_events
+
+    rows = conn.execute(
+        f"""SELECT {_N_COLUMNS}, c.owner_user_id, now() - n.created_at
+              FROM notify.notification n
+              LEFT JOIN core."case" c ON c.id = n.case_id
+             WHERE n.priority = %s
+               AND n.kind <> 'ESCALATION'
+               AND n.acknowledged_at IS NULL
+               AND n.created_at < now() - %s
+               AND NOT EXISTS (SELECT 1 FROM notify.notification e
+                                WHERE e.kind = 'ESCALATION'
+                                  AND e.object_type = 'notification'
+                                  AND e.object_id = n.id)
+             ORDER BY n.created_at ASC
+             LIMIT %s""",
+        (URGENT, after, ESCALATION_BATCH)).fetchall()
+    if not rows:
+        return 0
+    officers = [r[0] for r in conn.execute(
+        """SELECT DISTINCT ur.user_id
+             FROM iam.user_role ur
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.role_key = 'SECURITY_OFFICER' AND u.is_active""").fetchall()]
+    escalated = 0
+    for r in rows:
+        original, owner, age = _record(r[:16]), r[16], r[17]
+        try:
+            written = False
+            if owner is not None and owner != original.recipient_id:
+                written = notify_events.escalation_to_owner(
+                    conn, original=original, owner_id=owner, age=age) is not None
+            if not written:
+                for officer in officers:
+                    if officer == original.recipient_id:
+                        continue
+                    if notify_events.escalation_to_officer(
+                            conn, original=original, officer_id=officer,
+                            age=age) is not None:
+                        written = True
+        except Exception:  # noqa: BLE001 - one bad row must not end the sweep
+            # Same reasoning as `notify_events.case_reviews_due`: this runs
+            # inside the drain and one notification with a label nobody can
+            # parse must not stop every other silence being escalated.
+            log.exception("could not escalate notification %s", original.id)
+            continue
+        if written:
+            escalated += 1
+    return escalated
+
+
+#: How many unacknowledged originals one sweep will escalate. Each may fan
+#: out to every security officer, so the bound is on inputs, not rows.
+ESCALATION_BATCH = 200
+
+
 def deliver_after(priority: int, pref: Preference,
                   now: datetime) -> datetime:
     """When this delivery becomes due.
@@ -732,5 +866,6 @@ __all__ = [
     "IN_APP", "SMTP", "WEBHOOK", "JIRA", "URGENT", "NORMAL", "LOW",
     "KINDS", "Kind", "Notification", "NotificationError",
     "NotificationService", "Preference", "Tlp", "deliver_after",
-    "effective_labels_for_notification", "readable_predicate",
+    "effective_labels_for_notification", "escalate_unacknowledged",
+    "readable_predicate",
 ]
