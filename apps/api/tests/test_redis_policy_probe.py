@@ -26,10 +26,20 @@ import logging
 
 import pytest
 
+from noctornal_api.http.limits import EVICTION_WARNING
 from noctornal_api.ratelimit_redis import RedisBackend, is_evicting_policy
 
 LOGGER = "noctornal.ratelimit"
-EVICTION_WARNING = "RATE-LIMIT REDIS EVICTS KEYS"
+
+# EVICTION_WARNING is IMPORTED from the module that emits it, not restated
+# here. Until 2026-09-02 this file kept its own copy of the literal. The
+# positive assertion below would still have caught a reworded warning, but
+# the three `EVICTION_WARNING not in text` assertions would not have: once
+# the copy and the emitter drifted, "the warning was not emitted" would be
+# satisfied by a warning that WAS emitted under its new wording. A negative
+# assertion against a stale literal is an assertion about nothing, which is
+# the quieter half of this codebase's "two internally consistent halves"
+# defect -- consistent with itself, and no longer about the product.
 
 
 class FakeRedis:

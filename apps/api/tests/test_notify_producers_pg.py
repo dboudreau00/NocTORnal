@@ -55,7 +55,23 @@ def conn():
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
+    ours = (f"(SELECT id FROM notify.notification "
+            f"  WHERE recipient_id IN {sub} OR actor_id IN {sub})")
     with c.transaction():
+        # The officer copies FIRST, and before the originals they point at.
+        # `escalation_to_officer` is case-less and goes to a real
+        # SECURITY_OFFICER of this database, so neither clause below
+        # reaches it: the integrity-alarm test's escalations outlived the
+        # suite. Harmless while `dispatch_due` sent what it raised in the
+        # same pass; once the producers moved below the drain loop
+        # (2026-09-02) the leftovers stayed PENDING and URGENT and the next
+        # suite's drain sent them first. See the same note in
+        # test_notify_escalation_pg.py.
+        esc = (f"(SELECT id FROM notify.notification WHERE kind = 'ESCALATION' "
+               f"   AND object_type = 'notification' AND object_id IN {ours})")
+        c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN {esc}")
+        c.execute(f"DELETE FROM notify.notification WHERE kind = 'ESCALATION' "
+                  f"  AND object_type = 'notification' AND object_id IN {ours}")
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification "
                   f"  WHERE recipient_id IN {sub} OR actor_id IN {sub})")
@@ -214,6 +230,88 @@ def test_a_mismatch_found_on_read_raises_the_alarm_too(conn, client):
     assert alarms[0].object_id == ev_id
 
 
+@pytest.mark.skipif(not MINIO, reason="MINIO_ENDPOINT required")
+def test_re_reading_a_tampered_exhibit_does_not_mint_another_alarm(conn, client):
+    """The read path is not an outbound-email amplifier.
+
+    Before 2026-09-02 `evidence_integrity_alarm` was a bare
+    `notify_case_owner` with no dedupe, no idempotence key and no throttle,
+    fired from BOTH detection sites -- `_fetch_verified` (every read) and
+    `verify_integrity` (every explicit verify). Neither
+    `GET /cases/{id}/evidence/{id}/content` nor `POST /{id}/verify` carries
+    a `rate_limit` dependency, and `notify.notification` has no unique
+    constraint. So any caller holding `evidence.read` on a case with one
+    corrupt exhibit minted one priority-1 notification and one PENDING SMTP
+    delivery to the case owner PER REQUEST -- on a path that had previously
+    written only a cheap internal audit row. Suppression 1 was no defence:
+    the owner is the recipient and the looper is anybody else.
+
+    The second half is why this is more than volume. Because the owner IS
+    the recipient, `notifications.escalate_unacknowledged` skips
+    `escalation_to_owner` and fans EVERY one of those alarms out to EVERY
+    active SECURITY_OFFICER, repeating each drain until each is
+    acknowledged individually -- so the party with the motive to bury the
+    tamper alarm could drown it in copies of itself.
+
+    This test therefore reads both sides: three detections through
+    `evidence.py` must leave ONE alarm in `notify_events.py`, and therefore
+    ONE fan-out through `notifications.py`, not three.
+    """
+    from noctornal_api.evidence import EvidenceService, EvidenceStorage, IntegrityError
+    from noctornal_api.notifications import NotificationService, escalate_unacknowledged
+
+    owner, case_id, ev_id = _owner_case_and_tampered_exhibit(conn, client)
+    reader, _, _ = _make_user(conn)
+    _assign(conn, case_id, reader, "ANALYST", owner)
+    svc = EvidenceService(conn, EvidenceStorage())
+
+    for _ in range(2):
+        with pytest.raises(IntegrityError):
+            svc.view(ev_id, reader)
+    assert svc.verify_integrity(ev_id, reader) is False
+
+    alarms = _inbox(conn, owner, "EVIDENCE_INTEGRITY_ALARM")
+    mine = [a for a in alarms if a.object_id == ev_id]
+    assert len(mine) == 1, (
+        f"three detections minted {len(mine)} URGENT notifications; the read "
+        f"path is an unbounded outbound-email amplifier")
+    deliveries = conn.execute(
+        """SELECT count(*) FROM notify.delivery
+            WHERE notification_id = %s AND channel = 'SMTP'""",
+        (mine[0].id,)).fetchone()[0]
+    assert deliveries == 1, "one alarm, one queued email"
+
+    # The consequence half, in the same test because the contract crosses
+    # the two files: one outstanding alarm escalates to the officers once,
+    # not once per attacker request.
+    conn.execute("UPDATE notify.notification SET created_at = now() - interval "
+                 "'3 hours' WHERE id = %s", (mine[0].id,))
+    officers = [r[0] for r in conn.execute(
+        """SELECT DISTINCT ur.user_id FROM iam.user_role ur
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.role_key = 'SECURITY_OFFICER' AND u.is_active""").fetchall()]
+    escalate_unacknowledged(conn, after=timedelta(hours=1))
+    fanned = conn.execute(
+        """SELECT count(*) FROM notify.notification
+            WHERE kind = 'ESCALATION' AND object_type = 'notification'
+              AND object_id = %s""", (mine[0].id,)).fetchone()[0]
+    assert fanned == len([o for o in officers if o != owner]), (
+        "the alarm fans out to every security officer; it must do so for "
+        "ONE alarm, which is why the alarm itself has to be deduped")
+
+    # A genuinely new failure after the owner has answered is NOT lost: the
+    # guard is keyed on `acknowledged_at IS NULL`, not on existence.
+    assert NotificationService(conn).acknowledge(mine[0].id, owner)
+    with pytest.raises(IntegrityError):
+        svc.view(ev_id, reader)
+    again = [a for a in _inbox(conn, owner, "EVIDENCE_INTEGRITY_ALARM")
+             if a.object_id == ev_id]
+    assert len(again) == 2, (
+        "an acknowledged alarm must not suppress the next one; the exhibit "
+        "is still failing and the owner has said they are done with the "
+        "last report")
+
+
 # ---------------------------------------------------------------------------
 # PROPOSAL_QUEUED
 # ---------------------------------------------------------------------------
@@ -240,10 +338,25 @@ def test_a_capture_that_queues_proposals_tells_the_owner(conn, client):
     assert queued[0].case_id == UUID(case_id)
 
 
-def test_a_capture_notification_failure_is_reported_not_raised(conn, client, monkeypatch):
+def test_a_capture_notification_failure_is_null_not_false(conn, client, monkeypatch):
     """The document and the proposals committed before the notify write;
     a 500 here would tell the analyst the capture failed, and they would
-    paste it again."""
+    paste it again.
+
+    And the failure is reported as `null`, NOT `false`. Until 2026-09-02
+    the except path returned False -- the same value the endpoint uses for
+    "there were no proposals" and "the owner is the person who pasted it"
+    -- so a broken notifier and a deliberate suppression read identically
+    to every caller. `NotificationService.notify` returns None for
+    suppressed precisely to keep "we decided not to" apart from "we tried
+    and could not"; conflating them one file downstream is this codebase's
+    signature defect, a failure reported as the wrong thing rather than as
+    a crash.
+
+    `test_a_capture_that_queues_proposals_tells_the_owner` pins the True
+    end of the same field; False remains what `proposals_queued` returns
+    when it deliberately said nothing.
+    """
     from noctornal_api import notify_events
 
     def boom(*a, **kw):
@@ -261,8 +374,12 @@ def test_a_capture_notification_failure_is_reported_not_raised(conn, client, mon
                     headers=_auth(u_token),
                     json={"text": SAMPLE, "title": f"nprod-{uuid4().hex[:6]}"})
     assert r.status_code == 201, r.text
-    assert r.json()["owner_notified"] is False
-    assert r.json()["proposals_created"] > 0
+    body = r.json()
+    assert body["owner_notified"] is None, (
+        "a notify that FAILED must not report the same value as a notify "
+        "that was deliberately suppressed")
+    assert body["owner_notified"] is not False
+    assert body["proposals_created"] > 0
 
 
 # ---------------------------------------------------------------------------

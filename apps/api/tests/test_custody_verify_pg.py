@@ -10,6 +10,19 @@ seen intact data is not known to work, and one that answers "intact"
 unconditionally is worse than none: it manufactures the assurance the
 docstring on 0024 invokes FRE 902(13)-(14) for.
 
+## Two of these tests pin a BLIND SPOT, not a behaviour
+
+Added 2026-09-02. `test_deleted_tail_row_is_a_KNOWN_blind_spot` and
+`test_a_renumbering_is_a_KNOWN_blind_spot` assert that the verifier does
+NOT notice, which is the opposite of what the rest of the file does, and
+they exist because the pair above them -- middle row, first row -- read as
+an exhaustive enumeration over delete positions while silently omitting
+the third. The omitted one is the cheapest attack in the set. Each of the
+two also asserts the docstring that admits the limit, so the code and the
+claim cannot drift apart again: a limit recorded in prose alone is a limit
+that gets quietly dropped in the next edit, and a limit recorded in a test
+alone reads as a bug.
+
 ## How the tampering is done, and why it is safe
 
 The ledger carries row-level and statement-level triggers that block
@@ -258,6 +271,143 @@ def test_deleted_first_row_is_NO_GENESIS(tamperable):
     assert kinds <= {"NO_GENESIS", "LINK"}, kinds
 
 
+def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
+    """Deleting the NEWEST rows is invisible. This pins the limit, not a
+    behaviour anyone wants.
+
+    The two delete tests above read as an exhaustive enumeration -- middle
+    and first -- and until 2026-09-02 the third position had no test and
+    no mention in `custody_verify.py`'s "What this cannot see", which named
+    only the far more expensive re-chaining attack. A tail delete is the
+    CHEAPEST delete there is: nothing names the newest row as its
+    predecessor, so one DELETE with no rehashing at all leaves every
+    survivor linking to a real predecessor, one genesis and no forks.
+
+    That matters because the tail is where an export or a destruction is
+    recorded, and because 0024's own docstring (0024:15-17) claims "a
+    deleted or reordered row is detectable on replay". It is not, for this
+    position. Closing the hole needs something the ledger cannot supply
+    about itself -- a persisted high-water mark, or `tail_row_hash`
+    recorded out of band and compared on the next run.
+
+    So this test asserts BOTH halves that have to stay in step: the
+    behaviour, and the module docstring that admits it. A docstring that
+    quietly re-acquired the withdrawn claim would turn this red.
+    """
+    from noctornal_api import custody_verify
+    from noctornal_api.custody_verify import verify_custody_chain
+
+    before = verify_custody_chain(tamperable)
+    _guard_clean_start(before)
+    evidence_id, uid = _exhibit(tamperable, "truncated")
+    ids = _seed(tamperable, evidence_id, uid, n=4)
+
+    seeded = verify_custody_chain(tamperable)
+    assert seeded.checked == before.checked + 4
+    tail_before = seeded.tail_row_hash
+    assert tail_before, "an anchor that is None cannot be compared to anything"
+
+    # The whole attack. No hash is recomputed; the rows just stop existing.
+    tamperable.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
+    tamperable.execute(
+        "DELETE FROM core.evidence_custody WHERE id = ANY(%s)", (ids[-2:],))
+
+    after = verify_custody_chain(tamperable)
+    assert after.intact, \
+        f"the blind spot closed -- update the docstring: " \
+        f"{[(b.kind, b.id) for b in after.breaks]}"
+    assert after.breaks == ()
+    assert after.forks == ()
+    assert after.genesis_count == 1
+    # `checked` is the ONLY field that moves, and only a caller who knew the
+    # previous count can read anything into that.
+    assert after.checked == seeded.checked - 2
+    assert after.last_id == ids[-3]
+
+    # The one value that does change, which is why it is reported at all.
+    assert after.tail_row_hash != tail_before, \
+        "tail_row_hash is the only defence against this; it must move"
+
+    doc = custody_verify.__doc__
+    assert "TAIL DELETION" in doc, \
+        "the module must NAME this blind spot, not just have it"
+    assert "the LAST is not caught at all" in doc, \
+        "the by-position enumeration must stay complete"
+    withdrawn = "every case the docstring on 0024 was previously claiming to catch"
+    assert withdrawn not in doc or "WITHDRAWN" in doc, \
+        "that claim is false while this test passes; it may only appear as " \
+        "a withdrawal"
+
+
+def test_a_renumbering_is_a_KNOWN_blind_spot(tamperable):
+    """Swapping two rows' ids changes no hash. Also pinned as a limit.
+
+    `id` is not among the columns `_HASH_EXPR` covers, so a renumbering is
+    invisible to every check -- which is the other half of 0024:15-17's
+    false claim that "a deleted or reordered row is detectable on replay".
+    Recorded here on 2026-09-02 because the module docstring now says so
+    and a claim nobody checks is a claim that rots.
+
+    The ids are swapped through a negative parking value, because the
+    primary key is unique and `UPDATE ... SET id = <the other one>` would
+    collide mid-statement.
+    """
+    from noctornal_api import custody_verify
+    from noctornal_api.custody_verify import _HASH_EXPR, verify_custody_chain
+
+    assert "c.id" not in _HASH_EXPR, \
+        "id is now hashed; a renumbering IS detectable and this test is stale"
+    assert "A pure renumbering." in custody_verify.__doc__, \
+        "the module must NAME this blind spot, not just have it"
+
+    _guard_clean_start(verify_custody_chain(tamperable))
+    evidence_id, uid = _exhibit(tamperable, "renumbered")
+    ids = _seed(tamperable, evidence_id, uid, n=3)
+    a, b = ids[0], ids[1]
+
+    tamperable.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
+    tamperable.execute("UPDATE core.evidence_custody SET id = -1 WHERE id = %s", (a,))
+    tamperable.execute("UPDATE core.evidence_custody SET id = %s WHERE id = %s", (a, b))
+    tamperable.execute("UPDATE core.evidence_custody SET id = %s WHERE id = -1", (b,))
+
+    after = verify_custody_chain(tamperable)
+    assert after.intact, [(x.kind, x.id) for x in after.breaks]
+    assert after.genesis_count == 1
+
+
+def test_tail_row_hash_is_what_the_next_row_chains_onto(tamperable):
+    """The writer's tail and the verifier's tail must be the same row.
+
+    Both sides of one contract, read in one test: `tail_row_hash` is
+    computed here with `ORDER BY id DESC LIMIT 1`, and 0024's
+    `core.custody_chain_hash()` picks its predecessor exactly that way. If
+    the verifier ever reported a different row's hash -- ordering by
+    `occurred_at`, say, which a clock adjustment can reorder -- an operator
+    comparing the anchor across runs would see it change on an untouched
+    ledger and stop believing it, which is the failure mode the whole
+    module is written to avoid.
+
+    Proved by writing a row THROUGH the trigger rather than by re-running
+    the verifier's own query against itself.
+    """
+    from noctornal_api.custody_verify import verify_custody_chain
+
+    _guard_clean_start(verify_custody_chain(tamperable))
+    evidence_id, uid = _exhibit(tamperable, "anchored")
+    _seed(tamperable, evidence_id, uid, n=2)
+
+    reported = verify_custody_chain(tamperable).tail_row_hash
+    assert reported
+
+    successor = _seed(tamperable, evidence_id, uid, n=1)[0]
+    chained = tamperable.execute(
+        "SELECT encode(prev_hash, 'hex') FROM core.evidence_custody WHERE id = %s",
+        (successor,)).fetchone()[0]
+    assert chained == reported, \
+        "the trigger chained onto a different row than the verifier calls " \
+        "the tail; the anchor names nothing an operator can rely on"
+
+
 def _forge_second_genesis(conn, evidence_id, uid) -> int:
     """Insert a row claiming to be the chain's first.
 
@@ -310,6 +460,58 @@ def test_a_second_genesis_is_reported_as_tampering(tamperable):
         "both claimants must be named -- which one is the intruder is not "
         "something this can decide")
     assert forged in {b.id for b in after.breaks}
+
+
+def test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope(tamperable):
+    """A scoped report can come back not-intact naming other exhibits' rows.
+
+    GENESIS and NO_GENESIS are computed over the whole table and appended
+    to every report, scoped or not -- deliberately, because the anchor is a
+    property of the chain and an officer producing one exhibit still needs
+    to hear that the ledger was re-anchored. But it means a scoped
+    `intact` is not purely "a statement about the rows REPORTED", which is
+    what `CustodyReport.intact`'s docstring said until 2026-09-02 while
+    the endpoint's scoped caveat enumerated only LINK, FORK and CONTENT.
+    Two prose halves agreeing with each other and not with the code.
+
+    Both halves are asserted here: the behaviour, and the docstring that
+    now describes it.
+    """
+    from noctornal_api.custody_verify import CustodyReport, verify_custody_chain
+
+    _guard_clean_start(verify_custody_chain(tamperable))
+    clean_ev, clean_uid = _exhibit(tamperable, "innocent")
+    _seed(tamperable, clean_ev, clean_uid, n=2)
+    forger_ev, forger_uid = _exhibit(tamperable, "forger")
+    forged = _forge_second_genesis(tamperable, forger_ev, forger_uid)
+
+    scoped = verify_custody_chain(tamperable, evidence_id=clean_ev)
+    assert scoped.checked == 2
+    assert not scoped.intact, \
+        "a re-anchored ledger must not read as intact from inside one exhibit"
+    assert {b.kind for b in scoped.breaks} == {"GENESIS"}
+    assert forged in {b.id for b in scoped.breaks}
+    # Not one of the reported rows belongs to the exhibit that was asked
+    # about. A caller that attributes a scoped break to the scope is wrong.
+    assert all(b.evidence_id != clean_ev for b in scoped.breaks), \
+        [(b.kind, b.id, str(b.evidence_id)) for b in scoped.breaks]
+
+    # ...and an EMPTY scope is not spared either, which is why `intact`'s
+    # docstring no longer says an empty result returns True full stop.
+    empty = verify_custody_chain(tamperable, evidence_id=uuid4())
+    assert empty.checked == 0 and not empty.intact
+
+    doc = CustodyReport.intact.fget.__doc__
+    assert "WHOLE-LEDGER findings" in doc, \
+        "the property must say the anchor crosses the scope"
+    # The old text sent the caller to an unscoped run to find a deletion.
+    # That run is blind to a tail delete as well, so the redirection may
+    # only survive as a retraction, never as advice.
+    assert "the unscoped run is blind to them too" in doc, \
+        "the property must say an unscoped run is not the answer either"
+    if "run without `evidence_id`" in doc:
+        assert "no longer" in doc, \
+            "that redirection is withdrawn; it may only appear as a retraction"
 
 
 def test_per_exhibit_view_is_exact_while_the_global_run_reports_the_rest(tamperable):
@@ -372,9 +574,18 @@ def test_an_empty_scope_is_not_reported_as_a_pass(tamperable):
     A caller that reads `intact` without `checked` for an exhibit that has
     no custody at all would believe its custody verified. `first_id` /
     `last_id` being None is the tell.
+
+    `intact` is True here only because the ledger underneath is ANCHORED:
+    GENESIS and NO_GENESIS are whole-ledger findings injected into every
+    report, so an empty scope over a re-anchored ledger comes back
+    not-intact instead -- see
+    `test_a_scoped_run_reports_whole_ledger_findings_from_outside_its_scope`.
+    The guard below is what keeps that from surfacing here as a confusing
+    failure of the empty-scope rule it is not about (added 2026-09-02).
     """
     from noctornal_api.custody_verify import verify_custody_chain
 
+    _guard_clean_start(verify_custody_chain(tamperable))
     report = verify_custody_chain(tamperable, evidence_id=uuid4())
     assert report.checked == 0
     assert report.intact
@@ -464,9 +675,21 @@ def test_the_endpoint_reports_what_the_service_reports(conn, client):
     assert body["first_id"] == report.first_id
     assert body["last_id"] == report.last_id
     assert body["forks"] == len(report.forks)
-    assert body["scoped"] is False and body["caveat"] is None
+    assert body["fork_ids"] == [b.id for b in report.forks], \
+        "fork_note tells the officer to investigate; the ids are what with"
+    assert body["tail_row_hash"] == report.tail_row_hash
+    assert body["scoped"] is False
     assert [(b["kind"], b["id"]) for b in body["breaks"]] == \
         [(b.kind, b.id) for b in report.breaks]
+
+    # An UNSCOPED run carries a caveat too. Until 2026-09-02 it returned
+    # `"caveat": null`, which an officer reads as "nothing qualifies this
+    # answer" -- while the qualification that matters most is true of every
+    # run: the checks are relative, so rows removed from the END of the
+    # ledger leave `intact: true` and no trace at all.
+    assert body["caveat"], "an unscoped answer needs a caveat as much as a scoped one"
+    assert "END" in body["caveat"] and "tail_row_hash" in body["caveat"], \
+        body["caveat"]
     # The chain in the test database is expected to be intact here. If it
     # is not, the two sides still have to AGREE about that -- asserted
     # above -- and this says so rather than hiding it.
@@ -482,6 +705,67 @@ def test_the_endpoint_reports_what_the_service_reports(conn, client):
     assert scoped["caveat"], "a scoped answer must say it is scoped"
     assert scoped["genesis_count"] == report.genesis_count, \
         "the anchor is whole-chain even when the report is scoped"
+    assert scoped["tail_row_hash"] == report.tail_row_hash, \
+        "the tail is whole-ledger, like the anchor: an exhibit's newest row " \
+        "is not the chain's tail"
+    # The scoped caveat used to promise "Run without `evidence_id` for
+    # that" -- an unscoped run does NOT reveal a deletion when the removed
+    # rows were the ledger's own tail, so that sentence was withdrawn.
+    assert "Run without `evidence_id`" not in scoped["caveat"], scoped["caveat"]
+    assert "breaks[].evidence_id" in scoped["caveat"], \
+        "a scoped run can report GENESIS breaks belonging to other " \
+        "exhibits; the caveat has to say so"
+
+
+def test_the_console_consumes_this_endpoint_and_the_docstring_names_how():
+    """The other end of the contract: the analyst console.
+
+    An endpoint with no reachable caller is a feature nobody can run, and
+    this repo has closed audit-chain work before only once the UI landed
+    the same day. `verify_custody`'s docstring now NAMES its console half
+    -- the button, the wiring function, the renderer -- so this test reads
+    the names out of the docstring and checks each one exists in the
+    shipped static assets. A rename on either side turns the docstring
+    into a lie and this red, which is the only thing that keeps a
+    cross-file claim like that honest.
+
+    `custodyVerdict` must render the four fields `/audit/verify`'s panel
+    has no equivalent for: `scoped` and `caveat`, so a per-exhibit answer
+    is never read as a global one, and `genesis_count` with
+    `genesis_note`, which is the one removal no relative check can see.
+
+    Pure -- no database, no browser -- following `test_ui_invariants.py`,
+    which reads the same files for the same reason. It sits in this
+    module anyway so the endpoint and its consumer are checked together;
+    the consequence is that it skips with the rest of the file when there
+    is no DATABASE_URL.
+    """
+    from pathlib import Path
+
+    from noctornal_api.http.routers.audit import verify_custody
+
+    static = (Path(__file__).resolve().parents[1]
+              / "src" / "noctornal_api" / "http" / "static")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    html = (static / "index.html").read_text(encoding="utf-8")
+
+    doc = verify_custody.__doc__
+    for name in ("btn-custody-verify", "wireCustodyVerify", "custodyVerdict"):
+        assert name in doc, \
+            f"the endpoint docstring stopped naming its consumer {name}"
+
+    assert 'id="btn-custody-verify"' in html
+    assert "function wireCustodyVerify()" in js
+    # Defined is not wired. `wireAuditVerify` had a registration line and
+    # so must this, or the button exists and does nothing.
+    assert "wireCustodyVerify();" in js, \
+        "wireCustodyVerify is defined but never called"
+    assert "'/audit/custody/verify'" in js
+    assert "function custodyVerdict(" in js
+    for key in ("scoped", "caveat", "genesis_count", "genesis_note"):
+        assert f"r.{key}" in js, \
+            f"the console never reads {key}; a scoped or re-anchored answer " \
+            f"would render as an unqualified one"
 
 
 def test_the_endpoint_is_gated_on_audit_read(conn, client):

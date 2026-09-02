@@ -76,14 +76,40 @@ _NODE_METRICS = (
 class RunResult:
     payload: dict
     run_id: UUID
+    #: WHERE THE BYTES CAME FROM, and nothing more: True when this answer
+    #: was read out of `analytics.metric_run`, False when it was computed
+    #: during this request. It is NOT a freshness verdict -- see `current`.
     cached: bool
     #: When the run finished, for a result read back by `latest`. None on
     #: the compute and cache-hit paths, where the answer is "now" or the
     #: caller asked for a hash match rather than a moment in time.
     computed_at: datetime | None = None
+    #: THE CURRENCY VERDICT, split out of `cached` on 2026-09-02. True when
+    #: this answer is known to describe the caller's graph as it stands now
+    #: -- either it was just computed, or `_lookup` matched on `graph_hash`.
+    #: None means NOT CHECKED, and is what `latest` returns: it reads the
+    #: newest stored run without re-projecting the graph, so it cannot know.
+    #:
+    #: Before the split, `latest` and a `_lookup` hit both reached the wire
+    #: as `cached: true` with nothing to separate them, so a client that
+    #: rendered `cached` -- and the console's only renderer of it prints
+    #: "unchanged since the last run" -- would tell an analyst the case
+    #: graph was unchanged when it had moved underneath them. Staleness
+    #: reported as freshness is this codebase's signature defect, and a
+    #: timestamp is not a substitute: `computed_at` says when, never whether.
+    #:
+    #: No path sets this False today. The three-valued field exists so that
+    #: a future "read it back AND re-hash" path has somewhere honest to put
+    #: "checked, and stale" instead of overloading `cached` again.
+    current: bool | None = True
 
     def as_response(self) -> dict:
-        out = {**self.payload, "run_id": str(self.run_id), "cached": self.cached}
+        out = {**self.payload, "run_id": str(self.run_id),
+               # Both fields on every response. A currency verdict that
+               # appeared only on some of them would send clients straight
+               # back to inferring freshness from whichever other keys were
+               # present, which is the habit that produced the defect.
+               "cached": self.cached, "current": self.current}
         if self.computed_at is not None:
             # The ONE place the shape is extended, so `latest` is the suite
             # response plus this field and cannot drift into its own shape.
@@ -163,6 +189,16 @@ class AnalyticsRunService:
         an analyst who wants it presses the button. Nor does it insert a
         projection row: a read that leaves a row behind is not a read.
 
+        Because it does not re-project, it CANNOT answer the second
+        question, so it returns `current=None` -- not checked. Until
+        2026-09-02 it returned only `cached=True`, which on every other
+        path means "`_lookup` matched the graph hash", i.e. nothing has
+        changed since that run. The two meanings reached the wire as one
+        field, so opening the pane on a changed graph would have reported
+        a stale answer as a current one. `cached` now says only that the
+        bytes came out of storage, which is true here and says nothing
+        about the graph.
+
         Scoped by `visibility_clearance` / `visibility_compartments`
         exactly as `history` and `_lookup` are, and for the same reason:
         a run computed over a better-cleared analyst's graph is never
@@ -185,7 +221,8 @@ class AnalyticsRunService:
         if row is None:
             return None
         run_id, payload, finished_at = row
-        return RunResult(payload, run_id, cached=True, computed_at=finished_at)
+        return RunResult(payload, run_id, cached=True, computed_at=finished_at,
+                         current=None)
 
     def history(self, case_id: UUID, node_id: UUID, metric: str,
                 limit: int = 50) -> list[dict]:
@@ -233,7 +270,13 @@ class AnalyticsRunService:
             hit = self._lookup(projection_id, algorithm, digest)
             if hit is not None:
                 run_id, payload = hit
-                return RunResult(payload, run_id, cached=True)
+                # `current=True` is stated rather than left to the default:
+                # this is the ONE path that earns it by comparison, because
+                # `_lookup` matched `digest` -- the hash of the graph just
+                # projected above -- against the hash the run was computed
+                # under. `latest` reads the same table with no such
+                # comparison and must say `current=None`.
+                return RunResult(payload, run_id, cached=True, current=True)
 
         started = time.monotonic()
         run_id = uuid4()
@@ -313,7 +356,9 @@ class AnalyticsRunService:
                     {"duration_ms": duration,
                      "node_count": len(sub.nodes),
                      "is_approximate": bool(payload.get("is_approximate"))})
-        return RunResult(payload, run_id, cached=False)
+        # Computed from the projection taken at the top of this call, so it
+        # describes the graph as it stands now: `current=True` by construction.
+        return RunResult(payload, run_id, cached=False, current=True)
 
     def _cache_key(self, sub, p: Projection, params: AnalyticsParams,
                    extra: dict) -> bytes:

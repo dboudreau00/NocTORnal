@@ -259,7 +259,53 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
     finding out from somebody ELSE's discovery, and its URGENT priority is
     what puts it in front of `escalate_unacknowledged` if they then sit on
     it.
+
+    ## One alarm per exhibit while it is unanswered (2026-09-02)
+
+    Returns None -- writing nothing -- when an unacknowledged alarm for
+    this exhibit already exists. Until this fix the alarm fired on EVERY
+    detection, which made the evidence read path an outbound-email
+    amplifier: `GET /cases/{id}/evidence/{id}/content` and
+    `POST /{id}/verify` carry no `rate_limit` dependency, so any caller
+    holding `evidence.read` on a case with one corrupt exhibit minted one
+    priority-1 notification plus one PENDING SMTP delivery to the case
+    owner per HTTP request, on a path that previously wrote only a cheap
+    internal audit row. Suppression 1 was no defence, because the owner is
+    the RECIPIENT and the looper is anyone else. Worse, because the owner
+    is the recipient, `notifications.escalate_unacknowledged` skips the
+    owner and fans every one of those out to EVERY active
+    SECURITY_OFFICER, once per drain until each is acknowledged
+    individually -- so the party with the motive to bury the tamper alarm
+    could drown it, and the system's only tamper alarm is the last thing
+    that may be drowned.
+
+    Keyed on `acknowledged_at IS NULL` rather than on existence, so a
+    genuinely NEW failure after the owner has answered the last one is
+    still raised. Deliberately the same shape as this module's other two
+    producers -- `case_reviews_due`'s deterministic `object_id` and
+    `escalate_unacknowledged`'s NOT EXISTS -- which were made idempotent
+    on the same day precisely to stop fan-out; the one producer a hostile
+    caller can drive got neither, which is the inconsistency this closes.
+    Like theirs, the guard is a read-then-write with no unique index
+    behind it, so it bounds a loop rather than winning a race: two
+    simultaneous reads of the same tampered exhibit can still write two.
+    That is a cap of one per concurrent request rather than one per
+    request, which is the difference the amplifier turned on.
+
+    The custody and audit rows are written by `evidence.py` regardless and
+    are the durable record; this only decides whether the OWNER'S PHONE
+    rings again about something they have already been told.
     """
+    outstanding = conn.execute(
+        """SELECT 1 FROM notify.notification
+            WHERE kind = 'EVIDENCE_INTEGRITY_ALARM'
+              AND object_type = 'evidence' AND object_id = %s
+              AND acknowledged_at IS NULL
+            LIMIT 1""", (evidence_id,)).fetchone()
+    if outstanding is not None:
+        log.info("exhibit %s already has an unacknowledged integrity alarm; "
+                 "not raising another", evidence_id)
+        return None
     code, classification, compartments = _case(conn, case_id)
     labels = conn.execute(
         "SELECT classification, compartments FROM core.evidence WHERE id = %s",
@@ -301,13 +347,21 @@ def case_reviews_due(conn: psycopg.Connection, *, as_of: date | None = None,
     were WRITTEN -- not how many cases were seen -- so a sweep whose every
     owner was suppressed reports 0 and does not claim to have told anyone.
 
-    Idempotent by construction rather than by a "last swept" column: the
+    Idempotent ACROSS sweeps rather than by a "last swept" column: the
     `object_id` is a uuid5 over the case id and the due date, so the row
     the sweep writes is the row the next sweep looks for, and a review that
     is moved to a new date is a new deadline and is announced again. The
     table has no slot for the date itself and a migration is out of scope
     for this change; a deterministic id is the honest substitute and is
     stated here so nobody later reads the object_id as a reference.
+
+    That dedupe is a SELECT into `already` followed by INSERTs, with no
+    lock and no unique index behind it (`notification_object_idx` is a
+    plain partial btree on `object_id`), so it holds only while ONE sweep
+    runs at a time. `transports.dispatch_due` is what guarantees that: it
+    takes a session advisory lock across the whole drain. Corrected
+    2026-09-02, when this docstring still said "idempotent by
+    construction" without qualification and nothing serialised the callers.
 
     Overdue reviews are included (`review_due <= as_of + horizon`, not a
     band). A sweep that only looked forward would never announce a review

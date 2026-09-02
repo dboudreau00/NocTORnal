@@ -87,6 +87,16 @@ MAX_PER_DRAIN = 200
 # A permanently-retried delivery is a permanently-hot outbox.
 MAX_ATTEMPTS = 5
 
+#: Serialises the WHOLE drain across processes -- see `dispatch_due`.
+#:
+#: Session-scoped (`pg_try_advisory_lock`), not transaction-scoped, because
+#: `db.connect()` is autocommit: a `pg_advisory_xact_lock` would be released
+#: by the very statement that took it and would guard nothing. The name is
+#: hashed with `hashtextextended(..., 0)`, the same idiom migrations 0013
+#: and 0024 use for the audit and custody chains, so the lock space is
+#: addressed one way across the codebase.
+_DRAIN_LOCK = "notify.dispatch_due"
+
 PRODUCT = "NocTORnal"
 
 
@@ -359,63 +369,126 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
     The transports are injectable so the tests exercise the gate, the
     redaction and the ledger without a mail server.
 
-    Begins by closing out any PENDING delivery whose recipient may no longer
-    read it — see `revoke_undeliverable`. That has to happen BEFORE the
-    drain rather than as a filter inside it, or the rows would queue up
-    invisibly forever.
+    Closes out any PENDING delivery whose recipient may no longer read it —
+    see `revoke_undeliverable` — BEFORE the drain rather than as a filter
+    inside it, or the rows would queue up invisibly forever.
 
     ## One drain does three things (N3, 2026-09-02)
 
     The review-due sweep (`notify_events.case_reviews_due`) and the
     escalation of unacknowledged priority-1s
-    (`notifications.escalate_unacknowledged`) run here too, BEFORE `due()`
-    is read, so the rows they raise go out in the same pass. There is no
+    (`notifications.escalate_unacknowledged`) run here too. There is no
     worker to give them a schedule of their own, and a second cron entry is
     a second thing to forget; the operator who runs the drain gets all
-    three, and the counters say what each did. `scripts/notify_drain.py`
-    is the cron entry.
+    three, and the counters say what each did. `scripts/notify_drain.py` is
+    the cron entry.
+
+    ## The producers run AFTER the drain loop, not before (2026-09-02)
+
+    They were originally evaluated inside the `counters` literal, i.e.
+    BEFORE `due()` was read, so anything they raised went out in the SAME
+    pass. That quietly broke the contract every other caller relies on:
+    ESCALATION is registered URGENT and `deliver_after` returns `now` for
+    priority 1, so a drain whose only queued row was DEFERRED still sent
+    mail. `test_notifications_pg.py::test_a_deferred_delivery_is_not_drained_early`
+    asserts `sent == []` after exactly that drain, and it began failing
+    whenever the database happened to hold one unacknowledged URGENT older
+    than an hour — which is the state the escalation feature exists to
+    serve. It was not caught because the database it was developed against
+    held zero escalation candidates and zero cases due for review, so both
+    producers were inert and every new test passed over a no-op.
+
+    So: a drain sends what was ALREADY due when it started, and what the
+    producers raise goes out on the next pass. Deferring an urgent
+    escalation by one drain interval is the cheap half of that trade; a
+    "drain the outbox" call that also manufactures its own outbound mail is
+    not a drain, and no caller can reason about it.
+
+    ## One drain at a time (2026-09-02)
+
+    Both producers dedupe by reading the rows they are about to write
+    (`escalate_unacknowledged`'s NOT EXISTS, `case_reviews_due`'s uuid5
+    `object_id`), and `notify.notification` has no unique index to fall back
+    on — `notification_object_idx` is a plain partial btree on `object_id`.
+    On an autocommit connection with no lock that dedupe is a read-then-write
+    race, so two overlapping drains each see "no escalation yet" and both
+    write one. That is the ordinary case, not an exotic one: a real-SMTP
+    drain of a few hundred rows takes minutes, and `scripts/notify_drain.py`
+    on a cron overlaps an operator's POST /notifications/dispatch. Duplicate
+    ESCALATION rows are URGENT, the one tier that overrides quiet hours and
+    reaches every security officer, so the failure mode is precisely the
+    alert fatigue this module argues against.
+
+    `pg_try_advisory_lock` rather than `pg_advisory_lock`: an operator who
+    presses dispatch while cron holds the lock gets an immediate all-zero
+    drain and can see that nothing was theirs to do, instead of a request
+    that blocks for five minutes behind somebody else's SMTP. The lock also
+    closes the same race on the delivery loop itself — two drains reading
+    the same PENDING rows out of `due()` and both sending them — which is
+    older than the producers but has the same cause.
 
     Every key in the `counters` literal below is a field of the HTTP
     `DrainOut` model, and test_ui_invariants reads this literal to hold the
     model to it -- so a new counter goes IN the literal, not on a later
-    line, or that test cannot see it.
+    line, or that test cannot see it. The producers assign INTO the literal
+    after the loop for that reason; their keys are still declared in it.
     """
     counters = {"sent": 0, "redacted": 0, "refused": 0, "failed": 0,
-                "revoked": revoke_undeliverable(conn),
-                "reviews_due": case_reviews_due(conn),
-                "escalated": escalate_unacknowledged(conn)}
-    for out in due(conn, limit):
-        decision = can_egress(
-            out.classification, destination_for(out.channel),
-            compartments=out.compartments,
-            destination_ceiling=os.environ.get(
-                f"NOCTORNAL_{out.channel}_CEILING") or None,
-        )
-        redacted = decision.denied
+                "revoked": 0, "reviews_due": 0, "escalated": 0}
+    held = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                        (_DRAIN_LOCK,)).fetchone()[0]
+    if not held:
+        # Not an error and not a failure: another drain is doing exactly
+        # this work right now. All-zero is the honest report -- this call
+        # sent nothing, revoked nothing and produced nothing.
+        log.info("a drain is already running; this one did nothing")
+        return counters
+    try:
+        counters["revoked"] = revoke_undeliverable(conn)
+        for out in due(conn, limit):
+            decision = can_egress(
+                out.classification, destination_for(out.channel),
+                compartments=out.compartments,
+                destination_ceiling=os.environ.get(
+                    f"NOCTORNAL_{out.channel}_CEILING") or None,
+            )
+            redacted = decision.denied
 
-        try:
-            if out.channel == SMTP:
-                if not out.address:
-                    raise TransportError("no email address for this recipient")
-                send_mail(render_email(out, redacted=redacted))
-            elif out.channel == WEBHOOK:
-                url = os.environ.get("NOCTORNAL_WEBHOOK_URL")
-                if not url:
-                    raise TransportError("NOCTORNAL_WEBHOOK_URL is not set")
-                post_webhook(url, webhook_payload(out, redacted=redacted),
-                             os.environ.get("NOCTORNAL_WEBHOOK_SECRET"))
-            else:
-                raise TransportError(f"no transport for channel {out.channel}")
-        except Exception as exc:  # noqa: BLE001 - every failure is a ledger row
-            _fail(conn, out, str(exc))
-            counters["failed"] += 1
-            continue
+            try:
+                if out.channel == SMTP:
+                    if not out.address:
+                        raise TransportError("no email address for this recipient")
+                    send_mail(render_email(out, redacted=redacted))
+                elif out.channel == WEBHOOK:
+                    url = os.environ.get("NOCTORNAL_WEBHOOK_URL")
+                    if not url:
+                        raise TransportError("NOCTORNAL_WEBHOOK_URL is not set")
+                    post_webhook(url, webhook_payload(out, redacted=redacted),
+                                 os.environ.get("NOCTORNAL_WEBHOOK_SECRET"))
+                else:
+                    raise TransportError(
+                        f"no transport for channel {out.channel}")
+            except Exception as exc:  # noqa: BLE001 - every failure is a ledger row
+                _fail(conn, out, str(exc))
+                counters["failed"] += 1
+                continue
 
-        _succeed(conn, out, redacted=redacted,
-                 detail=decision.reason if redacted else None)
-        counters["redacted" if redacted else "sent"] += 1
-        if redacted:
-            counters["refused"] += 1
+            _succeed(conn, out, redacted=redacted,
+                     detail=decision.reason if redacted else None)
+            counters["redacted" if redacted else "sent"] += 1
+            if redacted:
+                counters["refused"] += 1
+        # After the loop, on purpose. See "The producers run AFTER the drain
+        # loop" above: what these raise is due next pass, not this one.
+        counters["reviews_due"] = case_reviews_due(conn)
+        counters["escalated"] = escalate_unacknowledged(conn)
+    finally:
+        # A session lock outlives the statement that took it, so an
+        # exception escaping the drain would otherwise strand it for the
+        # life of the connection -- and in a pooled process, for the life of
+        # the pool.
+        conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                     (_DRAIN_LOCK,))
     return counters
 
 

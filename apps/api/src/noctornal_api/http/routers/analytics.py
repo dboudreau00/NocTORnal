@@ -116,6 +116,19 @@ def latest(
     never find a run made with a non-default confidence floor. Computes
     nothing and writes nothing, so it carries no analytics meter; the
     blanket ceiling applies.
+
+    THIS ENDPOINT NEVER VERIFIES THE GRAPH HASH, so it always answers
+    `current: null` -- "not checked" -- and a client must not present its
+    answer as up to date. `cached: true` here says only that the bytes
+    came out of `analytics.metric_run`; on `GET /analytics` the same
+    `cached: true` additionally means the hash matched, which is a
+    currency claim this endpoint cannot make. Until 2026-09-02 there was
+    no `current` and the two were indistinguishable on the wire, so the
+    pane that opens on this endpoint would have told an analyst the case
+    graph was unchanged while it had moved. `computed_at` says WHEN the
+    run happened, never WHETHER it still holds. To ask whether it holds,
+    call `GET /cases/{case_id}/analytics` -- its hash lookup is the only
+    thing in the service that answers that question.
     """
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, leiden_resolution)

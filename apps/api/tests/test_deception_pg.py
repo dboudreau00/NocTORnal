@@ -74,6 +74,13 @@ def conn():
                   f"AND id NOT IN {pinned_cases}")
         c.execute(f"DELETE FROM iam.app_user WHERE id IN {sub} "
                   f"AND id NOT IN {pinned_users}")
+    # The compartment key `_register` added is deliberately NOT removed.
+    # This teardown PINS any case a custody row points at, so a key this
+    # file registered can still be in use afterwards -- and an in-use
+    # value with no registry entry is exactly the state
+    # `test_compartment_registry_pg.py` asserts can never exist. Widening
+    # the vocabulary is monotone and safe; narrowing it is what strands a
+    # case, which is the whole reason 0057 exists.
     c.close()
 
 
@@ -87,8 +94,26 @@ def _user(conn, clearance="RED", compartments=()):
     return uid
 
 
+def _register(conn, compartments) -> None:
+    """Put the fixture's compartment keys in `iam.compartment` first.
+
+    0057 (2026-09-02) made the registry a closed vocabulary and
+    `CaseService.create` refuses a key that is not in it. Until this helper
+    existed the three compartment tests below passed only on a database
+    whose backfill had happened to find `OPX` already in an array, and
+    failed on every fresh one -- CI's included. Idempotent, because the
+    key survives its owner (`created_by` is ON DELETE SET NULL) and the
+    fixture runs once per test.
+    """
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (deception test)"))
+
+
 def _case(conn, owner, classification="GREEN", compartments=()):
     from noctornal_api.cases import CaseService
+    _register(conn, compartments)
     return CaseService(conn).create(
         code=f"OP-DCP-{uuid4().hex[:6]}", title="Deception",
         legal_basis="production order", retention_until=date(2028, 1, 1),

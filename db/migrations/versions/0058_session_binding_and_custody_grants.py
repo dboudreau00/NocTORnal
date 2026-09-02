@@ -22,6 +22,21 @@ strict binding is a deliberate posture for a deployment that would rather
 re-authenticate than risk it. `ip_hash` stays as it was, unwritten: two
 representations of one fact would be two things to keep consistent.
 
+"Validation" means BOTH of the application's two validation sites: HTTP
+requests, through `deps.current_user`, and the WebSocket handshake in
+`http/routers/live.py`. The websocket was not covered when this migration
+first shipped and this paragraph is why it is now: a control disclosed to
+an operator as covering validation, with one of two call sites exempt, is
+a control the operator cannot reason about. Both refuse before sliding
+the idle window, so a refused replay cannot keep a session alive.
+
+Two kinds of session can never satisfy the comparison and are refused
+under strict binding by design: one minted before this migration (no
+recorded address), and one minted by `scripts/bootstrap.py session`,
+which runs in a shell for a browser it has never met. The audit row for
+those carries `unbound: true`, so a refusal that means "this could never
+be verified" is distinguishable from one that means "this token moved".
+
 ## The custody ledger's REVOKE
 
 0013 pairs `audit.event`'s append-only triggers with `REVOKE UPDATE,

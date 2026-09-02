@@ -172,9 +172,9 @@ def test_a_case_cannot_enter_a_compartment_until_it_is_registered(conn, client):
     assert r.status_code == 201, r.text
     assert _create(conn, owner_id, [key])
 
-    # Any authenticated user can read the vocabulary -- it is the list an
-    # analyst needs in order to ask for the right read-in, and a key is
-    # not a secret (a case's contents are).
+    # The owner is read into this key, so the listing shows it to them.
+    # WHO may read what is pinned by
+    # `test_the_listing_shows_only_the_callers_own_read_ins` below.
     listed = client.get("/api/v1/compartments", headers=_auth(owner))
     assert listed.status_code == 200, listed.text
     mine = [c for c in listed.json()["compartments"] if c["key"] == key]
@@ -202,6 +202,63 @@ def test_registering_the_same_key_twice_is_a_refusal_not_a_relabel(conn):
     assert conn.execute(
         "SELECT label FROM iam.compartment WHERE key = %s", (key,)
     ).fetchone()[0] == "First"
+
+
+def test_the_listing_shows_only_the_callers_own_read_ins(conn, client):
+    """The access decision on `GET /compartments`, which had no test at all
+    until 2026-09-02 -- the one thing in this surface nobody had pinned.
+
+    Until then the endpoint was gated on `current_user` alone and returned
+    the WHOLE registry, with each key's administrator-written label, to
+    every authenticated account. In this system the key IS the
+    need-to-know lock: 0057 calls compartments "need-to-know locks" and
+    `cases.py` refuses an unregistered key because "a key is something
+    typed into a warrant schedule". Handing an analyst with zero read-ins
+    the full codeword vocabulary told them which operations exist, which
+    is the fact the compartment was created to withhold.
+
+    Three parties, one URL, and the response says which answer it is --
+    because a listing that silently narrows is a correct answer to a
+    different question, and the client cannot tell.
+    """
+    held, unheld = _key(), _key()
+    admin_id, admin_email, admin_secret = _user(conn, "SYS_ADMIN")
+    svc = _admin_svc(conn)
+    svc.register_compartment(key=held, label="Held", actor_id=admin_id)
+    svc.register_compartment(key=unheld, label="Not held", actor_id=admin_id)
+
+    _, analyst_email, analyst_secret = _user(conn, compartments=(held,))
+    analyst = _login(client, analyst_email, analyst_secret)
+    body = client.get("/api/v1/compartments", headers=_auth(analyst))
+    assert body.status_code == 200, body.text
+    # The disclosure itself first, so a regression here fails saying what
+    # actually leaked rather than which field went missing.
+    assert unheld not in body.text, (
+        "an analyst must not be able to enumerate compartments they are "
+        "not read into: the key IS the need-to-know lock, so the list of "
+        "keys is the list of operations that exist")
+    assert [c["key"] for c in body.json()["compartments"]] == [held]
+    assert set(body.json()["compartments"][0]) == {"key", "label"}, (
+        "who registered a compartment and when is registry administration, "
+        "not something a read-in entitles you to")
+    assert body.json()["scope"] == "held"
+    assert body.json()["count"] == 1
+
+    # The account that maintains the registry sees the registry.
+    admin = _login(client, admin_email, admin_secret)
+    whole = client.get("/api/v1/compartments", headers=_auth(admin))
+    assert whole.status_code == 200, whole.text
+    assert whole.json()["scope"] == "all"
+    keys = {c["key"] for c in whole.json()["compartments"]}
+    assert {held, unheld} <= keys
+    entry = next(c for c in whole.json()["compartments"] if c["key"] == held)
+    assert entry["created_by"] == str(admin_id) and entry["created_at"]
+
+    # `holds_global_permission` widens a READ and must never be mistaken
+    # for authorisation to write: the analyst still cannot register.
+    assert client.post("/api/v1/compartments", headers=_auth(analyst),
+                       json={"key": _key(), "label": "x"}).status_code == 403
+    assert client.get("/api/v1/compartments").status_code == 401
 
 
 # --- the user write site --------------------------------------------------
@@ -273,6 +330,59 @@ def test_set_compartments_refuses_a_typo_and_a_stranding_removal(conn, client):
                       json={"compartments": []}).status_code == 403
 
 
+def test_narrowing_a_read_in_reports_the_assignments_it_strands(conn):
+    """The gap between what `set_compartments`' refusal covers and what its
+    reasoning claimed, closed on 2026-09-02 by reporting rather than by
+    refusing more.
+
+    The refusal covers OWNER and DEPUTY, because those have no route back:
+    an owner locked out of their own case cannot transfer it. An ASSIGNEE
+    does have one, so refusing there would mean an administrator cannot
+    narrow anyone's read-ins until every case they are on is unpicked --
+    and a control nobody can use is not a control. But losing a case you
+    are assigned to is still silent no-access, so the act is recorded
+    instead of prevented.
+
+    Both halves, because the audit row is a CLAIM about access: the
+    detail names the case, and `list_for_user` -- the listing that must
+    return exactly what the five-part gate allows -- agrees that the
+    analyst can no longer see it.
+    """
+    from noctornal_api.cases import CaseService
+    from noctornal_api.iam_admin import AdminError
+    key = _key()
+    admin_id, _, _ = _user(conn, "SYS_ADMIN")
+    owner_id, _, _ = _user(conn, "CASE_OWNER", clearance="RED",
+                           compartments=(key,))
+    analyst_id, _, _ = _user(conn, clearance="RED", compartments=(key,))
+    svc = _admin_svc(conn)
+    svc.register_compartment(key=key, label="Alpha", actor_id=admin_id)
+    case_id = _create(conn, owner_id, [key])
+    cases = CaseService(conn)
+    cases.assign_user(case_id, analyst_id, "ANALYST", granted_by=owner_id)
+    code = conn.execute('SELECT code FROM core."case" WHERE id = %s',
+                        (case_id,)).fetchone()[0]
+    assert code in [c.code for c in cases.list_for_user(analyst_id)]
+
+    svc.set_compartments(analyst_id, [], actor_id=admin_id)
+
+    detail = conn.execute(
+        """SELECT detail FROM audit.event
+            WHERE object_id = %s AND action = 'USER_COMPARTMENTS_CHANGED'
+            ORDER BY seq DESC LIMIT 1""", (analyst_id,)).fetchone()[0]
+    assert detail["stranded_assignments"] == [code], (
+        "an assignee who quietly loses a case is the silent no-access this "
+        "registry exists to end; the act is allowed, so it must be visible")
+    assert code not in [c.code for c in cases.list_for_user(analyst_id)], (
+        "the audit row claims the analyst lost the case -- the gate has to "
+        "agree, or the record is about something that did not happen")
+
+    # The owner is still REFUSED outright: that is the position with no
+    # route back, and reporting is not enough for it.
+    with pytest.raises(AdminError, match="strand"):
+        svc.set_compartments(owner_id, [], actor_id=admin_id)
+
+
 def test_the_key_format_is_enforced_on_every_way_in(conn, client):
     """`^[A-Z0-9_-]{2,32}$`: a key is something typed into a warrant
     schedule and compared byte-for-byte by the access gate, so case and
@@ -298,11 +408,20 @@ def test_the_key_format_is_enforced_on_every_way_in(conn, client):
 
 # --- the migration --------------------------------------------------------
 
-def _backfill_sql() -> str:
+def _m0057():
+    """The version file itself, loaded as a module.
+
+    Read from the file rather than reimplemented here: a test that
+    restates the migration's SQL proves the test agrees with the test.
+    """
     spec = importlib.util.spec_from_file_location("m0057", MIGRATION)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.BACKFILL_SQL
+    return module
+
+
+def _backfill_sql() -> str:
+    return _m0057().BACKFILL_SQL
 
 
 def test_the_backfill_registers_every_value_already_in_either_array(conn):
@@ -341,6 +460,101 @@ def test_the_backfill_registers_every_value_already_in_either_array(conn):
         tx.execute(_backfill_sql())
         assert tx.execute("SELECT count(*) FROM iam.compartment WHERE key = %s",
                           (key,)).fetchone()[0] == 1
+    finally:
+        tx.rollback()
+        tx.close()
+
+
+def test_a_legacy_value_the_format_cannot_hold_stops_the_upgrade_with_the_fix(conn):
+    """0057 hard-fails on a value it cannot register, so the refusal has to
+    be an instruction rather than a wall -- and the instruction has to run.
+
+    Three halves of one contract, and the third is the one that was
+    missing until 2026-09-02. `test_notifications_pg.py` wrote the
+    compartment `'A'` into `iam.app_user.compartments`; a run interrupted
+    before its teardown leaves that behind, and the next `alembic upgrade`
+    on that database stops at 0057 forever. The migration's docstring now
+    says the refusal is a documented pre-upgrade cleanup step, so this
+    pins that the cleanup exists, names the value, and WORKS:
+
+    - the schema genuinely cannot hold the value (so skipping it, rather
+      than refusing, would strand every case filed under it);
+    - `UNREGISTRABLE_SQL` finds it in either array;
+    - the SQL `refusal_message` prints is executable, touches BOTH arrays,
+      and leaves `UNREGISTRABLE_SQL` empty -- i.e. the operator who does
+      what the error says can then complete the upgrade.
+    """
+    import psycopg
+
+    from noctornal_api.db import dsn
+    m = _m0057()
+    legacy = "A"           # one character: `^[A-Z0-9_-]{2,32}$` can never take it
+    good = _key()
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, 'x')",
+                     (legacy,))
+
+    email = f"cmp-{uuid4().hex[:8]}@noctornal.test"
+    tx = psycopg.connect(dsn())
+    try:
+        uid = tx.execute(
+            """INSERT INTO iam.app_user (email, display_name, password_hash,
+                                         tlp_clearance, compartments)
+               VALUES (%s, 'Legacy', 'x', 'RED', %s) RETURNING id""",
+            (email, [legacy])).fetchone()[0]
+        # Raw SQL, not `CaseService.create`: the service now REFUSES this
+        # key, which is the point -- this is the pre-0057 row an upgrade
+        # actually finds, not one the product could still make today.
+        tx.execute(
+            """INSERT INTO core."case" (code, title, status, legal_basis,
+                                        retention_until, review_due,
+                                        classification, compartments,
+                                        owner_user_id)
+               VALUES (%s, 'Legacy', 'DRAFT', 'production order', '2028-01-01',
+                       '2027-01-01', 'AMBER', %s, %s)""",
+            (f"OP-CMP-{uuid4().hex[:6]}", [legacy], uid))
+        assert [r[0] for r in tx.execute(m.UNREGISTRABLE_SQL).fetchall()] == [legacy]
+
+        message = m.refusal_message([legacy])
+        assert f"'{legacy}'" in message, "the operator must be told WHICH value"
+        assert "iam.app_user" in message and 'core."case"' in message, (
+            "renaming one array and not the other is the typo 0057 exists "
+            "to stop; the fix has to name both")
+        assert m.REPLACEMENT in message
+
+        # The printed cleanup, actually run -- the rename branch, not the
+        # `array_remove` one, which is offered second because dropping a
+        # lock declassifies every case that carried it.
+        assert m.rename_sql(legacy, m.REPLACEMENT) in message, (
+            "the runnable statement and the message must be the same text, "
+            "or this test is exercising a paraphrase")
+        tx.execute(m.rename_sql(legacy, good))
+        assert tx.execute(m.UNREGISTRABLE_SQL).fetchall() == [], (
+            "the upgrade must be able to proceed after the operator does "
+            "exactly what the refusal told them to do")
+        assert tx.execute(
+            "SELECT compartments FROM iam.app_user WHERE id = %s",
+            (uid,)).fetchone()[0] == [good]
+        assert tx.execute(
+            'SELECT compartments FROM core."case" WHERE owner_user_id = %s',
+            (uid,)).fetchone()[0] == [good]
+
+        # An apostrophe is one of the ways to fail the key format, so a
+        # value containing one is exactly the kind this code is printed
+        # for. Python's repr() would quote it with DOUBLE quotes, which
+        # Postgres reads as an identifier -- the refusal would hand the
+        # operator a statement that fails with "column does not exist".
+        quoted = "OP'X"
+        tx.execute(
+            "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
+            ([quoted], uid))
+        assert [r[0] for r in tx.execute(m.UNREGISTRABLE_SQL).fetchall()] == [quoted]
+        tx.execute(m.rename_sql(quoted, good))
+        assert tx.execute(m.UNREGISTRABLE_SQL).fetchall() == []
+        assert tx.execute(
+            "SELECT compartments FROM iam.app_user WHERE id = %s",
+            (uid,)).fetchone()[0] == [good]
     finally:
         tx.rollback()
         tx.close()

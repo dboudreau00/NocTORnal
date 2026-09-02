@@ -434,9 +434,21 @@ class NotificationService:
         """
         if channel not in _DEFAULTS:
             raise NotificationError(f"unknown channel {channel!r}")
-        if fields.get("enabled") is True:
-            _require_transport(channel)
         current = self.preferences(user_id)[channel]
+        # The TRANSITION off->on is what needs a transport, not the word
+        # `enabled` appearing in the payload. Read below `current` for that
+        # reason: until 2026-09-02 this ran above it on `fields.get(
+        # "enabled") is True`, so a client PUTting the whole preference
+        # object back -- which is what the settings pane does when you edit
+        # a quiet window on an already-enabled WEBHOOK -- was refused with
+        # "WEBHOOK cannot be enabled: NOCTORNAL_WEBHOOK_URL is not
+        # configured". Nobody was enabling anything. That is this
+        # codebase's signature defect (a failure reported as the wrong
+        # thing) and it contradicted `_require_transport`'s own docstring,
+        # which already promised that editing an already-enabled channel is
+        # not the moment to discover the URL was unset.
+        if fields.get("enabled") is True and not current.enabled:
+            _require_transport(channel)
         if "address" in fields and fields["address"] != current.address:
             self._check_address(user_id, channel, fields["address"],
                                 current.address)
@@ -629,9 +641,13 @@ def _require_transport(channel: str) -> None:
     never going to arrive. The delivery ledger filled with a
     misconfiguration dressed as an outage.
 
-    Only ENABLING is checked. Turning a channel off is always allowed, and
-    editing the other settings of an already-enabled channel is not the
-    moment to discover the URL was unset.
+    Only the off->on TRANSITION is checked, and `set_preference` is where
+    that is decided -- it compares against the CURRENT row, not against the
+    payload. Turning a channel off is always allowed, and editing the other
+    settings of an already-enabled channel is not the moment to discover
+    the URL was unset. Between N4 and 2026-09-02 the caller tested only
+    `fields["enabled"] is True`, so this promise was made here and not kept
+    there; see the comment at the call site.
     """
     if channel == JIRA:
         raise NotificationError(
@@ -666,12 +682,24 @@ def escalate_unacknowledged(conn: psycopg.Connection, *,
       problem again one level up. The recipient is excluded from the
       officers: escalating somebody's silence to themselves is noise.
 
-    Idempotent by construction: the row it writes carries
-    `object_type='notification', object_id=<original>` and the SELECT
-    excludes originals that already have one. A notification whose
-    escalation could not be written anywhere is tried again next sweep and
-    not counted -- the count is of silences a human was actually told
-    about.
+    Idempotent PER SWEEP, and only so long as one sweep runs at a time.
+    The row it writes carries `object_type='notification',
+    object_id=<original>` and the SELECT excludes originals that already
+    have one -- but that is a read followed by a write on an autocommit
+    connection, and `notify.notification` has no unique index to fall back
+    on (`notification_object_idx` is a plain partial btree on `object_id`,
+    migration 0029). Two sweeps overlapping in this window each see "no
+    escalation yet" and both write one, and duplicate ESCALATION rows are
+    URGENT -- the tier that overrides quiet hours and reaches every
+    security officer. What actually guarantees the property is
+    `transports.dispatch_due`, which holds a session advisory lock across
+    the whole drain; corrected here 2026-09-02, when the docstring still
+    claimed the SELECT alone was enough. A caller invoking this function
+    directly (the tests do) is responsible for its own serialisation.
+
+    A notification whose escalation could not be written anywhere is tried
+    again next sweep and not counted -- the count is of silences a human
+    was actually told about.
 
     ESCALATION rows are never themselves candidates. Otherwise an
     unacknowledged escalation escalates, and that one escalates, and the

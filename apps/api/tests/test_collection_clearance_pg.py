@@ -18,16 +18,38 @@ the inverse of the mistake `collection.py`'s read-path note already warns
 about (a worker that reads NULL as "see everything"). Both directions
 are tested here so neither can quietly become the default.
 
+## The second pass (2026-09-02): what the first one exempted
+
+The first pass filtered every listing and exempted `/sources/{id}/run`,
+writing the exemption into the router's module docstring as "neither
+returns a source's name or URL". That sentence was false, and it was
+load-bearing -- it was the stated reason a route was left unchecked. A
+poll returns `error`, which is the redacted adapter failure, and the SSRF
+guard writes the source's HOST into that message; `redact` masks
+credential shapes and does not touch hostnames. An AMBER caller who
+guessed a RED source's id got back
+`{"error": "cannot resolve red-forum.test"}` with a 200, and the
+200-versus-400 split confirmed the id was real before they read it.
+
+Three more places where the two sides of a claim disagreed are pinned
+here too: the hit writers claimed to be unwritable wherever the reader is
+blind and carried only half the reader's predicate; `documents()` and
+`SearchService.search` return the SOURCE's name and URL on every row and
+checked only the DOCUMENT's label, so raising a source to RED after
+collection hid nothing; and `runs` answers `[]` where `egress` refuses,
+which is defensible but was nowhere written down.
+
 Env-gated on DATABASE_URL. Users are `colk1-`, sources `test-srck1-`,
 egress profiles `test-egk1-`: `LIKE 'col-%'`, `LIKE 'test-src-%'` and
 `LIKE 'test-eg-%'` match none of them (the hyphen is literal), so this
 file's teardown and `test_collection_pg`'s cannot delete each other's rows.
+Cases are `OP-K1-` and are swept by owner, for the same reason.
 """
 from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -50,12 +72,25 @@ def conn():
     yield c
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'colk1-%@noctornal.test')"
     ssub = "(SELECT id FROM collect.source WHERE name LIKE 'test-srck1-%')"
+    csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     with c.transaction():
+        # Foreign keys, not reading order: hits before watches and
+        # documents, documents and watches before sources, assignments
+        # before the case that owns them. `audit.event` is deliberately
+        # NOT swept: 0013 makes it append-only with a trigger, so a DELETE
+        # here would raise and take the whole teardown with it. It has no
+        # foreign keys either, so the rows these tests write are left
+        # where an audit ledger's rows belong.
+        c.execute(f"DELETE FROM collect.watch_hit WHERE watch_id IN "
+                  f"(SELECT id FROM collect.watch WHERE source_id IN {ssub})")
+        c.execute(f"DELETE FROM collect.watch WHERE source_id IN {ssub}")
         c.execute(f"DELETE FROM collect.document WHERE source_id IN {ssub}")
         c.execute(f"DELETE FROM collect.collection_run WHERE source_id IN {ssub}")
         c.execute(f"DELETE FROM collect.collection_account WHERE source_id IN {ssub}")
         c.execute(f"DELETE FROM collect.source WHERE id IN {ssub}")
         c.execute("DELETE FROM collect.egress_profile WHERE name LIKE 'test-egk1-%'")
+        c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
+        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
         c.execute(f"DELETE FROM iam.session WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {sub}")
         c.execute("DELETE FROM iam.app_user WHERE email LIKE 'colk1-%@noctornal.test'")
@@ -147,6 +182,48 @@ def _egress(conn):
         """INSERT INTO collect.egress_profile (name, kind, key_id)
            VALUES (%s, 'PROXY', 'k') RETURNING id""",
         (f"test-egk1-{uuid4().hex[:6]}",)).fetchone()[0]
+
+
+def _case(conn, owner):
+    from noctornal_api.cases import CaseService
+    return CaseService(conn).create(
+        code=f"OP-K1-{uuid4().hex[:6]}", title="Clearance",
+        legal_basis="production order", retention_until=date(2028, 1, 1),
+        review_due=date(2027, 1, 1), owner_user_id=owner, created_by=owner)
+
+
+def _doc(conn, source_id, *, classification="AMBER", title="A thread",
+         body="ransomware crew recruiting affiliates"):
+    return conn.execute(
+        """INSERT INTO collect.document
+               (source_id, external_id, external_url, title, body_text,
+                author_handle, posted_at, content_sha256, classification,
+                triage_state)
+           VALUES (%s, %s, 'https://red-forum.test/t/1', %s, %s, 'vendor01',
+                   now(), decode(md5(%s), 'hex'), %s::core.tlp, 'NEW')
+           RETURNING id""",
+        (source_id, uuid4().hex, title, body, uuid4().hex,
+         classification)).fetchone()[0]
+
+
+def _watch(conn, source_id, case_id, owner):
+    return conn.execute(
+        """INSERT INTO collect.watch
+               (case_id, source_id, name, target_kind, target_ref,
+                keywords, owner_user_id)
+           VALUES (%s, %s, %s, 'BOARD', 'https://red-forum.test/b/1',
+                   ARRAY['ransom'], %s)
+           RETURNING id""",
+        (case_id, source_id, f"watch-{uuid4().hex[:6]}", owner)).fetchone()[0]
+
+
+def _hit(conn, watch_id, document_id):
+    return conn.execute(
+        """INSERT INTO collect.watch_hit
+               (watch_id, document_id, matched_on, score)
+           VALUES (%s, %s, '["selector:ransom"]'::jsonb, 0.5)
+           RETURNING id""",
+        (watch_id, document_id)).fetchone()[0]
 
 
 def _ids(rows) -> set[str]:
@@ -273,3 +350,219 @@ def test_the_routers_pass_the_callers_own_ceiling_to_the_service(conn, client):
     assert r.status_code == 404, r.text
     r = client.get(f"{API}/sources/{red}/egress", headers=red_hdr)
     assert r.status_code == 200, r.text
+
+
+# --- the route the ceiling pass exempted, and the reason it gave ---------
+
+def test_a_red_source_cannot_be_polled_below_its_classification(conn):
+    """`run_once` took no ceiling until 2026-09-02.
+
+    The router's module docstring exempted the poll route from the
+    clearance pass on the stated grounds that it "neither returns a
+    source's name or URL", and that was false: a fetch failure becomes
+    `RunResult.error`, the route returns it verbatim, and the SSRF guard
+    writes the HOST into it. So the exemption disclosed the one value
+    `due_sources` says the label protects.
+
+    Refused as `CollectionNotFound` rather than emptied or 400'd, so the
+    router answers with the same 404 an id that is not a source gets.
+    `None` stays the worker's reading and polls anything, as `due_sources`
+    does -- a collector has no user.
+    """
+    from noctornal_api.collection import (
+        CollectionNotFound,
+        CollectionService,
+    )
+
+    red = _source(conn, classification="RED")
+    svc = CollectionService(conn)
+    with pytest.raises(CollectionNotFound):
+        svc.run_once(red, actor_id=uuid4(), clearance="AMBER")
+    # A source that does not exist is refused with the SAME type, so the
+    # router cannot turn the two into different status codes.
+    with pytest.raises(CollectionNotFound):
+        svc.run_once(uuid4(), actor_id=uuid4(), clearance="RED")
+
+
+def test_the_redactor_does_not_touch_the_host_the_ssrf_guard_names(conn):
+    """The other half of the same defect, in one assertion.
+
+    `run_once` hands every adapter failure through `redact` before storing
+    it, and the exemption's reasoning rested on that being enough.
+    `redact` masks credential SHAPES; a bare hostname is not one. This
+    reads both sides -- the guard that writes the host into the message
+    and the redactor that was supposed to be removing it -- because that
+    is the pair whose disagreement made the docstring's claim false.
+    """
+    from noctornal_api.collection import (
+        CollectionError,
+        _resolve_and_check,
+        redact,
+    )
+
+    with pytest.raises(CollectionError) as caught:
+        # 169.254.169.254 is the cloud metadata address, refused by the
+        # guard without a DNS lookup, so this asserts the redactor's
+        # behaviour rather than the resolver's.
+        _resolve_and_check("https://169.254.169.254/latest/meta-data/")
+    assert "169.254.169.254" in redact(str(caught.value)), (
+        "redact() masks credentials, not hostnames: the SSRF guard's "
+        "message still names the source's host after redaction, which is "
+        "why the poll route needs its own ceiling check")
+
+
+def test_the_run_route_refuses_a_source_above_the_ceiling(conn, client):
+    """Both halves of the poll contract in one test.
+
+    The service filter is worth nothing unless the ROUTE resolves the
+    caller's ceiling and passes it, and the router previously passed
+    none at all. Asserts the 404, that it is indistinguishable from the
+    answer for an id that is not a source, and -- the point of the whole
+    fix -- that the RED source's hostname appears nowhere in the response
+    the AMBER caller gets.
+    """
+    red = _source(conn, classification="RED")
+    roles = ("ANALYST", "COLLECTOR")  # COLLECTOR holds collection.run
+    _, amber_email, amber_secret = _user(conn, clearance="AMBER", roles=roles)
+    _, red_email, red_secret = _user(conn, clearance="RED", roles=roles)
+    amber = _auth(_login(client, amber_email, amber_secret))
+    red_hdr = _auth(_login(client, red_email, red_secret))
+
+    r = client.post(f"{API}/sources/{red}/run", json={}, headers=amber)
+    assert r.status_code == 404, r.text
+    # `_source` builds every source at https://red-forum.test/feed. Before
+    # 2026-09-02 the AMBER caller got 200 and this string in `error`,
+    # because the poll failed to resolve it and the route returned the
+    # guard's message verbatim.
+    assert "red-forum.test" not in r.text, (
+        "the poll route handed a RED source's host back to a caller "
+        "below its classification")
+
+    missing = client.post(f"{API}/sources/{uuid4()}/run", json={},
+                          headers=amber)
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"] == r.json()["detail"], (
+        "a source above the ceiling and one that does not exist must be "
+        "indistinguishable, or the 404 is an existence oracle wearing a "
+        "different status code")
+
+    # The RED caller is past the gate. What the poll then does with an
+    # unresolvable host is the adapter's business, not this test's; all
+    # that is asserted is that the ceiling is no longer what stops them.
+    cleared = client.post(f"{API}/sources/{red}/run", json={},
+                          headers=red_hdr)
+    assert cleared.status_code != 404, cleared.text
+
+
+def test_an_over_ceiling_source_id_reads_the_same_as_one_that_is_not_a_source(
+        conn):
+    """Pins the reason `runs` answers `[]` where `egress` refuses.
+
+    `CollectionService.runs` says an empty run history is the same answer
+    for a source that has never been polled, one above the caller's
+    ceiling, and an id that is not a source at all -- which is why it does
+    not need the 404 the egress check has. That is only true while the
+    three answers really are identical, so it is asserted rather than
+    restated. This is a pinning test, not a regression test: the
+    behaviour it describes is unchanged, only the reason for it is new.
+    """
+    from noctornal_api.collection import CollectionService
+
+    red = _source(conn, classification="RED")
+    _run(conn, red)
+    svc = CollectionService(conn)
+    assert svc.runs(source_id=red, clearance="AMBER") == []
+    assert svc.runs(source_id=uuid4(), clearance="AMBER") == []
+    assert svc.runs(source_id=red, clearance="RED") != []
+
+
+# --- the label the writers and the readers disagreed about ---------------
+
+def test_a_hit_on_a_purged_document_is_unwritable_not_merely_hidden(conn):
+    """The read path and the write path, read together.
+
+    `watch_hits` has always dropped hits whose document was purged, and
+    the comment above the hit writers claims "a row the caller may not see
+    is not merely hidden but unwritable". Until 2026-09-02 that was true
+    of the clearance predicate and false of the purge one: all three
+    writers omitted `d.purged_at IS NULL`, so a hit no list would ever
+    show could still be suppressed, unsuppressed and acknowledged, each
+    returning a 200 for a change nobody could observe.
+    """
+    from noctornal_api.collection import (
+        CollectionError,
+        CollectionNotFound,
+        CollectionService,
+    )
+
+    owner, _, _ = _user(conn, clearance="RED")
+    case = _case(conn, owner)
+    src = _source(conn, classification="AMBER")
+    doc = _doc(conn, src)
+    hit = _hit(conn, _watch(conn, src, case, owner), doc)
+    svc = CollectionService(conn)
+    assert str(hit) in {h["id"] for h in svc.watch_hits(case, clearance="RED")}
+
+    # What `retention._purge_documents` actually writes: `body_text` is
+    # NOT NULL, so the purge empties it rather than nulling it.
+    conn.execute("UPDATE collect.document SET purged_at = now(), "
+                 "body_text = '' WHERE id = %s", (doc,))
+
+    assert str(hit) not in {h["id"] for h in
+                            svc.watch_hits(case, clearance="RED")}, (
+        "the read path has always hidden hits on purged documents")
+    with pytest.raises(CollectionNotFound):
+        svc.suppress_hit(case, hit, actor_id=owner,
+                         reason="the same thread all afternoon",
+                         clearance="RED")
+    with pytest.raises(CollectionNotFound):
+        svc.unsuppress_hit(case, hit, actor_id=owner, clearance="RED")
+    with pytest.raises(CollectionError):
+        svc.acknowledge_hit(hit, user_id=owner, clearance="RED")
+
+
+def test_a_source_reclassified_red_takes_its_own_name_with_it(conn):
+    """`_store_document` copies the source's label at INSERT and never again.
+
+    So a source collected while AMBER and later raised to RED left every
+    document it had already produced at AMBER -- and both read paths
+    return the SOURCE's identity on each of those rows: `documents()`
+    returns `source_name` and `external_url`, and `SearchService.search`
+    returns `source_name`. The reclassification that was meant to hide
+    the forum's name went on publishing it. Both halves are asserted in
+    one test because they are the same claim about the same row, and a
+    fix to one of them would otherwise look complete.
+    """
+    from noctornal_api.collection import CollectionService
+    from noctornal_api.curation import SearchService
+
+    owner, _, _ = _user(conn, clearance="RED")
+    case = _case(conn, owner)
+    src = _source(conn, classification="AMBER")
+    doc = _doc(conn, src, classification="AMBER",
+               body="ransomware crew recruiting affiliates")
+    svc = CollectionService(conn)
+    search = SearchService(conn)
+
+    def found():
+        return {h["id"] for h in search.search(
+            case_id=case, query="ransomware", clearance="AMBER",
+            compartments=frozenset(), include_evidence=False)}
+
+    assert str(doc) in _ids(svc.documents(clearance="AMBER"))
+    assert str(doc) in found()
+
+    conn.execute("UPDATE collect.source SET classification = 'RED' "
+                 "WHERE id = %s", (src,))
+
+    assert str(doc) not in _ids(svc.documents(clearance="AMBER")), (
+        "a source raised to RED kept handing its name and URL to AMBER "
+        "callers through the documents it had already collected")
+    assert str(doc) not in found(), (
+        "search returns the SOURCE's name on every document row, so it "
+        "needs the source's label as well as the document's")
+    # The RED caller still sees both: this is a ceiling, not a deletion.
+    assert str(doc) in _ids(svc.documents(clearance="RED"))
+    assert str(doc) in {h["id"] for h in search.search(
+        case_id=case, query="ransomware", clearance="RED",
+        compartments=frozenset(), include_evidence=False)}

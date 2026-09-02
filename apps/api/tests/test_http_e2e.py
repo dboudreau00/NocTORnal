@@ -356,6 +356,17 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
     the leg that passed vacuously before, because an uploaded exhibit
     carries no compartments of its own so the case must supply them."""
     from noctornal_api.cases import CaseService
+    # 0057 (2026-09-02) made `iam.compartment` a closed vocabulary and
+    # `CaseService.create` refuses a key that is not in it, so the case
+    # below cannot be filed until `OP_X` is registered. Before this line
+    # the test passed only where the 0057 backfill had happened to find
+    # `OP_X` already in an array, and failed on every fresh database.
+    # Not withdrawn in teardown: this file PINS cases that custody rows
+    # point at, and an in-use value with no registry entry is the one
+    # state `test_compartment_registry_pg.py` says cannot exist.
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES ('OP_X', "
+        "'Compartmented Op (e2e test)') ON CONFLICT (key) DO NOTHING")
     owner_id, owner_email, owner_secret = _make_user(
         conn, clearance="AMBER", global_roles=("CASE_OWNER",), compartments=("OP_X",))
     owner_token = _login(client, owner_email, owner_secret)

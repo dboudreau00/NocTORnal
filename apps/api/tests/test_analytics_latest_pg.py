@@ -167,7 +167,13 @@ def test_latest_is_404_before_any_run_and_the_run_afterwards(conn, client):
     assert set(latest) == set(suite) | {"computed_at"}
     assert latest["nodes"] == suite["nodes"]
     assert latest["projection"] == suite["projection"]
+    # `cached` says only where the bytes came from -- storage, not a fresh
+    # computation -- and that is true of both responses here. It used to
+    # carry a currency claim as well, which `latest` could not honour; the
+    # currency verdict is `current`, and `latest` never establishes one.
+    # See test_latest_never_claims_the_graph_is_unchanged.
     assert latest["cached"] is True
+    assert latest["current"] is None
     datetime.fromisoformat(latest["computed_at"])   # parses, and is not a duration
 
 
@@ -236,3 +242,110 @@ def test_latest_rejects_an_unknown_preset_like_the_suite_does(conn, client):
     r = _latest(client, token, case_id, preset="nonsense")
     assert r.status_code == 400
     assert "unknown preset" in r.json()["detail"]
+
+
+# --- `cached` must not mean two things -----------------------------------
+
+def _add_a_tie(client, token, case_id) -> None:
+    """Move the graph so its hash moves with it: two more actors and the
+    tie between them, which is what an analyst does between opening the
+    pane and looking at it again."""
+    ids = []
+    for label in ("delta", "echo"):
+        r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
+            "node_type": "IDENTITY", "label": label,
+            "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "B",
+                          "credibility": "2"}})
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+    r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token), json={
+        "edge_type": "VOUCHED_FOR", "src_node_id": ids[0], "dst_node_id": ids[1],
+        "assertion": {"basis": "DIRECT_OBSERVATION", "rationale": "vouched"}})
+    assert r.status_code == 201, r.text
+
+
+def test_latest_never_claims_the_graph_is_unchanged(conn, client):
+    """Reads BOTH sides of what `cached` means, across the file boundary
+    it crosses.
+
+    On the suite endpoint `cached: true` can only come from
+    `AnalyticsRunService._lookup`, whose WHERE clause matches on
+    `graph_hash`, so it carries a currency claim: nothing the caller can
+    see has changed since that run. `latest` reads the newest COMPLETE run
+    back by projection name and makes no hash comparison at all --
+    deliberately, because the question it answers is "what did the last run
+    say", not "is the last run still true".
+
+    Until 2026-09-02 both answers went onto the wire as the same
+    `cached: true` with nothing to tell them apart, and the only renderer
+    of the field prints "unchanged since the last run, served from cache".
+    So the first client to call the endpoint that exists for opening the
+    pane would have told an analyst the case graph was unchanged while it
+    had moved underneath them -- staleness reported as freshness, this
+    codebase's signature defect built into a new endpoint and pinned by its
+    own test.
+
+    `current` is now the currency verdict and `cached` says only where the
+    bytes came from. `latest` answers `current: null` -- NOT CHECKED.
+    """
+    _, email, secret = _make_user(conn)
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    _seed_small_graph(client, token, case_id)
+
+    def _suite(**params):
+        r = client.get(f"/api/v1/cases/{case_id}/analytics",
+                       headers=_auth(token), params=params)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    first = _suite()
+    assert first["cached"] is False
+    assert first["current"] is True, "a run just computed describes the graph now"
+
+    # Same graph: `_lookup`'s graph_hash matches, so the suite's `cached`
+    # DOES carry a currency claim here.
+    again = _suite()
+    assert again["run_id"] == first["run_id"]
+    assert again["cached"] is True
+    assert again["current"] is True
+
+    # Now move the graph.
+    _add_a_tie(client, token, case_id)
+
+    stale = _latest(client, token, case_id).json()
+    assert stale["run_id"] == first["run_id"], "still the old run"
+    assert stale["cached"] is True, "the bytes did come out of storage"
+    assert stale["current"] is None, (
+        "/latest does not compare graph hashes, so it must not report a "
+        "currency verdict it never established")
+
+    # The other half of the contract, read here rather than assumed: the
+    # suite's `cached` really is driven by the hash filter, so the graph
+    # this run was computed over is provably not the graph now. That is
+    # what makes the assertion above load-bearing rather than pedantic.
+    moved = _suite()
+    assert moved["cached"] is False, (
+        "the graph changed, so _lookup's graph_hash filter must miss")
+    assert moved["run_id"] != first["run_id"]
+    assert moved["current"] is True
+
+
+def test_the_currency_verdict_is_on_every_analytics_response(conn, client):
+    """`current` is not an optional extra on one endpoint. A field that is
+    present only sometimes sends a client back to inferring currency from
+    whichever other keys happen to be there, which is the habit that
+    produced the defect."""
+    _, email, secret = _make_user(conn)
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    _seed_small_graph(client, token, case_id)
+
+    suite = client.get(f"/api/v1/cases/{case_id}/analytics",
+                       headers=_auth(token)).json()
+    kpp = client.get(f"/api/v1/cases/{case_id}/analytics/key-player",
+                     headers=_auth(token), params={"n": 1}).json()
+    latest = _latest(client, token, case_id).json()
+    for name, body in (("suite", suite), ("key-player", kpp), ("latest", latest)):
+        assert "current" in body, f"{name} carries no currency verdict"
+        assert body["current"] in (True, None), (name, body["current"])

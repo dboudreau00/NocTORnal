@@ -24,9 +24,22 @@ The tests that carry this file:
 - ON: a moved token is refused with 401 problem+json, audited as
   SESSION_BINDING_REFUSED naming WHICH binding failed, and does not slide
   the idle window -- a refused replay must not keep the session alive;
+- BOTH SURFACES: the same is true of the WebSocket handshake, which is
+  the application's second session-validation site. It was not until
+  2026-09-02: `live.py` validated with the touching default and never
+  consulted the binding, so a token refused on every HTTP request was
+  accepted on the live case-event stream AND slid the idle window on
+  every reconnect, which meant the bullet above was true only over HTTP
+  while the 0058 docstring and the `iam.session.ip` COMMENT both said
+  "validation". One test now reads both halves of that contract;
 - PRE-BINDING: a session minted before 0058 has no address to compare,
   and strict mode refuses it rather than waving it through, because
   "cannot verify" and "verified" are different facts;
+- UNBOUND BY CONSTRUCTION: `scripts/bootstrap.py session` mints from a
+  shell for a browser it has never met and so can pass neither value.
+  Strict mode refuses it, correctly; the audit row carries
+  `unbound: true` so that refusal does not read as a replay, and the
+  command prints the warning before it hands over the URL;
 - THE LEDGER: `core.evidence_custody` carries the same explicit REVOKE as
   `audit.event` (0013), `core.purge_tombstone` and `lab.sample_access`
   (0052). Read from both sides: the version file's own statement, and the
@@ -221,6 +234,102 @@ def test_with_strict_binding_on_a_moved_token_is_refused_and_audited(conn, monke
     # replay that revoked the session would hand an attacker holding the
     # token a way to log the victim out on demand.
     assert _me(home, token, HOME_UA).status_code == 200
+
+
+def test_the_websocket_applies_the_same_binding_as_http(conn, monkeypatch):
+    """The contract crosses two files, so this test reads both.
+
+    Until 2026-09-02 `live.py` called `SessionService.validate(token)` with
+    `touch` defaulting to True and never consulted `binding_mismatch`. The
+    consequences were exactly the two this asserts away, and both
+    contradicted what the operator was told: (a) a stolen token refused on
+    every HTTP request was still accepted on the live case-event stream,
+    where `_may_read` re-runs the five-part gate and so hands the attacker
+    what the victim can read; (b) the unconditional touch slid
+    `last_seen_at` on every reconnect, so the 30-minute idle timeout never
+    fired and the replay kept the victim's session alive indefinitely --
+    the direct opposite of the invariant this file's header calls
+    load-bearing, which was true only over HTTP.
+
+    So: HTTP refuses the moved token AND the socket refuses it, the idle
+    window does not move for either, the audit row says which surface it
+    came from, and the legitimate holder's socket still works and still
+    counts as activity.
+    """
+    from starlette.websockets import WebSocketDisconnect
+    monkeypatch.setenv(FLAG, "1")
+    app = _app()
+    home, away = _client(app, HOME_IP), _client(app, AWAY_IP)
+    uid, email, secret = _user(conn)
+    token = _login(home, email, secret, HOME_UA)
+    assert _me(home, token, HOME_UA).status_code == 200
+    seen_before = _session_row(conn, uid)[2]
+
+    # HTTP refuses the moved token -- the half that already worked.
+    assert _me(away, token, AWAY_UA).status_code == 401
+
+    # The socket refuses it too, and says nothing more than an unknown
+    # case would: a close reason that distinguished "real token, wrong
+    # address" would be the oracle the 401 wording is careful not to be.
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with away.websocket_connect("/api/v1/live",
+                                    headers={"User-Agent": AWAY_UA}) as ws:
+            ws.send_json({"token": token})
+            ws.receive_json()
+    assert refused.value.code == 1008
+
+    # Neither refusal counted as activity. This is the assertion the
+    # websocket half failed: a refused replay must not keep the session
+    # alive, on EITHER surface.
+    assert _session_row(conn, uid)[2] == seen_before
+
+    # And the audit trail names the surface, because a security officer
+    # chasing a replay needs to know it arrived on the socket.
+    refusals = _refusals(conn, uid)
+    assert [d["path"] for d in refusals] == ["http", "websocket"]
+    assert all(d["mismatched"] and d["unbound"] is False for d in refusals)
+
+    # The legitimate holder is untouched, and their socket still slides
+    # the idle window -- the touch moved, it did not disappear.
+    with home.websocket_connect("/api/v1/live",
+                                headers={"User-Agent": HOME_UA}) as ws:
+        ws.send_json({"token": token})
+        assert ws.receive_json()["type"] == "ready"
+    assert _session_row(conn, uid)[2] > seen_before
+
+
+def test_a_bootstrap_session_is_refused_as_unbound_not_as_a_replay(conn, monkeypatch):
+    """`scripts/bootstrap.py session` mints from a shell for a browser it
+    has never met, so it passes no address and no User-Agent and CANNOT.
+    Under strict binding it is therefore refused on its first request,
+    with the generic 401 -- the operator recovery path for a machine whose
+    clock TOTP cannot live with dies, and before 2026-09-02 it died saying
+    nothing at all about why.
+
+    The audit row now separates the two facts a mismatch can mean. This is
+    an `unbound` session (nothing was ever recorded), not a moved one, and
+    the row says so; `cmd_session` prints the same warning before it hands
+    over the URL. `binding_mismatch` still refuses it -- "cannot verify"
+    and "verified" are different facts -- so this pins the DISCLOSURE, not
+    a carve-out.
+    """
+    from uuid import uuid4 as _uuid4
+
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    monkeypatch.setenv(FLAG, "1")
+    uid, _, _ = _user(conn)
+    # Exactly bootstrap's call: no ip, no user_agent.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        _uuid4(), uid, mfa_satisfied=True)
+
+    assert _me(_client(_app(), HOME_IP), token, HOME_UA).status_code == 401
+    refusals = _refusals(conn, uid)
+    assert len(refusals) == 1
+    assert refusals[0]["unbound"] is True, (
+        "a session that could never have been bound must not read in the "
+        "audit log as a token someone moved")
+    assert refusals[0]["mismatched"] == ["ip", "user_agent"]
 
 
 def test_a_session_minted_before_binding_cannot_pass_strict_mode():

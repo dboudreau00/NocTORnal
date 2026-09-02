@@ -61,6 +61,12 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 #: Throwaway roles, keyed so they can never collide with the seeded set.
 TEST_ROLES = ("CLC_CLOSER", "CLC_EMPTY")
 
+#: The one compartment this file files a case under. 0057 (2026-09-02) made
+#: `iam.compartment` a closed vocabulary and `CaseService.create` refuses a
+#: key that is not in it, so the fixture has to widen the vocabulary before
+#: it can use it — see `_register_compartment`.
+TEST_COMPARTMENT = "OP_CLC"
+
 
 @pytest.fixture
 def conn():
@@ -86,6 +92,12 @@ def conn():
         # role_permission before role: it references role(key).
         c.execute(f"DELETE FROM iam.role_permission WHERE role_key IN ({roles})")
         c.execute(f"DELETE FROM iam.role WHERE key IN ({roles})")
+    # `TEST_COMPARTMENT` is deliberately left registered. Widening the
+    # vocabulary is monotone; withdrawing a key while any case is still
+    # filed under it produces exactly the state
+    # `test_compartment_registry_pg.py` asserts can never exist (an in-use
+    # value with no registry entry), and a leaked case would do that
+    # silently on some later run rather than here.
     c.close()
 
 
@@ -194,6 +206,20 @@ def _create_case(client, token, **overrides) -> str:
     r = client.post("/api/v1/cases", headers=_auth(token), json=body)
     assert r.status_code == 201, r.text
     return r.json()["id"]
+
+
+def _register_compartment(conn) -> None:
+    """Widen the vocabulary before filing a case under it.
+
+    0057 closed `iam.compartment` and `CaseService.create` now refuses an
+    unregistered key. Before 2026-09-02 the compartment test below passed
+    only where the 0057 backfill had happened to find `OP_CLC` already in
+    an array, and failed on every fresh database, CI's included.
+    """
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO NOTHING",
+        (TEST_COMPARTMENT, "Clockwork (lifecycle test)"))
 
 
 def _assign(conn, case_id, user_id, role_key, granted_by, expires_at=None):
@@ -620,11 +646,12 @@ def test_an_under_cleared_assignee_is_refused(conn, client):
 def test_an_assignee_outside_the_compartment_is_refused(conn, client):
     """Need-to-know is not implied by clearance: an AMBER analyst who is
     not read into the case's compartment could not see it."""
+    _register_compartment(conn)
     _, owner_email, owner_secret = _make_user(
         conn, clearance="AMBER", global_roles=("CASE_OWNER",),
-        compartments=("OP_CLC",))
+        compartments=(TEST_COMPARTMENT,))
     owner = _login(client, owner_email, owner_secret)
-    case_id = _create_case(client, owner, compartments=["OP_CLC"])
+    case_id = _create_case(client, owner, compartments=[TEST_COMPARTMENT])
     plain_id, _, _ = _make_user(conn, clearance="AMBER")        # no compartments
 
     r = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),

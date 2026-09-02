@@ -9,14 +9,37 @@ here is testable in-memory and backed by iam.session in production.
 
 A token is a bearer credential, so until 2026-09-02 a stolen one was
 perfectly portable: nothing on record said where a session was minted,
-and validation had nothing to compare a replay against. A session now
-carries the address and User-Agent it was created with, and
+and validation had nothing to compare a replay against. `create` now
+takes the address and User-Agent it was minted with and records them, and
 `binding_mismatch` says whether a presentation matches them. Whether a
 mismatch is REFUSED is `NOCTORNAL_SESSION_STRICT_BINDING`, off by default:
 a browser update changes the User-Agent mid-session and a laptop moving
 between networks changes the address, so refusing is a deliberate posture
 for a deployment that would rather re-authenticate than risk it. The
 values are recorded either way, for the audit trail.
+
+WHICH sessions actually carry them is a shorter list than "a session
+now carries" suggested, and saying it that way was a claim this module
+could not keep. There are exactly two create sites:
+
+- `http/routers/auth.py` (the login handler) passes both, so every
+  session a person signs in for is bound;
+- `scripts/bootstrap.py session` passes NEITHER, and cannot: it mints
+  from a shell for a browser it has never met, and a guessed address
+  would be a fact on record that nobody established. Under strict
+  binding that session is refused on first use -- deliberately, since
+  "cannot verify" is not "verified" -- and the command says so before it
+  prints the URL.
+
+A session minted before 0058 is in the same position and is refused for
+the same reason. `deps.refuse_unbound_session` records `unbound` in the
+audit row so the security officer can tell that case from a replay.
+
+Both validation call sites -- `deps.current_user` for HTTP and the
+websocket handshake in `http/routers/live.py` -- run the check in the
+same order: validate with `touch=False`, refuse, and only then slide the
+idle window. `live.py` did not until 2026-09-02, which made the socket a
+way to both use and keep alive a session HTTP had already refused.
 """
 from __future__ import annotations
 
@@ -172,9 +195,13 @@ class SessionService:
 
     def touch(self, record: SessionRecord) -> SessionRecord:
         """Slide the idle window. Separate from `validate` so a caller can
-        validate first, apply its own refusal (the strict binding check in
-        `deps.current_user`), and count the request as activity only if it
-        passed -- a refused replay must not keep the session alive."""
+        validate first, apply its own refusal (`deps.refuse_unbound_session`,
+        from `deps.current_user` over HTTP and from the websocket handshake
+        in `routers/live.py`), and count the request as activity only if it
+        passed -- a refused replay must not keep the session alive. Any new
+        validation call site owes the same order; `live.py` used the
+        touching default until 2026-09-02 and every refused reconnect kept
+        the victim's session from ever timing out."""
         updated = replace(record, last_seen_at=self._now())
         self._store.update(updated)
         return updated

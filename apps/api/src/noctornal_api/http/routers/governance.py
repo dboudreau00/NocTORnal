@@ -403,6 +403,17 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         # So the three account for the batch: an operator reading
         # `evidence_purged: 100, storage_locked: 3` cannot otherwise
         # tell whether the other 97 went or were never tried.
+        #
+        # All three are EXHIBIT ROWS, the same unit as `evidence_purged`
+        # and as the tombstone's `object_count`, and they sum to it. For
+        # one commit on 2026-09-02 `storage_deleted` and `storage_locked`
+        # were object VERSION counts while this comment still promised the
+        # arithmetic, so a single exhibit with one version removed and one
+        # under a lock was published here as `evidence_purged: 1,
+        # storage_deleted: 1` while its bytes were all still in the bucket.
+        # An object-version total is per key and belongs in `warnings`,
+        # which names the key it describes; a number printed beside a row
+        # count has to be a row count.
         "storage_deleted": result.storage_deleted,
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
@@ -410,10 +421,15 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
             "DRY RUN -- nothing was destroyed. The counts above are what "
             "WOULD be destroyed if this ran for real."
             if dry_run else
-            "Destruction is irreversible. `storage_locked` counts objects "
-            "the store REFUSED to delete: COMPLIANCE-mode object lock can "
-            "refuse even to satisfy a deletion order, and a tombstone "
-            "recording a purge that did not happen is a false record."),
+            "Destruction is irreversible. `storage_locked` counts EXHIBITS "
+            "the store REFUSED to delete -- exhibits, not object versions, "
+            "so the three storage counters add up to `evidence_purged`: "
+            "COMPLIANCE-mode object lock can refuse even to satisfy a "
+            "deletion order, and a tombstone recording a purge that did "
+            "not happen is a false record. An exhibit is counted as "
+            "deleted only when the store confirmed every version of its "
+            "object gone; `warnings` says which key refused and how many "
+            "of its versions."),
     }
 
 
