@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -129,6 +129,20 @@ class ApprovalRequest:
     decision_note: str | None
     consumed_at: datetime | None
     result_ref: UUID | None
+    #: N1 (2026-09-02). Whether the notification that a request or a
+    #: decision raises actually reached anyone, on the record returned by
+    #: `request()` / `decide()` ONLY.
+    #:
+    #: `approvers_notified`: 0 means nobody else on the case both holds the
+    #: operation's permission and may read the request (or the request has
+    #: no case); None means the notify write itself failed after the row
+    #: committed. `requester_notified`: False means suppressed, None means
+    #: failed. Reach is not stored, so a record read back from the table
+    #: carries None for both -- which is "not recorded", not "failed". The
+    #: router renders them only on the two writes, so a listing never
+    #: claims a failure it cannot know about.
+    approvers_notified: int | None = None
+    requester_notified: bool | None = None
 
     def is_expired(self, now: datetime | None = None) -> bool:
         return self.expires_at <= (now or datetime.now(timezone.utc))
@@ -202,13 +216,29 @@ class ApprovalService:
             "expires_at": record.expires_at.isoformat(),
         })
         # An approval nobody is told about is an approval nobody gives, and
-        # then dual control is just a merge button that does not work.
+        # then dual control is just a merge button that does not work. So
+        # the reach is COUNTED and returned, not discarded: until N1
+        # (2026-09-02) this was a bare statement, `approval_requested`
+        # returned a count nothing read, and a request that reached nobody
+        # was a 201 like any other.
+        #
+        # It runs on an autocommit connection AFTER the row above committed,
+        # so a failure here is logged and reported as `None`, never raised.
+        # Raising turned a request that EXISTS into a 500; the analyst
+        # re-submitted, and the retry was a 409 for an identical pending
+        # request they had just been told was never made.
+        reach: int | None = 0
         if case_id is not None:
-            notify_events.approval_requested(
-                self._c, case_id=case_id, request_id=record.id,
-                operation=operation, permission=op.permission,
-                justification=record.justification, actor_id=requested_by)
-        return record
+            try:
+                reach = notify_events.approval_requested(
+                    self._c, case_id=case_id, request_id=record.id,
+                    operation=operation, permission=op.permission,
+                    justification=record.justification, actor_id=requested_by)
+            except Exception:  # noqa: BLE001 - reported on the record, not raised
+                log.exception("approval request %s was recorded but its "
+                              "notification failed", record.id)
+                reach = None
+        return replace(record, approvers_notified=reach)
 
     def decide(self, request_id: UUID, *, decided_by: UUID, approve: bool,
                note: str | None = None) -> ApprovalRequest:
@@ -256,13 +286,22 @@ class ApprovalService:
                         "requested_by": str(record.requested_by),
                         "note": record.decision_note,
                     })
+        # Same shape as `request()` (N1, 2026-09-02): the decision is
+        # committed, so a failure to tell the requester is a fact on the
+        # record, not a 500 that says the decision was not made.
+        told: bool | None = False
         if record.case_id is not None:
-            notify_events.approval_decided(
-                self._c, case_id=record.case_id, request_id=record.id,
-                operation=record.operation, requested_by=record.requested_by,
-                approved=approve, note=record.decision_note,
-                actor_id=decided_by)
-        return record
+            try:
+                told = notify_events.approval_decided(
+                    self._c, case_id=record.case_id, request_id=record.id,
+                    operation=record.operation, requested_by=record.requested_by,
+                    approved=approve, note=record.decision_note,
+                    actor_id=decided_by) is not None
+            except Exception:  # noqa: BLE001 - reported on the record, not raised
+                log.exception("approval decision on %s was recorded but its "
+                              "notification failed", record.id)
+                told = None
+        return replace(record, requester_notified=told)
 
     def withdraw(self, request_id: UUID, *, actor_id: UUID) -> ApprovalRequest:
         """The requester changing their mind. Not a decision -- a withdrawn

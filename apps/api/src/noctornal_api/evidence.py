@@ -439,6 +439,32 @@ class EvidenceService:
                           hash_verified=ok)
             self._audit("EVIDENCE_HASH_VERIFIED", actor_id, evidence_id, case_id,
                         {"ok": ok})
+            if not ok:
+                # N2 (2026-09-02). The explicit verify wrote only
+                # HASH_VERIFIED on a mismatch; only the incidental read path
+                # wrote EVIDENCE_INTEGRITY_ALARM. Same event, two names, and
+                # the one an auditor greps for was missing from the path an
+                # auditor would use.
+                self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
+                            case_id, {"sha256_ok": sha_ok, "blake3_ok": blake_ok,
+                                      "on_read": False})
+        if not ok:
+            # After the transaction, not inside it: the custody and audit
+            # rows are the record, and a failed notify write must neither
+            # roll them back nor turn a correctly detected mismatch into a
+            # 500. Function-local imports keep this hunk inside the method;
+            # another group owns the delete region and both must merge.
+            import logging
+
+            from noctornal_api import notify_events
+            try:
+                notify_events.evidence_integrity_alarm(
+                    self._c, case_id=case_id, evidence_id=evidence_id,
+                    actor_id=actor_id, on_read=False)
+            except Exception:  # noqa: BLE001 - audited already; the alarm is logged
+                logging.getLogger(__name__).exception(
+                    "integrity alarm for exhibit %s was audited but its "
+                    "notification failed", evidence_id)
         return ok
 
     def export(self, evidence_id: UUID, actor_id: UUID,
@@ -522,7 +548,23 @@ class EvidenceService:
                 self._custody(evidence_id, "HASH_VERIFIED", actor_id,
                               detail={"on_read": True}, hash_verified=False)
                 self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
-                            case_id, {})
+                            case_id, {"on_read": True})
+            # N2 (2026-09-02): this path wrote the AUDIT row and never raised
+            # the URGENT notification the kind promises. After the
+            # transaction and before the raise, for the reasons given in
+            # `verify_integrity`: the record is committed, and a failure to
+            # notify must not change what the caller is told.
+            import logging
+
+            from noctornal_api import notify_events
+            try:
+                notify_events.evidence_integrity_alarm(
+                    self._c, case_id=case_id, evidence_id=evidence_id,
+                    actor_id=actor_id, on_read=True)
+            except Exception:  # noqa: BLE001 - audited already; the alarm is logged
+                logging.getLogger(__name__).exception(
+                    "integrity alarm for exhibit %s was audited but its "
+                    "notification failed", evidence_id)
             raise IntegrityError(
                 f"evidence {evidence_id} bytes do not match the recorded hash"
             )

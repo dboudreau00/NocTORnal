@@ -189,7 +189,19 @@ class BreakGlassService:
             "classification": classification,
             "permissions": permissions or [],
         })
-        self._alert(grant, officers)
+        # N1 (2026-09-02). The grant row is committed (autocommit) and, since
+        # 2026-09-01, RAISES the caller's effective clearance. Letting a
+        # failed notify write propagate reported a grant that exists -- and
+        # elevates -- as a 500, and an analyst at 3am who believes they were
+        # refused stops looking for the access they now hold. The review
+        # queue (`unreviewed()`) is the durable half of the control and does
+        # not depend on this alert; the failure to be loud is logged.
+        try:
+            self._alert(grant, officers)
+        except Exception:  # noqa: BLE001 - the grant stands; the failure is logged
+            import logging
+            logging.getLogger(__name__).exception(
+                "break-glass grant %s was recorded but its alert failed", grant.id)
         return grant
 
     def _alert(self, grant: Grant, officers: list[UUID]) -> None:

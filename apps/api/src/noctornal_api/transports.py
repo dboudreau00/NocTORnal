@@ -72,8 +72,10 @@ from noctornal_api.notifications import (
     SENT,
     SMTP,
     WEBHOOK,
+    escalate_unacknowledged,
     readable_predicate,
 )
+from noctornal_api.notify_events import case_reviews_due
 
 log = logging.getLogger("noctornal.transports")
 
@@ -361,9 +363,27 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
     read it — see `revoke_undeliverable`. That has to happen BEFORE the
     drain rather than as a filter inside it, or the rows would queue up
     invisibly forever.
+
+    ## One drain does three things (N3, 2026-09-02)
+
+    The review-due sweep (`notify_events.case_reviews_due`) and the
+    escalation of unacknowledged priority-1s
+    (`notifications.escalate_unacknowledged`) run here too, BEFORE `due()`
+    is read, so the rows they raise go out in the same pass. There is no
+    worker to give them a schedule of their own, and a second cron entry is
+    a second thing to forget; the operator who runs the drain gets all
+    three, and the counters say what each did. `scripts/notify_drain.py`
+    is the cron entry.
+
+    Every key in the `counters` literal below is a field of the HTTP
+    `DrainOut` model, and test_ui_invariants reads this literal to hold the
+    model to it -- so a new counter goes IN the literal, not on a later
+    line, or that test cannot see it.
     """
     counters = {"sent": 0, "redacted": 0, "refused": 0, "failed": 0,
-                "revoked": revoke_undeliverable(conn)}
+                "revoked": revoke_undeliverable(conn),
+                "reviews_due": case_reviews_due(conn),
+                "escalated": escalate_unacknowledged(conn)}
     for out in due(conn, limit):
         decision = can_egress(
             out.classification, destination_for(out.channel),

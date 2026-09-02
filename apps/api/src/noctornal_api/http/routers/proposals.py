@@ -16,6 +16,7 @@ ingest its own separate, write-only key model instead.
 """
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 import psycopg
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from psycopg.types.json import Json
 
+from noctornal_api import notify_events
 from noctornal_api.http.deps import (
     CurrentUser,
     check_writable_labels,
@@ -39,6 +41,8 @@ from noctornal_api.proposals import (
     ProposalRow,
     ProposalStore,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cases/{case_id}/proposals", tags=["proposals"])
 
@@ -140,8 +144,26 @@ def capture(
            VALUES (%s, 'USER', 'DOCUMENT_CAPTURED', 'document', %s, %s, %s)""",
         (user.user_id, result.document_id, case_id, Json(result.summary())),
     )
+    # N2 (2026-09-02). `notify_events.proposals_queued` had existed since
+    # Phase 5 with the wording, the priority and the digest default all
+    # decided -- and no router called it, so an analyst found out there was
+    # triage work by looking. The document and the proposals are committed
+    # above; a notify failure is reported as `owner_notified: false`, never
+    # raised, because a 500 here reads as "the capture failed" and the
+    # analyst pastes the same material again.
+    try:
+        owner_notified = notify_events.proposals_queued(
+            conn, case_id=case_id, count=len(result.proposal_ids),
+            actor_id=user.user_id)
+    except Exception:  # noqa: BLE001 - reported in the response, not raised
+        log.exception("capture %s was recorded but its notification failed",
+                      result.document_id)
+        owner_notified = False
     return {
         **result.summary(),
+        # False also when there was nothing to say (no proposals) or when
+        # the owner is the person who pasted it -- see proposals_queued.
+        "owner_notified": owner_notified,
         "note": ("Nothing has entered the graph. Each finding is a proposal "
                  "waiting in the triage queue."),
     }
