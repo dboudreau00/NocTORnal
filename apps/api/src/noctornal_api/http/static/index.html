@@ -1272,58 +1272,113 @@
              from bullet points launders a hunch into a grid. -->
         <section id="pane-ach" class="pane" role="tabpanel"
                  aria-labelledby="tab-ach" tabindex="-1" hidden>
-
-          <div class="pane-head">
-            <button id="ach-refresh" type="button" class="btn">Refresh</button>
-            <label class="field inline check">
-              <input id="ach-rejected" type="checkbox">
-              <span class="label">Include rejected</span>
-            </label>
-            <span id="ach-counts" class="muted small"></span>
+          <!-- Two structured-analytic techniques, side by side. ACH asks which
+               hypothesis the evidence least contradicts; the register asks what
+               the whole analysis is TAKING FOR GRANTED. The second is the one
+               that loses a case in cross-examination, and until 0056 there was
+               nowhere to write it down. -->
+          <div class="subtabs" role="tablist" aria-label="Analytic techniques">
+            <button type="button" class="subtab" role="tab" aria-selected="true"
+                    data-subtab="hypotheses"
+                    aria-controls="ach-hypotheses">Hypotheses</button>
+            <button type="button" class="subtab" role="tab" aria-selected="false"
+                    tabindex="-1" data-subtab="assumptions"
+                    aria-controls="ach-assumptions">Assumptions</button>
           </div>
 
-          <p id="ach-method" class="help"></p>
-          <div id="ach-warnings"></div>
+          <div id="ach-hypotheses" class="subpane">
 
-          <div id="ach-ranking"></div>
-          <p id="ach-empty" class="empty">
-            No hypotheses yet. ACH is worth the effort when you have at
-            least three, including one you expect to lose.
-          </p>
 
-          <h2 class="h-sm">The matrix</h2>
-          <p class="help">
-            A cell is how one piece of evidence stands against one
-            hypothesis. Evidence consistent with <em>everything</em> is kept
-            in the record and excluded from the ranking, because it
-            discriminates nothing — that is the row marked not diagnostic.
-          </p>
-          <div id="ach-matrix" class="scroll-x"></div>
+            <div class="pane-head">
+              <button id="ach-refresh" type="button" class="btn">Refresh</button>
+              <label class="field inline check">
+                <input id="ach-rejected" type="checkbox">
+                <span class="label">Include rejected</span>
+              </label>
+              <span id="ach-counts" class="muted small"></span>
+            </div>
 
-          <details class="card">
-            <summary>Add a hypothesis</summary>
-            <p class="help">
-              Write the one you think is wrong too. A set of hypotheses that
-              are all variations of the same theory produces a confident
-              answer to a question nobody asked.
+            <p id="ach-method" class="help"></p>
+            <div id="ach-warnings"></div>
+
+            <div id="ach-ranking"></div>
+            <p id="ach-empty" class="empty">
+              No hypotheses yet. ACH is worth the effort when you have at
+              least three, including one you expect to lose.
             </p>
-            <label class="field">
-              <span class="label">Statement</span>
-              <input id="ach-statement" type="text" spellcheck="false"
-                     placeholder="e.g. NIGHTJAR and KESTREL are the same operator">
-            </label>
-            <label class="field inline">
-              <span class="label">Initial confidence</span>
-              <select id="ach-confidence" class="select">
-                <option value="LOW" selected>LOW</option>
-                <option value="MODERATE">MODERATE</option>
-                <option value="HIGH">HIGH</option>
-              </select>
-            </label>
-            <p id="ach-msg" class="msg" hidden></p>
-            <button id="ach-add" type="button" class="btn primary">
-              Add hypothesis</button>
-          </details>
+
+            <h2 class="h-sm">The matrix</h2>
+            <p class="help">
+              A cell is how one piece of evidence stands against one
+              hypothesis. Evidence consistent with <em>everything</em> is kept
+              in the record and excluded from the ranking, because it
+              discriminates nothing — that is the row marked not diagnostic.
+            </p>
+            <div id="ach-matrix" class="scroll-x"></div>
+
+            <details class="card">
+              <summary>Add a hypothesis</summary>
+              <p class="help">
+                Write the one you think is wrong too. A set of hypotheses that
+                are all variations of the same theory produces a confident
+                answer to a question nobody asked.
+              </p>
+              <label class="field">
+                <span class="label">Statement</span>
+                <input id="ach-statement" type="text" spellcheck="false"
+                       placeholder="e.g. NIGHTJAR and KESTREL are the same operator">
+              </label>
+              <label class="field inline">
+                <span class="label">Initial confidence</span>
+                <select id="ach-confidence" class="select">
+                  <option value="LOW" selected>LOW</option>
+                  <option value="MODERATE">MODERATE</option>
+                  <option value="HIGH">HIGH</option>
+                </select>
+              </label>
+              <p id="ach-msg" class="msg" hidden></p>
+              <button id="ach-add" type="button" class="btn primary">
+                Add hypothesis</button>
+            </details>
+        
+          </div>
+
+          <div id="ach-assumptions" class="subpane" hidden>
+            <div class="card">
+              <h2 class="h-sm">What this analysis takes for granted</h2>
+              <p class="help">An assumption is a claim the case rests on that
+                nobody has evidenced &mdash; that a handle belongs to one person,
+                that a timezone is local, that a leaked database is genuine.
+                Writing it down is what makes it reviewable: an OPEN assumption
+                is a question still owed an answer, and a REFUTED one that nobody
+                revisited is how an analysis quietly becomes wrong.
+                <strong>Open and confirmed assumptions appear in the report</strong>
+                &mdash; withdrawn and refuted ones do not.</p>
+              <form id="asm-create" class="row-form" novalidate>
+                <label class="field grow">
+                  <span class="label">Assumption</span>
+                  <input id="asm-statement" type="text" required
+                         placeholder="what is being taken for granted">
+                </label>
+                <label class="field grow">
+                  <span class="label">Basis (optional)</span>
+                  <input id="asm-basis" type="text"
+                         placeholder="why it is reasonable to assume, for now">
+                </label>
+                <button id="asm-create-btn" type="submit" class="btn primary">
+                  Record</button>
+              </form>
+              <p id="asm-msg" class="msg" hidden></p>
+              <label class="field inline check">
+                <input id="asm-withdrawn" type="checkbox">
+                <span class="label">Include withdrawn</span>
+              </label>
+            </div>
+            <p id="asm-empty" class="empty" hidden>
+              Nothing recorded. Every analysis has assumptions; one with none
+              written down has not looked for them.</p>
+            <div id="asm-list" class="stack"></div>
+          </div>
         </section>
 
         <!-- REPORT (Phase 6, docs/08). Build at a classification, see
