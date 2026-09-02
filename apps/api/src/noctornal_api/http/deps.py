@@ -119,30 +119,79 @@ def current_user(
     failed, because that is what the security officer needs. Refused, not
     revoked: an attacker holding the token could otherwise log the victim
     out on demand. The idle window slides only after the check, so a
-    refused replay does not keep the session alive. The websocket path
-    (`live.py`) validates its own token and is not bound here.
+    refused replay does not keep the session alive.
+
+    This is ONE of the two places a session token is validated. The other
+    is the websocket in `routers/live.py`, which applies the same check in
+    the same order through `refuse_unbound_session`. Until 2026-09-02 it
+    did not, and the gap was not cosmetic: a token refused on every HTTP
+    request was still accepted on the live case-event stream, and every
+    reconnect slid the idle window, so the replay kept the victim's
+    session alive indefinitely. Both call sites now share the check, and
+    `test_session_binding_pg.py` asserts it over both.
     """
     service = SessionService(PgSessionStore(conn))
     result = service.validate(raw, touch=False)
     if not result.ok:
-        _audit(conn, "AUTH_SESSION_REJECTED", None, None,
-               {"reason": result.reason})
+        audit_auth_event(conn, "AUTH_SESSION_REJECTED", None, None,
+                         {"reason": result.reason})
         raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = result.session
-    if strict_binding_enabled():
-        mismatched = binding_mismatch(
-            s, ip=client_ip(request), user_agent=request.headers.get("user-agent"))
-        if mismatched:
-            _audit(conn, "SESSION_BINDING_REFUSED", s.user_id, None,
-                   {"session_id": str(s.id), "mismatched": mismatched})
-            raise Problem(401, "Unauthenticated", "invalid or expired session")
+    if refuse_unbound_session(
+            conn, s, ip=client_ip(request),
+            user_agent=request.headers.get("user-agent"), path="http"):
+        raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = service.touch(s)
     return CurrentUser(s.user_id, s.id, s.mfa_satisfied_at)
 
 
-def _audit(conn, action: str, actor_id, case_id, detail: dict) -> None:
+def refuse_unbound_session(conn, session, *, ip: str | None,
+                           user_agent: str | None, path: str) -> bool:
+    """True when strict binding says this presentation must be refused.
+
+    Shared by BOTH session-validation call sites -- `current_user` here and
+    the websocket handshake in `routers/live.py`. It is a function rather
+    than two copies because the two halves of this control were wrong
+    together until 2026-09-02: the HTTP half refused a moved token and the
+    websocket half did not consult the binding at all, so the same stolen
+    credential was rejected on every REST call and accepted on the live
+    stream, which re-runs the five-part gate and therefore showed the
+    attacker exactly what the victim could read.
+
+    The caller must have validated with `touch=False` and must slide the
+    idle window only after this returns False. A refused replay that
+    touched the row would keep the victim's session alive for as long as
+    the attacker kept reconnecting.
+
+    `unbound` in the audit detail separates two different facts that both
+    produce a mismatch: a session minted somewhere else (a replay) from a
+    session minted with no binding at all -- a pre-0058 row, or one issued
+    by `scripts/bootstrap.py session`, which mints from a shell that is
+    not the browser that will present it. The security officer reading the
+    log needs to tell "someone moved this token" from "this session could
+    never have been bound"; `path` tells them which surface it arrived on.
+    """
+    if not strict_binding_enabled():
+        return False
+    mismatched = binding_mismatch(session, ip=ip, user_agent=user_agent)
+    if not mismatched:
+        return False
+    audit_auth_event(conn, "SESSION_BINDING_REFUSED", session.user_id, None,
+                     {"session_id": str(session.id), "mismatched": mismatched,
+                      "path": path,
+                      "unbound": session.ip is None and session.user_agent is None})
+    return True
+
+
+def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None:
     """Append to the hash-chained audit log. Authentication and
-    authorization outcomes are auditable events (docs/05)."""
+    authorization outcomes are auditable events (docs/05).
+
+    Public (it was `_audit` until 2026-09-02) because `routers/live.py`
+    writes the same SESSION_BINDING_REFUSED row from the websocket
+    handshake, and two spellings of one audit action is how an audit
+    query comes back short.
+    """
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
@@ -195,9 +244,9 @@ def authorize_object(
     )
     decision = evaluate(ctx)
     if not decision.allowed:
-        _audit(conn, "AUTHZ_DENIED", user.user_id, case_id,
-               {"permission": permission_key,
-                "failed_checks": list(decision.failed_checks)})
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, case_id,
+                         {"permission": permission_key,
+                          "failed_checks": list(decision.failed_checks)})
         # A caller with NO relationship to the case must not learn whether it
         # exists: return the same 404 a nonexistent case gives. Once they are
         # assigned, 403 reveals nothing they do not already know (they can see
@@ -231,8 +280,8 @@ def require_global(permission_key: str):
             (user.user_id, permission_key),
         ).fetchone()
         if row is None:
-            _audit(conn, "AUTHZ_DENIED", user.user_id, None,
-                   {"permission": permission_key, "scope": "global"})
+            audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                             {"permission": permission_key, "scope": "global"})
             raise Problem(403, "Forbidden",
                           f"missing global permission {permission_key}")
         if row[0]:  # requires_step_up
@@ -242,9 +291,10 @@ def require_global(permission_key: str):
                 < STEP_UP_FRESHNESS
             )
             if not fresh:
-                _audit(conn, "AUTHZ_DENIED", user.user_id, None,
-                       {"permission": permission_key, "scope": "global",
-                        "failed_checks": ["step_up_freshness"]})
+                audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                                 {"permission": permission_key,
+                                  "scope": "global",
+                                  "failed_checks": ["step_up_freshness"]})
                 raise Problem(403, "Forbidden", "re-authentication required")
         return user
     return _dep
@@ -288,8 +338,9 @@ def require_step_up(
         < STEP_UP_FRESHNESS
     )
     if not fresh:
-        _audit(conn, "AUTHZ_DENIED", user.user_id, None,
-               {"failed_checks": ["step_up_freshness"], "scope": "step_up"})
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                         {"failed_checks": ["step_up_freshness"],
+                          "scope": "step_up"})
         raise Problem(403, "Forbidden",
                       "re-authenticate with your second factor before "
                       "performing this operation")

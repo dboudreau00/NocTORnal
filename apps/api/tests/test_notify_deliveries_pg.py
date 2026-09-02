@@ -112,12 +112,42 @@ def _raise(conn, recipient, actor, **kw):
     return n
 
 
+def _drain_until_attempted(conn, notification_id, send_mail, *, passes=10):
+    """Drain until OUR row has actually been tried, not just once.
+
+    URGENT puts the row at the front of `due()`'s ordering, but `due()`
+    orders by priority THEN age and caps at MAX_PER_DRAIN=200, so 200+
+    older due URGENT rows -- which a killed run of any suite leaves behind
+    -- starve it out of a single pass anyway. The ledger assertions below
+    would then fail on a PENDING row that was never reached: a failure
+    reported as the wrong thing, and the reason a hand-deletion of 676 rows
+    from this database was load-bearing for these tests on 2026-09-02.
+
+    Each pass backs the rows it touched off into the future
+    (`transports._fail` sets `deliver_after = now() + 2^attempts minutes`),
+    so the backlog drains rather than repeating. Bounded, because a loop
+    that cannot terminate is worse than a starved assertion.
+    """
+    from noctornal_api.transports import dispatch_due
+    for _ in range(passes):
+        dispatch_due(conn, send_mail=send_mail)
+        row = conn.execute(
+            """SELECT last_attempt_at FROM notify.delivery
+                WHERE notification_id = %s AND channel = 'SMTP'""",
+            (notification_id,)).fetchone()
+        if row is not None and row[0] is not None:
+            return
+    raise AssertionError(
+        f"{passes} drains never reached notification {notification_id}; the "
+        f"outbox backlog is deeper than {passes} x MAX_PER_DRAIN")
+
+
 # ---------------------------------------------------------------------------
 # GET /notifications/deliveries
 # ---------------------------------------------------------------------------
 
 def test_the_ledger_is_readable_with_reason_and_address(conn, client):
-    from noctornal_api.transports import TransportError, dispatch_due
+    from noctornal_api.transports import TransportError
 
     admin, a_email, a_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
     recipient, r_email, _ = _make_user(conn)
@@ -126,7 +156,7 @@ def test_the_ledger_is_readable_with_reason_and_address(conn, client):
 
     def boom(message):
         raise TransportError("relay refused the connection")
-    dispatch_due(conn, send_mail=boom)
+    _drain_until_attempted(conn, n.id, boom)
 
     token = _login(client, a_email, a_secret)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token),
@@ -151,7 +181,7 @@ def test_the_ledger_is_readable_with_reason_and_address(conn, client):
 
 
 def test_refused_only_hides_what_was_delivered(conn, client):
-    from noctornal_api.transports import TransportError, dispatch_due
+    from noctornal_api.transports import TransportError
 
     admin, a_email, a_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
     # Cleared for the row, or suppression 2 never writes it (an AMBER
@@ -160,7 +190,7 @@ def test_refused_only_hides_what_was_delivered(conn, client):
     recipient, _, _ = _make_user(conn, clearance="AMBER_STRICT")
     actor, _, _ = _make_user(conn)
     n = _raise(conn, recipient, actor, classification="AMBER_STRICT")
-    dispatch_due(conn, send_mail=lambda m: None)
+    _drain_until_attempted(conn, n.id, lambda m: None)
 
     token = _login(client, a_email, a_secret)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token),
@@ -262,6 +292,36 @@ def test_webhook_cannot_be_enabled_without_a_url(conn, monkeypatch):
     monkeypatch.setenv("NOCTORNAL_WEBHOOK_URL", "https://hooks.example/noctornal")
     pref = NotificationService(conn).set_preference(user, "WEBHOOK", enabled=True)
     assert pref.enabled is True
+
+
+def test_editing_an_already_enabled_channel_is_not_a_new_enable(conn, monkeypatch):
+    """`_require_transport`'s docstring has always promised that "editing
+    the other settings of an already-enabled channel is not the moment to
+    discover the URL was unset". Until 2026-09-02 the call site tested
+    `fields.get("enabled") is True` -- the PAYLOAD, not the transition --
+    so a client PUTting the whole preference object back (which is what a
+    settings pane does when you change a quiet window) was refused with
+    "WEBHOOK cannot be enabled: NOCTORNAL_WEBHOOK_URL is not configured".
+    Nobody was enabling anything, and the operator reading that message
+    would go looking for a URL they had never needed to unset.
+
+    The docstring made the promise and the code did not keep it. This test
+    reads both sides: the claim is in `notifications._require_transport`
+    and the comparison that honours it is in
+    `NotificationService.set_preference`.
+    """
+    from noctornal_api.notifications import NotificationService
+
+    monkeypatch.setenv("NOCTORNAL_WEBHOOK_URL", "https://hooks.example/noctornal")
+    user, _, _ = _make_user(conn)
+    svc = NotificationService(conn)
+    assert svc.set_preference(user, "WEBHOOK", enabled=True).enabled is True
+
+    # The URL goes away underneath an already-enabled channel.
+    monkeypatch.delenv("NOCTORNAL_WEBHOOK_URL", raising=False)
+    pref = svc.set_preference(user, "WEBHOOK", enabled=True, min_priority=1,
+                              digest=True)
+    assert pref.enabled is True and pref.digest is True and pref.min_priority == 1
 
 
 def test_disabling_an_unconfigured_channel_is_always_allowed(conn, monkeypatch):

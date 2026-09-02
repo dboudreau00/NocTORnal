@@ -1052,16 +1052,48 @@ class CollectionService:
 
     def run_once(self, source_id: UUID, *, actor_id: UUID,
                  persona_id: UUID | None = None,
-                 watch_id: UUID | None = None) -> RunResult:
+                 watch_id: UUID | None = None,
+                 clearance: str | None = None) -> RunResult:
         """One poll. Every outcome is a `collection_run` row, including the
         failures -- parser health is only knowable if the failures are
-        recorded as carefully as the successes."""
+        recorded as carefully as the successes.
+
+        `clearance` is the caller's own ceiling, and a source above it is
+        refused as `CollectionNotFound` -- indistinguishably from a source
+        that does not exist, which is why the missing row raises the same
+        thing rather than a 400-shaped `CollectionError`.
+
+        Added 2026-09-02, because this poll DID disclose the value the
+        label protects. The K1 clearance pass filtered every listing and
+        exempted this route, and wrote the exemption into the router's
+        module docstring on the grounds that a poll "neither returns a
+        source's name or URL". It returns the URL. A fetch failure becomes
+        `RunResult.error`, the route hands that back verbatim, and the
+        SSRF guard's own messages quote the host -- "cannot resolve
+        {host}", "{host} resolves into private address space",
+        "{host} is a cloud metadata endpoint". `redact` masks credential
+        shapes, not hostnames, so nothing downstream removed it. Any
+        `collection.run` holder who guessed a RED source's id got its
+        hostname back from a failing poll, and the 200-versus-"no such
+        source" difference confirmed the id was real before they even
+        read the error.
+
+        `None` is the worker's reading and applies NO filter, exactly as
+        in `due_sources`: a collector has no user, and a NULL ceiling read
+        as "see nothing" would be a scheduler that polls nothing and
+        reports no error.
+        """
         source = self._c.execute(
             """SELECT base_url, parser_key, max_rps, classification,
                       default_reliability
-                 FROM collect.source WHERE id = %s""", (source_id,)).fetchone()
+                 FROM collect.source
+                WHERE id = %s
+                  AND (%s::core.tlp IS NULL
+                       OR classification <= %s::core.tlp)""",
+            (source_id, clearance, clearance)).fetchone()
         if source is None:
-            raise CollectionError("no such source")
+            raise CollectionNotFound(
+                "no such source, or it is above your clearance")
         adapter = self._adapters.get(source[1])
         if adapter is None:
             raise CollectionError(
@@ -1387,6 +1419,34 @@ class CollectionService:
         RED forum's run history was readable by any `collection.read`
         holder. Joined and filtered now; `clearance=None` is the worker
         reading and filters nothing, as in `due_sources`.
+
+        An explicit `source_id` above the ceiling is answered with an
+        empty list, NOT refused -- deliberately, and the difference from
+        `check_egress_separation` (which raises `CollectionNotFound` for
+        exactly that case) is worth stating, because applying one rule in
+        two places for unstated reasons is how the next reader picks the
+        wrong one.
+
+        The egress check refuses because its route attaches a MEANING to
+        emptiness: the notice says an empty result means no shared egress
+        was found among this source's personas, so `[]` would be an
+        assurance of safety about a forum the caller is not cleared to
+        know exists. Nothing here makes that kind of claim. An empty run
+        history means "no polls matched", which is the truthful answer
+        for a source that has never been polled, for one above the
+        caller's ceiling, and for a source id that is not a source at all
+        -- and those three answers are identical, so the caller learns
+        nothing about which of them they hit.
+
+        `source_id` is also OPTIONAL here, as it is on `documents()`,
+        which is the other listing that takes it and answers the same way.
+        A 404 would be safe too (it would cover the nonexistent and the
+        over-ceiling id alike), but it would make one of a matched pair of
+        listings behave unlike the other for no gain in what is withheld,
+        and `/sources/{id}/run` and `/sources/{id}/egress` -- the two
+        routes that really are questions about ONE named source, and
+        cannot be asked without naming it -- are where the 404 earns its
+        keep.
         """
         rows = self._c.execute(
             """SELECT r.id, r.source_id, r.started_at, r.finished_at,
@@ -1452,10 +1512,28 @@ class CollectionService:
         list-view concern, and an endpoint that returns every body pulls
         megabytes to render twenty titles.
 
-        Purged documents are excluded outright. `retention` NULLs
-        `body_text` and sets `purged_at`; a row whose text is gone renders
-        as an EMPTY document rather than as a deletion, which is the
-        reported-as-the-wrong-thing shape this codebase keeps finding.
+        Purged documents are excluded outright. `retention` EMPTIES
+        `body_text` and stamps `purged_at`; a row whose text is gone
+        renders as an EMPTY document rather than as a deletion, which is
+        the reported-as-the-wrong-thing shape this codebase keeps
+        finding. (Until 2026-09-02 this said retention "NULLs" the
+        column. It cannot: `collect.document.body_text` is NOT NULL, so
+        the purge writes `''` and `purged_at` is what says the empty
+        string means destroyed rather than blank -- which is exactly why
+        `purged_at`, not the text, is the predicate below.)
+
+        BOTH labels are checked -- the document's and its source's -- and
+        the second was added on 2026-09-02. Every row here carries
+        `s.name` and `d.external_url`, which is the source's identity, and
+        `_store_document` copies the source's label onto the document only
+        at INSERT. So a source collected while it was AMBER and later
+        reclassified RED left its already-collected documents at AMBER,
+        and the reclassification that was supposed to hide the forum's
+        name went on publishing it on every one of them. The two labels
+        answer different questions -- the document's says how sensitive
+        the post is, the source's says how sensitive it is that we are
+        reading that forum at all -- and a row that discloses both has to
+        satisfy both.
         """
         rows = self._c.execute(
             """SELECT d.id, d.source_id, s.name, d.external_url, d.title,
@@ -1467,13 +1545,14 @@ class CollectionService:
                  JOIN collect.source s ON s.id = d.source_id
                 WHERE d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
+                  AND s.classification <= %s::core.tlp
                   AND (%s::uuid IS NULL OR d.source_id = %s)
                   AND (%s::text IS NULL OR d.triage_state = %s)
                   AND (%s::timestamptz IS NULL OR d.captured_at >= %s)
                 ORDER BY coalesce(d.posted_at, d.captured_at) DESC
                 LIMIT %s""",
-            (clearance, source_id, source_id, triage_state, triage_state,
-             since, since, limit)).fetchall()
+            (clearance, clearance, source_id, source_id, triage_state,
+             triage_state, since, since, limit)).fetchall()
         return [{"id": str(r[0]), "source_id": str(r[1]), "source_name": r[2],
                  "external_url": r[3], "title": r[4], "excerpt": r[5],
                  "author_handle": r[6],
@@ -1501,6 +1580,20 @@ class CollectionService:
         alert hygiene -- the same thread matching hourly -- and hiding it
         outright would make a watch that is drowning look like a watch
         that is quiet, which is exactly the difference an analyst needs.
+
+        Filtered on the DOCUMENT's label only, unlike `documents()` and
+        `SearchService.search`, which were given the source's label as
+        well on 2026-09-02. The difference is deliberate and is the case
+        scope: a row is here because a watch somebody put on THIS case
+        matched, the route is gated on `collection.read` against that
+        case rather than globally, and the analyst who configured the
+        watch is already entitled to know it fired. `external_url` does
+        carry the source's host, so a source reclassified RED after
+        collection is still reachable this way by the people on the case
+        its watch belongs to -- recorded here rather than silently
+        assumed covered, because whether a watch may be placed on a
+        source above its owner's ceiling is a question about watch
+        creation and belongs with that, not here.
         """
         rows = self._c.execute(
             """SELECT h.id, h.watch_id, w.name, h.document_id, d.title,
@@ -1546,6 +1639,12 @@ class CollectionService:
         SELECT, so there is no window between deciding and writing, and a
         hit on a document above the caller's clearance is not merely
         hidden from the list but unacknowledgeable.
+
+        `d.purged_at IS NULL` is the same predicate on the other axis, and
+        it was missing until 2026-09-02: `watch_hits` has always dropped
+        hits on purged documents, so acknowledging one stamped
+        `acknowledged_by` on a row no list will ever show again -- a
+        write reported as a success that no reader can observe.
         """
         row = self._c.execute(
             """UPDATE collect.watch_hit h
@@ -1553,6 +1652,7 @@ class CollectionService:
                       acknowledged_at = coalesce(h.acknowledged_at, now())
                  FROM collect.document d
                 WHERE h.id = %s AND d.id = h.document_id
+                  AND d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
             RETURNING h.id, h.acknowledged_by, h.acknowledged_at""",
             (user_id, hit_id, clearance)).fetchone()
@@ -1574,10 +1674,21 @@ class CollectionService:
     # describing rows that did not exist.
     #
     # Every write is inside one UPDATE whose WHERE carries the case (for
-    # hits) and the clearance, exactly as `acknowledge_hit` does: no window
-    # between deciding and writing, and a row the caller may not see is not
-    # merely hidden but unwritable. Every write is audited, because these
-    # columns record nothing about who changed them.
+    # hits), the clearance, and `d.purged_at IS NULL`, exactly as the
+    # matching read does: no window between deciding and writing, and a row
+    # the caller may not see is not merely hidden but unwritable. Every
+    # write is audited, because these columns record nothing about who
+    # changed them.
+    #
+    # The purge half of that sentence was untrue when it was written. The
+    # writers carried the clearance predicate and not the purge one, while
+    # `watch_hits` and `set_document_triage` carried both -- so a hit on a
+    # purged document was invisible to every reader and still suppressible,
+    # unsuppressible and acknowledgeable, and each of those returned a 200
+    # describing a change no list would ever show. Corrected 2026-09-02, on
+    # all three writers rather than the two that were reported: the claim is
+    # about the read/write pair, and fixing one of a matched set is how the
+    # next reader concludes the odd one out was deliberate.
 
     def suppress_hit(self, case_id: UUID, hit_id: UUID, *, actor_id: UUID,
                      reason: str, clearance: str) -> dict:
@@ -1610,6 +1721,7 @@ class CollectionService:
                  FROM collect.watch w, collect.document d
                 WHERE h.id = %s AND w.id = h.watch_id AND w.case_id = %s
                   AND d.id = h.document_id
+                  AND d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
             RETURNING h.id, h.suppressed, h.suppress_reason""",
             (reason, hit_id, case_id, clearance)).fetchone()
@@ -1624,13 +1736,19 @@ class CollectionService:
     def unsuppress_hit(self, case_id: UUID, hit_id: UUID, *, actor_id: UUID,
                        clearance: str) -> dict:
         """Put a hit back. Clears the reason too: a hit that is not
-        suppressed but still carries a reason would render as both."""
+        suppressed but still carries a reason would render as both.
+
+        Carries `d.purged_at IS NULL` for the same reason `suppress_hit`
+        does: unsuppressing a hit the list will never show is a write
+        reported as a success that changes nothing an analyst can see.
+        """
         row = self._c.execute(
             """UPDATE collect.watch_hit h
                   SET suppressed = false, suppress_reason = NULL
                  FROM collect.watch w, collect.document d
                 WHERE h.id = %s AND w.id = h.watch_id AND w.case_id = %s
                   AND d.id = h.document_id
+                  AND d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
             RETURNING h.id, h.suppressed, h.suppress_reason""",
             (hit_id, case_id, clearance)).fetchone()

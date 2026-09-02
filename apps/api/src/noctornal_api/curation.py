@@ -233,6 +233,17 @@ class SearchService:
         still appears for them. Documents have no compartments column, so
         the compartment predicate applies to nodes and evidence only.
 
+        The document half checks the SOURCE's label as well as the
+        document's, added 2026-09-02 alongside the same predicate in
+        `CollectionService.documents`. A document row here carries
+        `source_name` and `external_url` -- the forum's identity, which is
+        frequently the finding -- and `CollectionService._store_document`
+        copies the source's label onto a document only at INSERT. Without
+        the second predicate a source reclassified RED after collection
+        kept publishing its own name through every AMBER document it had
+        already produced, which is precisely the leak the clearance pass
+        on the collection routes had just closed everywhere else.
+
         Documents are NOT case-scoped, for the reason `documents()` gives:
         a document hangs off a source, and the same forum post is
         material in however many cases cite it. What IS case-scoped is
@@ -286,6 +297,7 @@ class SearchService:
                     WHERE %(documents)s
                       AND d.purged_at IS NULL
                       AND d.classification <= %(clearance)s::core.tlp
+                      AND s.classification <= %(clearance)s::core.tlp
                       AND d.search_tsv @@ plainto_tsquery('simple', %(q)s)
                  ) hits
                 ORDER BY rank DESC, kind, id

@@ -76,6 +76,8 @@ import psycopg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from noctornal_api.db import connect
+from noctornal_api.http.deps import refuse_unbound_session
+from noctornal_api.http.limits import client_ip
 from noctornal_api.security.access import evaluate
 from noctornal_api.security.sessions import SessionService
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
@@ -243,8 +245,20 @@ async def live(ws: WebSocket) -> None:
     # Authenticate on a SHORT-LIVED connection, released immediately. The
     # first version held this one open for the life of the socket, which is
     # how twenty-five people with two tabs each exhausted Postgres.
+    # The peer and client software this socket arrived from, read HERE and
+    # handed to the worker thread: `_authenticate` runs off the event loop
+    # and has no request object of its own. `client_ip` is typed for a
+    # `Request` but only ever touches `.headers.getlist` and `.client`,
+    # which a Starlette `WebSocket` has for the same reason -- both are
+    # `HTTPConnection` -- so the socket gets the SAME address the rate
+    # limiter and the login handler would compute, X-Forwarded-For hop
+    # counting included. Computing it differently here would make the
+    # binding comparison fail for every deployment behind a proxy.
+    ip = client_ip(ws)
+    user_agent = ws.headers.get("user-agent")
     try:
-        session = await asyncio.to_thread(_authenticate, token, case_id)
+        session = await asyncio.to_thread(
+            _authenticate, token, case_id, ip, user_agent)
     except Exception:  # noqa: BLE001
         log.exception("live authentication failed")
         await ws.close(code=1011, reason="internal error")
@@ -269,20 +283,44 @@ async def live(ws: WebSocket) -> None:
         await _hub.unsubscribe(queue)
 
 
-def _authenticate(token: str, case_id: UUID | None):
+def _authenticate(token: str, case_id: UUID | None, ip: str | None,
+                  user_agent: str | None):
     """Validate the session and the case gate on one borrowed connection.
 
     Returns `(user_id, mfa_at)` or None. Runs on a worker thread because
     psycopg is synchronous, and the connection is closed before returning
     so nothing is held for the life of the socket.
+
+    The order is `deps.current_user`'s, deliberately and exactly:
+    validate WITHOUT touching, apply strict binding, and only then slide
+    the idle window. Until 2026-09-02 this called `validate(token)` with
+    `touch` defaulting to True and never consulted the binding at all,
+    which made this socket the hole in a control that was disclosed as
+    covering "validation". With NOCTORNAL_SESSION_STRICT_BINDING=1 a
+    stolen token refused on every HTTP request was still accepted here --
+    and because `_may_read` re-runs the five-part gate, the attacker read
+    exactly what the victim could read. Worse, the unconditional touch
+    meant each reconnect slid `last_seen_at`, so the 30-minute idle
+    timeout never fired and the replay kept the victim's session alive
+    for as long as the attacker kept the socket cycling.
+
+    The case gate runs AFTER the touch, as it does over HTTP: failing
+    `case.read` is an authorization outcome and does not make the session
+    itself less alive. Failing the binding check does, and that is why
+    only the binding check sits before the touch.
     """
     conn = connect()
     try:
-        result = SessionService(PgSessionStore(conn)).validate(token)
+        service = SessionService(PgSessionStore(conn))
+        result = service.validate(token, touch=False)
         if not result.ok:
             return None
-        user_id = result.session.user_id
-        mfa_at = result.session.mfa_satisfied_at
+        s = result.session
+        if refuse_unbound_session(conn, s, ip=ip, user_agent=user_agent,
+                                  path="websocket"):
+            return None
+        s = service.touch(s)
+        user_id, mfa_at = s.user_id, s.mfa_satisfied_at
         if case_id is not None and not _may_read(conn, user_id, case_id, mfa_at):
             return None
         return user_id, mfa_at

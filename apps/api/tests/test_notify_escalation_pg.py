@@ -42,7 +42,30 @@ def conn():
     yield c
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
+    ours = (f"(SELECT id FROM notify.notification "
+            f"  WHERE recipient_id IN {sub} OR actor_id IN {sub} "
+            f"     OR case_id IN {csub})")
     with c.transaction():
+        # The officer copies FIRST, and before the originals they point at.
+        #
+        # `escalation_to_officer` is GREEN and case-less by design, and its
+        # recipient is a real SECURITY_OFFICER of this database, not one of
+        # this suite's users -- so none of the three clauses below reaches
+        # it and every officer escalation this suite provoked survived
+        # teardown. That was invisible while `dispatch_due` sent what it
+        # raised in the same pass (the rows were left SENT). Once the
+        # producers moved below the drain loop on 2026-09-02 the leftovers
+        # stayed PENDING and URGENT, so the NEXT suite's drain sent them
+        # first -- and `test_notifications_pg.py::
+        # test_amber_strict_never_leaves_and_the_stub_goes_instead`, which
+        # asserts on `sent[0]` of a global drain, read somebody else's
+        # escalation stub. A test suite that leaves priority-1 rows behind
+        # is a suite that decides what the next one sees.
+        esc = (f"(SELECT id FROM notify.notification WHERE kind = 'ESCALATION' "
+               f"   AND object_type = 'notification' AND object_id IN {ours})")
+        c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN {esc}")
+        c.execute(f"DELETE FROM notify.notification WHERE kind = 'ESCALATION' "
+                  f"  AND object_type = 'notification' AND object_id IN {ours}")
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification "
                   f"  WHERE recipient_id IN {sub} OR actor_id IN {sub} "
@@ -225,6 +248,154 @@ def test_the_drain_escalates_and_sweeps_reviews_and_reports_both(conn):
     assert set(counters) == set(DrainOut.model_fields), (
         set(counters) ^ set(DrainOut.model_fields))
     assert out.escalated == counters["escalated"]
+
+
+def test_the_drain_does_not_send_what_its_own_producers_raised(conn):
+    """A drain sends what was ALREADY due when it started. What the
+    producers raise goes out on the NEXT pass.
+
+    This test reads both sides of one contract on purpose, because the
+    contract crosses two files and each half was internally consistent:
+
+    - `transports.dispatch_due` evaluated `escalate_unacknowledged(conn)`
+      inside the `counters` literal, i.e. BEFORE `for out in due(conn,
+      limit)`;
+    - `notifications.deliver_after` returns `now` for priority 1, and
+      ESCALATION is registered URGENT in `KINDS`.
+
+    Neither is wrong alone. Together they made "drain the outbox" also
+    manufacture its own outbound mail and send it in the same call, which
+    silently converted the untouched
+    `test_notifications_pg.py::test_a_deferred_delivery_is_not_drained_early`
+    (`assert sent == []`) into a test that fails whenever the database
+    holds one unacknowledged URGENT older than an hour -- the exact state
+    the escalation feature exists to serve. It survived review because the
+    database it was written against held zero escalation candidates and
+    zero cases due for review, so both producers were inert and every new
+    test passed over a no-op. Fixed 2026-09-02 by moving both producers
+    below the drain loop.
+
+    Asserted on the delivery ROW rather than on the length of `sent`,
+    because the drain is global and a backlog another suite left behind is
+    legitimately sent in the same pass and is not this test's business.
+    """
+    from noctornal_api.transports import dispatch_due
+
+    owner, analyst, actor = _user(conn), _user(conn), _user(conn)
+    case_id = _case(conn, owner)
+    _assign(conn, case_id, analyst, owner)
+    _assign(conn, case_id, actor, owner)
+    code = conn.execute('SELECT code FROM core."case" WHERE id = %s',
+                        (case_id,)).fetchone()[0]
+
+    # (1) A deferred delivery: the shape test_a_deferred_delivery_is_not_
+    # drained_early builds. Young, so it is not itself an escalation
+    # candidate.
+    deferred = _urgent(conn, analyst, case_id, actor, age=timedelta(minutes=1))
+    conn.execute(
+        """UPDATE notify.delivery SET deliver_after = now() + interval '1 hour'
+            WHERE notification_id = %s AND channel = 'SMTP'""", (deferred.id,))
+
+    # (2) An aged unacknowledged URGENT whose own SMTP row is already done,
+    # so the ONLY thing this drain could send for our users is whatever the
+    # escalation producer raises during it.
+    n = _urgent(conn, analyst, case_id, actor)
+    conn.execute(
+        """UPDATE notify.delivery SET state = 'SENT', sent_at = now()
+            WHERE notification_id = %s AND state = 'PENDING'""", (n.id,))
+
+    sent = []
+    counters = dispatch_due(conn, send_mail=lambda m: sent.append(m))
+    assert counters["escalated"] >= 1, counters
+
+    esc = _escalations(conn, owner, n.id)
+    assert len(esc) == 1, esc
+    delivery = conn.execute(
+        """SELECT state, attempts, sent_at FROM notify.delivery
+            WHERE notification_id = %s AND channel = 'SMTP'""",
+        (esc[0][0],)).fetchone()
+    assert delivery is not None, "the escalation should still have queued SMTP"
+    assert delivery[0] == "PENDING" and delivery[1] == 0 and delivery[2] is None, (
+        "the escalation this very drain raised was also SENT by it; the "
+        "producers must run after the drain loop, not inside the counters "
+        "literal above it")
+    subjects = [m["Subject"] or "" for m in sent]
+    assert not [s for s in subjects if code in s], (
+        f"a message about {code} left in the pass that raised it: {subjects}")
+
+    # The deferred row is untouched -- the half the untouched suite asserts.
+    assert conn.execute(
+        """SELECT state, attempts FROM notify.delivery
+            WHERE notification_id = %s AND channel = 'SMTP'""",
+        (deferred.id,)).fetchone() == ("PENDING", 0)
+
+    # And the escalation goes out on the NEXT pass, so nothing was dropped.
+    dispatch_due(conn, send_mail=lambda m: sent.append(m))
+    assert conn.execute(
+        """SELECT state FROM notify.delivery
+            WHERE notification_id = %s AND channel = 'SMTP'""",
+        (esc[0][0],)).fetchone()[0] == "SENT"
+
+
+# ---------------------------------------------------------------------------
+# two drains at once
+# ---------------------------------------------------------------------------
+
+def test_two_concurrent_drains_escalate_one_silence_once(conn):
+    """`escalate_unacknowledged`'s dedupe is a SELECT followed by INSERTs on
+    an autocommit connection, and `notify.notification` has NO unique index
+    to fall back on -- `notification_object_idx` (migration 0029) is a plain
+    partial btree on `object_id`. So the docstring's original unqualified
+    claim of idempotence "by construction" was a read-then-write TOCTOU, and
+    the concurrency it fails under is the ordinary one the same change
+    introduced: `scripts/notify_drain.py` on a cron overlapping an
+    operator's POST /notifications/dispatch, on a drain that takes minutes
+    against a real relay. Duplicate ESCALATIONs are URGENT -- the one tier
+    that overrides quiet hours and mails every security officer -- so the
+    consequence is the alert fatigue this module argues against.
+
+    Fixed 2026-09-02 by serialising the whole drain on a session advisory
+    lock in `transports.dispatch_due`, so the loser returns an immediate
+    all-zero drain rather than blocking behind somebody else's SMTP. This
+    test reads both sides: the lock lives in transports.py and the property
+    it guarantees is claimed in notifications.py.
+    """
+    import threading
+
+    from noctornal_api.db import connect
+    from noctornal_api.transports import dispatch_due
+
+    owner, analyst, actor = _user(conn), _user(conn), _user(conn)
+    case_id = _case(conn, owner)
+    _assign(conn, case_id, analyst, owner)
+    _assign(conn, case_id, actor, owner)
+    n = _urgent(conn, analyst, case_id, actor)
+
+    barrier = threading.Barrier(2)
+    results: list = []
+
+    def drain():
+        c = connect()
+        try:
+            barrier.wait(timeout=30)
+            results.append(dispatch_due(c, send_mail=lambda m: None))
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            results.append(exc)
+        finally:
+            c.close()
+
+    threads = [threading.Thread(target=drain) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+        assert not t.is_alive(), "a drain never returned; is the lock released?"
+
+    assert all(isinstance(r, dict) for r in results), results
+    assert len(_escalations(conn, owner, n.id)) == 1, (
+        "one silence, escalated twice: the SELECT-then-INSERT dedupe raced")
+    assert sum(r["escalated"] for r in results) == 1, (
+        f"both drains counted the same escalation: {results}")
 
 
 # ---------------------------------------------------------------------------

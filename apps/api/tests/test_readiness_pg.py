@@ -27,6 +27,7 @@ Email prefix `rdy-`, unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
+import base64
 import os
 import time
 from uuid import uuid4
@@ -46,6 +47,7 @@ PASSWORD = "correct-horse-battery-staple-9"
 # service turns this file red instead of shrinking the contract to match.
 EXPECTED_CHECKS = (
     "prohibited_content_policy",
+    "sample_origin_configured",
     "retention_rules_confirmed",
     "security_officer_present",
     "sys_admin_present",
@@ -327,3 +329,162 @@ def test_migrations_check_compares_the_database_to_the_script_head(conn, client)
     # every operator to run alembic against a database that is already
     # at head.
     assert check["ok"] is True, check
+
+
+# --- the KEK check, and the one decoder it is allowed to have ------------
+#
+# `totp_kek_set` was the one entry in the register that no test ever
+# flipped, which is how it came to keep its own copy of a rule the envelope
+# already owned. These tests flip it four ways and, in the first one, read
+# BOTH halves of the contract on a single value.
+
+#: Exactly 32 bytes, so the base64 of it is a KEK the envelope accepts.
+_KEK_BYTES = b"readiness-probe-kek-32-bytes!!!!"
+_KEK_CLEAN = base64.b64encode(_KEK_BYTES).decode()
+
+
+def _envelope_round_trips() -> bool:
+    """Does the product itself work with whatever KEK the environment now
+    holds? The oracle is the envelope's own encrypt/decrypt, because that
+    is literally what every TOTP enrolment and every login performs -- not
+    a re-statement of the rule, which is the thing that went wrong.
+    """
+    from noctornal_api.security import envelope
+    try:
+        blob, _ = envelope.encrypt("readiness-probe")
+        return envelope.decrypt(blob) == "readiness-probe"
+    except Exception:
+        return False
+
+
+@pytest.mark.parametrize("label, raw", [
+    ("clean", _KEK_CLEAN),
+    # A trailing newline is what a Docker/Kubernetes secret file and a
+    # copy-pasted `.env` line routinely carry, and a leading space is what
+    # `NOCTORNAL_TOTP_KEK= AAAA...` produces. The envelope's lenient
+    # base64 decoder discards both, so the product works.
+    ("trailing newline", _KEK_CLEAN + "\n"),
+    ("leading space", " " + _KEK_CLEAN),
+    ("inner space", _KEK_CLEAN[:10] + " " + _KEK_CLEAN[10:]),
+])
+def test_the_kek_check_agrees_with_the_envelope_on_the_same_value(
+        conn, client, monkeypatch, label, raw):
+    """One test that reads both sides of a contract that crosses files.
+
+    Until 2026-09-02 `readiness._totp_kek_set` decoded with
+    `base64.b64decode(raw, validate=True)` while `envelope._load_kek`
+    decoded leniently, and the check's docstring nonetheless claimed "the
+    same test `envelope._load_kek` applies". So a KEK carrying a trailing
+    newline sealed and opened every TOTP secret in the product and was
+    still reported `ok=false, ready=false` with the evidence
+    "NOCTORNAL_TOTP_KEK is set but is not valid base64" -- a working
+    deployment reported as broken, with the wrong reason, which is the
+    exact defect the readiness module exists to prevent.
+
+    The two halves are pinned to each other here rather than to a literal,
+    so tightening `_load_kek` later moves this check with it instead of
+    silently reopening the gap.
+    """
+    token = _admin_token(conn, client)   # minted while the KEK still works
+    monkeypatch.setenv("NOCTORNAL_TOTP_KEK", raw)
+    works = _envelope_round_trips()
+    check = _by_name(client.get("/api/v1/admin/readiness",
+                                headers=_auth(token)).json())["totp_kek_set"]
+    assert check["ok"] is works, (
+        f"{label}: the envelope round trip says usable={works} but the "
+        f"register says ok={check['ok']} -- {check['evidence']}")
+
+
+def test_an_unset_kek_flips_that_check(conn, client, monkeypatch):
+    token = _admin_token(conn, client)
+    monkeypatch.delenv("NOCTORNAL_TOTP_KEK", raising=False)
+    assert _envelope_round_trips() is False
+    body = client.get("/api/v1/admin/readiness", headers=_auth(token)).json()
+    check = _by_name(body)["totp_kek_set"]
+    assert check["ok"] is False, check
+    assert "NOCTORNAL_TOTP_KEK" in check["evidence"]
+    assert "not set" in check["evidence"]
+    assert "NOCTORNAL_TOTP_KEK" in check["action"]
+    assert body["ready"] is False
+
+
+def test_a_kek_of_the_wrong_length_flips_that_check(conn, client, monkeypatch):
+    """Well-formed base64 of the wrong size: the envelope refuses it, so
+    the register must too, and must say what it got rather than only that
+    something is wrong."""
+    token = _admin_token(conn, client)
+    monkeypatch.setenv("NOCTORNAL_TOTP_KEK", base64.b64encode(b"K" * 16).decode())
+    assert _envelope_round_trips() is False
+    check = _by_name(client.get("/api/v1/admin/readiness",
+                                headers=_auth(token)).json())["totp_kek_set"]
+    assert check["ok"] is False, check
+    assert "16" in check["evidence"] and "32" in check["evidence"]
+
+
+def test_a_kek_the_lenient_decoder_still_rejects_flips_that_check(
+        conn, client, monkeypatch):
+    """"not a key" survives whitespace stripping and then fails on padding,
+    so `_load_kek` raises binascii.Error rather than its own RuntimeError.
+    The check must report that as a failed check with evidence, not let it
+    escape as an unhandled exception."""
+    token = _admin_token(conn, client)
+    monkeypatch.setenv("NOCTORNAL_TOTP_KEK", "not a key")
+    assert _envelope_round_trips() is False
+    r = client.get("/api/v1/admin/readiness", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    check = _by_name(r.json())["totp_kek_set"]
+    assert check["ok"] is False, check
+    assert check["evidence"].strip()
+    assert check["action"].strip()
+
+
+def test_the_kek_never_appears_in_the_register(conn, client, monkeypatch):
+    """The register is the page an operator screenshots into a ticket. A
+    KEK that leaked into the evidence would leak every TOTP secret with
+    it, so no branch of the check may quote the value -- including the
+    failing ones, which is where a naive `repr(raw)` would end up."""
+    token = _admin_token(conn, client)
+    for raw in (_KEK_CLEAN, _KEK_CLEAN + "\n",
+                base64.b64encode(b"K" * 16).decode(), "not a key"):
+        monkeypatch.setenv("NOCTORNAL_TOTP_KEK", raw)
+        check = _by_name(client.get("/api/v1/admin/readiness",
+                                    headers=_auth(token)).json())["totp_kek_set"]
+        assert raw.strip() not in check["evidence"], check
+        assert raw.strip() not in check["action"], check
+
+
+# --- docs/16 C9: the sample origin ---------------------------------------
+
+def test_the_sample_origin_check_reads_the_same_value_download_does(
+        conn, client, monkeypatch):
+    """docs/16 C9 is in the register because its configured half is a plain
+    env fact, and until 2026-09-02 it was missing: `ready=true` was
+    returned for deployments where `samples.download()` refuses every
+    request, while the module docstring claimed to be "the code-side half
+    of the legal register ... in one place".
+
+    Reads both halves: the register's verdict and `samples.sample_origin()`,
+    the reader `download()` itself consults.
+    """
+    from noctornal_api.samples import sample_origin
+    token = _admin_token(conn, client)
+
+    monkeypatch.delenv("NOCTORNAL_SAMPLE_ORIGIN", raising=False)
+    assert sample_origin() == ""
+    body = client.get("/api/v1/admin/readiness", headers=_auth(token)).json()
+    check = _by_name(body)["sample_origin_configured"]
+    assert check["ok"] is False, check
+    assert "NOCTORNAL_SAMPLE_ORIGIN" in check["evidence"]
+    assert "NOCTORNAL_SAMPLE_ORIGIN" in check["action"]
+    assert body["ready"] is False
+
+    monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://samples.example.test/")
+    assert sample_origin() == "https://samples.example.test"
+    check = _by_name(client.get("/api/v1/admin/readiness",
+                                headers=_auth(token)).json())["sample_origin_configured"]
+    assert check["ok"] is True, check
+    assert sample_origin() in check["evidence"]
+    # The register must not claim more than it establishes: docs/16 C9 says
+    # the runtime cannot tell a real origin split from a CNAME, so the
+    # passing evidence has to hand that half back to a human.
+    assert "human" in check["evidence"] or "confirm" in check["evidence"].lower()

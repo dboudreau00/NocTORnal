@@ -5462,11 +5462,23 @@ async function runAnalysis() {
     renderAnalytics();
     /* computed_at_ms is how long the ORIGINAL run took, so on a cache hit
        it describes that run, not this response. Saying "served from cache
-       in 24 ms" would claim the cache took 24 ms. */
+       in 24 ms" would claim the cache took 24 ms.
+
+       "unchanged" is a claim about the GRAPH, so it is read from `current`
+       -- the API's currency verdict -- and not from `cached`, which since
+       2026-09-02 says only that the bytes came out of storage. Both are
+       true together on this endpoint, because a suite cache hit is a
+       graph-hash match; the distinction matters because `/analytics/latest`
+       also answers `cached: true` and answers `current: null`, and a
+       renderer keyed on `cached` alone would have printed "unchanged since
+       the last run" over a graph that had moved. */
+    const ms = (suite.computed_at_ms || 0) + ' ms';
     setMsg($('an-status'), suite.cached
-      ? 'unchanged since the last run, served from cache (computed in '
-        + (suite.computed_at_ms || 0) + ' ms)'
-      : 'computed in ' + (suite.computed_at_ms || 0) + ' ms');
+      ? (suite.current === true
+          ? 'unchanged since the last run, served from cache (computed in '
+            + ms + ')'
+          : 'served from cache; currency not checked (computed in ' + ms + ')')
+      : 'computed in ' + ms);
   } catch (err) {
     show($('an-results'), false);
     show($('an-empty'), true);

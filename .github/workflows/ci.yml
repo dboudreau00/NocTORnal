@@ -255,9 +255,22 @@ jobs:
       # trigger stood down, so this verifies a chain with traffic in it.
       #
       # `checked == 0` is a failure, not a pass: an empty ledger verifies
-      # trivially and would mean the suites stopped writing custody, or the
-      # ledger was truncated. The anchor is checked explicitly because it is
-      # the one thing the relative checks cannot see.
+      # trivially. What that catches is the SUITES having stopped writing
+      # custody rows (or the ledger having been emptied outright) -- it is
+      # NOT a truncation check, and until 2026-09-02 the comment and the
+      # error message here both said it was. A partial truncation leaves
+      # `checked` high and every check green: deleting the newest k rows
+      # orphans nothing, so the verifier reports intact. See "What this
+      # cannot see" in custody_verify.py.
+      #
+      # `tail_row_hash` is printed for that reason and no other: it is the
+      # value an operator records out of band and compares against the next
+      # run, and it is the only thing that reveals a tail deletion. This
+      # workflow does not store it either -- printing it into the log is
+      # where the chain of custody for the chain of custody currently ends.
+      #
+      # The anchor (`genesis_count`) is checked explicitly because it is the
+      # one removal the relative checks CAN see.
       - name: Custody chain verifies
         run: |
           python - <<'PY'
@@ -268,10 +281,14 @@ jobs:
           report = verify_custody_chain(connect())
           print(f"checked {report.checked} custody rows, "
                 f"id {report.first_id}..{report.last_id}, "
-                f"genesis_count {report.genesis_count}")
+                f"genesis_count {report.genesis_count}, "
+                f"tail_row_hash {report.tail_row_hash}")
           if report.checked == 0:
               print("::error::No custody rows to verify. The suite ran "
-                    "without writing any, or the ledger was truncated.")
+                    "without writing any, or the ledger was emptied "
+                    "entirely. This gate does NOT catch a partial "
+                    "truncation -- deleting the NEWEST rows leaves this "
+                    "step green; compare tail_row_hash across runs.")
               sys.exit(1)
           if report.forks:
               print(f"::warning::{len(report.forks)} custody row(s) share a "

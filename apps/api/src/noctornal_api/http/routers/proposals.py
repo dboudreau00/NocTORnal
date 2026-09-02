@@ -148,21 +148,31 @@ def capture(
     # Phase 5 with the wording, the priority and the digest default all
     # decided -- and no router called it, so an analyst found out there was
     # triage work by looking. The document and the proposals are committed
-    # above; a notify failure is reported as `owner_notified: false`, never
-    # raised, because a 500 here reads as "the capture failed" and the
-    # analyst pastes the same material again.
+    # above; a notify failure is never raised, because a 500 here reads as
+    # "the capture failed" and the analyst pastes the same material again.
+    #
+    # The failure is reported as `owner_notified: null`, NOT false. Until
+    # 2026-09-02 it was false, which is the same value this endpoint uses
+    # for "there was nothing to say" and "the owner pasted it themselves" --
+    # a broken notifier and a deliberate suppression reading identically to
+    # the caller. Keeping "we decided not to" apart from "we tried and
+    # could not" is exactly the distinction `NotificationService.notify`
+    # returning None was built to preserve, and losing it one file
+    # downstream is this codebase's signature defect: a failure reported as
+    # the wrong thing rather than as a crash.
     try:
-        owner_notified = notify_events.proposals_queued(
+        owner_notified: bool | None = notify_events.proposals_queued(
             conn, case_id=case_id, count=len(result.proposal_ids),
             actor_id=user.user_id)
     except Exception:  # noqa: BLE001 - reported in the response, not raised
         log.exception("capture %s was recorded but its notification failed",
                       result.document_id)
-        owner_notified = False
+        owner_notified = None
     return {
         **result.summary(),
-        # False also when there was nothing to say (no proposals) or when
-        # the owner is the person who pasted it -- see proposals_queued.
+        # true = told. false = deliberately not told (no proposals, or the
+        # owner is the person who pasted it -- see proposals_queued).
+        # null = the attempt itself failed and is in the log.
         "owner_notified": owner_notified,
         "note": ("Nothing has entered the graph. Each finding is a proposal "
                  "waiting in the triage queue."),

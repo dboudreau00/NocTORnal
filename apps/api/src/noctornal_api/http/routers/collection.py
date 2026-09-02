@@ -45,12 +45,35 @@ withheld. The name of a RED source is frequently the finding. So every
 route here that LISTS sources, runs, personas or documents, or answers a
 question about one source, passes `user_ceiling(...)[0].name` to the
 service; the service treats `None` as the worker path with no filter, and
-nothing in this file ever passes `None`. The two routes that take no
-ceiling -- `/sources/{id}/run` and `/personas/{id}/status` -- are writes
-to one row the caller named by id, under `collection.run` and
-`collection_account.manage` respectively, and neither returns a source's
-name or URL; they are not listings and are not what this section is
-about.
+nothing in this file ever passes `None`.
+
+`/sources/{id}/run` was exempted from that rule for half a day on
+2026-09-02, and this docstring justified the exemption by asserting the
+route "neither returns a source's name or URL". That was false, and it
+was the one sentence a maintainer would have trusted instead of reading
+the route. The poll returns `error`, which is the redacted adapter
+failure, and the SSRF guard writes the HOST into it ("cannot resolve
+{host}", "{host} resolves into private address space", "{host} is a
+cloud metadata endpoint"); `redact` masks credential shapes and leaves
+hostnames alone. The route now resolves the caller's ceiling like every
+other, and a source above it gets the same 404 a nonexistent id gets --
+which closes the existence oracle in the old 400-versus-200 split as
+well, and stops a sub-cleared caller from making the collector touch a
+forum on their say-so.
+
+`/personas/{id}/status` remains the one route here that takes no
+ceiling. It is a write to one persona the caller named by id, under
+`collection_account.manage`, and its response body is the persona id and
+the status the caller asked for -- no source name, no URL, no run
+detail. It is not an existence oracle either, but not because it was
+made safe: `PersonaVault.set_status` runs a bare UPDATE and does not
+check that it matched, so an unknown persona id and a real one produce
+the same 200. That silence is a separate defect (a write that did not
+happen, reported as one that did) and fixing it needs a decision about
+what the route should say instead; it is recorded here rather than
+changed under a clearance pass, because adding a 404 there without a
+ceiling check would create the oracle this paragraph currently gets for
+free.
 """
 from __future__ import annotations
 
@@ -164,15 +187,27 @@ def run_once(
     hits and never touches `collect.proposal` -- the `Adapter` docstring in
     collection.py says where items actually go and why the proposal wiring
     is deliberately not made.
+
+    404 for a source above the caller's ceiling, and for one that does not
+    exist, indistinguishably. This route was exempted from the ceiling
+    pass earlier on 2026-09-02 on the reasoning that a poll returns no
+    name or URL; `error` below is the redacted adapter failure, and the
+    SSRF guard names the HOST in it, so the exemption was disclosing
+    exactly what the label protects. The 400-versus-200 split was an
+    existence oracle on top of it, and the poll itself ran against a
+    source the caller was not cleared to know about.
     """
+    clearance, _ = user_ceiling(conn, user.user_id)
     try:
         result = CollectionService(conn).run_once(
             source_id, actor_id=user.user_id, persona_id=body.persona_id,
-            watch_id=body.watch_id)
+            watch_id=body.watch_id, clearance=clearance.name)
     except PersonaUnavailable as exc:
         # 409 rather than 403: the caller is allowed, the persona is not
         # usable -- suspended, burnt, or cooling down.
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {

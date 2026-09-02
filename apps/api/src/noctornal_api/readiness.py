@@ -1,4 +1,5 @@
-"""The code-side half of the legal register (docs/16), in one place.
+"""The facts from the legal register (docs/16) that code can check, in one
+place. Not every entry in docs/16 -- see "What is deliberately NOT here".
 
 docs/16 lists what must be settled before this build may be switched on.
 Some of those entries are decisions only a human can take and the software
@@ -29,10 +30,14 @@ evidence and the check's standing action.
 
 **One reader per fact.** Where the code already decides something
 (`limits.rate_limiting_disabled`, `samples.policy_declared`,
-`envelope._load_kek`), the check calls that reader rather than keeping its
-own copy of the rule. Two internally consistent halves that are wrong
-together is the other signature defect, and a readiness check that kept
-its own list of off-values would be exactly that.
+`samples.sample_origin`, `envelope._load_kek`), the check calls that
+reader rather than keeping its own copy of the rule. Two internally
+consistent halves that are wrong together is the other signature defect,
+and a readiness check that kept its own list of off-values would be
+exactly that. `_totp_kek_set` is the cautionary tale: until 2026-09-02 it
+CLAIMED to apply the envelope's test and instead applied a stricter one,
+so a KEK the product encrypted and decrypted with every day was reported
+not-ready. A rule stated in a docstring and not in the code is not a rule.
 
 ## What is deliberately NOT here
 
@@ -41,11 +46,29 @@ deployment, whether the retention periods are the right ones: the software
 records declarations and cannot verify them, and docs/16 says so. This
 module reports that the declarations have been made. `ready=true` means
 "the code-side preconditions hold", not "this deployment is lawful".
+
+Two register items are checked only as far as the code CAN check them,
+and each says so in its own passing evidence rather than leaving the
+operator to infer it. docs/16 C8: the check confirms Redis is reachable
+and reports its eviction policy, but whether the limiter has an instance
+to itself is a deployment fact nothing here can see. docs/16 C9: the
+check confirms NOCTORNAL_SAMPLE_ORIGIN is set, but docs/16 says outright
+that the runtime "cannot tell the difference between a real origin split
+and a CNAME", so whether the configured origin is genuinely separate is a
+human confirmation.
+
+And the register below is NOT claimed to be exhaustive over docs/16.
+docs/16 runs to L1-L5, D1-D8 and C1-C13, most of which are decisions and
+external confirmations with no code-side half; `_CHECKS` holds the ones
+that do have one and that somebody has since wired up. So `ready=true`
+means "every check in this list passes", which is weaker than "docs/16 is
+satisfied" -- read it alongside docs/16, never instead of it. Saying so
+here is the point: until 2026-09-02 this docstring described itself as the
+code-side half of the register "in one place" while C9's env fact was not
+checked at all, which made ready=true claim more than it had established.
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 import os
 from collections.abc import Callable
@@ -195,27 +218,82 @@ def _sys_admin_present(conn: psycopg.Connection) -> Check:
 
 
 def _totp_kek_set(conn: psycopg.Connection) -> Check:
-    """The same test `envelope._load_kek` applies on every encrypt and
-    decrypt -- set, base64, 32 bytes -- so a KEK this check accepts is one
-    the envelope accepts. The value itself is never in the evidence."""
-    raw = os.environ.get(_TOTP_KEK_ENV, "")
+    """Calls `envelope._load_kek`, the reader every encrypt and every
+    decrypt already calls, so this check and the envelope cannot disagree
+    about what a usable KEK is. The evidence is the reader's own refusal.
+
+    Until 2026-09-02 this check claimed exactly that and did not do it: it
+    kept a private copy of the rule and decoded with
+    `base64.b64decode(raw, validate=True)` while `envelope._load_kek`
+    decodes leniently. A KEK carrying a trailing newline -- what a Docker
+    or Kubernetes secret file and a copy-pasted `.env` line routinely hold
+    -- sealed and opened every TOTP secret in the product and was still
+    reported `ok=false, ready=false` with the evidence
+    "NOCTORNAL_TOTP_KEK is set but is not valid base64". That is a working
+    deployment reported as broken, with the wrong reason, which is the
+    defect this module exists to prevent, and it is why "one reader per
+    fact" above is a rule and not a preference. It was also the one entry
+    in the register no test ever flipped, which is how it survived.
+
+    Neither `_load_kek`'s messages nor this check quote the value, so the
+    KEK cannot leak into an operator's screenshot of the register.
+    """
+    from noctornal_api.security.envelope import _load_kek
+
     action = (
         f"set {_TOTP_KEK_ENV} to a base64-encoded 32-byte key in the API's "
         f"environment; without it no TOTP secret can be sealed or opened, so "
         f"nobody can enrol or sign in")
-    if not raw:
-        return Check("totp_kek_set", False, f"{_TOTP_KEK_ENV} is not set", action)
     try:
-        key = base64.b64decode(raw, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        return Check("totp_kek_set", False,
-                     f"{_TOTP_KEK_ENV} is set but is not valid base64 ({exc})",
-                     action)
-    if len(key) != 32:
-        return Check("totp_kek_set", False,
-                     f"{_TOTP_KEK_ENV} decodes to {len(key)} bytes, not 32", action)
+        key = _load_kek()
+    except (RuntimeError, ValueError) as exc:
+        # RuntimeError is `_load_kek`'s own refusal (unset, wrong length).
+        # ValueError catches binascii.Error, which it lets through
+        # unwrapped for a value even the lenient decoder cannot parse
+        # (bad padding) -- reporting that here rather than letting
+        # `_guarded` label it a crash keeps the operator's action right.
+        return Check("totp_kek_set", False, str(exc), action)
     return Check("totp_kek_set", True,
-                 f"{_TOTP_KEK_ENV} is set and decodes to 32 bytes")
+                 f"{_TOTP_KEK_ENV} is set and decodes to {len(key)} bytes")
+
+
+def _sample_origin_configured(conn: psycopg.Connection) -> Check:
+    """docs/16 C9. Reads `samples.sample_origin()` -- the reader
+    `samples.download()` itself consults before handing over live malware
+    -- rather than the environment variable directly.
+
+    Added 2026-09-02. C9 was the one register entry with a code-checkable
+    half that this module did not check, so `ready=true` was returned for
+    deployments where every sample download refuses outright (invariant
+    10) while the module docstring claimed to be the code-side half of the
+    register "in one place".
+
+    What it establishes is deliberately narrow, and the passing evidence
+    says so: that a second origin is CONFIGURED, not that it is genuinely
+    separate. docs/16 C9 is explicit that the runtime "cannot tell the
+    difference between a real origin split and a CNAME", so that half stays
+    a human confirmation and is named in "What is deliberately NOT here".
+    """
+    from noctornal_api.samples import sample_origin
+
+    origin = sample_origin()
+    action = (
+        "set NOCTORNAL_SAMPLE_ORIGIN to a genuinely separate origin -- its own "
+        "host, cookie scope and CSP, never a path on the app's own host "
+        "(docs/16 C9); until it is set, samples.download() refuses every "
+        "request, so no analyst can retrieve a sample at all")
+    if not origin:
+        return Check(
+            "sample_origin_configured", False,
+            "NOCTORNAL_SAMPLE_ORIGIN is not set, so samples.download() refuses "
+            "every request (invariant 10: sample bytes are only ever served "
+            "from a separate origin)",
+            action)
+    return Check(
+        "sample_origin_configured", True,
+        f"NOCTORNAL_SAMPLE_ORIGIN={origin}; that this is a real origin split "
+        f"and not a CNAME onto the app's own host is a human confirmation "
+        f"(docs/16 C9), which the runtime cannot make")
 
 
 def _rate_limiting_enabled(conn: psycopg.Connection) -> Check:
@@ -423,6 +501,8 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("prohibited_content_policy", _prohibited_content_policy,
      "set NOCTORNAL_PROHIBITED_CONTENT_POLICY and NOCTORNAL_DESIGNATED_PERSON "
      "(docs/16 L1)"),
+    ("sample_origin_configured", _sample_origin_configured,
+     "set NOCTORNAL_SAMPLE_ORIGIN to a separate origin (docs/16 C9)"),
     ("retention_rules_confirmed", _retention_rules_confirmed,
      "the retention table could not be read; run alembic upgrade head and "
      "then confirm each rule at POST /retention/rules/{category}"),

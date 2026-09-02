@@ -164,7 +164,16 @@ def verify_custody(
     narrows what is REPORTED, not what is checked: an exhibit's rows chain
     off other exhibits' rows, and a link check confined to one exhibit
     would call every one of its rows an orphan. The scoped answer says it
-    is scoped, and its caveat says what it cannot tell you.
+    is scoped, and EVERY answer carries a caveat — see the `caveat` key
+    below for why an unscoped run needs one just as badly.
+
+    Consumed by the analyst console: `btn-custody-verify` in
+    `static/index.html`, wired by `wireCustodyVerify()` in `static/app.js`
+    and rendered by `custodyVerdict()`, which prints `scoped`, `caveat`,
+    `genesis_count` and `genesis_note` rather than folding them into the
+    verdict chip. Named here because an endpoint with no reachable caller
+    is a feature nobody can run, and the only way to keep that honest is
+    for each half to say where the other one is.
     """
     report = verify_custody_chain(conn, evidence_id=evidence_id)
     return {
@@ -176,16 +185,47 @@ def verify_custody(
         # no custody rows -- can never be read as a pass.
         "scoped": evidence_id is not None,
         "evidence_id": str(evidence_id) if evidence_id else None,
+        # The hash of the newest row in the WHOLE ledger, scoped run or not.
+        # Returned because it is the ONLY thing that reveals the blind spot
+        # the caveat below describes: recorded out of band and compared on
+        # the next run, it changes if the tail was removed. Neither this
+        # service nor the CI step persists it -- an operator has to.
+        "tail_row_hash": report.tail_row_hash,
+        # A caveat on EVERY run, not only the scoped ones. Until 2026-09-02
+        # an unscoped run returned `"caveat": null`, which reads as "nothing
+        # qualifies this answer" -- and the qualification that matters most
+        # is true of every run: the checks are all RELATIVE, so removing the
+        # newest custody rows leaves `intact: true` and no trace. An officer
+        # producing an exhibit under FRE 902(13)-(14) is entitled to that
+        # sentence beside the green tick, not after an incident. The scoped
+        # half also lost its promise that running without `evidence_id`
+        # would reveal a deletion: it does not, when the removed rows were
+        # the ledger's own tail.
         "caveat": (
-            "Scoped to one exhibit: LINK, FORK and CONTENT are each exact "
-            "for the rows reported, because the predecessor lookup covers "
-            "the whole ledger. What a scoped run cannot tell you is whether "
-            "this exhibit's history is COMPLETE — a row deleted from it is "
-            "revealed by whichever row came next in the global chain, which "
-            "is usually another exhibit's. Run without `evidence_id` for "
-            "that."
-        ) if evidence_id is not None else None,
+            ("Scoped to one exhibit: LINK, FORK and CONTENT are each exact "
+             "for the rows reported, because the predecessor lookup covers "
+             "the whole ledger. GENESIS and NO_GENESIS are whole-ledger "
+             "findings and are reported here too, so a scoped run can come "
+             "back not-intact naming rows of OTHER exhibits — read "
+             "`breaks[].evidence_id` before attributing one. An unscoped "
+             "run sees more of this exhibit's history, because a row "
+             "deleted from it is revealed by whichever row came next in the "
+             "global chain, which is usually another exhibit's. "
+             if evidence_id is not None else
+             "Whole ledger, every exhibit. ")
+            + "What NO run can tell you is whether rows were removed from "
+              "the END. Nothing names the newest row as its predecessor, so "
+              "deleting the last entries — the export, the destruction — "
+              "orphans nothing, costs one DELETE and no rehashing, and "
+              "leaves `intact` true. The defence is `tail_row_hash`: record "
+              "it somewhere this system cannot reach and compare it next "
+              "time. This service does not persist it."
+        ),
         "forks": len(report.forks),
+        # The ids, not just the count. `fork_note` tells the officer a fork
+        # is worth investigating; until 2026-09-02 the response handed her
+        # nothing to investigate WITH, which is how a note stops being read.
+        "fork_ids": [b.id for b in report.forks],
         "fork_note": (
             "Rows sharing a predecessor. Not counted as tampering, for the "
             "reasons /audit/verify gives — but on a ledger written by 0024, "
