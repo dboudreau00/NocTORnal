@@ -101,7 +101,10 @@ class RunResult:
     #: No path sets this False today. The three-valued field exists so that
     #: a future "read it back AND re-hash" path has somewhere honest to put
     #: "checked, and stale" instead of overloading `cached` again.
-    current: bool | None = True
+    #: Defaults to None -- "not checked" -- rather than True, so a future
+    #: construction site that forgets the field cannot silently claim
+    #: currency. Every path that HAS checked sets it explicitly.
+    current: bool | None = None
 
     def as_response(self) -> dict:
         out = {**self.payload, "run_id": str(self.run_id),

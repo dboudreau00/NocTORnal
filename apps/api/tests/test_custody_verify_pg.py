@@ -319,7 +319,11 @@ def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
     assert after.breaks == ()
     assert after.forks == ()
     assert after.genesis_count == 1
-    # `checked` is the ONLY field that moves, and only a caller who knew the
+    # `checked`, `last_id` and `tail_row_hash` all move (measured on a
+    # two-row tail delete: 166->164, 861->859, 0c42c7d6->330df2cd), while
+    # `breaks`, `forks`, `first_id` and `genesis_count` do not. None of the
+    # three is DETECTION: each needs a value recorded before the delete, and
+    # this module persists none of them. Only a caller who knew the
     # previous count can read anything into that.
     assert after.checked == seeded.checked - 2
     assert after.last_id == ids[-3]

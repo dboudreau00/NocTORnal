@@ -367,7 +367,9 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
     return Check(
         "redis_limiter_store", True,
         f"Redis at {where} answers PING; maxmemory-policy="
-        f"{policy or '(unset, defaults to noeviction)'}")
+        f"{policy or '(unset, defaults to noeviction)'}; whether the "
+        f"limiter has this instance to itself is a deployment fact the "
+        f"runtime cannot see (docs/16 C8)")
 
 
 def _evidence_bucket_object_lock(conn: psycopg.Connection) -> Check:

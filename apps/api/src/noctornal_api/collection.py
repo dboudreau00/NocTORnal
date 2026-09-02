@@ -1773,7 +1773,14 @@ class CollectionService:
         only one who can say so.
 
         NOT case-scoped, like `documents`: a document hangs off a source,
-        not a case. Gated on clearance inside the UPDATE, and purged
+        not a case. Gated on clearance inside the UPDATE -- on the
+        DOCUMENT's label and on its SOURCE's, because triage is the
+        reader's verb and has to be gated on exactly what the read is
+        gated on. `documents()` gained the source join on 2026-09-02 and
+        this writer was left behind for the length of one commit, which
+        made a document hidden from the list still triageable and turned
+        the 200-vs-404 split into an existence oracle of the same shape
+        `/sources/{id}/run` had just lost. Purged
         documents are untouchable -- triaging a destroyed exhibit would
         resurrect it in the filtered list with an empty body.
         """
@@ -1785,11 +1792,14 @@ class CollectionService:
             """UPDATE collect.document d
                   SET triage_state = %s
                  FROM (SELECT id, triage_state FROM collect.document
-                        WHERE id = %s) old
-                WHERE d.id = old.id AND d.purged_at IS NULL
+                        WHERE id = %s) old,
+                      collect.source s
+                WHERE d.id = old.id AND s.id = d.source_id
+                  AND d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
+                  AND s.classification <= %s::core.tlp
             RETURNING d.id, old.triage_state, d.triage_state""",
-            (state, document_id, clearance)).fetchone()
+            (state, document_id, clearance, clearance)).fetchone()
         if row is None:
             raise CollectionNotFound(
                 "no such document, or it is above your clearance")

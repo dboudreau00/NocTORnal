@@ -100,7 +100,7 @@ disagrees with it. Nothing names the newest row as its predecessor, so
 removing the last k rows of the ledger orphans nothing at all. Every
 survivor still links to a real predecessor, there is still exactly one
 genesis, and there are no forks — so this module answers `intact=True`,
-`breaks=[]`, `forks=0`, `genesis_count=1`, and the only field that moves
+`breaks=[]`, `forks=0`, `genesis_count=1`, and the fields that move
 is `checked`. Measured on 2026-09-02 against the development ledger: 119
 rows checked and intact; delete the newest two with the append-only
 trigger stood down; 117 rows checked and still intact. Unlike re-chaining
@@ -210,7 +210,17 @@ class CustodyReport:
     #: scoped run, like `genesis_count`: the chain has one tail, and an
     #: exhibit's newest row is almost never it.
     #:
-    #: This is the ONLY defence against the tail deletion the module
+    #: A tail-to-tail EQUALITY comparison is not the defence it looks
+    #: like: this hash changes on every honest append, so run-to-run
+    #: equality mismatches on any live ledger and teaches an operator to
+    #: ignore it. Two checks do work under the one-DELETE-no-rehash
+    #: threat model: `last_id` and `checked` are monotone on an
+    #: append-only ledger, so either DECREASING against a previously
+    #: recorded value is a truncation signal that cannot fire honestly;
+    #: and a recorded hash should be checked for continued EXISTENCE in
+    #: the ledger rather than for equality with the tail, which has no
+    #: endpoint today. This is a partial defence against the tail
+    #: deletion the module
     #: docstring describes, and it only works if somebody records it OUT OF
     #: BAND and compares it on the next run. Added 2026-09-02; nothing in
     #: this tree persists it yet, so a caller that merely reads it past is
