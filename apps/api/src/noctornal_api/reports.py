@@ -85,6 +85,7 @@ from uuid import UUID
 
 import psycopg
 
+from noctornal_api.assumptions import AssumptionService
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.projections import GraphService, Projection
 from noctornal_api.security.access import Tlp, tlp_from_name
@@ -117,11 +118,18 @@ class Redaction:
     #: reader who is not told this reads an untitled report as an
     #: administrative quirk rather than as a redaction.
     header_withheld: bool = False
+    #: How many still-standing assumptions (OPEN or CONFIRMED) went with
+    #: the header. An assumption is free text an analyst wrote ABOUT the
+    #: case -- "the OP-KESTREL key is the operator's" -- so it is case
+    #: content at the case's own level, exactly like the title, and it is
+    #: withheld on the same condition. Counted so the statement can say so.
+    assumptions_withheld: int = 0
 
     @property
     def anything_withheld(self) -> bool:
         return bool(self.nodes_withheld or self.edges_withheld
-                    or self.evidence_withheld or self.header_withheld)
+                    or self.evidence_withheld or self.header_withheld
+                    or self.assumptions_withheld)
 
     def statement(self) -> str:
         if not self.anything_withheld:
@@ -137,6 +145,13 @@ class Redaction:
                 "operation, its subject or the authority it was collected "
                 "under -- which means it is not a disclosure document as it "
                 "stands.")
+            if self.assumptions_withheld:
+                header += (
+                    f" The {self.assumptions_withheld} recorded assumption(s) "
+                    f"the case rests on are withheld with it, because they "
+                    f"are written about the case at the case's own level; "
+                    f"the findings below therefore rest on premises this "
+                    f"document cannot state.")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
@@ -157,6 +172,11 @@ class Report:
     relationships: list[dict] = field(default_factory=list)
     evidence: list[dict] = field(default_factory=list)
     hypotheses: dict = field(default_factory=dict)
+    #: The still-standing assumptions (`assumptions.REPORTABLE_STATUSES`):
+    #: what the findings rest on, with who made them and who reviewed
+    #: them. A document that does not say what it assumes is a document
+    #: whose reader cannot tell a finding from a premise.
+    assumptions: list[dict] = field(default_factory=list)
     #: The compartments of everything actually in the document. Carried on
     #: the report rather than re-derived at the gate, because the gate is
     #: pure and the thing that knows what went in is the builder.
@@ -179,8 +199,10 @@ class Report:
                 "evidence_withheld": self.redaction.evidence_withheld,
                 "statement": self.redaction.statement(),
                 "header_withheld": self.redaction.header_withheld,
+                "assumptions_withheld": self.redaction.assumptions_withheld,
             },
             "summary": self.summary,
+            "assumptions": self.assumptions,
             "actors": self.actors,
             "relationships": self.relationships,
             "evidence": self.evidence,
@@ -288,6 +310,15 @@ class ReportBuilder:
         marking = (max((tlp_from_name(c) for c in included), default=Tlp.CLEAR)
                    if included else Tlp.CLEAR)
 
+        # The register (0056). An assumption is free text written ABOUT the
+        # case -- it names the operation, its subjects, its premises -- so
+        # it is case content at the case's own level and goes in on exactly
+        # the header's condition. When the header is withheld the builder
+        # only COUNTS them, so the text it must not include is never read.
+        register = AssumptionService(self._c)
+        assumptions = register.for_report(case_id) if header_ok else []
+        assumptions_withheld = 0 if header_ok else register.count_reportable(case_id)
+
         redaction = Redaction(
             built_at_tlp=marking.name, ceiling_tlp=target.name,
             case_tlp=case_tlp,
@@ -295,6 +326,7 @@ class ReportBuilder:
             edges_withheld=withheld.edges or 0,
             evidence_withheld=evidence_total - len(evidence_rows),
             header_withheld=not header_ok,
+            assumptions_withheld=assumptions_withheld,
         )
 
         metrics = redacted.metrics(projection) if hasattr(
@@ -359,6 +391,7 @@ class ReportBuilder:
                 "computed_over": "the redacted graph",
                 **({"metrics": metrics} if metrics else {}),
             },
+            assumptions=assumptions,
             actors=actors,
             relationships=relationships,
             evidence=[{
@@ -467,6 +500,42 @@ def render_markdown(report: Report) -> str:
         f"- Relationships: {d['summary']['relationships']}",
         f"- Exhibits: {d['summary']['exhibits']}",
         f"- All figures computed over {d['summary']['computed_over']}.",
+        "",
+        "## Assumptions",
+        "",
+    ]
+    # Before the entities, because a premise is read before the findings
+    # that rest on it. An empty register is said out loud: "no assumptions
+    # recorded" is a fact about the analysts, not about the case, and a
+    # heading that silently disappears reads as "there were none".
+    if d["assumptions"]:
+        lines += [
+            "What the findings below rest on. An assumption is a premise the "
+            "analysts chose to work from, not a finding; each is listed with "
+            "who made it and whether it has been reviewed.",
+            "",
+            "| Assumption | Basis | Status | Made by | Reviewed |",
+            "|---|---|---|---|---|",
+        ]
+        for a in d["assumptions"]:
+            if a["reviewed_at"]:
+                reviewed = a["reviewed_at"] + (
+                    f" — {a['review_note']}" if a["review_note"] else "")
+            else:
+                reviewed = "not yet"
+            lines.append(f"| {a['statement']} | {a['basis'] or '—'} | {a['status']} | "
+                         f"{a['made_by_name']} ({a['made_at']}) | {reviewed} |")
+    elif d["redaction"]["assumptions_withheld"]:
+        lines.append(f"_{d['redaction']['assumptions_withheld']} recorded "
+                     f"assumption(s) withheld with the case header; see the "
+                     f"marking statement above._")
+    else:
+        lines.append("_No assumptions have been recorded against this case. That "
+                     "is a statement about the register, not that there are none: "
+                     "a finding whose premises are unwritten has premises its "
+                     "reader cannot challenge._")
+
+    lines += [
         "",
         "## Entities",
         "",

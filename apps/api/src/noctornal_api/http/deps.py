@@ -30,13 +30,19 @@ from psycopg.types.json import Json
 
 from noctornal_api.db import connect
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import client_ip
 from noctornal_api.security.access import (
     CHECK_ASSIGNMENT,
     Tlp,
     evaluate,
     tlp_from_name,
 )
-from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
+from noctornal_api.security.sessions import (
+    STEP_UP_FRESHNESS,
+    SessionService,
+    binding_mismatch,
+    strict_binding_enabled,
+)
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -97,18 +103,40 @@ def session_token(
 
 
 def current_user(
+    request: Request,
     raw: str = Depends(session_token),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> CurrentUser:
     """Resolve the session token to a live session. The failure reason is
     deliberately NOT returned: distinguishing 'revoked' from 'not_found'
-    would confirm to a token holder that the string was a real session."""
-    result = SessionService(PgSessionStore(conn)).validate(raw)
+    would confirm to a token holder that the string was a real session.
+
+    Under `NOCTORNAL_SESSION_STRICT_BINDING` (0058) a live session
+    presented from a different address or client than it was minted with
+    is refused too, with the SAME generic 401 -- the holder of a replayed
+    token must not learn that the string was a real session that merely
+    failed a binding check -- and an audit row that names WHICH binding
+    failed, because that is what the security officer needs. Refused, not
+    revoked: an attacker holding the token could otherwise log the victim
+    out on demand. The idle window slides only after the check, so a
+    refused replay does not keep the session alive. The websocket path
+    (`live.py`) validates its own token and is not bound here.
+    """
+    service = SessionService(PgSessionStore(conn))
+    result = service.validate(raw, touch=False)
     if not result.ok:
         _audit(conn, "AUTH_SESSION_REJECTED", None, None,
                {"reason": result.reason})
         raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = result.session
+    if strict_binding_enabled():
+        mismatched = binding_mismatch(
+            s, ip=client_ip(request), user_agent=request.headers.get("user-agent"))
+        if mismatched:
+            _audit(conn, "SESSION_BINDING_REFUSED", s.user_id, None,
+                   {"session_id": str(s.id), "mismatched": mismatched})
+            raise Problem(401, "Unauthenticated", "invalid or expired session")
+    s = service.touch(s)
     return CurrentUser(s.user_id, s.id, s.mfa_satisfied_at)
 
 

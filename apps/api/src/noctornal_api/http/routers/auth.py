@@ -25,7 +25,12 @@ from noctornal_api.http.deps import (
     get_conn,
 )
 from noctornal_api.http.errors import Problem
-from noctornal_api.http.limits import consume_on_failure, rate_limit, rate_limit_peek
+from noctornal_api.http.limits import (
+    client_ip,
+    consume_on_failure,
+    rate_limit,
+    rate_limit_peek,
+)
 from noctornal_api.security.auth import AuthService
 from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
 from noctornal_api.stores import PgSessionStore, PgUserStore
@@ -94,8 +99,14 @@ def login(body: LoginBody, request: Request, response: Response,
         _audit(conn, "AUTH_FAILED", result.user_id,
                {"reason": result.audit_reason, "email": body.email}, request)
         raise Problem(401, "Unauthenticated", "invalid credentials")
+    # Where the session was minted (0058). `client_ip` is the rate
+    # limiter's view of the peer -- the outermost trusted proxy's client
+    # when NOCTORNAL_TRUSTED_PROXY_HOPS says so -- because a binding to the
+    # proxy's own address would match every replay that came through the
+    # same proxy, which is every replay.
     _, token = SessionService(PgSessionStore(conn)).create(
-        uuid4(), result.user_id, mfa_satisfied=True
+        uuid4(), result.user_id, mfa_satisfied=True,
+        ip=client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     _audit(conn, "AUTH_SUCCEEDED", result.user_id, {}, request)
     # Cookie for browser clients (HttpOnly; the __Host- prefix requires
