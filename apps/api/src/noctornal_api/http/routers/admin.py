@@ -210,9 +210,17 @@ def readiness(
     user: CurrentUser = Depends(require_global("user.manage")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The code-side half of the legal register (docs/16), as `{ready,
+    """What the deployment can establish about itself, as `{ready,
     checks}` with evidence per check. See `readiness.py` for what is
     checked and why.
+
+    Deliberately NOT "the code-side half of the legal register": that
+    phrasing was removed from `readiness.py` on 2026-09-02 because two of
+    the register items are only partly checkable from inside the runtime,
+    and it survived here -- on the operator-facing OpenAPI description of
+    the very endpoint that serves the register, which is where an
+    overclaim does the most damage. `ready: true` means the code-side
+    preconditions hold, never that the deployment is lawful.
 
     Gated on `user.manage` rather than a read permission because the
     evidence names the deployment's configuration -- which variables are

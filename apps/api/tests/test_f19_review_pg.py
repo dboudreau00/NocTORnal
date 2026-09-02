@@ -122,7 +122,17 @@ def _user(conn, clearance="RED", compartments=()):
 
 
 def _case(conn, owner, classification="AMBER", compartments=()):
+    # Since migration 0057 a compartment must be registered before a case
+    # can be filed under it, and this helper is the only route these tests
+    # have to a compartmented case. Registering here rather than in each
+    # test keeps the refusal under test the READ-IN ceiling, not the
+    # registry: an unregistered key is refused first, and a test that
+    # cannot reach the check it names proves nothing.
     from noctornal_api.cases import CaseService
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (f19 test)"))
     return CaseService(conn).create(
         code=f"OP-F19-{uuid4().hex[:6]}", title="Kestrel field office",
         legal_basis="production order", retention_until=date(2028, 1, 1),

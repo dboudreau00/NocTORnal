@@ -68,8 +68,9 @@ hidden` and simply amputate the last few with no way to reach them.
 
 The app bar no longer wraps its buttons onto two lines, and no longer
 scrolls the page sideways. `#hdr-user` was 326px of that bar — a third of
-it — because `/auth/me` returns a user_id and nothing else, so the pill
-could only render a raw UUID.
+it — because `/auth/me` returned a user_id and nothing else, so the pill
+could only render a raw UUID. (`/auth/me` carries `display_name` and
+`email` as of Alpha 4, and the bar now renders the name.)
 
 ### Also
 

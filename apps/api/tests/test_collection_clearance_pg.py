@@ -561,8 +561,31 @@ def test_a_source_reclassified_red_takes_its_own_name_with_it(conn):
     assert str(doc) not in found(), (
         "search returns the SOURCE's name on every document row, so it "
         "needs the source's label as well as the document's")
-    # The RED caller still sees both: this is a ceiling, not a deletion.
+    # The WRITE half of the same ceiling. `set_document_triage` is the
+    # reader's verb -- an analyst triages what the list showed them -- so it
+    # has to refuse exactly what the list now hides. When the source join
+    # was added to `documents()` on 2026-09-02 this writer was left behind
+    # for the length of one commit, and a document hidden from the list
+    # stayed triageable: the 200-vs-404 split then answered "does this RED
+    # source have documents?" for a caller who could not see any of them.
+    # Asserted here rather than in a test of its own because the read and
+    # the write are one claim, and a fix to either alone looks complete.
+    import pytest as _pytest
+    from noctornal_api.collection import CollectionNotFound
+    with _pytest.raises(CollectionNotFound):
+        svc.set_document_triage(doc, "TRIAGED", clearance="AMBER",
+                                actor_id=owner)
+    assert conn.execute(
+        "SELECT triage_state FROM collect.document WHERE id = %s",
+        (doc,)).fetchone()[0] == "NEW", "the refused triage still wrote"
+
+    # The RED caller still sees both, and can still triage: this is a
+    # ceiling, not a deletion.
     assert str(doc) in _ids(svc.documents(clearance="RED"))
     assert str(doc) in {h["id"] for h in search.search(
         case_id=case, query="ransomware", clearance="RED",
         compartments=frozenset(), include_evidence=False)}
+    svc.set_document_triage(doc, "TRIAGED", clearance="RED", actor_id=owner)
+    assert conn.execute(
+        "SELECT triage_state FROM collect.document WHERE id = %s",
+        (doc,)).fetchone()[0] == "TRIAGED"

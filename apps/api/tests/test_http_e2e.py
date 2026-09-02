@@ -397,6 +397,20 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
 
 
 def test_cannot_create_case_in_a_compartment_you_lack(conn, client):
+    """The read-in ceiling refuses an owner who is not read in.
+
+    Since migration 0057 `cases.py` runs `_require_registered` BEFORE
+    `_require_compartments`, so an unregistered key is refused first and a
+    substring match on "compartment" is satisfied by the REGISTRY refusal.
+    This test -- the only cover for the owner branch of the read-in
+    ceiling -- therefore proved nothing between 0057 and 2026-09-02: it
+    passed because the key was unregistered, not because the caller lacked
+    it. Register the key so the request reaches the check under test, and
+    assert on "not read into" so the two refusals cannot be confused again.
+    """
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES "
+                 "('OP_SECRET', 'Secret Op (e2e test)') "
+                 "ON CONFLICT (key) DO NOTHING")
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _login(client, email, secret)
     r = client.post("/api/v1/cases", headers=_auth(token), json={
@@ -404,7 +418,7 @@ def test_cannot_create_case_in_a_compartment_you_lack(conn, client):
         "legal_basis": "x", "retention_until": str(date(2028, 1, 1)),
         "review_due": str(date(2027, 1, 1)), "compartments": ["OP_SECRET"],
     })
-    assert r.status_code == 400 and "compartment" in r.text
+    assert r.status_code == 400 and "not read into" in r.text
 
 
 def test_cannot_author_above_your_clearance(conn, client):
