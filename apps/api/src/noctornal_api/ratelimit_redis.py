@@ -45,6 +45,31 @@ log = logging.getLogger("noctornal.ratelimit")
 CONNECT_TIMEOUT_S = 0.25
 SOCKET_TIMEOUT_S = 0.25
 
+# Every maxmemory-policy Redis documents, other than `noeviction`, starts
+# with one of these two prefixes: the allkeys-* family evicts any key and
+# the volatile-* family evicts keys that carry a TTL -- which is EVERY
+# meter this backend writes (`SET ... PX`). Under either, memory pressure
+# deletes live meters, and a deleted meter reads as an empty one: the
+# next request from a subject that was being refused is admitted with a
+# full burst. Nothing errors and nothing logs; the limiter just stops
+# limiting whoever the cache happened to evict.
+_EVICTING_PREFIXES = ("allkeys-", "volatile-")
+
+
+def is_evicting_policy(policy: str | None) -> bool:
+    """True when `policy` is a maxmemory-policy under which Redis may
+    delete a rate-limit meter of its own accord.
+
+    Prefix-matched rather than listed, so a policy Redis adds later
+    (allkeys-lfu arrived in 4.0; volatile-lfu with it) is classified by
+    the family it belongs to instead of slipping through an enumeration
+    written against one version. Case-insensitive because CONFIG GET
+    echoes whatever case the operator typed.
+    """
+    if not policy:
+        return False
+    return policy.strip().lower().startswith(_EVICTING_PREFIXES)
+
 # GCRA, atomically. Microseconds throughout: Lua numbers are doubles, and
 # integer microseconds of Unix time (~1.8e15) sit comfortably below 2^53,
 # so this arithmetic is exact and matches ratelimit.gcra() exactly.
@@ -172,6 +197,44 @@ class RedisBackend:
             return bool(self._redis.ping())
         except Exception:  # noqa: BLE001 - a startup probe reports, it does not raise
             return False
+
+    def maxmemory_policy(self) -> str | None:
+        """`CONFIG GET maxmemory-policy`, as text.
+
+        Returns the policy name (`"allkeys-lru"`, `"noeviction"`, ...), an
+        empty string when the server answered but named no policy, and
+        None when the server would not answer at all. None is a distinct
+        value on purpose: most managed Redis offerings rename or disable
+        CONFIG, and "the server refused to say" is not the same fact as
+        "the server does not evict". `build_limiter` reports the first as
+        unknown and the second as fine, and collapsing them would report
+        an unverifiable deployment as a verified one.
+
+        Never raises. This is a startup probe, and a probe that can turn
+        a boot into an outage is worse than no probe -- the same rule
+        `ping` follows.
+
+        Added 2026-09-02: until then nothing in the process read the
+        policy, and docs/16 C8 was the only place the eviction risk was
+        recorded.
+        """
+        try:
+            answer = self._redis.config_get("maxmemory-policy")
+        except Exception as exc:  # noqa: BLE001 - see docstring: reports, never raises
+            log.debug("CONFIG GET maxmemory-policy was refused: %s: %s",
+                      type(exc).__name__, exc)
+            return None
+        # `decode_responses` is off (the Lua path wants bytes), so the
+        # keys and values may come back as bytes; older client versions
+        # decode CONFIG replies regardless. Accept both.
+        for key, value in (answer or {}).items():
+            if isinstance(key, bytes):
+                key = key.decode("utf-8", errors="replace")
+            if key == "maxmemory-policy":
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="replace")
+                return str(value)
+        return ""
 
     def close(self) -> None:
         try:

@@ -56,6 +56,25 @@ log = logging.getLogger("noctornal.ratelimit")
 
 _OFF = {"0", "off", "false", "no", "disabled"}
 
+#: The words the eviction warning opens with. A constant rather than a
+#: string in the call, so the test that pins the warning and the code that
+#: emits it cannot drift apart silently.
+EVICTION_WARNING = "RATE-LIMIT REDIS EVICTS KEYS"
+
+
+def rate_limiting_disabled() -> bool:
+    """Is the NOCTORNAL_RATELIMIT off-switch thrown?
+
+    ONE reader for the off-set. `build_limiter` decides whether to build
+    a limiter from it, and the readiness register (`readiness.py`) reports
+    whether one was built from it; if each kept its own list of off-values
+    they would eventually disagree, and a deployment would be reported
+    ready with a limiter that never built. Public since 2026-09-02, when
+    the readiness check was added and needed the same answer.
+    """
+    setting = os.environ.get("NOCTORNAL_RATELIMIT", "").strip().lower()
+    return setting in _OFF
+
 
 def _trusted_proxy_hops() -> int:
     raw = os.environ.get("NOCTORNAL_TRUSTED_PROXY_HOPS", "0")
@@ -138,13 +157,12 @@ def build_limiter() -> RateLimiter:
     test process do not share meters -- a limit leaking between tests is a
     flaky suite, and a flaky security test gets deleted.
     """
-    setting = os.environ.get("NOCTORNAL_RATELIMIT", "").strip().lower()
-    if setting in _OFF:
+    if rate_limiting_disabled():
         log.warning(
             "RATE LIMITING IS DISABLED (NOCTORNAL_RATELIMIT=%s). Login guessing "
             "is braked only by the account lockout, and the analytics endpoints "
             "are an unmetered CPU-bound path for any authenticated analyst.",
-            setting,
+            os.environ.get("NOCTORNAL_RATELIMIT", "").strip().lower(),
         )
         return RateLimiter(InProcessBackend(), enabled=False)
 
@@ -161,20 +179,64 @@ def build_limiter() -> RateLimiter:
 
     backend = RedisBackend(url)
     if backend.ping():
-        log.info("rate limiting via Redis at %s", _redacted(url))
+        log.info("rate limiting via Redis at %s", redacted_url(url))
+        _warn_if_evicting(backend, url)
     else:
         # Not fatal: the per-limit policy already says what an unreachable
         # backend means, and refusing to boot would make a cache outage an
         # application outage. But it must not be discovered from a graph.
+        # No eviction probe either: a second question to a backend that
+        # just failed to answer the first would only add a second timeout.
         log.error(
             "rate-limit Redis at %s did not answer PING. Limits with "
-            "on_backend_failure=DENY will refuse until it does.", _redacted(url),
+            "on_backend_failure=DENY will refuse until it does.", redacted_url(url),
         )
     return RateLimiter(backend)
 
 
-def _redacted(url: str) -> str:
-    """A Redis URL may carry a password. It is going into a log line."""
+def _warn_if_evicting(backend, url: str) -> None:
+    """Shout at startup if the limiter's Redis may delete its own meters.
+
+    docs/16 C8 has recorded since Phase 7 that `infra/docker-compose.yml`
+    runs Redis with `allkeys-lru`, under which memory pressure evicts
+    rate-limit keys and an evicted meter is a reset meter. Until
+    2026-09-02 that was a paragraph in a register: nothing in the process
+    read the policy, so a deployment that copied the compose file had a
+    limiter that silently stopped limiting whoever the cache evicted, and
+    the operator had to know to look. This is the same failure shape as
+    RATE LIMITING IS DISABLED, so it is reported in the same voice.
+
+    A Redis that refuses CONFIG (managed offerings usually rename it away)
+    is reported as UNKNOWN below WARNING: it is the true statement, and
+    nagging every boot of a deployment that cannot answer trains people
+    to ignore the line that matters.
+    """
+    from noctornal_api.ratelimit_redis import is_evicting_policy
+
+    policy = backend.maxmemory_policy()
+    if policy is None:
+        log.info(
+            "rate-limit Redis at %s: maxmemory-policy is unknown (CONFIG GET was "
+            "refused, which managed Redis usually does). Confirm out of band that "
+            "it runs with maxmemory-policy=noeviction -- docs/16 C8.",
+            redacted_url(url),
+        )
+    elif is_evicting_policy(policy):
+        log.warning(
+            "%s (maxmemory-policy=%s at %s). Under memory pressure Redis will "
+            "delete live rate-limit meters, and a deleted meter admits the "
+            "subject it was refusing with a full burst -- the limiter stops "
+            "limiting whoever the cache evicts, silently. Run the limiter's "
+            "Redis with maxmemory-policy=noeviction, or give it its own "
+            "instance (docs/16 C8; infra/docker-compose.yml sets allkeys-lru).",
+            EVICTION_WARNING, policy, redacted_url(url),
+        )
+
+
+def redacted_url(url: str) -> str:
+    """A Redis URL may carry a password. It is going into a log line, or
+    into readiness evidence an administrator reads -- never either with
+    the secret in it."""
     if "@" in url:
         scheme, _, rest = url.partition("://")
         return f"{scheme}://***@{rest.rpartition('@')[2]}"
