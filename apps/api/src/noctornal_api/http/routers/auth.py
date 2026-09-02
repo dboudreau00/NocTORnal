@@ -128,14 +128,35 @@ def logout(request: Request,
 
 class Me(BaseModel):
     user_id: str
+    # Who you are, not just which row you are. Until 2026-09-02 the model
+    # carried the id and the code count and nothing else, and the analyst
+    # UI put `me.user_id` straight into the app bar, so every signed-in
+    # analyst was greeted by their own UUID.
+    display_name: str
+    email: str
     recovery_codes_remaining: int
 
 
 @router.get("/me", response_model=Me)
 def me(user: CurrentUser = Depends(current_user),
        conn: psycopg.Connection = Depends(get_conn)) -> Me:
+    # Read live from the row rather than from anything the session
+    # carries, so an administrator's correction to a name shows up on the
+    # analyst's next load and not their next login.
+    row = conn.execute(
+        "SELECT display_name, email FROM iam.app_user WHERE id = %s",
+        (user.user_id,),
+    ).fetchone()
+    if row is None:
+        # A session that resolved a moment ago and now names no account:
+        # the row went between the two reads. Say so as an auth failure,
+        # not as a 500 the client would retry.
+        raise Problem(401, "Unauthenticated", "session refers to no account")
+    display_name, email = row
     return Me(
         user_id=str(user.user_id),
+        display_name=display_name,
+        email=email,
         # The COUNT only. Knowing you are down to your last code is
         # actionable; the codes themselves exist in plaintext exactly once,
         # at the moment they are issued.

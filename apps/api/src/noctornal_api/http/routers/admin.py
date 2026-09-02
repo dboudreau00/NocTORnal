@@ -20,9 +20,14 @@ from pydantic import BaseModel, Field
 from noctornal_api.http.deps import CurrentUser, get_conn, require_global
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api import readiness as readiness_register
 from noctornal_api.iam_admin import AdminError, IamAdminService, OneTimeCredentials
 
-router = APIRouter(prefix="/admin/users", tags=["admin"])
+# Prefixed at /admin rather than /admin/users since 2026-09-02, so the
+# readiness register can live beside the account routes without a
+# second router to register in app.py. Every account route spells its
+# own /users, so the URLs a client already uses are unchanged.
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 class CreateBody(BaseModel):
@@ -69,7 +74,7 @@ def _credentials(c: OneTimeCredentials) -> dict:
     }
 
 
-@router.get("", response_model=dict)
+@router.get("/users", response_model=dict)
 def list_users(
     user: CurrentUser = Depends(require_global("user.manage")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -81,7 +86,7 @@ def list_users(
             "you": str(user.user_id)}
 
 
-@router.post("", response_model=dict, status_code=201,
+@router.post("/users", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("auth.recovery_codes"))])
 def create_user(
     body: CreateBody,
@@ -98,7 +103,7 @@ def create_user(
     return _credentials(creds)
 
 
-@router.post("/{user_id}/deactivate", response_model=dict)
+@router.post("/users/{user_id}/deactivate", response_model=dict)
 def deactivate(
     user_id: UUID,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -114,7 +119,7 @@ def deactivate(
                       "history remain."}
 
 
-@router.post("/{user_id}/reactivate", response_model=dict)
+@router.post("/users/{user_id}/reactivate", response_model=dict)
 def reactivate(
     user_id: UUID,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -128,7 +133,7 @@ def reactivate(
     return {"user_id": str(user_id), "is_active": True}
 
 
-@router.post("/{user_id}/clearance", response_model=dict)
+@router.post("/users/{user_id}/clearance", response_model=dict)
 def set_clearance(
     user_id: UUID, body: ClearanceBody,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -142,7 +147,7 @@ def set_clearance(
     return {"user_id": str(user_id), "tlp_clearance": body.clearance}
 
 
-@router.post("/{user_id}/roles", response_model=dict)
+@router.post("/users/{user_id}/roles", response_model=dict)
 def grant_role(
     user_id: UUID, body: RoleBody,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -156,7 +161,7 @@ def grant_role(
     return {"user_id": str(user_id), "granted": body.role.upper()}
 
 
-@router.delete("/{user_id}/roles/{role}", response_model=dict)
+@router.delete("/users/{user_id}/roles/{role}", response_model=dict)
 def revoke_role(
     user_id: UUID, role: str,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -172,7 +177,7 @@ def revoke_role(
 
 # Same meter as recovery codes: both mint a credential in a loop
 # an impatient operator will happily click.
-@router.post("/{user_id}/totp", response_model=dict,
+@router.post("/users/{user_id}/totp", response_model=dict,
              dependencies=[Depends(rate_limit("auth.recovery_codes"))])
 def reenrol_totp(
     user_id: UUID,
@@ -187,7 +192,7 @@ def reenrol_totp(
     return _credentials(creds)
 
 
-@router.post("/{user_id}/unlock", response_model=dict)
+@router.post("/users/{user_id}/unlock", response_model=dict)
 def unlock(
     user_id: UUID,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -198,3 +203,22 @@ def unlock(
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "unlocked": True}
+
+
+@router.get("/readiness", response_model=dict)
+def readiness(
+    user: CurrentUser = Depends(require_global("user.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The code-side half of the legal register (docs/16), as `{ready,
+    checks}` with evidence per check. See `readiness.py` for what is
+    checked and why.
+
+    Gated on `user.manage` rather than a read permission because the
+    evidence names the deployment's configuration -- which variables are
+    set, where Redis and the object store are, who holds which role --
+    and that is an administrator's view, not an analyst's. Every probe is
+    guarded, so a service that is down is a failed check with the error
+    as evidence and this endpoint still answers 200.
+    """
+    return readiness_register.report(conn)

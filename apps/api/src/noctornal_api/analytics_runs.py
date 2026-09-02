@@ -39,6 +39,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import psycopg
@@ -76,9 +77,18 @@ class RunResult:
     payload: dict
     run_id: UUID
     cached: bool
+    #: When the run finished, for a result read back by `latest`. None on
+    #: the compute and cache-hit paths, where the answer is "now" or the
+    #: caller asked for a hash match rather than a moment in time.
+    computed_at: datetime | None = None
 
     def as_response(self) -> dict:
-        return {**self.payload, "run_id": str(self.run_id), "cached": self.cached}
+        out = {**self.payload, "run_id": str(self.run_id), "cached": self.cached}
+        if self.computed_at is not None:
+            # The ONE place the shape is extended, so `latest` is the suite
+            # response plus this field and cannot drift into its own shape.
+            out["computed_at"] = self.computed_at.isoformat()
+        return out
 
 
 class AnalyticsRunService:
@@ -134,6 +144,48 @@ class AnalyticsRunService:
             }
         return self._run(p, params, KPP_NEG, {"n_remove": n_remove},
                          force=force, compute=compute)
+
+    def latest(self, p: Projection, params: AnalyticsParams) -> RunResult | None:
+        """The most recent COMPLETE suite run for this projection, at the
+        caller's visibility, or None when there is none.
+
+        Until 2026-09-02 the analytics pane was empty until somebody
+        pressed "Run analysis", although every completed run was already
+        on `analytics.metric_run` with its full `result` payload: the
+        persistence was written for cache hits and time series and never
+        read back as "what was the last answer". So an analyst opening a
+        case saw nothing, ran the suite again, and was served the cached
+        row anyway.
+
+        Deliberately does NOT re-project the graph. The question is "what
+        did the last run say", not "is the last run still current" --
+        that second question is what `suite()`'s hash lookup answers, and
+        an analyst who wants it presses the button. Nor does it insert a
+        projection row: a read that leaves a row behind is not a read.
+
+        Scoped by `visibility_clearance` / `visibility_compartments`
+        exactly as `history` and `_lookup` are, and for the same reason:
+        a run computed over a better-cleared analyst's graph is never
+        served to a lesser one, because the score's explanation would lie
+        in nodes they may not see.
+        """
+        row = self._c.execute(
+            """SELECT r.id, r.result, r.finished_at
+                 FROM analytics.metric_run r
+                 JOIN analytics.projection pr ON pr.id = r.projection_id
+                WHERE pr.case_id = %s AND pr.name = %s
+                  AND r.algorithm = %s AND r.status = 'COMPLETE'
+                  AND r.visibility_clearance = %s::core.tlp
+                  AND r.visibility_compartments = %s
+                ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
+                LIMIT 1""",
+            (p.case_id, self._projection_name(p, params), SUITE,
+             self._clearance, sorted(self._comp)),
+        ).fetchone()
+        if row is None:
+            return None
+        run_id, payload, finished_at = row
+        return RunResult(payload, run_id, cached=True, computed_at=finished_at)
 
     def history(self, case_id: UUID, node_id: UUID, metric: str,
                 limit: int = 50) -> list[dict]:
@@ -308,11 +360,7 @@ class AnalyticsRunService:
         two callers asking the same question land on the same projection.
         `preset` and `params` carry the readable form.
         """
-        fingerprint = hashlib.sha256(
-            json.dumps({**p.describe(), **params.describe()},
-                       sort_keys=True, default=str).encode()
-        ).hexdigest()[:16]
-        name = f"auto:{p.preset}:{fingerprint}"
+        name = self._projection_name(p, params)
         edge_types = p.resolved_edge_types()
         row = self._c.execute(
             """INSERT INTO analytics.projection
@@ -328,6 +376,18 @@ class AnalyticsRunService:
              Json({**p.describe(), **params.describe()}), self._actor),
         ).fetchone()
         return row[0]
+
+    @staticmethod
+    def _projection_name(p: Projection, params: AnalyticsParams) -> str:
+        """The derived name `_upsert_projection` stores and `latest` looks
+        up. One function for both, because a `latest` that fingerprinted
+        the parameters its own way would look for a row the upsert never
+        wrote and answer 404 to a case with a dozen completed runs."""
+        fingerprint = hashlib.sha256(
+            json.dumps({**p.describe(), **params.describe()},
+                       sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+        return f"auto:{p.preset}:{fingerprint}"
 
     def _persist_node_metrics(self, run_id: UUID, payload: dict) -> None:
         """Write the per-node numbers relationally so they are queryable

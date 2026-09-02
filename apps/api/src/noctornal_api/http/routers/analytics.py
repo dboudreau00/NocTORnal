@@ -95,6 +95,39 @@ def suite(
         raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
 
 
+@router.get("/latest", response_model=dict)
+def latest(
+    case_id: UUID,
+    preset: str = Query("all"),
+    include_inferred: bool = Query(False),
+    min_confidence: str = Query("LOW"),
+    as_of: datetime | None = Query(None),
+    decay_half_life_months: float | None = Query(None),
+    leiden_resolution: float = Query(1.0, gt=0, le=10),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The most recent completed suite run for this projection, in the
+    suite endpoint's shape plus `computed_at`; 404 when there is none.
+
+    What the pane shows on opening. Takes the same projection parameters
+    as the suite -- with the same defaults -- because they are what name
+    the projection row: a `latest` that could only say `preset` would
+    never find a run made with a non-default confidence floor. Computes
+    nothing and writes nothing, so it carries no analytics meter; the
+    blanket ceiling applies.
+    """
+    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
+    params = _params(decay_half_life_months, leiden_resolution)
+    found = _svc(conn, user).latest(p, params)
+    if found is None:
+        raise Problem(404, "Not found",
+                      "no completed analytics run for this projection at your "
+                      "clearance yet; run the suite first "
+                      "(GET /cases/{case_id}/analytics)")
+    return found.as_response()
+
+
 @router.get("/key-player", response_model=dict,
             dependencies=[Depends(rate_limit("analytics.key_player"))])
 def key_player(
