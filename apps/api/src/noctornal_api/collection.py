@@ -93,6 +93,18 @@ from noctornal_api.security import envelope
 HEALTHY, COOLDOWN, LOCKED, BURNED = "HEALTHY", "COOLDOWN", "LOCKED", "BURNED"
 _TERMINAL = frozenset({BURNED})
 
+#: `collect.document.triage_state`, as 0011 declared it in a column comment
+#: and the Collected pane's filter offers it. A `text` column with no CHECK,
+#: so this tuple is the only thing standing between the dropdown and a
+#: fifth state the filter cannot select -- a document in one would have
+#: disappeared from every view without being deleted.
+TRIAGE_STATES = ("NEW", "TRIAGED", "LINKED", "DISCARDED")
+
+#: A suppression is a hit removed from the queue on somebody's say-so, and
+#: the reason is the only record of whose and why. Same floor the persona
+#: status route applies, for the same reason.
+MIN_SUPPRESS_REASON_LENGTH = 5
+
 #: Private ranges an outbound fetch must never reach. A floor, not a
 #: solution -- see the module docstring and docs/16.
 #:
@@ -234,6 +246,16 @@ class PersonaUnavailable(CollectionError):
     """The persona cannot be used right now -- cooling down, locked or
     burnt. A distinct type because the caller's response differs: a
     cooldown is a wait, a burn is a replacement."""
+
+
+class CollectionNotFound(CollectionError):
+    """The row does not exist, is not on the case named, or sits above
+    the caller's clearance -- and the caller is told none of which. A
+    distinct type because the router's answer differs: this is a 404,
+    where a bad argument (a triage state that is not one, a reason too
+    short to be one) is a 400. Before 2026-09-02 every `CollectionError`
+    from a hit route was a 404, so a refused ARGUMENT would have reported
+    as a missing ROW."""
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +488,50 @@ class PersonaVault:
                     {"reason": reason, "cooldown_until":
                      until.isoformat() if until else None})
 
-    def check_egress_separation(self, source_id: UUID) -> list[dict]:
+    def personas(self, *, clearance: str | None = None) -> list[dict]:
+        """Persona HEALTH, never a secret, filtered by the SOURCE's label.
+
+        Every column except `secret_ciphertext` / `secret_key_id` /
+        `secret_nonce`, named explicitly rather than selected with `*` so
+        that adding a secret-bearing column later cannot quietly start
+        returning it. Lived in the router until 2026-09-02; moved here so
+        the clearance filter is testable without HTTP.
+
+        Each row carries the source's name and base_url, and
+        `collect.source.classification` can be RED. So a persona on a RED
+        source is withheld from a caller below RED -- the persona is not
+        classified itself, but the row would name the forum it works, and
+        the forum is what the label protects. A persona bound to NO
+        source is always listed: there is nothing on that row for a
+        source label to protect.
+
+        `clearance=None` applies NO filter. That is the worker path -- a
+        scheduler has no user, and a NULL clearance read as "see nothing"
+        would be a collector that quietly stops -- and every HTTP caller
+        passes the user's own ceiling instead.
+        """
+        rows = self._c.execute(
+            """SELECT a.id, a.handle, s.name, s.base_url, a.status,
+                      a.last_used_at, a.burn_reason, a.cooldown_until,
+                      a.approved_by, a.secret_rotated_at
+                 FROM collect.collection_account a
+                 LEFT JOIN collect.source s ON s.id = a.source_id
+                WHERE %s::core.tlp IS NULL OR s.id IS NULL
+                   OR s.classification <= %s::core.tlp
+                ORDER BY a.status, a.handle""",
+            (clearance, clearance)).fetchall()
+        return [
+            {"id": str(r[0]), "handle": r[1], "source_name": r[2],
+             "source_url": r[3], "status": r[4],
+             "last_used_at": r[5].isoformat() if r[5] else None,
+             "burn_reason": r[6],
+             "cooldown_until": r[7].isoformat() if r[7] else None,
+             "approved": r[8] is not None,
+             "secret_rotated_at": r[9].isoformat() if r[9] else None}
+            for r in rows]
+
+    def check_egress_separation(self, source_id: UUID, *,
+                                clearance: str | None = None) -> list[dict]:
         """docs/04: one persona, one egress profile.
 
         "Two personas sharing an exit IP can be correlated by any competent
@@ -478,7 +543,22 @@ class PersonaVault:
         against the SAME source. That is a temporal condition, and a check
         with a stated reason beats a constraint that is either wrong or
         unenforceable.
+
+        With a `clearance`, a source above it (or one that does not exist)
+        is REFUSED rather than answered with an empty list. The egress
+        route's own notice says an empty result means no shared egress was
+        found, so returning `[]` to a caller who may not see the source
+        would report "clean" about a forum they are not cleared to know
+        exists. `None` is the worker path and applies no check.
         """
+        if clearance is not None:
+            visible = self._c.execute(
+                """SELECT 1 FROM collect.source
+                    WHERE id = %s AND classification <= %s::core.tlp""",
+                (source_id, clearance)).fetchone()
+            if visible is None:
+                raise CollectionNotFound(
+                    "no such source, or it is above your clearance")
         rows = self._c.execute(
             """SELECT egress_profile_id, count(*), array_agg(handle)
                  FROM collect.collection_account
@@ -541,9 +621,25 @@ class Adapter:
 
     `fetch` returns ITEMS, never graph elements. An adapter that could
     construct a node would be an extractor writing the graph, and invariant
-    3 says extractors propose. Everything an adapter produces lands as a
-    `collect.document` and reaches the graph only through the proposal
-    queue a human works.
+    3 says extractors propose.
+
+    Where an item actually goes -- corrected 2026-09-02. This docstring
+    used to say everything an adapter produces "reaches the graph only
+    through the proposal queue a human works". It does not reach the
+    graph at all. `CollectionService.run_once` stores each item as a
+    `collect.document` (versioned, deduplicated on content hash) and, when
+    a watch matches, a `collect.watch_hit`; it never calls `ProposalStore`
+    and no extractor runs over the document afterwards. The only path from
+    a source into `collect.proposal` is a MANUAL capture through
+    `CaptureService`, which is an analyst pasting a page, not a poll.
+
+    Wiring the collector into the proposal queue is a design decision
+    deliberately NOT made here. It would put a machine's suggestions into
+    an analyst's triage at the collector's rate rather than the analyst's,
+    which is the "landfill" docs/09 warns about, and it belongs with the
+    extractor work rather than with a docstring correction. What this
+    class promises is the narrower and true thing: an adapter cannot write
+    `core.node` or `core.edge`, because it never holds anything that could.
     """
 
     key: str = "abstract"
@@ -859,6 +955,27 @@ class RunResult:
 
 
 class CollectionService:
+    """The scheduler's reporting half, one poll, and the read path.
+
+    Where a poll's output goes, stated exactly because the `Adapter`
+    docstring used to overstate it: `run_once` stores what it fetched as
+    `collect.document` and `collect.watch_hit` rows, and records the poll
+    itself on `collect.collection_run`, on the source (health, failure
+    count, next due time) and on `collect.watch.last_hit_at`. That is the
+    whole list. No proposal, no extraction, no graph element. The
+    collector fills the aggregation bucket; what leaves the bucket is a
+    separate, human-driven step that this class does not perform.
+
+    Two kinds of caller share this class, and `clearance` is how they are
+    told apart. The listing methods (`due_sources`, `unhealthy_sources`,
+    `never_polled_sources`, `runs`) take `clearance=None` for the
+    worker/scheduler, which has no user and must see every source or it
+    silently polls nothing, and a TLP name for an HTTP caller, whose own
+    ceiling then hides any source labelled above it. Until 2026-09-02 the
+    listings had no filter at all, so a RED source's name and URL reached
+    any `collection.read` holder while its posts -- correctly -- did not.
+    """
+
     def __init__(self, conn: psycopg.Connection,
                  adapters: dict[str, Adapter] | None = None,
                  limiter: RateLimiter | None = None):
@@ -867,7 +984,8 @@ class CollectionService:
         self._limiter = limiter or RateLimiter(conn)
 
     def due_sources(self, *, now: datetime | None = None,
-                    rng: random.Random | None = None) -> list[dict]:
+                    rng: random.Random | None = None,
+                    clearance: str | None = None) -> list[dict]:
         """What is ready to poll. Reports; does not act.
 
         Nothing loops here. A collector that runs itself on a timer nobody
@@ -881,6 +999,14 @@ class CollectionService:
         toward the floor -- a regular cadence, which is the signature
         jitter exists to avoid. The schedule is now stored, rolled once
         when a run finishes, and read as-is.
+
+        `clearance=None` -- the default, and the scheduler's reading --
+        applies NO classification filter. A worker has no user, and a
+        NULL clearance read as "see nothing" would be a collector that
+        polls nothing and reports no error, which is the inverse of the
+        mistake the read-path note below warns about. An HTTP caller
+        passes its own ceiling, and a source labelled above it is not
+        reported as due: its name and URL are what the label protects.
         """
         now = now or datetime.now(timezone.utc)
         rows = self._c.execute(
@@ -888,7 +1014,10 @@ class CollectionService:
                       max_rps, parser_key, last_ok_at, consecutive_failures,
                       health, next_due_at
                  FROM collect.source
-                WHERE is_active ORDER BY next_due_at NULLS FIRST""").fetchall()
+                WHERE is_active
+                  AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)
+                ORDER BY next_due_at NULLS FIRST""",
+            (clearance, clearance)).fetchall()
         due = []
         for row in rows:
             when = row[11]
@@ -1184,7 +1313,7 @@ class CollectionService:
                         ELSE 'OK' END
                 WHERE id = %s""", (source_id,))
 
-    def unhealthy_sources(self) -> list[dict]:
+    def unhealthy_sources(self, *, clearance: str | None = None) -> list[dict]:
         """Sources that have actually FAILED, not sources nobody has polled.
 
         `WHERE health <> 'OK'` looked right and was not: a source that has
@@ -1199,6 +1328,10 @@ class CollectionService:
         watching. Never-polled sources are reported separately, because
         "added and never collected" is also worth knowing — it is just not
         the same thing as broken.
+
+        `clearance` as in `due_sources`: None is the worker and filters
+        nothing; a TLP name hides sources labelled above it. "Broken" next
+        to a RED forum's name is the same leak as "due" next to it.
         """
         rows = self._c.execute(
             """SELECT id, name, health, consecutive_failures, last_ok_at
@@ -1206,7 +1339,9 @@ class CollectionService:
                 WHERE is_active
                   AND (consecutive_failures > 0
                        OR (health <> 'OK' AND last_ok_at IS NOT NULL))
-                ORDER BY consecutive_failures DESC""").fetchall()
+                  AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)
+                ORDER BY consecutive_failures DESC""",
+            (clearance, clearance)).fetchall()
         return [{"id": str(r[0]), "name": r[1], "health": r[2],
                  "consecutive_failures": r[3],
                  "last_ok_at": r[4].isoformat() if r[4] else None,
@@ -1215,41 +1350,85 @@ class CollectionService:
                          "somebody is watching this"}
                 for r in rows]
 
-    def never_polled_sources(self) -> list[dict]:
+    def never_polled_sources(self, *,
+                             clearance: str | None = None) -> list[dict]:
         """Active, configured, and never successfully collected from.
 
         Not an error and not healthy either. A source somebody added and
         nobody ever ran is the quiet way a collection plan turns out to
         have been aspirational.
+
+        `clearance` as in `due_sources`: None filters nothing, a TLP name
+        hides sources labelled above it.
         """
         rows = self._c.execute(
             """SELECT id, name, kind, created_at, consecutive_failures
                  FROM collect.source
                 WHERE is_active AND last_ok_at IS NULL
                   AND consecutive_failures = 0
-                ORDER BY created_at""").fetchall()
+                  AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)
+                ORDER BY created_at""",
+            (clearance, clearance)).fetchall()
         return [{"id": str(r[0]), "name": r[1], "kind": r[2],
                  "created_at": r[3].isoformat() if r[3] else None,
                  "consecutive_failures": r[4],
                  "note": "configured but never collected from"}
                 for r in rows]
 
+    def runs(self, *, source_id: UUID | None = None, limit: int = 50,
+             clearance: str | None = None) -> list[dict]:
+        """Recent polls, successes and failures alike, newest first.
+
+        Lived in the router as a raw SELECT on `collection_run` with no
+        join until 2026-09-02 -- which is why it could not filter by
+        classification even in principle: the label is on the SOURCE, and
+        the query never looked at the source. A run row names its source
+        by id, and the error text of a failed run quotes the fetch, so a
+        RED forum's run history was readable by any `collection.read`
+        holder. Joined and filtered now; `clearance=None` is the worker
+        reading and filters nothing, as in `due_sources`.
+        """
+        rows = self._c.execute(
+            """SELECT r.id, r.source_id, r.started_at, r.finished_at,
+                      r.status, r.items_seen, r.items_new, r.http_status,
+                      r.error_class, r.error_detail
+                 FROM collect.collection_run r
+                 JOIN collect.source s ON s.id = r.source_id
+                WHERE (%s::uuid IS NULL OR r.source_id = %s)
+                  AND (%s::core.tlp IS NULL
+                       OR s.classification <= %s::core.tlp)
+                ORDER BY r.started_at DESC LIMIT %s""",
+            (source_id, source_id, clearance, clearance, limit)).fetchall()
+        return [
+            {"id": str(r[0]), "source_id": str(r[1]),
+             "started_at": r[2].isoformat() if r[2] else None,
+             "finished_at": r[3].isoformat() if r[3] else None,
+             "status": r[4], "items_seen": r[5], "items_new": r[6],
+             "http_status": r[7], "error_class": r[8], "error_detail": r[9]}
+            for r in rows]
+
     # ── the read path ──────────────────────────────────────────────────
     #
     # Everything above WRITES `collect.document` and `collect.watch_hit`.
     # Until 2026-08-10 nothing read them back. No endpoint, no UI, and no
-    # search reach -- `SearchService` covers `core.node` and
+    # search reach -- `SearchService` covered `core.node` and
     # `core.evidence` only, and `document.search_tsv`'s GIN index was used
-    # by no query in the tree. A watch could fire four hundred times and
-    # the analyst saw the integer 400 on a run card and could not open one
-    # of them.
+    # by no query in the tree until `SearchService.search` joined the
+    # document table on 2026-09-02. A watch could fire four hundred times
+    # and the analyst saw the integer 400 on a run card and could not open
+    # one of them.
     #
     # That is the tags/node-sets defect one layer up: not a service with
     # no caller, an entire PHASE with no caller. The lifecycle columns
     # show the intent was never finished rather than decided against --
     # `watch_hit` carries `notified_at`, `suppressed`, `acknowledged_by`,
     # `acknowledged_at` and a partial index for the unnotified set, none
-    # of them written or read by anything.
+    # of them written or read by anything. The read path made three of
+    # them visible; `suppress_hit`, `unsuppress_hit` and
+    # `set_document_triage` below (2026-09-02) are the writers the pane
+    # had been describing. `notified_at` still has no writer: there is no
+    # notification kind for a watch hit, and inventing one belongs with
+    # the notification registry, not here.
     #
     # Clearance is a PARAMETER here rather than constructor state, unlike
     # CommsService, because this same class does the collecting and the
@@ -1382,3 +1561,131 @@ class CollectionService:
                 "no such watch hit, or it is above your clearance")
         return {"id": str(row[0]), "acknowledged_by": str(row[1]),
                 "acknowledged_at": row[2].isoformat() if row[2] else None}
+
+    # ── the writers the Collected pane was describing ─────────────────
+    #
+    # `watch_hits` returns `suppressed` and `suppress_reason`, `documents`
+    # returns and filters on `triage_state`, and the pane offers both. Until
+    # 2026-09-02 no production path set any of them: `_match_watches`
+    # drops a suppressed match BEFORE the row is written (so a stored
+    # `suppressed = true` could only come from a test), and nothing touched
+    # `triage_state` after the INSERT default. The UI was internally
+    # consistent with a service that showed the columns, and both were
+    # describing rows that did not exist.
+    #
+    # Every write is inside one UPDATE whose WHERE carries the case (for
+    # hits) and the clearance, exactly as `acknowledge_hit` does: no window
+    # between deciding and writing, and a row the caller may not see is not
+    # merely hidden but unwritable. Every write is audited, because these
+    # columns record nothing about who changed them.
+
+    def suppress_hit(self, case_id: UUID, hit_id: UUID, *, actor_id: UUID,
+                     reason: str, clearance: str) -> dict:
+        """Take a hit out of the queue on somebody's say-so, with a reason.
+
+        The reason is the whole point. A hit that vanished from the queue
+        for no stated cause is exactly what the pane's "suppressed hits
+        are shown with their reason" exists to prevent, so a blank or a
+        three-letter one is refused here, for every caller, rather than by
+        a validator on one route.
+
+        Re-suppressing an already-suppressed hit replaces the reason. The
+        latest reason is the one the next analyst needs, and the audit
+        trail keeps the earlier ones.
+
+        `case_id` is the case in the ROUTE, and it must be the case the
+        watch belongs to. The route gate authorised the caller against
+        that case, not against whatever case the hit is actually on.
+        """
+        reason = (reason or "").strip()
+        if len(reason) < MIN_SUPPRESS_REASON_LENGTH:
+            raise CollectionError(
+                f"a suppression has to say why, in at least "
+                f"{MIN_SUPPRESS_REASON_LENGTH} characters: without a reason "
+                f"the next analyst cannot tell noise from something somebody "
+                f"wanted gone")
+        row = self._c.execute(
+            """UPDATE collect.watch_hit h
+                  SET suppressed = true, suppress_reason = %s
+                 FROM collect.watch w, collect.document d
+                WHERE h.id = %s AND w.id = h.watch_id AND w.case_id = %s
+                  AND d.id = h.document_id
+                  AND d.classification <= %s::core.tlp
+            RETURNING h.id, h.suppressed, h.suppress_reason""",
+            (reason, hit_id, case_id, clearance)).fetchone()
+        if row is None:
+            raise CollectionNotFound(
+                "no such watch hit on this case, or it is above your clearance")
+        self._audit(actor_id, "WATCH_HIT_SUPPRESSED", "watch_hit", hit_id,
+                    {"reason": reason}, case_id=case_id)
+        return {"id": str(row[0]), "suppressed": row[1],
+                "suppress_reason": row[2]}
+
+    def unsuppress_hit(self, case_id: UUID, hit_id: UUID, *, actor_id: UUID,
+                       clearance: str) -> dict:
+        """Put a hit back. Clears the reason too: a hit that is not
+        suppressed but still carries a reason would render as both."""
+        row = self._c.execute(
+            """UPDATE collect.watch_hit h
+                  SET suppressed = false, suppress_reason = NULL
+                 FROM collect.watch w, collect.document d
+                WHERE h.id = %s AND w.id = h.watch_id AND w.case_id = %s
+                  AND d.id = h.document_id
+                  AND d.classification <= %s::core.tlp
+            RETURNING h.id, h.suppressed, h.suppress_reason""",
+            (hit_id, case_id, clearance)).fetchone()
+        if row is None:
+            raise CollectionNotFound(
+                "no such watch hit on this case, or it is above your clearance")
+        self._audit(actor_id, "WATCH_HIT_UNSUPPRESSED", "watch_hit", hit_id,
+                    {}, case_id=case_id)
+        return {"id": str(row[0]), "suppressed": row[1],
+                "suppress_reason": row[2]}
+
+    def set_document_triage(self, document_id: UUID, state: str, *,
+                            actor_id: UUID, clearance: str) -> dict:
+        """Move a document between 0011's four triage states.
+
+        Validated against `TRIAGE_STATES` because the column is bare
+        `text`: a fifth value would be stored, would match no option in
+        the pane's filter, and the document would have left every view
+        without being deleted. LINKED is settable by hand deliberately --
+        nothing automated links a document to the graph (see the
+        `Adapter` docstring), so an analyst who has done it by hand is the
+        only one who can say so.
+
+        NOT case-scoped, like `documents`: a document hangs off a source,
+        not a case. Gated on clearance inside the UPDATE, and purged
+        documents are untouchable -- triaging a destroyed exhibit would
+        resurrect it in the filtered list with an empty body.
+        """
+        if state not in TRIAGE_STATES:
+            raise CollectionError(
+                f"unknown triage state {state!r}: one of "
+                f"{', '.join(TRIAGE_STATES)}")
+        row = self._c.execute(
+            """UPDATE collect.document d
+                  SET triage_state = %s
+                 FROM (SELECT id, triage_state FROM collect.document
+                        WHERE id = %s) old
+                WHERE d.id = old.id AND d.purged_at IS NULL
+                  AND d.classification <= %s::core.tlp
+            RETURNING d.id, old.triage_state, d.triage_state""",
+            (state, document_id, clearance)).fetchone()
+        if row is None:
+            raise CollectionNotFound(
+                "no such document, or it is above your clearance")
+        self._audit(actor_id, "DOCUMENT_TRIAGED", "document", document_id,
+                    {"from": row[1], "to": row[2]})
+        return {"id": str(row[0]), "previous_state": row[1],
+                "triage_state": row[2]}
+
+    def _audit(self, actor_id: UUID, action: str, object_type: str,
+               object_id: UUID, detail: dict, *,
+               case_id: UUID | None = None) -> None:
+        self._c.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, object_id,
+                    case_id, detail)
+               VALUES (%s, 'USER', %s, %s, %s, %s, %s)""",
+            (actor_id, action, object_type, object_id, case_id, Json(detail)))
