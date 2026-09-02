@@ -246,6 +246,43 @@ jobs:
           sys.exit(1 if report.breaks else 0)
           PY
 
+      # The same job for the OTHER tamper-evident ledger. core.evidence_custody
+      # was hash-chained in 0024 and, until 2026-09-02, nothing recomputed it
+      # either -- on the record that is actually produced to a court. Runs
+      # after the suite for the same reason: the evidence, provenance and e2e
+      # suites write real custody rows, and (since the same date) their
+      # teardowns leave them in place rather than deleting them with the
+      # trigger stood down, so this verifies a chain with traffic in it.
+      #
+      # `checked == 0` is a failure, not a pass: an empty ledger verifies
+      # trivially and would mean the suites stopped writing custody, or the
+      # ledger was truncated. The anchor is checked explicitly because it is
+      # the one thing the relative checks cannot see.
+      - name: Custody chain verifies
+        run: |
+          python - <<'PY'
+          import sys
+          from noctornal_api.custody_verify import verify_custody_chain
+          from noctornal_api.db import connect
+
+          report = verify_custody_chain(connect())
+          print(f"checked {report.checked} custody rows, "
+                f"id {report.first_id}..{report.last_id}, "
+                f"genesis_count {report.genesis_count}")
+          if report.checked == 0:
+              print("::error::No custody rows to verify. The suite ran "
+                    "without writing any, or the ledger was truncated.")
+              sys.exit(1)
+          if report.forks:
+              print(f"::warning::{len(report.forks)} custody row(s) share a "
+                    f"predecessor. Not counted as tampering, but on a ledger "
+                    f"written by 0024 this should not occur -- investigate.")
+          for b in report.breaks:
+              print(f"::error::custody chain {b.kind} break at id {b.id} "
+                    f"({b.action} on {b.evidence_id} at {b.occurred_at})")
+          sys.exit(1 if report.breaks else 0)
+          PY
+
       # The suite must not quietly become unit-only because a service died:
       # every _pg test skips without DATABASE_URL, so a broken Postgres
       # service would show as a green run with 100+ skips.

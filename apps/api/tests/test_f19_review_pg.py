@@ -79,6 +79,13 @@ def conn():
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification WHERE recipient_id IN {sub})")
         c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {sub}")
+        # By ACTOR as well -- the gap `test_governance_pg.py` had: an alert
+        # whose actor is a swept user but whose recipient and case are not
+        # survives the two sweeps around it and blocks the user delete with
+        # notification_actor_id_fkey. Closed here on the same day
+        # (2026-09-02), before it was seen to bite in this suite.
+        # notify.delivery cascades from notification.
+        c.execute(f"DELETE FROM notify.notification WHERE actor_id IN {sub}")
         c.execute(f"DELETE FROM notify.notification WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM notify.preference WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
