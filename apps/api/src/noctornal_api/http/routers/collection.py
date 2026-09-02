@@ -33,6 +33,24 @@ notice. The software will happily drive an account into a site; whether
 you may is not a software question, and in several jurisdictions accessing
 a system with credentials registered under a false identity engages
 computer-misuse law regardless of intent.
+
+## Every listing is filtered by the caller's own ceiling
+
+`collect.source.classification` defaults to AMBER and can be RED, and
+until 2026-09-02 only the document and watch-hit routes honoured it. The
+older routes -- due, unhealthy, runs, personas, egress -- handed a RED
+source's name, URL, health and run history to any global
+`collection.read` holder, while the posts from that source were correctly
+withheld. The name of a RED source is frequently the finding. So every
+route here that LISTS sources, runs, personas or documents, or answers a
+question about one source, passes `user_ceiling(...)[0].name` to the
+service; the service treats `None` as the worker path with no filter, and
+nothing in this file ever passes `None`. The two routes that take no
+ceiling -- `/sources/{id}/run` and `/personas/{id}/status` -- are writes
+to one row the caller named by id, under `collection.run` and
+`collection_account.manage` respectively, and neither returns a source's
+name or URL; they are not listings and are not what this section is
+about.
 """
 from __future__ import annotations
 
@@ -44,6 +62,7 @@ from pydantic import BaseModel, Field
 
 from noctornal_api.collection import (
     CollectionError,
+    CollectionNotFound,
     CollectionService,
     PersonaUnavailable,
     PersonaVault,
@@ -80,8 +99,12 @@ def due_sources(
     A newly-added source is due immediately rather than after a full
     interval -- that was a real defect, and a source that sits idle on its
     first day looks broken to whoever just configured it.
+
+    Filtered by the caller's own ceiling. A source above it is not "due"
+    to this caller; its name and URL are what its label protects.
     """
-    due = CollectionService(conn).due_sources()
+    clearance, _ = user_ceiling(conn, user.user_id)
+    due = CollectionService(conn).due_sources(clearance=clearance.name)
     return {"due": [{**d, "id": str(d["id"])} for d in due],
             "count": len(due),
             "notice": ("Nothing polls itself. Call /sources/{id}/run to "
@@ -106,9 +129,10 @@ def unhealthy(
     parser that genuinely stopped matching pads the alert with non-alerts
     — which is how a list that exists to be watched stops being watched.
     """
+    clearance, _ = user_ceiling(conn, user.user_id)
     svc = CollectionService(conn)
-    rows = svc.unhealthy_sources()
-    never = svc.never_polled_sources()
+    rows = svc.unhealthy_sources(clearance=clearance.name)
+    never = svc.never_polled_sources(clearance=clearance.name)
     return {"sources": rows, "count": len(rows),
             "never_polled": never, "never_polled_count": len(never),
             "notice": ("Never-polled sources are listed separately: added "
@@ -132,9 +156,14 @@ def run_once(
 
     Every outcome becomes a `collection_run` row including the failures,
     because parser health is only knowable if failures are recorded as
-    carefully as successes. Metered under `capture` for the same reason
-    that limit exists: each poll can raise a proposal per new item, and a
-    loop floods the analyst's triage queue rather than the server.
+    carefully as successes. Metered under `capture` because it is the same
+    shape of work -- one call that stores rows at machine rate -- and a
+    loop floods `collect.document` and the watch-hit queue rather than the
+    server. Until 2026-09-02 this docstring said each poll "can raise a
+    proposal per new item"; it cannot. A poll writes documents and watch
+    hits and never touches `collect.proposal` -- the `Adapter` docstring in
+    collection.py says where items actually go and why the proposal wiring
+    is deliberately not made.
     """
     try:
         result = CollectionService(conn).run_once(
@@ -177,27 +206,14 @@ def personas(
     What an operator needs instead is whether a persona is usable and why
     not -- a burnt persona that still looks available is one somebody will
     keep using.
+
+    Each row names the persona's SOURCE, so the list is filtered by the
+    caller's ceiling against the source's label (`PersonaVault.personas`
+    says how, and why a source-less persona is always shown).
     """
-    # Every column EXCEPT secret_ciphertext / secret_key_id / secret_nonce,
-    # named explicitly rather than selected with * so that adding a
-    # secret-bearing column later cannot quietly start returning it.
-    rows = conn.execute(
-        """SELECT a.id, a.handle, s.name, s.base_url, a.status,
-                  a.last_used_at, a.burn_reason, a.cooldown_until,
-                  a.approved_by, a.secret_rotated_at
-             FROM collect.collection_account a
-             LEFT JOIN collect.source s ON s.id = a.source_id
-            ORDER BY a.status, a.handle""").fetchall()
+    clearance, _ = user_ceiling(conn, user.user_id)
     return {
-        "personas": [
-            {"id": str(r[0]), "handle": r[1], "source_name": r[2],
-             "source_url": r[3], "status": r[4],
-             "last_used_at": r[5].isoformat() if r[5] else None,
-             "burn_reason": r[6],
-             "cooldown_until": r[7].isoformat() if r[7] else None,
-             "approved": r[8] is not None,
-             "secret_rotated_at": r[9].isoformat() if r[9] else None}
-            for r in rows],
+        "personas": PersonaVault(conn).personas(clearance=clearance.name),
         "notice": ("Secrets are never returned by any endpoint. " + L3_NOTICE),
     }
 
@@ -242,8 +258,19 @@ def egress_separation(
     single persona's own view -- which is why this is a question you have
     to ask deliberately rather than something the system warns about
     while you work.
+
+    404 for a source above the caller's ceiling, and for one that does
+    not exist, indistinguishably: the notice below says an empty result
+    means no shared egress was found, so answering an AMBER caller with
+    `[]` about a RED source would report "clean" about a forum they are
+    not cleared to know exists.
     """
-    findings = PersonaVault(conn).check_egress_separation(source_id)
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        findings = PersonaVault(conn).check_egress_separation(
+            source_id, clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
     return {"source_id": str(source_id), "findings": findings,
             "count": len(findings),
             "notice": ("An empty result means no SHARED egress was found "
@@ -263,24 +290,18 @@ def runs(
     The failures are the point. A run that fetched 200 items and parsed
     zero is a broken parser, and it is indistinguishable from a quiet feed
     unless the run is recorded either way.
+
+    Filtered by the caller's ceiling against the SOURCE's label. This was
+    a raw SELECT on `collection_run` with no join, so it could not have
+    filtered even if asked: the label lives on the source.
     """
-    rows = conn.execute(
-        """SELECT id, source_id, started_at, finished_at, status,
-                  items_seen, items_new, http_status, error_class, error_detail
-             FROM collect.collection_run
-            WHERE (%s::uuid IS NULL OR source_id = %s)
-            ORDER BY started_at DESC LIMIT %s""",
-        (source_id, source_id, limit)).fetchall()
-    return {"runs": [
-        {"id": str(r[0]), "source_id": str(r[1]),
-         "started_at": r[2].isoformat() if r[2] else None,
-         "finished_at": r[3].isoformat() if r[3] else None,
-         "status": r[4], "items_seen": r[5], "items_new": r[6],
-         "http_status": r[7], "error_class": r[8], "error_detail": r[9]}
-        for r in rows], "count": len(rows),
-        "note": ("A run with items_seen > 0 and items_new = 0 across "
-                 "several polls is usually a parser that stopped matching, "
-                 "not a quiet source.")}
+    clearance, _ = user_ceiling(conn, user.user_id)
+    rows = CollectionService(conn).runs(
+        source_id=source_id, limit=limit, clearance=clearance.name)
+    return {"runs": rows, "count": len(rows),
+            "note": ("A run with items_seen > 0 and items_new = 0 across "
+                     "several polls is usually a parser that stopped "
+                     "matching, not a quiet source.")}
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +339,39 @@ def documents(
             "note": ("Bodies are excerpted to 400 characters; `truncated` "
                      "says which. Purged documents are omitted entirely "
                      "rather than returned with an empty body.")}
+
+
+class TriageBody(BaseModel):
+    state: str
+
+
+@router.post("/documents/{document_id}/triage", response_model=dict)
+def triage_document(
+    document_id: UUID, body: TriageBody,
+    user: CurrentUser = Depends(require_global("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Move a document between the four triage states the pane filters on.
+
+    Gated exactly as reading documents is -- global `collection.read`,
+    and the document's own classification against the caller's ceiling
+    inside the service's UPDATE -- because triage is the reader's verb:
+    the analyst working the Collected list is the one who decides a post
+    is noise or worth a look. NOT case-scoped, for the reason `documents`
+    gives: a document hangs off a source, not a case.
+
+    A state outside the four is a 400 carrying the list; a document the
+    caller cannot see is a 404, the same 404 a random UUID gets.
+    """
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        return CollectionService(conn).set_document_triage(
+            document_id, body.state, actor_id=user.user_id,
+            clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 case_router = APIRouter(prefix="/cases/{case_id}/collection",
@@ -375,3 +429,55 @@ def acknowledge_watch_hit(
     except CollectionError as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     return result
+
+
+class SuppressBody(BaseModel):
+    #: No `min_length` here on purpose. The floor is the service's
+    #: (`MIN_SUPPRESS_REASON_LENGTH`), so every caller -- this route, a
+    #: script, a future digest job -- meets the same rule, and a short
+    #: reason is a 400 carrying the service's words rather than a 422
+    #: from a validator that restates them.
+    reason: str
+
+
+@case_router.post("/watch-hits/{hit_id}/suppress", response_model=dict)
+def suppress_watch_hit(
+    case_id: UUID,
+    hit_id: UUID, body: SuppressBody,
+    user: CurrentUser = Depends(require("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Take a hit out of the queue, with a reason the list will show.
+
+    The case in the path is handed to the service and must be the case
+    the hit's watch belongs to: the gate above authorised the caller
+    against THIS case, and a hit id from another case would otherwise be
+    written under an authorisation that never covered it. A hit that is
+    not on this case and a hit that does not exist get the same 404.
+    """
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        return CollectionService(conn).suppress_hit(
+            case_id, hit_id, actor_id=user.user_id, reason=body.reason,
+            clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
+@case_router.post("/watch-hits/{hit_id}/unsuppress", response_model=dict)
+def unsuppress_watch_hit(
+    case_id: UUID,
+    hit_id: UUID,
+    user: CurrentUser = Depends(require("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Put a hit back in the queue. Same gate, same case check, and the
+    reason is cleared with it."""
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        return CollectionService(conn).unsuppress_hit(
+            case_id, hit_id, actor_id=user.user_id, clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
