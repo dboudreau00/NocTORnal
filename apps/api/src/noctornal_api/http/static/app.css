@@ -712,14 +712,18 @@ select.select { appearance: none; padding-right: 24px; }
 
 /* -- analysis panel (Phase 3) ---------------------------------------- */
 #pane-analytics { overflow-y: auto; padding-bottom: 24px; }
-#pane-analytics .h3 {
+/* Section headings inside a pane. Scoped to #pane-analytics until
+   2026-09-02, while governance, the collection pane and the watch list
+   used the same class and got the browser's default <h3>. */
+.h3 {
   font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
   margin: 22px 0 6px; color: var(--text-primary);
 }
-#pane-analytics .h4 {
+.h4 {
   font-size: 12px; font-weight: 600; margin: 0 0 8px;
   color: var(--text-primary);
 }
+.card > .h3:first-child { margin-top: 0; }
 #pane-analytics .card { margin-bottom: 4px; }
 #pane-analytics .card p { margin: 0 0 8px; }
 #pane-analytics .card p:last-child { margin-bottom: 0; }
@@ -1055,7 +1059,6 @@ select.select { appearance: none; padding-right: 24px; }
  * here, not the alarm.
  */
 
-.scroll-x { overflow-x: auto; max-width: 100%; }
 
 .ach-table {
   border-collapse: collapse; font-size: 12px; margin-top: 6px;
@@ -1481,7 +1484,12 @@ select.select { appearance: none; padding-right: 24px; }
  * This app is driven from the keyboard more than it looks, and all of it
  * was documented in a 10px legend under the canvas. `?` is the convention.
  */
-.keys-sheet { max-width: 640px; padding: 20px 22px; text-align: left; }
+.keys-sheet {
+  max-width: 640px; padding: 20px 22px; text-align: left;
+  /* On a short viewport the sheet used to run past the bottom edge with
+     the Close button on the far side of it. */
+  max-height: min(84vh, calc(100dvh - 48px)); overflow-y: auto;
+}
 .keys-grid { margin: 14px 0; }
 .keys-grid .h-xs { margin-top: 14px; }
 .keys-grid .h-xs:first-child { margin-top: 0; }
