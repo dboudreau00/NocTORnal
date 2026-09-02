@@ -131,19 +131,21 @@
       <div class="cases-col">
         <h1 class="h-md">Cases</h1>
         <div class="card">
-          <table class="table" id="cases-table">
-            <caption class="sr-only">Cases you are cleared to open</caption>
-            <thead>
-              <tr>
-                <th scope="col">Code</th>
-                <th scope="col">Title</th>
-                <th scope="col">Status</th>
-                <th scope="col">Classification</th>
-                <th scope="col"><span class="sr-only">Open</span></th>
-              </tr>
-            </thead>
-            <tbody id="cases-body"></tbody>
-          </table>
+          <div class="scroll-x">
+            <table class="table" id="cases-table">
+              <caption class="sr-only">Cases you are cleared to open</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Code</th>
+                  <th scope="col">Title</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Classification</th>
+                  <th scope="col"><span class="sr-only">Open</span></th>
+                </tr>
+              </thead>
+              <tbody id="cases-body"></tbody>
+            </table>
+          </div>
           <p id="cases-empty" class="empty" hidden>No cases are open to you yet.</p>
         </div>
       </div>
@@ -487,18 +489,20 @@
             </label>
             <span id="ent-count" class="muted small"></span>
           </div>
-          <table class="table">
-            <caption class="sr-only">Entities in this case</caption>
-            <thead>
-              <tr>
-                <th scope="col">Type</th>
-                <th scope="col">Label</th>
-                <th scope="col">Classification</th>
-                <th scope="col">First seen</th>
-              </tr>
-            </thead>
-            <tbody id="ent-body"></tbody>
-          </table>
+          <div class="scroll-x">
+            <table class="table">
+              <caption class="sr-only">Entities in this case</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Type</th>
+                  <th scope="col">Label</th>
+                  <th scope="col">Classification</th>
+                  <th scope="col">First seen</th>
+                </tr>
+              </thead>
+              <tbody id="ent-body"></tbody>
+            </table>
+          </div>
           <p id="ent-empty" class="empty" hidden>No entities match.</p>
         </section>
 
@@ -512,7 +516,7 @@
           <div class="card">
             <div class="row space-between">
               <h2 class="pane-title">Notifications</h2>
-              <button id="inbox-read-all" type="button" class="ghost">
+              <button id="inbox-read-all" type="button" class="btn ghost">
                 Mark all read</button>
             </div>
             <p class="help">Everything here is filtered by your CURRENT
