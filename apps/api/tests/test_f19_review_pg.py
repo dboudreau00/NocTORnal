@@ -79,6 +79,13 @@ def conn():
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification WHERE recipient_id IN {sub})")
         c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {sub}")
+        # By ACTOR as well -- the gap `test_governance_pg.py` had: an alert
+        # whose actor is a swept user but whose recipient and case are not
+        # survives the two sweeps around it and blocks the user delete with
+        # notification_actor_id_fkey. Closed here on the same day
+        # (2026-09-02), before it was seen to bite in this suite.
+        # notify.delivery cascades from notification.
+        c.execute(f"DELETE FROM notify.notification WHERE actor_id IN {sub}")
         c.execute(f"DELETE FROM notify.notification WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM notify.preference WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
@@ -115,7 +122,17 @@ def _user(conn, clearance="RED", compartments=()):
 
 
 def _case(conn, owner, classification="AMBER", compartments=()):
+    # Since migration 0057 a compartment must be registered before a case
+    # can be filed under it, and this helper is the only route these tests
+    # have to a compartmented case. Registering here rather than in each
+    # test keeps the refusal under test the READ-IN ceiling, not the
+    # registry: an unregistered key is refused first, and a test that
+    # cannot reach the check it names proves nothing.
     from noctornal_api.cases import CaseService
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (f19 test)"))
     return CaseService(conn).create(
         code=f"OP-F19-{uuid4().hex[:6]}", title="Kestrel field office",
         legal_basis="production order", retention_until=date(2028, 1, 1),

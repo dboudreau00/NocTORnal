@@ -615,7 +615,13 @@ async function doLogout() {
 async function startApp() {
   const me = await api('/auth/me');
   state.userId = me.user_id;
-  $('hdr-user').textContent = me.user_id;
+  /* `display_name`, not `user_id`. /auth/me carried the id and the
+     recovery-code count and nothing else until 2026-09-02, so the app
+     bar showed a UUID to every signed-in analyst. The id stays as the
+     tooltip because it is what a support request needs. */
+  $('hdr-user').textContent = me.display_name || me.user_id;
+  $('hdr-user').title = me.email
+    ? me.email + ' \u00b7 ' + me.user_id : me.user_id;
   show($('view-login'), false);
   show($('view-app'), true);
   await showCaseList();
@@ -807,9 +813,9 @@ function selectTab(name) {
   if (name === 'graph') { resizeGraph(); resizeDensity(); }
   /* A canvas in a hidden pane has clientWidth 0, so it has to be sized on
      the way in or the trend draws into nothing and reads as "no data". */
-  if (name === 'analytics') resizeHistory();
+  if (name === 'analytics') { resizeHistory(); loadLatestAnalysis(); }
   if (name === 'triage') { loadTriage(); loadApprovals(); }
-  if (name === 'admin') loadAdminUsers();
+  if (name === 'admin') { loadAdminUsers(); loadReadiness(); }
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
   if (name === 'comms') {
@@ -823,7 +829,7 @@ function selectTab(name) {
   /* Only the visible subtab loads. Four fetches on tab-open would mean
      three of them are for a panel nobody is looking at, and one of those
      three is a rate-limited search. */
-  if (name === 'ach') loadAch();
+  if (name === 'ach') { loadAch(); loadAssumptions(); }
   if (name === 'feeds' && selectFeedsSub) selectFeedsSub(currentSub('pane-feeds'));
   if (name === 'governance' && selectGovSub) {
     selectGovSub(currentSub('pane-governance'));
@@ -4694,6 +4700,10 @@ function wire() {
   initSetup();
   wireElementActions();
   wireAuditVerify();
+  wireCustodyVerify();
+  wireRetentionConfirm();
+  wireDeliveries();
+  wireAssumptions();
   wireCaseActions();
   initCanvas();
   initPalette();
@@ -5452,11 +5462,23 @@ async function runAnalysis() {
     renderAnalytics();
     /* computed_at_ms is how long the ORIGINAL run took, so on a cache hit
        it describes that run, not this response. Saying "served from cache
-       in 24 ms" would claim the cache took 24 ms. */
+       in 24 ms" would claim the cache took 24 ms.
+
+       "unchanged" is a claim about the GRAPH, so it is read from `current`
+       -- the API's currency verdict -- and not from `cached`, which since
+       2026-09-02 says only that the bytes came out of storage. Both are
+       true together on this endpoint, because a suite cache hit is a
+       graph-hash match; the distinction matters because `/analytics/latest`
+       also answers `cached: true` and answers `current: null`, and a
+       renderer keyed on `cached` alone would have printed "unchanged since
+       the last run" over a graph that had moved. */
+    const ms = (suite.computed_at_ms || 0) + ' ms';
     setMsg($('an-status'), suite.cached
-      ? 'unchanged since the last run, served from cache (computed in '
-        + (suite.computed_at_ms || 0) + ' ms)'
-      : 'computed in ' + (suite.computed_at_ms || 0) + ' ms');
+      ? (suite.current === true
+          ? 'unchanged since the last run, served from cache (computed in '
+            + ms + ')'
+          : 'served from cache; currency not checked (computed in ' + ms + ')')
+      : 'computed in ' + ms);
   } catch (err) {
     show($('an-results'), false);
     show($('an-empty'), true);
@@ -6533,12 +6555,435 @@ function keyRow(k) {
   return card;
 }
 
+/* --- the custody chain -------------------------------------------------
+ *
+ * `core.evidence_custody` is the second tamper-evident ledger, hash-chained
+ * by migration 0024 under a docstring that invokes FRE 902(13)-(14). Until
+ * 2026-09-02 nothing recomputed it: the record actually produced to a court
+ * was the one nobody verified, while `audit.event` -- an internal log -- had
+ * both a verifier and a CI step.
+ *
+ * It is ONE chain across every exhibit, so `evidence_id` narrows what is
+ * REPORTED and not what is checked. The server sends that sentence in
+ * `caveat` and this renders it verbatim rather than paraphrasing: a scoped
+ * pass that reads like a completeness pass is precisely the wrong answer to
+ * "has anything been removed from this exhibit's history".
+ */
+function wireCustodyVerify() {
+  const btn = $('btn-custody-verify');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const box = $('custody-verdict');
+    const scope = $('custody-evidence-id').value.trim();
+    clear(box);
+    btn.disabled = true;
+    box.appendChild(el('p', 'help', 'recomputing…'));
+    let r;
+    try {
+      r = await api('/audit/custody/verify'
+        + (scope ? '?evidence_id=' + encodeURIComponent(scope) : ''));
+    } catch (err) {
+      clear(box);
+      /* Same treatment as the audit verdict: a 403 is the expected answer
+         for most accounts, and `refusalText` puts the SERVER's reason first
+         so an inactive account is not told it lacks a permission it holds. */
+      if (err instanceof ApiError && err.status === 403) {
+        box.appendChild(el('p', 'help warn', refusalText(err,
+          'audit.read is granted to SECURITY_OFFICER alone — the '
+          + 'administrator configures, the officer audits.')));
+      } else if (err instanceof ApiError && err.status === 422) {
+        box.appendChild(el('p', 'help warn', refusalText(err,
+          'That is not a valid exhibit id.')));
+      } else { fail(err); }
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    clear(box);
+    box.appendChild(custodyVerdict(r));
+  });
+}
+
+/** Render one custody report.
+ *
+ *  `intact && checked > 0`, exactly as the audit verdict computes it: an
+ *  exhibit with no custody rows answers "intact, 0 checked", and a green
+ *  tick on that would report an absence of history as a clean history.
+ *
+ *  Forks and the genesis count are NOT folded into the verdict chip. The
+ *  server keeps them separate because they mean different things -- a fork
+ *  means the chain cannot be linearised, a second genesis row means the
+ *  trigger was bypassed -- and flattening them here would undo that.
+ */
+function custodyVerdict(r) {
+  const ok = r.intact && r.checked > 0;
+  const card = el('div', 'card');
+  card.appendChild(el('span', 'chip ' + (ok ? 'good' : 'bad'),
+    r.checked === 0 ? 'NOTHING TO CHECK' : (r.intact ? 'INTACT' : 'BROKEN')));
+  const span = (r.first_id === null || r.first_id === undefined)
+    ? '' : ' · id ' + r.first_id + '–' + r.last_id;
+  card.appendChild(el('p', 'help',
+    r.checked.toLocaleString() + ' custody row(s) checked' + span
+    + (r.scoped ? ' · scoped to one exhibit' : ' · whole ledger')));
+  if (r.caveat) card.appendChild(el('p', 'help warn', r.caveat));
+  if (r.forks) {
+    card.appendChild(el('p', 'help warn',
+      r.forks + ' fork(s). ' + (r.fork_note || '')));
+  }
+  card.appendChild(el('p', 'help', 'Genesis rows: ' + r.genesis_count
+    + (r.genesis_count === 1 ? ' (the chain is anchored).' : '')));
+  if (r.genesis_note) card.appendChild(el('p', 'help warn', r.genesis_note));
+  return card;
+}
+
+/* --- confirming a retention rule ---------------------------------------
+ *
+ * The point of a confirmation is not the number, it is that somebody's id
+ * is attached to it: an unconfirmed rule is a period the build chose, and
+ * it becomes policy by default if nobody ever looks. The console listed
+ * the unconfirmed ones and offered no way to confirm one.
+ */
+function wireRetentionConfirm() {
+  const form = $('ret-confirm');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = $('ret-confirm-msg');
+    const cat = $('ret-cat').value;
+    const days = parseInt($('ret-days').value, 10);
+    const why = $('ret-rationale').value.trim();
+    /* Checked here as well as at the server, because the server's 422 is
+       about a request body the analyst never sees -- it names a field, not
+       the box they typed in. */
+    if (!cat) { setMsg(msg, 'Pick a category.'); return; }
+    if (!(days > 0)) {
+      setMsg(msg, 'A retention period has to be at least one day.'); return;
+    }
+    if (why.length < 10) {
+      setMsg(msg, 'The rationale has to answer "why this period" to '
+        + 'somebody who was not in the room — at least 10 characters.');
+      return;
+    }
+    const btn = $('ret-confirm-btn');
+    btn.disabled = true;
+    setMsg(msg, 'saving…');
+    try {
+      await api('/retention/rules/' + encodeURIComponent(cat),
+        { method: 'POST', json: { retain_days: days, rationale: why } });
+    } catch (err) {
+      btn.disabled = false;
+      setMsg(msg, refusalText(err,
+        'Confirming a rule needs retention.manage and a step-up session.'));
+      return;
+    }
+    btn.disabled = false;
+    setMsg(msg, 'Confirmed. ' + cat + ' now retains for '
+      + days + ' day(s), against your name.');
+    $('ret-rationale').value = '';
+    await loadRetention();
+  });
+}
+
+/** Fill the category picker from the rules actually loaded.
+ *
+ *  Not a fixed list: the categories come from `core.retention_rule`, and a
+ *  picker that offered a category the deployment does not have would send
+ *  a confirmation the server has nothing to attach to. Unconfirmed ones
+ *  are marked, because they are the ones that need the attention.
+ */
+function fillRetentionCategories(rules) {
+  const sel = $('ret-cat');
+  if (!sel) return;
+  const keep = sel.value;
+  opts(sel, rules.map((r) => [r.category,
+    r.category + (r.is_placeholder ? ' — unconfirmed' : '')]), keep);
+}
+
+/* --- the delivery ledger ------------------------------------------------
+ *
+ * `notify.delivery` has recorded every refusal with a reason since 0029 and
+ * every destination since 0044, and nothing rendered it: the one table that
+ * answers "did the summary leave the building, and where did it go" was
+ * write-only.
+ */
+function wireDeliveries() {
+  const btn = $('dlv-reload');
+  if (!btn) return;
+  btn.addEventListener('click', () => loadDeliveries());
+  $('dlv-refused').addEventListener('change', () => loadDeliveries());
+}
+
+async function loadDeliveries() {
+  const q = new URLSearchParams({ limit: '100' });
+  const kind = $('dlv-kind').value.trim();
+  if (kind) q.set('kind', kind);
+  if ($('dlv-refused').checked) q.set('refused_only', 'true');
+  try {
+    const body = await api('/notifications/deliveries?' + q.toString());
+    renderList('dlv-list', 'dlv-empty', body.deliveries, deliveryRow);
+    if (!body.deliveries.length) {
+      $('dlv-empty').textContent = $('dlv-refused').checked
+        ? 'Nothing was refused, failed or revoked.'
+        : 'Nothing has been sent yet.';
+    }
+  } catch (err) {
+    clear($('dlv-list'));
+    const empty = $('dlv-empty');
+    show(empty, true);
+    /* The empty line carries the refusal, rather than a banner: "no
+       deliveries" and "you may not read the ledger" are different facts and
+       an empty list must never stand in for the second. */
+    empty.textContent = refusalText(err,
+      'The delivery ledger needs integration.manage.');
+  }
+}
+
+/** One delivery attempt.
+ *
+ *  SUPPRESSED is deliberately not styled as a failure. Two different things
+ *  write it: the recipient's own channel preference (no attempt timestamp),
+ *  and a clearance or assignment revoked after queueing -- which IS an
+ *  absence somebody should see. The attempt time tells them apart, so it is
+ *  shown rather than summarised away.
+ */
+function deliveryRow(d) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', d.kind));
+  const bad = d.outcome === 'REFUSED' || d.outcome === 'FAILED';
+  head.appendChild(el('span', 'chip ' + (bad ? 'bad'
+    : (d.outcome === 'SENT' ? 'good' : 'subtle')), d.outcome));
+  head.appendChild(el('span', 'chip subtle', d.channel));
+  if (d.redacted) head.appendChild(el('span', 'chip warn', 'redacted'));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  if (d.recipient) facts.appendChild(el('span', 'muted small', d.recipient));
+  /* The address is the whole point of the ledger -- "where did it go" -- and
+     it is already the server's redacted form where redaction applied. */
+  if (d.address) facts.appendChild(el('span', 'mono small', d.address));
+  if (d.attempts) {
+    facts.appendChild(el('span', 'muted small', d.attempts + ' attempt(s)'));
+  }
+  const when = d.attempted_at || d.raised_at;
+  if (when) facts.appendChild(el('span', 'muted small', when));
+  card.appendChild(facts);
+  if (d.reason) card.appendChild(el('p', 'why', d.reason));
+  return card;
+}
+
+/* --- the readiness register --------------------------------------------
+ *
+ * docs/16's code-side half, in one request. Each line is a claim about THIS
+ * deployment with its evidence beside it, and a failed check carries the
+ * action that closes it -- an "action" on a passing check would be noise,
+ * so the server sends none and this renders none.
+ */
+async function loadReadiness() {
+  const list = $('rdy-list');
+  if (!list) return;
+  const summary = $('rdy-summary');
+  summary.textContent = 'checking…';
+  let body;
+  try {
+    body = await api('/admin/readiness');
+  } catch (err) {
+    clear(list);
+    summary.textContent = refusalText(err,
+      'The readiness register needs user.manage.');
+    return;
+  }
+  clear(list);
+  const failed = body.checks.filter((c) => !c.ok).length;
+  /* "READY" is only ever said about the code-side checks. The legal
+     register's own items are not software and this endpoint cannot see
+     them, so the phrasing stays narrow on purpose. */
+  summary.textContent = body.ready
+    ? 'Every code-side check passes.'
+    : failed + ' of ' + body.checks.length + ' check(s) need attention.';
+  for (const c of body.checks) list.appendChild(readinessRow(c));
+}
+
+function readinessRow(c) {
+  const card = el('div', 'card row-card compact'
+    + (c.ok ? '' : ' row-incomplete'));
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', c.check));
+  head.appendChild(el('span', 'chip ' + (c.ok ? 'good' : 'bad'),
+    c.ok ? 'PASS' : 'ATTENTION'));
+  card.appendChild(head);
+  card.appendChild(el('p', 'why', c.evidence));
+  if (c.action) card.appendChild(el('p', 'help warn', c.action));
+  return card;
+}
+
+/* --- the last completed analysis ---------------------------------------
+ *
+ * Opening the pane used to show an empty scoreboard whether the case had
+ * never been analysed or had been analysed an hour ago, and the only way to
+ * tell was to pay for a fresh run. `/analytics/latest` reads the stored run
+ * for this exact projection -- same parameters, because they are what names
+ * the projection row -- and 404s when there is none.
+ */
+async function loadLatestAnalysis() {
+  if (!state.caseId || state.analytics) return;
+  let suite;
+  try {
+    suite = await api(cpath('/analytics/latest?' + anQuery().toString()));
+  } catch (err) {
+    /* 404 is the ordinary answer for a case nobody has analysed, and 403
+       for an account without analytics.run. Neither is a malfunction, and
+       neither should raise a banner on a pane the analyst merely opened. */
+    if (err instanceof ApiError
+        && (err.status === 404 || err.status === 403)) return;
+    fail(err);
+    return;
+  }
+  /* De-fang at the boundary, exactly as runAnalysis does: this is the pane
+     that NAMES people, and a stored run is no more trustworthy than a fresh
+     one -- the labels came from the same graph. */
+  state.analytics = safeLabelsDeep(suite);
+  renderAnalytics();
+  setMsg($('an-status'), suite.computed_at
+    ? 'Showing the run of ' + suite.computed_at + ' — not recomputed.'
+    : 'Showing the last completed run — not recomputed.');
+}
+
+/* --- the assumptions register ------------------------------------------
+ *
+ * Migration 0056. An assumption is a claim the analysis rests on that
+ * nobody has evidenced, and the reason to write it down is that it becomes
+ * reviewable: the register turns "we all sort of assumed that" into a row
+ * with a name, a date and a status somebody can argue with.
+ *
+ * Only OPEN and CONFIRMED reach the report (`REPORTABLE_STATUSES` in
+ * assumptions.py). This says so on the panel, because an analyst who thinks
+ * a withdrawn assumption still appears will leave it withdrawn rather than
+ * deleting it, and one who thinks the opposite will do the reverse.
+ */
+function wireAssumptions() {
+  const form = $('asm-create');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = $('asm-msg');
+    const statement = $('asm-statement').value.trim();
+    if (!statement) { setMsg(msg, 'Write the assumption first.'); return; }
+    const btn = $('asm-create-btn');
+    btn.disabled = true;
+    setMsg(msg, 'recording…');
+    try {
+      await api(cpath('/assumptions'), {
+        method: 'POST',
+        json: { statement, basis: $('asm-basis').value.trim() || null },
+      });
+    } catch (err) {
+      btn.disabled = false;
+      setMsg(msg, refusalText(err, 'Recording an assumption needs case.update.'));
+      return;
+    }
+    btn.disabled = false;
+    setMsg(msg, '');
+    $('asm-statement').value = '';
+    $('asm-basis').value = '';
+    await loadAssumptions();
+  });
+  $('asm-withdrawn').addEventListener('change', () => loadAssumptions());
+}
+
+async function loadAssumptions() {
+  if (!state.caseId) return;
+  const q = $('asm-withdrawn').checked ? '?include_withdrawn=true' : '';
+  try {
+    const body = await api(cpath('/assumptions' + q));
+    renderList('asm-list', 'asm-empty', body.assumptions, assumptionRow);
+  } catch (err) {
+    clear($('asm-list'));
+    const empty = $('asm-empty');
+    show(empty, true);
+    /* The empty line carries the refusal rather than a banner: "no
+       assumptions recorded" and "you may not read them" are different
+       facts, and on this panel the first one is an accusation. */
+    empty.textContent = refusalText(err, 'Assumptions need case.read.');
+  }
+}
+
+/** One assumption, with the two review verbs beside it.
+ *
+ *  CONFIRMED is not styled as a pass and REFUTED is not styled as a
+ *  failure. A refuted assumption is a GOOD outcome — the register worked,
+ *  somebody checked, and the analysis can be corrected while it still can
+ *  be. What deserves the warning colour is an OPEN one, because that is
+ *  the question still owed an answer.
+ */
+function assumptionRow(a) {
+  const card = el('div', 'card row-card'
+    + (a.status === 'OPEN' ? ' row-incomplete' : ''));
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', a.statement));
+  head.appendChild(el('span', 'chip ' + (a.status === 'OPEN' ? 'warn'
+    : (a.status === 'CONFIRMED' ? 'good' : 'subtle')), a.status));
+  card.appendChild(head);
+  if (a.basis) card.appendChild(el('p', 'why', a.basis));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('recorded', a.made_at));
+  if (a.reviewed_at) facts.appendChild(fact('reviewed', a.reviewed_at));
+  card.appendChild(facts);
+  if (a.review_note) card.appendChild(el('p', 'why', a.review_note));
+
+  /* A withdrawn assumption is out of the analysis and out of the report;
+     re-reviewing it would be a status change with no meaning, so the verbs
+     are not offered. */
+  if (a.status === 'WITHDRAWN') return card;
+  const actions = el('div', 'row-actions');
+  for (const [label, status] of [['Confirm', 'CONFIRMED'],
+                                 ['Refute', 'REFUTED'],
+                                 ['Withdraw', 'WITHDRAWN']]) {
+    if (status === a.status) continue;
+    const b = el('button', 'btn small'
+      + (status === 'WITHDRAWN' ? ' danger' : ''), label);
+    b.type = 'button';
+    b.addEventListener('click', () => reviewAssumption(a, status));
+    actions.appendChild(b);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+/** Change one assumption's status.
+ *
+ *  The note is required for a REFUTED verdict by the service, and asking
+ *  here rather than letting the 400 come back means the analyst types the
+ *  reason once, into a prompt that says what it is for.
+ */
+async function reviewAssumption(a, status) {
+  let note = null;
+  if (status !== 'CONFIRMED') {
+    note = window.prompt(status === 'REFUTED'
+      ? 'What refutes it? This is kept with the assumption.'
+      : 'Why withdraw it? Optional.');
+    /* Cancel is null and an empty string is "typed nothing"; neither should
+       become the string "null" in the record. */
+    if (status === 'REFUTED' && !note) return;
+    if (!note) note = null;
+  }
+  try {
+    await api(cpath('/assumptions/' + encodeURIComponent(a.id)),
+      { method: 'PATCH', json: { status, note } });
+  } catch (err) {
+    setMsg($('asm-msg'), refusalText(err, 'Reviewing needs case.update.'));
+    return;
+  }
+  setMsg($('asm-msg'), '');
+  await loadAssumptions();
+}
+
 /* --- retention --------------------------------------------------------- */
 
 async function loadRetention() {
   try {
     const rules = await api('/retention/rules');
     renderList('ret-rules', 'ret-rules-notice', rules.rules, ruleRow);
+    fillRetentionCategories(rules.rules);
     const notice = $('ret-rules-notice');
     /* `.length`, not the array. `unconfirmed` is a LIST and `[] ? a : b`
        takes `a`, so the alert-coloured banner was permanently lit — reading
@@ -8036,7 +8481,15 @@ function watchHitRow(h) {
   facts.appendChild(fact('watch', visibleText(h.watch_name)));
   facts.appendChild(fact('author', visibleText(h.author_handle)));
   facts.appendChild(fact('posted', fmtTime(h.posted_at)));
-  facts.appendChild(fact('matched', Object.keys(h.matched_on || {}).join(', ')));
+  // The collector writes matched_on as a LIST of reasons ("regex:...",
+  // "selector:..."). This rendered Object.keys() of it, which on a list is
+  // its indices -- so every real hit said it fired on "0" or "0, 1". The
+  // read-path test fixture had fabricated a dict, and both sides were
+  // green. A dict is still accepted for any legacy row; a list renders as
+  // the reasons themselves.
+  const why = Array.isArray(h.matched_on)
+    ? h.matched_on : Object.keys(h.matched_on || {});
+  facts.appendChild(fact('matched', why.join(', ')));
   card.appendChild(facts);
 
   if (h.excerpt) card.appendChild(el('p', 'muted small', visibleText(h.excerpt)));
@@ -8347,6 +8800,15 @@ function initOpsPanes() {
   $('col-hits-unack').addEventListener('change', loadWatchHits);
   $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
   $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
+  /* The deliveries view is fetched on selection rather than on sign-in:
+     it needs integration.manage, which most accounts do not hold, and a
+     403 banner on every login would train people to ignore banners. */
+  initSubtabs('pane-ach', (name) => {
+    if (name === 'assumptions') loadAssumptions();
+  });
+  initSubtabs('pane-inbox', (name) => {
+    if (name === 'deliveries') loadDeliveries();
+  });
   selectGovSub = initSubtabs('pane-governance', (name) => {
     if (name === 'retention') loadRetention();
     if (name === 'tombstones') loadTombstones();

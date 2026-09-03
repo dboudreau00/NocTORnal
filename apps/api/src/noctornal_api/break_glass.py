@@ -29,21 +29,20 @@ a role with a dramatic name.
 that overrides quiet hours (decision 46). Somebody's evening is interrupted
 on purpose.
 
-**4. Use is counted, not just grant -- AS A DESIGN, NOT AS SHIPPED.**
-`used_at` and `action_count` exist because "was it used" and "was it
-granted" are different questions, and the interesting review case is the
-grant that was never used -- which usually means the analyst found another
-way, and the emergency was not one.
+**4. Use is counted, not just grant.** `used_at` and `action_count`
+exist because "was it used" and "was it granted" are different questions,
+and the interesting review case is the grant that was never used -- which
+usually means the analyst found another way, and the emergency was not one.
 
-> **NOT WIRED (recorded 2026-08-10).** `record_use()` below is the only
-> thing that writes either column, and it has no caller outside its own
-> test. So `action_count` is **structurally zero on every grant** and
-> `used_at` is always NULL. An officer who reads them as "this grant was
-> never used" is reading a fact about the wiring, not about the analyst.
-> They are therefore NOT published in the API response -- a zero that
-> cannot be anything else is worse than an absent field, because it
-> answers the question. Restoring them means calling `record_use()` from
-> the access path and republishing the fields together, in that order.
+> **WIRED 2026-09-01.** `PgAccessResolver.resolve()` (stores.py) calls
+> `record_use()` from the access path -- and only when the grant is what
+> made the access possible: base clearance below the object, granted
+> clearance at or above it. A read the analyst could already make is not
+> a use of the grant. From 2026-08-10 until then both columns were
+> structurally zero and were deliberately NOT published, because a zero
+> that cannot be anything else answers "was this used?" in the wrong
+> direction. They are published again now, together, as that note said
+> they should be.
 
 **5. Review is mandatory and its absence is visible.** `unreviewed()` is
 the queue. An expired grant with no review is an open item forever; it does
@@ -55,28 +54,34 @@ formality.
 It does not grant a permission the user could not otherwise be given, and
 it does not cross a compartment.
 
-> **AND IT DOES NOT CURRENTLY RAISE ANYTHING. Corrected 2026-08-10; this
-> paragraph used to say it "raises a user's *effective clearance* for one
-> case, for a few hours".** It does not. `invoke()` writes a grant row
-> carrying `granted_classification` and `granted_permissions`, audits it,
-> alerts the security officer and queues it for review -- and **no access
-> decision anywhere reads that row.** Effective clearance is resolved by
-> `PgAccessContextStore` straight from `iam.app_user.tlp_clearance`, and
-> outside this module the string `break_glass` appears in `apps/api/src`
-> only in a comment in `deps.py` about step-up. So an analyst who invokes
-> break-glass in an emergency gets a loud, audited, reviewable record and
-> exactly the access they already had.
+It DOES raise the user's effective clearance for one case, for a few
+hours -- **since 2026-09-01.** A live, unrevoked grant carrying a
+`granted_classification` is read by `PgAccessResolver.resolve()`
+(stores.py), the single construction site of the five-part gate's
+`AccessContext`, and the caller's clearance is raised to that level for
+the case the grant names (or every case, if it names none). That is the
+change the paragraph below said should be made on purpose, made on
+purpose.
+
+> **History.** From 2026-08-10 to 2026-09-01 this docstring said the
+> opposite -- "AND IT DOES NOT CURRENTLY RAISE ANYTHING" -- because it
+> was true: `invoke()` wrote the row and no access decision read it, so an
+> analyst who invoked break-glass at 3am got a loud, audited, reviewable
+> record and exactly the access they already had. The claim was withdrawn
+> then rather than implemented, on the grounds that a wrong statement about
+> an emergency control is the more urgent half. It is implemented now.
 >
-> The claim is withdrawn rather than implemented because a wrong statement
-> about an emergency control is the more urgent half: an analyst who
-> believes the elevation worked stops looking for another way in, at 3am,
-> during the incident the control exists for. Implementing it is a
-> deliberate change to the single `AccessContext` construction site and
-> should be made on purpose, not to make a docstring true.
+> **Scope of the raise, stated exactly.** It applies at the gate every
+> case-scoped read and write passes through. It does NOT apply to
+> `deps.user_ceiling()`, the case-agnostic ceiling behind search and some
+> forty list endpoints, except for a GLOBAL grant -- a grant scoped to one
+> case must not widen the caller's view of every other case. So under a
+> case-scoped grant an analyst can open an exhibit a search will not list.
+> That is stated in `user_ceiling()` too, rather than hidden.
 >
-> **Nothing about the grant, the audit trail, the alert or the review
-> queue is affected by this correction** -- those all work, and they are
-> the parts docs/05 calls the safety. What is missing is the access.
+> `granted_permissions` is stored and still NOT consulted: this module has
+> always said break-glass "does not grant a permission the user could not
+> otherwise be given", and that stays true.
 
 Compartments are deliberately excluded: a compartment is need-to-know, and
 "there is an emergency" is not knowledge of the need. If somebody genuinely
@@ -184,7 +189,19 @@ class BreakGlassService:
             "classification": classification,
             "permissions": permissions or [],
         })
-        self._alert(grant, officers)
+        # N1 (2026-09-02). The grant row is committed (autocommit) and, since
+        # 2026-09-01, RAISES the caller's effective clearance. Letting a
+        # failed notify write propagate reported a grant that exists -- and
+        # elevates -- as a 500, and an analyst at 3am who believes they were
+        # refused stops looking for the access they now hold. The review
+        # queue (`unreviewed()`) is the durable half of the control and does
+        # not depend on this alert; the failure to be loud is logged.
+        try:
+            self._alert(grant, officers)
+        except Exception:  # noqa: BLE001 - the grant stands; the failure is logged
+            import logging
+            logging.getLogger(__name__).exception(
+                "break-glass grant %s was recorded but its alert failed", grant.id)
         return grant
 
     def _alert(self, grant: Grant, officers: list[UUID]) -> None:

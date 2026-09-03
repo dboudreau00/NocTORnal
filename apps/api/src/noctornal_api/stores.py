@@ -12,6 +12,7 @@ atomicity comes from the statement itself, not a surrounding transaction.
 """
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
 from uuid import UUID
 
@@ -24,7 +25,7 @@ from noctornal_api.security.access import (
     tlp_from_name,
 )
 from noctornal_api.security.auth import AuthUser, UserStore
-from noctornal_api.security.sessions import SessionRecord, SessionStore
+from noctornal_api.security.sessions import SessionRecord, SessionStore, normalise_ip
 
 
 class PgUserStore(UserStore):
@@ -241,6 +242,48 @@ class PgAccessResolver:
         user_clearance = tlp_from_name(user[0])
         user_compartments = frozenset(user[1] or [])
 
+        # Break-glass (docs/05, break_glass.py). A live, unrevoked grant for
+        # this user that names a classification raises the caller's
+        # effective clearance to that level -- for THIS case, or for every
+        # case if the grant was global (case_id NULL). Compartments are
+        # deliberately not widened: need-to-know is a read-in with a name
+        # on it, not an eight-hour bypass.
+        #
+        # A use is recorded only when the grant is what makes the access
+        # possible (base < object <= granted). An analyst reading a CLEAR
+        # node under an AMBER grant has not USED the grant, and counting it
+        # would tell the reviewing officer the emergency was busier than it
+        # was. The connection is autocommit, so the count survives whatever
+        # the request does next.
+        #
+        # A grant whose classification does not parse is ignored, not
+        # fatal: failing closed here means "no raise", not "every request
+        # from this user 403s until an officer revokes the row".
+        grant = self._c.execute(
+            """SELECT id, granted_classification
+                 FROM iam.break_glass
+                WHERE user_id = %s
+                  AND revoked_at IS NULL
+                  AND expires_at > now()
+                  AND granted_classification IS NOT NULL
+                  AND (case_id IS NULL OR case_id = %s)
+                ORDER BY expires_at DESC
+                LIMIT 1""",
+            (user_id, case_id),
+        ).fetchone()
+        if grant is not None:
+            try:
+                granted = tlp_from_name(grant[1])
+                needed = tlp_from_name(object_classification)
+            except AccessResolutionError:
+                granted = None
+            if granted is not None and granted > user_clearance:
+                if user_clearance < needed <= granted:
+                    from noctornal_api.break_glass import BreakGlassService
+                    BreakGlassService(self._c).record_use(
+                        grant[0], action=permission_key, case_id=case_id)
+                user_clearance = granted
+
         assignment = self._c.execute(
             """SELECT role_key, (expires_at IS NULL OR expires_at > now()) AS unexpired
                  FROM iam.case_assignment WHERE case_id = %s AND user_id = %s""",
@@ -275,28 +318,44 @@ class PgSessionStore(SessionStore):
         self._c = conn
 
     def insert(self, record: SessionRecord) -> None:
+        # `ip` is an `inet` column (0058). It is handed to psycopg as an
+        # ipaddress object rather than as text so the driver dumps it with
+        # the inet OID and a string that is not an address (Starlette's
+        # "testclient", a Unix-socket peer) becomes NULL here instead of a
+        # 22P02 at login. `normalise_ip` is what makes that decision, so
+        # the row and the validator's comparison agree on what counts.
+        ip = normalise_ip(record.ip)
         self._c.execute(
             """INSERT INTO iam.session
                    (id, user_id, token_hash, issued_at, expires_at,
-                    last_seen_at, mfa_satisfied_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    last_seen_at, mfa_satisfied_at, ip, user_agent)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (record.id, record.user_id, record.token_hash, record.issued_at,
-             record.expires_at, record.last_seen_at, record.mfa_satisfied_at),
+             record.expires_at, record.last_seen_at, record.mfa_satisfied_at,
+             ipaddress.ip_address(ip) if ip else None, record.user_agent),
         )
 
     def get_by_token_hash(self, token_hash: bytes) -> SessionRecord | None:
         row = self._c.execute(
             """SELECT id, user_id, token_hash, issued_at, expires_at,
-                      last_seen_at, mfa_satisfied_at, revoked_at, revoke_reason
+                      last_seen_at, mfa_satisfied_at, revoked_at, revoke_reason,
+                      ip, user_agent
                  FROM iam.session WHERE token_hash = %s""",
             (token_hash,),
         ).fetchone()
         if row is None:
             return None
+        # psycopg loads inet as an ipaddress object -- an Interface when
+        # the value carries a netmask, an Address otherwise. `.ip` on an
+        # Interface is the Address; on an Address there is no such
+        # attribute, so fall back to the object itself.
+        ip = row[9]
         return SessionRecord(
             id=row[0], user_id=row[1], token_hash=bytes(row[2]),
             issued_at=row[3], expires_at=row[4], last_seen_at=row[5],
             mfa_satisfied_at=row[6], revoked_at=row[7], revoke_reason=row[8],
+            ip=str(getattr(ip, "ip", ip)) if ip is not None else None,
+            user_agent=row[10],
         )
 
     def update(self, record: SessionRecord) -> None:

@@ -17,6 +17,17 @@ os.environ.setdefault(
     "NOCTORNAL_TOTP_KEK", "A" * 43 + "="  # 32 zero-ish bytes, valid base64
 )
 
+# Every exhibit a test ingests is written under a COMPLIANCE object lock,
+# and a COMPLIANCE retention cannot be shortened, lifted or overridden by
+# any credential -- that is the point of the mode. `evidence.DEFAULT_RETENTION`
+# is read from EVIDENCE_RETENTION_DAYS at IMPORT time and defaulted to 365,
+# so until 2026-09-02 every run of the evidence-writing tests added another
+# year of undeletable objects to the dev bucket. One day is the shortest
+# whole-day value; the live lock test uses seconds via `put(retain_until=)`
+# and does not depend on this. Must run before the first import of
+# `noctornal_api.evidence`, which is why it sits up here with the KEK.
+os.environ.setdefault("EVIDENCE_RETENTION_DAYS", "1")
+
 from noctornal_api.security.auth import AuthUser, UserStore
 from noctornal_api.security.sessions import SessionRecord, SessionStore
 

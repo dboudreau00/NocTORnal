@@ -246,11 +246,72 @@ jobs:
           sys.exit(1 if report.breaks else 0)
           PY
 
+      # The same job for the OTHER tamper-evident ledger. core.evidence_custody
+      # was hash-chained in 0024 and, until 2026-09-02, nothing recomputed it
+      # either -- on the record that is actually produced to a court. Runs
+      # after the suite for the same reason: the evidence, provenance and e2e
+      # suites write real custody rows, and (since the same date) their
+      # teardowns leave them in place rather than deleting them with the
+      # trigger stood down, so this verifies a chain with traffic in it.
+      #
+      # `checked == 0` is a failure, not a pass: an empty ledger verifies
+      # trivially. What that catches is the SUITES having stopped writing
+      # custody rows (or the ledger having been emptied outright) -- it is
+      # NOT a truncation check, and until 2026-09-02 the comment and the
+      # error message here both said it was. A partial truncation leaves
+      # `checked` high and every check green: deleting the newest k rows
+      # orphans nothing, so the verifier reports intact. See "What this
+      # cannot see" in custody_verify.py.
+      #
+      # `tail_row_hash` is printed for that reason and no other: it is the
+      # value an operator records out of band and compares against the next
+      # run, and it is the only thing that reveals a tail deletion. This
+      # workflow does not store it either -- printing it into the log is
+      # where the chain of custody for the chain of custody currently ends.
+      #
+      # The anchor (`genesis_count`) is checked explicitly because it is the
+      # one removal the relative checks CAN see.
+      - name: Custody chain verifies
+        run: |
+          python - <<'PY'
+          import sys
+          from noctornal_api.custody_verify import verify_custody_chain
+          from noctornal_api.db import connect
+
+          report = verify_custody_chain(connect())
+          print(f"checked {report.checked} custody rows, "
+                f"id {report.first_id}..{report.last_id}, "
+                f"genesis_count {report.genesis_count}, "
+                f"tail_row_hash {report.tail_row_hash}")
+          if report.checked == 0:
+              print("::error::No custody rows to verify. The suite ran "
+                    "without writing any, or the ledger was emptied "
+                    "entirely. This gate does NOT catch a partial "
+                    "truncation -- deleting the NEWEST rows leaves this "
+                    "step green; compare tail_row_hash across runs.")
+              sys.exit(1)
+          if report.forks:
+              print(f"::warning::{len(report.forks)} custody row(s) share a "
+                    f"predecessor. Not counted as tampering, but on a ledger "
+                    f"written by 0024 this should not occur -- investigate.")
+          for b in report.breaks:
+              print(f"::error::custody chain {b.kind} break at id {b.id} "
+                    f"({b.action} on {b.evidence_id} at {b.occurred_at})")
+          sys.exit(1 if report.breaks else 0)
+          PY
+
       # The suite must not quietly become unit-only because a service died:
       # every _pg test skips without DATABASE_URL, so a broken Postgres
       # service would show as a green run with 100+ skips.
       - name: No tests were skipped
         run: |
+          # pipefail: without it the step's exit status is tee's, so a
+          # pytest FAILURE in this run would pass as long as nothing
+          # skipped. Harmless while the Tests step above runs first and
+          # fails on its own, but a gate that discards the exit code of
+          # the thing it is gating is one edit away from being the only
+          # run -- and then green would mean nothing.
+          set -o pipefail
           pytest apps/api/tests packages/ontology/tests -q -rs 2>&1 | tee /tmp/out
           if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/out; then
             echo "::error::Tests were SKIPPED. The Postgres or MinIO leg is not running."

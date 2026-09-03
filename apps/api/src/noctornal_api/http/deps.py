@@ -30,13 +30,19 @@ from psycopg.types.json import Json
 
 from noctornal_api.db import connect
 from noctornal_api.http.errors import Problem
+from noctornal_api.http.limits import client_ip
 from noctornal_api.security.access import (
     CHECK_ASSIGNMENT,
     Tlp,
     evaluate,
     tlp_from_name,
 )
-from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
+from noctornal_api.security.sessions import (
+    STEP_UP_FRESHNESS,
+    SessionService,
+    binding_mismatch,
+    strict_binding_enabled,
+)
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -97,24 +103,95 @@ def session_token(
 
 
 def current_user(
+    request: Request,
     raw: str = Depends(session_token),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> CurrentUser:
     """Resolve the session token to a live session. The failure reason is
     deliberately NOT returned: distinguishing 'revoked' from 'not_found'
-    would confirm to a token holder that the string was a real session."""
-    result = SessionService(PgSessionStore(conn)).validate(raw)
+    would confirm to a token holder that the string was a real session.
+
+    Under `NOCTORNAL_SESSION_STRICT_BINDING` (0058) a live session
+    presented from a different address or client than it was minted with
+    is refused too, with the SAME generic 401 -- the holder of a replayed
+    token must not learn that the string was a real session that merely
+    failed a binding check -- and an audit row that names WHICH binding
+    failed, because that is what the security officer needs. Refused, not
+    revoked: an attacker holding the token could otherwise log the victim
+    out on demand. The idle window slides only after the check, so a
+    refused replay does not keep the session alive.
+
+    This is ONE of the two places a session token is validated. The other
+    is the websocket in `routers/live.py`, which applies the same check in
+    the same order through `refuse_unbound_session`. Until 2026-09-02 it
+    did not, and the gap was not cosmetic: a token refused on every HTTP
+    request was still accepted on the live case-event stream, and every
+    reconnect slid the idle window, so the replay kept the victim's
+    session alive indefinitely. Both call sites now share the check, and
+    `test_session_binding_pg.py` asserts it over both.
+    """
+    service = SessionService(PgSessionStore(conn))
+    result = service.validate(raw, touch=False)
     if not result.ok:
-        _audit(conn, "AUTH_SESSION_REJECTED", None, None,
-               {"reason": result.reason})
+        audit_auth_event(conn, "AUTH_SESSION_REJECTED", None, None,
+                         {"reason": result.reason})
         raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = result.session
+    if refuse_unbound_session(
+            conn, s, ip=client_ip(request),
+            user_agent=request.headers.get("user-agent"), path="http"):
+        raise Problem(401, "Unauthenticated", "invalid or expired session")
+    s = service.touch(s)
     return CurrentUser(s.user_id, s.id, s.mfa_satisfied_at)
 
 
-def _audit(conn, action: str, actor_id, case_id, detail: dict) -> None:
+def refuse_unbound_session(conn, session, *, ip: str | None,
+                           user_agent: str | None, path: str) -> bool:
+    """True when strict binding says this presentation must be refused.
+
+    Shared by BOTH session-validation call sites -- `current_user` here and
+    the websocket handshake in `routers/live.py`. It is a function rather
+    than two copies because the two halves of this control were wrong
+    together until 2026-09-02: the HTTP half refused a moved token and the
+    websocket half did not consult the binding at all, so the same stolen
+    credential was rejected on every REST call and accepted on the live
+    stream, which re-runs the five-part gate and therefore showed the
+    attacker exactly what the victim could read.
+
+    The caller must have validated with `touch=False` and must slide the
+    idle window only after this returns False. A refused replay that
+    touched the row would keep the victim's session alive for as long as
+    the attacker kept reconnecting.
+
+    `unbound` in the audit detail separates two different facts that both
+    produce a mismatch: a session minted somewhere else (a replay) from a
+    session minted with no binding at all -- a pre-0058 row, or one issued
+    by `scripts/bootstrap.py session`, which mints from a shell that is
+    not the browser that will present it. The security officer reading the
+    log needs to tell "someone moved this token" from "this session could
+    never have been bound"; `path` tells them which surface it arrived on.
+    """
+    if not strict_binding_enabled():
+        return False
+    mismatched = binding_mismatch(session, ip=ip, user_agent=user_agent)
+    if not mismatched:
+        return False
+    audit_auth_event(conn, "SESSION_BINDING_REFUSED", session.user_id, None,
+                     {"session_id": str(session.id), "mismatched": mismatched,
+                      "path": path,
+                      "unbound": session.ip is None and session.user_agent is None})
+    return True
+
+
+def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None:
     """Append to the hash-chained audit log. Authentication and
-    authorization outcomes are auditable events (docs/05)."""
+    authorization outcomes are auditable events (docs/05).
+
+    Public (it was `_audit` until 2026-09-02) because `routers/live.py`
+    writes the same SESSION_BINDING_REFUSED row from the websocket
+    handshake, and two spellings of one audit action is how an audit
+    query comes back short.
+    """
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
@@ -167,9 +244,9 @@ def authorize_object(
     )
     decision = evaluate(ctx)
     if not decision.allowed:
-        _audit(conn, "AUTHZ_DENIED", user.user_id, case_id,
-               {"permission": permission_key,
-                "failed_checks": list(decision.failed_checks)})
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, case_id,
+                         {"permission": permission_key,
+                          "failed_checks": list(decision.failed_checks)})
         # A caller with NO relationship to the case must not learn whether it
         # exists: return the same 404 a nonexistent case gives. Once they are
         # assigned, 403 reveals nothing they do not already know (they can see
@@ -203,8 +280,8 @@ def require_global(permission_key: str):
             (user.user_id, permission_key),
         ).fetchone()
         if row is None:
-            _audit(conn, "AUTHZ_DENIED", user.user_id, None,
-                   {"permission": permission_key, "scope": "global"})
+            audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                             {"permission": permission_key, "scope": "global"})
             raise Problem(403, "Forbidden",
                           f"missing global permission {permission_key}")
         if row[0]:  # requires_step_up
@@ -214,9 +291,10 @@ def require_global(permission_key: str):
                 < STEP_UP_FRESHNESS
             )
             if not fresh:
-                _audit(conn, "AUTHZ_DENIED", user.user_id, None,
-                       {"permission": permission_key, "scope": "global",
-                        "failed_checks": ["step_up_freshness"]})
+                audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                                 {"permission": permission_key,
+                                  "scope": "global",
+                                  "failed_checks": ["step_up_freshness"]})
                 raise Problem(403, "Forbidden", "re-authentication required")
         return user
     return _dep
@@ -260,8 +338,9 @@ def require_step_up(
         < STEP_UP_FRESHNESS
     )
     if not fresh:
-        _audit(conn, "AUTHZ_DENIED", user.user_id, None,
-               {"failed_checks": ["step_up_freshness"], "scope": "step_up"})
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                         {"failed_checks": ["step_up_freshness"],
+                          "scope": "step_up"})
         raise Problem(403, "Forbidden",
                       "re-authenticate with your second factor before "
                       "performing this operation")
@@ -304,4 +383,35 @@ def user_ceiling(conn: psycopg.Connection, user_id: UUID) -> tuple[Tlp, frozense
     ).fetchone()
     if row is None:
         raise Problem(401, "Unauthenticated", "unknown user")
-    return tlp_from_name(row[0]), frozenset(row[1] or [])
+    clearance, held = tlp_from_name(row[0]), frozenset(row[1] or [])
+
+    # This ceiling has no case in hand -- it is what search, comms, samples
+    # and some forty other sites use to decide what NOT to show. A
+    # case-scoped break-glass grant therefore cannot apply here: raising it
+    # would widen the caller's view of every OTHER case for the life of the
+    # grant. Only a global grant (case_id NULL) raises this ceiling. The
+    # case-scoped raise lives in PgAccessResolver.resolve(), which is the
+    # gate every case-scoped read and write passes through.
+    #
+    # Honest consequence: an analyst under a case-scoped AMBER grant can
+    # OPEN an AMBER exhibit on that case, but a case-wide search filtered
+    # by this ceiling will not LIST it. Stated here rather than papered
+    # over; the fix is a case_id parameter on this function and forty call
+    # sites, which is a change to make on purpose.
+    g = conn.execute(
+        """SELECT granted_classification FROM iam.break_glass
+            WHERE user_id = %s AND case_id IS NULL
+              AND revoked_at IS NULL AND expires_at > now()
+              AND granted_classification IS NOT NULL
+            ORDER BY expires_at DESC LIMIT 1""",
+        (user_id,),
+    ).fetchone()
+    if g is not None:
+        from noctornal_api.security.access import AccessResolutionError
+        try:
+            granted = tlp_from_name(g[0])
+        except AccessResolutionError:
+            granted = None
+        if granted is not None and granted > clearance:
+            clearance = granted
+    return clearance, held

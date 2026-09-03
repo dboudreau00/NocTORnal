@@ -18,6 +18,16 @@ secrets). `export()` goes through the shared TLP egress gate
 (`noctornal_api.egress`, Phase 5) — the same one function SMTP, Jira and
 webhooks call, so invariant 8 has exactly one implementation to keep
 right.
+
+Destruction goes through `EvidenceStorage.delete_all_versions()`, which
+`retention._purge_evidence` has called since 2026-09-02. The keyless
+`delete()` is NOT a destruction path on this bucket: the bucket is
+versioned (forced by `--with-lock`), so a keyless delete inserts a delete
+marker and returns success with every byte still retrievable by version
+id — measured live on 2026-08-10 and again on 2026-09-02. It is kept only
+so `tests/test_evidence_lock_live_pg.py` can keep demonstrating that.
+`is_retention_refusal()` is the ONE classifier both this module and
+`retention` use to tell a lock refusal from a plain failure.
 """
 from __future__ import annotations
 
@@ -91,11 +101,81 @@ class VersionedDeleteResult:
 
     @property
     def outcome(self) -> str:
-        """Matches `retention.STORAGE_*` vocabulary without importing it
-        (retention imports this module)."""
+        """A one-word summary for logs and tests. NOT the tombstone vocabulary.
+
+        Until 2026-09-02 this docstring claimed to match
+        `retention.STORAGE_*`. It never did: retention's words — and the
+        CHECK on `core.purge_tombstone.storage_outcome` (migration 0032) —
+        are DELETED / LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, and
+        two of the three values here, DESTROYED and NOTHING_TO_DELETE,
+        would be refused by that CHECK. Only LOCKED_UNTIL_RETENTION
+        coincides, which is what made the claim look true. So
+        `retention._purge_evidence` maps the three COUNTS above onto its
+        own vocabulary and never writes this string anywhere;
+        `tests/test_evidence_versioned_delete.py` reads both sides and the
+        migration to keep it that way.
+        """
         if self.versions_locked:
             return "LOCKED_UNTIL_RETENTION"
         return "DESTROYED" if self.versions_removed else "NOTHING_TO_DELETE"
+
+
+#: Codes that mean "the object is under retention" and nothing else. The
+#: S3 vendors do not agree on one, so there are two.
+_RETENTION_REFUSAL_CODES = frozenset({"RetentionPeriodNotMet", "MethodNotAllowed"})
+#: Codes that mean "there is NO lock configuration", whatever the message
+#: says — and MinIO's message for the first one contains "Object Lock".
+_NOT_A_LOCK_CODES = frozenset({
+    "ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration",
+})
+#: What a store says when a retention lock is the reason. MinIO:
+#: "Object is WORM protected and cannot be overwritten".
+_LOCK_WORDS = ("worm", "retention", "object lock")
+
+
+def is_retention_refusal(exc: Exception) -> bool:
+    """True only when the store said the object is under a retention lock.
+
+    LOCKED_UNTIL_RETENTION is a specific claim — "the bytes will become
+    deletable when a retention expires" — and it is written into an
+    append-only tombstone. So this errs towards FAILED: a failure an
+    operator investigates is recoverable; a permissions refusal recorded
+    as a lawful lock is a false record nobody revisits.
+
+    What was wrong until 2026-09-02: `retention._is_retention_refusal`
+    returned True on a bare `AccessDenied` or `InvalidRequest`, so a
+    read-only key or a bucket policy denying `s3:DeleteObject` was
+    recorded as a retention lock — and it listed
+    `ObjectLockConfigurationNotFoundError`, which means the bucket has NO
+    lock configuration, as one. Meanwhile `delete_all_versions` kept its
+    own code-only tuple with the same defect. Both halves now share this
+    one function so they cannot drift: `delete_all_versions` uses it to
+    decide locked-versus-raise, and retention uses it to classify what a
+    store without version enumeration raises.
+
+    `AccessDenied` and `InvalidRequest` therefore need the MESSAGE to say
+    worm / retention / object lock. The message is read, not `str(exc)`:
+    minio's `S3Error.__str__` quotes the resource and object name, and an
+    exhibit whose key contains the word "retention" must not turn a
+    policy denial into a lock. Message-only refusals from clients that
+    carry no code (the governance test stubs raise
+    RuntimeError("object is under a retention lock")) still count.
+
+    Measured against the live MinIO 2026-09-02: a COMPLIANCE-locked
+    version is refused with code `InvalidRequest` and message "Object is
+    WORM protected and cannot be overwritten" — not `AccessDenied`, as the
+    docstring below said until then. `tests/test_evidence_lock_live_pg.py`
+    re-measures that on every run so a vocabulary drift shows up here
+    rather than in a tombstone.
+    """
+    code = getattr(exc, "code", None)
+    if code in _NOT_A_LOCK_CODES:
+        return False
+    if code in _RETENTION_REFUSAL_CODES:
+        return True
+    message = getattr(exc, "message", None)
+    text = str(message if message else exc).lower()
+    return any(word in text for word in _LOCK_WORDS)
 
 
 class EvidenceStorage:
@@ -131,7 +211,16 @@ class EvidenceStorage:
         )
 
     def delete(self, key: str) -> None:
-        """Attempt to remove the object. RAISES if the store refuses.
+        """Keyless delete. On this bucket it destroys NOTHING — read on.
+
+        Not a destruction path and not called by production code since
+        2026-09-02; `retention._purge_evidence` calls
+        `delete_all_versions()` instead, and
+        `tests/test_evidence_versioned_delete.py` asserts that it does.
+        This method survives only so `tests/test_evidence_lock_live_pg.py`
+        can keep measuring the defect below against the live store. The
+        two paragraphs that follow are what it was believed to do; the
+        section after them is what it does.
 
         THIS CLASS HAD NO `delete` AT ALL until 2026-08-07, and nothing
         else in the repository removed an evidence object either — only
@@ -174,80 +263,85 @@ class EvidenceStorage:
         performed, and both were fixed. This one reports it while holding
         the object.
 
-        `delete_all_versions()` below is the honest version. It is NOT
-        wired in — see its docstring for what has to be decided first.
+        `delete_all_versions()` below is the honest version, and since
+        2026-09-02 it is the one the purge calls. Re-measured that day
+        against the live stack with the same result:
+        `tests/test_evidence_lock_live_pg.py::
+        test_the_old_keyless_delete_returns_success_while_holding_the_bytes`
+        asserts this behaviour STILL happens, so a change in MinIO's
+        semantics shows up as a test failure rather than a silent change
+        in what a tombstone means.
         """
         self._client.remove_object(self._bucket, key)
 
     # ---------------------------------------------------------------
-    # NOT WIRED. Nothing calls this, deliberately.
+    # The destruction path. `retention._purge_evidence` calls this
+    # since 2026-09-02, and nothing else does.
     # ---------------------------------------------------------------
     def delete_all_versions(self, key: str) -> "VersionedDeleteResult":
         """Remove every version of `key`, reporting refusals as refusals.
 
-        **This is written and deliberately NOT ENABLED.** No caller
-        references it; `RetentionService` still calls `delete()`. Enabling
-        it is a decision, not a follow-up commit, because it changes what
-        the system does to evidence and what it records having done:
+        Enumerate every version under the key, delete each by
+        `version_id`, and separate the two outcomes that `delete()` merges
+        into silence — bytes actually gone, versus the store refusing
+        because a retention has not expired. A refusal is RETURNED as a
+        count, not raised, because the caller (`retention._purge_evidence`)
+        has to record it against the tombstone rather than abort a batch;
+        anything that is neither a deletion nor a recognised lock refusal
+        raises, because an unrecognised storage failure is not an outcome
+        to write down as a lock. `is_retention_refusal` is the one
+        classifier for that, shared with retention.
 
-        1. **It flips production outcomes.** Today a purge under an
-           unexpired COMPLIANCE lock records `evidence_purged` and a
-           tombstone saying DESTROYED. With this wired the same purge
-           records `LOCKED_UNTIL_RETENTION` and warns that the store
-           disagrees with the database. That is correct, and it will make
-           previously-quiet purges start reporting failures — which is the
-           point, and is also an operational change somebody must expect.
+        ## Written 2026-08-10, deliberately held back, wired 2026-09-02
+
+        It was held back because enabling it changed what the system does
+        to evidence and what it records having done. What was decided,
+        item by item, when it was enabled:
+
+        1. **It flips production outcomes.** A purge under an unexpired
+           COMPLIANCE lock used to record DELETED; now it records
+           `LOCKED_UNTIL_RETENTION`, leaves the row unpurged and due, and
+           warns that the store refused. Previously-quiet purges now
+           report refusals. That is the point.
 
         2. **Tombstones already written are wrong and cannot be fixed.**
-           `core.purge_tombstone` is append-only. Every DESTROYED
-           tombstone written for an object that was still locked is a
-           false record that will remain a false record. Enabling this
-           stops new ones; it does not repair old ones, and whether those
-           are reportable is a question for docs/18, not for code.
+           `core.purge_tombstone` is append-only. Every DELETED tombstone
+           written between 2026-08-07 and 2026-09-02 for an object that
+           was still locked is a false record and remains one. Whether
+           those are reportable is a docs/18 question, not a code one;
+           nothing here rewrites history.
 
-        3. **It genuinely destroys bytes.** `delete()` never did. The
-           first run of this against a real bucket is the first time this
-           system has actually removed an exhibit, so it wants a dry run
-           and a backup, not a deploy.
+        3. **It genuinely destroys bytes.** `delete()` never did. Its
+           first live run was `tests/test_evidence_lock_live_pg.py` on
+           2026-09-02, against throwaway `_itest-lock/` keys with
+           seconds-long locks — not against an exhibit.
 
-        4. **Its integration test creates an object nobody can ever
-           delete.** A COMPLIANCE retention cannot be shortened, lifted or
-           overridden by any credential — that is the entire point of the
-           mode. A test that locks an object for a year has added a year
-           of storage to the bucket, permanently. Use a retention of
-           seconds, and assert the bucket's object-lock configuration
-           before trusting a passing result: against a bucket where
-           locking is off, every assertion here passes for the wrong
-           reason.
+        4. **Its integration test creates objects nobody can delete
+           early.** A COMPLIANCE retention cannot be shortened, lifted or
+           overridden by any credential. The live test therefore uses
+           `put(retain_until=)` with a lock of seconds, sweeps its own
+           prefix on the next run, and FAILS (not skips) unless the
+           bucket's object-lock configuration and versioning are on:
+           against a bucket where locking is off, every assertion about a
+           refusal passes for the wrong reason. `tests/conftest.py` also
+           caps `EVIDENCE_RETENTION_DAYS` at 1 for every other test that
+           ingests, so runs stop adding 365-day objects to the dev bucket.
 
-        5. **On the shipped configuration this refuses for a YEAR.**
-           `infra/docker-compose.yml` sets a bucket DEFAULT of
-           `GOVERNANCE 365d`, so every object inherits a lock even when
-           `put()` is not given a retention — verified here: an object
-           written with no explicit retention still refused deletion. So
-           wiring this in without also deciding the retention policy turns
-           every purge into `LOCKED_UNTIL_RETENTION` for a year, which is
-           *correct* and is not what an operator expects from "purge".
-           Governance mode can be bypassed by a caller holding
-           `s3:BypassGovernanceRetention`; COMPLIANCE cannot, by anyone.
-           This method deliberately does NOT send the bypass header —
-           acquiring that power silently is not a decision to make in a
-           helper.
+        5. **On the shipped configuration a purge refuses for the object's
+           whole retention.** `infra/docker-compose.yml` sets a bucket
+           DEFAULT of `GOVERNANCE 365d` and `put()` applies COMPLIANCE for
+           `DEFAULT_RETENTION` per object, so a purge before that expires
+           records `LOCKED_UNTIL_RETENTION` — which is *correct*, and is
+           why the row now stays due: the sweep after expiry finishes the
+           job. This method deliberately does NOT send the
+           GOVERNANCE-bypass header; acquiring that power silently is not
+           a decision to make in a helper, and COMPLIANCE ignores it
+           anyway.
 
-        Both branches are verified against a live MinIO: a COMPLIANCE-locked
-        object reports `LOCKED_UNTIL_RETENTION` with its bytes intact, and a
-        versioned object with no lock is removed, both versions, reporting
-        `DESTROYED`.
-
-        The behaviour, once enabled: enumerate every version under the
-        key, delete each by `version_id`, and separate the two outcomes
-        that `delete()` currently merges into silence — bytes actually
-        gone, versus the store refusing because the retention has not
-        expired. A refusal is returned, not raised, because the caller
-        (`_purge_evidence`) has to record it against the tombstone rather
-        than abort a batch; anything that is neither a deletion nor a
-        lock still raises, because an unrecognised storage failure is not
-        an outcome to write down.
+        Both branches are measured against a live MinIO on every run of
+        the live test: a COMPLIANCE-locked object reports a locked version
+        with its bytes intact, and a versioned object with no lock is
+        removed, every version.
         """
         removed, locked = 0, 0
         # `include_version=True` is the whole fix. Without it the listing
@@ -269,13 +363,16 @@ class EvidenceStorage:
                     self._bucket, key, version_id=v.version_id)
                 removed += 1
             except S3Error as exc:
-                # MinIO answers a locked version with AccessDenied. The
-                # code is matched loosely on purpose: the S3 vendors do not
-                # agree on it, and treating an unrecognised refusal as a
-                # successful delete is the failure this method exists to
-                # end. Anything that is not recognisably a refusal raises.
-                if exc.code in ("AccessDenied", "MethodNotAllowed",
-                                "InvalidRequest", "RetentionPeriodNotMet"):
+                # MinIO answers a locked version with InvalidRequest and
+                # "Object is WORM protected and cannot be overwritten"
+                # (measured 2026-09-02; this comment said AccessDenied
+                # before, and the code-only tuple it guarded counted a
+                # plain policy denial as a lock). The shared classifier
+                # decides; anything it does not recognise as a refusal
+                # raises, because treating an unknown failure as either
+                # a lock or a successful delete is the failure this
+                # method exists to end.
+                if is_retention_refusal(exc):
                     locked += 1
                 else:
                     raise
@@ -439,6 +536,32 @@ class EvidenceService:
                           hash_verified=ok)
             self._audit("EVIDENCE_HASH_VERIFIED", actor_id, evidence_id, case_id,
                         {"ok": ok})
+            if not ok:
+                # N2 (2026-09-02). The explicit verify wrote only
+                # HASH_VERIFIED on a mismatch; only the incidental read path
+                # wrote EVIDENCE_INTEGRITY_ALARM. Same event, two names, and
+                # the one an auditor greps for was missing from the path an
+                # auditor would use.
+                self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
+                            case_id, {"sha256_ok": sha_ok, "blake3_ok": blake_ok,
+                                      "on_read": False})
+        if not ok:
+            # After the transaction, not inside it: the custody and audit
+            # rows are the record, and a failed notify write must neither
+            # roll them back nor turn a correctly detected mismatch into a
+            # 500. Function-local imports keep this hunk inside the method;
+            # another group owns the delete region and both must merge.
+            import logging
+
+            from noctornal_api import notify_events
+            try:
+                notify_events.evidence_integrity_alarm(
+                    self._c, case_id=case_id, evidence_id=evidence_id,
+                    actor_id=actor_id, on_read=False)
+            except Exception:  # noqa: BLE001 - audited already; the alarm is logged
+                logging.getLogger(__name__).exception(
+                    "integrity alarm for exhibit %s was audited but its "
+                    "notification failed", evidence_id)
         return ok
 
     def export(self, evidence_id: UUID, actor_id: UUID,
@@ -522,7 +645,23 @@ class EvidenceService:
                 self._custody(evidence_id, "HASH_VERIFIED", actor_id,
                               detail={"on_read": True}, hash_verified=False)
                 self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
-                            case_id, {})
+                            case_id, {"on_read": True})
+            # N2 (2026-09-02): this path wrote the AUDIT row and never raised
+            # the URGENT notification the kind promises. After the
+            # transaction and before the raise, for the reasons given in
+            # `verify_integrity`: the record is committed, and a failure to
+            # notify must not change what the caller is told.
+            import logging
+
+            from noctornal_api import notify_events
+            try:
+                notify_events.evidence_integrity_alarm(
+                    self._c, case_id=case_id, evidence_id=evidence_id,
+                    actor_id=actor_id, on_read=True)
+            except Exception:  # noqa: BLE001 - audited already; the alarm is logged
+                logging.getLogger(__name__).exception(
+                    "integrity alarm for exhibit %s was audited but its "
+                    "notification failed", evidence_id)
             raise IntegrityError(
                 f"evidence {evidence_id} bytes do not match the recorded hash"
             )

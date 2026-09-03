@@ -319,12 +319,23 @@ def test_animations_move_only_composited_properties():
     version would scale its own border radius.
     """
     css = APP_CSS.read_text(encoding="utf-8")
-    for block in re.findall(r"@keyframes[^{]+\{(.*?)\n\}", css, re.S):
-        props = re.findall(r"^\s*([a-z-]+)\s*:", block, re.M)
-        for prop in props:
-            assert prop in {"opacity", "transform"}, (
-                f"keyframe animates {prop!r}, which forces layout or paint "
-                f"per frame")
+    # Scan INSIDE each step's braces. The previous scan anchored on line
+    # start -- `^\s*([a-z-]+)\s*:` -- and every keyframe line here begins
+    # with a selector (`from {`, `0%, 100% {`) with the properties after
+    # the brace on the same line, so it extracted NOTHING from all six
+    # blocks and this test passed on any animation whatsoever. Found
+    # 2026-09-01. The sentinel at the end is the fix that matters: a check
+    # that matches nothing must fail, not pass.
+    seen = 0
+    for name, body in re.findall(r"@keyframes\s+([\w-]+)\s*\{(.*?)\n\}", css, re.S):
+        for step in re.findall(r"\{([^{}]*)\}", body):
+            for prop in re.findall(r"([a-z-]+)\s*:", step):
+                seen += 1
+                assert prop in {"opacity", "transform"}, (
+                    f"@keyframes {name} animates {prop!r}, which forces "
+                    f"layout or paint per frame")
+    assert seen > 0, ("the keyframe scan extracted nothing; a check that "
+                      "matches nothing passes on any CSS")
 
 
 # ---------------------------------------------------------------------------
@@ -813,3 +824,193 @@ def test_the_admin_pane_offers_exactly_the_roles_the_server_grants():
 
     # SERVICE is a machine identity and must not be offered anywhere.
     assert "SERVICE" not in server and "SERVICE" not in ui
+
+
+# ---------------------------------------------------------------------------
+# Invariant -- the watch-hit "matched on" contract holds across three files
+# ---------------------------------------------------------------------------
+
+def test_the_watch_hit_reason_is_a_list_on_every_side_of_the_contract():
+    """The collector writes `matched_on` as a JSON LIST of reasons
+    ("regex:...", "selector:..."). For three weeks the console rendered
+    `Object.keys()` of it -- on a list, its indices -- so every real hit on
+    screen said it fired on "0" or "0, 1". The read-path test fixture had
+    fabricated a DICT, and both sides were individually green.
+
+    This is the third time this codebase has shipped two internally
+    consistent halves that were wrong together (co-participation keys,
+    the approvals operation key). So the shape is asserted on all three
+    sides at once, from the one file that reads all of them.
+    """
+    src = STATIC.parents[1]
+    collector = (src / "collection.py").read_text(encoding="utf-8")
+    fixture = (Path(__file__).with_name("test_collection_readpath_pg.py")
+               .read_text(encoding="utf-8"))
+    js = _js()
+
+    # 1. The writer builds a list.
+    assert re.search(r"matched\.append\(", collector), (
+        "collection.py no longer builds matched_on with list.append -- "
+        "re-check the shape before trusting the two assertions below")
+
+    # 2. The fixture writes the same shape (a JSON array, not an object).
+    m = re.search(r"matched_on,[^;]*?VALUES\s*\([^)]*?'(\[[^']*\])'::jsonb",
+                  fixture, flags=re.S)
+    assert m, ("test_collection_readpath_pg._hit must insert matched_on as a "
+               "JSON ARRAY, matching what the collector writes")
+    assert not re.search(r"matched_on\"\]\s*==\s*\{", fixture), (
+        "the read-path test asserts matched_on is a dict; the collector "
+        "writes a list")
+
+    # 3. The renderer handles the list as a list.
+    row = re.search(r"function watchHitRow\b.*?\n\}", js, flags=re.S)
+    assert row, "watchHitRow() is gone -- update this test with the renderer"
+    assert "Array.isArray(h.matched_on)" in row.group(0), (
+        "watchHitRow renders matched_on without checking for a list; "
+        "Object.keys() of a list is its indices")
+
+
+# ---------------------------------------------------------------------------
+# Invariant -- the drain's counters all survive the HTTP boundary
+# ---------------------------------------------------------------------------
+
+def test_the_drain_response_declares_every_counter_the_drain_returns():
+    """`transports.dispatch_due` returns five counters; `DrainOut` declared
+    four. Pydantic drops an undeclared key silently, so `revoked` -- the
+    count of people deliberately NOT told because their clearance or
+    assignment was revoked after the row was queued -- was computed on
+    every drain and reached nobody. A counter that exists to explain an
+    absence, absent.
+
+    Asserted structurally so the next counter cannot vanish the same way:
+    every key the service builds must be a declared field.
+    """
+    src = STATIC.parents[1]
+    transports = (src / "transports.py").read_text(encoding="utf-8")
+    m = re.search(r"counters\s*=\s*\{(.*?)\}\s*\n", transports, flags=re.S)
+    assert m, "transports.dispatch_due no longer builds a `counters = {...}` dict"
+    returned = set(re.findall(r'"([a-z_]+)"\s*:', m.group(1)))
+    assert returned >= {"sent", "refused", "failed", "revoked"}, returned
+
+    from noctornal_api.http.routers.notifications import DrainOut
+    declared = set(DrainOut.model_fields)
+    missing = returned - declared
+    assert not missing, (
+        f"dispatch_due returns {sorted(missing)} and DrainOut does not declare "
+        "them; pydantic will drop them from the response without an error")
+
+
+# ---------------------------------------------------------------------------
+# Invariant -- the static files stay inside the CSP that serves them
+# ---------------------------------------------------------------------------
+# `_UI_CSP` (http/app.py) is script-src 'self', style-src 'self',
+# connect-src 'self', img-src 'self' data:, with no 'unsafe-inline' and no
+# font-src. Until 2026-09-01 nothing asserted the files honoured it: a
+# webfont @import or a CDN <script> passed every test and broke only in a
+# browser -- silently, because a blocked resource is a console line, not
+# an error anybody tests for. And nothing in the suite requested any /ui
+# path at all, so the header itself was unasserted too.
+
+def _css_body(name: str) -> str:
+    return re.sub(r"/\*.*?\*/", "", (STATIC / name).read_text(encoding="utf-8"),
+                  flags=re.S)
+
+
+def _js_body(name: str) -> str:
+    js = re.sub(r"/\*.*?\*/", "", (STATIC / name).read_text(encoding="utf-8"),
+                flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$", "", js)
+
+
+#: A URL that leaves the origin: any scheme (https:, data:, blob:,
+#: javascript:) or a protocol-relative //host.
+_LEAVES_ORIGIN = re.compile(r"^\s*(?:[a-z][a-z0-9+.\-]*:|//)", re.I)
+#: Every attribute through which markup can name a URL.
+_URL_ATTR = re.compile(
+    r"""\b(?:src|href|action|formaction|poster|data|srcset|ping)\s*=\s*["']([^"']*)["']""",
+    re.I)
+
+
+def test_index_html_references_only_same_origin_relative_paths():
+    bad = [v for v in _URL_ATTR.findall(_html()) if _LEAVES_ORIGIN.match(v)]
+    assert not bad, f"index.html references off-origin or scheme URLs: {bad}"
+
+
+def test_index_html_has_no_inline_script_style_or_handlers():
+    """No 'unsafe-inline' anywhere in the policy. An inline block or
+    handler is not merely untidy: the browser refuses it, and whatever it
+    was wired to simply does nothing."""
+    html = _html()
+    assert not re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html, re.I), "inline <script>"
+    assert not re.findall(r"<style\b", html, re.I), "inline <style>"
+    assert not re.findall(r"\sstyle\s*=", html, re.I), "style= attribute"
+    assert not re.findall(r"\son[a-z]+\s*=", html, re.I), "on*= handler"
+    assert not re.findall(r"<base\b", html, re.I), "base-uri 'none' forbids <base>"
+    assert not re.findall(r"<meta[^>]*http-equiv", html, re.I), "a meta CSP would shadow the header"
+    assert not re.findall(
+        r"<link[^>]*rel=[\"'](?:preconnect|dns-prefetch|prefetch|preload)", html, re.I)
+
+
+@pytest.mark.parametrize("name", ["app.css", "theme.css"])
+def test_stylesheets_import_nothing_and_fetch_nothing_off_origin(name: str):
+    css = _css_body(name)
+    assert "@import" not in css, f"{name} has an @import; style-src 'self' blocks it"
+    off = [m.group(0) for m in re.finditer(
+        r"url\(\s*['\"]?\s*(?:[a-z][a-z0-9+.\-]*:|//)[^)]*\)", css, re.I)]
+    assert not off, f"{name} fetches off-origin or scheme URLs: {off}"
+    assert "@font-face" not in css, (
+        f"{name} declares a webfont; the CSP has no font-src and the stack "
+        f"was chosen to ship no font files")
+
+
+_FETCH = re.compile(r"\bfetch\(\s*([^,)]+)")
+_WS = re.compile(r"new WebSocket\(\s*([^)]+)\)")
+_WORKER = re.compile(r"new Worker\(\s*([^)]+)\)")
+
+
+@pytest.mark.parametrize("name", ["app.js", "layout-worker.js"])
+def test_scripts_talk_only_to_their_own_origin(name: str):
+    """Same-origin API calls are fetch(API + ...); the WebSocket is built
+    from location.host; the worker is a relative script name. Anything
+    else is a connection the CSP will refuse at runtime."""
+    js = _js_body(name)
+    for arg in _FETCH.findall(js):
+        assert arg.strip().startswith("API +"), f"{name}: fetch() not rooted at API: {arg!r}"
+    for arg in _WS.findall(js):
+        assert "${location.host}${API}" in arg, f"{name}: WebSocket not same-origin: {arg!r}"
+    for arg in _WORKER.findall(js):
+        assert re.fullmatch(r"['\"][\w./-]+\.js['\"]", arg.strip()), f"{name}: Worker from {arg!r}"
+    assert not re.search(r"https?://", js), f"{name} carries an absolute http(s) URL"
+    assert not re.search(r"['\"`]//", js), f"{name} carries a protocol-relative URL"
+    assert not re.search(
+        r"new EventSource\(|XMLHttpRequest|sendBeacon\(|importScripts\(|\bimport\(", js)
+    assert not re.search(
+        r"createElement\(\s*['\"](?:script|link|iframe|object|embed)['\"]", js), (
+        f"{name} inserts a resource-loading element at runtime")
+    assert not re.search(r"\beval\(|new Function\(", js), "script-src 'self' has no 'unsafe-eval'"
+    assert not re.search(r"\.style\s*=|\.cssText\s*=|setAttribute\(\s*['\"]style['\"]", js), (
+        "style-src 'self' with no 'unsafe-inline' blocks style attribute writes")
+    # `.href =` is allowed ONLY for an object URL of a blob already fetched.
+    for m in re.finditer(r"\.href\s*=\s*([^;]+);", js):
+        assert m.group(1).strip() == "url", f"{name}: .href assigned from {m.group(1).strip()!r}"
+
+
+def test_the_console_is_served_under_the_ui_csp(monkeypatch):
+    """The header, not only the files. Nothing requested /ui in the suite,
+    so the policy the files are held to above was itself unasserted. A
+    database is not needed: the console is StaticFiles."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@192.0.2.1:5432/x")
+    from noctornal_api.http.app import _UI_CSP, create_app
+    client = TestClient(create_app())
+    for path in ("/ui/", "/ui/app.js", "/ui/app.css"):
+        r = client.get(path)
+        assert r.status_code == 200, (path, r.status_code)
+        assert r.headers["Content-Security-Policy"] == _UI_CSP, path
+        assert "unsafe-inline" not in _UI_CSP
+        assert "unsafe-eval" not in _UI_CSP
+    # And the API keeps the stricter default-src 'none' -- the UI policy
+    # must not leak onto it.
+    r = client.get("/healthz")
+    assert r.headers["Content-Security-Policy"].startswith("default-src 'none'")

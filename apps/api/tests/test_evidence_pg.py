@@ -22,23 +22,44 @@ def conn():
     from noctornal_api.db import connect
     c = connect()
     yield c
-    # Evidence + custody are WORM/append-only by design, so cleanup must
-    # briefly disable the custody trigger (the test role owns the table).
-    # audit.event rows carry no case FK and are meant to persist — left in.
+    # Custody rows are NEVER deleted here and the chain trigger is never
+    # stood down. Until 2026-09-02 this teardown did both, and the other
+    # evidence-writing suites copied the idiom from here. It was harmless
+    # only by accident: a suite's rows were always the newest in the ledger
+    # when its own teardown ran, so each deletion took the chain's tail and
+    # no link broke -- and `custody_verify.py` cannot see a tail go. Any
+    # interleaving (a pinned row from another suite, a parallel worker)
+    # turns the same delete into a LINK break on a ledger that exists to be
+    # produced in court. So the rows stay, and everything they point at
+    # stays with them (every FK involved is NO ACTION): the exhibit, its
+    # case, and each human named on the custody row (actor_id), the exhibit
+    # (acquired_by) or the case (owner, deputy). The residue is keyed on
+    # this suite's uuid-random email prefix and case code, so it cannot
+    # collide with a later run. audit.event is left alone, as before.
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'ev-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
+    # NULL-guarded on purpose: one NULL in a NOT IN list makes the whole
+    # predicate unknown and the delete silently removes nothing.
+    pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
+    pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
+    pinned_users = (
+        "(SELECT actor_id FROM core.evidence_custody WHERE actor_id IS NOT NULL"
+        " UNION SELECT acquired_by FROM core.evidence WHERE acquired_by IS NOT NULL"
+        ' UNION SELECT owner_user_id FROM core."case" WHERE owner_user_id IS NOT NULL'
+        ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL)'
+    )
     with c.transaction():
-        c.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
+                  f"AND id NOT IN {pinned_evidence}")
         c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
-        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
-        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'ev-%@noctornal.test'")
-        c.execute("ALTER TABLE core.evidence_custody ENABLE TRIGGER USER")
+        c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
+                  f"AND id NOT IN {pinned_cases}")
+        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'ev-%@noctornal.test' "
+                  f"AND id NOT IN {pinned_users}")
     c.close()
 
 

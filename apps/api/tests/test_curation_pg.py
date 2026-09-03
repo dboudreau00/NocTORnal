@@ -22,8 +22,22 @@ def conn():
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'cur-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
+    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
+    # this teardown deleted them with the trigger stood down, which only
+    # ever took the chain's tail and so never tripped `custody_verify.py`
+    # -- the teardown in `test_evidence_pg.py` has the full account. What
+    # a custody row points at stays with it: the exhibit, its case, and
+    # the humans on the custody row, the exhibit and the case. NULL-guarded
+    # because one NULL in a NOT IN list silently deletes nothing.
+    pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
+    pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
+    pinned_users = (
+        "(SELECT actor_id FROM core.evidence_custody WHERE actor_id IS NOT NULL"
+        " UNION SELECT acquired_by FROM core.evidence WHERE acquired_by IS NOT NULL"
+        ' UNION SELECT owner_user_id FROM core."case" WHERE owner_user_id IS NOT NULL'
+        ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL)'
+    )
     with c.transaction():
-        c.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM core.tag_assignment WHERE evidence_id IN {esub} "
                   f"OR node_id IN (SELECT id FROM core.node WHERE case_id IN {csub})")
         c.execute(f"DELETE FROM core.tag WHERE case_id IN {csub}")
@@ -34,13 +48,14 @@ def conn():
                   f"(SELECT id FROM core.node_set WHERE case_id IN {csub})")
         c.execute(f"DELETE FROM core.node_set WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
+                  f"AND id NOT IN {pinned_evidence}")
         c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
-        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
-        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'cur-%@noctornal.test'")
-        c.execute("ALTER TABLE core.evidence_custody ENABLE TRIGGER USER")
+        c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
+                  f"AND id NOT IN {pinned_cases}")
+        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'cur-%@noctornal.test' "
+                  f"AND id NOT IN {pinned_users}")
     c.close()
 
 

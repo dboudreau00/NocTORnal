@@ -123,17 +123,43 @@ def main() -> int:
     g = GraphWriteService(conn)
     sel = SelectorStore(conn)
 
-    # The compartmented case cannot be created unless its OWNER is read into
-    # the compartment — `CaseService.create` refuses outright, and it is
-    # right to: a case whose own owner cannot see it is a case nobody can
-    # work. Without this the seeder died half-way on a fresh machine, having
-    # already committed the first two cases (the connection is autocommit),
-    # which left a partial estate that the "already seeded" guard below then
-    # refused to finish.
+    # A compartmented case needs TWO things that a fresh install does not
+    # have, and it needs them in this order. Getting either wrong killed the
+    # seeder half-way, after the first two cases had already been committed
+    # on an autocommit connection — a partial estate that the "already
+    # seeded" guard below then refused to finish. That happened twice: once
+    # for the read-in, and again on 2026-09-02 for the registry.
     #
-    # Granted rather than skipped, because the compartment is one of the
-    # things worth SEEING in a demo — and said out loud, because widening an
-    # account's access is not something a seed script should do quietly.
+    # FIRST, the key must be in the REGISTRY. 0057 made `iam.compartment` a
+    # closed vocabulary and `CaseService.create` refuses a key that is not in
+    # it. The registry block below survived review only because a developer
+    # machine's 0057 backfill had already found STEALER-2026 sitting in an
+    # array; on a fresh install — which is every install, and every CI run —
+    # there was nothing to find.
+    #
+    # Guarded with a lookup rather than caught, because `register_compartment`
+    # REFUSES a duplicate by design (a re-registration would silently relabel
+    # what every case in the compartment is filed under) and this script is
+    # re-runnable. Said out loud, because widening the vocabulary the access
+    # gate compares against is not something a seed script should do quietly.
+    from noctornal_api.iam_admin import IamAdminService
+    admin = IamAdminService(conn)
+    known = {r["key"] for r in admin.list_compartments()}
+    new_keys = [k for k in DEMO_COMPARTMENTS if k not in known]
+    for key in new_keys:
+        admin.register_compartment(key=key, label=f"{key} (demo seed)",
+                                   actor_id=owner)
+    if new_keys:
+        print(f"  REGISTERED compartment(s) {', '.join(new_keys)} — this "
+              f"widens the vocabulary every case and read-in is checked "
+              f"against, and is audited as COMPARTMENT_REGISTERED.")
+
+    # SECOND, the OWNER must be read into it — `CaseService.create` refuses
+    # outright otherwise, and it is right to: a case whose own owner cannot
+    # see it is a case nobody can work. Granted rather than skipped, because
+    # the compartment is one of the things worth SEEING in a demo, and said
+    # out loud, because widening an account's access is not something a seed
+    # script should do quietly.
     have = conn.execute(
         "SELECT compartments FROM iam.app_user WHERE id = %s",
         (owner,)).fetchone()[0] or []

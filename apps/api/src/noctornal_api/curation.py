@@ -6,7 +6,9 @@ and can carry an external id (e.g. a MITRE ATT&CK technique). Node sets are
 ad-hoc analyst working sets that are deliberately NOT ontological claims —
 they group nodes for a task without becoming edges that would distort
 centrality (docs/01). Search runs over the trigger-maintained tsvectors on
-node and evidence.
+node, evidence and -- since 2026-09-02 -- collected documents, which had
+carried a maintained tsvector and a GIN index since 0011/0016 that no
+query in the tree ever used.
 """
 from __future__ import annotations
 
@@ -208,3 +210,105 @@ class SearchService:
             (query, case_id, clearance, list(compartments), query, limit),
         ).fetchall()
         return [SearchHit(r[0], r[1], r[2]) for r in rows]
+
+    def search(
+        self, *, case_id: UUID, query: str, limit: int = 50,
+        clearance: str, compartments: frozenset[str],
+        include_evidence: bool = True, include_documents: bool = True,
+    ) -> list[dict]:
+        """Nodes, evidence AND collected documents in one ranked list.
+
+        Until 2026-09-02 search reached `core.node` and `core.evidence`
+        and nothing else, so the one box an analyst types a handle or a
+        domain into never looked at what the collector had collected --
+        the phase that exists to find those things. `collect.document`
+        has carried a trigger-maintained `search_tsv` and a GIN index
+        since 0011/0016; this is the first query to use them.
+
+        Each half is filtered by the CALLER's own ceiling, as the two
+        older methods are and as `CollectionService.documents` is:
+        `collect.document.classification` defaults to AMBER and can be
+        higher, so a RED post is invisible to an AMBER analyst rather
+        than discoverable-then-403, while a node carrying the same token
+        still appears for them. Documents have no compartments column, so
+        the compartment predicate applies to nodes and evidence only.
+
+        The document half checks the SOURCE's label as well as the
+        document's, added 2026-09-02 alongside the same predicate in
+        `CollectionService.documents`. A document row here carries
+        `source_name` and `external_url` -- the forum's identity, which is
+        frequently the finding -- and `CollectionService._store_document`
+        copies the source's label onto a document only at INSERT. Without
+        the second predicate a source reclassified RED after collection
+        kept publishing its own name through every AMBER document it had
+        already produced, which is precisely the leak the clearance pass
+        on the collection routes had just closed everywhere else.
+
+        Documents are NOT case-scoped, for the reason `documents()` gives:
+        a document hangs off a source, and the same forum post is
+        material in however many cases cite it. What IS case-scoped is
+        the permission to see them at all -- global `collection.read`,
+        which the router checks and expresses as `include_documents`;
+        `include_evidence` is `evidence.read` on the case, likewise. The
+        flags are inside the SQL rather than around it so LIMIT applies
+        after every filter and cannot fill up with rows the caller may not
+        see.
+
+        Purged documents are excluded outright: the trigger recomputes
+        the vector from what is left (the title), and a destroyed exhibit
+        findable by its title would render as a search result with no
+        body -- a deletion reported as a blank.
+        """
+        rows = self._c.execute(
+            """SELECT kind, id, label, excerpt, source_name, posted_at,
+                      external_url, rank
+                 FROM (
+                   SELECT 'node' AS kind, n.id, n.label,
+                          NULL::text AS excerpt, NULL::text AS source_name,
+                          NULL::timestamptz AS posted_at,
+                          NULL::text AS external_url,
+                          ts_rank(n.search_tsv,
+                                  plainto_tsquery('simple', %(q)s)) AS rank
+                     FROM core.node n
+                    WHERE n.case_id = %(case_id)s
+                      AND n.deleted_at IS NULL AND n.merged_into_id IS NULL
+                      AND n.classification <= %(clearance)s::core.tlp
+                      AND n.compartments <@ %(compartments)s
+                      AND n.search_tsv @@ plainto_tsquery('simple', %(q)s)
+                   UNION ALL
+                   SELECT 'evidence', e.id, e.title, NULL, NULL, NULL, NULL,
+                          ts_rank(e.search_tsv,
+                                  plainto_tsquery('simple', %(q)s))
+                     FROM core.evidence e
+                    WHERE %(evidence)s
+                      AND e.case_id = %(case_id)s
+                      AND e.classification <= %(clearance)s::core.tlp
+                      AND e.compartments <@ %(compartments)s
+                      AND e.search_tsv @@ plainto_tsquery('simple', %(q)s)
+                   UNION ALL
+                   SELECT 'document', d.id,
+                          coalesce(nullif(d.title, ''), left(d.body_text, 80)),
+                          left(d.body_text, 240), s.name, d.posted_at,
+                          d.external_url,
+                          ts_rank(d.search_tsv,
+                                  plainto_tsquery('simple', %(q)s))
+                     FROM collect.document d
+                     JOIN collect.source s ON s.id = d.source_id
+                    WHERE %(documents)s
+                      AND d.purged_at IS NULL
+                      AND d.classification <= %(clearance)s::core.tlp
+                      AND s.classification <= %(clearance)s::core.tlp
+                      AND d.search_tsv @@ plainto_tsquery('simple', %(q)s)
+                 ) hits
+                ORDER BY rank DESC, kind, id
+                LIMIT %(limit)s""",
+            {"q": query, "case_id": case_id, "clearance": clearance,
+             "compartments": list(compartments),
+             "evidence": include_evidence, "documents": include_documents,
+             "limit": limit},
+        ).fetchall()
+        return [{"kind": r[0], "id": str(r[1]), "label": r[2] or "",
+                 "excerpt": r[3], "source_name": r[4],
+                 "posted_at": r[5].isoformat() if r[5] else None,
+                 "external_url": r[6], "rank": float(r[7])}
+                for r in rows]

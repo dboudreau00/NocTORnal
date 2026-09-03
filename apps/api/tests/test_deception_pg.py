@@ -38,13 +38,25 @@ def conn():
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
-    # Evidence and custody are WORM/append-only by design, so cleanup has
-    # to disable the custody trigger briefly — the same idiom, for the same
-    # reason, as `test_evidence_pg.py`. `audit.event` is left alone
-    # entirely: invariant 6 has no such escape hatch, and a teardown that
-    # could tidy the audit trail would mean the invariant did not hold.
+    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
+    # this teardown deleted them with the trigger stood down -- the idiom
+    # copied from `test_evidence_pg.py`, whose teardown now has the full
+    # account of why that only ever took the chain's tail and so never
+    # tripped `custody_verify.py`. What a custody row points at stays with
+    # it: the exhibit, its case, and the humans on the custody row, the
+    # exhibit and the case. `audit.event` is left alone entirely, as
+    # before: invariant 6 has no escape hatch, and a teardown that could
+    # tidy the audit trail would mean the invariant did not hold.
+    # NULL-guarded because one NULL in a NOT IN list silently deletes nothing.
+    pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
+    pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
+    pinned_users = (
+        "(SELECT actor_id FROM core.evidence_custody WHERE actor_id IS NOT NULL"
+        " UNION SELECT acquired_by FROM core.evidence WHERE acquired_by IS NOT NULL"
+        ' UNION SELECT owner_user_id FROM core."case" WHERE owner_user_id IS NOT NULL'
+        ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL)'
+    )
     with c.transaction():
-        c.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM deception.capture_hop WHERE capture_id IN "
                   f"(SELECT id FROM deception.capture WHERE case_id IN {csub})")
         c.execute(f"DELETE FROM deception.capture WHERE case_id IN {csub}")
@@ -55,12 +67,20 @@ def conn():
         c.execute(f"DELETE FROM deception.email_message WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM deception.call_record WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
+                  f"AND id NOT IN {pinned_evidence}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
-        c.execute(f"DELETE FROM iam.app_user WHERE id IN {sub}")
-        c.execute("ALTER TABLE core.evidence_custody ENABLE TRIGGER USER")
+        c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
+                  f"AND id NOT IN {pinned_cases}")
+        c.execute(f"DELETE FROM iam.app_user WHERE id IN {sub} "
+                  f"AND id NOT IN {pinned_users}")
+    # The compartment key `_register` added is deliberately NOT removed.
+    # This teardown PINS any case a custody row points at, so a key this
+    # file registered can still be in use afterwards -- and an in-use
+    # value with no registry entry is exactly the state
+    # `test_compartment_registry_pg.py` asserts can never exist. Widening
+    # the vocabulary is monotone and safe; narrowing it is what strands a
+    # case, which is the whole reason 0057 exists.
     c.close()
 
 
@@ -74,8 +94,26 @@ def _user(conn, clearance="RED", compartments=()):
     return uid
 
 
+def _register(conn, compartments) -> None:
+    """Put the fixture's compartment keys in `iam.compartment` first.
+
+    0057 (2026-09-02) made the registry a closed vocabulary and
+    `CaseService.create` refuses a key that is not in it. Until this helper
+    existed the three compartment tests below passed only on a database
+    whose backfill had happened to find `OPX` already in an array, and
+    failed on every fresh one -- CI's included. Idempotent, because the
+    key survives its owner (`created_by` is ON DELETE SET NULL) and the
+    fixture runs once per test.
+    """
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (deception test)"))
+
+
 def _case(conn, owner, classification="GREEN", compartments=()):
     from noctornal_api.cases import CaseService
+    _register(conn, compartments)
     return CaseService(conn).create(
         code=f"OP-DCP-{uuid4().hex[:6]}", title="Deception",
         legal_basis="production order", retention_until=date(2028, 1, 1),
