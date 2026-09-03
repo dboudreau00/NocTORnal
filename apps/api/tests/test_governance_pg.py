@@ -41,6 +41,14 @@ def conn():
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification WHERE recipient_id IN {sub})")
         c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {sub}")
+        # By ACTOR as well. An alert raised by a gov- user (actor_id) for a
+        # recipient outside the sweep, on no case of theirs, survived the
+        # recipient and case deletes and blocked the user delete with
+        # notification_actor_id_fkey: 35 teardown errors per run until
+        # 2026-09-02. Each one rolled back the WHOLE cleanup transaction,
+        # so the global TEST% retention rules leaked too and later tests
+        # failed on them. notify.delivery cascades from notification.
+        c.execute(f"DELETE FROM notify.notification WHERE actor_id IN {sub}")
         c.execute(f"DELETE FROM notify.notification WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
         # Confirming a retention rule attaches a human to it, so the
@@ -55,15 +63,30 @@ def conn():
         c.execute(f"DELETE FROM core.purge_tombstone WHERE purged_by IN {sub}")
         c.execute("ALTER TABLE core.purge_tombstone ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM core.approval_request WHERE case_id IN {csub}")
-        c.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
-        c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN "
-                  f"(SELECT id FROM core.evidence WHERE case_id IN {csub})")
-        c.execute("ALTER TABLE core.evidence_custody ENABLE TRIGGER USER")
-        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
+        # Custody rows stay and the chain trigger stays up. Until 2026-09-02
+        # this teardown deleted them with the trigger stood down, which
+        # only ever took the chain's tail and so never tripped
+        # `custody_verify.py` -- the teardown in `test_evidence_pg.py` has
+        # the full account. What a custody row points at stays with it:
+        # the exhibit, its case, and the humans on the custody row, the
+        # exhibit and the case. NULL-guarded because one NULL in a NOT IN
+        # list silently deletes nothing.
+        pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
+        pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
+        pinned_users = (
+            "(SELECT actor_id FROM core.evidence_custody WHERE actor_id IS NOT NULL"
+            " UNION SELECT acquired_by FROM core.evidence WHERE acquired_by IS NOT NULL"
+            ' UNION SELECT owner_user_id FROM core."case" WHERE owner_user_id IS NOT NULL'
+            ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL)'
+        )
+        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
+                  f"AND id NOT IN {pinned_evidence}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
+        c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
+                  f"AND id NOT IN {pinned_cases}")
         c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {sub}")
-        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'gov-%@noctornal.test'")
+        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'gov-%@noctornal.test' "
+                  f"AND id NOT IN {pinned_users}")
     c.close()
 
 

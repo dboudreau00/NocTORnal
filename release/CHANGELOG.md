@@ -1,5 +1,141 @@
 # Changelog
 
+## Alpha 4 — 2026-09-02
+
+Completion release. **Still not audited, and still not lawful to operate
+against real material until the five blocking items in
+[docs/16](../docs/16-legal-and-external.md) are settled by somebody
+outside this codebase.** Nothing in this release touches those.
+
+This one closed gaps rather than adding surface, and most of what it
+closed was a control that existed and could not be reached, or a sentence
+that claimed more than the code did.
+
+### The custody ledger is verified for the first time
+
+`core.evidence_custody` has been hash-chained since migration 0024, under
+a docstring invoking FRE 902(13)–(14) — and nothing had ever recomputed
+it. The internal audit log had a verifier, a CI step and a UI button; the
+record actually produced to a court had none of the three.
+
+It now has all three: `custody_verify.py`, `GET /audit/custody/verify`
+under `audit.read`, a CI step beside the audit chain, and a control in
+Governance → Audit chain. It checks LINK, CONTENT, FORK and GENESIS
+across the whole ledger, and because the chain is global, naming an
+exhibit narrows what is *reported* and never what is checked — the scoped
+answer says so rather than reading like a completeness pass.
+
+**What it still cannot see is a tail truncation.** Deleting the newest
+rows orphans nothing and needs no rehash, so the ledger still agrees with
+itself. That is the first entry in the module's own list of what it cannot
+see, and the response carries `last_id`, `checked` and `tail_row_hash` so
+an operator recording them out of band can catch a decrease. A run-to-run
+equality check on the hash is *not* the defence it looks like — the hash
+changes on every honest append — and the docstring says which two checks
+do work.
+
+### Break-glass raises something
+
+Since Alpha 3 the grant is read by `PgAccessResolver.resolve()` and does
+what its docstring always promised. `record_use()` is called only when the
+grant is what made an access possible, so the security officer's review
+queue counts accesses the grant actually bought rather than a constant
+zero.
+
+### Controls that existed and could not be reached
+
+- **The readiness register** — `GET /admin/readiness`, and an Admin
+  section — answers what this deployment can establish about itself, with
+  the evidence beside each line. It is the code-side half only: the
+  docs/16 items that need a human are named as out of scope, and two items
+  it *can* partly check say so in their passing evidence rather than
+  leaving the operator to infer it.
+- **The delivery ledger** — `notify.delivery` has recorded every refusal
+  since 0029 and every destination since 0044, and nothing read it. There
+  is now a route and an Inbox → Deliveries view. It carries kinds,
+  channels, addresses and reasons; never subjects or summaries.
+- **The assumptions register** (migration 0056) — the last named feature
+  gap in Phase 6. An assumption is what the analysis takes for granted,
+  and writing it down is what makes it reviewable. Open and confirmed
+  statements reach the report; withdrawn and refuted ones do not.
+- **Retention rules can be confirmed from the console.** The panel that
+  lists unconfirmed rules offered no way to confirm one, so the only route
+  was `curl`.
+- **Escalation of an unacknowledged priority-1**, three registered
+  notification kinds that had no producer, and a `notify_drain.py` cron
+  entry.
+
+### The compartment registry (migration 0057)
+
+Compartments were free text, so a typo was a case nobody could see. They
+are now registered, and every write site validates against the registry.
+
+The migration refuses to run rather than silently skipping a value it
+cannot register — and the decision about what to do with a legacy value
+that cannot satisfy the format is stated in its docstring rather than
+left to be discovered.
+
+### Fixes worth naming
+
+- **The purge reported bytes destroyed that were still in the bucket.**
+  `EvidenceStorage.delete()` inserts a delete marker on a versioned,
+  locked bucket and returns success. The purge now calls
+  `delete_all_versions`, marks only rows whose objects the store confirmed
+  gone, and counts exhibit ROWS in the operator-facing counter rather than
+  object VERSIONS — which two docstrings had claimed it already did.
+- **The evidence integrity alarm was an outbound-email amplifier.** It
+  re-fired on every read of a corrupt exhibit, on a route with no rate
+  limit, and each alarm then fanned out to every security officer. It is
+  now idempotent while unacknowledged.
+- **Strict session binding covered the HTTP path only.** A token refused
+  on every request was accepted on the live event stream, where it also
+  slid the idle window and kept the victim's session alive.
+- **`/sources/{id}/run` returned a RED source's hostname** in its error
+  string, under a module docstring certifying that route as safe.
+- **`/analytics/latest` claimed `cached: true`** with no hash check, and
+  the console rendered that as "unchanged since the last run" — staleness
+  reported as freshness, on the pane that names people.
+- The collection listing endpoints filter on the caller's ceiling;
+  `suppressed` and `triage_state` have writers; search reaches
+  `collect.document`. The triage write is gated on the document's label
+  and its source's, because the read is.
+
+### The console
+
+Custody verify, the delivery ledger, the readiness register, retention
+confirmation, the assumptions register, and the analytics pane showing the
+last completed run instead of an empty scoreboard. `/auth/me` now carries
+`display_name`, so the app bar greets an analyst by name rather than with
+their own UUID.
+
+Also: `.h3`/`.h4` were scoped to the analytics pane while three other
+panes used them and got the browser's default `<h3>`; `.pane-title` had
+been in the Inbox markup since it was written and was never defined; the
+keyboard sheet ran past the bottom of a short viewport with its close
+button on the far side; and the two widest tables now scroll inside their
+own box.
+
+### Documentation is now checked against the tree
+
+`test_doc_invariants.py` proved that a cited *document* exists. The
+roadmap is written mostly in three other currencies — source files, test
+names and endpoints — and none of them were checked. Three new tests
+close that: a cited module must be in the tree, a cited test must be
+defined, and a cited endpoint must be routed.
+
+The scoreboard's overall figure was corrected from ~95% to 92.7%. It had
+never been recomputed after the per-phase numbers were revised downward,
+so the summary and the table it summarised disagreed — which is the same
+defect the document catalogues everywhere else.
+
+### Known
+
+The suite is not order-independent on a REUSED database:
+`test_an_expired_dead_letter_can_be_purged_even_if_it_predates_0040`
+passes alone and fails when an earlier test in the same session has left a
+case with expired retention and unpurged evidence. It is a property of the
+fixture estate, not of the purge, and a fresh database does not show it.
+
 ## Alpha 3 — 2026-09-01
 
 Interface release. **Still not audited, and still not lawful to operate
@@ -68,8 +204,9 @@ hidden` and simply amputate the last few with no way to reach them.
 
 The app bar no longer wraps its buttons onto two lines, and no longer
 scrolls the page sideways. `#hdr-user` was 326px of that bar — a third of
-it — because `/auth/me` returns a user_id and nothing else, so the pill
-could only render a raw UUID.
+it — because `/auth/me` returned a user_id and nothing else, so the pill
+could only render a raw UUID. (`/auth/me` carries `display_name` and
+`email` as of Alpha 4, and the bar now renders the name.)
 
 ### Also
 

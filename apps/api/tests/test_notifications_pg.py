@@ -639,7 +639,15 @@ def test_every_registered_kind_has_a_sane_priority():
     for kind in KINDS.values():
         assert 1 <= kind.default_priority <= 3
     urgent = {k for k, v in KINDS.items() if v.default_priority == 1}
-    assert urgent == {"EVIDENCE_INTEGRITY_ALARM", "BREAK_GLASS_INVOKED"}, (
+    # ESCALATION joined the list on 2026-09-02 (N3): it is raised by
+    # `escalate_unacknowledged` only when a priority-1 notification has
+    # already gone unanswered past the window, so it is urgent by
+    # construction -- a quieter escalation would defeat the thing it
+    # exists to do. `notifications.py` says so at the kind itself. This
+    # assertion was not updated with it, so the file failed on any
+    # database and for a reason that had nothing to do with one.
+    assert urgent == {"EVIDENCE_INTEGRITY_ALARM", "BREAK_GLASS_INVOKED",
+                      "ESCALATION"}, (
         "priority 1 overrides quiet hours; it has to stay a short list")
 
 
@@ -657,11 +665,29 @@ def test_the_notification_labels_match_the_access_gates(conn):
     from noctornal_api.http.deps import effective_labels
     from noctornal_api.notifications import effective_labels_for_notification
 
-    owner = _user(conn, clearance="RED", compartments=("A",))
-    case_id = _case(conn, owner, classification="AMBER", compartments=("A",))
-    from_deps = effective_labels(conn, case_id, "RED", frozenset({"B"}))
+    # These were "A" and "B" until 2026-09-02. "A" is a one-character key,
+    # which 0057's CHECK (`^[A-Z0-9_-]{2,32}$`) can NEVER accept -- so this
+    # fixture manufactured a value the registry cannot hold, and a database
+    # left holding it (an interrupted run, a teardown that rolled back)
+    # cannot be migrated past 0057 at all: `upgrade()` refuses rather than
+    # strand every case filed under an unregistrable key. Renamed at the
+    # source, because the fixture, not the migration, is what was wrong.
+    #
+    # Only CASE_KEY is registered: it is written to `core."case"` through
+    # `CaseService.create`, which 0057 gates. ELEMENT_KEY never reaches a
+    # column -- it is handed straight to two pure functions -- so there is
+    # nothing for the registry to gate, and registering it would imply a
+    # read-in that does not exist.
+    case_key, element_key = "NTFY-CASE", "NTFY-ELEM"
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO NOTHING",
+        (case_key, "Notification label test"))
+    owner = _user(conn, clearance="RED", compartments=(case_key,))
+    case_id = _case(conn, owner, classification="AMBER", compartments=(case_key,))
+    from_deps = effective_labels(conn, case_id, "RED", frozenset({element_key}))
     from_notify = effective_labels_for_notification(
-        "AMBER", frozenset({"A"}), "RED", frozenset({"B"}))
+        "AMBER", frozenset({case_key}), "RED", frozenset({element_key}))
     assert from_deps == from_notify
 
 

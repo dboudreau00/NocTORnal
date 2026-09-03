@@ -42,4 +42,26 @@ def connect() -> psycopg.Connection:
     # counter advance and the lockout increment are compare-and-set UPDATEs),
     # so no multi-statement transaction is needed and read paths never leave
     # a connection "idle in transaction" pinning the vacuum horizon.
-    return psycopg.connect(dsn(), autocommit=True)
+    #
+    # connect_timeout: libpq's default is effectively "wait for ever" on a
+    # host that does not answer. A database that is down therefore did not
+    # FAIL -- every request, every test and every script sat in TCP connect
+    # until something external killed it (a 300s CI timeout, a person).
+    # Found 2026-09-01 when the dev stack was down and a read-only audit
+    # hung for five minutes with no message. A connect that cannot complete
+    # in ten seconds is not going to; say so.
+    return psycopg.connect(dsn(), autocommit=True,
+                           connect_timeout=connect_timeout_seconds())
+
+
+def connect_timeout_seconds() -> int:
+    """Seconds to wait for the TCP/handshake phase before giving up.
+
+    Overridable for tests and for genuinely slow links; never unbounded.
+    A value of 0 would mean "no limit" to libpq, so it is clamped to 1.
+    """
+    raw = os.environ.get("NOCTORNAL_DB_CONNECT_TIMEOUT", "10").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 10

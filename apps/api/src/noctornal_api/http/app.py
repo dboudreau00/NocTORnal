@@ -25,12 +25,14 @@ from noctornal_api.http.routers import (
     ach,
     admin,
     analytics,
+    assumptions,
     audit,
     approvals,
     auth,
     cases,
     collection,
     comms,
+    compartments,
     curation,
     deception,
     evidence,
@@ -150,6 +152,11 @@ def create_app() -> FastAPI:
                    # empty) and the analyst-admin surface behind
                    # user.manage.
                    setup.router, admin.router,
+                   # The compartment vocabulary (0057): the closed set
+                   # both case creation and user read-ins are checked
+                   # against. Free text until 2026-09-02, and a typo in
+                   # it was silent no-access.
+                   compartments.router,
                    cases.router, graph.router,
                    # Oversight, not case access: `audit.read` is held by
                    # SECURITY_OFFICER alone, and the chain had no verifier
@@ -160,7 +167,10 @@ def create_app() -> FastAPI:
                    proposals.router, merges.router,
                    approvals.router, approvals.policy_router,
                    notifications.router, samples.router,
-                   ach.router, reports.router,
+                   # The assumptions register (docs/08 Phase 6, 0056):
+                   # what the report's findings rest on, listed where
+                   # they can be challenged. Nothing until 2026-09-02.
+                   ach.router, assumptions.router, reports.router,
                    comms.router, comms.global_router,
                    governance.router, governance.break_glass_router,
                    # `case_router` is the read path: the collector wrote

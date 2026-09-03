@@ -107,3 +107,165 @@ def test_the_known_wrong_register_is_present():
     assert "CHANGE LIKELY" in text and "ACCEPTED COST" in text, (
         "the register no longer carries its severity vocabulary, so the "
         "citations to it (docs/17 F15, F19, F20) resolve to something else")
+
+# ---------------------------------------------------------------------------
+# A citation to code, not to a document
+# ---------------------------------------------------------------------------
+#
+# Everything above proves that a cited DOCUMENT exists. The documents that
+# matter most here are not written in documents -- `ROADMAP-REMAINING.md` is
+# written almost entirely in three other currencies: source files
+# (`retention.py`), test names (`test_a_locked_exhibit_stays_due...`) and
+# endpoints (`GET /audit/custody/verify`). Each is a claim about the tree,
+# each reads as evidence, and until 2026-09-02 nothing checked any of them.
+#
+# These are deliberately forgiving. A prose mention of a name is not a
+# citation, and a document is allowed to describe something that was
+# REMOVED as long as it says so; the checks below therefore look only at
+# names written in the shape this project uses for a live reference, and
+# report the whole set at once rather than failing on the first.
+
+_SRC = ROOT / "apps" / "api" / "src" / "noctornal_api"
+_TESTS = ROOT / "apps" / "api" / "tests"
+
+#: `` `something_py.py` `` in backticks -- the shape this tree uses when it
+#: means "this module", as opposed to a bare word in a sentence.
+_PY_CITE = re.compile(r"`([a-z0-9_]+\.py)`")
+
+#: `` `test_whatever` `` or `` `test_whatever()` ``.
+_TEST_CITE = re.compile(r"`(test_[a-z0-9_]+)\(?\)?`")
+
+#: `GET /path`, `POST /path` -- the shape the docs use for a route.
+_ROUTE_CITE = re.compile(r"`(GET|POST|PATCH|PUT|DELETE) (/[A-Za-z0-9_{}/-]+)`")
+
+#: Modules named in the docs that are deliberately not in `noctornal_api`,
+#: or are named as examples rather than as citations.
+_PY_EXEMPT = {
+    "setup.py", "conftest.py", "__init__.py", "manage.py", "env.py",
+    "package_release.py", "app.py", "main.py",
+}
+
+
+def _roadmap_and_architecture() -> list[Path]:
+    return [p for p in (ROOT / "ROADMAP-REMAINING.md",
+                        ROOT / "ARCHITECTURE.md") if p.exists()]
+
+
+def test_cited_python_modules_exist():
+    """A roadmap that names a module which is gone is worse than silent.
+
+    It is read as a map of the tree by somebody deciding what to work on
+    next, and a name that resolves to nothing costs them the time it takes
+    to discover that -- which is exactly the time the roadmap exists to
+    save.
+    """
+    known = {p.name for p in _SRC.rglob("*.py")}
+    known |= {p.name for p in _TESTS.rglob("*.py")}
+    known |= {p.name for p in (ROOT / "scripts").rglob("*.py")}
+    known |= {p.name for p in (ROOT / "db").rglob("*.py")}
+    # `packages/ontology` is a separate distribution but the same tree, and
+    # ARCHITECTURE.md cites `generate.py` and `normalisers.py` from it.
+    known |= {p.name for p in (ROOT / "packages").rglob("*.py")}
+    assert len(known) > 50, f"only found {len(known)} modules -- tree moved?"
+
+    missing: dict[str, set[str]] = {}
+    for doc in _roadmap_and_architecture():
+        gone = {
+            name for name in _PY_CITE.findall(doc.read_text(encoding="utf-8"))
+            if name not in known and name not in _PY_EXEMPT
+        }
+        if gone:
+            missing[doc.name] = gone
+    assert not missing, (
+        f"documents cite Python modules that are not in the tree: {missing}. "
+        f"Either the module moved and the citation is stale, or it was "
+        f"deleted and the paragraph around it is now describing nothing.")
+
+
+def test_cited_test_names_exist():
+    """The roadmap's evidence is very often a test name.
+
+    "asserted by `test_the_console_is_served_under_the_ui_csp`" is the
+    strongest kind of claim this file makes, because a reader can run it.
+    A renamed test turns that into a claim that cannot be checked, which
+    is the failure mode this whole file exists to prevent.
+    """
+    defined: set[str] = set()
+    for path in _TESTS.rglob("test_*.py"):
+        defined |= set(re.findall(r"^def (test_[a-z0-9_]+)",
+                                  path.read_text(encoding="utf-8"),
+                                  re.M))
+    assert len(defined) > 500, f"only found {len(defined)} tests -- tree moved?"
+
+    missing: dict[str, set[str]] = {}
+    for doc in _roadmap_and_architecture():
+        text = doc.read_text(encoding="utf-8")
+        gone = {n for n in _TEST_CITE.findall(text) if n not in defined}
+        # `test_error_invariants` is a FILE, cited without its extension --
+        # a legitimate way to name a suite, and not a missing function. Only
+        # a name that is neither a defined test nor a test module is stale.
+        gone = {n for n in gone
+                if not (_TESTS / f"{n}.py").exists()}
+        if gone:
+            missing[doc.name] = gone
+    assert not missing, (
+        f"documents cite tests that no longer exist: {missing}. A test name "
+        f"in these documents is an invitation to go and run it.")
+
+
+def test_cited_endpoints_are_routed():
+    """`GET /audit/custody/verify` has to be a route, not a plan.
+
+    Three of the endpoints this project documented were, at various points,
+    written down before they were routed or after they were renamed. The
+    app's own router table is the only honest source for what exists.
+    """
+    from noctornal_api.http.app import create_app
+
+    # NOT `app.routes`: this app mounts its routers as `_IncludedRouter`
+    # objects, which carry neither `.path` nor a walkable `.routes`, so
+    # iterating the attribute returns three paths and a test built on it
+    # would pass by checking almost nothing. The generated schema is the
+    # only enumeration that agrees with what the server actually serves.
+    app = create_app()
+    routed: set[str] = set(app.openapi().get("paths", {}))
+    # `/healthz` is routed with include_in_schema=False, so the schema alone
+    # would report the liveness probe as undocumented-and-missing. Union the
+    # routes attached directly to the app, which is where those live.
+    routed |= {r.path for r in app.routes if getattr(r, "path", None)}
+    assert len(routed) > 80, f"only saw {len(routed)} routes -- app changed?"
+
+    #: The docs write `/cases/{id}/...` where the app declares
+    #: `/cases/{case_id}/...`, and both are prefixed `/api/v1`. Compare on
+    #: a shape that ignores both differences.
+    def norm(p: str) -> str:
+        p = re.sub(r"^/api/v1", "", p)
+        return re.sub(r"\{[a-z_]+\}", "{}", p)
+
+    have = {norm(p) for p in routed}
+
+    #: Matched on the TAIL, not on equality. ARCHITECTURE.md documents each
+    #: router's routes relative to that router's own prefix -- `POST /nodes`
+    #: under the graph router, `GET /me` under auth -- while the roadmap
+    #: writes some of them absolute. Requiring equality would fail on 58
+    #: routes that all exist, which is a test that reports the wrong thing
+    #: about itself. The tail match still catches the case worth catching:
+    #: a path that appears nowhere in the routing table at all.
+    def routed_somewhere(path: str) -> bool:
+        want = norm(path)
+        return any(p == want or p.endswith(want) for p in have)
+
+    missing: dict[str, set[str]] = {}
+    for doc in _roadmap_and_architecture():
+        text = doc.read_text(encoding="utf-8")
+        gone = {
+            f"{verb} {path}"
+            for verb, path in _ROUTE_CITE.findall(text)
+            if not routed_somewhere(path)
+        }
+        if gone:
+            missing[doc.name] = gone
+    assert not missing, (
+        f"documents cite endpoints the app does not route: {missing}. An "
+        f"endpoint written down before it is routed reads exactly like one "
+        f"that shipped.")

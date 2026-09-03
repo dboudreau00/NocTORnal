@@ -235,7 +235,10 @@ def test_the_audit_throttle_never_fails_a_request():
     a path that was already refusing the request."""
     limiter = RateLimiter(DeadBackend(), limits={
         "x": Limit("x", quota=1, per_seconds=1, scope=Scope.USER)})
-    limiter.should_audit("x", "u:1")  # must not raise
+    # "Must not raise" IS the property, but a bare call reads as a test
+    # with no assertion. Say what a non-raising call has to hand back: a
+    # decision, one way or the other, never an exception.
+    assert limiter.should_audit("x", "u:1") in (True, False)
 
 
 def test_the_audit_throttle_fails_CLOSED_not_open():

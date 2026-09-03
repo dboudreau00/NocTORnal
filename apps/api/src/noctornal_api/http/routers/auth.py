@@ -25,7 +25,12 @@ from noctornal_api.http.deps import (
     get_conn,
 )
 from noctornal_api.http.errors import Problem
-from noctornal_api.http.limits import consume_on_failure, rate_limit, rate_limit_peek
+from noctornal_api.http.limits import (
+    client_ip,
+    consume_on_failure,
+    rate_limit,
+    rate_limit_peek,
+)
 from noctornal_api.security.auth import AuthService
 from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
 from noctornal_api.stores import PgSessionStore, PgUserStore
@@ -94,8 +99,14 @@ def login(body: LoginBody, request: Request, response: Response,
         _audit(conn, "AUTH_FAILED", result.user_id,
                {"reason": result.audit_reason, "email": body.email}, request)
         raise Problem(401, "Unauthenticated", "invalid credentials")
+    # Where the session was minted (0058). `client_ip` is the rate
+    # limiter's view of the peer -- the outermost trusted proxy's client
+    # when NOCTORNAL_TRUSTED_PROXY_HOPS says so -- because a binding to the
+    # proxy's own address would match every replay that came through the
+    # same proxy, which is every replay.
     _, token = SessionService(PgSessionStore(conn)).create(
-        uuid4(), result.user_id, mfa_satisfied=True
+        uuid4(), result.user_id, mfa_satisfied=True,
+        ip=client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     _audit(conn, "AUTH_SUCCEEDED", result.user_id, {}, request)
     # Cookie for browser clients (HttpOnly; the __Host- prefix requires
@@ -128,14 +139,35 @@ def logout(request: Request,
 
 class Me(BaseModel):
     user_id: str
+    # Who you are, not just which row you are. Until 2026-09-02 the model
+    # carried the id and the code count and nothing else, and the analyst
+    # UI put `me.user_id` straight into the app bar, so every signed-in
+    # analyst was greeted by their own UUID.
+    display_name: str
+    email: str
     recovery_codes_remaining: int
 
 
 @router.get("/me", response_model=Me)
 def me(user: CurrentUser = Depends(current_user),
        conn: psycopg.Connection = Depends(get_conn)) -> Me:
+    # Read live from the row rather than from anything the session
+    # carries, so an administrator's correction to a name shows up on the
+    # analyst's next load and not their next login.
+    row = conn.execute(
+        "SELECT display_name, email FROM iam.app_user WHERE id = %s",
+        (user.user_id,),
+    ).fetchone()
+    if row is None:
+        # A session that resolved a moment ago and now names no account:
+        # the row went between the two reads. Say so as an auth failure,
+        # not as a 500 the client would retry.
+        raise Problem(401, "Unauthenticated", "session refers to no account")
+    display_name, email = row
     return Me(
         user_id=str(user.user_id),
+        display_name=display_name,
+        email=email,
         # The COUNT only. Knowing you are down to your last code is
         # actionable; the codes themselves exist in plaintext exactly once,
         # at the moment they are issued.

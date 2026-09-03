@@ -161,35 +161,40 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
 
 def test_break_glass_publishes_a_use_count_only_if_something_counts_uses():
     """`action_count` and `used_at` are written by exactly one function,
-    `BreakGlassService.record_use`, and it has no caller outside its own
-    test. Both are therefore constant on every grant that has ever
-    existed: zero, and NULL.
+    `BreakGlassService.record_use`. From 2026-08-10 to 2026-09-01 it had
+    no caller outside its own test, so both were constant on every grant
+    that had ever existed -- zero, and NULL -- and were deliberately NOT
+    published: a zero to the security officer's review queue answers "was
+    this grant used?" with a fact about the wiring, in the direction that
+    CLOSES the question.
 
-    Publishing that zero to the security officer's review queue answers
-    "was this grant used?" with a fact about the wiring, in the direction
-    that CLOSES the question -- the reviewer sees a number, believes it,
-    and the grant that was never used is exactly the interesting review
-    case the field was added to surface.
-
-    So the two must move together: either something counts uses, or the
-    count is not published. This test fails whichever one is reintroduced
-    without the other.
+    Since 2026-09-01 the ACCESS PATH counts uses: `PgAccessResolver.resolve`
+    (stores.py) calls `record_use()` whenever a live grant is what made an
+    access possible, and the fields are published again. The two must
+    still move together: either something on the access path counts uses,
+    or the count is not published. This test fails whichever one is
+    reintroduced without the other.
     """
-    service = (_SRC / "break_glass.py").read_text(encoding="utf-8")
     router = (_SRC / "http" / "routers" / "governance.py").read_text(
         encoding="utf-8")
-
     published = '"action_count"' in router or '"used_at"' in router
-    # Parsed, not grepped. The reasoning for the withdrawal is written in
-    # break_glass.py's own docstring and NAMES `record_use()` twice, so a
-    # text scan counts the explanation as an implementation -- the same
-    # trap the innerHTML check in the UI suite had to avoid. An AST walk
-    # sees calls and nothing else.
-    counted = any(
-        isinstance(node, ast.Call)
-        and getattr(node.func, "attr", getattr(node.func, "id", None))
-        == "record_use"
-        for node in ast.walk(ast.parse(service)))
+
+    # Parsed, not grepped, and over the ACCESS PATH as well as the service:
+    # break_glass.py's own docstring names `record_use()` several times
+    # while explaining its history, so a text scan would count the
+    # explanation as an implementation. An AST walk sees calls and nothing
+    # else. stores.py is where the call legitimately lives -- the single
+    # construction site of the five-part gate's context -- and break_glass
+    # .py is kept in the walk so that a future move back into the service
+    # is still seen.
+    counted = False
+    for name in ("stores.py", "break_glass.py"):
+        source = (_SRC / name).read_text(encoding="utf-8")
+        counted = counted or any(
+            isinstance(node, ast.Call)
+            and getattr(node.func, "attr", getattr(node.func, "id", None))
+            == "record_use"
+            for node in ast.walk(ast.parse(source)))
 
     assert published == counted, (
         "break-glass publishes a use count that nothing increments"
@@ -214,9 +219,20 @@ def test_break_glass_does_not_promise_an_elevation_it_does_not_perform():
     router = (_SRC / "http" / "routers" / "governance.py").read_text(
         encoding="utf-8")
 
-    reads_grant = "break_glass" in stores or "iam.break_glass" in deps
+    reads_grant = "iam.break_glass" in stores or "iam.break_glass" in deps
     if not reads_grant:
         assert "does NOT currently raise your clearance" in router, (
             "nothing reads the break-glass grant, and the invoke response "
             "does not say so -- an analyst will believe the elevation "
             "applied")
+    else:
+        # The elevation IS implemented (2026-09-01: PgAccessResolver.resolve
+        # reads iam.break_glass). Now the opposite claim is the dangerous
+        # one: a notice that still says the grant raises nothing would send
+        # the analyst looking for another way in while the door is open.
+        assert "does NOT currently raise your clearance" not in router, (
+            "the access path reads the break-glass grant, but the invoke "
+            "response still tells the analyst the elevation did not apply")
+        assert "raised to that level" in router, (
+            "the invoke response must say the clearance is raised, and to "
+            "what, now that it is")

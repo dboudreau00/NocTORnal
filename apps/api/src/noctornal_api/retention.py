@@ -34,8 +34,25 @@ before its retention expires **even to satisfy a deletion order**. That is a
 real, unresolved tension between two obligations (docs/16 C2), and the
 honest response is a `storage_outcome` on the tombstone rather than a purge
 that reports success because the database row changed. `LOCKED_UNTIL_RETENTION`
-means: the record says destroyed, the object store disagrees, and somebody
-needs to know that before they tell a court otherwise.
+means: the schedule says destroy, the object store refused, and somebody
+needs to know that before they tell a court otherwise. Since 2026-09-02 a
+refused exhibit is also NOT marked purged. On the SCHEDULED path that
+means it stays due, and the sweep after the lock expires destroys it and
+writes its own DELETED record. On `purge_out_of_schedule` there is no such
+sweep -- `due()` only ever returns evidence whose case retention has
+expired, and that path is for exhibits whose retention has not -- so it
+warns instead that nothing will retry the row and that the four-eyes
+approval has been spent. Before all this the row was marked on the
+refusal and dropped out of every sweep, so the bytes outlived the lock
+under a tombstone saying they were locked; and the purge asked the store
+with a keyless delete that a versioned bucket answers with a delete
+marker and success, so the tombstone said DELETED while every byte stayed
+retrievable by version id.
+
+The counts that go with it (`storage_deleted` / `storage_locked` /
+`storage_failed`) are EXHIBIT ROWS, the unit the tombstone's
+`object_count` and the governance router speak, and they add up to what
+was attempted. Per-key object VERSION counts live in the warnings.
 
 ## What this module will not do
 
@@ -53,6 +70,8 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api.evidence import is_retention_refusal
+
 #: A category with no rule falls back to the case's own retention. Never
 #: to "forever" and never to a default period -- an unknown category is a
 #: gap in the taxonomy, and inventing a clock for it would hide that.
@@ -63,38 +82,59 @@ STORAGE_LOCKED = "LOCKED_UNTIL_RETENTION"
 STORAGE_FAILED = "FAILED"
 STORAGE_NA = "NOT_APPLICABLE"
 
-#: What an object store says when a retention lock refuses a delete. The S3
-#: vendors do not agree on the code, so the match is deliberately loose --
-#: but it is a match rather than a catch-all, because
-#: LOCKED_UNTIL_RETENTION is a specific claim ("the object is under a
-#: retention lock") and a connection reset is not that claim.
-_RETENTION_REFUSAL_CODES = frozenset({
-    "AccessDenied", "MethodNotAllowed", "InvalidRequest",
-    "RetentionPeriodNotMet", "ObjectLockConfigurationNotFoundError",
-})
-
-
 def _is_retention_refusal(exc: Exception) -> bool:
-    code = getattr(exc, "code", None)
-    if code in _RETENTION_REFUSAL_CODES:
-        return True
-    # Some clients carry the reason only in the message.
-    text = str(exc).lower()
-    return "retention" in text or "object lock" in text or "worm" in text
+    """Is this exception the store saying "the object is under a retention
+    lock" -- and nothing else?
+
+    One classifier, shared with `EvidenceStorage.delete_all_versions`; the
+    rule and its live measurement are on `evidence.is_retention_refusal`.
+    Kept under this name because it is the purge's half of a contract that
+    `tests/test_evidence_lock_live_pg.py` reads from both sides.
+
+    What was wrong until 2026-09-02: this module kept its own set of codes,
+    returned True on a bare `AccessDenied` or `InvalidRequest`, and listed
+    `ObjectLockConfigurationNotFoundError` -- which means the bucket has NO
+    lock configuration -- as a lock. A read-only key, or a bucket policy
+    denying `s3:DeleteObject`, was therefore written into an append-only
+    tombstone as LOCKED_UNTIL_RETENTION: the specific claim that the bytes
+    will become deletable when a retention expires, which they will not.
+    """
+    return is_retention_refusal(exc)
 
 
 @dataclass(frozen=True)
 class _StorageOutcome:
-    """Per-object counts, not one verdict for a batch.
+    """Per-EXHIBIT-ROW counts, not one verdict for a batch.
 
     `outcome` keeps the single string the tombstone column takes, and the
     counts are what the caller reports -- so a partial refusal stops being
-    indistinguishable from a total one.
+    indistinguishable from a total one. Every row lands in exactly one of
+    the three, so `deleted + locked + failed == len(rows)`: rows is the
+    unit the tombstone's `object_count` and the governance router already
+    speak, and a counter that does not add up to the batch cannot tell an
+    operator whether the rest went or were never tried.
+
+    Between two commits on 2026-09-02 `deleted` and `locked` were sums of
+    `versions_removed` / `versions_locked` across keys instead. One
+    exhibit with one version removed and one refused then answered
+    `evidence_purged: 1, storage_deleted: 1, storage_locked: 1` with zero
+    rows marked purged -- an operator-facing claim that an object was
+    destroyed for an exhibit that was entirely intact and still readable.
+    That is this module's signature defect, "a failure reported as the
+    wrong thing", restated in a different unit.
+
+    `warnings` (added 2026-09-02) names the keys the store had nothing
+    under, refused for a reason that is not a lock, or refused under a
+    lock -- and carries the VERSION counts, which belong in prose beside
+    the key they describe rather than in a counter published next to a row
+    count. A bare count of failures does not tell an operator WHICH
+    exhibit the store disagrees about.
     """
     outcome: str
     deleted: int = 0
     locked: int = 0
     failed: int = 0
+    warnings: tuple[str, ...] = ()
 
 
 class RetentionError(Exception):
@@ -136,6 +176,12 @@ class DueItem:
 @dataclass
 class PurgeResult:
     tombstones: list[UUID] = field(default_factory=list)
+    #: Exhibits the purge ATTEMPTED, not the number destroyed. Since
+    #: 2026-09-02 only a row whose object the store confirmed removed is
+    #: marked `purged_at`; `storage_deleted` is that number, and the two
+    #: differ by exactly `storage_locked + storage_failed`. Kept as the
+    #: attempt count because the tombstone's `object_count` is the
+    #: attempt too, and the two must agree.
     evidence_purged: int = 0
     documents_purged: int = 0
     #: Ingest, added 2026-07-25 (docs/17 F17(a)). Counted SEPARATELY rather
@@ -145,20 +191,27 @@ class PurgeResult:
     records_purged: int = 0
     dead_letters_purged: int = 0
     held_back: int = 0
-    #: Objects the store REFUSED because of a retention lock. This is the
-    #: refusal count; it used to be the batch size, so one refusal in a
-    #: hundred and a hundred refusals wrote the same number into an
-    #: append-only tombstone.
+    #: EXHIBIT ROWS the store refused because at least one version of the
+    #: object is under a retention lock -- the same unit as
+    #: `evidence_purged`, not object versions. This is the refusal count;
+    #: it used to be the batch size, so one refusal in a hundred and a
+    #: hundred refusals wrote the same number into an append-only
+    #: tombstone. It was briefly a version count on 2026-09-02, which
+    #: broke the arithmetic above; the per-key version detail is in
+    #: `warnings`.
     storage_locked: int = 0
-    #: Objects that failed to delete for a reason that is NOT a retention
-    #: lock. Previously collapsed into `storage_locked` by a bare
+    #: EXHIBIT ROWS that failed to delete for a reason that is NOT a
+    #: retention lock. Previously collapsed into `storage_locked` by a bare
     #: `except Exception`, which turned "the store did not answer" into the
     #: specific and defensible claim "the object is under a lock".
     storage_failed: int = 0
-    #: Objects the store confirmed it removed. Reported so the three add up
-    #: to what was attempted: without it an operator reading
-    #: `evidence_purged: 100, storage_locked: 3` cannot tell whether the
-    #: other 97 went or were never tried.
+    #: EXHIBIT ROWS the store confirmed it removed -- exactly the rows this
+    #: purge marked `purged_at`. Reported so the three add up to what was
+    #: attempted: without it an operator reading `evidence_purged: 100,
+    #: storage_locked: 3` cannot tell whether the other 97 went or were
+    #: never tried. Never counts a row whose object was partly refused:
+    #: a version removed from a key whose other version is locked destroys
+    #: nothing, because the exhibit is still readable.
     storage_deleted: int = 0
     warnings: list[str] = field(default_factory=list)
 
@@ -426,28 +479,39 @@ class RetentionService:
                 storage = self._purge_evidence(evidence_ids)
                 outcome = storage.outcome
                 result.evidence_purged = len(evidence_ids)
+                # All three counts, always. Until 2026-09-02 `storage_failed`
+                # was only copied when the batch verdict was FAILED, so a
+                # batch with one lock and one transport failure reported the
+                # lock and lost the failure -- the verdict is the WORST
+                # outcome, not the only one.
                 result.storage_deleted = storage.deleted
-                if outcome == STORAGE_LOCKED:
-                    # The REFUSAL count, not the batch size.
-                    result.storage_locked = storage.locked
+                result.storage_locked = storage.locked
+                result.storage_failed = storage.failed
+                result.warnings.extend(storage.warnings)
+                if storage.locked:
+                    # The REFUSAL count in EXHIBIT ROWS, not the batch size
+                    # and not the number of object versions -- see
+                    # `_StorageOutcome`. The per-key version detail is in
+                    # the warnings copied above.
                     result.warnings.append(
                         f"{storage.locked} of {len(evidence_ids)} evidence "
-                        f"rows are marked purged but their objects are under "
-                        f"a retention lock and could not be deleted. The "
-                        f"record says destroyed; the object store disagrees. "
-                        f"See docs/16 C2 before telling anybody the bytes "
-                        f"are gone.")
-                if outcome == STORAGE_FAILED:
+                        f"rows are under a retention lock and could not be "
+                        f"deleted. The retention schedule says destroy; the "
+                        f"object store disagrees. Those rows are NOT marked "
+                        f"purged and stay due, so the sweep after the lock "
+                        f"expires finishes the job. See docs/16 C2 before "
+                        f"telling anybody the bytes are gone.")
+                if storage.failed:
                     # Distinct from LOCKED on purpose: a lock is a lawful
                     # refusal that will expire, a failure is a store that
-                    # did not answer and may destroy the bytes on retry.
-                    result.storage_failed = storage.failed
+                    # did not answer -- or had nothing under the key -- and
+                    # somebody has to look before the next sweep retries it.
                     result.warnings.append(
                         f"{storage.failed} of {len(evidence_ids)} evidence "
                         f"objects could not be deleted, and NOT because of a "
-                        f"retention lock. The rows are marked purged. The "
-                        f"bytes may still be there; do not report this as a "
-                        f"completed destruction.")
+                        f"retention lock. Those rows are NOT marked purged. "
+                        f"The bytes may still be there; do not report this "
+                        f"as a completed destruction.")
                 if outcome == STORAGE_NA:
                     # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
                     # has to be told. `RetentionService(conn)` takes
@@ -597,6 +661,42 @@ class RetentionService:
                 result.storage_locked = storage.locked
                 result.storage_failed = storage.failed
                 result.storage_deleted = storage.deleted
+                result.warnings.extend(storage.warnings)
+                if storage.locked or storage.failed:
+                    # THIS PATH HAS NO NEXT SWEEP. `_purge_evidence` leaves
+                    # a refused row unmarked and `purge_due` tells the
+                    # operator it "stays due, so the sweep after the lock
+                    # expires finishes the job". That is true of the
+                    # scheduled path and FALSE here: `due()` gates evidence
+                    # on `case.retention_until <= now`, and an
+                    # out-of-schedule purge is by definition of exhibits
+                    # whose retention has NOT expired.
+                    #
+                    # Until 2026-09-02 this path copied `purge_due`'s counts
+                    # and its per-key warnings but not its "the rows are NOT
+                    # marked purged" warning, so a court-ordered early
+                    # destruction refused by a COMPLIANCE lock returned
+                    # `evidence_purged: 1, storage_locked: N, warnings: []`,
+                    # left every byte in the bucket, left the row visible
+                    # and off every sweep, and consumed the four-eyes
+                    # approval -- changing nothing while reporting a purge.
+                    # Before the row-marking change it was at least marked;
+                    # the change altered what this response means and said
+                    # nothing on this path.
+                    result.warnings.append(
+                        f"{storage.locked + storage.failed} of "
+                        f"{len(evidence_ids)} exhibit(s) still have their "
+                        f"bytes in the object store, so those rows are NOT "
+                        f"marked purged. Unlike the scheduled sweep, nothing "
+                        f"will retry them: `due()` returns only evidence "
+                        f"whose case retention has expired, and this purge "
+                        f"is out of schedule, so those exhibits are not due "
+                        f"and will not come back due when the lock lifts. "
+                        f"The four-eyes approval has been CONSUMED and "
+                        f"cannot be reused -- a second attempt needs a new "
+                        f"one. A tombstone recording the refusal was "
+                        f"written. Do not report this as a completed "
+                        f"destruction.")
                 result.tombstones.append(self._tombstone(
                     case_id=case_id, object_type="evidence",
                     ids=evidence_ids, authority=authority, actor_id=actor_id,
@@ -610,20 +710,66 @@ class RetentionService:
     # -- internals ---------------------------------------------------------
 
     def _purge_evidence(self, ids: list[UUID]) -> "_StorageOutcome":
-        """Mark the rows and try the object store.
+        """Ask the object store, then mark ONLY the rows whose bytes went.
 
-        The row is marked either way. If the object cannot go, that is the
-        object store's answer and it belongs on the tombstone -- pretending
-        the purge succeeded because the database row changed is how
-        somebody ends up telling a court the material was destroyed when it
-        is sitting under a compliance lock for another eighteen months.
+        Until 2026-09-02 this marked every row `purged_at` up front and
+        then asked the store, on the theory that the store's answer
+        belonged on the tombstone and the row was the database's business.
+        Two things were wrong with that at once:
+
+        1. The store was asked through `EvidenceStorage.delete()`, a
+           keyless delete. The evidence bucket is versioned (forced by
+           `--with-lock`), so a keyless delete inserts a delete marker and
+           returns success with every version still retrievable by version
+           id. The tombstone said DELETED; the bytes were all there.
+           `delete_all_versions()` -- which enumerates the versions and
+           reports a refusal as a refusal -- existed, was verified live,
+           and had a test asserting that nothing called it. It is what
+           this calls now, whenever the store offers it.
+
+        2. A row marked purged on a REFUSAL vanished from every read path
+           and from `due()`, so nothing ever retried it: the lock expired
+           and the bytes sat in the bucket forever under a tombstone saying
+           LOCKED_UNTIL_RETENTION. Now only a row whose object the store
+           confirmed removed is marked.
+
+           WHEN THE CALLER IS `purge_due`, a refused or failed row stays
+           due, and the sweep after the lock expires finishes the job and
+           writes its own DELETED record. That is not true of
+           `purge_out_of_schedule`, the other caller: `due()` gates
+           evidence on `case.retention_until <= now`, and an
+           out-of-schedule purge exists precisely for exhibits whose
+           retention has NOT expired, so a row it leaves unmarked is on no
+           sweep at all and nothing will retry it. That path says so in a
+           warning of its own -- added 2026-09-02, because for one commit
+           it inherited this justification without the fact that makes it
+           true.
+
+        The COUNTS are per EXHIBIT ROW, and are mapped, never
+        `VersionedDeleteResult.outcome`: that property says DESTROYED /
+        NOTHING_TO_DELETE, and the tombstone CHECK (migration 0032) takes
+        only the `STORAGE_*` words in this module. A key with any locked
+        version -> locked (the exhibit is still readable, so nothing was
+        destroyed for it however many other versions went); a key with
+        nothing locked and nothing removed -> failed, because "the row says
+        an exhibit was written and the store has nothing" is a disagreement
+        to investigate, not a destruction to record; a key the store
+        emptied -> deleted, and only those rows are marked. Anything
+        `delete_all_versions` raises is a failure it did not recognise as a
+        lock, and is counted as one. Every row lands in exactly one
+        counter, so the three add up to the batch -- the arithmetic
+        `PurgeResult.evidence_purged` and the governance router both state
+        in prose, and which summing object VERSIONS into `deleted` and
+        `locked` broke for one commit on 2026-09-02. The version counts
+        are kept, in the warning that names the key they belong to.
+
+        A store without `delete_all_versions` (the test stubs; nothing in
+        production) is asked through `delete()`, and its exception, if any,
+        is classified by `_is_retention_refusal`.
         """
         rows = self._c.execute(
-            "SELECT storage_key FROM core.evidence WHERE id = ANY(%s)",
+            "SELECT id, storage_key FROM core.evidence WHERE id = ANY(%s)",
             (ids,)).fetchall()
-        self._c.execute(
-            "UPDATE core.evidence SET purged_at = now() WHERE id = ANY(%s)",
-            (ids,))
         if self._storage is None and ids:
             # REFUSE. NOT_APPLICABLE is a lie for evidence.
             # (`and ids`: with nothing to destroy there is nothing to
@@ -670,15 +816,86 @@ class RetentionService:
         # about a retention lock. A connection reset is not that claim, and
         # STORAGE_FAILED existed for it and was dead code.
         deleted = locked = failed = 0
-        for (key,) in rows:
+        destroyed_ids: list[UUID] = []
+        warnings: list[str] = []
+        for evidence_id, key in rows:
+            if hasattr(self._storage, "delete_all_versions"):
+                try:
+                    r = self._storage.delete_all_versions(key)
+                except Exception as exc:  # noqa: BLE001 - counted, not hidden
+                    # Not a lock (the method returns those as a count) and
+                    # not a deletion: an unrecognised refusal or a store
+                    # that did not answer. The key is named because on the
+                    # scheduled path the next sweep will retry it and
+                    # somebody should know why -- and on the out-of-schedule
+                    # path nothing will, which is worse and is why that
+                    # caller adds a warning of its own.
+                    failed += 1
+                    warnings.append(
+                        f"object store refused storage_key {key!r} for a "
+                        f"reason that is not a retention lock "
+                        f"({type(exc).__name__}: {exc}); the row is not "
+                        f"marked purged")
+                    continue
+                if r.versions_locked:
+                    # Bytes remain, so this ROW is a refusal whatever else
+                    # went: locked wins over removed. Between two commits
+                    # on 2026-09-02 `deleted += r.versions_removed` ran
+                    # BEFORE this check, so an exhibit with one version
+                    # removed and one refused reported
+                    # `storage_deleted: 1` beside `evidence_purged: 1`
+                    # while its row stayed unpurged and every byte stayed
+                    # readable -- "one object deleted" for an exhibit that
+                    # is entirely intact.
+                    #
+                    # The VERSION counts are not lost, they are put where
+                    # they are honest: in a warning naming the key, rather
+                    # than in a counter the router publishes next to a row
+                    # count.
+                    locked += 1
+                    warnings.append(
+                        f"{r.versions_locked} of {r.versions_seen} version(s) "
+                        f"of storage_key {key!r} are under a retention lock "
+                        f"({r.versions_removed} removed); the exhibit's bytes "
+                        f"remain, so nothing was destroyed for it and the row "
+                        f"is not marked purged")
+                    continue
+                if r.versions_removed == 0:
+                    failed += 1
+                    warnings.append(
+                        f"no object found for storage_key {key!r}: the store "
+                        f"holds no bytes under it ({r.versions_seen} "
+                        f"version(s) listed, none of them an object), so "
+                        f"nothing was destroyed and the row is not marked "
+                        f"purged. The database says an exhibit was written; "
+                        f"the object store has nothing.")
+                    continue
+                # One row, one count. `deleted` is len(destroyed_ids) by
+                # construction, which is what makes it the number of rows
+                # this method marked `purged_at`.
+                deleted += 1
+                destroyed_ids.append(evidence_id)
+                continue
             try:
                 self._storage.delete(key)
-                deleted += 1
             except Exception as exc:  # noqa: BLE001 - a refusal IS the answer
                 if _is_retention_refusal(exc):
                     locked += 1
                 else:
                     failed += 1
+                continue
+            deleted += 1
+            destroyed_ids.append(evidence_id)
+        if destroyed_ids:
+            # ONLY these. A row marked purged while its bytes are in the
+            # bucket is the false record this method exists to end. A row
+            # left unmarked is simply due again on the next SCHEDULED
+            # sweep; `purge_out_of_schedule` has no such sweep behind it
+            # and warns instead, because `due()` will never return an
+            # exhibit whose case retention has not expired.
+            self._c.execute(
+                "UPDATE core.evidence SET purged_at = now() WHERE id = ANY(%s)",
+                (destroyed_ids,))
         if locked:
             outcome = STORAGE_LOCKED
         elif failed:
@@ -686,7 +903,8 @@ class RetentionService:
         else:
             outcome = STORAGE_DELETED
         return _StorageOutcome(outcome=outcome, deleted=deleted,
-                               locked=locked, failed=failed)
+                               locked=locked, failed=failed,
+                               warnings=tuple(warnings))
 
     def _tombstone(self, *, case_id: UUID | None, object_type: str,
                    ids: list[UUID], authority: str, actor_id: UUID,

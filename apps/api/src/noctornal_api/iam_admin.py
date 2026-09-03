@@ -35,9 +35,20 @@ administrator who shares accounts instead.
 Lowering a user's clearance below a case they OWN is refused for the same
 reason `cases.py` refuses to raise a case above its owner: both create an
 owner who cannot read their own case, and there is no route back.
+
+## Compartments (0057)
+
+The registry lesson cited by the role allowlist below was, until
+2026-09-02, applied to roles and not to compartments: a user's read-ins
+had no product write path at all and were set with `psql`, where a typo
+was silent no-access. `register_compartment` and `set_compartments` are
+that write path, and both refuse an unknown key by NAME. Removing a
+compartment an owned (or deputised) case requires is refused exactly as
+lowering clearance is, and for the same reason.
 """
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass
 from uuid import UUID
@@ -77,6 +88,13 @@ _NOT_GRANTABLE = frozenset({"SERVICE"})
 _LOAD_BEARING = ("SYS_ADMIN", "SECURITY_OFFICER")
 
 _TLP = ("CLEAR", "GREEN", "AMBER", "RED")
+
+#: The key format, identical to 0057's CHECK constraint. Checked here too
+#: so the refusal is an authored message naming the rule, not a
+#: CheckViolation laundered through `safe_detail`. A key is compared
+#: byte-for-byte by the access gate, so case and whitespace variants are
+#: not "the same compartment"; they are a second one that nobody holds.
+COMPARTMENT_KEY = re.compile(r"^[A-Z0-9_-]{2,32}$")
 
 
 @dataclass(frozen=True)
@@ -360,6 +378,210 @@ class IamAdminService:
             self._audit(actor_id, "USER_UNLOCKED", user_id, {
                 "email": row[2], "failed_logins": row[0],
                 "was_locked_until": row[1].isoformat() if row[1] else None})
+
+    # -- compartments (0057) ---------------------------------------------
+
+    def list_compartments(self, *, held_by: UUID | None = None) -> list[dict]:
+        """The registry, or the part of it one user is read into.
+
+        `held_by` is not a convenience filter, it is the access decision.
+        Until 2026-09-02 there was only the full listing and
+        `GET /compartments` returned it, with labels, to every
+        authenticated account: an analyst with no read-ins could enumerate
+        the whole codeword vocabulary and learn which operations exist,
+        which is precisely the fact a compartment is there to withhold.
+        0057 calls these "need-to-know locks" and `cases.py` refuses an
+        unregistered key because "a key is something typed into a warrant
+        schedule" -- so the key IS the lock, and the vocabulary is not
+        public. See `routers/compartments.py` for who gets which.
+        """
+        if held_by is None:
+            rows = self._c.execute(
+                """SELECT key, label, created_by, created_at
+                     FROM iam.compartment ORDER BY key""").fetchall()
+        else:
+            rows = self._c.execute(
+                """SELECT c.key, c.label, c.created_by, c.created_at
+                     FROM iam.compartment c
+                     JOIN iam.app_user u ON u.id = %s
+                    WHERE c.key = ANY(u.compartments)
+                    ORDER BY c.key""", (held_by,)).fetchall()
+        return [self._compartment(r) for r in rows]
+
+    def holds_global_permission(self, user_id: UUID, permission_key: str) -> bool:
+        """Does this ACTIVE account hold `permission_key` through a global
+        role? The same question `deps.require_global` asks, WITHOUT the
+        step-up freshness clause, and only ever to widen a read.
+
+        Step-up re-challenges an action; this decides how much of a listing
+        an administrator is shown. Tying it to the 15-minute MFA clock
+        would make one GET return two different answers depending on when
+        the caller last typed a code, and the caller would have no way to
+        tell which they got -- so the endpoint reports its `scope` in the
+        response instead, and never silently narrows.
+
+        This must not be used to authorise a WRITE. `require_global` is the
+        only thing that may do that, because a write is exactly what
+        step-up exists to re-challenge.
+        """
+        return self._c.execute(
+            """SELECT 1
+                 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                 JOIN iam.app_user u ON u.id = ur.user_id
+                WHERE ur.user_id = %s AND rp.permission_key = %s AND u.is_active
+                LIMIT 1""", (user_id, permission_key)).fetchone() is not None
+
+    def register_compartment(self, *, key: str, label: str,
+                             actor_id: UUID | None) -> dict:
+        """Add a key to the vocabulary. A second registration of the same
+        key is a REFUSAL, not a relabel: `ON CONFLICT DO UPDATE` would let a
+        second administrator silently rename what every case in the
+        compartment is filed under."""
+        key = (key or "").strip()
+        label = (label or "").strip()
+        self._check_compartment_key(key)
+        if not label:
+            raise AdminError("a compartment needs a label: the key is what "
+                             "the gate compares, the label is what a person "
+                             "reads")
+        with self._c.transaction():
+            row = self._c.execute(
+                """INSERT INTO iam.compartment (key, label, created_by)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (key) DO NOTHING
+                   RETURNING key, label, created_by, created_at""",
+                (key, label, actor_id)).fetchone()
+            if row is None:
+                raise AdminError(
+                    f"compartment {key} is already registered; a key is not "
+                    f"relabelled by registering it again")
+            self._c.execute(
+                """INSERT INTO audit.event
+                       (actor_id, actor_kind, action, object_type, object_id,
+                        detail)
+                   VALUES (%s, %s, 'COMPARTMENT_REGISTERED', 'compartment',
+                           NULL, %s)""",
+                (actor_id, "USER" if actor_id else "SYSTEM",
+                 Json({"key": key, "label": label})))
+        return self._compartment(row)
+
+    def set_compartments(self, user_id: UUID, keys: list[str], *,
+                         actor_id: UUID) -> list[str]:
+        """Replace the COMPLETE set of compartments a user holds.
+
+        Two refusals make this safe to expose. An unknown key is named and
+        refused -- the typo that used to be silent no-access. And a
+        compartment an OWNED or DEPUTISED case requires cannot be taken
+        away: the mirror of the clearance-lowering refusal in
+        `set_clearance`, for the same reason. An owner who cannot read
+        their own case has no route back, and a deputy who cannot is a
+        succession plan that fails on the day it is needed.
+
+        ASSIGNEES are deliberately outside the refusal, and are REPORTED
+        instead (2026-09-02). The refusal exists for the position with no
+        route back: an owner locked out of their own case cannot transfer
+        it, and a deputy is the succession plan. An assignee has both
+        routes -- the read-in can be granted again, or the assignment
+        removed -- and refusing for them would make it impossible to
+        narrow anyone's read-ins without first unpicking every case they
+        are on, which is how a control stops being used. But losing access
+        to a case you are assigned to IS silent no-access, so the audit row
+        names those cases in `stranded_assignments`: the act stays
+        possible and stops being invisible, the same trade break-glass
+        makes. `set_clearance` has the identical scope and does not report
+        yet; if that changes, both belong in one place.
+
+        Re-stating the set the user already holds is not an error and
+        writes no audit row: re-running an admin action is not a change.
+        """
+        keys = list(dict.fromkeys(k.strip() for k in keys if k and k.strip()))
+        row = self._c.execute(
+            "SELECT compartments, email FROM iam.app_user WHERE id = %s",
+            (user_id,)).fetchone()
+        if row is None:
+            raise AdminError("no such user")
+        current = list(row[0] or [])
+        if sorted(current) == sorted(keys):
+            return current
+        unknown = self._unknown_compartments(keys)
+        if unknown:
+            raise AdminError(
+                f"compartment(s) not registered: {', '.join(unknown)}. Register "
+                f"the key first (POST /compartments); an unregistered key is a "
+                f"typo, and a typo in a read-in is a case the user cannot see")
+        removed = sorted(set(current) - set(keys))
+        if removed:
+            stranded = self._c.execute(
+                """SELECT code,
+                          CASE WHEN owner_user_id = %s THEN 'owner'
+                               ELSE 'deputy' END,
+                          ARRAY(SELECT x FROM unnest(compartments) x
+                                 WHERE x = ANY(%s) ORDER BY x)
+                     FROM core."case"
+                    WHERE (owner_user_id = %s OR deputy_user_id = %s)
+                      AND status <> 'CLOSED'
+                      AND compartments && %s
+                    ORDER BY code LIMIT 5""",
+                (user_id, removed, user_id, user_id, removed)).fetchall()
+            if stranded:
+                names = ", ".join(
+                    f"{r[0]} ({r[1]}: needs {', '.join(r[2])})" for r in stranded)
+                raise AdminError(
+                    f"removing compartment(s) {', '.join(removed)} would strand "
+                    f"this user outside cases they hold ({names}). Transfer, "
+                    f"reassign or close those cases first.")
+        detail = {"email": row[1], "from": current, "to": keys}
+        if removed:
+            detail["stranded_assignments"] = self._stranded_assignments(
+                user_id, removed)
+        with self._c.transaction():
+            self._c.execute(
+                "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
+                (keys, user_id))
+            self._audit(actor_id, "USER_COMPARTMENTS_CHANGED", user_id, detail)
+        return keys
+
+    def _stranded_assignments(self, user_id: UUID, removed: list[str]) -> list[str]:
+        """Open cases this user is ASSIGNED to that they can no longer read.
+
+        Reported, never refused -- see `set_compartments`. Only unexpired
+        assignments count, because an expired one already fails
+        `CHECK_ASSIGNMENT` at the gate and naming it would be reporting a
+        loss the user had already taken. Capped, because the audit row is
+        evidence that this happened and to which cases, not a report the
+        administrator is meant to work through in a JSON field.
+        """
+        return [r[0] for r in self._c.execute(
+            """SELECT DISTINCT c.code
+                 FROM iam.case_assignment a
+                 JOIN core."case" c ON c.id = a.case_id
+                WHERE a.user_id = %s
+                  AND (a.expires_at IS NULL OR a.expires_at > now())
+                  AND c.status <> 'CLOSED'
+                  AND c.compartments && %s
+                ORDER BY 1 LIMIT 20""", (user_id, removed)).fetchall()]
+
+    def _check_compartment_key(self, key: str) -> None:
+        if not COMPARTMENT_KEY.match(key or ""):
+            raise AdminError(
+                f"compartment key {key!r} is not valid: a key is 2-32 "
+                f"characters of A-Z0-9_- (upper case, no spaces), because "
+                f"the access gate compares it byte-for-byte")
+
+    def _unknown_compartments(self, keys: list[str]) -> list[str]:
+        if not keys:
+            return []
+        known = {r[0] for r in self._c.execute(
+            "SELECT key FROM iam.compartment WHERE key = ANY(%s)",
+            (keys,)).fetchall()}
+        return [k for k in keys if k not in known]
+
+    @staticmethod
+    def _compartment(r) -> dict:
+        return {"key": r[0], "label": r[1],
+                "created_by": str(r[2]) if r[2] else None,
+                "created_at": r[3].isoformat() if r[3] else None}
 
     # -- internals ---------------------------------------------------------
 

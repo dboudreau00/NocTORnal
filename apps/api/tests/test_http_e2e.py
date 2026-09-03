@@ -33,11 +33,25 @@ def conn():
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
     psub = f"(SELECT id FROM analytics.projection WHERE case_id IN {csub})"
     rsub = f"(SELECT id FROM analytics.metric_run WHERE projection_id IN {psub})"
+    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
+    # this teardown deleted them with the trigger stood down, which only
+    # ever took the chain's tail and so never tripped `custody_verify.py`
+    # -- the teardown in `test_evidence_pg.py` has the full account. What
+    # a custody row points at stays with it: the exhibit, its case, and
+    # the humans on the custody row, the exhibit and the case. NULL-guarded
+    # because one NULL in a NOT IN list silently deletes nothing.
+    pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
+    pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
+    pinned_users = (
+        "(SELECT actor_id FROM core.evidence_custody WHERE actor_id IS NOT NULL"
+        " UNION SELECT acquired_by FROM core.evidence WHERE acquired_by IS NOT NULL"
+        ' UNION SELECT owner_user_id FROM core."case" WHERE owner_user_id IS NOT NULL'
+        ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL)'
+    )
     with c.transaction():
-        c.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence_custody WHERE evidence_id IN {esub}")
-        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
+                  f"AND id NOT IN {pinned_evidence}")
         c.execute(f"DELETE FROM core.selector WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification WHERE case_id IN {csub})")
@@ -59,11 +73,12 @@ def conn():
         c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
+        c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
+                  f"AND id NOT IN {pinned_cases}")
         c.execute(f"DELETE FROM iam.session WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {sub}")
-        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'e2e-%@noctornal.test'")
-        c.execute("ALTER TABLE core.evidence_custody ENABLE TRIGGER USER")
+        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'e2e-%@noctornal.test' "
+                  f"AND id NOT IN {pinned_users}")
     c.close()
 
 
@@ -341,6 +356,17 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
     the leg that passed vacuously before, because an uploaded exhibit
     carries no compartments of its own so the case must supply them."""
     from noctornal_api.cases import CaseService
+    # 0057 (2026-09-02) made `iam.compartment` a closed vocabulary and
+    # `CaseService.create` refuses a key that is not in it, so the case
+    # below cannot be filed until `OP_X` is registered. Before this line
+    # the test passed only where the 0057 backfill had happened to find
+    # `OP_X` already in an array, and failed on every fresh database.
+    # Not withdrawn in teardown: this file PINS cases that custody rows
+    # point at, and an in-use value with no registry entry is the one
+    # state `test_compartment_registry_pg.py` says cannot exist.
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES ('OP_X', "
+        "'Compartmented Op (e2e test)') ON CONFLICT (key) DO NOTHING")
     owner_id, owner_email, owner_secret = _make_user(
         conn, clearance="AMBER", global_roles=("CASE_OWNER",), compartments=("OP_X",))
     owner_token = _login(client, owner_email, owner_secret)
@@ -371,6 +397,20 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
 
 
 def test_cannot_create_case_in_a_compartment_you_lack(conn, client):
+    """The read-in ceiling refuses an owner who is not read in.
+
+    Since migration 0057 `cases.py` runs `_require_registered` BEFORE
+    `_require_compartments`, so an unregistered key is refused first and a
+    substring match on "compartment" is satisfied by the REGISTRY refusal.
+    This test -- the only cover for the owner branch of the read-in
+    ceiling -- therefore proved nothing between 0057 and 2026-09-02: it
+    passed because the key was unregistered, not because the caller lacked
+    it. Register the key so the request reaches the check under test, and
+    assert on "not read into" so the two refusals cannot be confused again.
+    """
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES "
+                 "('OP_SECRET', 'Secret Op (e2e test)') "
+                 "ON CONFLICT (key) DO NOTHING")
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _login(client, email, secret)
     r = client.post("/api/v1/cases", headers=_auth(token), json={
@@ -378,7 +418,7 @@ def test_cannot_create_case_in_a_compartment_you_lack(conn, client):
         "legal_basis": "x", "retention_until": str(date(2028, 1, 1)),
         "review_due": str(date(2027, 1, 1)), "compartments": ["OP_SECRET"],
     })
-    assert r.status_code == 400 and "compartment" in r.text
+    assert r.status_code == 400 and "not read into" in r.text
 
 
 def test_cannot_author_above_your_clearance(conn, client):

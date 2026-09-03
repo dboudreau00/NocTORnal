@@ -403,6 +403,17 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         # So the three account for the batch: an operator reading
         # `evidence_purged: 100, storage_locked: 3` cannot otherwise
         # tell whether the other 97 went or were never tried.
+        #
+        # All three are EXHIBIT ROWS, the same unit as `evidence_purged`
+        # and as the tombstone's `object_count`, and they sum to it. For
+        # one commit on 2026-09-02 `storage_deleted` and `storage_locked`
+        # were object VERSION counts while this comment still promised the
+        # arithmetic, so a single exhibit with one version removed and one
+        # under a lock was published here as `evidence_purged: 1,
+        # storage_deleted: 1` while its bytes were all still in the bucket.
+        # An object-version total is per key and belongs in `warnings`,
+        # which names the key it describes; a number printed beside a row
+        # count has to be a row count.
         "storage_deleted": result.storage_deleted,
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
@@ -410,10 +421,15 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
             "DRY RUN -- nothing was destroyed. The counts above are what "
             "WOULD be destroyed if this ran for real."
             if dry_run else
-            "Destruction is irreversible. `storage_locked` counts objects "
-            "the store REFUSED to delete: COMPLIANCE-mode object lock can "
-            "refuse even to satisfy a deletion order, and a tombstone "
-            "recording a purge that did not happen is a false record."),
+            "Destruction is irreversible. `storage_locked` counts EXHIBITS "
+            "the store REFUSED to delete -- exhibits, not object versions, "
+            "so the three storage counters add up to `evidence_purged`: "
+            "COMPLIANCE-mode object lock can refuse even to satisfy a "
+            "deletion order, and a tombstone recording a purge that did "
+            "not happen is a false record. An exhibit is counted as "
+            "deleted only when the store confirmed every version of its "
+            "object gone; `warnings` says which key refused and how many "
+            "of its versions."),
     }
 
 
@@ -502,13 +518,15 @@ def _grant(g: Grant) -> dict:
         # written, so access was granted invisibly and the officer
         # who must review it could not list it.
         "awaiting_review": g.awaiting_review,
-        # `action_count` and `used_at` are NOT published. `record_use()` is
-        # the only writer of either and has no caller outside its test, so
-        # both are constant -- zero and NULL -- on every grant that has ever
-        # existed. Publishing a zero to the officer's review queue answers
-        # "was this used?" with a fact about the wiring, and it answers it
-        # in the direction that closes the question. An absent field makes
-        # them ask. See break_glass.py, property 4.
+        # Published again from 2026-09-01: the access path now calls
+        # `record_use()` whenever a grant is what made an access possible,
+        # so these answer "was it used?" with a fact about the analyst.
+        # Between 2026-08-10 and then they were withheld on purpose -- both
+        # were structurally zero, and a zero that cannot be anything else
+        # answers the question in the wrong direction. See break_glass.py,
+        # property 4.
+        "used_at": g.used_at.isoformat() if g.used_at else None,
+        "action_count": g.action_count,
         "reviewed_by": str(g.reviewed_by) if g.reviewed_by else None,
         "reviewed_at": g.reviewed_at.isoformat() if g.reviewed_at else None,
         "review_outcome": getattr(g, "review_outcome", None),
@@ -556,17 +574,18 @@ def invoke(
     except BreakGlassError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {**_grant(grant),
-            # Says what is true. The previous wording -- "every action taken
-            # under this grant is audited AGAINST IT" -- claimed a link that
-            # does not exist: actions are audited, but nothing attributes
-            # them to the grant, because nothing reads the grant.
+            # Says what is true, which changed on 2026-09-01: the access
+            # gate reads the grant now. The notice still names the one
+            # limit an analyst could trip over at 3am.
             "notice": ("This grant is recorded, a security officer who is "
                        "not you must review it, and it expires on its own. "
-                       "It does NOT currently raise your clearance: no "
-                       "access decision reads the grant, so if a case was "
-                       "refused before, it will still be refused. Say so in "
-                       "the incident record rather than assuming the "
-                       "elevation applied.")}
+                       "If it names a classification, your clearance is "
+                       "raised to that level on the case it names (or on "
+                       "every case, if it names none) until it expires, and "
+                       "every access it makes possible is counted against "
+                       "it. It does not read you into any compartment. A "
+                       "case-scoped grant opens exhibits on that case; it "
+                       "does not widen search across other cases.")}
 
 
 @break_glass_router.get("/unreviewed", response_model=dict)

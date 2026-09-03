@@ -87,10 +87,13 @@ class CaseService:
         self._require_clearance(owner_user_id, classification, "owner")
         if deputy_user_id is not None:
             self._require_clearance(deputy_user_id, classification, "deputy")
-        # Compartments are need-to-know locks, so a creator cannot put a case
-        # into a compartment they are not read into — they would be locked out
-        # of the case they just made (and a typo'd compartment would do the
-        # same silently).
+        # Compartments are need-to-know locks. A key must exist in the
+        # registry first (0057): until 2026-09-02 the array was free text,
+        # so a typo'd compartment was a lock nobody held, and the only
+        # symptom was that the case vanished from every listing. Then the
+        # creator must be read into it, or they would be locked out of the
+        # case they just made.
+        self._require_registered(compartments or [])
         self._require_compartments(owner_user_id, compartments or [], "owner")
         if deputy_user_id is not None:
             self._require_compartments(deputy_user_id, compartments or [], "deputy")
@@ -283,6 +286,32 @@ class CaseService:
                 f"{who} clearance {row[0]} is below the case classification "
                 f"{classification} — they could not see the case"
             )
+
+    def _require_registered(self, compartments: list[str]) -> None:
+        """Every key must be in `iam.compartment` (0057), and the refusal
+        NAMES the unknown ones: the whole defect was that a wrong key
+        produced a correct-looking denial with no indication of why.
+
+        `create` is the only write site. `update_metadata` deliberately has
+        no `compartments` parameter (its router body says why: adding a
+        compartment locks out every assignee not read into it, and needs
+        its own endpoint with "who loses access" reporting), and the test
+        pins that absence on both halves, so whoever adds it must bring
+        this check along.
+        """
+        if not compartments:
+            return
+        known = {r[0] for r in self._c.execute(
+            "SELECT key FROM iam.compartment WHERE key = ANY(%s)",
+            (list(compartments),)).fetchall()}
+        unknown = sorted(set(compartments) - known)
+        if unknown:
+            raise CaseError(
+                f"compartment(s) {unknown} are not registered. A compartment "
+                f"must be registered (POST /compartments, user.manage) before "
+                f"a case can be filed under it, because an unregistered key "
+                f"is a typo, and a typo in a need-to-know lock is a case "
+                f"nobody can see")
 
     def _require_compartments(
         self, user_id: UUID, compartments: list[str], who: str

@@ -1077,6 +1077,20 @@ def cmd_session(args: argparse.Namespace) -> None:
     and 30 minute idle expiry, same revocation — so nothing downstream is
     weakened. The proper fix on a real deployment is recovery codes (see
     docs/05), which are not built yet.
+
+    It is UNBOUND, and that is deliberate. 0058 records the address and
+    User-Agent a session was minted from, and `SessionService.create` takes
+    both; this command passes neither because it cannot. It runs in a shell
+    on behalf of a browser it has never met, and inventing an address here
+    would put a fact on record that nobody established — the opposite of
+    what 0058 is for. The consequence is real and is printed below rather
+    than discovered: with NOCTORNAL_SESSION_STRICT_BINDING=1 on the server,
+    this session is refused on its FIRST request, with the same generic 401
+    as an expired one. That refusal is audited as SESSION_BINDING_REFUSED
+    with `unbound: true`, which is how a security officer tells "this
+    session could never have been bound" from "someone moved this token" —
+    added on 2026-09-02, because before it the recovery path for a machine
+    whose clock TOTP cannot live with died with an error about nothing.
     """
     _require_database_url()
     from uuid import uuid4
@@ -1093,6 +1107,8 @@ def cmd_session(args: argparse.Namespace) -> None:
         ).fetchone()[0]
         if not active:
             _fail(f"{args.email} is deactivated")
+        # No ip/user_agent: see the docstring. A shell cannot know, and must
+        # not guess, where the browser that will present this token is.
         record, token = SessionService(PgSessionStore(conn)).create(
             uuid4(), user_id, mfa_satisfied=True
         )
@@ -1125,6 +1141,13 @@ def cmd_session(args: argparse.Namespace) -> None:
     print("  Recorded in the audit trail as an MFA-bypassed login. Use it to")
     print("  get working on a machine whose clock TOTP cannot live with, not")
     print("  as the normal way in.")
+    print()
+    print("  This session is UNBOUND: it carries no address and no User-Agent,")
+    print("  because a shell cannot know which browser will present it. If the")
+    print("  API runs with NOCTORNAL_SESSION_STRICT_BINDING=1 it will be")
+    print("  refused on its first request with a generic 401, audited as")
+    print("  SESSION_BINDING_REFUSED with unbound=true. Turn strict binding")
+    print("  off for the recovery, or sign in normally once the clock is right.")
     print(RULE)
 
     if getattr(args, "open", False):

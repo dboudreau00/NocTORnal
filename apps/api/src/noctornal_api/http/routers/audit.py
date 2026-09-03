@@ -35,6 +35,7 @@ import psycopg
 from fastapi import APIRouter, Depends, Query
 
 from noctornal_api.audit_verify import verify_chain
+from noctornal_api.custody_verify import verify_custody_chain
 from noctornal_api.http.deps import CurrentUser, get_conn, require_global
 from noctornal_api.http.limits import rate_limit
 
@@ -132,6 +133,135 @@ def verify(
                 "kind": b.kind,
                 "actor_id": str(b.actor_id) if b.actor_id else None,
                 "case_id": str(b.case_id) if b.case_id else None,
+            }
+            for b in report.breaks
+        ],
+    }
+
+
+@router.get("/custody/verify", response_model=dict,
+            dependencies=[Depends(rate_limit("analytics.suite"))])
+def verify_custody(
+    evidence_id: UUID | None = Query(
+        None,
+        description="report only this exhibit's custody rows; the chain "
+                    "checks still run against the whole ledger"),
+    user: CurrentUser = Depends(require_global("audit.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Recompute the custody hash chain and report every row that does not
+    verify.
+
+    Same gate, metering and shape as `/verify`, for the other tamper-evident
+    ledger in the system: `core.evidence_custody` was hash-chained in 0024
+    with a docstring invoking FRE 902(13)-(14), and until 2026-09-02 nothing
+    recomputed it — the same "written and never verified" gap `/verify`
+    closed for `audit.event`, on the record that is actually produced to a
+    court.
+
+    The custody ledger is ONE chain across every exhibit (the trigger's
+    predecessor is the newest row in the whole table), so `evidence_id`
+    narrows what is REPORTED, not what is checked: an exhibit's rows chain
+    off other exhibits' rows, and a link check confined to one exhibit
+    would call every one of its rows an orphan. The scoped answer says it
+    is scoped, and EVERY answer carries a caveat — see the `caveat` key
+    below for why an unscoped run needs one just as badly.
+
+    Consumed by the analyst console: `btn-custody-verify` in
+    `static/index.html`, wired by `wireCustodyVerify()` in `static/app.js`
+    and rendered by `custodyVerdict()`, which prints `scoped`, `caveat`,
+    `genesis_count` and `genesis_note` rather than folding them into the
+    verdict chip. Named here because an endpoint with no reachable caller
+    is a feature nobody can run, and the only way to keep that honest is
+    for each half to say where the other one is.
+    """
+    report = verify_custody_chain(conn, evidence_id=evidence_id)
+    return {
+        "intact": report.intact,
+        "checked": report.checked,
+        "first_id": report.first_id,
+        "last_id": report.last_id,
+        # Stated explicitly so "intact: true, checked: 0" -- an exhibit with
+        # no custody rows -- can never be read as a pass.
+        "scoped": evidence_id is not None,
+        "evidence_id": str(evidence_id) if evidence_id else None,
+        # The hash of the newest row in the WHOLE ledger, scoped run or not.
+        # Returned because it is the ONLY thing that reveals the blind spot
+        # the caveat below describes: recorded out of band and compared on
+        # the next run, it changes if the tail was removed. Neither this
+        # service nor the CI step persists it -- an operator has to.
+        "tail_row_hash": report.tail_row_hash,
+        # A caveat on EVERY run, not only the scoped ones. Until 2026-09-02
+        # an unscoped run returned `"caveat": null`, which reads as "nothing
+        # qualifies this answer" -- and the qualification that matters most
+        # is true of every run: the checks are all RELATIVE, so removing the
+        # newest custody rows leaves `intact: true` and no trace. An officer
+        # producing an exhibit under FRE 902(13)-(14) is entitled to that
+        # sentence beside the green tick, not after an incident. The scoped
+        # half also lost its promise that running without `evidence_id`
+        # would reveal a deletion: it does not, when the removed rows were
+        # the ledger's own tail.
+        "caveat": (
+            ("Scoped to one exhibit: LINK, FORK and CONTENT are each exact "
+             "for the rows reported, because the predecessor lookup covers "
+             "the whole ledger. GENESIS and NO_GENESIS are whole-ledger "
+             "findings and are reported here too, so a scoped run can come "
+             "back not-intact naming rows of OTHER exhibits — read "
+             "`breaks[].evidence_id` before attributing one. An unscoped "
+             "run sees more of this exhibit's history, because a row "
+             "deleted from it is revealed by whichever row came next in the "
+             "global chain, which is usually another exhibit's. "
+             if evidence_id is not None else
+             "Whole ledger, every exhibit. ")
+            + "What NO run can tell you is whether rows were removed from "
+              "the END. Nothing names the newest row as its predecessor, so "
+              "deleting the last entries — the export, the destruction — "
+              "orphans nothing, costs one DELETE and no rehashing, and "
+              "leaves `intact` true. The defence is `tail_row_hash`: record "
+              "it somewhere this system cannot reach and compare it next "
+              "time. This service does not persist it."
+        ),
+        "forks": len(report.forks),
+        # The ids, not just the count. `fork_note` tells the officer a fork
+        # is worth investigating; until 2026-09-02 the response handed her
+        # nothing to investigate WITH, which is how a note stops being read.
+        "fork_ids": [b.id for b in report.forks],
+        "fork_note": (
+            "Rows sharing a predecessor. Not counted as tampering, for the "
+            "reasons /audit/verify gives — but on a ledger written by 0024, "
+            "whose advisory lock serialises writers, a fork is not known to "
+            "be reachable by ordinary traffic and is worth investigating. "
+            "What it means for certain is that the chain cannot be fully "
+            "linearised."
+        ) if report.forks else None,
+        # Always whole-ledger, always reported: 1 says the chain is anchored,
+        # and only an explicit number distinguishes that from "not looked at".
+        "genesis_count": report.genesis_count,
+        "genesis_note": (
+            "More than one row claims to be the first. The chaining trigger "
+            "writes a NULL predecessor only into an EMPTY table, under a "
+            "lock, and no application code writes prev_hash at all — so a "
+            "second one means the trigger was bypassed. This IS evidence of "
+            "tampering, and it is the shape a truncation leaves: delete the "
+            "first rows, re-anchor the next one, and every other check still "
+            "passes."
+            if report.genesis_count > 1 else
+            "The ledger has no first row, though it has rows. The original "
+            "genesis was removed; every surviving row still links to a real "
+            "predecessor, so no other check can see this."
+        ) if report.genesis_count != 1 and (report.checked or report.breaks) else None,
+        "breaks": [
+            {
+                "id": b.id,
+                "evidence_id": str(b.evidence_id) if b.evidence_id else None,
+                # NO_GENESIS describes a row that is NOT THERE, so it has no
+                # timestamp; an unconditional .isoformat() would 500 the
+                # endpoint on exactly the finding it exists to report.
+                "occurred_at": (b.occurred_at.isoformat()
+                                if b.occurred_at else None),
+                "action": b.action,
+                "kind": b.kind,
+                "actor_id": str(b.actor_id) if b.actor_id else None,
             }
             for b in report.breaks
         ],

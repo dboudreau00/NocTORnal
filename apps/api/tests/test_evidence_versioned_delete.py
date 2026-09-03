@@ -1,4 +1,5 @@
-"""`EvidenceStorage.delete_all_versions` — written, verified, NOT wired.
+"""`EvidenceStorage.delete_all_versions` -- written, verified, and since
+2026-09-02 the purge's one destruction path.
 
 ## Why this exists
 
@@ -9,31 +10,48 @@ on a versioned bucket: it inserts a DELETE MARKER and returns success.
 Reproduced against a live MinIO before any of this was written -- an
 object under a COMPLIANCE lock, then `remove_object(key)` returned
 normally, the real version was still listed, and `get_object(version_id)`
-returned the original bytes. So `EvidenceStorage.delete()` reports a
-destruction while still holding the object, `RetentionService` records
+returned the original bytes. So `EvidenceStorage.delete()` reported a
+destruction while still holding the object, `RetentionService` recorded
 `evidence_purged`, and the tombstone -- the record that is supposed to
-outlive the data -- says DESTROYED.
+outlive the data -- said DELETED.
 
 That is the third instance of one defect: `retention._purge_evidence` and
 `ingest._with_raw` both reported destructions they had not performed.
+
+## The guard at the bottom was INVERTED on 2026-09-02
+
+Until then the last tests here asserted that NOTHING called
+`delete_all_versions` and that the purge still used `delete()` -- a
+deliberate hold, because wiring it flipped production outcomes and could
+not repair the DELETED tombstones already written for still-locked
+objects. That decision was taken that day (the method's docstring records
+what was decided, item by item). The guard is inverted rather than
+deleted so the pair of facts cannot drift back to "neither is called",
+and a second test reads both modules and migration 0032 together: the
+purge maps the three COUNTS and never `outcome`, whose words the
+tombstone's CHECK would refuse.
 
 These tests use a STUB client. They must never create a real
 COMPLIANCE-locked object: that retention cannot be shortened, lifted or
 overridden by any credential, so a test that locks something for a year
 has added a year of storage to the bucket, permanently. The live
-verification was done once, by hand, with a 45-second retention.
+measurement is `tests/test_evidence_lock_live_pg.py`, with locks of
+seconds; the refusal shape the stub here raises is what that file
+measured.
 
 Pure -- no MinIO, no database.
 """
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
 from minio.error import S3Error
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
+MIGRATIONS = Path(__file__).resolve().parents[3] / "db" / "migrations" / "versions"
 
 
 class _Version:
@@ -43,18 +61,32 @@ class _Version:
         self.is_delete_marker = is_delete_marker
 
 
-def _s3_error(code: str) -> S3Error:
-    return S3Error(code=code, message=code, resource="r",
+#: What MinIO actually says for a COMPLIANCE-locked version, measured
+#: against the live stack 2026-09-02 (`tests/test_evidence_lock_live_pg.py`
+#: re-measures it every run). Until that day this stub refused with a bare
+#: `AccessDenied` and the classifier counted it as a lock -- the same
+#: defect `retention._is_retention_refusal` had, seen from the other side:
+#: a policy denial recorded as a retention lock.
+WORM = ("InvalidRequest", "Object is WORM protected and cannot be overwritten")
+
+
+def _s3_error(code: str, message: str | None = None) -> S3Error:
+    return S3Error(code=code, message=message or code, resource="r",
                    request_id="1", host_id="1", response=None)
 
 
 class _StubClient:
-    """Refuses whichever version ids are named as locked."""
+    """Refuses whichever version ids are named as locked.
 
-    def __init__(self, versions, locked_ids=(), refusal="AccessDenied"):
+    `refusal` is either a bare code (the message is then the code, which
+    is what a client with nothing to say looks like) or a (code, message)
+    pair for the shapes whose message is what makes them a lock.
+    """
+
+    def __init__(self, versions, locked_ids=(), refusal=WORM):
         self._versions = versions
         self._locked = set(locked_ids)
-        self._refusal = refusal
+        self._refusal = refusal if isinstance(refusal, tuple) else (refusal, None)
         self.removed: list[str] = []
 
     def list_objects(self, bucket, prefix=None, include_version=False,
@@ -69,7 +101,7 @@ class _StubClient:
             "deleted by key rather than by version -- that inserts a delete "
             "marker and destroys nothing")
         if version_id in self._locked:
-            raise _s3_error(self._refusal)
+            raise _s3_error(*self._refusal)
         self.removed.append(version_id)
 
 
@@ -147,37 +179,114 @@ def test_only_versions_of_the_requested_key_are_touched():
     assert r.versions_seen == 1
 
 
+def test_a_bare_access_denied_is_not_a_lock_and_raises():
+    """What a read-only key, or a bucket policy denying s3:DeleteObject,
+    produces. Until 2026-09-02 the code-only tuple here counted it under
+    `versions_locked`, so the purge recorded LOCKED_UNTIL_RETENTION -- "the
+    bytes will go when a retention expires" -- for an object nothing is
+    retaining. It is neither a deletion nor a lock, so it raises, and the
+    purge counts it as FAILED, named per key."""
+    stub = _StubClient([_Version("k", "v1")], locked_ids=["v1"],
+                       refusal=("AccessDenied", "Access Denied."))
+    with pytest.raises(S3Error) as info:
+        _storage(stub).delete_all_versions("k")
+    assert info.value.code == "AccessDenied"
+    assert stub.removed == []
+
+
+def test_an_access_denied_that_names_the_lock_is_a_lock():
+    """The other vendors' shape: AccessDenied WITH the reason. The code
+    alone is ambiguous; the message is what makes it a lock."""
+    stub = _StubClient(
+        [_Version("k", "v1")], locked_ids=["v1"],
+        refusal=("AccessDenied",
+                 "Object is WORM protected and cannot be overwritten"))
+    r = _storage(stub).delete_all_versions("k")
+    assert (r.versions_locked, r.versions_removed) == (1, 0)
+
+
 # ---------------------------------------------------------------------------
-# The "not enabled" half of the contract
+# The wiring half of the contract: retention IS the caller, and it maps
+# the counts, never the outcome string
 # ---------------------------------------------------------------------------
 
-def test_delete_all_versions_has_no_production_caller():
-    """It is written and deliberately not wired: enabling it flips
-    production purge outcomes, and the DESTROYED tombstones already
-    written for still-locked objects are false records in an append-only
-    table that enabling cannot repair.
+def _attribute_calls(tree: ast.AST, attr: str) -> list[ast.Call]:
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == attr]
 
-    If this fails, somebody wired it in -- which may well be right, but it
-    is a decision that belongs in a commit message and in docs/18, not in
-    a passing test. Delete this test in the same change.
+
+def test_delete_all_versions_is_called_by_retention_and_nothing_else():
+    """Inverted 2026-09-02. Until then this asserted that NOTHING called
+    `delete_all_versions` -- deliberately, because wiring it flipped
+    production purge outcomes and could not repair the DELETED tombstones
+    already written for still-locked objects. That decision was taken (the
+    method's docstring records what was decided, item by item), and the
+    guard is inverted rather than deleted so the pair of facts cannot
+    drift back to "neither is called": `retention._purge_evidence` is the
+    one production caller, and a second caller would be a second
+    destruction path nobody reviewed.
     """
-    callers = []
+    callers = {}
     for path in SRC.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and getattr(node.func, "attr", None)
-                    == "delete_all_versions"):
-                callers.append(f"{path.name}:{node.lineno}")
-    assert not callers, (
-        f"delete_all_versions is now called from {callers}; see its "
-        f"docstring for what has to be decided first")
+        calls = _attribute_calls(tree, "delete_all_versions")
+        if calls:
+            callers[path.name] = [c.lineno for c in calls]
+    assert set(callers) == {"retention.py"}, (
+        f"delete_all_versions is called from {callers or 'nowhere'}; the "
+        f"purge in retention.py must be its one caller")
+    assert len(callers["retention.py"]) == 1, callers
 
 
-def test_the_retention_service_still_calls_the_unversioned_delete():
-    """The other side of the same fact, stated positively so the pair
-    cannot drift into "neither is called"."""
-    retention = (SRC / "retention.py").read_text(encoding="utf-8")
-    assert ".delete(" in retention, (
-        "RetentionService no longer calls delete() and does not call "
-        "delete_all_versions() either -- the purge path deletes nothing")
+def test_retention_maps_the_counts_and_never_the_outcome_string():
+    """Both modules and the migration, read together.
+
+    `VersionedDeleteResult.outcome` says DESTROYED / NOTHING_TO_DELETE /
+    LOCKED_UNTIL_RETENTION. The tombstone column takes DELETED /
+    LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, enforced by a CHECK in
+    migration 0032. Until 2026-09-02 the property's docstring claimed the
+    two vocabularies matched; one word coincided, which is what made the
+    claim look true. Writing `outcome` into the tombstone would fail the
+    CHECK on every successful destruction -- a crash that aborts the purge
+    transaction -- so retention reads the three counts and never the
+    string. This proves the vocabularies really differ (so the rule is not
+    vacuous), that retention's words are exactly the CHECK's, and that the
+    name retention binds the versioned result to is never read for
+    `.outcome`.
+    """
+    from noctornal_api import retention
+    from noctornal_api.evidence import VersionedDeleteResult
+
+    migration = next(MIGRATIONS.glob("0032_*.py")).read_text(encoding="utf-8")
+    m = re.search(r"CHECK \(storage_outcome IN \(([^)]*)\)\)", migration)
+    assert m, "the storage_outcome CHECK moved; re-read migration 0032"
+    allowed = set(re.findall(r"'([A-Z_]+)'", m.group(1)))
+    assert allowed == {retention.STORAGE_DELETED, retention.STORAGE_LOCKED,
+                       retention.STORAGE_FAILED, retention.STORAGE_NA}
+
+    outcomes = {
+        VersionedDeleteResult("k", 1, 0, 1).outcome,   # locked
+        VersionedDeleteResult("k", 1, 1, 0).outcome,   # destroyed
+        VersionedDeleteResult("k", 0, 0, 0).outcome,   # nothing there
+    }
+    assert outcomes - allowed == {"DESTROYED", "NOTHING_TO_DELETE"}, (
+        "the vocabularies now coincide; if that is deliberate, this test "
+        "and the property's docstring both need rewriting")
+
+    tree = ast.parse((SRC / "retention.py").read_text(encoding="utf-8"))
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "attr", None)
+                == "delete_all_versions"):
+            bound.update(t.id for t in node.targets
+                         if isinstance(t, ast.Name))
+    assert bound, "retention no longer binds the versioned result to a name"
+    reads = [f"retention.py:{n.lineno}" for n in ast.walk(tree)
+             if isinstance(n, ast.Attribute) and n.attr == "outcome"
+             and isinstance(n.value, ast.Name) and n.value.id in bound]
+    assert not reads, (
+        f"retention reads VersionedDeleteResult.outcome at {reads}; the "
+        f"tombstone CHECK refuses DESTROYED and NOTHING_TO_DELETE")

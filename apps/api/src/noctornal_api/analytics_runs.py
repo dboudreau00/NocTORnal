@@ -39,6 +39,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import psycopg
@@ -75,10 +76,48 @@ _NODE_METRICS = (
 class RunResult:
     payload: dict
     run_id: UUID
+    #: WHERE THE BYTES CAME FROM, and nothing more: True when this answer
+    #: was read out of `analytics.metric_run`, False when it was computed
+    #: during this request. It is NOT a freshness verdict -- see `current`.
     cached: bool
+    #: When the run finished, for a result read back by `latest`. None on
+    #: the compute and cache-hit paths, where the answer is "now" or the
+    #: caller asked for a hash match rather than a moment in time.
+    computed_at: datetime | None = None
+    #: THE CURRENCY VERDICT, split out of `cached` on 2026-09-02. True when
+    #: this answer is known to describe the caller's graph as it stands now
+    #: -- either it was just computed, or `_lookup` matched on `graph_hash`.
+    #: None means NOT CHECKED, and is what `latest` returns: it reads the
+    #: newest stored run without re-projecting the graph, so it cannot know.
+    #:
+    #: Before the split, `latest` and a `_lookup` hit both reached the wire
+    #: as `cached: true` with nothing to separate them, so a client that
+    #: rendered `cached` -- and the console's only renderer of it prints
+    #: "unchanged since the last run" -- would tell an analyst the case
+    #: graph was unchanged when it had moved underneath them. Staleness
+    #: reported as freshness is this codebase's signature defect, and a
+    #: timestamp is not a substitute: `computed_at` says when, never whether.
+    #:
+    #: No path sets this False today. The three-valued field exists so that
+    #: a future "read it back AND re-hash" path has somewhere honest to put
+    #: "checked, and stale" instead of overloading `cached` again.
+    #: Defaults to None -- "not checked" -- rather than True, so a future
+    #: construction site that forgets the field cannot silently claim
+    #: currency. Every path that HAS checked sets it explicitly.
+    current: bool | None = None
 
     def as_response(self) -> dict:
-        return {**self.payload, "run_id": str(self.run_id), "cached": self.cached}
+        out = {**self.payload, "run_id": str(self.run_id),
+               # Both fields on every response. A currency verdict that
+               # appeared only on some of them would send clients straight
+               # back to inferring freshness from whichever other keys were
+               # present, which is the habit that produced the defect.
+               "cached": self.cached, "current": self.current}
+        if self.computed_at is not None:
+            # The ONE place the shape is extended, so `latest` is the suite
+            # response plus this field and cannot drift into its own shape.
+            out["computed_at"] = self.computed_at.isoformat()
+        return out
 
 
 class AnalyticsRunService:
@@ -135,6 +174,59 @@ class AnalyticsRunService:
         return self._run(p, params, KPP_NEG, {"n_remove": n_remove},
                          force=force, compute=compute)
 
+    def latest(self, p: Projection, params: AnalyticsParams) -> RunResult | None:
+        """The most recent COMPLETE suite run for this projection, at the
+        caller's visibility, or None when there is none.
+
+        Until 2026-09-02 the analytics pane was empty until somebody
+        pressed "Run analysis", although every completed run was already
+        on `analytics.metric_run` with its full `result` payload: the
+        persistence was written for cache hits and time series and never
+        read back as "what was the last answer". So an analyst opening a
+        case saw nothing, ran the suite again, and was served the cached
+        row anyway.
+
+        Deliberately does NOT re-project the graph. The question is "what
+        did the last run say", not "is the last run still current" --
+        that second question is what `suite()`'s hash lookup answers, and
+        an analyst who wants it presses the button. Nor does it insert a
+        projection row: a read that leaves a row behind is not a read.
+
+        Because it does not re-project, it CANNOT answer the second
+        question, so it returns `current=None` -- not checked. Until
+        2026-09-02 it returned only `cached=True`, which on every other
+        path means "`_lookup` matched the graph hash", i.e. nothing has
+        changed since that run. The two meanings reached the wire as one
+        field, so opening the pane on a changed graph would have reported
+        a stale answer as a current one. `cached` now says only that the
+        bytes came out of storage, which is true here and says nothing
+        about the graph.
+
+        Scoped by `visibility_clearance` / `visibility_compartments`
+        exactly as `history` and `_lookup` are, and for the same reason:
+        a run computed over a better-cleared analyst's graph is never
+        served to a lesser one, because the score's explanation would lie
+        in nodes they may not see.
+        """
+        row = self._c.execute(
+            """SELECT r.id, r.result, r.finished_at
+                 FROM analytics.metric_run r
+                 JOIN analytics.projection pr ON pr.id = r.projection_id
+                WHERE pr.case_id = %s AND pr.name = %s
+                  AND r.algorithm = %s AND r.status = 'COMPLETE'
+                  AND r.visibility_clearance = %s::core.tlp
+                  AND r.visibility_compartments = %s
+                ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
+                LIMIT 1""",
+            (p.case_id, self._projection_name(p, params), SUITE,
+             self._clearance, sorted(self._comp)),
+        ).fetchone()
+        if row is None:
+            return None
+        run_id, payload, finished_at = row
+        return RunResult(payload, run_id, cached=True, computed_at=finished_at,
+                         current=None)
+
     def history(self, case_id: UUID, node_id: UUID, metric: str,
                 limit: int = 50) -> list[dict]:
         """One node's value for one metric across runs -- the time series
@@ -181,7 +273,13 @@ class AnalyticsRunService:
             hit = self._lookup(projection_id, algorithm, digest)
             if hit is not None:
                 run_id, payload = hit
-                return RunResult(payload, run_id, cached=True)
+                # `current=True` is stated rather than left to the default:
+                # this is the ONE path that earns it by comparison, because
+                # `_lookup` matched `digest` -- the hash of the graph just
+                # projected above -- against the hash the run was computed
+                # under. `latest` reads the same table with no such
+                # comparison and must say `current=None`.
+                return RunResult(payload, run_id, cached=True, current=True)
 
         started = time.monotonic()
         run_id = uuid4()
@@ -261,7 +359,9 @@ class AnalyticsRunService:
                     {"duration_ms": duration,
                      "node_count": len(sub.nodes),
                      "is_approximate": bool(payload.get("is_approximate"))})
-        return RunResult(payload, run_id, cached=False)
+        # Computed from the projection taken at the top of this call, so it
+        # describes the graph as it stands now: `current=True` by construction.
+        return RunResult(payload, run_id, cached=False, current=True)
 
     def _cache_key(self, sub, p: Projection, params: AnalyticsParams,
                    extra: dict) -> bytes:
@@ -308,11 +408,7 @@ class AnalyticsRunService:
         two callers asking the same question land on the same projection.
         `preset` and `params` carry the readable form.
         """
-        fingerprint = hashlib.sha256(
-            json.dumps({**p.describe(), **params.describe()},
-                       sort_keys=True, default=str).encode()
-        ).hexdigest()[:16]
-        name = f"auto:{p.preset}:{fingerprint}"
+        name = self._projection_name(p, params)
         edge_types = p.resolved_edge_types()
         row = self._c.execute(
             """INSERT INTO analytics.projection
@@ -328,6 +424,18 @@ class AnalyticsRunService:
              Json({**p.describe(), **params.describe()}), self._actor),
         ).fetchone()
         return row[0]
+
+    @staticmethod
+    def _projection_name(p: Projection, params: AnalyticsParams) -> str:
+        """The derived name `_upsert_projection` stores and `latest` looks
+        up. One function for both, because a `latest` that fingerprinted
+        the parameters its own way would look for a row the upsert never
+        wrote and answer 404 to a case with a dozen completed runs."""
+        fingerprint = hashlib.sha256(
+            json.dumps({**p.describe(), **params.describe()},
+                       sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+        return f"auto:{p.preset}:{fingerprint}"
 
     def _persist_node_metrics(self, run_id: UUID, payload: dict) -> None:
         """Write the per-node numbers relationally so they are queryable
