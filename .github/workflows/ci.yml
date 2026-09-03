@@ -23,6 +23,14 @@ env:
   # the Redis leg would skip -- and the "No tests were skipped" gate below
   # would then fail the build, which is the intended behaviour.
   REDIS_URL: redis://localhost:6379/0
+  # Same reasoning as REDIS_URL, for the SMTP leg: the Mailpit round-trip
+  # test is gated on SMTP_HOST, so without this it skips -- and the "No
+  # tests were skipped" gate below then fails the build, which is what it
+  # is for. 1025/8025 and the plaintext flag mirror infra/docker-compose.yml
+  # and what install.sh writes into .env.local.
+  SMTP_HOST: localhost
+  SMTP_PORT: "1025"
+  SMTP_ALLOW_PLAINTEXT: "1"
   MINIO_ENDPOINT: localhost:9000
   MINIO_ACCESS_KEY: noctornal
   MINIO_SECRET_KEY: dev_only_change_me
@@ -158,6 +166,25 @@ jobs:
           done
           echo "MinIO did not become ready; logs follow:" >&2
           docker logs minio >&2
+          exit 1
+
+      - name: Start Mailpit
+        run: |
+          # A service container, like MinIO, would be the obvious choice and
+          # is again the wrong one: the health check has to reach Mailpit's
+          # own /readyz, and `docker run` keeps CI on the same image and
+          # ports infra/docker-compose.yml uses.
+          docker run -d --name mailpit \
+            -p 1025:1025 -p 8025:8025 \
+            axllent/mailpit:latest
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:8025/readyz >/dev/null 2>&1; then
+              echo "Mailpit ready after ${i} attempt(s)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Mailpit did not become ready; logs follow:" >&2
+          docker logs mailpit >&2
           exit 1
 
       # CREATE EXTENSION needs superuser, which the migration role must
