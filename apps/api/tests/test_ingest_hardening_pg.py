@@ -79,6 +79,15 @@ def _user(conn):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"f15-{uuid4().hex[:8]}@noctornal.test", "F15", PW)
+    # Registered before it is used. `compartments` is set here with a raw
+    # UPDATE, which is the write path 0057's registry gate does not cover
+    # -- so without this the value is in use and unregistered, and
+    # test_compartment_registry_pg's whole-database invariant reports it.
+    # It only ever passed on a workstation whose database pre-dated 0057
+    # and had the value backfilled; CI builds a fresh one.
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES "
+                 "('STEALER-2026', 'Stealer logs 2026 (test)') "
+                 "ON CONFLICT (key) DO NOTHING")
     conn.execute("UPDATE iam.app_user SET tlp_clearance = 'RED', "
                  "compartments = %s WHERE id = %s", (["STEALER-2026"], uid))
     return uid
