@@ -126,10 +126,10 @@ services:
 #
 # docs/02 named OpenFGA/SpiceDB as the intended relationship-based (marked
 # superseded there on 2026-09-09; the five-part gate lives in Postgres)
-# authorisation store. That remains the plan; the five-part gate in
-# `deps.py` is the current implementation and is entirely in Postgres. When
-# ReBAC is actually wired up, the service comes back -- with code calling
-# it.
+# authorisation store. It is not the plan any more: the five-part gate in
+# `deps.py` is the implementation, entirely in Postgres, and nothing is
+# waiting on a ReBAC service. If one is ever adopted it comes back here
+# with code calling it, not before.
 #
 # NOTE for anyone re-adding OpenFGA: `openfga-migrate` declared
 # `depends_on: postgres: service_healthy`, which had the side effect of
