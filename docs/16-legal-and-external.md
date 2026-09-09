@@ -365,8 +365,12 @@ the kind that gets missed.
 ### C9 — Sample origin split
 
 Invariant 10 requires sample bytes to be served from a **separate origin**.
-`samples.download()` refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is configured
-and the request arrived at it.
+`samples.download()` refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is configured,
+is a real second origin rather than a second name for the application's
+(`NOCTORNAL_BASE_URL`), and the process serving the request is configured
+as that origin (`NOCTORNAL_PUBLIC_ORIGIN`) -- decided from configuration,
+never from the request, since 2026-09-09. Unset means the split is OFF and
+every download refuses; the readiness register says so.
 
 **Confirm** that the deployment actually provides a second origin with
 different cookie scope and CSP — `app.internal/samples` is not a separate
