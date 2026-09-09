@@ -1,7 +1,7 @@
 """Guard against the corruption modes this repo has actually suffered.
 
-Two checks, both cheap, both encoding something that cost real debugging
-time and is recorded in docs/15.
+Three checks, all cheap, each encoding something that has actually gone
+wrong in this repository.
 
 **NUL bytes.** The editing tools on the development machine have more than
 once corrupted a non-ASCII literal into a NUL byte. In Python that is a
@@ -21,6 +21,16 @@ Deliberately NOT an all-ASCII rule: the docs and the UI legitimately use
 em dashes and box-drawing characters, and banning them would mean either
 a wall of escapes or a rule everyone disables.
 
+**A private identity in the tree.** The project is published under one
+name and its owner has a private alias that must never appear in public.
+On 2026-08-25 every commit in the history was rewritten to remove that
+alias from commit AUTHORS -- and NOTICE.md, the licence page, kept it in
+the copyright line through Alpha 2, 3 and 4, because the sweep read
+authors and the release checks read for tool attribution, and nothing
+read file contents. This check does. The forbidden strings are
+assembled from fragments below for the same reason the codepoints are
+spelled numerically: a checker must pass its own check.
+
 Exit code 1 on any finding, with the file, line and codepoint named --
 "something is wrong somewhere" is not an error message.
 """
@@ -35,7 +45,7 @@ REPO = Path(__file__).resolve().parent.parent
 # than filtered, so a new binary format cannot trip this by accident.
 SUFFIXES = {".py", ".js", ".css", ".html", ".sql", ".md", ".toml", ".yml",
             ".yaml", ".ps1", ".sh", ".ini", ".json", ".ts"}
-SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".next",
+SKIP_DIRS = {".git", ".claude", ".venv", "node_modules", "__pycache__", ".next",
              ".pytest_cache", ".ruff_cache", "dist", "build", ".mypy_cache",
              "egg-info"}
 
@@ -61,6 +71,15 @@ DANGEROUS = {
     0x200D: "ZERO WIDTH JOINER",
     BOM: "ZERO WIDTH NO-BREAK SPACE (BOM inside the file)",
 }
+
+# The owner's private alias, and the local part of the e-mail that goes
+# with it. Assembled from fragments so that THIS file passes; matched
+# case-insensitively. Deliberately not the bare first name, which is a
+# common word that fixtures and test data may legitimately contain.
+PRIVATE_IDENTITY = tuple("".join(parts) for parts in (
+    ("tur", "pine"),
+    ("jeff", "rey", "tur", "pine"),
+))
 
 
 def files() -> list[Path]:
@@ -115,6 +134,17 @@ def main() -> int:
                     f"(U+{point:04X}). Source that does not read the way it "
                     f"executes is refused outright (CVE-2021-42574).")
 
+        lowered = text.lower()
+        for needle in PRIVATE_IDENTITY:
+            if needle in lowered:
+                line = lowered[:lowered.index(needle)].count("\n") + 1
+                problems.append(
+                    f"{rel}:{line}: the owner's private identity. It is "
+                    f"published under one name only; this string shipped "
+                    f"on the licence page of three releases before this "
+                    f"check existed. Replace it with the public name.")
+                break
+
     if problems:
         print(f"Source hygiene: {len(problems)} problem(s) in {checked} files.\n",
               file=sys.stderr)
@@ -123,7 +153,8 @@ def main() -> int:
         return 1
 
     print(f"Source hygiene: {checked} files clean "
-          f"(no NUL bytes, no bidirectional or zero-width characters).")
+          f"(no NUL bytes, no bidirectional or zero-width characters, "
+          f"no private identity).")
     return 0
 
 
