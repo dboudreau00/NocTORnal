@@ -87,6 +87,11 @@ def conn():
         c.execute(f"DELETE FROM collect.document WHERE source_id IN {ssub}")
         c.execute(f"DELETE FROM collect.collection_run WHERE source_id IN {ssub}")
         c.execute(f"DELETE FROM collect.collection_account WHERE source_id IN {ssub}")
+        # A persona bound to NO source (the status-write tests make one,
+        # because such a row has no label to protect) is not reached by
+        # the source sweep above.
+        c.execute("DELETE FROM collect.collection_account "
+                  "WHERE handle LIKE 'persona-k1free-%'")
         c.execute(f"DELETE FROM collect.source WHERE id IN {ssub}")
         c.execute("DELETE FROM collect.egress_profile WHERE name LIKE 'test-egk1-%'")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
@@ -169,12 +174,18 @@ def _run(conn, source_id):
         (source_id,)).fetchone()[0]
 
 
-def _persona(conn, source_id, *, egress=None):
+def _persona(conn, source_id, *, egress=None, handle=None):
     return conn.execute(
         """INSERT INTO collect.collection_account
                (source_id, handle, status, egress_profile_id)
            VALUES (%s, %s, 'HEALTHY', %s) RETURNING id""",
-        (source_id, f"persona-{uuid4().hex[:6]}", egress)).fetchone()[0]
+        (source_id, handle or f"persona-{uuid4().hex[:6]}", egress)).fetchone()[0]
+
+
+def _persona_status(conn, persona_id):
+    return conn.execute(
+        "SELECT status, burn_reason FROM collect.collection_account WHERE id = %s",
+        (persona_id,)).fetchone()
 
 
 def _egress(conn):
@@ -474,6 +485,111 @@ def test_an_over_ceiling_source_id_reads_the_same_as_one_that_is_not_a_source(
     assert svc.runs(source_id=red, clearance="AMBER") == []
     assert svc.runs(source_id=uuid4(), clearance="AMBER") == []
     assert svc.runs(source_id=red, clearance="RED") != []
+
+
+# --- the last write that took no ceiling (2026-09-09) --------------------
+
+def test_a_persona_on_a_red_source_cannot_have_its_status_written_below_it(
+        conn):
+    """`PersonaVault.set_status` was the last write in the collection
+    layer with no ceiling: the persona list withheld a RED source's
+    persona from an AMBER caller, and the same caller could burn it by
+    id. Gated on the same predicate the listing uses, so the read and the
+    write cannot disagree; refused as `CollectionNotFound`, the type the
+    router turns into the 404 an unknown id gets.
+
+    The three readings of `clearance` again: AMBER is refused and the row
+    is untouched, RED writes, and None -- the worker -- writes too. And a
+    persona bound to no source is writable at AMBER, for the reason it is
+    always listed: there is no label on that row to protect.
+    """
+    from noctornal_api.collection import (
+        BURNED,
+        COOLDOWN,
+        CollectionNotFound,
+        PersonaVault,
+    )
+
+    red = _source(conn, classification="RED")
+    persona = _persona(conn, red)
+    free = _persona(conn, None, handle=f"persona-k1free-{uuid4().hex[:6]}")
+    actor = uuid4()
+    vault = PersonaVault(conn)
+
+    with pytest.raises(CollectionNotFound):
+        vault.set_status(persona, BURNED, actor_id=actor,
+                         reason="challenged by an admin", clearance="AMBER")
+    assert _persona_status(conn, persona) == ("HEALTHY", None), (
+        "the refused write still changed the row")
+    assert conn.execute(
+        "SELECT count(*) FROM audit.event WHERE object_id = %s "
+        "AND action = 'PERSONA_BURNED'", (persona,)).fetchone()[0] == 0, (
+        "an audit row was written for a change that was refused")
+
+    vault.set_status(free, COOLDOWN, actor_id=actor, clearance="AMBER")
+    assert _persona_status(conn, free)[0] == "COOLDOWN"
+
+    vault.set_status(persona, COOLDOWN, actor_id=actor, clearance=None)
+    assert _persona_status(conn, persona)[0] == "COOLDOWN"
+    vault.set_status(persona, BURNED, actor_id=actor,
+                     reason="challenged by an admin", clearance="RED")
+    assert _persona_status(conn, persona) == ("BURNED", "challenged by an admin")
+
+
+def test_an_unknown_persona_id_is_refused_not_written(conn):
+    """Until 2026-09-09 an unknown id ran an UPDATE that matched nothing,
+    wrote a PERSONA_<status> audit row for it, and returned: a write that
+    did not happen, reported as one that did. Refused with the SAME type
+    an over-ceiling persona gets, at every clearance including the
+    worker's, so no router mapping can tell the two apart."""
+    from noctornal_api.collection import BURNED, CollectionNotFound, PersonaVault
+
+    missing = uuid4()
+    for clearance in ("AMBER", "RED", None):
+        with pytest.raises(CollectionNotFound):
+            PersonaVault(conn).set_status(
+                missing, BURNED, actor_id=uuid4(), reason="never existed",
+                clearance=clearance)
+    assert conn.execute(
+        "SELECT count(*) FROM audit.event WHERE object_id = %s",
+        (missing,)).fetchone()[0] == 0, (
+        "an audit row records a status change on a persona that does not exist")
+
+
+def test_the_status_route_refuses_a_persona_above_the_ceiling(conn, client):
+    """Both halves of the status-write contract in one test: the route
+    resolves the caller's ceiling and passes it, the service refuses, and
+    the answer is the 404 an id that is not a persona gets -- with the
+    same detail, so the status code is not an existence oracle. Before
+    2026-09-09 the AMBER caller got 200 and the RED persona was burnt;
+    the unknown id got 200 as well."""
+    red = _source(conn, classification="RED")
+    persona = _persona(conn, red)
+    roles = ("ANALYST", "COLLECTOR")  # COLLECTOR holds collection_account.manage
+    _, amber_email, amber_secret = _user(conn, clearance="AMBER", roles=roles)
+    _, red_email, red_secret = _user(conn, clearance="RED", roles=roles)
+    amber = _auth(_login(client, amber_email, amber_secret))
+    red_hdr = _auth(_login(client, red_email, red_secret))
+    body = {"status": "BURNED", "reason": "admin asked for a phone number"}
+
+    r = client.post(f"{API}/personas/{persona}/status", json=body, headers=amber)
+    assert r.status_code == 404, r.text
+    assert _persona_status(conn, persona) == ("HEALTHY", None), (
+        "an AMBER caller burnt a persona on a RED source")
+
+    missing = client.post(f"{API}/personas/{uuid4()}/status", json=body,
+                          headers=amber)
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"] == r.json()["detail"], (
+        "a persona above the ceiling and one that does not exist must be "
+        "indistinguishable")
+
+    cleared = client.post(f"{API}/personas/{persona}/status", json=body,
+                          headers=red_hdr)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {"persona_id": str(persona), "status": "BURNED"}
+    assert _persona_status(conn, persona) == (
+        "BURNED", "admin asked for a phone number")
 
 
 # --- the label the writers and the readers disagreed about ---------------

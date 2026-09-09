@@ -52,10 +52,17 @@ and each says so in its own passing evidence rather than leaving the
 operator to infer it. docs/16 C8: the check confirms Redis is reachable
 and reports its eviction policy, but whether the limiter has an instance
 to itself is a deployment fact nothing here can see. docs/16 C9: the
-check confirms NOCTORNAL_SAMPLE_ORIGIN is set, but docs/16 says outright
-that the runtime "cannot tell the difference between a real origin split
-and a CNAME", so whether the configured origin is genuinely separate is a
-human confirmation.
+check reads `samples.origin_split()` -- the same verdict `download()`
+refuses or serves on -- so it can say that the sample origin is set, is
+an origin, is not a second name for the application's, and which of the
+two THIS process is configured as. It cannot see the other process, and
+docs/16 says outright that the runtime "cannot tell the difference
+between a real origin split and a CNAME", so that the sample origin is
+actually served by a process configured as it, and that the two hostnames
+are genuinely separate, stay human confirmations. When
+`NOCTORNAL_SAMPLE_ORIGIN` is unset the check FAILS and says the control is
+off: every download refuses, and `ready=true` must not be readable as
+"invariant 10 holds".
 
 And the register below is NOT claimed to be exhaustive over docs/16.
 docs/16 runs to L1-L5, D1-D8 and C1-C13, most of which are decisions and
@@ -258,9 +265,9 @@ def _totp_kek_set(conn: psycopg.Connection) -> Check:
 
 
 def _sample_origin_configured(conn: psycopg.Connection) -> Check:
-    """docs/16 C9. Reads `samples.sample_origin()` -- the reader
-    `samples.download()` itself consults before handing over live malware
-    -- rather than the environment variable directly.
+    """docs/16 C9. Reads `samples.origin_split()` -- the one verdict
+    `samples.download()` refuses or serves on -- rather than the
+    environment variables directly.
 
     Added 2026-09-02. C9 was the one register entry with a code-checkable
     half that this module did not check, so `ready=true` was returned for
@@ -268,32 +275,69 @@ def _sample_origin_configured(conn: psycopg.Connection) -> Check:
     10) while the module docstring claimed to be the code-side half of the
     register "in one place".
 
-    What it establishes is deliberately narrow, and the passing evidence
-    says so: that a second origin is CONFIGURED, not that it is genuinely
-    separate. docs/16 C9 is explicit that the runtime "cannot tell the
-    difference between a real origin split and a CNAME", so that half stays
-    a human confirmation and is named in "What is deliberately NOT here".
-    """
-    from noctornal_api.samples import sample_origin
+    Rewritten 2026-09-09. Until then it passed on "the variable is set",
+    and the download itself compared that variable against the Host
+    header: a deployment whose sample origin was a second name for the
+    application origin passed this check and served hostile bytes from
+    the application, and one whose console could not reach the sample
+    origin at all (the UI CSP allowed only 'self') passed it too. The
+    check now fails on the same three deployment problems the download
+    refuses on -- unset, not an origin, equal to the application origin --
+    and, when the split is usable, says which of the two origins THIS
+    process is configured as, because a register that passed on the
+    application process was silent about whether anything served at the
+    sample origin.
 
-    origin = sample_origin()
+    Unset is reported as the control being OFF, in those words: there is
+    no origin split, every download refuses, and a reader of `ready`
+    must not be able to take a passing register as "invariant 10 holds".
+    What stays human (docs/16 C9, named in "What is deliberately NOT
+    here"): that the sample origin is served by a process configured as
+    it, and that the two hostnames are a real split and not a CNAME.
+    """
+    from noctornal_api.samples import origin_split, sample_origin
+
+    split = origin_split()
     action = (
         "set NOCTORNAL_SAMPLE_ORIGIN to a genuinely separate origin -- its own "
         "host, cookie scope and CSP, never a path on the app's own host "
-        "(docs/16 C9); until it is set, samples.download() refuses every "
-        "request, so no analyst can retrieve a sample at all")
-    if not origin:
+        "(docs/16 C9) -- and, on the process that serves it, set "
+        "NOCTORNAL_PUBLIC_ORIGIN to the same value; NOCTORNAL_BASE_URL names "
+        "the application origin on both. Until the split is usable, "
+        "samples.download() refuses every request, so no analyst can "
+        "retrieve a sample at all")
+    if split.role == "unconfigured":
         return Check(
             "sample_origin_configured", False,
-            "NOCTORNAL_SAMPLE_ORIGIN is not set, so samples.download() refuses "
-            "every request (invariant 10: sample bytes are only ever served "
-            "from a separate origin)",
+            "CONTROL OFF: NOCTORNAL_SAMPLE_ORIGIN is not set, so there is no "
+            "origin split and samples.download() refuses every request on "
+            "every process (invariant 10: sample bytes are only ever served "
+            "from a separate origin). Nothing about this deployment satisfies "
+            "the invariant",
             action)
+    if split.split_problem is not None:
+        return Check(
+            "sample_origin_configured", False,
+            f"NOCTORNAL_SAMPLE_ORIGIN={sample_origin()}: {split.split_problem}",
+            action)
+    if split.serves_here:
+        return Check(
+            "sample_origin_configured", True,
+            f"NOCTORNAL_SAMPLE_ORIGIN={split.sample}; this process is configured "
+            f"as the sample origin (NOCTORNAL_PUBLIC_ORIGIN) and serves sample "
+            f"downloads to the console at {split.app} and nothing else. That "
+            f"this is a real origin split and not a CNAME onto the app's own "
+            f"host is a human confirmation (docs/16 C9), which the runtime "
+            f"cannot make")
     return Check(
         "sample_origin_configured", True,
-        f"NOCTORNAL_SAMPLE_ORIGIN={origin}; that this is a real origin split "
-        f"and not a CNAME onto the app's own host is a human confirmation "
-        f"(docs/16 C9), which the runtime cannot make")
+        f"NOCTORNAL_SAMPLE_ORIGIN={split.sample}; this process is configured "
+        f"as the application origin ({split.this}) and refuses every "
+        f"download, directing the console to {split.sample}. That a process "
+        f"configured with NOCTORNAL_PUBLIC_ORIGIN={split.sample} is serving "
+        f"there is that process's own readiness to confirm, and that the two "
+        f"are a real origin split and not a CNAME onto the app's own host is "
+        f"a human confirmation (docs/16 C9), which the runtime cannot make")
 
 
 def _rate_limiting_enabled(conn: psycopg.Connection) -> Check:
@@ -504,7 +548,8 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "set NOCTORNAL_PROHIBITED_CONTENT_POLICY and NOCTORNAL_DESIGNATED_PERSON "
      "(docs/16 L1)"),
     ("sample_origin_configured", _sample_origin_configured,
-     "set NOCTORNAL_SAMPLE_ORIGIN to a separate origin (docs/16 C9)"),
+     "set NOCTORNAL_SAMPLE_ORIGIN to a separate origin, and "
+     "NOCTORNAL_PUBLIC_ORIGIN on the process that serves it (docs/16 C9)"),
     ("retention_rules_confirmed", _retention_rules_confirmed,
      "the retention table could not be read; run alembic upgrade head and "
      "then confirm each rule at POST /retention/rules/{category}"),

@@ -458,12 +458,34 @@ class PersonaVault:
 
     def set_status(self, persona_id: UUID, status: str, *, actor_id: UUID,
                    reason: str | None = None,
-                   cooldown: timedelta | None = None) -> None:
+                   cooldown: timedelta | None = None,
+                   clearance: str | None = None) -> None:
         """Move a persona through the lifecycle.
 
         BURNED is terminal and requires a reason: the reason is what stops
         the next analyst quietly reusing it, and "burnt" with no explanation
         reads as "somebody was being careful once".
+
+        Gated on the caller's ceiling against the SOURCE's label, exactly
+        as `personas()` lists them: a persona on a RED source is the one
+        the listing withholds from an AMBER caller, and until 2026-09-09
+        that same caller could burn it, lock it or clear its cooldown by
+        id -- the last write here that took no ceiling, after the poll
+        route was closed on 2026-09-02. A persona bound to no source is
+        writable by anyone holding the verb, for the reason it is always
+        listed: there is no source label on that row to protect.
+        `clearance=None` is the worker path and applies no filter, as
+        every other reader and writer in this file treats it.
+
+        Refuses with `CollectionNotFound` when the row does not exist OR is
+        above the ceiling, and the two are indistinguishable, so the router
+        cannot become an existence oracle by mapping them differently.
+        Until 2026-09-09 an unknown id ran a bare UPDATE that matched
+        nothing, wrote a `PERSONA_<status>` audit row for a change that
+        never happened, and returned as if it had -- a write that did not
+        happen, reported as one that did. The UPDATE's row count is checked
+        as well as the SELECT before it, so a row that vanished or was
+        relabelled between the two is refused rather than half-recorded.
         """
         if status not in {HEALTHY, COOLDOWN, LOCKED, BURNED}:
             raise CollectionError(f"unknown persona status {status!r}")
@@ -471,19 +493,34 @@ class PersonaVault:
             raise CollectionError(
                 "a burn has to say what burnt it: without a reason the next "
                 "analyst has nothing to avoid repeating")
+        # The same predicate as `personas()`: no ceiling, or no source, or
+        # a source the ceiling covers. Written once here and reused by the
+        # UPDATE below so the read and the write cannot disagree.
+        visible = """(%s::core.tlp IS NULL OR a.source_id IS NULL
+                      OR EXISTS (SELECT 1 FROM collect.source s
+                                  WHERE s.id = a.source_id
+                                    AND s.classification <= %s::core.tlp))"""
         current = self._c.execute(
-            "SELECT status FROM collect.collection_account WHERE id = %s",
-            (persona_id,)).fetchone()
-        if current and current[0] == BURNED and status != BURNED:
+            f"""SELECT a.status FROM collect.collection_account a
+                 WHERE a.id = %s AND {visible}""",
+            (persona_id, clearance, clearance)).fetchone()
+        if current is None:
+            raise CollectionNotFound(
+                "no such persona, or it is above your clearance")
+        if current[0] == BURNED and status != BURNED:
             raise CollectionError(
                 "a burnt persona does not come back: reusing one a forum "
                 "admin has already flagged burns the next one too")
         until = (datetime.now(timezone.utc) + cooldown) if cooldown else None
-        self._c.execute(
-            """UPDATE collect.collection_account
-                  SET status = %s, cooldown_until = %s, burn_reason = %s
-                WHERE id = %s""",
-            (status, until, (reason or "").strip() or None, persona_id))
+        updated = self._c.execute(
+            f"""UPDATE collect.collection_account a
+                   SET status = %s, cooldown_until = %s, burn_reason = %s
+                 WHERE a.id = %s AND {visible}""",
+            (status, until, (reason or "").strip() or None, persona_id,
+             clearance, clearance)).rowcount
+        if updated != 1:
+            raise CollectionNotFound(
+                "no such persona, or it is above your clearance")
         self._audit(actor_id, f"PERSONA_{status}", persona_id,
                     {"reason": reason, "cooldown_until":
                      until.isoformat() if until else None})
