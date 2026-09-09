@@ -1,11 +1,14 @@
-# Development only. Production runs the three zones from docs/02 as
-# separate network policies — do not derive a prod deployment from this.
+# Development only -- do not derive a prod deployment from this file.
+# (Until 2026-09-09 this header cited a three-zone production sketch from
+# docs/02; that sketch was superseded. The program is one API process; a
+# production deployment puts it behind your own reverse proxy and network
+# policy, and runs the sample origin as a second process of the same code.)
 name: noctornal
 
 services:
   postgres:
-    # pgvector image; add pg_uuidv7 in a derived Dockerfile if you want
-    # time-sortable IDs generated in-database rather than app-side.
+    # pgvector image. Ids are uuid4() app-side and gen_random_uuid() in
+    # SQL; the pg_uuidv7 idea from the 2026-07 sketch was not taken.
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: noctornal

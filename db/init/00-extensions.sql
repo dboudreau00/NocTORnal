@@ -7,4 +7,5 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 CREATE EXTENSION IF NOT EXISTS "btree_gist";
 CREATE EXTENSION IF NOT EXISTS "citext";
 CREATE EXTENSION IF NOT EXISTS "vector";      -- pgvector, for semantic search
--- CREATE EXTENSION IF NOT EXISTS "pg_uuidv7"; -- preferred; else uuid v4 app-side
+-- No pg_uuidv7: ids are uuid4() app-side and gen_random_uuid() in SQL (the
+-- 2026-07 sketch preferred v7; the build did not take it).

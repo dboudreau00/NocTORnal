@@ -602,7 +602,7 @@ This diverges from the 2026-07 sketch that `docs/02-architecture.md` used to car
 
 ### Coverage — the honest gap
 
-UI panes exist for: login/case list (Phase 0), Entities and add-entity/add-relationship/assertions (Phase 1), the sociogram and scrubber (Phase 2), Analysis (Phase 3), Triage/capture (Phase 4), Inbox notifications and delivery prefs (Phase 5), entity-resolution merge (Phase 6), and Comms (Phase 7). **API-only** in this console: Phase 8 sample handling (no samples tab — invariant 10 keeps sample bytes out of the DOM), Phase 9 ingest API (write-only keys), and Phase 5 integration configuration beyond the inbox. WebAuthn is not built.
+UI panes exist for: login/case list (Phase 0), Entities and add-entity/add-relationship/assertions (Phase 1), the sociogram and scrubber (Phase 2), Analysis (Phase 3), Triage/capture (Phase 4), Inbox notifications and delivery prefs (Phase 5), entity-resolution merge (Phase 6), and Comms (Phase 7). Phase 8 has the Lab pane (sample bytes are downloaded from the sample origin and never rendered — invariant 10), and Phase 9's keys, triage queue and dead letters reached the Feeds pane. **API-only** in this console: Phase 5 integration configuration beyond the inbox (the Jira and webhook transports). (This sentence said "no samples tab" until 2026-09-09, contradicting the Phase 8 row above it.) WebAuthn is not built.
 
 ---
 

@@ -2,7 +2,8 @@
 
 Pure-SQL migrations: there is no SQLAlchemy metadata and no autogenerate.
 The schema of record is the ordered set of revisions in versions/;
-db/schema.sql is a human-readable reference that must be kept in sync.
+db/schema.sql is GENERATED from a migrated database by scripts/dump_schema.py
+and gated in CI; regenerate it after every revision rather than editing it.
 """
 import os
 
