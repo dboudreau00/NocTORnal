@@ -508,7 +508,14 @@ class IamAdminService:
         if unknown:
             raise AdminError(
                 f"compartment(s) not registered: {', '.join(unknown)}. Register "
-                f"the key first (POST /compartments); an unregistered key is a "
+                # Spelled with the mount prefix, for the reason cases.py
+                # gives at its twin refusal: until 2026-09-09 this said
+                # `POST /compartments`, which the router does not serve,
+                # and disagreed with the 0059 trigger's wording of the
+                # same rule. `test_compartment_binding_pg.py` pins all
+                # three to the migration constant and the route table.
+                f"the key first (POST /api/v1/compartments); an unregistered "
+                f"key is a "
                 f"typo, and a typo in a read-in is a case the user cannot see")
         removed = sorted(set(current) - set(keys))
         if removed:
@@ -536,9 +543,21 @@ class IamAdminService:
             detail["stranded_assignments"] = self._stranded_assignments(
                 user_id, removed)
         with self._c.transaction():
-            self._c.execute(
-                "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
-                (keys, user_id))
+            try:
+                self._c.execute(
+                    "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
+                    (keys, user_id))
+            except psycopg.errors.RaiseException as exc:
+                # 0059's binding on the column, refusing a key the check
+                # above did not catch -- which cannot happen while
+                # `_unknown_compartments` is called first, and is exactly
+                # why this exists: the trigger is the guarantee, the check
+                # is the readable error, and if the check is ever skipped
+                # or drifts the guarantee must still arrive as this
+                # surface's 409 naming the key (`safe_detail` forwards the
+                # trigger's first line), not as a 500. Until 2026-09-09 a
+                # raw UPDATE here was accepted whatever the key was.
+                raise AdminError(str(exc)) from exc
             self._audit(actor_id, "USER_COMPARTMENTS_CHANGED", user_id, detail)
         return keys
 
@@ -570,6 +589,17 @@ class IamAdminService:
                 f"the access gate compares it byte-for-byte")
 
     def _unknown_compartments(self, keys: list[str]) -> list[str]:
+        """The keys not in `iam.compartment`, ALL of them, in the caller's
+        order, so one refusal names every typo at once.
+
+        Kept after migration 0059 bound the column itself. The trigger is
+        the guarantee -- it refuses the same write from psql -- but it
+        names the keys in one authored sentence with a correlation id
+        appended by `safe_detail`, and it fires only after the stranding
+        query in `set_compartments` has already run. This check is the
+        readable, earlier refusal; `set_compartments` wraps the trigger's
+        refusal too, so the two can never disagree about the status.
+        """
         if not keys:
             return []
         known = {r[0] for r in self._c.execute(

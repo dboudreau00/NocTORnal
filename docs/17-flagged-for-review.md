@@ -582,7 +582,7 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 | Non-owner DB role + RLS | The API connects as the table owner, so RLS is a no-op behind it |
 | Real SSRF protection | `collection.fetch()` blocks non-HTTP schemes and private literals; **DNS rebinding is not addressed** |
 | Login timing equalisation | A missing account returns faster than a wrong password |
-| Compartment registry | Free-text; a typo creates silent no-access |
+| Compartment rename / removal | The registry itself is done: `iam.compartment` is the closed vocabulary (0057, 2026-09-02) and every compartment column is bound to it by trigger (0059, 2026-09-09), so a typo is refused and named, not silent. What is still missing is a product route to rename or drop a registered key — the database refuses either while any row carries it, so today it is a manual per-column operation |
 | Redis isolation | The limiter shares an instance running `allkeys-lru` |
 | WebAuthn | TOTP only, and TOTP cannot work on the current dev host |
 

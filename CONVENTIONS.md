@@ -99,7 +99,7 @@ See `docs/02-architecture.md` for the reasoning. What is in the tree, as
 of 2026-09-09:
 
 - Postgres 16 + pgvector as the system of record; 58 Alembic revisions
-  (`0001`–`0058`), `db/schema.sql` regenerated from them
+  (`0001`–`0059`), `db/schema.sql` regenerated from them
 - Python 3.12+ / FastAPI — **one process**, serving the REST API under
   `/api/v1`, the analyst console under `/ui`, the `/api/v1/live`
   WebSocket, and running the collectors, the analytics and the

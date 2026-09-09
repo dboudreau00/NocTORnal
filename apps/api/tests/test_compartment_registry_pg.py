@@ -20,6 +20,13 @@ file read BOTH sides of that contract wherever it crosses a file:
   edit -- checked on the router body AND the service signature, so adding
   the field to either half without the other fails here.
 
+Since 2026-09-09 (migration 0059) the arrays THEMSELVES are bound to the
+registry, so the raw `UPDATE` this file's fixtures use is no longer the
+ungated out-of-band path it was first described as: a key is registered
+before it is written, and the two tests that need an unregistered value
+in an array seed it behind the trigger (`_pre_0059`). The binding has its
+own file, `test_compartment_binding_pg.py`.
+
 Env-gated on DATABASE_URL. Email prefix `cmp-`; registry keys `ALPHA-T6-`.
 """
 from __future__ import annotations
@@ -90,9 +97,14 @@ def _user(conn, *global_roles, clearance="AMBER", compartments=()):
     uid = store.create_user(email, "Cmp", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Direct SQL, as every fixture in this suite does: this is the
-    # out-of-band path the registry does not gate, and the tests below
-    # are explicit about which side of that line they stand on.
+    # Direct SQL, as every fixture in this suite does. Until 2026-09-09
+    # this was the out-of-band path the registry did not gate; migration
+    # 0059 bound the column, so the keys are registered first. A test that
+    # needs an UNREGISTERED value in the array seeds it via `_pre_0059`.
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (fixture)"))
     conn.execute(
         "UPDATE iam.app_user SET tlp_clearance = %s, compartments = %s WHERE id = %s",
         (clearance, list(compartments), uid))
@@ -143,12 +155,19 @@ def _admin_svc(conn):
 def test_a_case_cannot_enter_a_compartment_until_it_is_registered(conn, client):
     """Before registration: refused, and the refusal NAMES the key, on the
     service and on the wire. After POST /compartments: the same request
-    succeeds. The owner already holds the key (out of band), so the only
-    thing standing between the two outcomes is the registry."""
+    succeeds.
+
+    Until 2026-09-09 the owner was read into the key OUT OF BAND first (a
+    raw UPDATE), "so the only thing standing between the two outcomes is
+    the registry". Migration 0059 bound that raw UPDATE to the registry
+    too, so an out-of-band read-in to an unregistered key no longer
+    exists to build on. The owner is read in through the product AFTER
+    the key is registered, which is the order the binding now enforces
+    on every writer; the registry check in `cases.py` runs before the
+    holds-the-key check, so the refusal is still about registration."""
     from noctornal_api.cases import CaseError
     key = _key()
-    owner_id, owner_email, owner_secret = _user(conn, "CASE_OWNER",
-                                                compartments=(key,))
+    owner_id, owner_email, owner_secret = _user(conn, "CASE_OWNER")
     admin_id, admin_email, admin_secret = _user(conn, "SYS_ADMIN")
     owner = _login(client, owner_email, owner_secret)
 
@@ -167,6 +186,9 @@ def test_a_case_cannot_enter_a_compartment_until_it_is_registered(conn, client):
                        json={"key": key, "label": "Alpha (test)"})
     assert made.status_code == 201, made.text
     assert made.json()["key"] == key and made.json()["created_by"] == str(admin_id)
+    read_in = client.put(f"/api/v1/compartments/users/{owner_id}",
+                         headers=_auth(admin), json={"compartments": [key]})
+    assert read_in.status_code == 200, read_in.text
 
     r = client.post("/api/v1/cases", headers=_auth(owner), json=_case_body([key]))
     assert r.status_code == 201, r.text
@@ -352,11 +374,14 @@ def test_narrowing_a_read_in_reports_the_assignments_it_strands(conn):
     from noctornal_api.iam_admin import AdminError
     key = _key()
     admin_id, _, _ = _user(conn, "SYS_ADMIN")
+    svc = _admin_svc(conn)
+    # Registered BEFORE anyone is read into it: since 0059 the fixture's
+    # raw UPDATE is refused for an unregistered key, and a second
+    # registration is a refusal by design.
+    svc.register_compartment(key=key, label="Alpha", actor_id=admin_id)
     owner_id, _, _ = _user(conn, "CASE_OWNER", clearance="RED",
                            compartments=(key,))
     analyst_id, _, _ = _user(conn, clearance="RED", compartments=(key,))
-    svc = _admin_svc(conn)
-    svc.register_compartment(key=key, label="Alpha", actor_id=admin_id)
     case_id = _create(conn, owner_id, [key])
     cases = CaseService(conn)
     cases.assign_user(case_id, analyst_id, "ANALYST", granted_by=owner_id)
@@ -424,6 +449,21 @@ def _backfill_sql() -> str:
     return _m0057().BACKFILL_SQL
 
 
+def _pre_0059(tx) -> None:
+    """Put the transaction in the state a 0057 upgrade actually finds.
+
+    The two migration tests below seed an UNREGISTERED value into the
+    arrays to prove what 0057's backfill and refusal do with it. Since
+    2026-09-09 migration 0059 binds both arrays to the registry, so at
+    head the seed itself is refused. `DISABLE TRIGGER USER` is the suite's
+    idiom for stepping behind a trigger (`test_audit_verify_pg.py`); it is
+    transactional, so the rollback that ends each test re-enables the
+    binding, and it is a no-op on a database that has not reached 0059.
+    """
+    tx.execute("ALTER TABLE iam.app_user DISABLE TRIGGER USER")
+    tx.execute('ALTER TABLE core."case" DISABLE TRIGGER USER')
+
+
 def test_the_backfill_registers_every_value_already_in_either_array(conn):
     """Two halves. The migrated database: every distinct value in either
     array is registered, which is what an upgrade must leave behind. And
@@ -444,6 +484,7 @@ def test_the_backfill_registers_every_value_already_in_either_array(conn):
     key = _key()
     tx = psycopg.connect(dsn())
     try:
+        _pre_0059(tx)
         tx.execute(
             """INSERT INTO iam.app_user (email, display_name, password_hash,
                                          compartments)
@@ -498,6 +539,7 @@ def test_a_legacy_value_the_format_cannot_hold_stops_the_upgrade_with_the_fix(co
     email = f"cmp-{uuid4().hex[:8]}@noctornal.test"
     tx = psycopg.connect(dsn())
     try:
+        _pre_0059(tx)
         uid = tx.execute(
             """INSERT INTO iam.app_user (email, display_name, password_hash,
                                          tlp_clearance, compartments)

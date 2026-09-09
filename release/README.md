@@ -109,7 +109,7 @@ what the numbers mean, and the traps.
 |---|---|
 | Completion | ~95% on a four-dimension measure (model and tests 45%, HTTP API 15%, analyst UI 25%, adversarial review 15%) |
 | Tests | 1565 tests (`def test_` functions across the two pytest roots, `apps/api/tests` and `packages/ontology/tests`; 2170 collected items once parametrised) — a snapshot taken 2026-09-09; the live figure is `pytest --co -q` over both roots |
-| Database | PostgreSQL 16 + pgvector, Alembic head 0058 (58 revisions, `0001`–`0058`, snapshot 2026-09-09) |
+| Database | PostgreSQL 16 + pgvector, Alembic head 0059 (59 revisions, `0001`–`0059`, snapshot 2026-09-09) |
 | Reviewed | Every phase has had at least one hostile pass; Phase 6's is partial |
 | Audited | **No** |
 | Lawful to operate | **Not until L1–L4 are settled** |

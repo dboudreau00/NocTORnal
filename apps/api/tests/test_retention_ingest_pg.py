@@ -80,6 +80,14 @@ def _user(conn):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"rti-{uuid4().hex[:8]}@noctornal.test", "Rti", "x" * 20)
+    # Registered here, in this file, so the suite does not depend on
+    # test_ingest_pg having run first and left the row behind (0059
+    # binds the column; on a fresh database in isolation this UPDATE was
+    # refused until 2026-09-09).
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO NOTHING",
+        ("STEALER-2026", "Stealer logs 2026 (test)"))
     conn.execute("UPDATE iam.app_user SET tlp_clearance = 'RED', "
                  "compartments = %s WHERE id = %s", (["STEALER-2026"], uid))
     return uid
