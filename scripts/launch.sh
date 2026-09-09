@@ -135,7 +135,7 @@ fi
 # Step b: the compose stack
 # ---------------------------------------------------------------------------
 
-step 'Starting the service containers (Postgres, Redis, MinIO, OpenFGA, NATS, Mailpit)'
+step 'Starting the service containers (Postgres, Redis, MinIO, Mailpit)'
 
 if [ "$SKIP_DOCKER" -eq 1 ]; then
   detail 'skipped (--skip-docker)'
