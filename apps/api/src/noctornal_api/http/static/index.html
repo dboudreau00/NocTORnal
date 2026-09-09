@@ -35,11 +35,25 @@
     </label>
 
     <div class="field">
-      <label class="label" for="login-totp">Authenticator code</label>
-      <input id="login-totp" type="text" name="totp_code" inputmode="numeric"
-             autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}"
+      <label class="label" for="login-totp">Authenticator or recovery code</label>
+      <!-- One field for either factor: the server tells a recovery code
+           from a TOTP code by SHAPE (security/recovery.looks_like_code),
+           so the client never says which. Until 2026-09-09 this input was
+           maxlength="6" pattern="[0-9]{6}" inputmode="numeric" -- the
+           recovery codes docs/05 specifies were accepted by the API and
+           could not be typed here, so the working fallback for a skewed
+           clock was `bootstrap.py session`, which bypasses MFA. A recovery
+           code is three groups of five letters and digits joined by
+           dashes; the pattern admits that with spaces or dashes, any case,
+           and keeps the six-digit fast path. No inputmode: the alphabet
+           has letters, and a numeric keyboard cannot type them. -->
+      <input id="login-totp" type="text" name="totp_code"
+             autocomplete="one-time-code" maxlength="24"
+             pattern="[0-9]{6}|[A-Za-z0-9 \-]{15,24}"
              class="mono" required aria-describedby="login-totp-help">
-      <span id="login-totp-help" class="help">Six digits from your TOTP app.</span>
+      <span id="login-totp-help" class="help">Six digits from your TOTP app
+        &mdash; or one of your recovery codes (xxxxx-xxxxx-xxxxx) if the
+        app cannot produce a code that works.</span>
     </div>
 
     <p id="login-error" class="form-error" role="alert" hidden></p>
@@ -1316,6 +1330,43 @@
             </p>
             <div id="ach-matrix" class="scroll-x"></div>
 
+            <!-- Scoring (2026-09-09). A cell exists only once an assertion
+                 has a stance against some hypothesis, so a matrix with
+                 hypotheses and no evidence has nothing to click; this is
+                 where the first row comes from. Evidence is an ASSERTION
+                 (routers/ach.py), never typed-in text. -->
+            <details class="card" id="ach-score-card">
+              <summary>Score an assertion</summary>
+              <p class="help">
+                Evidence in this matrix is an <em>assertion</em>, never free
+                text: each row inherits the Admiralty grading and the
+                retraction status of the claim it rests on. Select an entity
+                or a tie in the graph, load its live assertions here, and
+                score one against a hypothesis. Every further cell in that
+                row is then one click in the matrix above.
+              </p>
+              <div class="pane-head">
+                <button id="ach-evidence-load" type="button" class="btn">
+                  Load assertions of the selected element</button>
+                <span id="ach-evidence-of" class="muted small"></span>
+              </div>
+              <label class="field">
+                <span class="label">Assertion</span>
+                <select id="ach-evidence-pick" class="select" disabled>
+                  <option value="">Load the selected element's assertions first</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Against hypothesis</span>
+                <select id="ach-evidence-hyp" class="select" disabled>
+                  <option value="">Add a hypothesis first</option>
+                </select>
+              </label>
+              <p id="ach-evidence-msg" class="msg" hidden></p>
+              <button id="ach-evidence-add" type="button" class="btn primary"
+                      disabled>Score it</button>
+            </details>
+
             <details class="card">
               <summary>Add a hypothesis</summary>
               <p class="help">
@@ -2326,6 +2377,38 @@
      shift-click, and the palette is the fastest way to anything. All of it
      was documented in a 10px legend under the canvas, which is to say
      nowhere. `?` is the convention and costs one keystroke to discover. -->
+<!-- ACH stance chooser (2026-09-09). One dialog for every matrix cell and
+     for the first score from the scorer. The options are built at runtime
+     from ACH_STANCES with the service's own labels; the note is offered,
+     not demanded, because nothing server-side requires one. -->
+<div id="ach-stance-scrim" class="palette-scrim" hidden>
+  <form id="ach-stance-form" class="palette stance-sheet" role="dialog"
+        aria-modal="true" aria-labelledby="ach-stance-title" novalidate>
+    <h2 id="ach-stance-title" class="h-sm">Score evidence against a hypothesis</h2>
+    <div class="field">
+      <span class="label">Evidence (an assertion)</span>
+      <span id="ach-stance-evidence" class="stance-evidence"></span>
+      <span id="ach-stance-basis" class="stance-basis"></span>
+    </div>
+    <div class="field">
+      <span class="label">Hypothesis</span>
+      <span id="ach-stance-hypothesis"></span>
+    </div>
+    <fieldset id="ach-stance-options" class="stance-options">
+      <legend class="label">Stance &mdash; how this evidence stands against the hypothesis</legend>
+    </fieldset>
+    <label class="field">
+      <span class="label">Note (optional &mdash; why it stands where it does)</span>
+      <textarea id="ach-stance-note" rows="2"></textarea>
+    </label>
+    <p id="ach-stance-msg" class="msg" hidden></p>
+    <div class="stance-actions">
+      <button id="ach-stance-cancel" type="button" class="btn">Cancel</button>
+      <button id="ach-stance-save" type="submit" class="btn primary">Save stance</button>
+    </div>
+  </form>
+</div>
+
 <div id="keys-scrim" class="palette-scrim" hidden>
   <div class="palette keys-sheet" role="dialog" aria-modal="true"
        aria-labelledby="keys-heading">

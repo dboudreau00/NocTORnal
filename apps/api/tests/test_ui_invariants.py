@@ -1014,3 +1014,352 @@ def test_the_console_is_served_under_the_ui_csp(monkeypatch):
     # must not leak onto it.
     r = client.get("/healthz")
     assert r.headers["Content-Security-Policy"].startswith("default-src 'none'")
+
+
+# ---------------------------------------------------------------------------
+# Alpha 4 product review, 2026-09-09: the console and the API each held one
+# half of four contracts, and nothing read both halves
+# ---------------------------------------------------------------------------
+
+
+def _ach_block() -> str:
+    """The ACH pane, anchored on `renderAchMatrix`, which exists in every
+    version of the file, and closed on the PGP block that follows it."""
+    js = _js()
+    start = js.index("function renderAchMatrix(")
+    return js[start:js.index("\n/* --- PGP verification", start)]
+
+
+def test_the_ach_cells_call_the_stance_route_with_the_routers_vocabulary():
+    """K1. `PUT /cases/{id}/ach/hypotheses/{hid}/stance` has existed since
+    Phase 6 and `renderAchMatrix` drew every cell as a `<td>` with a
+    tooltip, so the only way to score evidence against a hypothesis was
+    `curl`. The ranking pane looked complete -- it rendered a matrix,
+    a scale and a method paragraph -- and could not be driven.
+
+    Reads both sides: the route the console calls must be the one the
+    router defines, the payload keys must be `StanceBody`'s, and the
+    stances the chooser offers must be exactly the integers the router's
+    `Field(ge=, le=)` accepts and the service labels. Fails before
+    2026-09-09 because the console never named the route at all.
+    """
+    import ast
+
+    router_src = (SRC / "http" / "routers" / "ach.py").read_text(encoding="utf-8")
+    assert re.search(r'@router\.put\("/hypotheses/\{hypothesis_id\}/stance"',
+                     router_src), "the router no longer defines the stance route"
+    assert 'prefix="/cases/{case_id}/ach"' in router_src
+
+    block = _ach_block()
+    assert "'/ach/hypotheses/'" in block and "'/stance'" in block, (
+        "the console never calls the stance route: the matrix cannot be "
+        "scored from the UI")
+    assert "method: 'PUT'" in block, "the stance is not sent as a PUT"
+
+    # The payload the console builds is the model the router parses.
+    from noctornal_api.http.routers.ach import StanceBody
+    for key in StanceBody.model_fields:
+        assert re.search(rf"\b{key}:", block), (
+            f"the console's stance payload has no `{key}`, which StanceBody "
+            f"requires or would silently default")
+
+    # The vocabulary: Field(ge=-2, le=2) on the router, STANCE_LABEL on the
+    # service, ACH_STANCES on the console. Three copies, one test.
+    tree = ast.parse(router_src)
+    bounds: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "StanceBody":
+            for stmt in node.body:
+                if (isinstance(stmt, ast.AnnAssign)
+                        and getattr(stmt.target, "id", None) == "stance"
+                        and isinstance(stmt.value, ast.Call)):
+                    for kw in stmt.value.keywords:
+                        if kw.arg in {"ge", "le"}:
+                            bounds[kw.arg] = ast.literal_eval(kw.value)
+    assert set(bounds) == {"ge", "le"}, "StanceBody.stance lost its bounds"
+    router_accepts = set(range(bounds["ge"], bounds["le"] + 1))
+
+    from noctornal_api.ach import STANCE_LABEL
+    assert set(STANCE_LABEL) == router_accepts
+
+    m = re.search(r"const ACH_STANCES = \[([^\]]*)\];", _js())
+    assert m, "the console does not name the stance vocabulary once"
+    offered = {int(v) for v in re.findall(r"-?\d+", m.group(1))}
+    assert offered == router_accepts, (
+        f"the chooser offers {sorted(offered)} and the router accepts "
+        f"{sorted(router_accepts)}")
+
+    # The stance is an ASSERTION (router docstring), so the chooser shows
+    # what the assertion rests on, and a save re-reads the matrix so the
+    # router's warnings render through the pane's existing path.
+    assert "Admiralty" in block, "the chooser does not show the assertion's grading"
+    assert "loadAch()" in block, "a saved stance does not re-render the ranking"
+
+
+def test_there_is_one_labelOf_and_it_never_returns_null():
+    """K2. Two top-level `function labelOf(` declarations, one at the
+    inspector (falls back to the projection list, then a short id) and one
+    at the merge panel (entity list only, else `null`). Function
+    declarations hoist and the LAST wins, so the focus flag, the path
+    anchor, the palette and `edgeById` -- every caller written against the
+    first -- printed "ego of null" for any node the projection knew and the
+    entity list did not. Nothing crashed, which is why it shipped.
+
+    One declaration, and the fallback order is asserted through the helper
+    it delegates to: the entity list first (richer record), then the
+    projection, then a placeholder that says what it is standing in for.
+    Callers that papered over the null with `|| shortId(...)` are gone,
+    because a guard against a value the function can no longer return is
+    the next reader's false clue.
+    """
+    js = _js()
+    declared = re.findall(r"^function labelOf\(", js, flags=re.M)
+    assert len(declared) == 1, (
+        f"{len(declared)} top-level labelOf declarations; the last one wins "
+        f"and every caller written against the other is wrong")
+
+    start = js.index("function labelOf(")
+    body = js[start:js.index("\n}", start)]
+    assert "return null" not in body, "labelOf can still return null"
+    assert "nodeById(" in body, "labelOf no longer consults both node lists"
+    assert "shortId(" in body, "the placeholder no longer carries the id"
+
+    nb_start = js.index("function nodeById(")
+    nb = js[nb_start:js.index("\n}", nb_start)]
+    assert nb.index("state.nodes") < nb.index("state.gnodes"), (
+        "the projection is consulted before the entity list, so the poorer "
+        "record wins")
+
+    guarded = [line.strip() for line in js.splitlines()
+               if re.search(r"labelOf\([^()]*\)\s*\|\|", line)]
+    assert not guarded, (
+        "a caller still guards labelOf against a null it cannot return:\n"
+        + "\n".join("  " + g for g in guarded))
+
+
+def test_the_login_code_field_admits_a_recovery_code():
+    """K3. `AuthService.authenticate` has accepted a recovery code in
+    `totp_code` since the codes were built (`recovery.looks_like_code`
+    tells the two apart by shape), and the sign-in field was
+    `maxlength="6" pattern="[0-9]{6}" inputmode="numeric"`. The escape
+    hatch existed on the server and could not be typed into the client,
+    so the working fallback for a skewed clock was `bootstrap.py session`
+    -- which bypasses MFA and says so in the audit trail.
+
+    The shape is taken from the recovery module, not copied: a second copy
+    of the alphabet or the group length is how the field drifts again.
+    """
+    from noctornal_api.security import recovery
+
+    tag = re.search(r'<input id="login-totp"[^>]*>', _html(), flags=re.S)
+    assert tag, "the sign-in code field is gone"
+    tag = tag.group(0)
+    maxlength = re.search(r'maxlength="(\d+)"', tag)
+    pattern = re.search(r'pattern="([^"]+)"', tag)
+    assert maxlength and pattern, "the field no longer states its shape"
+
+    code = recovery.generate_code()
+    assert len(code) <= int(maxlength.group(1)), (
+        f"maxlength={maxlength.group(1)} truncates a {len(code)}-character "
+        f"recovery code before it reaches the server")
+    assert re.fullmatch(pattern.group(1), code), (
+        f"pattern={pattern.group(1)!r} rejects the recovery code {code!r}")
+    # The six-digit fast path is kept, not replaced.
+    assert re.fullmatch(pattern.group(1), "123456")
+
+    # The alphabet has letters in it, so a numeric keyboard would hide the
+    # keys the code is made of. Derived from the module, so a future
+    # all-digit alphabet may bring the numeric hint back.
+    if any(c.isalpha() for c in recovery._ALPHABET):
+        assert 'inputmode="numeric"' not in tag, (
+            "a numeric on-screen keyboard cannot type a recovery code")
+
+    html = _html()
+    start = html.index('id="login-totp-help"')
+    help_text = re.sub(r"\s+", " ", html[start:html.index("</span>", start)])
+    assert "recovery code" in help_text.lower(), (
+        "the help text does not say a recovery code works here")
+
+
+def test_the_console_holds_no_token_in_web_storage_and_speaks_the_cookie_contract():
+    """K4. The server has set `__Host-session` (HttpOnly) and `__Host-csrf`
+    on every login since the CSRF work, and `deps.session_token` has
+    honoured the pair with an `x-csrf-token` double-submit -- and the
+    console kept a bearer token in `sessionStorage` anyway, readable by
+    any script on the origin for the life of the tab.
+
+    Both halves of the contract, from one file: the storage write is gone,
+    the header and cookie names the console uses are the ones deps.py
+    declares, requests carry credentials, and the `#token=` hand-off from
+    `bootstrap.py session` is exchanged for the cookie session through a
+    route auth.py defines.
+    """
+    js = _js()
+    stored = [
+        (i, line.strip()) for i, line in enumerate(js.splitlines(), 1)
+        for m in [re.search(r"(session|local)Storage\.setItem\(\s*([^,]+),", line)]
+        if m and "token" in m.group(2).lower()
+    ]
+    assert not stored, (
+        "the console still writes the session token to web storage:\n"
+        + "\n".join(f"  app.js:{i}: {line}" for i, line in stored))
+    assert "sessionStorage.getItem(TOKEN_KEY)" not in js
+
+    from noctornal_api.http.deps import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE
+    assert f"'{CSRF_HEADER}'" in js, "the console does not send the CSRF header"
+    assert f"'{CSRF_COOKIE}'" in js, "the console does not read the CSRF cookie"
+    assert f"'{SESSION_COOKIE}'" not in js, (
+        "the session cookie is HttpOnly; a console that names it is trying "
+        "to read it")
+
+    start = js.index("async function _fetch(")
+    fetch_body = js[start:js.index("\n}", start)]
+    assert "credentials: 'same-origin'" in fetch_body, (
+        "requests are sent without credentials, so the cookie never travels")
+
+    auth_src = (SRC / "http" / "routers" / "auth.py").read_text(encoding="utf-8")
+    assert '@router.post("/cookie"' in auth_src, (
+        "auth.py has no route that turns a bearer session into the cookie pair")
+    assert "'/auth/cookie'" in js, (
+        "the console never exchanges a #token= hand-off for the cookie session")
+
+
+# ---------------------------------------------------------------------------
+# Alpha 4 product review, second pass (2026-09-09): the cookie session's
+# two refutations. Each test reads BOTH sides of a contract that crosses
+# app.js and the API, because each defect was two halves wrong together.
+# ---------------------------------------------------------------------------
+
+
+def _js_function(name: str) -> str:
+    """The body of a top-level function, comments included, closed on the
+    first `}` at column 0 after its declaration."""
+    js = _js()
+    start = js.index(f"function {name}(")
+    return js[start:js.index("\n}", start)]
+
+
+def test_a_refused_hand_off_or_sign_out_never_reports_what_the_server_did_not_do():
+    """K4, correctness. `_fetch` ended the session on ANY 401 that was not
+    the login's, including the speculative `POST /auth/cookie` exchange;
+    `endSession` deleted the readable `__Host-csrf` and could not touch
+    the HttpOnly half; `boot()` then showed the app on `GET /auth/me`,
+    which the session cookie alone satisfies; every write was 403
+    "missing or invalid CSRF token"; and `doLogout` swallowed that 403
+    and showed the sign-in form while the server kept the session, which
+    a reload restored. A stale `bootstrap.py session` link opened in a
+    signed-in tab was enough to reach it.
+
+    Three halves, read together: the routes whose 401 `_fetch` treats as
+    a verdict on the credential in the request are exactly the credential
+    checks `routers/auth.py` defines; `startApp` refuses a session that
+    has no readable half and no in-memory token; and `doLogout` ends the
+    session only after the server accepted the sign-out.
+    """
+    js = _js()
+    m = re.search(r"const _CREDENTIAL_CHECKS = new Set\(\[([^\]]*)\]\);", js)
+    assert m, "the console no longer names the 401 exemptions in one place"
+    exempt = set(re.findall(r"'([^']+)'", m.group(1)))
+    assert exempt == {"/auth/login", "/auth/cookie"}, exempt
+    auth_src = (SRC / "http" / "routers" / "auth.py").read_text(encoding="utf-8")
+    for route in exempt:
+        suffix = route.removeprefix("/auth")
+        assert re.search(rf'@router\.post\("{re.escape(suffix)}"', auth_src), (
+            f"{route} is exempt from ending the session but auth.py does "
+            f"not define it")
+    fetch_body = _js_function("_fetch")
+    assert "_CREDENTIAL_CHECKS.has(path)" in fetch_body
+    assert "path !== '/auth/login'" not in fetch_body, (
+        "the exemption is still a single hard-coded route")
+
+    guard = re.search(r"^function halfSession\(\) \{(.*)\}$", js, flags=re.M)
+    assert guard, "the console has no one definition of a half session"
+    assert "csrfCookie()" in guard.group(1) and "state.token" in guard.group(1)
+    start_app = _js_function("startApp")
+    assert "halfSession()" in start_app, "startApp shows the app on a half session"
+    assert start_app.index("halfSession()") < start_app.index("show($('view-app'), true)"), (
+        "the app is shown before the half-session check")
+    assert "endSession(HALF_SESSION_TITLE" in start_app, (
+        "a refused half session is not explained to the analyst")
+
+    logout = _js_function("doLogout")
+    assert "local sign-out regardless" not in logout
+    assert "} catch (err)" in logout and "banner(" in logout, (
+        "doLogout still swallows the server's refusal")
+    assert logout.index("endSession(") > logout.index("} catch (err)"), (
+        "doLogout ends the session before the server accepted the sign-out")
+    catch_block = logout[logout.index("} catch (err)"):logout.index("endSession(")]
+    assert "return;" in catch_block, "a refused sign-out still falls through to endSession"
+
+
+def test_a_fragment_token_never_replaces_the_session_the_browser_holds():
+    """K4, security. `adoptSessionFromFragment` POSTed the `#token=` to
+    `/auth/cookie` with the bearer forced and no look at the session the
+    browser already held; `deps.session_token` prefers the bearer; so a
+    link of the documented deep-link shape carrying another account's
+    token, opened by a signed-in analyst, swapped the cookie under every
+    tab they had open. Both halves: the console asks `/auth/me` on the
+    cookie BEFORE it exchanges and keeps a usable session it finds, and
+    `adopt_cookie` refuses a cookie session for a different account with
+    409 and an audit row -- the line that holds when the console is wrong
+    (`test_auth_cookie_http_pg` drives that refusal against Postgres).
+
+    Also holds the header comment to the code: the token IS readable from
+    script after a form sign-in (`state.token`, kept for the websocket's
+    first frame), and the header must say so rather than claim it cannot
+    be lifted.
+    """
+    js = _js()
+    body = _js_function("adoptSessionFromFragment")
+    probe = body.index("api('/auth/me')")
+    exchange = body.index("'/auth/cookie'")
+    assert probe < exchange, "the exchange runs before the browser's session is checked"
+    assert "halfSession()" in body[probe:exchange], (
+        "a live session with its readable half is not the condition for keeping it")
+    assert "state.token = token" in body and body.index("state.token = token") > probe, (
+        "the handed-over token is put in memory before the browser's session is checked")
+
+    header = js[:js.index("'use strict'")]
+    assert "cannot lift the token" not in header, (
+        "the header still claims the credential is unreadable from script")
+    assert "state.token" in header and "first frame" in header, (
+        "the header does not say the body token stays in memory for the websocket")
+
+    auth_src = (SRC / "http" / "routers" / "auth.py").read_text(encoding="utf-8")
+    fn = auth_src[auth_src.index("def adopt_cookie("):auth_src.index("\ndef _set_session_cookies")]
+    assert "409" in fn and "AUTH_COOKIE_ADOPT_REFUSED" in fn, (
+        "adopt_cookie does not refuse a cookie session for another account")
+    assert "request.cookies.get(SESSION_COOKIE)" in fn, (
+        "adopt_cookie never looks at the cookie the browser presents")
+    assert "strict-bound" not in fn, (
+        "the docstring claims strict binding unconditionally; it is "
+        "NOCTORNAL_SESSION_STRICT_BINDING-gated")
+
+
+def test_the_sample_download_presents_the_credential_the_sample_origin_preflight_admits():
+    """The Lab download is the console's one cross-origin request, and
+    two groups' 2026-09-09 changes met in it: the sample-origin split made
+    it cross-origin and the cookie session made `authHeaders('POST')`
+    prefer the CSRF header. The sample process answers the preflight with
+    `Access-Control-Allow-Headers: authorization` alone and sends no
+    `Allow-Credentials`, so a CSRF header fails the preflight and the pane
+    reports "did not complete" for a request the server never saw. Both
+    sides: the header the preflight admits is the one the console forces,
+    and a session restored from the cookie -- which holds no token -- is
+    told so instead of sending a request that cannot be authenticated.
+    """
+    app_src = (SRC / "http" / "app.py").read_text(encoding="utf-8")
+    m = re.search(r'"Access-Control-Allow-Headers":\s*"([^"]+)"', app_src)
+    assert m, "app.py no longer answers the download preflight"
+    admitted = {h.strip().lower() for h in m.group(1).split(",")}
+    assert admitted == {"authorization"}, admitted
+
+    body = _js_function("downloadSample")
+    assert "fetchFromSampleOrigin(" in body, "the download no longer goes to the sample origin"
+    assert "authHeaders('POST', state.token)" in body, (
+        "the download does not force the bearer; authHeaders('POST') sends "
+        "the CSRF header once a cookie pair exists, which the preflight refuses")
+    assert "credentials: 'omit'" in body
+    assert "if (!state.token)" in body, (
+        "a cookie-restored session sends a download request it cannot authenticate")
+    assert body.index("if (!state.token)") < body.index("fetchFromSampleOrigin(")

@@ -18,11 +18,13 @@ from psycopg.types.json import Json
 from pydantic import BaseModel
 
 from noctornal_api.http.deps import (
+    COOKIE_ATTRS,
     CSRF_COOKIE,
     SESSION_COOKIE,
     CurrentUser,
     current_user,
     get_conn,
+    session_token,
 )
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import (
@@ -45,7 +47,14 @@ class LoginBody(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    token: str  # opaque session token; send as Authorization: Bearer <token>
+    # The opaque session token, for `Authorization: Bearer <token>`. The
+    # SAME token is set as the `__Host-session` cookie (see `login`), so a
+    # client picks a transport rather than a session. It stays in the body
+    # for every client because `routers/live.py` authenticates the
+    # websocket from a token in its first frame and reads no cookie; a
+    # browser client that could drop the body token would need that
+    # socket to accept the cookie pair first.
+    token: str
 
 
 def _ip_hash(request: Request) -> bytes | None:
@@ -109,14 +118,16 @@ def login(body: LoginBody, request: Request, response: Response,
         ip=client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     _audit(conn, "AUTH_SUCCEEDED", result.user_id, {}, request)
-    # Cookie for browser clients (HttpOnly; the __Host- prefix requires
-    # Secure + Path=/ + no Domain). The paired readable CSRF cookie is the
-    # double-submit half required by docs/05 — deps.session_token demands a
-    # matching header for cookie-authenticated unsafe methods.
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=True,
-                        samesite="strict", path="/")
-    response.set_cookie(CSRF_COOKIE, secrets.token_urlsafe(32), httponly=False,
-                        secure=True, samesite="strict", path="/")
+    # The cookie pair, on EVERY login and with no switch in the body: the
+    # HttpOnly session cookie for browser clients and the readable CSRF
+    # cookie that is the double-submit half docs/05 requires
+    # (`deps.session_token` demands the matching header on a
+    # cookie-authenticated unsafe method). A script client that only wants
+    # the body token loses nothing by also receiving cookies it never
+    # sends. The analyst console has run on this pair since 2026-09-09;
+    # before that it held the body token in sessionStorage and the pair
+    # was set for nobody.
+    _set_session_cookies(response, token)
     return LoginResponse(token=token)
 
 
@@ -131,10 +142,87 @@ def logout(request: Request,
     _audit(conn, "AUTH_LOGOUT", user.user_id, {"session_id": str(user.session_id)},
            request)
     response = Response(status_code=204)
-    # Clear the cookies so the browser stops presenting a dead token.
-    response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(CSRF_COOKIE, path="/")
+    # Clear the cookies so the browser stops presenting a dead token. With
+    # the attributes they were SET with: until 2026-09-09 this was
+    # `delete_cookie(name, path="/")`, whose defaults emit no Secure and
+    # `SameSite=lax`, and a browser refuses a `__Host-` cookie without
+    # Secure -- so the deletion was ignored and the revoked token rode
+    # along on every later request while this endpoint said 204.
+    _clear_session_cookies(response)
     return response
+
+
+@router.post("/cookie", status_code=204)
+def adopt_cookie(request: Request,
+                 raw: str = Depends(session_token),
+                 user: CurrentUser = Depends(current_user),
+                 conn: psycopg.Connection = Depends(get_conn)) -> Response:
+    """Set the cookie pair for the session the caller is already presenting.
+
+    For the `#token=` hand-off: `scripts/bootstrap.py session` mints a
+    session from a shell and hands the token to the browser in the URL
+    fragment, and the console exchanges it here ONCE so the session
+    survives a reload without the token ever being written to web
+    storage. The cookie carries the same token, so no session is minted,
+    no login event is written and nothing about the session changes but
+    its transport -- which is why a successful adoption is not audited as
+    an authentication outcome: `current_user` has already validated the
+    session (and, under `NOCTORNAL_SESSION_STRICT_BINDING`, checked its
+    binding), and a bogus token gets the same generic 401 as everywhere
+    else with no cookie set.
+
+    Reachable with a cookie too, in which case the CSRF double-submit in
+    `session_token` applies and the effect is a fresh CSRF cookie for the
+    same session.
+
+    A bearer that arrives alongside a live cookie session for a DIFFERENT
+    account is refused with 409 and audited (2026-09-09). `session_token`
+    prefers the bearer, so until then a link of the documented deep-link
+    shape `#case=<id>&tab=feeds&token=<attacker's token>` opened by a
+    signed-in analyst replaced the browser's cookie with the attacker's
+    session: every tab the analyst already had open kept showing the
+    analyst, `authHeaders()` in each of them read the new CSRF cookie
+    live, and every write from those tabs landed in the hash-chained
+    audit log under the attacker's user_id. The console now checks for an
+    existing session before it exchanges; this refusal is what holds when
+    the console gets that wrong. The SAME account is allowed on purpose: a
+    tab left with the session cookie and no readable half recovers through
+    its own `bootstrap.py session` link, and the effect is a fresh pair
+    for the same user. A cookie the server no longer honours is replaced
+    freely -- there is no session there to protect.
+    """
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie and cookie != raw:
+        holder = SessionService(PgSessionStore(conn)).validate(cookie, touch=False)
+        if holder.ok and holder.session.user_id != user.user_id:
+            _audit(conn, "AUTH_COOKIE_ADOPT_REFUSED", user.user_id,
+                   {"reason": "cookie_session_belongs_to_another_account",
+                    "bearer_session_id": str(user.session_id),
+                    "cookie_session_id": str(holder.session.id),
+                    "cookie_user_id": str(holder.session.user_id)},
+                   request)
+            raise Problem(409, "Conflict",
+                          "this browser already holds a session for a "
+                          "different account; sign out of it before "
+                          "adopting another")
+    response = Response(status_code=204)
+    _set_session_cookies(response, raw)
+    return response
+
+
+def _set_session_cookies(response: Response, token: str) -> None:
+    """The pair, from ONE attribute declaration shared with the delete
+    (`deps.COOKIE_ATTRS`): HttpOnly on the session cookie because script
+    must never read it, readable on the CSRF cookie because script must
+    copy it into the header."""
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, **COOKIE_ATTRS)
+    response.set_cookie(CSRF_COOKIE, secrets.token_urlsafe(32), httponly=False,
+                        **COOKIE_ATTRS)
+
+
+def _clear_session_cookies(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, httponly=True, **COOKIE_ATTRS)
+    response.delete_cookie(CSRF_COOKIE, httponly=False, **COOKIE_ATTRS)
 
 
 class Me(BaseModel):
