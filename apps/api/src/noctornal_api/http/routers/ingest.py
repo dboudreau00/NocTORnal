@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import (
     CurrentUser,
+    audit_auth_event,
     authorize_object,
     current_user,
     get_conn,
@@ -52,7 +53,7 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import rate_limit, read_body_capped
 from noctornal_api.ingest import (
     AuthorisationRequired,
     CaseMismatch,
@@ -194,6 +195,36 @@ def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
     return case_id
 
 
+def _holds_global(conn: psycopg.Connection, user: CurrentUser,
+                  permission_key: str) -> tuple[bool, bool]:
+    """(held, fresh): `require_global`'s three checks asked as a question.
+
+    `require_global` is a dependency that REFUSES; this returns the same
+    facts -- the verb through a global role on an active account, and
+    whether step-up freshness (where the permission demands it) is
+    satisfied -- so an endpoint whose scope is the UNION of two verbs can
+    decide per row instead of per route. `fresh` is True whenever the
+    permission does not require step-up at all.
+    """
+    row = conn.execute(
+        """SELECT bool_or(p.requires_step_up)
+             FROM iam.user_role ur
+             JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+             JOIN iam.permission p ON p.key = rp.permission_key
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.user_id = %s AND rp.permission_key = %s
+              AND u.is_active""", (user.user_id, permission_key)).fetchone()
+    if row is None or row[0] is None:
+        return False, False
+    if not row[0]:
+        return True, True
+    fresh = (
+        user.session_mfa_at is not None
+        and (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
+        < STEP_UP_FRESHNESS)
+    return True, fresh
+
+
 def _authorised_cases_for_ingest(conn: psycopg.Connection,
                                  user: CurrentUser) -> list[UUID]:
     """Cases where the full five-part gate would allow `ingest.read`."""
@@ -244,6 +275,21 @@ async def submit(
     connection, never from a header, because the key's IP allowlist is
     only a control if the caller cannot choose the address it is compared
     against.
+
+    The body is read through `read_body_capped` against the key's own
+    `max_bytes_per_request` (a column on `ingest.api_key`, 32 MiB by
+    default, set per key at issue), and a body over it is a 413 with the
+    cap in the message. Until 2026-09-09 this line was `await
+    request.body()`: the whole body was accumulated in memory FIRST and
+    `accept()` compared its length with the cap afterwards, so a partner
+    -- or anyone holding a leaked key -- could hand the API gigabytes and
+    the refusal arrived only once they had been buffered. The cap was
+    documented and enforced and useless against the thing a cap is for.
+    Now a declared length over the cap is refused before a byte is read,
+    and a chunked body is refused on the chunk that crosses it. The key is
+    authenticated BEFORE the body is read, so an unauthenticated caller's
+    body is never read at all. `accept()` keeps its own length check for
+    callers that are not this route.
     """
     svc = _with_raw(conn)
     # From the server's own view of the connection, never from a header:
@@ -277,7 +323,9 @@ async def submit(
         # half of their guess was right.
         raise Problem(401, "Unauthenticated", "invalid ingest key")
 
-    raw = await request.body()
+    raw = await read_body_capped(
+        request, int(key["max_bytes_per_request"]),
+        what="a submission on this ingest key")
     try:
         result = svc.accept(
             key, raw, content_type=request.headers.get("content-type"),
@@ -459,15 +507,76 @@ def parse_batch(
 def dead_letters(
     api_key_id: UUID | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
-    user: CurrentUser = Depends(require_global("ingest.read")),
+    user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """What did not parse, and why.
+    """What did not parse, and why -- scoped to what the caller may read.
 
     A rising dead-letter rate on one key is the signal that a provider
     changed their format -- and it is invisible unless somebody looks,
     which is what this endpoint is for.
+
+    **Scope, since 2026-09-09.** Until then this listed EVERY case's dead
+    letters to any holder of the global `ingest.read` verb, filtered only
+    by the caller's clearance ceiling. An ANALYST on one case read the
+    partner key, error class, classification and failure rate of every
+    other case's feeds: the same over-broad grant `/records` and
+    `/quarantine` were split apart to avoid, reachable through the queue
+    next to them. `ingest.dead_letter` carries no `case_id` -- the batch
+    is parsed INTO a case and the case lands on `ingest.record` -- so a
+    dead letter's case is the case its batch's records went to, and the
+    listing is the union of two scopes, each behind its own verb:
+
+    - rows whose batch fed a case the caller is assigned to with
+      `ingest.read` (the five-part gate's assignment, expiry, verb and
+      labels, via `_authorised_cases_for_ingest`), for holders of the
+      global `ingest.read` verb;
+    - rows whose batch fed NO case -- wholly dead-lettered, or parsed into
+      quarantine -- for holders of the operator verb `ingest.manage`,
+      which is the verb `/quarantine` requires and the one the console
+      probes to decide whether to show the quarantine section at all.
+
+    A batch re-parsed into a second case belongs to both; each case's
+    readers see the row, and `case_ids` names only the cases the CALLER
+    may read. The caller's own clearance and compartments still bound
+    every row, as before. `ingest.manage` requires step-up: an operator
+    whose step-up has lapsed keeps the case rows they can read and is told
+    in `scope.unattached_withheld` that the unattached rows were not
+    listed, rather than being handed a listing that looks complete.
+
+    No `require_global` on the route, deliberately (the same reasoning as
+    `rescore`): which verb applies depends on what the row IS. A caller
+    holding neither verb is refused 403 with the same AUTHZ_DENIED audit
+    `require_global` would have written.
     """
+    reads, _ = _holds_global(conn, user, "ingest.read")
+    manages, fresh = _holds_global(conn, user, "ingest.manage")
+    if not (reads or manages):
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                         {"permission": "ingest.read", "scope": "global"})
+        raise Problem(403, "Forbidden", "missing global permission ingest.read")
+    if manages and not fresh and not reads:
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                         {"permission": "ingest.manage", "scope": "global",
+                          "failed_checks": ["step_up_freshness"]})
+        raise Problem(403, "Forbidden", "re-authentication required")
+    allowed = _authorised_cases_for_ingest(conn, user) if reads else []
+    unattached = manages and fresh
+    withheld = "re-authentication required" if manages and not fresh else None
+
+    if api_key_id is not None and not unattached:
+        # A key is visible to a case reader only if it fed one of their
+        # cases. 404 either way: "that key exists but fed nobody you read"
+        # is a disclosure about the deployment's feeds (deps.py rule 2),
+        # and it is the answer `/records` gives for a case off-scope.
+        fed = conn.execute(
+            """SELECT 1 FROM ingest.batch b
+                 JOIN ingest.record r ON r.batch_id = b.id
+                WHERE b.api_key_id = %s AND r.case_id = ANY(%s::uuid[])
+                LIMIT 1""", (api_key_id, allowed)).fetchone()
+        if fed is None:
+            raise Problem(404, "Not found", "no such key")
+
     # The fragment IS returned, and only because migration 0040 made that
     # safe: it is redacted structurally before it is stored, so what comes
     # back is keys, types and lengths and never a value. A queue you cannot
@@ -480,16 +589,28 @@ def dead_letters(
     # reasoning applies to any attacker-controlled bytes, not only samples.
     clearance, compartments = user_ceiling(conn, user.user_id)
     rows = conn.execute(
-        """SELECT id, batch_id, error_class, error_detail, occurred_at,
-                  replayed_at, resolution, raw_fragment, redacted,
-                  classification, retain_until
-             FROM ingest.dead_letter
-            WHERE (%s::uuid IS NULL OR api_key_id = %s)
-              AND purged_at IS NULL
-              AND classification <= %s::core.tlp AND compartments <@ %s
-            ORDER BY occurred_at DESC LIMIT %s""",
-        (api_key_id, api_key_id, clearance.name, list(compartments),
-         limit)).fetchall()
+        """SELECT dl.id, dl.batch_id, dl.error_class, dl.error_detail,
+                  dl.occurred_at, dl.replayed_at, dl.resolution,
+                  dl.raw_fragment, dl.redacted, dl.classification,
+                  dl.retain_until, k.name, k.key_id,
+                  ARRAY(SELECT DISTINCT r.case_id FROM ingest.record r
+                         WHERE r.batch_id = dl.batch_id
+                           AND r.case_id = ANY(%s::uuid[]))
+             FROM ingest.dead_letter dl
+             LEFT JOIN ingest.api_key k ON k.id = dl.api_key_id
+            WHERE (%s::uuid IS NULL OR dl.api_key_id = %s)
+              AND dl.purged_at IS NULL
+              AND dl.classification <= %s::core.tlp
+              AND dl.compartments <@ %s
+              AND (EXISTS (SELECT 1 FROM ingest.record r
+                            WHERE r.batch_id = dl.batch_id
+                              AND r.case_id = ANY(%s::uuid[]))
+                   OR (%s AND NOT EXISTS (SELECT 1 FROM ingest.record r
+                                           WHERE r.batch_id = dl.batch_id
+                                             AND r.case_id IS NOT NULL)))
+            ORDER BY dl.occurred_at DESC LIMIT %s""",
+        (allowed, api_key_id, api_key_id, clearance.name, list(compartments),
+         allowed, unattached, limit)).fetchall()
     out = {"dead_letters": [
         {"id": str(r[0]), "batch_id": str(r[1]) if r[1] else None,
          "error_class": r[2], "error_detail": r[3],
@@ -499,12 +620,25 @@ def dead_letters(
          "fragment": r[7] if r[8] else None,
          "fragment_withheld": not r[8],
          "classification": r[9],
-         "retain_until": r[10].isoformat() if r[10] else None}
+         "retain_until": r[10].isoformat() if r[10] else None,
+         # The feed, named -- this endpoint's docstring has always said a
+         # rising rate on ONE KEY is the signal, and until 2026-09-09 the
+         # rows never said which key. `/records` already shows both to
+         # the same readers.
+         "feed": r[11], "key_id": r[12],
+         "case_ids": [str(c) for c in (r[13] or [])],
+         "unattached": not (r[13] or [])}
         for r in rows],
         "count": len(rows),
+        "scope": {"cases": [str(c) for c in allowed],
+                  "unattached": unattached,
+                  "unattached_withheld": withheld},
         "notice": ("Fragments are structurally redacted: keys, types and "
                    "lengths only, never values. Rows recorded before "
-                   "2026-07-25 are withheld until the repair script runs.")}
+                   "2026-07-25 are withheld until the repair script runs. "
+                   "Listed: dead letters of feeds into cases you are "
+                   "assigned to, plus unattached ones if you hold "
+                   "ingest.manage -- `scope` says which applied.")}
     if api_key_id is not None:
         out["dead_letter_rate_24h"] = IngestService(conn).dead_letter_rate(
             api_key_id)

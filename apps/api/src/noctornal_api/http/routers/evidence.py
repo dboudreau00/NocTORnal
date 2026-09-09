@@ -25,9 +25,25 @@ from noctornal_api.http.deps import (
     require,
 )
 from noctornal_api.http.errors import Problem
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 
-router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"])
+# `route_class=BodyCappedRoute` is what makes the `@body_cap` marker on
+# `upload` do anything: the class wraps the ASGI receive that FastAPI's
+# multipart parser reads through, and only for endpoints that carry the
+# marker. Every other route on this router is untouched by it.
+router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"],
+                   route_class=BodyCappedRoute)
+
+#: 256 MiB, the same number and the same shape as `samples.MAX_SAMPLE_BYTES`:
+#: a module constant, changed on purpose by a deployment that needs larger
+#: exhibits. It bounds two things at once. Storage, because every exhibit
+#: is written under a COMPLIANCE object lock that no credential can
+#: shorten, so an accepted byte is a byte kept for the whole retention
+#: period whatever anyone later decides. Memory, because `EvidenceService.
+#: ingest` holds the exhibit as one `bytes` and then reads it back whole
+#: to verify the store, so one request costs the process roughly twice
+#: the upload. There was NO cap here until 2026-09-09.
+MAX_EVIDENCE_BYTES = 256 * 1024 * 1024
 
 
 def _svc(conn: psycopg.Connection) -> EvidenceService:
@@ -71,6 +87,7 @@ class IngestOut(BaseModel):
 # cannot be reclaimed, not about CPU.
 @router.post("", response_model=IngestOut, status_code=201,
              dependencies=[Depends(rate_limit("evidence.ingest"))])
+@body_cap(lambda: MAX_EVIDENCE_BYTES, what="an evidence upload")
 async def upload(
     case_id: UUID,
     file: UploadFile = File(...),
@@ -82,6 +99,25 @@ async def upload(
     user: CurrentUser = Depends(require("evidence.upload")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> IngestOut:
+    """Lodge an exhibit. The request body is capped at `MAX_EVIDENCE_BYTES`.
+
+    The cap is on the multipart BODY, of which the file is the bulk, and it
+    is enforced by `BodyCappedRoute` on the bytes as they arrive: a body
+    whose declared length exceeds the cap is refused before a byte of it is
+    read, and a chunked body is refused on the chunk that crosses the cap.
+    The 413 carries the cap in its message. Nothing below this line runs
+    for a refused upload, so nothing is written to the bucket or the
+    evidence table.
+
+    Until 2026-09-09 there was no cap. `await file.read()` accumulated
+    whatever arrived, the service put it in the bucket under a COMPLIANCE
+    object lock, and only then was anything about its size recorded. A
+    caller could hand the API gigabytes, the "refusal" never came, and the
+    object was locked under a retention that no credential can shorten.
+    The cap has to be enforced before the parser buffers the upload, which
+    is why it lives in the route class rather than in this function --
+    FastAPI parses the form before the handler or any dependency runs.
+    """
     data = await file.read()
     if not data:
         raise Problem(400, "Invalid request", "empty upload")

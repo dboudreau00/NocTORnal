@@ -135,7 +135,7 @@ fi
 # Step b: the compose stack
 # ---------------------------------------------------------------------------
 
-step 'Starting the service containers (Postgres, Redis, MinIO, OpenFGA, NATS, Mailpit)'
+step 'Starting the service containers (Postgres, Redis, MinIO, Mailpit)'
 
 if [ "$SKIP_DOCKER" -eq 1 ]; then
   detail 'skipped (--skip-docker)'
@@ -392,7 +392,6 @@ printf '\n'
 printf '  Also available:\n'
 printf '      http://localhost:9001   MinIO console (evidence store)\n'
 printf '      http://localhost:8025   Mailpit (captured e-mail)\n'
-printf '      http://localhost:3001   OpenFGA playground\n'
 
 # The OpenAPI page is off unless NOCTORNAL_ENABLE_DOCS says otherwise: it
 # describes the shape of a case system, so it stays opt-in. Advertise the URL

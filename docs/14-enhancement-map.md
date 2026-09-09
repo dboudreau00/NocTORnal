@@ -107,11 +107,18 @@ requests and wrong numbers.
 
 ## U — Interface debt
 
-**U1. sigma.js and ForceAtlas2 in a worker.** docs/02 specifies these; the
-canvas is currently hand-rolled because a strict CSP and no build step ruled
-out a bundler. It is adequate at tens of nodes and will not hold at
-thousands. Adopting a bundler is the real decision here, and it is a
-deviation worth recording rather than quietly leaving.
+**U1. sigma.js and ForceAtlas2 in a worker — superseded (recorded 2026-09-09).**
+The 2026-07 sketch of docs/02 specified sigma.js; it is not in the tree and never was,
+and docs/02 no longer specifies it. What was built instead (decision 37): a
+hand-written ForceAtlas2 with Barnes-Hut repulsion in a Web Worker
+(`layout-worker.js`), measured at 400 nodes / 1,187 edges in about a second
+off-thread, with the main-thread spring loop kept for interactive drag. The
+sentence this entry used to carry — "adequate at tens of nodes and will not
+hold at thousands" — described the pre-worker canvas and stopped being true
+when the worker landed. What is still open is the ceiling: Canvas 2D will
+not reach the 50–100k nodes a GPU-backed renderer does, and adopting one
+means adopting a bundler under the strict CSP. That is the real decision,
+and it is recorded here rather than left implicit.
 
 **U2. Why is this hidden?** An under-cleared analyst sees a smaller graph
 with no indication that anything was withheld. A non-disclosing count

@@ -326,7 +326,7 @@ fi
 # ---------------------------------------------------------------------------
 
 step 'Starting the service containers'
-detail 'Postgres, Redis, MinIO, OpenFGA, NATS, Mailpit'
+detail 'Postgres, Redis, MinIO, Mailpit'
 docker compose -f "$REPO_ROOT/infra/docker-compose.yml" up -d
 
 detail 'waiting for Postgres to report healthy'

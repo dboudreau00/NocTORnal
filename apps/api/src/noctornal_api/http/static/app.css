@@ -1075,7 +1075,35 @@ select.select { appearance: none; padding-right: 24px; }
   color: var(--text-tertiary); font-weight: 600; min-width: 3.5em;
   cursor: help;
 }
-.ach-cell { font-variant-numeric: tabular-nums; cursor: help; }
+/* A cell is a CONTROL (2026-09-09). The button fills the cell so the whole
+   square is the target, inherits the stance colour from the <td>'s class,
+   and shows a real focus ring: the matrix is worked by keyboard as often
+   as by mouse. Was `cursor: help` on a <td> with a tooltip -- a matrix
+   that could be read here and only written with curl. */
+.ach-table td.ach-cell { padding: 0; cursor: default; }
+.ach-cell-btn {
+  display: block; width: 100%; min-height: 2.2em; padding: 5px 8px;
+  background: transparent; border: 0; color: inherit; font: inherit;
+  font-variant-numeric: tabular-nums; cursor: pointer; text-align: center;
+}
+.ach-cell-btn:hover { background: var(--surface-2); }
+.ach-cell-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The stance chooser. Reuses the palette sheet so it sits where the
+   command palette and the keyboard sheet already sit. */
+.stance-sheet { width: min(560px, 100%); }
+.stance-evidence { color: var(--text-primary); }
+.stance-basis { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.stance-options {
+  border: 1px solid var(--hairline); border-radius: var(--r-sm);
+  padding: 8px 10px; margin: 0; display: flex; flex-direction: column; gap: 6px;
+}
+.stance-option { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+/* The console's generic input rule stretches a control to the row; a radio
+   that fills the row pushes its own label to the far edge. */
+.stance-option input { width: auto; flex: 0 0 auto; margin: 0; }
+.stance-k { font-variant-numeric: tabular-nums; min-width: 2em; text-align: right; font-weight: 600; }
+.stance-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .ach-diag {
   font-variant-numeric: tabular-nums; color: var(--text-tertiary);
 }

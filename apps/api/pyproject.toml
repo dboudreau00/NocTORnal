@@ -4,7 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noctornal-api"
-version = "0.1.0"
+# The ONE declaration of the version. `noctornal_api.__version__` reads this
+# file (or, for a wheel, the metadata built from it) and carries no literal of
+# its own. Until 2026-09-09 the package said "0.4.0" while this said "0.1.0",
+# and nothing read both, so the packaging metadata and the OpenAPI document
+# disagreed for three releases. apps/api/tests/test_version_contract.py holds
+# every reporter of the version to this line.
+version = "0.5.0"
 description = "NocTORnal API: FastAPI service. Session 3 lands authentication (Argon2id + TOTP + server-side sessions)."
 requires-python = ">=3.12"
 dependencies = [

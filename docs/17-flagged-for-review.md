@@ -65,6 +65,28 @@ use rather than discovered in a conclusion.
 **Decide:** accept with the warning / namespace and re-key / carry the
 entity type. Recorded as **docs/16 D8**.
 
+> **Update 2026-09-09 — the collision above CLOSED on 2026-07-26, and the
+> residual is narrower than the entry says.** Migration
+> `0051_telegram_norm_arithmetic.py` (docs/16 D8, resolved by options
+> (b)+(c)) made `telegram_id_norm` decode the Bot-API encoding
+> arithmetically — `chat_id = -(10**12 + id)`, not a string-strip of `100`
+> — and namespace every value by id space: `u:` user, `c:` channel /
+> supergroup, `g:` basic group, accepting an explicit prefix from a
+> collector that knows the type. It re-keyed stored `TELEGRAM_ID` selectors
+> from `raw_value` (an earlier draft rewrote `norm_value` in place and would
+> have stamped already-stripped channels as `u:`). Channel `-1001234567890`
+> and user `1234567890` are now `c:1234567890` and `u:1234567890`: the
+> `-100` prefix collision cannot occur, and the "known unresolved
+> collision" warning in `comms.normalise` became an informational note.
+> **What remains, precisely:** a bare positive id carries no type and is
+> ASSUMED `u:` on a strong selector, so a channel that reaches the
+> normaliser as a bare number — an MTProto observation, a hand-typed id —
+> still merges with a same-numbered user; and no Telegram collector exists
+> to pass `c:` (`RssAdapter` is the only adapter; the Telegram adapter is
+> behind docs/16 L3), so today nothing in the tree ever supplies the
+> prefix. The entry is kept above as written: the register's value is that
+> it does not lose history.
+
 ### F2 — `REJECTED` samples are destroyed, and that is the wrong default
 somewhere
 
@@ -560,7 +582,7 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 | Non-owner DB role + RLS | The API connects as the table owner, so RLS is a no-op behind it |
 | Real SSRF protection | `collection.fetch()` blocks non-HTTP schemes and private literals; **DNS rebinding is not addressed** |
 | Login timing equalisation | A missing account returns faster than a wrong password |
-| Compartment registry | Free-text; a typo creates silent no-access |
+| Compartment rename / removal | The registry itself is done: `iam.compartment` is the closed vocabulary (0057, 2026-09-02) and every compartment column is bound to it by trigger (0059, 2026-09-09), so a typo is refused and named, not silent. What is still missing is a product route to rename or drop a registered key — the database refuses either while any row carries it, so today it is a manual per-column operation |
 | Redis isolation | The limiter shares an instance running `allkeys-lru` |
 | WebAuthn | TOTP only, and TOTP cannot work on the current dev host |
 

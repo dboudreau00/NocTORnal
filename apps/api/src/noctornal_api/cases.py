@@ -308,7 +308,15 @@ class CaseService:
         if unknown:
             raise CaseError(
                 f"compartment(s) {unknown} are not registered. A compartment "
-                f"must be registered (POST /compartments, user.manage) before "
+                # The route is spelled with its mount prefix because the
+                # operator pastes it. Until 2026-09-09 this said
+                # `POST /compartments`, a path the router (mounted under
+                # `/api/v1`) does not serve, while the 0059 trigger said
+                # `POST /api/v1/compartments` for the same rule;
+                # `test_compartment_binding_pg.py` holds all three
+                # refusals to the migration constant and the route table.
+                f"must be registered (POST /api/v1/compartments, user.manage) "
+                f"before "
                 f"a case can be filed under it, because an unregistered key "
                 f"is a typo, and a typo in a need-to-know lock is a case "
                 f"nobody can see")

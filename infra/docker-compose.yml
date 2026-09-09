@@ -1,11 +1,14 @@
-# Development only. Production runs the three zones from docs/02 as
-# separate network policies — do not derive a prod deployment from this.
+# Development only -- do not derive a prod deployment from this file.
+# (Until 2026-09-09 this header cited a three-zone production sketch from
+# docs/02; that sketch was superseded. The program is one API process; a
+# production deployment puts it behind your own reverse proxy and network
+# policy, and runs the sample origin as a second process of the same code.)
 name: noctornal
 
 services:
   postgres:
-    # pgvector image; add pg_uuidv7 in a derived Dockerfile if you want
-    # time-sortable IDs generated in-database rather than app-side.
+    # pgvector image. Ids are uuid4() app-side and gen_random_uuid() in
+    # SQL; the pg_uuidv7 idea from the 2026-07 sketch was not taken.
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: noctornal
@@ -121,11 +124,12 @@ services:
 # install to fail with an error about a service the product never calls.
 # Ten published ports became six.
 #
-# docs/02 still names OpenFGA/SpiceDB as the intended relationship-based
-# authorisation store. That remains the plan; the five-part gate in
-# `deps.py` is the current implementation and is entirely in Postgres. When
-# ReBAC is actually wired up, the service comes back -- with code calling
-# it.
+# docs/02 named OpenFGA/SpiceDB as the intended relationship-based (marked
+# superseded there on 2026-09-09; the five-part gate lives in Postgres)
+# authorisation store. It is not the plan any more: the five-part gate in
+# `deps.py` is the implementation, entirely in Postgres, and nothing is
+# waiting on a ReBAC service. If one is ever adopted it comes back here
+# with code calling it, not before.
 #
 # NOTE for anyone re-adding OpenFGA: `openfga-migrate` declared
 # `depends_on: postgres: service_healthy`, which had the side effect of

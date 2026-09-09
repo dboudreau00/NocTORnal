@@ -616,6 +616,15 @@ def test_the_queue_is_filtered_by_the_callers_own_clearance(conn, svc):
 
 def test_a_compartmented_sample_is_invisible_without_the_compartment(conn, svc):
     alice = _user(conn)
+    # Registered before the sample is filed under it. Since 2026-09-09
+    # (migration 0059) `lab.sample.compartments` is bound to
+    # `iam.compartment`, so `submit` with a key nobody registered is
+    # refused by the database rather than silently filed, and this test
+    # failed on that refusal. ON CONFLICT and never deleted: the registry
+    # refuses to drop a key while any row still carries it.
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO NOTHING", ("OPERATION-X", "OPERATION-X (lab test)"))
     svc.submit(_unique("comp"), submitted_by=alice,
                compartments=frozenset({"OPERATION-X"}))
     assert not [s for s in svc.queue(clearance="RED")

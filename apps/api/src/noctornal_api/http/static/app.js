@@ -7,15 +7,53 @@
  * needs pixel control (the sociogram, the timeline density strip) is drawn on a
  * <canvas>.
  *
- * TOKEN HANDLING — read this before shipping to a browser deployment.
- * The bearer token is held in sessionStorage and sent as an Authorization
- * header. sessionStorage is readable by any script that achieves XSS on this
- * origin, so a production browser deployment should instead use the API's
- * HttpOnly session cookie plus the X-CSRF-Token double-submit it already
- * supports: the cookie is then unreadable from JS and the CSRF header defeats
- * cross-site posting. This build uses the bearer path because it is the same
- * code path an operator's CLI and the integration tests use. The token is
- * never logged, never put in a URL, and never rendered.
+ * SESSION HANDLING (2026-09-09; the previous design is recorded below).
+ * The console runs on the API's cookie session: `POST /auth/login` sets
+ * `__Host-session` (HttpOnly, Secure, SameSite=Strict) and a readable
+ * `__Host-csrf`, every request goes out with `credentials: 'same-origin'`,
+ * and every unsafe method copies the CSRF cookie into the `x-csrf-token`
+ * header -- the double-submit `deps.session_token` demands. What that
+ * buys, stated exactly: after a RELOAD the session is cookie-only, so
+ * script on this origin can act as the analyst while the tab lives and
+ * holds no token it could replay from anywhere else. After a form
+ * sign-in or a `#token=` hand-off the body token stays in `state.token`
+ * for the life of the page, because `routers/live.py` authenticates the
+ * websocket from a token in its first frame and reads no cookie, and
+ * script on this origin can read that. "The credential is unreadable
+ * from script" becomes true of every session only once that socket
+ * accepts the cookie pair and the body token is dropped -- not this
+ * round.
+ *
+ * Sign-out asks the server to revoke the session and delete both cookies
+ * (with the attributes they were set with -- a `__Host-` deletion without
+ * Secure is ignored by the browser, and that was the second half of this
+ * defect). When the server refuses -- the double-submit rejecting the
+ * POST because the readable half is gone, a rate limit, an unreachable
+ * API -- the console keeps the app up and says so (`doLogout`): it never
+ * shows the sign-in form for a session the server still holds, because a
+ * reload would restore that session. A session the cookie restores
+ * WITHOUT its readable half is not shown at all (`startApp`): it could
+ * read and never write, and could not even sign out.
+ *
+ * Until 2026-09-09 the bearer token from the login body was held in
+ * sessionStorage and sent as an Authorization header, while the server had
+ * set the cookie pair on every login for nobody. sessionStorage is readable
+ * by any script on the origin, and the header comment here said a browser
+ * deployment "should instead" use the cookie -- a claim the code did not
+ * back, which is the shape of defect the Alpha 4 review kept finding.
+ *
+ * The body token is held IN MEMORY (`state.token`, never storage) for
+ * two narrow uses: the live websocket above, which after a reload is
+ * honestly "off" until the next sign-in; and a console served over plain
+ * HTTP from a non-localhost address, where the browser refuses Secure
+ * cookies and the sign-in falls back to the in-memory bearer for the life
+ * of the page, with a banner saying so. `scripts/bootstrap.py session`
+ * hands a token over in the URL fragment; `adoptSessionFromFragment`
+ * exchanges it once for the cookie pair through `POST /auth/cookie` --
+ * and only when this browser holds no usable session already, because a
+ * link must never replace the session the browser has (the server refuses
+ * a different account with 409 regardless). The token is never logged,
+ * never put in a URL by this page, and never rendered.
  *
  * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
  * everything is measured against a PROJECTION — a named, parameterised view.
@@ -26,7 +64,16 @@
 'use strict';
 
 const API = '/api/v1';
-const TOKEN_KEY = 'noctornal.token';
+/* The readable half of the cookie pair and the header it is copied into.
+   Both names are `deps.py`'s (CSRF_COOKIE, CSRF_HEADER) and
+   `test_ui_invariants` holds the two files to each other. The session
+   cookie's name is deliberately NOT here: it is HttpOnly, and a script
+   that names it is a script trying to read it. */
+const CSRF_COOKIE = '__Host-csrf';
+const CSRF_HEADER = 'x-csrf-token';
+/* Where the previous build kept the bearer token. Named only so boot()
+   can remove a token a tab open across the upgrade still holds. */
+const LEGACY_TOKEN_STORAGE = 'noctornal.token';
 
 /* ── vocabularies ─────────────────────────────────────────────────────── */
 
@@ -103,7 +150,11 @@ const NODE_PAGE_STEPS = [800, 2000, 5000];   // 5000 is the server's own cap
 /* ── state ────────────────────────────────────────────────────────────── */
 
 const state = {
-  token: sessionStorage.getItem(TOKEN_KEY),
+  /* The bearer token, IN MEMORY ONLY and only when this page saw it (a
+     login response or a #token= hand-off). Null after a reload: the
+     session then lives in the HttpOnly cookie, which this script cannot
+     and need not read. See the header comment for the two uses. */
+  token: null,
   userId: null,
   cases: [],
   caseId: null,
@@ -210,6 +261,16 @@ const state = {
   paletteItems: [],
   paletteIndex: 0,
   paletteReturn: null,
+
+  /* ACH (Phase 6). `ach` is the last matrix the server returned. The
+     matrix names its evidence rows by label only; the basis and the
+     Admiralty grading behind each assertion arrive through the
+     inspector's and the scorer's `/assertions` reads, and are remembered
+     here by assertion id so the stance chooser can show what a cell rests
+     on (2026-09-09). */
+  ach: null,
+  assertionMeta: new Map(),  // assertion id -> {basis, reliability, ...}
+  achPick: [],               // live assertions of the selected element
 };
 
 /* ── DOM helpers ──────────────────────────────────────────────────────── */
@@ -492,10 +553,46 @@ function _busy(delta) {
   bar.hidden = true;
 }
 
+/** The readable CSRF cookie, or null when the browser holds none -- which
+ *  is also how the console learns that a Secure cookie was refused (plain
+ *  HTTP from a non-localhost address) and falls back to the bearer. */
+function csrfCookie() {
+  for (const part of document.cookie.split(';')) {
+    const [k, ...rest] = part.trim().split('=');
+    if (k === CSRF_COOKIE) return rest.join('=') || null;
+  }
+  return null;
+}
+
+function signedIn() { return !!state.userId; }
+
+/** Which credential a request carries, decided in ONE place for `api()`
+ *  and the two direct blob downloads.
+ *
+ *  Cookie session first: the browser attaches `__Host-session` itself,
+ *  and an unsafe method copies the CSRF cookie into the header the server
+ *  demands. The in-memory bearer is used only when no CSRF cookie exists
+ *  (the browser refused the Secure pair) or when a caller forces it -- the
+ *  one forced case is the `#token=` exchange, which must present the NEW
+ *  token and not whatever cookie session the tab already had. */
+function authHeaders(method, forceBearer) {
+  const headers = {};
+  if (forceBearer) {
+    headers['Authorization'] = 'Bearer ' + forceBearer;
+    return headers;
+  }
+  const csrf = csrfCookie();
+  if (csrf) {
+    if (!/^(GET|HEAD|OPTIONS)$/i.test(method || 'GET')) headers[CSRF_HEADER] = csrf;
+  } else if (state.token) {
+    headers['Authorization'] = 'Bearer ' + state.token;
+  }
+  return headers;
+}
+
 async function api(path, options) {
   const o = options || {};
-  const headers = {};
-  if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+  const headers = authHeaders(o.method || 'GET', o.bearer);
   let body;
   if (o.form) {
     body = o.form;                       // let the browser set the boundary
@@ -514,10 +611,26 @@ async function api(path, options) {
   }
 }
 
+/** The routes whose 401 judges the credential IN THE REQUEST -- a wrong
+ *  password, a stale hand-off token -- and says nothing about the session
+ *  this tab already holds. `_fetch` ends the session on every other 401.
+ *  Until 2026-09-09 only login was here, so a stale `#token=` opened in a
+ *  tab with a live cookie pair sent the exchange's 401 through
+ *  `endSession`, which deleted the readable CSRF cookie browser-wide and
+ *  could not touch the HttpOnly half: every tab was left able to read and
+ *  unable to write or sign out. `test_ui_invariants` holds this set to the
+ *  routes `routers/auth.py` defines. */
+const _CREDENTIAL_CHECKS = new Set(['/auth/login', '/auth/cookie']);
+
 async function _fetch(path, o, headers, body) {
   let res;
   try {
-    res = await fetch(API + path, { method: o.method || 'GET', headers, body });
+    /* `same-origin`: the session cookie must travel, and nothing here ever
+       talks to another origin (the CSP's connect-src 'self' would refuse
+       it anyway). The one cross-origin request, the sample download,
+       does not come through here: see `fetchFromSampleOrigin`. */
+    res = await fetch(API + path, { method: o.method || 'GET', headers, body,
+                                    credentials: 'same-origin' });
   } catch (_e) {
     throw new ApiError(0, 'Cannot reach the API',
       'The request did not complete. Check the API service and your network.');
@@ -525,7 +638,7 @@ async function _fetch(path, o, headers, body) {
   if (!res.ok) {
     const p = await problemOf(res);
     const err = new ApiError(res.status, p.title, p.detail);
-    if (res.status === 401 && path !== '/auth/login') {
+    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path)) {
       endSession('Session ended', p.detail || 'Sign in again to continue.');
       err.handled = true;          // endSession already told the analyst
     }
@@ -558,12 +671,24 @@ function inlineProblem(errBox, err) {
 
 /* ── session ──────────────────────────────────────────────────────────── */
 
-function endSession(title, detail) {
+/** Drop to the sign-in form. Reached from a 401 on any request that is
+ *  not a credential check (`_CREDENTIAL_CHECKS`), from a sign-out the
+ *  server accepted, and from `startApp` refusing a half session. The
+ *  banner is suppressed while booting -- a stale session on first load
+ *  is expected, not news -- unless `evenWhileBooting` says the analyst
+ *  must hear it, which the half-session refusal does: without the banner
+ *  the sign-in form would appear for a session the browser still holds,
+ *  with no word on why. */
+function endSession(title, detail, evenWhileBooting) {
   state.token = null;
   state.userId = null;
   state.caseId = null;
   state.caseRec = null;
-  sessionStorage.removeItem(TOKEN_KEY);
+  /* The readable half is dropped here; the HttpOnly half can only be
+     deleted by the server (logout does), and a session that 401'd is
+     dead there already. Without this, `csrfCookie()` would keep steering
+     requests down the cookie path against a session that is gone. */
+  document.cookie = CSRF_COOKIE + '=; Max-Age=0; Path=/; Secure; SameSite=Strict';
   closePalette();
   stopGraph();
   /* Before the view swap. A socket left open on a dead session keeps a
@@ -574,11 +699,30 @@ function endSession(title, detail) {
   show($('view-app'), false);
   show($('view-login'), true);
   /* On first load a stale token is expected, not news — boot() handles it. */
-  if (title && !state.booting) banner(title, detail, 'warn');
+  if (title && (evenWhileBooting || !state.booting)) banner(title, detail, 'warn');
   $('login-password').value = '';
   $('login-totp').value = '';
   $('login-email').focus();
 }
+
+/** True when this tab holds a session it cannot drive: the HttpOnly
+ *  cookie authenticates reads, but with no readable `__Host-csrf` and no
+ *  in-memory token `authHeaders()` has no credential to put on an unsafe
+ *  method, so every write is 403 and the server cannot even be asked to
+ *  sign out. Reached by any path that deletes the readable half while the
+ *  server keeps the session -- until 2026-09-09, a stale `#token=` link
+ *  opened in a signed-in tab. Named because two callers must agree on
+ *  what "usable" means: `startApp` refuses to show the app on it, and
+ *  `adoptSessionFromFragment` treats it as a session the hand-off may
+ *  repair rather than one it must keep. */
+function halfSession() { return !csrfCookie() && !state.token; }
+
+const HALF_SESSION_TITLE = 'Signed-in session cannot be used';
+const HALF_SESSION_DETAIL =
+  'This browser holds a session cookie but not its readable CSRF half, so '
+  + 'nothing could be saved and the server could not be asked to sign out. '
+  + 'Sign in again to set the pair; a bootstrap.py session link for the '
+  + 'same account also restores it.';
 
 async function doLogin(event) {
   event.preventDefault();
@@ -595,11 +739,23 @@ async function doLogin(event) {
         totp_code: $('login-totp').value.trim(),
       },
     });
+    /* In memory only -- never storage. The server has set the cookie pair
+       on this response; from here on `api()` rides the cookie and the
+       token serves the live socket (see the header comment). */
     state.token = out.token;
-    sessionStorage.setItem(TOKEN_KEY, out.token);
     $('login-password').value = '';
     $('login-totp').value = '';
     await startApp();
+    if (!csrfCookie()) {
+      /* The browser refused the Secure cookies: this console is reached
+         over plain HTTP from an address it does not treat as secure. Say
+         so, rather than letting the next reload look like an expiry. */
+      banner('Session cookie refused by the browser',
+        'This console is served over plain HTTP from a non-localhost '
+        + 'address, so the sign-in lasts only until the tab is reloaded. '
+        + 'Serve the console over HTTPS for a session that survives a '
+        + 'reload.', 'warn');
+    }
   } catch (err) {
     inlineProblem(errBox, err);
   } finally {
@@ -608,12 +764,41 @@ async function doLogin(event) {
 }
 
 async function doLogout() {
-  try { await api('/auth/logout', { method: 'POST' }); } catch (_e) { /* local sign-out regardless */ }
+  try {
+    await api('/auth/logout', { method: 'POST' });
+  } catch (err) {
+    /* A 401 means the server holds no session to revoke, and `_fetch`
+       has already ended this one. Anything else -- the double-submit
+       refusing the POST (403) because the readable half is gone, a rate
+       limit, an unreachable API -- means the server STILL HOLDS the
+       session. Until 2026-09-09 this swallowed every failure and showed
+       the sign-in form anyway: a sign-out reported that had not
+       happened, and a reload restored the session. */
+    if (err && err.handled) return;
+    banner('Sign-out refused',
+      (err instanceof ApiError ? (err.detail || err.title) : String(err))
+      + ' The server still holds this session, so nothing was signed out. '
+      + 'Reload the page to re-check it: a session the server has since '
+      + 'ended lands on the sign-in form.', 'warn');
+    return;
+  }
   endSession(null, null);
 }
 
 async function startApp() {
   const me = await api('/auth/me');
+  if (halfSession()) {
+    /* The cookie alone answered that read, and the cookie alone is what
+       this tab has: see `halfSession`. Showing the app here would render
+       every pane and refuse every save with "missing or invalid CSRF
+       token", and sign-out with the same. Ended with the banner forced
+       through the boot suppression, because the sign-in form for a
+       session the browser visibly still holds needs its reason. */
+    endSession(HALF_SESSION_TITLE, HALF_SESSION_DETAIL, true);
+    const err = new ApiError(0, HALF_SESSION_TITLE, HALF_SESSION_DETAIL);
+    err.handled = true;
+    throw err;
+  }
   state.userId = me.user_id;
   /* `display_name`, not `user_id`. /auth/me carried the id and the
      recovery-code count and nothing else until 2026-09-02, so the app
@@ -2867,9 +3052,25 @@ function nodeById(id) {
   return state.nodes.find((x) => x.id === id) ||
          state.gnodes.find((x) => x.id === id) || null;
 }
+/** The display label for a node id, never null.
+ *
+ *  Falls through the entity list (the richer record), then the projection
+ *  (a node the sociogram drew that the entity page does not hold), then a
+ *  placeholder that says what it stands in for and carries the short id.
+ *
+ *  THE ONLY declaration. Until 2026-09-09 there were two: this one, and a
+ *  second at the merge panel that consulted `state.nodes` alone and
+ *  returned `null`. Function declarations hoist and the last one wins, so
+ *  every caller written against this one -- the focus flag, the path
+ *  anchor, `edgeById`'s synthesised endpoint labels, the palette -- printed
+ *  "ego of null" for any projection-only node. Nothing threw, which is why
+ *  it shipped. The merge panel's own callers are served by the same
+ *  fallback and no longer guard against a null this cannot return.
+ */
 function labelOf(id) {
   const n = nodeById(id);
-  return n ? n.label : shortId(id);
+  if (n && typeof n.label === 'string' && n.label) return n.label;
+  return 'entity ' + shortId(id);
 }
 /** /graph edges carry endpoint ids, /edges carries endpoint labels. Prefer the
  *  richer record and synthesise the labels when only the projection has it. */
@@ -3542,7 +3743,9 @@ function renderAssertions(box, list) {
       'No live assertions. Nothing here is a fact without one.'));
     return;
   }
+  const owner = selectionLabel();
   for (const a of list) {
+    rememberAssertion(a, owner);
     const dead = a.retracted_at || a.superseded_at;
     const card = el('div', 'assert' + (dead ? ' dead' : ''));
     const top = el('div', 'assert-top');
@@ -4179,7 +4382,7 @@ function initPalette() {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
       e.preventDefault();
       if (state.paletteOpen) closePalette();
-      else if (state.token) openPalette();
+      else if (signedIn()) openPalette();
       return;
     }
     /* `?` opens the keyboard sheet — but NOT while the caret is in a
@@ -4190,7 +4393,7 @@ function initPalette() {
       const t = e.target;
       const typing = t && (t.isContentEditable
         || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
-      if (!typing && state.token) { e.preventDefault(); toggleKeys(); }
+      if (!typing && signedIn()) { e.preventDefault(); toggleKeys(); }
       return;
     }
     if (e.key === 'Escape' && !$('keys-scrim').hidden) {
@@ -4210,7 +4413,7 @@ function initPalette() {
       const t = e.target;
       const typing = t && (t.isContentEditable
         || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
-      if (typing || !state.token) return;
+      if (typing || !signedIn()) return;
       const tabs = Array.from(
         document.querySelectorAll('.rail-btn[data-tab]:not([hidden])'));
       const target = tabs[Number(e.key) - 1];
@@ -4801,8 +5004,12 @@ function wire() {
  * entry, or a Referer header. Written for `bootstrap.py session`, which is
  * the way in when TOTP cannot work — a host whose clock disagrees with the
  * phone's can never produce a matching code. A fragment is not sent to the
- * server, so the token does not appear in the access log either. */
-function adoptTokenFromFragment() {
+ * server, so the token does not appear in the access log either.
+ *
+ * Returns the banner to show once boot() has settled the view (title,
+ * detail, kind), or null. Banners raised here directly would be lost:
+ * `endSession` suppresses them while `state.booting` is set. */
+async function adoptSessionFromFragment() {
   const hash = window.location.hash || '';
   /* Read the deep link BEFORE the fragment is erased. `#case=<id>&tab=feeds`
    * opens a named case at a named pane — "look at the dead-letter queue on
@@ -4820,12 +5027,63 @@ function adoptTokenFromFragment() {
     /* No token, but possibly a tab: strip the fragment anyway so a
      * bookmark of this page does not carry a stale one. */
     if (hash) history.replaceState(null, '', window.location.pathname);
-    return;
+    return null;
   }
   const token = decodeURIComponent(match[1]);
   history.replaceState(null, '', window.location.pathname);
+
+  /* A fragment must never replace a session this browser already holds
+     (2026-09-09). Cookies are per profile, not per tab: until this check
+     the exchange below ran unconditionally with the bearer forced, so a
+     link of the documented deep-link shape carrying someone ELSE's token,
+     opened by a signed-in analyst, swapped the cookie under every tab
+     they had open -- each still showed the analyst, `authHeaders()` in
+     each read the new CSRF cookie live, and every write from them was
+     attributed to the other account in the audit chain. So: ask /auth/me
+     on the cookie first (`state.token` is null here, so no bearer goes
+     with it). A live session WITH its readable half is kept and the
+     handed-over token is dropped on the floor. A live session WITHOUT it
+     (`halfSession`) is one the exchange may repair: the server re-mints
+     the pair for the same account and refuses a different one with 409,
+     which is the line that holds even when this code is wrong. */
+  let holder = null;
+  try {
+    holder = await api('/auth/me');
+  } catch (_err) {
+    /* No session (that 401 went through `endSession` with `booting` set,
+       which resets a dead pair and shows nothing) or the API is
+       unreachable, which the exchange below reports. */
+  }
+  if (holder && !halfSession()) {
+    return {
+      title: 'Already signed in as ' + (holder.display_name || holder.user_id),
+      detail: 'The session handed over in the link was not used: a link '
+        + 'never replaces the session this browser already holds. Sign '
+        + 'out first to use it.',
+      kind: 'warn',
+    };
+  }
+
+  /* Exchange it ONCE for the cookie pair (`POST /auth/cookie`), forcing
+     the bearer so the NEW token is presented and not the cookie. Held in
+     memory before the call because a console the browser refuses Secure
+     cookies on runs on this token alone (see the header). A refusal --
+     a stale token's 401, another account's 409 -- comes back here rather
+     than through `endSession`: the tab's own session, if any, is not
+     what was judged. Nothing is written to storage on any path. */
   state.token = token;
-  sessionStorage.setItem(TOKEN_KEY, token);
+  try {
+    await api('/auth/cookie', { method: 'POST', bearer: token });
+    return null;
+  } catch (err) {
+    state.token = null;
+    return {
+      title: 'Handed-over session not adopted',
+      detail: (err instanceof ApiError ? (err.detail || err.title) : String(err))
+        + ' Sign in, or mint a fresh link with bootstrap.py session.',
+      kind: 'warn',
+    };
+  }
 }
 
 /** Honour a `#tab=` deep link once the workspace is up.
@@ -4856,12 +5114,11 @@ function applyDeepLinkTab() {
  * an ATTRIBUTION carrying a confidence (invariant 2) and the server
  * refuses it -- but an interface that offers a choice the server will
  * reject is worse than one that never offered it.
+ *
+ * `labelOf` is the inspector's (one declaration, see there): a second copy
+ * lived here until 2026-09-09 and, being declared last, silently replaced
+ * the first for every caller in the file.
  * ===================================================================== */
-
-function labelOf(nodeId) {
-  const n = state.nodes.find((x) => x.id === nodeId);
-  return n ? n.label : null;
-}
 
 function renderMergePanel(node) {
   const select = $('merge-target');
@@ -4895,8 +5152,7 @@ async function loadMergeHistory(nodeId) {
       top.appendChild(el('span', 'chip' + (m.is_live ? '' : ' stale'),
                          m.is_live ? 'LIVE' : 'REVERSED'));
       top.appendChild(document.createTextNode(
-        (isSource ? ' merged INTO ' : ' absorbed ') +
-        (labelOf(other) || shortId(other))));
+        (isSource ? ' merged INTO ' : ' absorbed ') + labelOf(other)));
       item.appendChild(top);
       item.appendChild(el('div', 'muted small',
         m.reason + ' \u00b7 ' + m.edges_repointed + ' tie(s) moved \u00b7 ' +
@@ -6276,7 +6532,10 @@ async function loadDeadLetters() {
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       renderList('dl-list', 'dl-empty', [], deadLetterRow);
-      $('dl-empty').textContent = refusalText(err, 'This needs ingest.read.');
+      /* Either verb opens the listing since 2026-09-09: ingest.read for the
+         caller's own scope, ingest.manage for the quarantine rows too. */
+      $('dl-empty').textContent = refusalText(err,
+        'This needs ingest.read, or ingest.manage for the quarantine.');
       return;
     }
     fail(err);
@@ -7268,6 +7527,13 @@ const STANCE_CLASS = {
   '-2': 'st-cc', '-1': 'st-c', '0': 'st-n', '1': 'st-s', '2': 'st-ss',
 };
 
+/* The stances the router accepts: `StanceBody.stance` is `Field(ge=-2,
+   le=2)` in routers/ach.py and `ach.STANCE_LABEL` names the same five.
+   Named ONCE here so `test_ui_invariants` can hold the three copies to
+   each other; the wording on screen comes from the response's
+   `stance_scale`, so the label is the service's and not a fourth copy. */
+const ACH_STANCES = [-2, -1, 0, 1, 2];
+
 async function loadAch() {
   if (!state.caseId) return;
   const q = $('ach-rejected').checked ? '?include_rejected=true' : '';
@@ -7355,11 +7621,29 @@ function renderAchRanking(body) {
   }
 }
 
-/** The grid. Evidence down, hypotheses across. */
+/** The grid. Evidence down, hypotheses across.
+ *
+ *  Every evidence x hypothesis cell is a BUTTON that opens the stance
+ *  chooser. Until 2026-09-09 each cell was a `<td>` with a tooltip: the
+ *  router had accepted `PUT .../hypotheses/{hid}/stance` since Phase 6 and
+ *  the console never called it, so a matrix could be read here and only
+ *  ever written with curl -- a pane that looked finished and could not be
+ *  driven, which is the shape of defect the Alpha 4 review kept finding.
+ */
 function renderAchMatrix(body) {
   const box = $('ach-matrix');
   clear(box);
-  if (!body.hypotheses.length || !body.evidence.length) return;
+  renderAchHypothesisPicker(body);
+  if (!body.hypotheses.length) return;
+  if (!body.evidence.length) {
+    /* Not silence. A grid that draws nothing is indistinguishable from a
+       grid that failed to load, and with hypotheses on the page the
+       honest statement is that nobody has scored anything yet. */
+    box.appendChild(el('p', 'empty',
+      'No evidence has been scored against these hypotheses yet. Score an '
+      + 'assertion below to put the first row in the matrix.'));
+    return;
+  }
 
   const stance = new Map();
   for (const c of body.cells || []) {
@@ -7380,7 +7664,10 @@ function renderAchMatrix(body) {
   table.appendChild(thead);
 
   const tbody = el('tbody');
-  for (const e of body.evidence) {
+  /* The evidence label is a node label or an edge type name the server
+     picked for the row -- attacker-chosen in the IDENTITY case -- so it
+     goes through the same boundary sanitiser as every other label. */
+  for (const e of body.evidence.map(withSafeLabel)) {
     /* Three states, not two. "Settles nothing" and "we have not finished
        entering this row" both render 0.00 and mean opposite things: one is
        a judgement about the evidence, the other is a gap in the matrix.
@@ -7389,19 +7676,30 @@ function renderAchMatrix(body) {
     const tr = el('tr', e.is_incomplete ? 'row-incomplete'
       : (e.is_diagnostic ? '' : 'not-diagnostic'));
     const label = el('td', 'ach-el', e.label);
-    label.title = e.label;
+    label.title = e.label + achBasisSuffix(e.assertion_id);
     tr.appendChild(label);
-    for (const h of body.hypotheses) {
+    body.hypotheses.forEach((h, i) => {
       const s = stance.get(e.assertion_id + '|' + h.id);
       const td = el('td', 'ach-cell '
         + (s === undefined ? 'st-none' : (STANCE_CLASS[String(s)] || 'st-n')));
-      td.textContent = s === undefined ? '·'
-        : (body.stance_scale ? (body.stance_scale[String(s)] || s) : s);
-      td.title = s === undefined
+      const text = s === undefined ? '·' : stanceText(s, body);
+      const btn = el('button', 'ach-cell-btn', text);
+      btn.type = 'button';
+      /* So a save can put focus back on THIS cell after the re-render
+         replaces it: the button that opened the chooser is gone by then. */
+      btn.dataset.assertion = e.assertion_id;
+      btn.dataset.hypothesis = String(h.id);
+      btn.title = (s === undefined
         ? 'Not assessed. Not the same as neutral.'
-        : (h.statement + ' — ' + td.textContent);
+        : (h.statement + ' — ' + text)) + ' Click to score.';
+      btn.setAttribute('aria-label',
+        e.label + ' against H' + (i + 1) + ': '
+        + (s === undefined ? 'not assessed' : text) + '. Change stance.');
+      btn.addEventListener('click', () => openStanceChooser(
+        { assertion_id: e.assertion_id, label: e.label }, h, s, btn));
+      td.appendChild(btn);
       tr.appendChild(td);
-    }
+    });
     const diag = el('td', 'ach-diag',
       e.is_incomplete ? '—' : e.diagnosticity.toFixed(2));
     if (e.is_incomplete) {
@@ -7429,6 +7727,260 @@ function renderAchMatrix(body) {
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([k, v]) => k + ' = ' + v).join(' · ');
   box.appendChild(key);
+}
+
+/** The service's wording for a stance, from the response's `stance_scale`;
+ *  the bare number only when the scale is missing. */
+function stanceText(s, body) {
+  const scale = (body || state.ach || {}).stance_scale || {};
+  return scale[String(s)] || String(s);
+}
+
+/* --- what a cell rests on ----------------------------------------------
+ *
+ * routers/ach.py: "Evidence in an ACH matrix is an ASSERTION, not free
+ * text" -- every cell inherits the Admiralty grading and the retraction
+ * status of the claim behind it. The matrix response names each row by
+ * label only, so the basis is remembered from the `/assertions` reads
+ * (inspector and scorer) and shown wherever a stance is chosen. Where it
+ * has not been read yet, the chooser SAYS so rather than showing nothing:
+ * "grading unknown" and "ungraded" are different facts.
+ */
+
+function rememberAssertion(a, ownerLabel) {
+  if (!a || !a.id) return;
+  state.assertionMeta.set(a.id, {
+    basis: a.basis, reliability: a.reliability, credibility: a.credibility,
+    rationale: a.rationale || null, owner: ownerLabel || null,
+    live: !(a.retracted_at || a.superseded_at),
+  });
+}
+
+/** The selected element's name, for the assertion memory and the scorer. */
+function selectionLabel() {
+  const sel = state.selection;
+  if (!sel) return '';
+  if (sel.kind === 'node') return labelOf(sel.id);
+  const e = edgeById(sel.id);
+  return e ? (e.src_label + ' → ' + e.dst_label) : 'tie ' + shortId(sel.id);
+}
+
+function gradingText(meta) {
+  return String(meta.reliability) + String(meta.credibility) + ' · '
+    + (RELIABILITY[meta.reliability] || 'unknown reliability') + ', '
+    + (CREDIBILITY[String(meta.credibility)] || 'unknown credibility');
+}
+
+function achBasisSuffix(assertionId) {
+  const meta = state.assertionMeta.get(assertionId);
+  if (!meta) return '';
+  const basis = (BASES.find((b) => b[0] === meta.basis) || [null, meta.basis])[1];
+  return ' · ' + basis + ' · Admiralty ' + gradingText(meta);
+}
+
+function renderStanceBasis(box, assertionId) {
+  clear(box);
+  const meta = state.assertionMeta.get(assertionId);
+  if (!meta) {
+    box.appendChild(el('span', 'help warn',
+      'Basis and Admiralty grading not loaded in this console: the matrix '
+      + 'names the row and does not carry its grading. Open the element in '
+      + 'the inspector, or load its assertions in "Score an assertion", to '
+      + 'see what this cell rests on.'));
+    return;
+  }
+  const basis = (BASES.find((b) => b[0] === meta.basis) || [null, meta.basis])[1];
+  box.appendChild(el('span', 'assert-basis', basis));
+  const grade = el('span', 'grading',
+    String(meta.reliability) + String(meta.credibility));
+  grade.title = 'Admiralty grading — ' + gradingText(meta);
+  box.appendChild(grade);
+  box.appendChild(el('span', 'help', 'Admiralty ' + gradingText(meta)));
+  if (meta.owner) box.appendChild(el('span', 'help', 'on ' + meta.owner));
+  if (meta.rationale) box.appendChild(el('span', 'help', meta.rationale));
+}
+
+/* --- the stance chooser --------------------------------------------------
+ *
+ * One dialog for every cell and for a first score from the picker. The
+ * five options are ACH_STANCES with the service's labels; the note is
+ * offered, not demanded: `core.hypothesis_evidence.note` is nullable
+ * (0007), `StanceBody.note` defaults to None and the service never reads
+ * it, and a client that refuses what the server accepts is inventing a
+ * rule the audit trail cannot see.
+ */
+
+let _stanceCtx = null;   // {assertionId, label, hypothesis, current, back}
+
+function openStanceChooser(evidence, hypothesis, current, returnFocus) {
+  _stanceCtx = {
+    assertionId: evidence.assertion_id, label: evidence.label,
+    hypothesis: hypothesis, current: current, back: returnFocus || null,
+  };
+  $('ach-stance-evidence').textContent = evidence.label;
+  renderStanceBasis($('ach-stance-basis'), evidence.assertion_id);
+  $('ach-stance-hypothesis').textContent = hypothesis.statement;
+
+  const fs = $('ach-stance-options');
+  while (fs.lastChild && fs.lastChild.tagName !== 'LEGEND') {
+    fs.removeChild(fs.lastChild);
+  }
+  for (const s of ACH_STANCES) {
+    const lab = el('label', 'stance-option ' + (STANCE_CLASS[String(s)] || ''));
+    const r = el('input');
+    r.type = 'radio';
+    r.name = 'ach-stance';
+    r.value = String(s);
+    if (current === s) r.checked = true;
+    lab.appendChild(r);
+    lab.appendChild(el('span', 'stance-k', (s > 0 ? '+' : '') + s));
+    lab.appendChild(el('span', null, stanceText(s)));
+    fs.appendChild(lab);
+  }
+  $('ach-stance-note').value = '';
+  setMsg($('ach-stance-msg'), '');
+  $('ach-stance-save').disabled = false;
+  show($('ach-stance-scrim'), true);
+  const first = fs.querySelector('input:checked') || fs.querySelector('input');
+  if (first) first.focus();
+}
+
+function closeStanceChooser() {
+  show($('ach-stance-scrim'), false);
+  const back = _stanceCtx && _stanceCtx.back;
+  _stanceCtx = null;
+  if (back && document.contains(back)) back.focus();
+}
+
+/** Tab stays inside the dialog while it is open; Escape closes it. */
+function stanceChooserKeys(e) {
+  if (e.key === 'Escape') { e.preventDefault(); closeStanceChooser(); return; }
+  if (e.key !== 'Tab') return;
+  const focusable = Array.from($('ach-stance-form').querySelectorAll(
+    'input, textarea, button')).filter((n) => !n.disabled);
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault(); first.focus();
+  }
+}
+
+async function saveStance(event) {
+  event.preventDefault();
+  const ctx = _stanceCtx;
+  if (!ctx) return;
+  const msg = $('ach-stance-msg');
+  const picked = $('ach-stance-options').querySelector('input:checked');
+  if (!picked) { setMsg(msg, 'Choose a stance.'); return; }
+  const note = $('ach-stance-note').value.trim();
+  $('ach-stance-save').disabled = true;
+  try {
+    await api(cpath('/ach/hypotheses/' + ctx.hypothesis.id + '/stance'), {
+      method: 'PUT',
+      json: { assertion_id: ctx.assertionId, stance: Number(picked.value),
+              note: note || null },
+    });
+    closeStanceChooser();
+    /* Re-read rather than patch the cell: the ranking, the diagnosticity
+       column and the service's warnings all move with one stance, and
+       loadAch renders the warnings through the pane's existing path. */
+    await loadAch();
+    /* The re-render replaced every cell, so the focus closeStanceChooser
+       put back landed on a detached button and fell to <body>. Find the
+       same cell in the new grid; a keyboard user scoring a row must not
+       be thrown back to the top of the page after every save. */
+    const again = document.querySelector(
+      '.ach-cell-btn[data-assertion="' + ctx.assertionId + '"]'
+      + '[data-hypothesis="' + ctx.hypothesis.id + '"]');
+    if (again) again.focus();
+  } catch (err) {
+    inlineProblem(msg, err);
+  } finally {
+    $('ach-stance-save').disabled = false;
+  }
+}
+
+/* --- putting a first row in the matrix ---------------------------------
+ *
+ * A cell exists only once an assertion has a stance against some
+ * hypothesis, so a matrix with hypotheses and no evidence has nothing to
+ * click. The scorer reads the live assertions of the element selected in
+ * the graph (the same `/assertions` read the inspector makes) and opens
+ * the chooser for one of them; after that first save the row is in the
+ * grid and every other cell is a click.
+ */
+
+function assertionOptionLabel(a) {
+  const basis = (BASES.find((b) => b[0] === a.basis) || [null, a.basis])[1];
+  const why = a.rationale ? visibleText(a.rationale) : 'no rationale recorded';
+  const short = why.length > 70 ? why.slice(0, 67) + '…' : why;
+  return basis + ' · ' + a.reliability + a.credibility + ' · ' + short;
+}
+
+function renderAchHypothesisPicker(body) {
+  const hyp = $('ach-evidence-hyp');
+  const keep = hyp.value;
+  const pairs = body.hypotheses.map((h, i) => [h.id, 'H' + (i + 1) + ' — '
+    + h.statement]);
+  opts(hyp, pairs.length ? pairs : [['', 'Add a hypothesis first']],
+       pairs.some((p) => p[0] === keep) ? keep : (pairs.length ? pairs[0][0] : ''));
+  hyp.disabled = !pairs.length;
+  updateAchScoreControls();
+}
+
+function updateAchScoreControls() {
+  $('ach-evidence-add').disabled =
+    !($('ach-evidence-pick').value && $('ach-evidence-hyp').value);
+}
+
+async function loadAchEvidenceOfSelection() {
+  const msg = $('ach-evidence-msg');
+  setMsg(msg, '');
+  const pick = $('ach-evidence-pick');
+  const sel = state.selection;
+  if (!sel) {
+    setMsg(msg, 'Select an entity or a tie in the graph first. Its live '
+      + 'assertions are the evidence this matrix can score.');
+    return;
+  }
+  const base = cpath((sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id);
+  let list;
+  try {
+    list = await api(base + '/assertions?include_retracted=false');
+  } catch (err) {
+    inlineProblem(msg, err);
+    return;
+  }
+  const owner = selectionLabel();
+  const live = (list || []).filter((a) => !a.retracted_at && !a.superseded_at);
+  for (const a of live) rememberAssertion(a, owner);
+  state.achPick = live;
+  $('ach-evidence-of').textContent = owner + ' · ' + live.length
+    + ' live assertion' + (live.length === 1 ? '' : 's');
+  opts(pick, live.length
+    ? live.map((a) => [a.id, assertionOptionLabel(a)])
+    : [['', 'No live assertions on this element']],
+  live.length ? live[0].id : '');
+  pick.disabled = !live.length;
+  updateAchScoreControls();
+}
+
+function scorePickedAssertion() {
+  const aid = $('ach-evidence-pick').value;
+  const hid = $('ach-evidence-hyp').value;
+  if (!aid || !hid || !state.ach) return;
+  const h = (state.ach.hypotheses || []).find((x) => String(x.id) === hid);
+  if (!h) return;
+  const meta = state.assertionMeta.get(aid);
+  const existing = (state.ach.cells || []).find(
+    (c) => c.assertion_id === aid && c.hypothesis_id === hid);
+  const row = (state.ach.evidence || []).find((e) => e.assertion_id === aid);
+  const label = row ? visibleText(row.label)
+    : ((meta && meta.owner) || 'assertion ' + shortId(aid));
+  openStanceChooser({ assertion_id: aid, label: label }, h,
+    existing ? existing.stance : undefined, $('ach-evidence-add'));
 }
 
 async function addHypothesis() {
@@ -7730,7 +8282,8 @@ async function downloadReport() {
   try {
     const res = await fetch(API + cpath('/report') + '?' + params.toString(), {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + state.token },
+      headers: authHeaders('POST'),
+      credentials: 'same-origin',
     });
     if (!res.ok) {
       const p = await problemOf(res);
@@ -8856,6 +9409,18 @@ function initOpsPanes() {
   $('ach-refresh').addEventListener('click', loadAch);
   $('ach-rejected').addEventListener('change', loadAch);
   $('ach-add').addEventListener('click', addHypothesis);
+  /* Scoring (2026-09-09): the matrix cells open the chooser themselves;
+     these wire the first-row scorer and the chooser's own controls. */
+  $('ach-evidence-load').addEventListener('click', loadAchEvidenceOfSelection);
+  $('ach-evidence-pick').addEventListener('change', updateAchScoreControls);
+  $('ach-evidence-hyp').addEventListener('change', updateAchScoreControls);
+  $('ach-evidence-add').addEventListener('click', scorePickedAssertion);
+  $('ach-stance-form').addEventListener('submit', saveStance);
+  $('ach-stance-form').addEventListener('keydown', stanceChooserKeys);
+  $('ach-stance-cancel').addEventListener('click', closeStanceChooser);
+  $('ach-stance-scrim').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeStanceChooser();
+  });
 
   $('comms-pgp-form').addEventListener('submit', verifyPgp);
   $('comms-unverified-refresh').addEventListener('click', loadUnverified);
@@ -9391,18 +9956,23 @@ function sampleActions(s) {
     'This produces a password-protected archive of a LIVE sample. The '
     + 'password is "infected" — an interlock against a double-click and a '
     + 'mail gateway, not confidentiality. It requires a fresh second '
-    + 'factor and it is refused unless this page is served from the '
-    + 'configured sample origin.'));
-  const origin = (smpPolicy && smpPolicy.sample_origin_configured);
+    + 'factor, and the archive is fetched from the separate sample origin, '
+    + 'never from the origin this page is served from.'));
+  /* The origin itself, not a boolean: this page is served from the
+     application origin and the bytes are not, so the button needs
+     somewhere to fetch FROM. Until 2026-09-09 it fetched this origin,
+     which the server refuses by design. */
+  const origin = (smpPolicy && smpPolicy.sample_origin) || null;
   const dlBtn = el('button', 'btn danger',
     origin ? 'Download encrypted archive' : 'Download — no origin configured');
   dlBtn.type = 'button';
   dlBtn.disabled = !origin;
   if (!origin) {
-    dlBtn.title = 'NOCTORNAL_SAMPLE_ORIGIN is not set. Invariant 10 requires '
+    dlBtn.title = (smpPolicy && smpPolicy.sample_origin_problem)
+      || ('NOCTORNAL_SAMPLE_ORIGIN is not set. Invariant 10 requires '
       + 'sample bytes to come from a separate origin, and an origin split '
       + 'that is only written down does not survive the first hurried '
-      + 'deploy — so the button is off rather than failing at the server.';
+      + 'deploy — so the button is off rather than failing at the server.');
   }
   dlBtn.addEventListener('click', () => downloadSample(s, msg));
   dl.appendChild(dlBtn);
@@ -9497,20 +10067,65 @@ async function copyText(text, btn) {
   }
 }
 
-/** POST, then hand the browser a blob.
+/** The ONE call in this file that leaves the page's origin, on purpose.
+ *
+ *  Every other request is fetch(API + ...) against the origin this page
+ *  is served from, and the console's CSP was connect-src 'self' to hold
+ *  exactly that. Sample bytes are the exception invariant 10 makes: they
+ *  come from a separate origin or not at all, so the server names that
+ *  origin in connect-src, answers this page's cross-origin request there
+ *  (and only there, and only for this origin), and the download is built
+ *  from the origin the policy endpoint reported. Bound under its own
+ *  name so the rule "fetch() is rooted at API" stays true of every call
+ *  spelled fetch(, and the one deliberate exception is greppable.
+ */
+const fetchFromSampleOrigin = window.fetch.bind(window);
+
+/** POST to the SAMPLE origin, then hand the browser a blob.
  *
  *  A plain <a href> would be a GET, and this endpoint is a POST behind
  *  step-up on purpose: a GET that puts malware on a disk is one that a
  *  prefetcher, a link scanner or a chat unfurl can trigger.
+ *
+ *  The Bearer token goes with it: the sample origin shares the session
+ *  store, and a header is the credential a cross-origin page cannot
+ *  forge, which is why the server accepts no cookie on that path.
  */
 async function downloadSample(s, msg) {
+  const origin = smpPolicy && smpPolicy.sample_origin;
+  if (!origin) {
+    setMsg(msg, (smpPolicy && smpPolicy.sample_origin_problem)
+      || 'No separate sample origin is configured; every download is refused.');
+    msg.className = 'msg bad';
+    return;
+  }
+  /* The bearer, FORCED (2026-09-09). This is the one request the console
+     sends to another origin: `__Host-` cookies are SameSite=Strict and
+     scoped to this host, so none travel there, and the sample process
+     answers the preflight with `Access-Control-Allow-Headers:
+     authorization` alone (`app.py` `_preflight`) -- a CSRF header, which
+     is what `authHeaders('POST')` prefers once the cookie pair exists,
+     would fail the preflight and surface as "did not complete". So the
+     credential is the in-memory token, and a session restored from the
+     cookie after a reload holds none: say that, rather than sending a
+     request that cannot be authenticated. */
+  if (!state.token) {
+    setMsg(msg, 'This session was restored from the session cookie, and the '
+      + 'sample origin accepts only the sign-in token, which this tab no '
+      + 'longer holds. Sign out and in again to download.');
+    msg.className = 'msg bad';
+    return;
+  }
   setMsg(msg, 'Requesting…');
   msg.className = 'msg';
-  const headers = { Authorization: 'Bearer ' + state.token };
+  const headers = authHeaders('POST', state.token);
   let res;
   try {
-    res = await fetch(API + '/samples/' + encodeURIComponent(s.id) + '/download',
-      { method: 'POST', headers });
+    /* `omit`, spelled out: the sample origin reads no cookie, and this
+       page has no business offering one there. */
+    res = await fetchFromSampleOrigin(
+      origin + API + '/samples/' + encodeURIComponent(s.id) + '/download',
+      { method: 'POST', headers, credentials: 'omit' });
   } catch (_e) {
     setMsg(msg, 'The request did not complete.');
     msg.className = 'msg bad';
@@ -9569,11 +10184,13 @@ async function loadSamplePolicy() {
   clear(originBox);
   originBox.appendChild(el('strong', null, 'This deployment: '));
   originBox.appendChild(document.createTextNode(
-    smpPolicy.sample_origin_configured
-      ? 'a separate sample origin is configured, so downloads are possible.'
-      : 'no separate sample origin is configured, so every download is '
+    smpPolicy.sample_origin
+      ? 'downloads are fetched from the separate sample origin '
+        + smpPolicy.sample_origin + ', never from this one.'
+      : (smpPolicy.sample_origin_problem
+        || 'no separate sample origin is configured, so every download is '
         + 'refused. That is invariant 10 as a runtime check rather than a '
-        + 'deployment note.'));
+        + 'deployment note.')));
 }
 
 async function submitSample() {
@@ -9652,11 +10269,11 @@ const _refetchSoon = debounce(async () => {
 
 const _badgeSoon = debounce(() => { refreshInboxBadge(); }, 400);
 
-function liveStatus(state_) {
+function liveStatus(state_, reason) {
   const dot = $('live-dot');
   if (!dot) return;
   dot.className = 'live-dot live-' + state_;
-  dot.title = {
+  dot.title = reason || {
     live: 'Live. Changes to this case by other analysts arrive without a '
       + 'refresh.',
     connecting: 'Connecting to the live channel…',
@@ -9667,7 +10284,20 @@ function liveStatus(state_) {
 }
 
 function connectLive() {
-  if (!state.token || !window.WebSocket) { liveStatus('off'); return; }
+  if (!state.token) {
+    /* The session is the HttpOnly cookie (this page was reloaded, or
+       signed in before a reload) and `routers/live.py` authenticates the
+       socket from a token in its first frame, reading no cookie. Saying
+       WHY the dot is off is the difference between "live is broken" and
+       "sign in again to go live" -- and the honest state of this build. */
+    liveStatus('off', 'Not live: this session was restored from the '
+      + 'session cookie, and the live channel still needs the sign-in '
+      + 'token in its first message. Sign out and in again to go live. '
+      + 'The console works normally; refresh to see another analyst\'s '
+      + 'changes.');
+    return;
+  }
+  if (!window.WebSocket) { liveStatus('off'); return; }
   disconnectLive();
   liveStatus('connecting');
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -9697,13 +10327,18 @@ function connectLive() {
     _refetchSoon();
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (event) => {
     if (_ws === ws) _ws = null;
     liveStatus('off');
-    /* Reconnect with a backoff, and give up after a while rather than
-       hammering a server that has told us no. `1008` is the policy close
-       the server sends for a bad token or a revoked assignment — retrying
-       that is pointless and looks like an attack in the audit log. */
+    /* `1008` is the policy close the server sends for a bad token, a
+       revoked assignment or a refused hello: the server has decided, and
+       retrying looks like an attack in the audit log. Until 2026-09-09
+       this comment said exactly that while the handler ignored the code
+       and retried anyway. Every other close (a dropped connection, a
+       restart, the pre-accept refusal a browser reports as 1006) is
+       reconnected with a backoff, and given up after a while rather than
+       hammering a server that may be down. */
+    if (event && event.code === 1008) return;
     if (!state.token || _wsRetry >= 6) return;
     const delay = Math.min(30000, 1000 * Math.pow(2, _wsRetry));
     _wsRetry += 1;
@@ -9724,23 +10359,36 @@ function disconnectLive() {
 
 async function boot() {
   wire();
-  adoptTokenFromFragment();
-  if (state.token) {
-    try {
-      await startApp();
-      state.booting = false;
-      return;
-    } catch (_err) {
-      /* A stale token is not an error worth a banner: just ask again. */
-      state.token = null;
-      sessionStorage.removeItem(TOKEN_KEY);
-    }
+  /* A tab open across the 2026-09-09 upgrade still holds the previous
+     build's bearer token in sessionStorage, readable by any script on
+     the origin. Remove it; nothing reads it any more. */
+  try { sessionStorage.removeItem(LEGACY_TOKEN_STORAGE); } catch (_e) { /* storage blocked */ }
+  const notice = await adoptSessionFromFragment();
+  /* Always attempted, not only with a token in hand: after a reload the
+     session is the HttpOnly cookie, which this script cannot see, so the
+     only way to learn whether one exists is to ask /auth/me with it.
+     `startApp` refuses a session that answers there without its readable
+     half (`halfSession`), with its own banner. */
+  let up = false;
+  try {
+    await startApp();
+    up = true;
+  } catch (_err) {
+    /* No session, or a stale one: not an error worth a banner (the 401
+       path already routed through endSession with `booting` set), just
+       ask again. */
+    state.token = null;
   }
   state.booting = false;
-  show($('view-app'), false);
-  show($('view-login'), true);
-  $('login-email').focus();
-  probeFirstRun();
+  if (!up) {
+    show($('view-app'), false);
+    show($('view-login'), true);
+    $('login-email').focus();
+  }
+  /* After `booting` clears, so it is not suppressed; after the view is
+     settled, so it lands next to the form or the app it is about. */
+  if (notice) banner(notice.title, notice.detail, notice.kind);
+  if (!up) probeFirstRun();
 }
 
 /* --- first run ---------------------------------------------------------

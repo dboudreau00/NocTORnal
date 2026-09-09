@@ -326,6 +326,19 @@ def test_an_ingest_key_can_write_and_cannot_read_anything(conn, client):
     file. The key path reaches exactly one endpoint."""
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
     token = _login(client, email, secret)
+    # Registered before the key is issued under it. Since 2026-09-09
+    # (migration 0059) `ingest.api_key.forced_compartment` is bound to
+    # `iam.compartment`, so a stealer-log key under a key nobody
+    # registered is a 400 naming it -- the contract
+    # `test_compartment_binding_pg.py` pins -- and this test got that 400
+    # where it expected the 201. A raw insert rather than the product
+    # route because a second registration is a refusal by design, and
+    # this file runs more than once against the same database. Never
+    # deleted: the registry refuses to drop a key still carried by a row.
+    conn.execute(
+        "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO NOTHING",
+        ("VICTIM-PII-TEST", "Victim PII (governance e2e)"))
     issued = client.post("/api/v1/ingest/keys", headers=_auth(token), json={
         "name": "partner-feed-test", "declared_category": "STEALER_LOG",
         # docs/12: a stealer-log feed needs its OWN compartment, tighter

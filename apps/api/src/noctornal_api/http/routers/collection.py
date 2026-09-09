@@ -61,19 +61,18 @@ which closes the existence oracle in the old 400-versus-200 split as
 well, and stops a sub-cleared caller from making the collector touch a
 forum on their say-so.
 
-`/personas/{id}/status` remains the one route here that takes no
-ceiling. It is a write to one persona the caller named by id, under
-`collection_account.manage`, and its response body is the persona id and
-the status the caller asked for -- no source name, no URL, no run
-detail. It is not an existence oracle either, but not because it was
-made safe: `PersonaVault.set_status` runs a bare UPDATE and does not
-check that it matched, so an unknown persona id and a real one produce
-the same 200. That silence is a separate defect (a write that did not
-happen, reported as one that did) and fixing it needs a decision about
-what the route should say instead; it is recorded here rather than
-changed under a clearance pass, because adding a 404 there without a
-ceiling check would create the oracle this paragraph currently gets for
-free.
+`/personas/{id}/status` was the last route here that took no ceiling,
+and it was a WRITE: an AMBER holder of `collection_account.manage` could
+burn, lock or clear the cooldown on a persona whose source the listing
+hid from them, by id. The previous version of this paragraph recorded
+that the route was "not an existence oracle" only because
+`PersonaVault.set_status` ran a bare UPDATE and answered 200 whether or
+not it matched -- a write that did not happen, reported as one that did
+-- and deferred both defects to a later decision. Closed 2026-09-09: the
+route resolves the caller's ceiling like every other, the service gates
+the UPDATE on the source's label and checks that it matched, and an
+unknown id and an over-ceiling one get the same 404 `/sources/{id}/run`
+gives. No route in this file takes no ceiling any more.
 """
 from __future__ import annotations
 
@@ -270,11 +269,21 @@ def set_persona_status(
     persona is safe to use again. "Burnt" and "cooling down after a rate
     limit" are the same status to a scheduler and completely different
     facts to a human.
+
+    404 for a persona whose source is above the caller's ceiling, and for
+    one that does not exist, indistinguishably -- the same answer
+    `/sources/{id}/run` gives, for the same reason. Until 2026-09-09 this
+    route passed no ceiling and the service checked nothing: an AMBER
+    caller could burn a persona on a RED source the persona list hid from
+    them, and an unknown id got a 200 for a write that never happened.
     """
+    clearance, _ = user_ceiling(conn, user.user_id)
     try:
         PersonaVault(conn).set_status(
             persona_id, body.status, actor_id=user.user_id,
-            reason=body.reason)
+            reason=body.reason, clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"persona_id": str(persona_id), "status": body.status}

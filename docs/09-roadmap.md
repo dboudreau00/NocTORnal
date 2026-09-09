@@ -297,8 +297,9 @@ stops being advisory.
 
 - [x] **Separate-origin sample service, download-only, no rendering.** The
       origin split is a RUNTIME refusal, not a deployment note: `download()`
-      refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is set and the request
-      arrived at it.
+      refuses unless this process is configured as the sample origin
+      (`NOCTORNAL_PUBLIC_ORIGIN`); the request is never consulted, and an
+      unset `NOCTORNAL_SAMPLE_ORIGIN` means every download refuses.
 - [x] **Encrypted-at-rest storage keyed by SHA-256.** Never the
       attacker-controlled filename. Bytes re-verified on every read, failing
       closed. EDR exclusions documented in `samples.py`.

@@ -13,8 +13,9 @@ linked-notes feel).
 > `docs/16-legal-and-external.md` (the blocking legal items) or
 > `docs/17-flagged-for-review.md` (what is known-wrong), THOSE are
 > authoritative and this is stale. `docs/02-architecture.md` holds the
-> original reasoning for the stack; this file describes what was actually
-> built.
+> reasoning for the stack (rewritten 2026-09-09 to describe the built
+> program; its 2026-07 sketch is recorded there as superseded); this file
+> describes what was actually built.
 
 This document is the system map: the founding ideas, the twelve invariants and
 how each is enforced, the ten build phases (0 through 9) and how they depend on
@@ -22,15 +23,19 @@ one another, then a layer-by-layer tour of the data model, ontology, graph and
 analytics, API, security, storage, collection, UI and stack, closing with the
 load-bearing decisions and the legal gates enforced in code.
 
-> **Freshness.** This map reflects the source as surveyed on **2026-07-25** at
-> **Alembic head 0052**, **1252 tests passing**. It follows the *code*, not the
-> original design intent — where the two diverge (front-end stack, UUID
-> version, pagination style, OpenFGA/NATS wiring) this document says so rather
-> than describing the aspiration as if it were built. Companion documents:
+> **Freshness.** This map was surveyed on **2026-07-25**; its counters and
+> stack sections were refreshed on **2026-09-09** at **Alembic head 0059**,
+> **1565 tests** (`def test_` functions across both pytest roots, which
+> parametrise to 2170 collected items) — a snapshot, and the live figure is
+> `pytest --co -q`. It follows the *code*, not the original design intent —
+> where the two diverged (front-end stack, UUID version, pagination style,
+> the authorisation engine and queue that were never wired) this document
+> says so rather than describing the aspiration as if it were built, and
+> since 2026-09-09 `docs/02` describes the same program. Companion documents:
 > `docs/00-decisions.md` (the numbered decisions), `docs/09-roadmap.md` (the
 > phase plan), `docs/16-legal-and-external.md` (the blocking legal items),
 > `CONVENTIONS.md` (the working agreement and the twelve invariants), and
-> `db/schema.sql` (the readable schema mirror).
+> `db/schema.sql` (the generated schema mirror — `db/README.md`).
 
 ## The three ideas everything follows from
 
@@ -65,7 +70,8 @@ flowchart TB
   subgraph API["FastAPI  (noctornal_api.http.app)"]
     MW["middleware: rate-limit -> security headers + CSP"]
     GATE["five-part access gate<br/>require / require_global / require_step_up"]
-    R["~20 routers under /api/v1"]
+    R["routers under /api/v1"]
+    WS["/api/v1/live WebSocket<br/>Postgres LISTEN/NOTIFY fan-out"]
     MW --> GATE --> R
   end
 
@@ -78,15 +84,9 @@ flowchart TB
   end
 
   subgraph DATA["Data plane"]
-    PG[("Postgres 16 + pgvector<br/>core / iam / audit / collect /<br/>analytics / notify / lab / ingest / comms")]
+    PG[("Postgres 16 + pgvector<br/>core / iam / audit / collect / analytics /<br/>notify / lab / ingest / comms / deception")]
     OBJ[("MinIO WORM<br/>evidence / raw / samples")]
     RED[("Redis<br/>rate-limit meter + cache")]
-  end
-
-  subgraph PROV["Provisioned, not fully wired"]
-    FGA["OpenFGA"]
-    NATS["NATS JetStream"]
-    WORK["Arq / Celery workers"]
   end
 
   ONT[["packages/ontology<br/>generates SQL seed + TS types"]]
@@ -127,10 +127,10 @@ is in the database it holds against any write path, including a mistaken one.
 | 4 | Inferred edges stay distinct | `core.edge.is_inferred`; projections exclude them unless `include_inferred`; SNA metrics exclude non-`is_social_tie` edges; the UI renders inferred edges dashed. |
 | 5 | History superseded, never overwritten | Retraction/supersede are row-preserving `UPDATE`s of `retracted_at` / `superseded_at`, never deletes; `retract_assertion` errors on a 0-row update. "At least one *live* assertion" is a projection property, deliberately not write-enforced, so an element can dissolve from the live graph while its rows persist for replay. |
 | 6 | Audit append-only | `audit.event`: `block_mutation()` on UPDATE/DELETE/TRUNCATE + `REVOKE`, and a hash chain via `chain_hash()` under an advisory xact lock over a UTC-canonical column render (`0013`). |
-| 7 | Credentials never leave the collector | `collection.py` `PersonaVault` exposes no `get_secret()` — only a `use(...)` context manager that decrypts an envelope-sealed secret, yields it to a block and drops it, auditing every use; errors are `redact()`-ed before they reach a log. |
+| 7 | Credentials never leave the vault | `collection.py` `PersonaVault` exposes no `get_secret()` — only a `use(...)` context manager that decrypts an envelope-sealed secret, yields it to a block and drops it, auditing every use; errors are `redact()`-ed before they reach a log. **The vault runs inside the API process** — there is no separate collector — so this is a guarantee about the shape of the code, not a network boundary: a compromised API host is a compromised vault. Reworded 2026-09-09 from "never leave the collector", which the topology never backed. |
 | 8 | TLP gates egress | `egress.py` `can_egress()` / `enforce_egress()`: `NEVER_EGRESS = {AMBER_STRICT, RED}` is checked before any per-destination ceiling, one function shared by export, SMTP, Jira and webhooks, failing closed on an unknown classification or destination (decision 38). |
 | 9 | Durable identifiers, not displayed ones | The ontology encodes each split as a strong/weak selector pair sharing no normalised value: `TOX_PK` (64-hex) vs `TOX_ID_FULL` (rotatable nospam), `TELEGRAM_ID` (numeric) vs `TELEGRAM_USER` (`@username`). `is_strong` gates auto-merge; a rotated-nospam regression test pins it. |
-| 10 | Samples never render, never execute | `SampleService.download` refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is set and the request arrived there (origin derived server-side, never a header); bytes ship `application/octet-stream` under `Content-Security-Policy: default-src 'none'; sandbox`; the object key is the SHA-256, never the filename; no sandbox combines `allow-scripts` with `allow-same-origin`. |
+| 10 | Samples never render, never execute | `SampleService.download` serves bytes only on a process CONFIGURED as the sample origin -- `samples.origin_split()` decides from `NOCTORNAL_SAMPLE_ORIGIN`, `NOCTORNAL_BASE_URL` and `NOCTORNAL_PUBLIC_ORIGIN` alone and never reads the request (until 2026-09-09 it compared against `request.url`, which Starlette builds from the Host header); it refuses when the variable is unset (the split is OFF and every download refuses), when it is not an origin, when it equals the application origin, or on any process that is not the sample origin, naming the origin to fetch from; bytes ship `application/octet-stream` under `Content-Security-Policy: default-src 'none'; sandbox`; the object key is the SHA-256, never the filename; no sandbox combines `allow-scripts` with `allow-same-origin`. |
 | 11 | Ingest keys are write-only | Keys carry the `noct_sk_` prefix and a `CHECK` forbids a `case:read` scope on `ingest.api_key`; `POST /ingest` is the only endpoint a key can reach. A leaked ingest key means junk data, never the case file. |
 | 12 | Nothing silently dropped | Unparseable ingest goes to `ingest.dead_letter` with the raw fragment, `error_class` and `parser_version`; a contact-block line that cannot be resolved is stored `UNPARSED`; a failed analytics run is marked `FAILED`, never silently absent. |
 
@@ -144,12 +144,12 @@ Sequenced in `docs/09-roadmap.md` so each phase is independently useful; the num
 |---|---|---|---|---|
 | 0 | Foundation | Monorepo, Docker Compose, Alembic, ontology to Py/TS codegen, Argon2id+TOTP auth, one five-part access gate, hash-chained `audit.event`, CI gates | — | **complete, 100%.** Model+tests done, API done, UI done, reviewed. No typecheck by decision 42. |
 | 1 | Graph core | Case CRUD, node/edge CRUD, assertion layer (`graph.py` `GraphWriteService`), selectors, evidence to MinIO WORM + custody ledger, tags, FTS | 0 (auth, gate, audit) | **complete, 100%.** All four dimensions done. |
-| 2 | Sociogram | Projection presets, graph API (neighbourhood/path/subgraph/as-of), canvas sociogram, inspector, live local metrics | 1 (graph, assertion, projections) | **partial, 95%.** Model+tests done, API done, UI partial, reviewed. Gap: WebSocket push (UI polls). |
+| 2 | Sociogram | Projection presets, graph API (neighbourhood/path/subgraph/as-of), canvas sociogram, inspector, live local metrics | 1 (graph, assertion, projections) | **partial, 95%.** Model+tests done, API done, UI partial, reviewed. WebSocket push is built (`/api/v1/live`, Postgres LISTEN/NOTIFY; `app.js` opens it). Gap: the full visual encoding of docs/06, and backlinks (docs/09 Phase 2). |
 | 3 | Analytics | `analytics.py` (pure, DB-free) fed by `GraphService.project()`; centralities, Leiden, Burt, cut vertices/bridges, KPP-Neg, signed balance; runs synchronously in API (decision 30) | 2 (materialises a projection) | **partial, 85%.** Model+tests partial, API done, UI partial, reviewed. Gap: CONCOR, history charting, actor-by-forum/wallet still two-mode. |
 | 4 | Collection | Adapter interface + scheduler (`due_sources`/`run_once`, no loop), RSS adapter, persona vault, document bucket, watch matching, `proposals.py` review gate | 1 (proposal to GraphWriteService; graph must work end-to-end first) | **partial, 75%.** Model+tests partial, API done, UI done (Feeds → Sources), reviewed (docs/17 F15 — ten service defects, all fixed at the service). Gap: XenForo/MyBB/Telegram adapters, embeddings, scheduler process. |
 | 5 | Notification & integration | `egress.py` TLP gate (one function, fails closed), `notifications.py` centre (Alembic 0029), SMTP digest/quiet-hours, HMAC webhooks | 1 (TLP/classification); events from 6 (merge, dual-control) | **partial, 85%.** Model+tests done, API done, UI partial, reviewed 2026-07-26 (docs/17 F19 — the centre never checked case assignment, the drain checked neither assignment nor current clearance). Gap: Jira, integration admin surface, priority-1 escalation, worker. |
 | 6 | Tradecraft & hardening | Entity merge with reversal (`merges.py`, 0027), dual control (decision 44, 0028), ACH (`ach.py`), report builder (`reports.py`), retention/purge, break-glass | 1 (nodes/edges, assertions); 5 (approval notifications) | **partial, 88%.** Model+tests partial, API done, UI done (merge in the inspector; Lifecycle, ACH, Report and — 2026-08-10 — the dual-control approvals surface, without which Merge was unreachable from the browser whenever dual control was on). **Reviewed 2026-08-10**, the last phase to get a hostile pass: nine findings, all closed, including `unmerge` writing recorded endpoints over an edge a later live merge owned. Gap: the assumptions register. ~~WebAuthn~~ is a documented deliberate absence (SECURITY.md says reporting it is not a finding) and ~~timeline replay~~ is built and belongs to Phase 2 — both were listed here in error. |
-| 7 | Comms channels | `comms.platform` (15 seeded), contact-block parser, CLAIMED/OBSERVED/CONFIRMED bindings, PGP verification (`pgp.py`), co-participation, minimisation, 20-endpoint router | 1 (selectors, proposals); 5 (egress gate); 2 (co-participation into sociogram) | **partial, 95%.** Model+tests done, API done, UI done, reviewed (docs/17: a forged PGP verdict, a 499× tie weight, an ASCII-only label defence). Gap: Telegram id-collision model change; detached signatures. |
+| 7 | Comms channels | `comms.platform` (15 seeded), contact-block parser, CLAIMED/OBSERVED/CONFIRMED bindings, PGP verification (`pgp.py`), co-participation, minimisation, 20-endpoint router | 1 (selectors, proposals); 5 (egress gate); 2 (co-participation into sociogram) | **partial, 95%.** Model+tests done, API done, UI done, reviewed (docs/17: a forged PGP verdict, a 499× tie weight, an ASCII-only label defence). Gap: detached signatures; a Telegram adapter able to pass the `c:` prefix (the id collision itself closed with migration 0051 on 2026-07-26 — docs/17 F1 update, docs/16 D8). |
 | 8 | Sample handling | Separate-origin download-only service (`samples.py`, 0031), encrypted-at-rest by SHA-256, quarantine to triage to RE queue, `MALWARE_ANALYST` role, static triage, REJECTED path | 0 (role, gate); 1 (case model) | **partial, 80%.** Model+tests done, API done, UI done (Lab pane), reviewed 2026-07-26 — **nine criticals**, incl. a download path with no label check and an "encrypted archive" that was a plain ZIP (docs/17 F19). Gap: imphash/ssdeep/TLSH, YARA (corpus pull started — see the YARA detection corpus section), prohibited-content screening, sandbox. **The one phase where 100% here would still mean "do not switch on" — see docs/18 L1.** |
 | 9 | Ingest API | `noct_sk_` write-only keys (invariant 11 CHECK), raw-persist-before-parse, sniffed format detection, category classifier, triage scoring, simhash dedupe, dead-letter replay, stealer-log compartment | 1 (case file, selectors, dead-letter); 4 (watch/triage, proposals) | **partial, 90%.** Model+tests done, API done (202 wired), UI done (Feeds), reviewed (docs/17 F15). Gap: outbound credential vault with per-provider quota. |
 
@@ -159,7 +159,7 @@ The one ordering constraint that matters (`docs/09` line 4): the graph and asser
 
 ### Current state
 
-Branch `deception-and-release-hardening`, Alembic head **0052**, **1252 tests passing, 12 skipped**, ruff clean; nothing pushed (no remote). The 12 skips are optional-dependency paths; without `DATABASE_URL` set you will instead see ~700, because half the suite is deliberately database-gated. The test count spans **two pytest roots** — `apps/api/tests` and `packages/ontology` — so run both or the figure will not reconcile.
+Branch `main` (byte-identical to `deception-and-release-hardening` except `README.md`), Alembic head **0059**, **1565 tests** counted as `def test_` functions across the **two pytest roots** — `apps/api/tests` and `packages/ontology/tests` — which parametrise to 2170 collected items on a live stack; ruff clean. Those figures are a snapshot taken 2026-09-09: the live figure is `pytest --co -q` over both roots, and running only one of them will not reconcile. Without `DATABASE_URL` roughly half the suite skips, because it is deliberately database-gated, and CI fails on any skip.
 
 Overall completion is **~92%**, the unweighted mean across the ten phases under the four-dimension measure. As of 2026-07-26 **every phase has a service, tests, an HTTP API, an analyst pane and an adversarial review.** UI was the single largest gap for most of this build's life and is no longer: the Lab pane (Phase 8) was the last, and what remains on that axis is WebSocket push for the sociogram and metric-history charting.
 
@@ -171,7 +171,7 @@ Completion is not lawfulness. `docs/16-legal-and-external.md` holds **four BLOCK
 
 ## Data model
 
-NocTORnal's system of record is Postgres 16 with `pgvector`. The reference schema is `db/schema.sql`; the authoritative source since 2026-07-24 is the Alembic chain `db/migrations/versions/0001`–`0039` (`alembic upgrade head`), which `schema.sql` mirrors. Extensions enabled (`0001` / `schema.sql`): `pgcrypto`, `pg_trgm`, `btree_gist`, `citext`, `vector`. IDs are UUIDs generated app-side; all timestamps are `timestamptz` in UTC; weights and money are `numeric`, never float.
+NocTORnal's system of record is Postgres 16 with `pgvector`. The authoritative source since 2026-07-24 is the Alembic chain `db/migrations/versions/0001`–`0059` (`alembic upgrade head`); `db/schema.sql` is a mirror of it, GENERATED by `scripts/dump_schema.py` and diffed in CI on every push since 2026-09-09 — before that it was hand-maintained and named five of the ten schemas below. Extensions are loaded out of band by `db/init/00-extensions.sql` (they need superuser): `pgcrypto`, `pg_trgm`, `btree_gist`, `citext`, `vector`. IDs are v4 UUIDs (`uuid4()` app-side, `gen_random_uuid()` as the column default); all timestamps are `timestamptz` in UTC; weights and money are `numeric`, never float.
 
 ### Schemas
 
@@ -186,6 +186,7 @@ NocTORnal's system of record is Postgres 16 with `pgvector`. The reference schem
 | `lab` | `0031` | `sample`, `sample_analysis`, `detonation`, `sample_access` |
 | `ingest` | `0033` | `api_key`, `batch`, `record`, `victim_credential`, `pii_authorisation`, `dead_letter`, `category_rule` |
 | `comms` | `0034` | `platform`, `channel_binding`, `device_fingerprint`, `conversation`, `participant`, `message` |
+| `deception` | `0048` | `capture`, `capture_hop`, `email_message`, `email_hop`, `email_attachment`, `call_record` |
 
 The ontology is data, not enums: `node_type`, `edge_type`, `selector_type` are reference tables keyed by `text`, so new types ship without a migration (seeded in `0017`). Genuinely fixed vocabularies are enums: `tlp`, `source_reliability` (A–F), `info_credibility` (1–6), `analytic_confidence` (LOW/MODERATE/HIGH), `assertion_basis`, `case_status`, `review_state`.
 
@@ -226,7 +227,7 @@ The ontology is data, not enums: `node_type`, `edge_type`, `selector_type` are r
 | Normaliser | Behaviour |
 |---|---|
 | `tox_pubkey` | truncates 76-hex Tox ID to durable first 64 hex |
-| `telegram_id_norm` | strips Bot-API `-100` supergroup prefix, keeps bare-minus chat ids |
+| `telegram_id_norm` | decodes the Bot-API encoding arithmetically (`chat_id = -(10**12 + id)`) and namespaces by id space — `u:` user, `c:` channel/supergroup, `g:` basic group — accepting an explicit prefix from a caller that knows the type; a bare positive is assumed `u:` (migration 0051, 2026-07-26) |
 | `eip55` | `0x` + lowercase hex (mixed-case checksum is display only) |
 | `punycode_lower` | IDNA2008/UTS-46 per-label punycode (avoids fass.de collisions) |
 | `e164` | drops extension/separators, `00` to `+`; no national-number completion |
@@ -380,9 +381,9 @@ The gate wires into requests through `apps/api/src/noctornal_api/http/deps.py`. 
 | Invariant | Enforced in |
 |-----------|-------------|
 | 8 — TLP gates egress | `apps/api/src/noctornal_api/egress.py`: `can_egress()`/`enforce_egress()`. `NEVER_EGRESS = {AMBER_STRICT, RED}` checked before any per-destination ceiling; compartmented material never crosses; unknown classification/destination fails closed. Destinations: `IN_APP, EXPORT, SMTP, JIRA, WEBHOOK`. |
-| 7 — credentials never leave the collector | `apps/api/src/noctornal_api/collection.py`: `collection_account.secret_*` is decrypted (`envelope.decrypt`) only inside the collection worker; no function returns a plaintext credential to the API process. |
+| 7 — credentials never leave the vault | `apps/api/src/noctornal_api/collection.py`: `collection_account.secret_*` is decrypted (`envelope.decrypt`) only inside `PersonaVault.use()`; no function returns a plaintext credential. The vault runs IN the API process — there is no collection worker. (Reworded 2026-09-09; the previous text claimed a worker the tree has never had.) |
 | 6 — audit append-only | `db/schema.sql`: trigger `event_append_only` (BEFORE UPDATE OR DELETE) + `event_no_truncate` calling `audit.block_mutation()`; `REVOKE UPDATE, DELETE, TRUNCATE ON audit.event FROM PUBLIC`; hash chain via `audit.chain_hash()` trigger `audit_chain`. Evidence custody has the parallel `evidence_custody_append_only`. |
-| 11 — ingest keys write-only | `CONSTRAINT api_key_no_read_scope CHECK (NOT ('case:read' = ANY(scopes)))`, default `scopes = '{ingest:write}'`. (As surveyed, this constraint lives in `db/concept/schema_concept.sql`; the ingest router enforces the write-only key model in code today.) |
+| 11 — ingest keys write-only | `ingest.api_key` `CONSTRAINT api_key_write_only CHECK (scopes <@ ARRAY['ingest:write','ingest:status'] AND NOT ('case:read' = ANY(scopes)))`, default `scopes = '{ingest:write}'` — migration 0033, visible in `db/schema.sql` since the mirror was regenerated on 2026-09-09. (The 2026-07-25 survey found the constraint only in `db/concept/schema_concept.sql`, because the hand-written mirror had never been updated for 0033; the constraint itself has been live since that migration.) |
 
 ---
 
@@ -550,7 +551,7 @@ automation, a mailbox connector, URL detonation from the UI, and any
 
 ### Collection layer (Phase 4)
 
-`collection.py` implements the adapter/persona/scheduler engine over the `collect.*` schema. Invariant 7 (credentials never leave the collector) is enforced by shape, not discipline: `PersonaVault` exposes no `get_secret()` — only `use(persona_id, *, actor_id, purpose)`, a context manager that decrypts `collect.collection_account.secret_ciphertext` via `security/envelope.decrypt(..., key_id=secret_key_id)`, yields the plaintext to a block, and drops it. Every use writes an `audit.event` (`PERSONA_USED` with a purpose). `store()` re-encrypts with `envelope.encrypt` and stamps `secret_rotated_at`. `redact()` masks credential-shaped substrings (structural regex over `password|token|api_key|...` and `user:pass@` URLs) and is applied to every adapter error before it reaches `collect.collection_run.error_detail`.
+`collection.py` implements the adapter/persona/scheduler engine over the `collect.*` schema, inside the API process — there is no separate collector, and the split is a deliberate not-yet (`docs/02`). Invariant 7 (credentials never leave the vault) is enforced by shape, not discipline: `PersonaVault` exposes no `get_secret()` — only `use(persona_id, *, actor_id, purpose)`, a context manager that decrypts `collect.collection_account.secret_ciphertext` via `security/envelope.decrypt(..., key_id=secret_key_id)`, yields the plaintext to a block, and drops it. Every use writes an `audit.event` (`PERSONA_USED` with a purpose). `store()` re-encrypts with `envelope.encrypt` and stamps `secret_rotated_at`. `redact()` masks credential-shaped substrings (structural regex over `password|token|api_key|...` and `user:pass@` URLs) and is applied to every adapter error before it reaches `collect.collection_run.error_detail`.
 
 Persona lifecycle: `HEALTHY/COOLDOWN/LOCKED/BURNED`; `BURNED` is terminal and `set_status` requires a `burn_reason`. `check_egress_separation(source_id)` reports two live personas sharing an `egress_profile_id` against one source (a temporal condition, deliberately not a DB constraint).
 
@@ -558,7 +559,7 @@ The `Adapter` interface returns `Item`s, never graph elements — only `RssAdapt
 
 ### Comms (Phase 7)
 
-`comms.py`, `contact_blocks.py`, `pgp.py`, `coparticipation.py` over the `comms.*` schema. `comms.normalise(platform_key, observed)` reduces an identifier to its durable part, delegating canonical form to `noctornal_ontology.normalise` (the single source of truth — a second normaliser is called "a correlation bug with a delay fuse"). Durable-selector traps: Tox to first 64 hex (nospam/checksum dropped); Telegram to numeric id, never `@username` (with a known unresolved `-100` channel/user collision, docs/16 D8); SimpleX to `None` with a coverage note; Signal/Wire to account UUID not phone/handle; Matrix to server part folded, localpart preserved. `CommsService.bind` writes `comms.channel_binding` at verification `CLAIMED/OBSERVED/CONFIRMED`; `correlate`/`co_declared`/`shared_devices`/`contact_graph` filter on the caller's own `classification`/`compartments`, not the case's.
+`comms.py`, `contact_blocks.py`, `pgp.py`, `coparticipation.py` over the `comms.*` schema. `comms.normalise(platform_key, observed)` reduces an identifier to its durable part, delegating canonical form to `noctornal_ontology.normalise` (the single source of truth — a second normaliser is called "a correlation bug with a delay fuse"). Durable-selector traps: Tox to first 64 hex (nospam/checksum dropped); Telegram to a type-namespaced numeric id (`u:`/`c:`/`g:`, migration 0051 — the `-100` channel/user collision of docs/16 D8 is closed; a bare positive is still assumed `u:`, docs/17 F1), never `@username`; SimpleX to `None` with a coverage note; Signal/Wire to account UUID not phone/handle; Matrix to server part folded, localpart preserved. `CommsService.bind` writes `comms.channel_binding` at verification `CLAIMED/OBSERVED/CONFIRMED`; `correlate`/`co_declared`/`shared_devices`/`contact_graph` filter on the caller's own `classification`/`compartments`, not the case's.
 
 `contact_blocks.parse` (pure) resolves each line by label (`_LABEL_ALIASES`), by unambiguous shape, or leaves it `UNPARSED` (invariant 12). Four escrow-error defences: third-party labels (incl. Cyrillic escrow-agent terms), in-line disclaimers, the `comms.service_selector` stoplist (global by default), and shared-service detection over distinct publishers (`SHARED_SERVICE_THRESHOLD = 3`). `parse_and_store` writes `comms.contact_block`/`contact_block_entry` and raises `collect.proposal` rows only — no `channel_binding`, `node` or `edge` (invariant 3); `block_fingerprint` (SELF selectors, computed after stoplist passes) detects copied blocks.
 
@@ -578,9 +579,9 @@ Supporting modules: `approvals.py` (four-eyes; `OPERATIONS` catalogue, payload-h
 
 ### Stack
 
-The analyst console is served from `apps/api/src/noctornal_api/http/static/` — four files, no build step, no bundler, no CDN: `index.html`, `app.css`, `app.js` (~4,510 lines) and `layout-worker.js` (~274 lines). `apps/api/src/noctornal_api/http/app.py` mounts it same-origin as `StaticFiles(directory=STATIC_DIR, html=True)` under `/ui` (`/` redirects to `/ui/`). A per-path CSP (`_UI_CSP` in `app.py`) sets `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'` — deliberately **no `unsafe-inline`**. The separate `.css`/`.js` files exist precisely so inline script stays forbidden; node-type hues are carried by CSS classes (`.hue-actor-persona`...) rather than inline styles for the same reason (`app.css`).
+The analyst console is served from `apps/api/src/noctornal_api/http/static/` — seven files, no build step, no bundler, no CDN: `index.html`, `app.css`, `theme.css`, `app.js` (~9,800 lines as of 2026-09-09), `layout-worker.js` (~274 lines), `logo.svg` and `favicon.svg`. `apps/api/src/noctornal_api/http/app.py` mounts it same-origin as `StaticFiles(directory=STATIC_DIR, html=True)` under `/ui` (`/` redirects to `/ui/`). A per-path CSP (`_UI_CSP` in `app.py`) sets `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'` — deliberately **no `unsafe-inline`**. The separate `.css`/`.js` files exist precisely so inline script stays forbidden; node-type hues are carried by CSS classes (`.hue-actor-persona`...) rather than inline styles for the same reason (`app.css`).
 
-This diverges from the `docs/02-architecture.md` plan. That document specifies Next.js 15 / TypeScript / Tailwind for the front end and `graphology` + `sigma.js` (WebGL) for the sociogram. None of that is present. The sociogram is a hand-rolled 2D `<canvas>` renderer (`#graph-canvas`) with a main-thread spring/repulsion simulation (`step()`, exact O(n^2) below 320 nodes, a uniform-grid approximation above) and an off-main-thread ForceAtlas2 Barnes-Hut layout in `layout-worker.js`. Plain vanilla JS throughout; state lives in one `state` object.
+This diverges from the 2026-07 sketch that `docs/02-architecture.md` used to carry — Next.js 15 / TypeScript / Tailwind and `graphology` + `sigma.js` (WebGL) — all superseded before anything was built; none of it is present, and since 2026-09-09 docs/02 describes what is here. The sociogram is a hand-rolled 2D `<canvas>` renderer (`#graph-canvas`) with a main-thread spring/repulsion simulation (`step()`, exact O(n^2) below 320 nodes, a uniform-grid approximation above) and an off-main-thread ForceAtlas2 Barnes-Hut layout in `layout-worker.js`. Plain vanilla JS throughout; state lives in one `state` object.
 
 ### Features
 
@@ -601,7 +602,7 @@ This diverges from the `docs/02-architecture.md` plan. That document specifies N
 
 ### Coverage — the honest gap
 
-UI panes exist for: login/case list (Phase 0), Entities and add-entity/add-relationship/assertions (Phase 1), the sociogram and scrubber (Phase 2), Analysis (Phase 3), Triage/capture (Phase 4), Inbox notifications and delivery prefs (Phase 5), entity-resolution merge (Phase 6), and Comms (Phase 7). **API-only** in this console: Phase 8 sample handling (no samples tab — invariant 10 keeps sample bytes out of the DOM), Phase 9 ingest API (write-only keys), and Phase 5 integration configuration beyond the inbox. WebAuthn is not built.
+UI panes exist for: login/case list (Phase 0), Entities and add-entity/add-relationship/assertions (Phase 1), the sociogram and scrubber (Phase 2), Analysis (Phase 3), Triage/capture (Phase 4), Inbox notifications and delivery prefs (Phase 5), entity-resolution merge (Phase 6), and Comms (Phase 7). Phase 8 has the Lab pane (sample bytes are downloaded from the sample origin and never rendered — invariant 10), and Phase 9's keys, triage queue and dead letters reached the Feeds pane. **API-only** in this console: Phase 5 integration configuration beyond the inbox (the Jira and webhook transports). (This sentence said "no samples tab" until 2026-09-09, contradicting the Phase 8 row above it.) WebAuthn is not built.
 
 ---
 
@@ -617,22 +618,23 @@ Verified from `apps/api/pyproject.toml`, `infra/docker-compose.yml`, `docs/02-ar
 | API | Python >=3.12 / FastAPI >=0.110 / uvicorn >=0.29 | REST service; entry point `noctornal_api.http.app:app` | Implemented |
 | Password/MFA | `argon2-cffi`, `cryptography` (AES-256-GCM), TOTP | Argon2id hashing; envelope-sealed TOTP secrets | Implemented |
 | SNA maths | `igraph` >=0.11, `leidenalg` >=0.10 | Centrality, key-player, communities (Leiden, not Louvain — `docs/00` #30) | Implemented, in-process |
-| Workers | Arq / Celery | Async collection & analytics (`docs/02` Zone B) | **Not wired.** Analytics run synchronously in the API process (`docs/00` #30); notifications via `dispatch_due()` (#46). Compute is written worker-ready |
-| Front end | plain HTML/CSS/JS at `.../http/static/`, served at `/ui`, no build step | Analyst UI, same origin as API | **Implemented as static assets.** `docs/02` specifies Next.js + `graphology`/`sigma.js`; that is **not** shipped. Layout is a hand-written ForceAtlas2 + Barnes-Hut Web Worker (`docs/00` #37) |
+| Workers | none | The 2026-07 sketch's Arq / Celery workers were superseded by in-process execution | Analytics run synchronously in the API process (`docs/00` #30); notifications via `dispatch_due()` (#46); collection via `run_once`, by call. Compute is written worker-ready; there is no queue, no worker and no scheduler process |
+| Front end | plain HTML/CSS/JS at `.../http/static/`, served at `/ui`, no build step | Analyst UI, same origin as API | **Implemented as static assets.** The sketch's Next.js + `graphology`/`sigma.js` was superseded before anything was built (`docs/00` #37, docs/14 U1). Layout is a hand-written ForceAtlas2 + Barnes-Hut Web Worker |
+| Live updates | Postgres `LISTEN`/`NOTIFY` → `/api/v1/live` WebSocket (`websockets` transport) | Push graph changes to the console; the socket carries no case content | Implemented (`http/routers/live.py`) |
 | Cache/queue/limits | Redis 7 (`redis:7-alpine`, `appendonly`, `maxmemory 1gb`/`allkeys-lru`) | Rate-limit meter (GCRA Lua), cache | Implemented; limiter degrades per-process without `REDIS_URL` |
-| Evidence store | MinIO (`minio/minio`) + `minio/mc` init | WORM evidence via object lock; buckets `noctornal-evidence` (`--with-lock`) and `noctornal-raw` | Implemented. Compose sets `--default GOVERNANCE 365d`; app writes COMPLIANCE-mode locks (`docs/00` #26) |
-| Authorization | OpenFGA (`openfga/openfga`, Postgres datastore, playground `:3001`) | Relationship-based authz (`docs/02`: "OpenFGA or SpiceDB") | **Provisioned in compose.** Shipped access path is an in-code five-part gate resolving roles/clearance/compartments in SQL (`docs/00` #29); whether the API queries OpenFGA is unverified. SpiceDB not present |
-| Message bus | NATS 2 (`nats:2-alpine`, JetStream `-js`) | Zone C to B queue (`docs/02`) | Provisioned in compose; no producer/consumer wired (`apps/collector` has no Python) |
+| Evidence store | MinIO (`minio/minio`) + `minio/mc` init | WORM evidence via object lock; buckets `noctornal-evidence` (`--with-lock`), `noctornal-raw` (ingest raw bytes, `rawstore.py`) and `noctornal-samples` | Implemented. Compose sets `--default GOVERNANCE 365d`; app writes COMPLIANCE-mode locks (`docs/00` #26) |
+| Authorization | the five-part gate, `security/access.py` over `iam.*` | Verb, assignment, clearance, compartments, step-up (`docs/00` #29) | **Implemented, in-process.** No external engine: the sketch's OpenFGA/SpiceDB was superseded (#8), and OpenFGA, called by nothing, was removed from compose on 2026-07-26 (R13) |
+| Message bus | none | — | The sketch's NATS queue was removed from compose on 2026-07-26 (R13); no producer or consumer was ever written, and there is no `apps/collector` |
 | Mail | Mailpit (`axllent/mailpit`, service `mailpit`) | Captured dev SMTP (`:1025`), inbox UI (`:8025`) | Implemented |
 
 ### Infra services defined in `infra/docker-compose.yml`
 
-`postgres` (TCP healthcheck, `pg_stat_statements` preloaded, extensions from `../db/init` only — schema comes from Alembic), `redis`, `minio` + `minio-init` (one-shot bucket/lock creation, `set -e`), `mailpit`. OpenFGA and NATS were REMOVED on 2026-07-26 (R13): neither was referenced by a line of `apps/api`, and between them they published four host ports (8080, 3001, 4222, 8222) that could fail the whole `compose up`. Named volumes: `pgdata`, `redisdata`, `miniodata`. Header comment: development only; production runs the three `docs/02` zones under separate network policies.
+`postgres` (TCP healthcheck, `pg_stat_statements` preloaded, extensions from `../db/init` only — schema comes from Alembic), `redis`, `minio` + `minio-init` (one-shot bucket/lock creation, `set -e`), `mailpit`. OpenFGA and NATS were REMOVED on 2026-07-26 (R13): neither was referenced by a line of `apps/api`, and between them they published four host ports (8080, 3001, 4222, 8222) that could fail the whole `compose up`. Named volumes: `pgdata`, `redisdata`, `miniodata`. The header comment says development only and still refers to "the three zones from docs/02" — a sketch that was superseded on 2026-09-09; there is no production manifest in the tree, and the documented production gaps live in `QUICKSTART.md` ("Before anything real") and docs/17.
 
 ### Conventions
 
 - **Migrations:** Alembic. `alembic.ini` sets `script_location = db/migrations`, `file_template = %%(rev)s_%%(slug)s`, `prepend_sys_path = .`; the URL is read from `DATABASE_URL`, never defaulted in the ini. One concern per migration, reversible (CI runs a head to base to head round-trip — `docs/00` #42).
-- **IDs:** `CONVENTIONS.md`/conventions state UUIDv7 app-side. **In practice** `db/schema.sql` PKs default to `gen_random_uuid()` (v4) and `pg_uuidv7` is commented out (`db/init/00-extensions.sql`); app-side generation uses `uuid4()` (e.g. `analytics_runs.py`). Time-sortable v7 is aspirational, not shipped.
+- **IDs:** v4 — `gen_random_uuid()` as the column default (`db/schema.sql`) and `uuid4()` app-side (e.g. `analytics_runs.py`). The 2026-07 convention of time-sortable UUIDv7 was never adopted and `CONVENTIONS.md` marked it superseded on 2026-09-09; `pg_uuidv7` is not installed (commented out in `db/init/00-extensions.sql`) and nothing sorts on an id.
 - **Times:** `timestamptz`, `DEFAULT now()`, UTC in DB (`db/schema.sql`).
 - **Money/weights:** `numeric`, never float — e.g. `edge.weight numeric(14,4)`.
 - **API:** REST under `/api/v1` (`API_PREFIX`); errors are `application/problem+json` (RFC 9457, `http/errors.py`). **Pagination is `limit`-capped**, not cursor-based (`http/routers/read.py`: `limit: int = Query(200, le=1000)` etc.); documented cursor pagination is not implemented in the routers read.
@@ -658,7 +660,7 @@ From `docs/00-decisions.md`. Numbers are the decision IDs in that file.
 - **4.** Bitemporal from day one — temporal replay and disclosure both need valid-time plus transaction-time; very high cost if reversed.
 - **6.** The ontology lives in tables, not enums — node/edge types change monthly in year one, so a vocabulary change is a data write, not a migration.
 - **7.** Machines propose, analysts dispose: extractors write `collect.proposal`, never `core.node`/`core.edge` — keeps auto-ingested graphs out of the case (invariant 3).
-- **8.** Zanzibar-style relationship authz (OpenFGA/SpiceDB) — access is relationship-shaped (assignment, clearance, compartments); a role table alone cannot express it.
+- **8.** Zanzibar-style relationship authz (OpenFGA/SpiceDB) — **superseded**: access is relationship-shaped (assignment, clearance, compartments) and a role table alone cannot express it, but the shape is one join and the five-part gate expresses it in-process; no engine was ever wired, and OpenFGA was removed from compose on 2026-07-26 (R13).
 - **10.** Single-tenant — multi-tenancy on this data class is a liability; shared infrastructure would touch every access path.
 - **11.** igraph (C core) over NetworkX — NetworkX dies around 50k edges; the SNA maths layer is built on igraph.
 - **13.** Prosecution-grade evidence, US + Canada — WORM store, custody ledger and hash chain are load-bearing Phase 1, targeting FRE 901/902(13)-(14) and Canada Evidence Act ss. 31.1-31.8; cannot be retrofitted onto evidence already collected.
@@ -683,7 +685,7 @@ unlawfully:
   `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and `NOCTORNAL_DESIGNATED_PERSON` are
   declared (`SampleService.policy_declared`).
 - **Sample download** refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is set and the
-  request arrived at that origin (invariant 10).
+  process serving it is configured as that origin -- `NOCTORNAL_PUBLIC_ORIGIN`, never the request (invariant 10).
 - **Ingest** mints no keys and fingerprints nothing without
   `NOCTORNAL_INGEST_PEPPER`; stealer-log reveals require a live
   `ingest.pii_authorisation` or return 451.
@@ -702,6 +704,9 @@ deployment lawful.
 
 *Generated 2026-07-25 from a parallel source survey (eleven readers over the
 data model, ontology, graph/analytics, API, security, storage, collection,
-comms, UI, stack and decisions) at Alembic head 0052, 1252 tests passing. It
-describes the code as built; where the code diverges from `docs/02` or the
-stated conventions, this document follows the code.*
+comms, UI, stack and decisions) at revision 0052; counters, stack and
+invariant-7 sections refreshed 2026-09-09 at revision 0059 (1565 tests as
+`def test_` functions, a snapshot). It describes the code as built; where the
+code diverged from the 2026-07 `docs/02` sketch or the stated conventions,
+this document followed the code, and the two documents now describe the same
+program.*
