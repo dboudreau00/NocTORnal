@@ -62,6 +62,19 @@ console behaves exactly as it did before: the analyst refreshes. Nothing
 here is load-bearing for correctness, and it must never become so — a
 push-based UI that silently stops pushing is worse than one that never
 pushed, because people stop refreshing.
+
+## A socket is COUNTED FROM `accept()`, not from authentication
+
+Until 2026-09-09 the only ceiling in this file, `_MAX_SOCKETS`, was
+compared against the number of AUTHENTICATED subscribers, and nothing
+else on the way in counted anything: the HTTP rate-limit middleware is
+registered with `@app.middleware("http")` and is never run for a
+`websocket` scope. So the window between `accept()` and the hello frame
+— an asyncio task and a buffered connection each, held for the whole
+hello deadline — was open to anyone with a TCP connection. The pool
+could be exhausted with no session at all, and the ceiling reported
+zero while it happened. `_PendingBudget` below is the fix; the record
+of what was wrong is on `live()`.
 """
 from __future__ import annotations
 
@@ -70,6 +83,8 @@ import contextlib
 import json
 import logging
 import os
+import threading
+import time
 from uuid import UUID
 
 import psycopg
@@ -99,14 +114,183 @@ _POLL_SECONDS = 1.0
 #: responding.
 _MAX_SOCKETS = int(os.environ.get("NOCTORNAL_LIVE_MAX_SOCKETS", "200"))
 
+#: Sockets that have been accepted and have not yet authenticated. A
+#: SEPARATE, smaller budget from `_MAX_SOCKETS`, because the two states
+#: cost different things and are held by different people: a subscriber
+#: has spent a valid session to get its slot, a pending socket has spent
+#: nothing but a TCP handshake. Sized as a quarter of the subscriber
+#: ceiling by default; a deployment that sees a real burst of console
+#: opens at shift change can raise it. Zero refuses every socket, which
+#: is a second off switch nobody should need -- `NOCTORNAL_LIVE=0` is
+#: the one that is documented. Added 2026-09-09; see `live()` for what
+#: the absence of this counter allowed.
+_MAX_PENDING = int(os.environ.get(
+    "NOCTORNAL_LIVE_MAX_PENDING", str(max(1, _MAX_SOCKETS // 4))))
+
+#: How many of those one peer address may hold at once. A browser sends
+#: its hello in the `open` handler, so a legitimate socket is pending for
+#: a round trip; even a NAT with a floor of analysts behind it does not
+#: keep eight open at once without something being wrong on their side.
+_MAX_PENDING_PER_PEER = int(os.environ.get(
+    "NOCTORNAL_LIVE_MAX_PENDING_PER_PEER", "8"))
+
+#: How long an accepted socket may sit without sending its hello. The
+#: value has been ten seconds since the file was written; what changed on
+#: 2026-09-09 is that a socket waiting it out now holds a counted slot,
+#: so the deadline bounds a budget instead of bounding nothing.
+_HELLO_SECONDS = float(os.environ.get("NOCTORNAL_LIVE_HELLO_SECONDS", "10"))
+
 #: Per-subscriber buffer. A client that cannot keep up is DISCONNECTED
 #: rather than queued indefinitely: these are hints to refetch, so a
 #: backlog of them is worthless, and an unbounded queue behind a stalled
 #: socket is a memory leak with a timer on it.
 _QUEUE_DEPTH = 32
 
-_CLOSE_UNAUTHENTICATED = 1008
+#: RFC 6455 "policy violation". One code for every refusal that is the
+#: caller's doing -- no credentials, a bad case id, a pending budget it
+#: has filled -- and the reason string says which. The client backs off
+#: on any close, so a finer code would change nothing it does.
+_CLOSE_POLICY = 1008
+_CLOSE_UNAUTHENTICATED = _CLOSE_POLICY
 _CLOSE_BUSY = 1013
+
+
+class _PendingBudget:
+    """Slots for sockets that are not yet subscribed: reserved BEFORE
+    `accept()`, held through the hello and authentication.
+
+    A socket takes a slot before `accept()` and gives it back when its
+    handshake ends -- authenticated and about to be handed to the hub, or
+    refused and closed -- so the count is of every socket the process is
+    holding on behalf of someone who has not yet proved who they are. Two ceilings: `_MAX_PENDING` for the process,
+    and `_MAX_PENDING_PER_PEER` keyed on the SAME address the HTTP rate
+    limiter and the login binding use -- `limits.client_ip`, trusted-hop
+    counting included -- so that behind a proxy the key is the analyst's
+    address and not the proxy's, exactly as it is for a 429. A socket
+    whose peer is unknown shares ONE bucket rather than escaping the
+    per-peer ceiling: unknown must bound more tightly, never less.
+
+    What the count does NOT cover, stated so nobody reads it as more
+    than it is. A socket refused because the budget is full is closed
+    BEFORE `accept()`, and under uvicorn's `websockets` backend -- the
+    one every launch script selects, since `--ws auto` picks it whenever
+    `websockets` is installed -- a pre-accept close is an HTTP 403
+    followed by an immediate `transport.close()`. There is no close
+    handshake for the peer to withhold, so a refused socket holds no
+    connection past the turn that refused it; measured on 2026-09-09 by
+    `test_live_handshake_pg`, which reads the server's own connection
+    set. A socket closed AFTER `accept()` -- a bad hello, a missed
+    deadline -- is different: that backend writes the close frame and
+    then keeps the transport up for its hard-coded ten-second
+    `close_timeout` waiting for the peer's echo, and this budget hands
+    the slot back when `close()` returns, not when the transport goes.
+    A peer that was accepted and then refused therefore keeps one TCP
+    connection lingering, uncounted, for those ten seconds, and by
+    cycling hellos one address can stack at most a per-peer budget's
+    worth of them per hello round trip. That residual is the server's
+    close handshake, not this budget's accounting; what changed on
+    2026-09-09 is that the REFUSAL itself -- the path reached with no
+    handshake completed, from one address, without limit -- no longer
+    lingers at all.
+
+    A plain `threading.Lock`, not an asyncio one: nothing here awaits,
+    and the counters must stay right even when more than one event-loop
+    thread drives sockets in one process, which Starlette's `TestClient`
+    does whenever it is not used as a context manager.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._total = 0
+        self._per_peer: dict[str, int] = {}
+
+    @property
+    def count(self) -> int:
+        return self._total
+
+    def count_for(self, peer: str | None) -> int:
+        return self._per_peer.get(peer or "", 0)
+
+    def reserve(self, peer: str | None) -> bool:
+        """Take a slot, or say no. Both ceilings are read at call time so
+        a test, or an operator restarting one worker with a new value,
+        sees the change without re-importing the module."""
+        key = peer or ""
+        with self._lock:
+            if self._total >= _MAX_PENDING:
+                return False
+            if self._per_peer.get(key, 0) >= _MAX_PENDING_PER_PEER:
+                return False
+            self._total += 1
+            self._per_peer[key] = self._per_peer.get(key, 0) + 1
+            return True
+
+    def release(self, peer: str | None) -> None:
+        key = peer or ""
+        with self._lock:
+            self._total -= 1
+            left = self._per_peer.get(key, 0) - 1
+            if left <= 0:
+                self._per_peer.pop(key, None)
+            else:
+                self._per_peer[key] = left
+
+
+_pending = _PendingBudget()
+
+#: How often the refusal WARNING may be written. One line per refused
+#: connection would let the peer being refused choose how fast the log
+#: grows: the refusal is answered with no credential and no completed
+#: handshake, so it is the cheapest thing this file does, and a line per
+#: attempt from one address is an amplifier, not a record. One line per
+#: window, carrying the count, records the campaign the way
+#: `RateLimiter.should_audit` records a throttled subject. Added
+#: 2026-09-09 with the pre-accept refusal it describes.
+_REFUSAL_LOG_SECONDS = 10.0
+
+
+class _SampledWarning:
+    """At most one log line per `_REFUSAL_LOG_SECONDS`, carrying the count
+    of everything the window swallowed, so the operator reads "412 refused
+    since the last line" rather than 412 lines whose volume the refused
+    peer chose. The window is read at call time so a test can shrink it.
+    A `threading.Lock` for the reason `_PendingBudget` has one: nothing
+    here awaits, and more than one loop thread may call it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last: float | None = None
+        self._since = 0
+
+    def note(self) -> int | None:
+        """Count one refusal. Returns how many refusals the due line stands
+        for -- on the first ever, and on the first after each window -- and
+        None when this one is to be swallowed into the next line's count."""
+        now = time.monotonic()
+        with self._lock:
+            self._since += 1
+            if self._last is not None and now - self._last < _REFUSAL_LOG_SECONDS:
+                return None
+            self._last = now
+            n, self._since = self._since, 0
+            return n
+
+
+_refusals = _SampledWarning()
+
+
+def _refused(reason: str, ip: str | None) -> None:
+    """Record a pre-accept refusal, sampled. The line names the reason of
+    the refusal that made it due; the count behind it may include the
+    other credential-free reason, which is the point of one sampler: the
+    operator wants the size of the campaign, not one meter per excuse."""
+    n = _refusals.note()
+    if n is not None:
+        log.warning("live socket refused before accept: %s (%d refusal(s) "
+                    "since the last line; %d subscribed, %d pending, %d "
+                    "pending from this peer)", reason, n, _hub.count,
+                    _pending.count, _pending.count_for(ip))
 
 
 class _Hub:
@@ -215,59 +399,104 @@ async def live(ws: WebSocket) -> None:
     a URL lands in proxy logs, browser history and `Referer`, and this one
     would carry a session bearer token. WebSocket has no header API in the
     browser, so the first frame is the only place left.
+
+    ## Counted from `accept()`, not from authentication
+
+    Until 2026-09-09 the only ceiling here was `_MAX_SOCKETS`, compared
+    against `_hub.count` -- and the hub only hears about a socket after it
+    has authenticated. The window between `accept()` and the hello frame
+    was counted by nobody: not by the hub, and not by the rate-limit
+    middleware, which is registered with `@app.middleware("http")` and is
+    never run for a `websocket` scope. So a peer with no session at all
+    could open sockets until the server ran out of descriptors, send
+    nothing, and hold every one of them for the full hello deadline -- an
+    asyncio task and a buffered connection each -- while `_hub.count`
+    reported zero. The pool could be exhausted with no credential
+    presented, and the module docstring's "a refusal an operator can see"
+    described only the sockets an attacker would never bother to
+    authenticate.
+
+    Now a socket takes a slot in `_pending` before it is accepted and gives
+    it back when its handshake ends, authenticated or refused, and a full
+    budget -- process-wide or per peer -- is refused with the policy close
+    code. The
+    subscriber ceiling is checked twice on purpose: before `accept()`, so
+    a full hub costs the caller no handshake and this process no database
+    round trip, and again after authentication, because up to
+    `_MAX_PENDING` sockets can pass the first check together and a check
+    that is only ever made before the count moves was never actually a
+    ceiling.
+
+    ## Refused BEFORE `accept()`, because a refused socket must hold nothing
+
+    Every refusal that needs no credential -- the off switch, a full hub,
+    a full budget -- is sent before the handshake completes. The first
+    version of this budget, earlier on 2026-09-09, sent them after it, on
+    the argument that a pre-accept close reaches a browser as a bare error
+    with no code, and that was wrong in the one way that mattered. Under
+    uvicorn's `websockets` backend a POST-accept close writes the close
+    frame and then arms a ten-second timer before dropping the transport,
+    waiting for the peer's echo, and `run_asgi` leaves the transport up
+    while that timer is armed. A peer that never echoed held one TCP
+    connection per refusal for ten seconds -- not counted by `_pending`,
+    which had just refused it, and invisible to `_hub.count`, which was
+    zero -- so the path added to close the hole was itself the hole:
+    reachable from one address, with no session, with no limit. A
+    PRE-accept close on that backend is an HTTP 403 and an immediate
+    `transport.close()`: no frame, no echo to wait for, nothing held. The
+    code-and-reason argument bought nothing in any case; the shipped
+    client (`connectLive` in `app.js`) reconnects with the same backoff
+    on every close and never reads the code. What remains is stated on
+    `_PendingBudget` so it is not mistaken for fixed: a socket refused
+    AFTER `accept()` still lingers for the server's ten seconds after its
+    slot is handed back. Measured on 2026-09-09 under uvicorn 0.52.4 with
+    websockets 17.1, by `test_live_handshake_pg` and by a twelve-second
+    sampling run of the same flood: two silent sockets held, thirty
+    refusals from the same address. Pre-accept, every refusal was a 403
+    and the server's own connection set read two from the first sample
+    (0.2 s) onward. Post-accept, every refusal was a 101 and the set read
+    thirty-two through nine seconds, then fell to two between 9.8 s and
+    10.3 s -- the backend's close timeout, and nothing this file did.
     """
-    await ws.accept()
+    # The peer this socket arrived from. `client_ip` is typed for a
+    # `Request` but only ever touches `.headers.getlist` and `.client`,
+    # which a Starlette `WebSocket` has for the same reason -- both are
+    # `HTTPConnection` -- so the socket gets the SAME address the rate
+    # limiter and the login handler compute, X-Forwarded-For hop counting
+    # included. It keys the per-peer pending bucket and, later, the
+    # session binding check; computing it differently here would make the
+    # binding comparison fail for every deployment behind a proxy.
+    ip = client_ip(ws)
+    # None of these three has called `accept()`. That is the whole fix
+    # (see the docstring): a close sent now is an HTTP 403 and a dropped
+    # transport, not a frame the peer can decline to answer.
     if not _live_enabled():
         await ws.close(code=_CLOSE_BUSY, reason="live updates are disabled")
         return
     if _hub.count >= _MAX_SOCKETS:
+        _refused("too many live subscribers", ip)
+        await ws.close(code=_CLOSE_BUSY, reason="too many live subscribers")
+        return
+    if not _pending.reserve(ip):
+        _refused("too many pending sockets", ip)
+        await ws.close(code=_CLOSE_POLICY, reason="too many pending sockets")
+        return
+    try:
+        await ws.accept()
+        auth = await _handshake(ws, ip)
+    finally:
+        # ONE release, whichever of the handshake's refusals was taken. A
+        # slot leaked on any of them would turn the budget into a slow
+        # lockout of the live feature for everyone.
+        _pending.release(ip)
+    if auth is None:
+        return
+    user_id, mfa_at, case_id = auth
+
+    if _hub.count >= _MAX_SOCKETS:
         log.warning("live socket refused: %d already open", _hub.count)
         await ws.close(code=_CLOSE_BUSY, reason="too many live subscribers")
         return
-
-    try:
-        hello = await asyncio.wait_for(ws.receive_json(), timeout=10)
-    except (TimeoutError, asyncio.TimeoutError, ValueError, WebSocketDisconnect):
-        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
-        return
-
-    token = (hello or {}).get("token")
-    raw_case = (hello or {}).get("case_id")
-    if not isinstance(token, str) or not token:
-        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
-        return
-    try:
-        case_id = UUID(raw_case) if raw_case else None
-    except (TypeError, ValueError):
-        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="bad case id")
-        return
-
-    # Authenticate on a SHORT-LIVED connection, released immediately. The
-    # first version held this one open for the life of the socket, which is
-    # how twenty-five people with two tabs each exhausted Postgres.
-    # The peer and client software this socket arrived from, read HERE and
-    # handed to the worker thread: `_authenticate` runs off the event loop
-    # and has no request object of its own. `client_ip` is typed for a
-    # `Request` but only ever touches `.headers.getlist` and `.client`,
-    # which a Starlette `WebSocket` has for the same reason -- both are
-    # `HTTPConnection` -- so the socket gets the SAME address the rate
-    # limiter and the login handler would compute, X-Forwarded-For hop
-    # counting included. Computing it differently here would make the
-    # binding comparison fail for every deployment behind a proxy.
-    ip = client_ip(ws)
-    user_agent = ws.headers.get("user-agent")
-    try:
-        session = await asyncio.to_thread(
-            _authenticate, token, case_id, ip, user_agent)
-    except Exception:  # noqa: BLE001
-        log.exception("live authentication failed")
-        await ws.close(code=1011, reason="internal error")
-        return
-    if session is None:
-        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no such case")
-        return
-    user_id, mfa_at = session
-
     queue = await _hub.subscribe()
     try:
         await ws.send_json({"type": "ready",
@@ -281,6 +510,70 @@ async def live(ws: WebSocket) -> None:
             await ws.close(code=1011, reason="internal error")
     finally:
         await _hub.unsubscribe(queue)
+
+
+async def _handshake(ws: WebSocket, ip: str | None):
+    """The pre-subscribe half of the socket: wait for the hello, then
+    authenticate it. Returns `(user_id, mfa_at, case_id)`, or None after
+    having closed the socket with a reason the client can act on.
+
+    Split out of `live()` on 2026-09-09 so that the pending slot is
+    released by ONE `finally` around this call rather than before each
+    of the five refusals below. Every one of them is necessarily sent
+    after `accept()` -- each needs a frame the peer sent -- and so every
+    one carries the ten-second linger `_PendingBudget` describes. The hub
+    ceiling used to be checked here first, after the handshake; it moved
+    to `live()`, in front of `accept()`, with the other credential-free
+    refusals, and the check that actually holds is the one `live()`
+    makes after authentication, because everything pending can pass a
+    pre-accept check at once.
+
+    The hello deadline is `_HELLO_SECONDS`, not a literal: before this
+    the ten seconds were written into the call, so nothing could shorten
+    it for a test or a deployment under load, and a socket that ran it
+    out was not counted anywhere while it did.
+    """
+    try:
+        hello = await asyncio.wait_for(ws.receive_json(),
+                                       timeout=_HELLO_SECONDS)
+    except (TimeoutError, asyncio.TimeoutError, ValueError, WebSocketDisconnect):
+        # Under uvicorn a close after the peer has already gone raises
+        # rather than no-ops; a peer that left before saying hello is not
+        # worth a traceback in the server log.
+        with contextlib.suppress(Exception):
+            await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
+        return None
+
+    token = (hello or {}).get("token")
+    raw_case = (hello or {}).get("case_id")
+    if not isinstance(token, str) or not token:
+        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
+        return None
+    try:
+        case_id = UUID(raw_case) if raw_case else None
+    except (TypeError, ValueError):
+        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="bad case id")
+        return None
+
+    # Authenticate on a SHORT-LIVED connection, released immediately. The
+    # first version held this one open for the life of the socket, which is
+    # how twenty-five people with two tabs each exhausted Postgres. The
+    # peer address and client software are read on the event loop and
+    # handed to the worker thread: `_authenticate` runs off the loop and
+    # has no request object of its own.
+    user_agent = ws.headers.get("user-agent")
+    try:
+        session = await asyncio.to_thread(
+            _authenticate, token, case_id, ip, user_agent)
+    except Exception:  # noqa: BLE001
+        log.exception("live authentication failed")
+        await ws.close(code=1011, reason="internal error")
+        return None
+    if session is None:
+        await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no such case")
+        return None
+    user_id, mfa_at = session
+    return user_id, mfa_at, case_id
 
 
 def _authenticate(token: str, case_id: UUID | None, ip: str | None,
