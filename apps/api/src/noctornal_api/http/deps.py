@@ -50,6 +50,20 @@ SESSION_COOKIE = "__Host-session"
 CSRF_COOKIE = "__Host-csrf"
 CSRF_HEADER = "x-csrf-token"
 
+#: The attributes BOTH cookies are set with and deleted with. One
+#: declaration next to the names, because a browser matches a deletion
+#: against the stored cookie's Secure/Path/SameSite and the two halves had
+#: drifted: `routers/auth.py` set the pair with `secure=True,
+#: samesite="strict"` and cleared them with `delete_cookie(name, path="/")`,
+#: whose defaults emit no Secure attribute and `SameSite=lax`. A `__Host-`
+#: cookie without Secure is refused outright, so until 2026-09-09 logout
+#: returned 204 and the browser kept presenting the revoked token on every
+#: request until the BROWSER closed: the pair is set with no Max-Age, which
+#: makes it a session cookie, and a session cookie outlives the tab.
+#: `secure=True` is also what the `__Host-` prefix requires, with `Path=/`
+#: and no Domain.
+COOKIE_ATTRS: dict = {"path": "/", "secure": True, "samesite": "strict"}
+
 
 def get_conn() -> Iterator[psycopg.Connection]:
     conn = connect()  # autocommit
