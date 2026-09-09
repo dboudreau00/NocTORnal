@@ -1,5 +1,104 @@
 # Changelog
 
+## Alpha 5 — 2026-09-09
+
+Review release. **Still not audited, and still not lawful to operate
+against real material until the five blocking items in
+[docs/16](../docs/16-legal-and-external.md) are settled by somebody
+outside this codebase.** Nothing in this release touches those.
+
+An external product review of Alpha 4 was accurate on every point checked.
+Its recurring finding was this codebase's own signature defect: a
+document, docstring or counter claiming something the code does not do.
+This release answers its first two tiers.
+
+### The documents describe the program that exists
+
+Eight documents still described the July sketch, every piece of it removed
+or never built: Next.js (removed), OpenFGA and SpiceDB (removed),
+NATS and Celery (removed), three trust zones (superseded), a sigma.js
+WebGL sociogram (replaced by Canvas 2D), UUIDv7 (not in the tree).
+The tree has been one FastAPI process on Postgres 16 with a
+vanilla console under a strict CSP, a Postgres access gate and a Canvas 2D
+sociogram since August. Every live description now says so; every
+reversed decision keeps its history with a dated superseded-by note; the
+launch scripts no longer announce containers that do not exist; and a test
+refuses any new mention of the removed stack unless the line marks it as
+history. `README.md` is the owner's and was left alone.
+
+The version is single-sourced from `pyproject.toml` (it said 0.1.0 while
+the package said 0.4.0). `db/schema.sql` is generated from a migrated
+database and diffed in CI — it had named five of eleven schemas under a
+docstring calling it a mirror. Test and migration counts are dated
+snapshots held to the tree by a test, and a document that quotes an
+Alembic head must quote the real one.
+
+### Before any second analyst
+
+- **ACH cells can be scored from the console.** The stance route had
+  existed since Phase 6 with nothing calling it. Each evidence × hypothesis
+  cell opens a chooser showing the assertion's Admiralty grading and the
+  five-point stance scale; the ranking re-renders on save.
+- **Recovery codes can be typed.** The login field admitted six digits
+  only, so the documented clock-skew fallback was a bootstrap script that
+  bypasses MFA.
+- **The console uses the cookie session.** `__Host-session` is HttpOnly
+  with a readable CSRF half; nothing is written to web storage; logout's
+  cookie deletions carry `Secure`, which browsers had been ignoring. A
+  `#token=` link can no longer replace a session the browser already holds
+  (it did, browser-wide, in the first cut of this change — caught by the
+  adversarial review), and the server refuses to adopt a cookie for a
+  different account with a 409 and an audit row. The websocket still
+  authenticates from a token in its first frame, so a session restored
+  from the cookie is honestly "not live" until the next sign-in, and says
+  so.
+- **Two `labelOf` functions became one.** The second silently shadowed
+  the first, and projection-only nodes printed `null`.
+- **Bodies are capped before they are buffered.** Evidence uploads had no
+  cap at all onto a COMPLIANCE-locked bucket; ingest checked its cap after
+  buffering the payload. Both now refuse with 413 before the bytes
+  accumulate.
+- **The dead-letter listing is scoped** to what the caller can read; it
+  had listed every case's failures to any holder of global `ingest.read`.
+- **The sample-origin check is decided by configuration, never by the
+  Host header.** It had compared against `request.url`, which Starlette
+  builds from a client-supplied header, and was unsatisfiable from a
+  console whose CSP allowed only its own origin. Three variables and five
+  verdicts now decide it; the UI CSP names the sample origin; unset means
+  the control is OFF and every download refuses, in the readiness register
+  and in every document that describes it. The sample origin is a second
+  process of this code — a deployment decision recorded, not made.
+- **The persona status write has a ceiling and checks its rowcount**; it
+  had burned a RED persona for any holder of the global verb who knew the
+  id, and returned 200 for an id that did not exist.
+- **Credential-free websocket handshakes are refused before `accept()`**
+  and bounded per peer. The first cut refused after accepting, which under
+  uvicorn's websockets backend let a hostile peer hold the transport for
+  ten seconds uncounted — measured, not reasoned, by the review that
+  caught it.
+- **Migration 0059 binds every compartment column, and the ingest key's
+  forced compartment, to the registry.** A raw UPDATE or a psql typo can
+  no longer file material under a compartment nobody registered. The
+  migration refuses to run over legacy values and prints the cleanup.
+  Eleven test fixtures and the demo seeder had been writing unregistered
+  keys, several passing only because an earlier file left the key behind;
+  each now registers what it writes.
+
+### The hygiene checker was vacuous from a worktree
+
+`scripts/check_source_hygiene.py` matched its skip list against absolute
+path parts, so from any checkout under a `.claude/` directory it scanned
+nothing and reported a clean tree. It now compares in-tree paths and
+refuses an empty scan. It also fails the build on the owner's private
+alias, which shipped on the licence page of three releases before this one.
+
+### Known
+
+The suite is not order-independent on a reused database (see Alpha 4).
+`test_ratelimit_redis::test_redis_and_python_agree_request_for_request`
+fails deterministically on the development box and has since July; its
+docstring records the injected-clock refactor it needs.
+
 ## Alpha 4 — 2026-09-02
 
 Completion release. **Still not audited, and still not lawful to operate

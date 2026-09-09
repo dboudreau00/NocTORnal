@@ -32,6 +32,14 @@ honest delta between that plan and the build.
 > researcher should read) spent three days absent from the tree with a
 > fully green suite.
 
+**State (2026-09-09):** branch `main` (the working branch for the review
+pass; byte-identical to `deception-and-release-hardening` except
+`README.md`), Alembic head `0059`, 1565 `def test_` functions across the
+two pytest roots (~2170 collected items on a live stack), version 0.5.0
+single-sourced from `pyproject.toml`. FULL-SUITE FIGURE: see the Alpha 5
+entry in `release/CHANGELOG.md`. The counts below this paragraph are the
+dated records they say they are.
+
 **State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
 head `0055`, **1890 passing, 0 failing, 0 skipped** on a live stack —
 Postgres, Redis, MinIO and Mailpit up, both pytest roots, 4m36s. The rise
@@ -134,14 +142,14 @@ regressed — the measure got honest.**
 | 3 — Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | CONCOR; charting metric history. Bipartite→one-mode landed for conversations only — actor×forum and actor×wallet still use two-mode presets, and `_mode_warning` still says so. |
 | 4 — Collection | **90%** | ◐ | ✅ | ✅ | ✅ | XenForo/MyBB/Telegram adapters, embeddings, a scheduler process. **The clearance filter, the write paths and search reach landed 2026-09-02**: the listing endpoints had been handing RED source names to AMBER holders, `suppressed`/`suppress_reason` and `triage_state` were read by the UI and written by nothing, and `SearchService` never reached `collect.document`. `/sources/{id}/run` was also returning a RED source's hostname inside its error string. **The READ PATH landed 2026-08-10** and was the largest gap in this phase: `collect.document` and `collect.watch_hit` were written by the collector from the day the phase shipped and read by NOTHING — no endpoint, no UI, no search reach — so a watch could fire 400 times and an analyst saw the integer 400 with nothing to open. Three routes (documents, watch-hits, acknowledge), a Feeds → **Collected** subtab, and no migration: every column already existed, including the `notified_at`/`suppressed`/`acknowledged_by`/`acknowledged_at` lifecycle set that nothing had ever written or read. `run_once` still never raises proposals; the false docstring claim was corrected on 2026-09-02 rather than the code, and the deliberate not-taken decision is recorded there. |
 | 5 — Notification | **92%** | ✅ | ✅ | ◐ | ✅ | Jira, the integration admin surface, a worker. **Escalation of an unacknowledged priority-1 landed 2026-09-02**, with the three registered kinds that had no producer (EVIDENCE_INTEGRITY_ALARM, PROPOSAL_QUEUED, CASE_REVIEW_DUE), a read for the delivery ledger that had been write-only since 0029, a `notify_drain.py` cron entry, and an advisory lock so two drains cannot double-raise. The integrity alarm is idempotent while unacknowledged, because on an unrate-limited read path it was otherwise one priority-1 email per request. **Reviewed 2026-07-26** (F19): the centre never checked case assignment, the outbox drain checked neither assignment nor current clearance, and the label composer had zero call sites. All fixed. |
-| 6 — Tradecraft | **95%** | ◐ | ✅ | ✅ | ✅ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. **The assumptions register landed 2026-09-02** — migration 0056, a service, `/cases/{id}/assumptions` under `case.read`/`case.update`, inclusion of OPEN and CONFIRMED statements in the report, and an Assumptions subtab beside ACH. What remains is the ACH-stance and dual-control-policy surfaces. |
+| 6 — Tradecraft | **96%** | ◐ | ✅ | ✅ | ✅ | ~~WebAuthn, timeline replay,~~ the assumptions register. **Corrected 2026-08-10 — two of the three named gaps were bookkeeping errors and the UI claim was false.** WebAuthn is a DELIBERATE absence stated in four documents, and SECURITY.md says reporting it is not a finding; timeline replay is BUILT, and belongs to Phase 2. The assumptions register is the only genuine remaining feature. ~~**"The UI is complete" was wrong**: approvals have no analyst surface at all.~~ **Approvals UI landed 2026-08-10** — Triage → Dual control lists requests with their exact payload (an approver who cannot see the parameters is signing a description of them), a 409 on merge now offers to raise the request carrying the same reason, and an approved unspent request is executable from the list. Before it, dual control did not make merging two-person, it made it impossible. **The assumptions register landed 2026-09-02** — migration 0056, a service, `/cases/{id}/assumptions` under `case.read`/`case.update`, inclusion of OPEN and CONFIRMED statements in the report, and an Assumptions subtab beside ACH. **ACH cells can be scored from the console since 2026-09-09** — the stance route had existed since Phase 6 with nothing calling it; each cell opens a chooser carrying the assertion's Admiralty grading and the five-point scale. What remains is the dual-control-policy surface. |
 | 7 — Comms | **95%** | ✅ | ✅ | ✅ | ✅ | **Effectively done.** The Comms pane covers the normalise preview, the contact-block parser, binding, correlation, PGP verification with its three outcome classes, the unverified queue and co-participation. ~~What is left is the Telegram id-collision model change (F1 / docs/16 D8)~~ — **D8 was CLOSED 2026-07-26** by migration 0051: `telegram_id_norm` namespaces every id `u:`/`c:`/`g:` and accepts an explicit prefix from a collector that knows the type. What is left is optional: detached signatures, and a keyserver-free way to obtain a vendor key. |
 | 8 — Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Fuzzy hashing (imphash/ssdeep/TLSH), YARA, prohibited-content screening, sandbox integration. Each absence is recorded on the sample row as a gap with a reason. **Reviewed 2026-07-26** — nine criticals, all fixed — and the Lab pane landed the same day. **Still the one phase where 100% here would mean "do not switch on": see L1.** |
 | 9 — Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | The outbound credential vault with per-provider quota. Raw object storage landed 2026-07-25 (`rawstore.py`), so raw-before-parse is real rather than aspirational and re-parse works. Triage queue, dead letters and key admin all reached the UI. |
 
-### Overall: **92.7%** (was ~84% at the start of 2026-07-26)
+### Overall: **92.8%** (was ~84% at the start of 2026-07-26)
 
-Unweighted mean across the ten phases: 100, 100, 100, 85, 90, 92, 95,
+Unweighted mean across the ten phases: 100, 100, 100, 85, 90, 92, 96,
 95, 80, 90.
 
 **Corrected 2026-09-02.** This line read ~95% while the row above it
@@ -769,12 +777,12 @@ one that must not be operated until L1–L4 are settled.
 | Item | Note |
 |---|---|
 | DNS-rebinding-proof SSRF protection | `fetch()` now re-validates every redirect hop and classifies addresses by what they ARE rather than by an enumerated list, but the name is still resolved once here and again by the socket layer. The real fix is a proxy enforcing policy at connect time. |
-| Session IP/UA binding | A stolen token is portable |
+| Session IP/UA binding | **Built** (migration 0058): `ip`/`user_agent` recorded at sign-in, enforced on the HTTP path and, since 2026-09-09, on the websocket handshake too -- opt-in via `NOCTORNAL_SESSION_STRICT_BINDING`, off by default, so a stolen token is portable until an operator turns it on |
 | Non-owner DB role + RLS | The API connects as the table owner, so RLS is a no-op behind it |
-| Login timing equalisation | A missing account returns faster than a wrong password |
-| Compartment registry | Free-text; a typo creates silent no-access |
+| Login timing equalisation | **Pinned by a test since 2026-09-02** (`test_login_timing`): the login path runs the Argon2 verify against a fixed hash for a missing account, exactly once, like a wrong password |
+| Compartment registry | **Registry since 0057; every compartment column and the ingest key's forced compartment bound to it since 0059 (2026-09-09).** A raw UPDATE or a psql typo is refused by the database. Still open: no route deletes or renames a registered key (0059 refuses both while any row carries it) |
 | CI typecheck | No annotations to check against |
-| Redis isolation | The limiter shares an instance running `allkeys-lru` |
+| Redis isolation | The limiter shares an instance running `allkeys-lru`; since 2026-09-02 the startup probe warns loudly about an evicting policy and the readiness register reports it, but whether the limiter has an instance to itself is a deployment fact the runtime cannot see |
 
 ---
 
@@ -829,6 +837,60 @@ test does not configure. It is a property of the fixture estate, not a
 defect in the purge. A fresh database, which is what CI builds, does not
 show it.
 
+## The review pass, 2026-09-09
+
+An external product review of Alpha 4 arrived and was accurate on every
+point checked: `pyproject` at 0.1.0 beside a package at 0.4.0; two
+`labelOf` functions; a login field that could not take a recovery code;
+an uncapped evidence upload onto a COMPLIANCE-locked bucket; a
+`db/schema.sql` naming five of eleven schemas under a docstring calling
+it a mirror; eight documents still describing a stack that was removed
+(Next.js and OpenFGA, removed; NATS, removed; a sigma.js WebGL sociogram,
+replaced by Canvas 2D); a sample-origin check that trusted the Host
+header; a persona write with no ceiling and a 200 for a missing id;
+unbounded credential-free websocket handshakes; compartment arrays bound
+to nothing. Its two nearer tiers were run here as six groups, each in a
+worktree on its own database clone, then eighteen adversarial reviews,
+a fix round, and fresh adversaries over the fixes.
+
+**Every group was refuted on its first cut again** — and the second cut
+of two of them was refuted again, on exactly the shape this file keeps
+naming. The console's new cookie session let a `#token=` link REPLACE a
+session the browser already held, browser-wide, attributing every write
+from every open tab to the link's account; and the websocket budget
+refused *after* `accept()`, which under uvicorn's websockets backend let
+a hostile peer hold each refused transport for ten seconds, uncounted —
+found by measuring held connections, not by reading the code. Both are
+closed, with tests that read both sides.
+
+What this pass hands the owner rather than decides:
+
+- **The sample origin is now a second process of this codebase** (the
+  same image with `NOCTORNAL_PUBLIC_ORIGIN` set to the sample origin).
+  `infra/docker-compose.yml` has no such service yet; a dev deployment
+  runs a second uvicorn on another port. With the variable unset the
+  control is OFF and every download refuses, and every document now says
+  so.
+- **The evidence upload cap is a 256 MiB module constant**, mirroring the
+  sample cap. There was no cap at all before. Exhibits larger than that
+  (disk images, full exports) need a decision and probably an override.
+- **A registered compartment cannot be deleted or renamed** while any
+  row carries it, and there is no route for either.
+- **The websocket still authenticates from the sign-in token in its
+  first frame** and reads no cookie, so a session restored from the
+  cookie is honestly "not live" until the next sign-in, and the dot says
+  so. Accepting the cookie pair on the socket is the change that would
+  let the login response stop returning the token at all.
+- **`README.md`** still says `graphology` + `sigma.js` (WebGL), 1269
+  tests, 52 revisions, and calls `db/schema.sql` an annotated reference.
+  It is the owner's file and this pass did not touch it.
+
+**Suite non-idempotence, again.** Under migration 0059 eleven fixtures in
+eight files were writing compartments nobody had registered; several
+passed only because an earlier file in alphabetical order left the key
+behind. Each now registers what it writes. The class is not closed by a
+test: a fixture that writes a new key still has to know to register it.
+
 ## Open questions for the operator
 
 - **Ingest key holders** — internal scripts only, or external partners?
@@ -841,6 +903,11 @@ show it.
   active user holds `SECURITY_OFFICER`.
 - **Retention periods.** Six placeholder rules ship in migration 0032, and
   purge warns loudly on every one nobody has confirmed.
+- **Where does the sample origin run?** It is a second process of this
+  code on its own hostname (docs/16 C9); nothing in compose starts it.
+- **How large is an exhibit?** The evidence upload cap is 256 MiB.
+- **Do compartments ever retire?** Nothing can delete or rename a
+  registered key while a row carries it.
 
 ---
 
