@@ -1379,8 +1379,9 @@ def test_the_live_client_stops_on_the_policy_close_the_server_documents():
     behaviour as the reason a finer code was not worth sending. Two files,
     each honest about the other, wrong together.
     """
-    js = (_SRC / "http" / "static" / "app.js").read_text(encoding="utf-8")
-    live = (_SRC / "http" / "routers" / "live.py").read_text(encoding="utf-8")
+    src = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
+    js = (src / "http" / "static" / "app.js").read_text(encoding="utf-8")
+    live = (src / "http" / "routers" / "live.py").read_text(encoding="utf-8")
 
     start = js.index("ws.addEventListener('close'")
     handler = js[start:start + 1200]
