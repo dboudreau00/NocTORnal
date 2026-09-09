@@ -87,8 +87,16 @@ def files() -> list[Path]:
     for path in REPO.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in SUFFIXES:
             continue
+        # RELATIVE parts, never absolute ones. On 2026-09-09 `.claude` was
+        # added to SKIP_DIRS and matched against `path.parts` -- the whole
+        # absolute path -- so from a checkout that itself lives under
+        # `.claude/worktrees/<name>/` every file matched the skip, the
+        # script scanned nothing, and printed "0 files clean" with exit 0.
+        # Two reviewers caught it the same afternoon. A skip list is about
+        # directories INSIDE the tree, so it is compared against the path
+        # inside the tree.
         if any(part in SKIP_DIRS or part.endswith(".egg-info")
-               for part in path.parts):
+               for part in path.relative_to(REPO).parts):
             continue
         out.append(path)
     return sorted(out)
@@ -144,6 +152,13 @@ def main() -> int:
                     f"on the licence page of three releases before this "
                     f"check existed. Replace it with the public name.")
                 break
+
+    # A scan that found nothing to scan is not a pass. Without this guard
+    # the skip-list bug above reported success from every harness worktree.
+    if checked == 0:
+        print("Source hygiene: 0 files checked -- the walk found nothing, "
+              "which is a broken checker, not a clean tree.", file=sys.stderr)
+        return 1
 
     if problems:
         print(f"Source hygiene: {len(problems)} problem(s) in {checked} files.\n",
