@@ -59,6 +59,18 @@ def _user(conn, clearance="AMBER", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"ntfy-{uuid4().hex[:8]}@noctornal.test", "Recipient", "x" * 20)
+    # Registered before the array is written. Since 2026-09-09 (migration
+    # 0059) `iam.app_user.compartments` -- and `notify.notification.
+    # compartments`, which `_raise` writes -- are bound to `iam.compartment`,
+    # so the raw UPDATE below, the out-of-band path the registry did not
+    # gate before then, is refused for a key nobody registered. Three tests
+    # here failed on exactly that refusal. ON CONFLICT and never deleted:
+    # OPERATION-X is shared by every test in this file, and the registry
+    # refuses to drop a key while any row still carries it.
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (notification test)"))
     conn.execute(
         "UPDATE iam.app_user SET tlp_clearance = %s, compartments = %s WHERE id = %s",
         (clearance, list(compartments), uid))

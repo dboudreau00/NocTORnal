@@ -44,6 +44,19 @@ EMAIL_LIKE = "iqe-%@noctornal.test"
 def conn():
     from noctornal_api.db import connect
     c = connect()
+    # The compartment every stealer-log test here forces onto its key and
+    # reads its caller into, registered by THIS file. Since 2026-09-09
+    # (migration 0059) `iam.app_user.compartments` (the raw UPDATE in
+    # `_make_user`) and `ingest.api_key.forced_compartment` (the key
+    # `_ingest` issues) are both bound to `iam.compartment`. Until then
+    # this file passed only because `test_ingest_pg.py` sorts first and
+    # leaves the same row behind; on a database without it, four tests
+    # failed at that UPDATE. ON CONFLICT because that other file registers
+    # the same key, and never deleted because the registry refuses to drop
+    # a key while any row still carries it.
+    c.execute("INSERT INTO iam.compartment (key, label) VALUES "
+              "('STEALER-2026', 'Stealer logs 2026 (test)') "
+              "ON CONFLICT (key) DO NOTHING")
     yield c
     sub = f"(SELECT id FROM iam.app_user WHERE email LIKE '{EMAIL_LIKE}')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'

@@ -114,6 +114,16 @@ def world(conn):
 
 def _svc(conn, uid, clearance="RED", compartments=frozenset()):
     from noctornal_api.analytics_runs import AnalyticsRunService
+    # Since 0059 every compartment column is bound to iam.compartment, and
+    # the run rows this service writes carry `visibility_compartments`.
+    # Register here, at the one place every caller passes through, so a
+    # test that names a compartment is not refused by the database for
+    # a key it never meant to invent.
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING",
+            (key, f"{key} (analytics test)"))
     return AnalyticsRunService(conn, clearance=clearance,
                                compartments=compartments, actor_id=uid)
 

@@ -579,6 +579,19 @@ class IngestService:
         A stealer-log feed without a compartment is refused here AND by a
         CHECK constraint. The constraint is the guarantee; this is the
         readable error, and it names the reason rather than the rule.
+
+        The compartment itself is checked by the database alone. Until
+        2026-09-09 `forced_compartment` was free text: a stealer-log key
+        issued under `OP-KESTRAL` was accepted, every record it ingested
+        was filed under a lock nobody held, and nothing said so. Migration
+        0059 binds the column to `iam.compartment`, and its refusal names
+        the key and the registration route on the one line
+        `http/errors.safe_detail` forwards -- so it is wrapped as an
+        `IngestError` below rather than re-checked here. Two authored
+        messages for one rule would be two things to keep identical, and
+        the trigger's is the one a psql operator also reads. Before the
+        wrap the same refusal left this method as a raw psycopg error and
+        reached the operator as a 500 with no key in it.
         """
         if environment not in {"live", "test"}:
             raise IngestError("environment must be live or test")
@@ -602,18 +615,30 @@ class IngestService:
         token = f"{KEY_PREFIX}_{environment}_{key_id}{secret_half}"
 
         now = datetime.now(timezone.utc)
-        row = self._c.execute(
-            """INSERT INTO ingest.api_key
-                   (key_id, secret_hmac, pepper_id, name, environment,
-                    source_id, declared_category, default_reliability,
-                    classification_ceiling, forced_compartment, ip_allowlist,
-                    expires_at, owner_user_id, replaces_key_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               RETURNING id, expires_at""",
-            (key_id, hash_secret(secret_half), "env:v1", name, environment,
-             source_id, declared_category, default_reliability,
-             classification_ceiling, forced_compartment, ip_allowlist or [],
-             now + ttl, owner_user_id, replaces_key_id)).fetchone()
+        try:
+            row = self._c.execute(
+                """INSERT INTO ingest.api_key
+                       (key_id, secret_hmac, pepper_id, name, environment,
+                        source_id, declared_category, default_reliability,
+                        classification_ceiling, forced_compartment, ip_allowlist,
+                        expires_at, owner_user_id, replaces_key_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id, expires_at""",
+                (key_id, hash_secret(secret_half), "env:v1", name, environment,
+                 source_id, declared_category, default_reliability,
+                 classification_ceiling, forced_compartment, ip_allowlist or [],
+                 now + ttl, owner_user_id, replaces_key_id)).fetchone()
+        except (psycopg.errors.RaiseException,
+                psycopg.errors.CheckViolation) as exc:
+            # RaiseException is 0059's compartment binding refusing an
+            # unregistered `forced_compartment`; CheckViolation is one of
+            # 0033's row rules (an unknown category, for instance) that
+            # this method does not pre-check. Both are the caller's input
+            # being wrong, so both are an IngestError -- the router's 400
+            # -- with the database as the cause, which `safe_detail`
+            # renders as the authored first line plus a correlation id.
+            # Until 2026-09-09 neither was caught and both were 500s.
+            raise IngestError(str(exc)) from exc
         self._audit(None, owner_user_id, "INGEST_KEY_ISSUED", {
             "key_id": key_id, "category": declared_category,
             "expires_at": row[1].isoformat(),

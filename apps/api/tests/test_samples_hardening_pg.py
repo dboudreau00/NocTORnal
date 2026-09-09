@@ -174,8 +174,21 @@ def policy(monkeypatch):
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://samples.example")
 
 
+def _register(conn, compartments):
+    """0059 binds `lab.sample.compartments` to the registry; a submit under
+    an unregistered key is refused by the database, which until
+    2026-09-09 this file only escaped because test_f19_review_pg sorts
+    earlier and registers OP-KESTREL."""
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING",
+            (key, f"{key} (samples hardening test)"))
+
+
 def _submit(conn, store, *, classification="AMBER", compartments=frozenset(),
             case_id=None):
+    _register(conn, compartments)
     from noctornal_api.stores import PgUserStore
     who = PgUserStore(conn).create_user(
         f"shp-{uuid4().hex[:8]}@noctornal.test", "Shp", "x" * 20)

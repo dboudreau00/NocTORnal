@@ -22,6 +22,16 @@ What it puts there, and why each one:
   * an IOC feed record with a watched selector, so one row scores high and
     the queue is visibly ordered by something;
   * a collection source that is due and one that is unhealthy.
+
+The stealer feed's compartment (STEALER-2026) is REGISTERED in
+`iam.compartment` first if it is not already there: since migration 0059
+(2026-09-09) an ingest key cannot force an unregistered compartment, and
+before this script registered it, a fresh database -- or any database on
+which seed_showcase.py had not happened to run first -- killed the seeder
+with an IngestError at that exact call. The registration is printed and
+audited, because it widens the vocabulary every read-in is checked
+against. Reading the case owner INTO the compartment stays
+seed_showcase.py's job; this script needs only the key to exist.
 """
 from __future__ import annotations
 
@@ -37,6 +47,7 @@ sys.path.insert(0, os.path.join(
 
 from _env import load_env_local  # noqa: E402
 from noctornal_api.db import connect  # noqa: E402
+from noctornal_api.iam_admin import IamAdminService  # noqa: E402
 from noctornal_api.ingest import IngestService  # noqa: E402
 from noctornal_api.rawstore import RawBatchStorage, RawStoreError  # noqa: E402
 
@@ -175,6 +186,29 @@ def main() -> int:
     partner = svc.authenticate(svc.issue_key(
         name=FEED_NAME, owner_user_id=owner,
         declared_category="RANSOM_LEAK_POST").secret)
+
+    # The compartment must be in the REGISTRY before a key can force it.
+    # Since 2026-09-09 (migration 0059) `ingest.api_key.forced_compartment`
+    # is bound to `iam.compartment`, and `issue_key` refuses an
+    # unregistered key with an IngestError naming it -- which, uncaught,
+    # is where this script died on a fresh database, or on any database
+    # where seed_showcase.py (which registers the same key for its
+    # compartmented case) had not happened to run first. Guarded with a
+    # lookup rather than caught, because `register_compartment` REFUSES a
+    # duplicate by design (a re-registration would silently relabel what
+    # every case in the compartment is filed under) and this script is
+    # re-runnable. Said out loud, for seed_showcase.py's reason: widening
+    # the vocabulary the access gate compares against is not something a
+    # seed script should do quietly.
+    admin = IamAdminService(conn)
+    if COMPARTMENT not in {r["key"] for r in admin.list_compartments()}:
+        admin.register_compartment(key=COMPARTMENT,
+                                   label=f"{COMPARTMENT} (demo seed)",
+                                   actor_id=owner)
+        print(f"REGISTERED compartment {COMPARTMENT} -- this widens the "
+              f"vocabulary every case and read-in is checked against, and "
+              f"is audited as COMPARTMENT_REGISTERED.")
+
     stealer = svc.authenticate(svc.issue_key(
         name=STEALER_FEED, owner_user_id=owner,
         declared_category="STEALER_LOG",

@@ -47,13 +47,29 @@ def conn():
     c.close()
 
 
+def _registered(conn, compartments) -> list[str]:
+    """Register each key before a row is filed under it, and return the
+    list the write wants. Since 2026-09-09 (migration 0059) every
+    compartment column -- the raw UPDATE in `_user` and the `core.node`
+    array `_node` writes through the graph service alike -- is bound to
+    `iam.compartment`, so an unregistered key is refused rather than
+    silently filed. Two tests here failed on that refusal. ON CONFLICT and
+    never deleted: OPERATION-X is shared across this file, and the
+    registry refuses to drop a key while any row still carries it."""
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (withheld test)"))
+    return list(compartments)
+
+
 def _user(conn, clearance="RED", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"wthh-{uuid4().hex[:8]}@noctornal.test", "Analyst", "x" * 20)
     conn.execute(
         "UPDATE iam.app_user SET tlp_clearance = %s, compartments = %s WHERE id = %s",
-        (clearance, list(compartments), uid))
+        (clearance, _registered(conn, compartments), uid))
     return uid
 
 
@@ -70,7 +86,8 @@ def _node(conn, case_id, actor, label, classification="GREEN", compartments=()):
     from noctornal_api.graph import AssertionInput, GraphWriteService
     return GraphWriteService(conn).create_node(
         case_id=case_id, node_type="IDENTITY", label=label, created_by=actor,
-        classification=classification, compartments=list(compartments),
+        classification=classification,
+        compartments=_registered(conn, compartments),
         assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=actor))
 
 

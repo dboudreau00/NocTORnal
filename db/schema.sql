@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0058.
+-- GENERATED MIRROR of the schema at Alembic revision 0059.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0058
+-- Alembic revision: 0059
 -- =====================================================================
 
 --
@@ -647,6 +647,151 @@ BEGIN
 
   RETURN NEW;
 END $$;
+
+--
+-- Name: compartment_in_use(text); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.compartment_in_use(key text) RETURNS text[]
+    LANGUAGE sql STABLE
+    AS $_$
+  SELECT array_agg(col ORDER BY col) FROM (
+        SELECT 'iam.app_user.compartments' AS col WHERE EXISTS (SELECT 1 FROM iam."app_user" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'core.case.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."case" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'core.node.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."node" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'core.edge.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."edge" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'core.evidence.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."evidence" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'analytics.metric_run.visibility_compartments' AS col WHERE EXISTS (SELECT 1 FROM analytics."metric_run" WHERE $1 = ANY(visibility_compartments))
+        UNION ALL
+        SELECT 'notify.notification.compartments' AS col WHERE EXISTS (SELECT 1 FROM notify."notification" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'lab.sample.compartments' AS col WHERE EXISTS (SELECT 1 FROM lab."sample" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'ingest.record.compartments' AS col WHERE EXISTS (SELECT 1 FROM ingest."record" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'ingest.dead_letter.compartments' AS col WHERE EXISTS (SELECT 1 FROM ingest."dead_letter" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'comms.channel_binding.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."channel_binding" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'comms.conversation.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."conversation" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'comms.message.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."message" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'comms.contact_block.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."contact_block" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'deception.capture.compartments' AS col WHERE EXISTS (SELECT 1 FROM deception."capture" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'deception.email_message.compartments' AS col WHERE EXISTS (SELECT 1 FROM deception."email_message" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'deception.call_record.compartments' AS col WHERE EXISTS (SELECT 1 FROM deception."call_record" WHERE $1 = ANY(compartments))
+        UNION ALL
+        SELECT 'ingest.api_key.forced_compartment' AS col WHERE EXISTS (SELECT 1 FROM ingest."api_key" WHERE forced_compartment = $1)
+  ) s
+$_$;
+
+--
+-- Name: FUNCTION compartment_in_use(key text); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.compartment_in_use(key text) IS 'The bound columns (schema.table.column) that still carry the key, or NULL. Used by the registry trigger that refuses to drop or rename a key in use.';
+
+--
+-- Name: compartments_registered(text[]); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.compartments_registered(keys text[]) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT keys IS NULL OR NOT EXISTS (
+    SELECT 1 FROM unnest(keys) AS k
+     WHERE k IS NULL
+        OR NOT EXISTS (SELECT 1 FROM iam.compartment c WHERE c.key = k))
+$$;
+
+--
+-- Name: FUNCTION compartments_registered(keys text[]); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.compartments_registered(keys text[]) IS 'True iff every element is a non-NULL key in iam.compartment. A NULL array is vacuously registered; a NULL ELEMENT is not, because it is not a key and can never be held.';
+
+--
+-- Name: refuse_compartment_removal(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.refuse_compartment_removal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  holders text[];
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.key = OLD.key THEN
+    RETURN NEW;
+  END IF;
+  holders := iam.compartment_in_use(OLD.key);
+  IF holders IS NOT NULL THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'compartment ' || OLD.key || ' is still carried by '
+      || array_to_string(holders, ', ')
+      || ': a registered key cannot be dropped or renamed while rows are'
+      || ' filed under it, because they would become unregistered and'
+      || ' unwritable. Rename or remove it in those columns first';
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END
+$$;
+
+--
+-- Name: refuse_unregistered_compartment(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.refuse_unregistered_compartment() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE
+  keys text[];
+  bad  text[];
+BEGIN
+  -- TG_ARGV[0] is the column, TG_ARGV[1] is 'array' or 'scalar'. Read
+  -- from NEW by name so one function serves every bound column.
+  IF TG_ARGV[1] = 'scalar' THEN
+    EXECUTE format('SELECT ARRAY[($1).%I]', TG_ARGV[0]) INTO keys USING NEW;
+  ELSE
+    EXECUTE format('SELECT ($1).%I', TG_ARGV[0]) INTO keys USING NEW;
+  END IF;
+  bad := iam.unregistered_compartments(keys);
+  IF bad IS NOT NULL THEN
+    -- One line, no DETAIL: http/errors.safe_detail forwards only the
+    -- first line of a P0001 to the client, so everything the operator
+    -- needs has to be on it. The default SQLSTATE IS the contract here;
+    -- a check_violation would be replaced by a generic sentence.
+    RAISE EXCEPTION USING MESSAGE =
+      'compartment key(s) ' || array_to_string(bad, ', ')
+      || ' in ' || TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME || '.' || TG_ARGV[0]
+      || ' are not registered: register each key first (POST /api/v1/compartments,'
+      || ' user.manage), because an unregistered key is a typo and a typo'
+      || ' in a need-to-know lock is silent no-access';
+  END IF;
+  RETURN NEW;
+END
+$_$;
+
+--
+-- Name: unregistered_compartments(text[]); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.unregistered_compartments(keys text[]) RETURNS text[]
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT array_agg(DISTINCT coalesce(k, 'NULL') ORDER BY coalesce(k, 'NULL'))
+    FROM unnest(keys) AS k
+   WHERE k IS NULL
+      OR NOT EXISTS (SELECT 1 FROM iam.compartment c WHERE c.key = k)
+$$;
 
 --
 -- Name: block_access_mutation(); Type: FUNCTION; Schema: lab; Owner: -
@@ -4115,6 +4260,12 @@ CREATE INDEX notification_recipient_idx ON notify.notification USING btree (reci
 CREATE INDEX notification_unread_idx ON notify.notification USING btree (recipient_id, created_at DESC) WHERE (read_at IS NULL);
 
 --
+-- Name: metric_run compartments_registered; Type: TRIGGER; Schema: analytics; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF visibility_compartments ON analytics.metric_run FOR EACH ROW WHEN ((cardinality(new.visibility_compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('visibility_compartments', 'array');
+
+--
 -- Name: event audit_chain; Type: TRIGGER; Schema: audit; Owner: -
 --
 
@@ -4139,6 +4290,30 @@ CREATE TRIGGER event_no_truncate BEFORE TRUNCATE ON audit.event FOR EACH STATEME
 CREATE TRIGGER document_tsv BEFORE INSERT OR UPDATE ON collect.document FOR EACH ROW EXECUTE FUNCTION collect.document_tsv_update();
 
 --
+-- Name: channel_binding compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON comms.channel_binding FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: contact_block compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON comms.contact_block FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: conversation compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON comms.conversation FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: message compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON comms.message FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
 -- Name: pgp_verification pgp_verification_confirms_its_binding; Type: TRIGGER; Schema: comms; Owner: -
 --
 
@@ -4149,6 +4324,30 @@ CREATE TRIGGER pgp_verification_confirms_its_binding BEFORE INSERT OR UPDATE ON 
 --
 
 CREATE CONSTRAINT TRIGGER assertion_protects_element AFTER DELETE OR UPDATE OF node_id, edge_id ON core.assertion DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION core.assertion_protects_element();
+
+--
+-- Name: case compartments_registered; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core."case" FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: edge compartments_registered; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core.edge FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: evidence compartments_registered; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core.evidence FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: node compartments_registered; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core.node FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
 -- Name: evidence_custody custody_chain; Type: TRIGGER; Schema: core; Owner: -
@@ -4277,10 +4476,64 @@ CREATE TRIGGER call_record_tlp BEFORE INSERT OR UPDATE ON deception.call_record 
 CREATE TRIGGER capture_tlp BEFORE INSERT OR UPDATE ON deception.capture FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
 
 --
+-- Name: call_record compartments_registered; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON deception.call_record FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: capture compartments_registered; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON deception.capture FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: email_message compartments_registered; Type: TRIGGER; Schema: deception; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON deception.email_message FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
 -- Name: email_message email_message_tlp; Type: TRIGGER; Schema: deception; Owner: -
 --
 
 CREATE TRIGGER email_message_tlp BEFORE INSERT OR UPDATE ON deception.email_message FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
+
+--
+-- Name: compartment compartment_in_use; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER compartment_in_use BEFORE DELETE OR UPDATE OF key ON iam.compartment FOR EACH ROW EXECUTE FUNCTION iam.refuse_compartment_removal();
+
+--
+-- Name: app_user compartments_registered; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON iam.app_user FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: api_key compartments_registered; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF forced_compartment ON ingest.api_key FOR EACH ROW WHEN ((new.forced_compartment IS NOT NULL)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('forced_compartment', 'scalar');
+
+--
+-- Name: dead_letter compartments_registered; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON ingest.dead_letter FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: record compartments_registered; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON ingest.record FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: sample compartments_registered; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON lab.sample FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
 -- Name: sample_access sample_access_append_only; Type: TRIGGER; Schema: lab; Owner: -
@@ -4299,6 +4552,12 @@ CREATE TRIGGER sample_access_no_truncate BEFORE TRUNCATE ON lab.sample_access FO
 --
 
 CREATE TRIGGER sample_tlp BEFORE INSERT OR UPDATE ON lab.sample FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
+
+--
+-- Name: notification compartments_registered; Type: TRIGGER; Schema: notify; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON notify.notification FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
 -- Name: notification notification_announce; Type: TRIGGER; Schema: notify; Owner: -
