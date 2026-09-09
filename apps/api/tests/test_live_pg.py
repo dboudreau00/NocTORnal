@@ -19,6 +19,7 @@ things.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -34,6 +35,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 
 EMAIL_LIKE = "live-%@noctornal.test"
+LIVE = "/api/v1/live"
+# TEST-NET addresses (RFC 5737), so a leaked fixture value can never be a
+# real peer.
+PEER_A = "203.0.113.20"
+PEER_B = "198.51.100.30"
+STRICT = "NOCTORNAL_SESSION_STRICT_BINDING"
 
 
 @pytest.fixture
@@ -49,6 +56,9 @@ def conn():
         c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
+        # The socket tests below mint sessions; a session row references
+        # its user, so it goes first.
+        c.execute(f"DELETE FROM iam.session WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM iam.app_user WHERE id IN {sub}")
     c.close()
 
@@ -316,3 +326,245 @@ def test_a_burst_is_coalesced(conn):
     js = (Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
           / "http" / "static" / "app.js").read_text(encoding="utf-8")
     assert "_refetchSoon = debounce(" in js
+
+
+# --- the pending budget: sockets are counted from before accept() --------
+#
+# Until 2026-09-09 `_MAX_SOCKETS` was compared against the number of
+# AUTHENTICATED subscribers, and nothing counted a socket between
+# `accept()` and its hello frame: the rate-limit middleware is an
+# `@app.middleware("http")` and never runs for a websocket scope. A peer
+# with no session could open sockets until the process ran out of
+# descriptors and hold each for the whole ten-second hello deadline while
+# the ceiling reported zero. These tests drive the real app through
+# Starlette's TestClient: `with TestClient(...)` shares one event loop
+# across every socket it opens, which is what lets several sit open at
+# once the way an attacker's would.
+
+def _app():
+    """The real app with the limiter swapped for an in-process one, so two
+    tests in one process do not share a meter -- the shape
+    `test_session_binding_pg._app` uses."""
+    from noctornal_api.http.app import create_app
+    from noctornal_api.ratelimit import LIMITS, InProcessBackend, RateLimiter
+    app = create_app()
+    app.state.limiter = RateLimiter(InProcessBackend(), limits=dict(LIMITS))
+    return app
+
+
+def _client(app, ip: str):
+    """A client whose sockets arrive FROM `ip`, opened as a context manager
+    so that all of them run on one portal (one event loop)."""
+    from fastapi.testclient import TestClient
+    return TestClient(app, client=(ip, 40000))
+
+
+def _token(conn, user_id) -> str:
+    """A session minted directly, the way `bootstrap.py session` does. With
+    strict binding off (every test below clears the flag) the socket
+    accepts a session that was never bound to an address."""
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), user_id, mfa_satisfied=True)
+    return token
+
+
+def _budget(monkeypatch, *, pending: int, per_peer: int = 8,
+            hello: float = 20.0):
+    """Shrink the budget for a test. `raising=False` so that the SAME test
+    runs against the pre-2026-09-09 module, where these names did not
+    exist, and reaches its behavioural assertion -- the N+1th socket being
+    parked for the deadline and closing with "no credentials" -- before
+    any line that reads the counter fails on the missing attribute. Run
+    that way on 2026-09-09: the three regression tests below fail on
+    behaviour first, the hub-ceiling test on the attribute."""
+    from noctornal_api.http.routers import live
+    monkeypatch.delenv(STRICT, raising=False)
+    monkeypatch.setattr(live, "_MAX_PENDING", pending, raising=False)
+    monkeypatch.setattr(live, "_MAX_PENDING_PER_PEER", per_peer, raising=False)
+    monkeypatch.setattr(live, "_HELLO_SECONDS", hello, raising=False)
+    return live
+
+
+def test_pending_sockets_are_budgeted_from_accept(conn, monkeypatch):
+    """N sockets that never say hello fill the budget; the N+1th is refused
+    at once with the policy close, not parked for the hello deadline; and
+    a slot given back admits an authenticated socket that streams. Before
+    the change the N+1th was accepted and sat silent for ten seconds, so
+    the reason it eventually closed with was "no credentials" and the
+    refusal took the whole deadline to arrive.
+    """
+    from starlette.websockets import WebSocketDisconnect
+    live = _budget(monkeypatch, pending=3, per_peer=3)
+    token = _token(conn, _user(conn))
+
+    with _client(_app(), PEER_A) as client:
+        held = [client.websocket_connect(LIVE) for _ in range(3)]
+        for h in held:
+            h.__enter__()
+        try:
+            started = time.monotonic()
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with client.websocket_connect(LIVE) as extra:
+                    extra.receive_json()
+            assert refused.value.code == 1008
+            assert refused.value.reason == "too many pending sockets"
+            assert time.monotonic() - started < 5, (
+                "the refusal waited for the hello deadline instead of "
+                "arriving on the budget check")
+            assert live._pending.count == 3
+
+            # A slot handed back is a slot somebody else can use -- and the
+            # authenticated path still works while the other two sit there.
+            held.pop().__exit__(None, None, None)
+            assert live._pending.count == 2
+            with client.websocket_connect(LIVE) as ws:
+                ws.send_json({"token": token})
+                assert ws.receive_json()["type"] == "ready"
+        finally:
+            for h in held:
+                h.__exit__(None, None, None)
+    assert live._pending.count == 0, "a closed socket kept its pending slot"
+
+
+def test_a_slow_hello_past_the_deadline_frees_its_slot(conn, monkeypatch):
+    """A socket that runs out the hello deadline is closed on the
+    CONFIGURED deadline and its slot comes back, so a budget that was full
+    of silent sockets empties itself. Before the change the deadline was a
+    literal ten seconds the environment could not shorten, and the socket
+    was not counted anywhere while it waited -- so there was nothing to
+    free and this assertion on timing could not have been written."""
+    from starlette.websockets import WebSocketDisconnect
+    live = _budget(monkeypatch, pending=2, hello=0.5)
+    token = _token(conn, _user(conn))
+
+    with _client(_app(), PEER_A) as client:
+        with contextlib.ExitStack() as stack:
+            held = [stack.enter_context(client.websocket_connect(LIVE))
+                    for _ in range(2)]
+            started = time.monotonic()
+            for h in held:
+                with pytest.raises(WebSocketDisconnect) as timed_out:
+                    h.receive_json()
+                assert timed_out.value.code == 1008
+                assert timed_out.value.reason == "no credentials"
+            # Timing FIRST: on the pre-change module this is the line that
+            # fails, ten seconds in, before the counter is ever read. That
+            # sockets are counted while silent is asserted by the two
+            # tests around this one.
+            assert time.monotonic() - started < 3, (
+                "the hello deadline is not the configured one")
+            assert live._pending.count == 0, (
+                "a socket closed on the deadline kept its slot")
+
+            # The budget that was full a moment ago now admits a socket,
+            # and that socket authenticates and streams.
+            with client.websocket_connect(LIVE) as ws:
+                ws.send_json({"token": token})
+                assert ws.receive_json()["type"] == "ready"
+
+
+def test_the_per_peer_budget_is_keyed_on_the_address_http_uses(conn, monkeypatch):
+    """The contract crosses two files, so this test reads both.
+
+    The per-peer bucket is keyed on `limits.client_ip`, the same function
+    that keys a 429 and the session binding, trusted-hop counting
+    included. Two consequences, both asserted: a second peer is a second
+    bucket, so one address filling its own budget does not touch another
+    analyst's socket; and behind ONE trusted proxy hop the key is the
+    forwarded address, not the proxy's, so sockets from different clients
+    behind the same proxy are not made to share a bucket -- and the key
+    the socket used is exactly what `client_ip` computes for an HTTP
+    request carrying the same headers. Before the change there was no
+    per-peer accounting at all, so the second socket from one peer was
+    simply accepted.
+    """
+    from starlette.requests import Request
+    from starlette.websockets import WebSocketDisconnect
+
+    from noctornal_api.http.limits import client_ip
+    live = _budget(monkeypatch, pending=10, per_peer=1)
+    monkeypatch.delenv("NOCTORNAL_TRUSTED_PROXY_HOPS", raising=False)
+    token = _token(conn, _user(conn))
+    app = _app()
+
+    with _client(app, PEER_A) as a, _client(app, PEER_B) as b:
+        with a.websocket_connect(LIVE):
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with a.websocket_connect(LIVE) as second:
+                    second.receive_json()
+            assert refused.value.code == 1008
+            assert refused.value.reason == "too many pending sockets"
+            # Peer B is another bucket: admitted, authenticated, streaming,
+            # while A's silent socket is still held.
+            with b.websocket_connect(LIVE) as ws:
+                ws.send_json({"token": token})
+                assert ws.receive_json()["type"] == "ready"
+        assert live._pending.count == 0
+
+        # One trusted hop: the key is what the proxy forwarded.
+        monkeypatch.setenv("NOCTORNAL_TRUSTED_PROXY_HOPS", "1")
+        with a.websocket_connect(LIVE, headers={"X-Forwarded-For": "10.0.0.1"}), \
+                a.websocket_connect(LIVE, headers={"X-Forwarded-For": "10.0.0.2"}):
+            assert live._pending.count == 2
+            for forwarded in ("10.0.0.1", "10.0.0.2"):
+                as_http = Request({
+                    "type": "http", "method": "GET", "path": LIVE,
+                    "headers": [(b"x-forwarded-for", forwarded.encode())],
+                    "client": (PEER_A, 40000), "query_string": b""})
+                assert live._pending.count_for(client_ip(as_http)) == 1, (
+                    f"the socket did not key its bucket on the address "
+                    f"HTTP would have used for {forwarded}")
+            # And the same forwarded address a second time is the same
+            # bucket, full.
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with a.websocket_connect(
+                        LIVE, headers={"X-Forwarded-For": "10.0.0.1"}) as third:
+                    third.receive_json()
+            assert refused.value.reason == "too many pending sockets"
+        assert live._pending.count == 0
+
+
+def test_a_full_hub_refuses_before_the_hello(conn, monkeypatch):
+    """The subscriber ceiling, exercised end to end for the first time. NOT
+    a regression for 2026-09-09 -- this check predates it -- but nothing
+    had ever driven it, and the pending budget was written on the claim
+    that this ceiling holds for authenticated sockets. A second subscriber
+    past the ceiling is refused with 1013 without being asked for a hello,
+    while the first keeps streaming."""
+    from starlette.websockets import WebSocketDisconnect
+    live = _budget(monkeypatch, pending=10)
+    monkeypatch.setattr(live, "_MAX_SOCKETS", 1)
+    token = _token(conn, _user(conn))
+
+    with _client(_app(), PEER_A) as client:
+        with client.websocket_connect(LIVE) as first:
+            first.send_json({"token": token})
+            assert first.receive_json()["type"] == "ready"
+            assert live._hub.count == 1
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with client.websocket_connect(LIVE) as second:
+                    second.receive_json()
+            assert refused.value.code == 1013
+            assert refused.value.reason == "too many live subscribers"
+            assert live._pending.count == 0, (
+                "a socket refused on the hub ceiling kept its pending slot")
+        assert live._hub.count == 0
+
+
+def test_an_unknown_peer_shares_one_bucket(conn):
+    """A socket whose peer address cannot be determined must be bounded
+    MORE tightly than a known one, never less: every such socket shares
+    the one bucket keyed on the empty string."""
+    from noctornal_api.http.routers.live import _PendingBudget
+    from noctornal_api.http.routers import live
+    budget = _PendingBudget()
+    per_peer = live._MAX_PENDING_PER_PEER
+    for _ in range(per_peer):
+        assert budget.reserve(None) is True
+    assert budget.reserve(None) is False, "unknown peers escaped the per-peer ceiling"
+    assert budget.count == per_peer and budget.count_for(None) == per_peer
+    for _ in range(per_peer):
+        budget.release(None)
+    assert budget.count == 0 and budget.count_for(None) == 0

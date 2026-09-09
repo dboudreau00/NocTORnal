@@ -151,6 +151,10 @@ The ones worth knowing:
 | `NOCTORNAL_SAMPLE_ORIGIN` | Sample downloads are refused. Invariant 10 requires malware bytes to come from a **separate origin**; an origin split that is only written down does not survive the first hurried deploy. |
 | `NOCTORNAL_NOTIFY_ADDRESS_DOMAINS` | Analysts cannot redirect their own notification email at all. Fail-closed on purpose: a subject line carries a case code, and a case code is intelligence. |
 | `NOCTORNAL_LIVE` | Live updates are on. Set to `0` behind PgBouncer in transaction mode, where `LISTEN` cannot work. |
+| `NOCTORNAL_LIVE_MAX_SOCKETS` | 200 authenticated live subscribers per API process; the next is refused with close code 1013. |
+| `NOCTORNAL_LIVE_MAX_PENDING` | A quarter of the subscriber ceiling (50 by default) of sockets that are open but not yet authenticated, per process. A peer with no session pays for these, so the budget is small, and a full budget is refused before the WebSocket handshake completes so that a refused socket holds nothing. |
+| `NOCTORNAL_LIVE_MAX_PENDING_PER_PEER` | 8 of those per peer address, the same address the rate limiter uses, trusted proxy hops included. |
+| `NOCTORNAL_LIVE_HELLO_SECONDS` | 10 seconds for an accepted socket to send its hello before it is closed and its slot returned. |
 | `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. |
 | `NOCTORNAL_ENABLE_DOCS` | The OpenAPI schema stays off. It publishes the full route inventory of a law-enforcement case system, so it is opt-in. |
 
