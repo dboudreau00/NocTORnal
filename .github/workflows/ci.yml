@@ -220,6 +220,28 @@ jobs:
       - name: Migrate to head
         run: alembic upgrade head
 
+      # db/schema.sql is a GENERATED mirror of the schema at head. Until
+      # 2026-09-09 it was maintained by hand, named five of the ten schemas
+      # the migrations create, and nothing compared it to anything -- so the
+      # one file readers were sent to for "the whole schema" described a
+      # database six weeks gone. Same shape as the ontology drift gate:
+      # regenerate and diff against the committed file.
+      #
+      # It runs against the FIRST upgrade, before the round-trip below, so
+      # a residue left by a non-reversible migration fails the round-trip
+      # step under its own name rather than showing up here as "schema
+      # drift" -- a failure reported as the wrong thing.
+      #
+      # The dump uses the pg_dump INSIDE the postgres service container --
+      # the same pgvector/pgvector:pg16 image the compose file and a
+      # developer's WSL stack run -- rather than whatever client version the
+      # runner image happens to ship, so the two sides cannot disagree on
+      # pg_dump's own formatting.
+      - name: Schema mirror matches the migrations
+        env:
+          NOCTORNAL_PG_DUMP: docker exec ${{ job.services.postgres.id }} pg_dump
+        run: python scripts/dump_schema.py --check
+
       # Every migration is required to be reversible (CONVENTIONS.md
       # conventions). Round-tripping the WHOLE chain is the only way to
       # find the one that silently is not -- and it has caught a real

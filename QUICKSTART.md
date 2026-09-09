@@ -18,7 +18,8 @@ Bypass` is needed because this machine's policy is `Restricted`; a bare
 The launcher is safe to re-run. It:
 
 1. starts Docker Desktop if it is not already running, and waits for it;
-2. brings up Postgres, Redis, MinIO, OpenFGA, NATS and Mailpit;
+2. brings up Postgres, Redis, MinIO and Mailpit — the whole stack; the
+   API process runs everything else itself (`docs/02`);
 3. creates `.env.local` with a fresh `NOCTORNAL_TOTP_KEK` on first run —
    **keep that file.** It seals every TOTP secret; lose it and all users
    must re-enrol;
@@ -26,9 +27,8 @@ The launcher is safe to re-run. It:
 5. serves the API and UI at <http://127.0.0.1:8000/ui/>.
 
 Stop it with Ctrl-C. Add `-SkipDocker` if the stack is already up, or
-`-Port 8010` to move the API. (Not 8080 — that used to be OpenFGA's
-published port, and it is among the most contended ports on a
-workstation regardless.)
+`-Port 8010` to move the API. (Not 8080 — it is among the most contended
+ports on a workstation; it was also OpenFGA's published port until that service was removed from the compose file on 2026-07-26.)
 
 ## 2. Create your account (first run only)
 
