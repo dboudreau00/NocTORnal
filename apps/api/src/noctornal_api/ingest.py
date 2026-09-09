@@ -726,6 +726,16 @@ class IngestService:
         docs/12: respond 202 immediately, parse asynchronously, never block
         the client on processing -- and persist raw BEFORE parsing, always,
         so a wrong parser is recoverable without a resend.
+
+        The length check below is this method's own guarantee for any
+        caller handing it bytes it already holds. It is NOT how the HTTP
+        route bounds an upload: `raw` is a complete `bytes`, so by the
+        time this runs the caller has already paid for buffering it.
+        Until 2026-09-09 that caller was `POST /ingest` via `await
+        request.body()`, which made the key's cap a check on memory
+        already spent; the route now refuses at the cap while the body is
+        still arriving (`http.limits.read_body_capped`) and this check
+        stays as the second, cheaper line.
         """
         if not raw:
             raise IngestError("empty body")
