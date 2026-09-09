@@ -99,6 +99,11 @@ The suite is not order-independent on a reused database (see Alpha 4).
 fails deterministically on the development box and has since July; its
 docstring records the injected-clock refactor it needs.
 
+Full suite on the release commit, both pytest roots, migration 0059:
+**2255 passed, 3 failed** — that Redis flake, and the two version-contract
+tests, which failed in the recording run because the version was bumped
+while it ran and pass on the final tree.
+
 ## Alpha 4 — 2026-09-02
 
 Completion release. **Still not audited, and still not lawful to operate
