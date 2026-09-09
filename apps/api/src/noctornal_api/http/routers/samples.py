@@ -12,13 +12,32 @@ type, entropy, analysis findings, custody. That is invariant 10's first
 half, and it is why the UI can show a sample at all.
 
 The second half is that `/download` returns the encrypted archive and is
-the ONLY endpoint that touches sample bytes, and it refuses unless the
-request arrived at the configured sample origin. The check is in the
-service so it cannot be skipped by a second caller, and the response
-headers are the belt to that braces: `application/octet-stream`,
-`Content-Disposition: attachment`, `nosniff`, and a CSP of `sandbox` so
-that even if something upstream serves this as HTML the browser will not
-execute it.
+the ONLY endpoint that touches sample bytes, and it refuses unless THIS
+PROCESS is configured as the sample origin -- `NOCTORNAL_PUBLIC_ORIGIN`
+equal to `NOCTORNAL_SAMPLE_ORIGIN`, which must itself differ from the
+application origin in `NOCTORNAL_BASE_URL` (`samples.origin_split()` is
+the one decision, and the readiness register reads the same one). The
+check is in the service so it cannot be skipped by a second caller, and
+the response headers are the belt to those braces: `application/octet-
+stream`, `Content-Disposition: attachment`, `nosniff`, and a CSP of
+`sandbox` so that even if something upstream serves this as HTML the
+browser will not execute it.
+
+Until 2026-09-09 the route derived "where the request arrived" from
+`request.url`, which is the Host header. That is a value the client
+sends, so the check granted on it; and because the console's CSP was
+`connect-src 'self'`, the only way the Lab pane could download at all was
+for the sample origin to BE the application origin, which is the
+configuration the invariant forbids. Now the console fetches the sample
+origin directly (app.py names it in `connect-src`, and the sample process
+answers the cross-origin request for the application origin alone), and
+the verdict comes from configuration.
+
+**When `NOCTORNAL_SAMPLE_ORIGIN` is unset the control is OFF.** Every
+download refuses on every process, `GET /samples/policy` reports the
+problem in `sample_origin_problem`, and `GET /admin/readiness` fails the
+`sample_origin_configured` check with the action. No document may say
+invariant 10 holds for such a deployment; the code does not back it.
 
 ## Two permissions that do not imply each other
 
@@ -54,8 +73,8 @@ from noctornal_api.samples import (
     Sample,
     SampleError,
     SampleService,
+    origin_split,
     policy_declared,
-    sample_origin,
 )
 
 router = APIRouter(prefix="/samples", tags=["samples"])
@@ -136,19 +155,31 @@ async def _read_capped(file: UploadFile) -> bytes:
 @router.get("/policy", response_model=dict)
 def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
     """Whether an operator has declared a prohibited-content policy, and
-    whether a separate sample origin is configured.
+    whether a separate sample origin is configured -- and which one.
 
     Surfaced rather than buried so that "sample submission is refused" has
     a discoverable cause. Returns the operator's own reference, which is
     the point of asking for a reference rather than a boolean.
+
+    `sample_origin` is the origin the console must fetch a download from,
+    or null; the Lab pane builds its download URL from it, because the
+    console is served from the application origin and the bytes are not.
+    `sample_origin_configured` is true only when the split is USABLE: set,
+    an origin, and not a second name for the application's. A value that
+    is set but unusable used to read as "configured" here while every
+    download refused, and `sample_origin_problem` now carries the reason
+    instead of the console guessing at one.
     """
     declared, detail = policy_declared()
-    origin = sample_origin()
+    split = origin_split()
+    usable = split.split_problem is None
     return {
         "policy_declared": declared,
         "policy_reference": detail if declared else None,
         "detail": None if declared else detail,
-        "sample_origin_configured": bool(origin),
+        "sample_origin_configured": usable,
+        "sample_origin": split.sample if usable else None,
+        "sample_origin_problem": split.split_problem,
         "counsel_review_required": True,
         "notice": (
             "Counsel must review this deployment before it is used in any "
@@ -284,7 +315,7 @@ def detail(
 
 @router.post("/{sample_id}/download")
 def download(
-    sample_id: UUID, request: Request,
+    sample_id: UUID,
     user: CurrentUser = Depends(require_global("sample.download")),
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
@@ -292,13 +323,18 @@ def download(
     """The encrypted archive. The ONLY endpoint that touches sample bytes.
 
     The origin check is in the service, not here, so a second caller cannot
-    skip it. These headers are the belt to that braces: even if something
-    upstream decided to serve this as HTML, `sandbox` in the CSP means the
-    browser will not execute it, and `nosniff` means it will not guess.
+    skip it -- and the service reads CONFIGURATION for it, so there is
+    nothing for this route to pass. It used to pass
+    `request.url.scheme://request.url.netloc` under a comment calling that
+    "the server's own view of the URL, never a header the client
+    controls"; Starlette builds `request.url` from the Host header, so the
+    comment was false and the check granted on a client-supplied value.
+    The route no longer takes the request at all, which is the shape that
+    cannot regress. These headers are the belt to those braces: even if
+    something upstream decided to serve this as HTML, `sandbox` in the CSP
+    means the browser will not execute it, and `nosniff` means it will not
+    guess.
     """
-    # Where the request actually arrived, from the server's own view of the
-    # URL -- never from a header the client controls.
-    arrived_at = f"{request.url.scheme}://{request.url.netloc}"
     # The caller's ceiling, exactly as `detail()` twenty lines above already
     # does. Its absence here was the worst defect found in this codebase:
     # `detail()` 404'd an over-classified sample and this endpoint handed
@@ -306,7 +342,7 @@ def download(
     clearance, compartments = user_ceiling(conn, user.user_id)
     try:
         blob, digest = _svc(conn).download(
-            sample_id, actor_id=user.user_id, request_origin=arrived_at,
+            sample_id, actor_id=user.user_id,
             clearance=clearance.name, compartments=compartments)
     except SampleError as exc:
         if "no such sample" in str(exc):

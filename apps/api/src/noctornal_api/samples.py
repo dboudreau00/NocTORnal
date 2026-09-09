@@ -26,13 +26,43 @@ declaration produces a working system and an unlawful deployment.
     encrypted archive download from a SEPARATE ORIGIN.
 
 The origin split is usually written down and then forgotten at deploy
-time, so it is a runtime check here: `download()` refuses unless
-`NOCTORNAL_SAMPLE_ORIGIN` is configured AND the request arrived at it.
-Serving hostile bytes from the same origin as the case file means an
-escape -- a crafted filename, an SVG preview, a PDF renderer bug -- runs
-with the analyst's session on the case data. docs/11: "you would have
-built a drive-by vector into your own highest-trust system, seeded with
-hostile files by design."
+time, so it is a runtime check here, and the check is CONFIGURATION,
+never a request header. Three origins decide it (`origin_split()`):
+
+- `NOCTORNAL_SAMPLE_ORIGIN` -- the origin sample bytes are served from;
+- `NOCTORNAL_BASE_URL` -- the application origin, the one the console is
+  served from and email links point at (`transports.base_url()`);
+- `NOCTORNAL_PUBLIC_ORIGIN` -- the origin THIS process is served at. It
+  defaults to the application origin, so a process that says nothing is
+  the application and refuses.
+
+`download()` serves bytes only on a process configured as the sample
+origin, and only when that origin is a real second origin rather than a
+second name for the application's. Everywhere else it refuses and names
+the origin to fetch from. Serving hostile bytes from the same origin as
+the case file means an escape -- a crafted filename, an SVG preview, a
+PDF renderer bug -- runs with the analyst's session on the case data.
+docs/11: "you would have built a drive-by vector into your own
+highest-trust system, seeded with hostile files by design."
+
+**Until 2026-09-09 the check compared `NOCTORNAL_SAMPLE_ORIGIN` against
+`request.url`, which Starlette builds from the Host header -- a value the
+client sends.** A caller who set `Host: samples.example` on a request to
+the application origin passed it, and behind a proxy that rewrote Host
+nobody passed it. It was also unsatisfiable from the console: the UI's
+CSP was `connect-src 'self'`, so the Lab pane could only ever fetch the
+application origin, which meant the variable was either equal to the
+application origin (the check a no-op, bytes served from the origin the
+invariant forbids, "invariant 10 holds" in every document) or the Lab
+pane could not download at all. The two halves were internally
+consistent and wrong together. Now the UI CSP names the sample origin,
+the sample process answers the console's cross-origin request, and the
+verdict comes from the three variables above.
+
+**When `NOCTORNAL_SAMPLE_ORIGIN` is unset the control is OFF**, and the
+readiness register, the router docstring and `GET /samples/policy` all
+say so in those words: every download refuses, on every process, and no
+document may claim the invariant holds for such a deployment.
 
 Three more rules the code holds:
 
@@ -82,6 +112,7 @@ import struct
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
@@ -151,14 +182,205 @@ def policy_declared() -> tuple[bool, str]:
 
 
 def sample_origin() -> str:
-    """The separate origin sample bytes may be served from.
+    """The separate origin sample bytes may be served from, as configured.
 
     Empty means "not configured", and `download()` then refuses. That is
     invariant 10 as a runtime check rather than a deployment note: an
     origin split that is only ever written down is an origin split that
     does not survive the first hurried deploy.
+
+    This is the raw setting, trailing slash stripped. Whether it is an
+    origin at all, and how it stands against the application origin and
+    this process's own, is `origin_split()`'s verdict; readers that need a
+    decision call that, and this exists so the register can quote what the
+    operator actually typed.
     """
     return os.environ.get("NOCTORNAL_SAMPLE_ORIGIN", "").strip().rstrip("/")
+
+
+#: What `transports.base_url()` falls back to. Restated here rather than
+#: imported so this module -- which the HTTP layer imports at startup --
+#: does not pull the mail transports in with it; a test reads both and
+#: insists they are the same string.
+_DEFAULT_APP_ORIGIN = "http://127.0.0.1:8000"
+
+
+def app_origin() -> str:
+    """The application origin, as configured: `NOCTORNAL_BASE_URL`, the
+    variable email links are already built from. A deployment has exactly
+    one console origin and that variable is where it is written down."""
+    return os.environ.get("NOCTORNAL_BASE_URL", _DEFAULT_APP_ORIGIN).strip().rstrip("/")
+
+
+def public_origin() -> str:
+    """The origin THIS process is served at: `NOCTORNAL_PUBLIC_ORIGIN`,
+    defaulting to the application origin.
+
+    The default is the safe direction. A process that does not say which
+    origin it is serving is taken to be the application, and the
+    application refuses to hand over sample bytes -- so forgetting the
+    variable on the sample process produces a refusal that names what to
+    set, and forgetting it on the application changes nothing.
+    """
+    return (os.environ.get("NOCTORNAL_PUBLIC_ORIGIN", "").strip().rstrip("/")
+            or app_origin())
+
+
+def normalise_origin(value: str, *, allow_path: bool = False) -> str | None:
+    """`scheme://host[:port]`, lower-cased, default port dropped -- or
+    None when the value is not an http(s) origin.
+
+    One normaliser, because the split is decided by string EQUALITY and
+    three readers (the download, the UI's CSP and the cross-origin
+    answer) must agree on what "the same origin" means. `allow_path`
+    exists for the application origin: `NOCTORNAL_BASE_URL` may carry a
+    path prefix for a deployment mounted under one, and its ORIGIN is
+    what the split compares. The sample origin may not: a path there
+    would make the console's download URL and the CSP source both
+    path-specific, and "an origin with a path" is exactly the
+    `app.internal/samples` shape docs/11 says is not a separate origin.
+    """
+    parts = urlsplit(value.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    if parts.username is not None or parts.password is not None:
+        return None
+    if not allow_path and (parts.path not in ("", "/") or parts.query
+                           or parts.fragment):
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+    if ":" in host:              # IPv6 literal: hostname strips the brackets
+        host = f"[{host}]"
+    default = 443 if parts.scheme == "https" else 80
+    suffix = f":{port}" if port and port != default else ""
+    return f"{parts.scheme}://{host}{suffix}"
+
+
+@dataclass(frozen=True)
+class OriginSplit:
+    """The three origins invariant 10 turns on, normalised, and the
+    verdict they give for THIS process.
+
+    `role` is one of:
+
+    - `unconfigured` -- `NOCTORNAL_SAMPLE_ORIGIN` is unset: the control is
+      OFF and every download refuses everywhere;
+    - `invalid` -- it is set but is not an origin;
+    - `same_origin` -- it names the application origin: two names for one
+      origin is not a split, and the download refuses rather than serve
+      hostile bytes from the origin the invariant forbids;
+    - `app` -- this process is the application: it refuses and names the
+      sample origin to fetch from;
+    - `sample` -- this process is the sample origin: it serves.
+
+    `refusal` is why `download()` refuses on this process, or None when it
+    serves. `split_problem` is the subset of refusals that are about the
+    DEPLOYMENT rather than about which process this is -- what the
+    register and the policy endpoint report, and what the console shows
+    instead of a download button.
+    """
+
+    role: str
+    sample: str | None
+    app: str | None
+    this: str | None
+    refusal: str | None
+
+    @property
+    def serves_here(self) -> bool:
+        return self.refusal is None
+
+    @property
+    def split_problem(self) -> str | None:
+        if self.role in ("unconfigured", "invalid", "same_origin"):
+            return self.refusal
+        return None
+
+
+def origin_split(*, this: str | None = None) -> OriginSplit:
+    """Decide the origin split from configuration alone.
+
+    `this` overrides `public_origin()`; the service tests use it to stand
+    a call on one process or the other without an environment. Nothing in
+    the HTTP layer passes it -- the router used to pass the Host header
+    here, which is the defect this function replaced.
+    """
+    raw_sample = sample_origin()
+    raw_app = app_origin()
+    raw_this = this if this is not None else public_origin()
+    app = normalise_origin(raw_app, allow_path=True)
+    this_origin = normalise_origin(raw_this, allow_path=True)
+
+    if not raw_sample:
+        return OriginSplit(
+            "unconfigured", None, app, this_origin,
+            "sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN is not "
+            "configured, so there is no separate origin to serve hostile "
+            "bytes from and the origin split is OFF. Invariant 10 is not a "
+            "deployment suggestion.")
+    sample = normalise_origin(raw_sample)
+    if sample is None:
+        return OriginSplit(
+            "invalid", None, app, this_origin,
+            f"sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN="
+            f"{raw_sample!r} is not an origin. It must be scheme://host[:port] "
+            f"with no path, query or credentials -- a path is a location on "
+            f"an origin, not an origin, and docs/11 is explicit that "
+            f"app.internal/samples is not separate from app.internal.")
+    if app is not None and sample == app:
+        return OriginSplit(
+            "same_origin", sample, app, this_origin,
+            f"sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN equals "
+            f"the application origin ({app}, from NOCTORNAL_BASE_URL). Two "
+            f"names for one origin is not a split, and serving hostile bytes "
+            f"there is the drive-by vector invariant 10 exists to prevent. "
+            f"Give samples their own host.")
+    if this_origin != sample:
+        return OriginSplit(
+            "app", sample, app, this_origin,
+            f"sample bytes are served only from the configured sample origin, "
+            f"never from the application origin: fetch this download from "
+            f"{sample}. This process is configured as "
+            f"{this_origin or raw_this!r} (NOCTORNAL_PUBLIC_ORIGIN, or "
+            f"NOCTORNAL_BASE_URL when that is unset).")
+    return OriginSplit("sample", sample, app, this_origin, None)
+
+
+def download_cors_headers(origin_header: str | None) -> dict[str, str]:
+    """The headers that let the console on the APPLICATION origin read a
+    download from THIS process -- when this process is the sample origin
+    and the request's `Origin` is the application's. Empty otherwise.
+
+    The allowed origin is the CONFIGURED application origin, never an echo
+    of the header: a page on any other origin gets no
+    `Access-Control-Allow-Origin` and the browser withholds the response.
+    No `Access-Control-Allow-Credentials`, so no cookie ever crosses; the
+    console authenticates the download with its Bearer token, which is
+    the credential a cross-origin page cannot forge.
+
+    Exists at all because a CSP that names the sample origin is only half
+    of letting the Lab pane download: without this answer the browser
+    performs the request and then refuses to show the page the bytes, and
+    the pane reports "the request did not complete" for a download the
+    server served. The two halves live in one module so they cannot drift.
+    """
+    split = origin_split()
+    if not split.serves_here or split.app is None:
+        return {}
+    if normalise_origin(origin_header or "") != split.app:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": split.app,
+        "Access-Control-Expose-Headers":
+            "Content-Disposition, X-Sample-Archive-Password",
+        "Vary": "Origin",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -801,18 +1023,24 @@ class SampleService:
     # -- egress ------------------------------------------------------------
 
     def download(self, sample_id: UUID, *, actor_id: UUID,
-                 request_origin: str | None,
+                 request_origin: str | None = None,
                  clearance: str | None = None,
                  compartments: frozenset[str] = frozenset()
                  ) -> tuple[bytes, str]:
         """The encrypted archive, and only from the separate origin.
 
-        `request_origin` is where the request actually arrived, taken from
-        the server's own configuration rather than from a header the client
-        controls. Serving hostile bytes from the app origin means an escape
-        runs with the analyst's session on the case file -- a drive-by
-        vector built into the highest-trust system in the estate, seeded
-        with hostile files by design (docs/11).
+        Which origin this process is serving comes from CONFIGURATION --
+        `origin_split()`, read here so a second caller cannot skip it.
+        `request_origin` is kept under its old name for the service tests,
+        which stand a call on one process or the other by passing the
+        origin that process would be configured as; it is NOT where a
+        request arrived, and nothing in the HTTP layer passes it. Until
+        2026-09-09 the router passed `request.url`'s origin here, and that
+        is the Host header: a client-supplied value the check then granted
+        on. Serving hostile bytes from the app origin means an escape runs
+        with the analyst's session on the case file -- a drive-by vector
+        built into the highest-trust system in the estate, seeded with
+        hostile files by design (docs/11).
 
         **The caller's clearance is REQUIRED, and it was missing entirely.**
         This method used to select `storage_key, data_key_ciphertext,
@@ -841,16 +1069,10 @@ class SampleService:
                 "clearance. Defaulting would make every caller that forgets "
                 "silently maximally privileged, which is how this path came "
                 "to have no label check at all.")
-        configured = sample_origin()
-        if not configured:
-            raise SampleError(
-                "sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN is not "
-                "configured, so there is no separate origin to serve hostile "
-                "bytes from. Invariant 10 is not a deployment suggestion.")
-        if (request_origin or "").rstrip("/") != configured:
-            raise SampleError(
-                "sample bytes are served only from the configured sample "
-                "origin, never from the application origin")
+        split = origin_split(this=request_origin)
+        if not split.serves_here:
+            raise SampleError(split.refusal)
+        configured = split.sample
 
         # The labels are applied IN the query, and the case's are composed
         # with the sample's -- stricter classification, union of
@@ -1170,7 +1392,9 @@ def _record(r) -> Sample:
 __all__ = [
     "ARCHIVE_PASSWORD", "ASSIGNED", "IN_ANALYSIS", "MAX_SAMPLE_BYTES",
     "QUARANTINED", "REJECTED", "REPORTED", "SUBMITTED", "TRIAGED",
-    "PolicyNotDeclared", "Sample", "SampleError", "SampleService", "Triage",
-    "archive", "file_type_of", "policy_declared", "sample_origin",
+    "OriginSplit", "PolicyNotDeclared", "Sample", "SampleError",
+    "SampleService", "Triage", "app_origin", "archive",
+    "download_cors_headers", "file_type_of", "normalise_origin",
+    "origin_split", "policy_declared", "public_origin", "sample_origin",
     "SampleStorage", "shannon_entropy", "triage",
 ]

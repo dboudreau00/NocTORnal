@@ -9391,18 +9391,23 @@ function sampleActions(s) {
     'This produces a password-protected archive of a LIVE sample. The '
     + 'password is "infected" — an interlock against a double-click and a '
     + 'mail gateway, not confidentiality. It requires a fresh second '
-    + 'factor and it is refused unless this page is served from the '
-    + 'configured sample origin.'));
-  const origin = (smpPolicy && smpPolicy.sample_origin_configured);
+    + 'factor, and the archive is fetched from the separate sample origin, '
+    + 'never from the origin this page is served from.'));
+  /* The origin itself, not a boolean: this page is served from the
+     application origin and the bytes are not, so the button needs
+     somewhere to fetch FROM. Until 2026-09-09 it fetched this origin,
+     which the server refuses by design. */
+  const origin = (smpPolicy && smpPolicy.sample_origin) || null;
   const dlBtn = el('button', 'btn danger',
     origin ? 'Download encrypted archive' : 'Download — no origin configured');
   dlBtn.type = 'button';
   dlBtn.disabled = !origin;
   if (!origin) {
-    dlBtn.title = 'NOCTORNAL_SAMPLE_ORIGIN is not set. Invariant 10 requires '
+    dlBtn.title = (smpPolicy && smpPolicy.sample_origin_problem)
+      || ('NOCTORNAL_SAMPLE_ORIGIN is not set. Invariant 10 requires '
       + 'sample bytes to come from a separate origin, and an origin split '
       + 'that is only written down does not survive the first hurried '
-      + 'deploy — so the button is off rather than failing at the server.';
+      + 'deploy — so the button is off rather than failing at the server.');
   }
   dlBtn.addEventListener('click', () => downloadSample(s, msg));
   dl.appendChild(dlBtn);
@@ -9497,19 +9502,45 @@ async function copyText(text, btn) {
   }
 }
 
-/** POST, then hand the browser a blob.
+/** The ONE call in this file that leaves the page's origin, on purpose.
+ *
+ *  Every other request is fetch(API + ...) against the origin this page
+ *  is served from, and the console's CSP was connect-src 'self' to hold
+ *  exactly that. Sample bytes are the exception invariant 10 makes: they
+ *  come from a separate origin or not at all, so the server names that
+ *  origin in connect-src, answers this page's cross-origin request there
+ *  (and only there, and only for this origin), and the download is built
+ *  from the origin the policy endpoint reported. Bound under its own
+ *  name so the rule "fetch() is rooted at API" stays true of every call
+ *  spelled fetch(, and the one deliberate exception is greppable.
+ */
+const fetchFromSampleOrigin = window.fetch.bind(window);
+
+/** POST to the SAMPLE origin, then hand the browser a blob.
  *
  *  A plain <a href> would be a GET, and this endpoint is a POST behind
  *  step-up on purpose: a GET that puts malware on a disk is one that a
  *  prefetcher, a link scanner or a chat unfurl can trigger.
+ *
+ *  The Bearer token goes with it: the sample origin shares the session
+ *  store, and a header is the credential a cross-origin page cannot
+ *  forge, which is why the server accepts no cookie on that path.
  */
 async function downloadSample(s, msg) {
+  const origin = smpPolicy && smpPolicy.sample_origin;
+  if (!origin) {
+    setMsg(msg, (smpPolicy && smpPolicy.sample_origin_problem)
+      || 'No separate sample origin is configured; every download is refused.');
+    msg.className = 'msg bad';
+    return;
+  }
   setMsg(msg, 'Requesting…');
   msg.className = 'msg';
   const headers = { Authorization: 'Bearer ' + state.token };
   let res;
   try {
-    res = await fetch(API + '/samples/' + encodeURIComponent(s.id) + '/download',
+    res = await fetchFromSampleOrigin(
+      origin + API + '/samples/' + encodeURIComponent(s.id) + '/download',
       { method: 'POST', headers });
   } catch (_e) {
     setMsg(msg, 'The request did not complete.');
@@ -9569,11 +9600,13 @@ async function loadSamplePolicy() {
   clear(originBox);
   originBox.appendChild(el('strong', null, 'This deployment: '));
   originBox.appendChild(document.createTextNode(
-    smpPolicy.sample_origin_configured
-      ? 'a separate sample origin is configured, so downloads are possible.'
-      : 'no separate sample origin is configured, so every download is '
+    smpPolicy.sample_origin
+      ? 'downloads are fetched from the separate sample origin '
+        + smpPolicy.sample_origin + ', never from this one.'
+      : (smpPolicy.sample_origin_problem
+        || 'no separate sample origin is configured, so every download is '
         + 'refused. That is invariant 10 as a runtime check rather than a '
-        + 'deployment note.'));
+        + 'deployment note.')));
 }
 
 async function submitSample() {
