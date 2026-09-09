@@ -468,6 +468,9 @@ def test_the_backfill_registers_every_value_already_in_either_array(conn):
     """Two halves. The migrated database: every distinct value in either
     array is registered, which is what an upgrade must leave behind. And
     the backfill statement ITSELF, run from the version file against a row
+    (fixture-guard: deliberate unregistered write -- the row is seeded
+    inside a rolled-back transaction precisely so the backfill has
+    something to register)
     seeded inside a rolled-back transaction -- because on CI the arrays
     are empty and the first half is vacuously true there."""
     unregistered = conn.execute(

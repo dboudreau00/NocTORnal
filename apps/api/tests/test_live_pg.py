@@ -67,6 +67,14 @@ def _user(conn, clearance="RED", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"live-{uuid4().hex[:8]}@noctornal.test", "Live", "x" * 20)
+    # Since 0059 every compartment column is bound to iam.compartment. This
+    # helper writes whatever it is handed, so it registers it first rather
+    # than trusting the caller to have done so -- two helpers of this shape
+    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (test)"))
     conn.execute(
         "UPDATE iam.app_user SET tlp_clearance = %s, compartments = %s "
         "WHERE id = %s", (clearance, list(compartments), uid))

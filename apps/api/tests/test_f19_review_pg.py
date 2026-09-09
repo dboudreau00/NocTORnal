@@ -115,6 +115,15 @@ def _user(conn, clearance="RED", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"f19-{uuid4().hex[:8]}@noctornal.test", "F19", "x" * 20)
+    # Since 0059 every compartment column is bound to iam.compartment, and
+    # this helper runs BEFORE _case (which registers) in every test that
+    # uses both -- so it must register what it is about to write. On the
+    # development database the keys were already there; on CI's fresh one
+    # this UPDATE was refused on the Alpha 5 release commit (2026-09-09).
+    for key in compartments:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (test)"))
     conn.execute(
         "UPDATE iam.app_user SET tlp_clearance = %s, compartments = %s "
         "WHERE id = %s", (clearance, list(compartments), uid))
