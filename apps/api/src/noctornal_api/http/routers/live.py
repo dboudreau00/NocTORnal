@@ -148,8 +148,10 @@ _QUEUE_DEPTH = 32
 
 #: RFC 6455 "policy violation". One code for every refusal that is the
 #: caller's doing -- no credentials, a bad case id, a pending budget it
-#: has filled -- and the reason string says which. The client backs off
-#: on any close, so a finer code would change nothing it does.
+#: has filled -- and the reason string says which. The console stops
+#: reconnecting on this code and backs off on every other close (app.js
+#: connectLive; test_ui_invariants binds the two), so this is the one
+#: code that must mean "the server decided" and nothing else.
 _CLOSE_POLICY = 1008
 _CLOSE_UNAUTHENTICATED = _CLOSE_POLICY
 _CLOSE_BUSY = 1013

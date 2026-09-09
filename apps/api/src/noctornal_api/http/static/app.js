@@ -6532,7 +6532,10 @@ async function loadDeadLetters() {
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       renderList('dl-list', 'dl-empty', [], deadLetterRow);
-      $('dl-empty').textContent = refusalText(err, 'This needs ingest.read.');
+      /* Either verb opens the listing since 2026-09-09: ingest.read for the
+         caller's own scope, ingest.manage for the quarantine rows too. */
+      $('dl-empty').textContent = refusalText(err,
+        'This needs ingest.read, or ingest.manage for the quarantine.');
       return;
     }
     fail(err);
@@ -10324,13 +10327,18 @@ function connectLive() {
     _refetchSoon();
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (event) => {
     if (_ws === ws) _ws = null;
     liveStatus('off');
-    /* Reconnect with a backoff, and give up after a while rather than
-       hammering a server that has told us no. `1008` is the policy close
-       the server sends for a bad token or a revoked assignment — retrying
-       that is pointless and looks like an attack in the audit log. */
+    /* `1008` is the policy close the server sends for a bad token, a
+       revoked assignment or a refused hello: the server has decided, and
+       retrying looks like an attack in the audit log. Until 2026-09-09
+       this comment said exactly that while the handler ignored the code
+       and retried anyway. Every other close (a dropped connection, a
+       restart, the pre-accept refusal a browser reports as 1006) is
+       reconnected with a backoff, and given up after a while rather than
+       hammering a server that may be down. */
+    if (event && event.code === 1008) return;
     if (!state.token || _wsRetry >= 6) return;
     const delay = Math.min(30000, 1000 * Math.pow(2, _wsRetry));
     _wsRetry += 1;

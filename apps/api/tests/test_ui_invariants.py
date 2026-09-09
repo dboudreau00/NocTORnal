@@ -1363,3 +1363,36 @@ def test_the_sample_download_presents_the_credential_the_sample_origin_preflight
     assert "if (!state.token)" in body, (
         "a cookie-restored session sends a download request it cannot authenticate")
     assert body.index("if (!state.token)") < body.index("fetchFromSampleOrigin(")
+
+# ---------------------------------------------------------------------------
+# The live socket's policy close is honoured by the client that receives it
+# ---------------------------------------------------------------------------
+
+def test_the_live_client_stops_on_the_policy_close_the_server_documents():
+    """live.py sends 1008 for "the server decided" and says the console stops
+    reconnecting on it; the console's close handler must therefore read the
+    close code and return on 1008 before scheduling a retry.
+
+    Until 2026-09-09 the handler's own comment said retrying 1008 "is
+    pointless and looks like an attack in the audit log" while the handler
+    ignored the code and retried six times, and live.py recorded that
+    behaviour as the reason a finer code was not worth sending. Two files,
+    each honest about the other, wrong together.
+    """
+    js = (_SRC / "http" / "static" / "app.js").read_text(encoding="utf-8")
+    live = (_SRC / "http" / "routers" / "live.py").read_text(encoding="utf-8")
+
+    start = js.index("ws.addEventListener('close'")
+    handler = js[start:start + 1200]
+    assert re.search(r"addEventListener\('close',\s*\(event\)", handler), (
+        "the close handler takes no event, so it cannot read the close code")
+    stop = re.search(r"event\.code\s*===\s*1008\)\s*return", handler)
+    retry = handler.index("setTimeout(connectLive")
+    assert stop and stop.start() < retry, (
+        "the handler must return on 1008 BEFORE it schedules a reconnect")
+
+    assert "_CLOSE_POLICY = 1008" in live
+    assert re.search(r"stops\s+reconnecting on this code", live.replace("#:", "")), (
+        "live.py must state the client's real policy for 1008")
+    assert "backs off\n#: on any close" not in live, (
+        "live.py still says the client backs off on ANY close")
