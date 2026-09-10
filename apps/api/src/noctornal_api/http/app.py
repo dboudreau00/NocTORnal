@@ -6,7 +6,9 @@ from the docs/05 checklist. Run it with:
     uvicorn noctornal_api.http.app:app --reload
 
 Environment: DATABASE_URL, NOCTORNAL_TOTP_KEK, and (for evidence) the
-MINIO_* variables. Nothing has a default secret.
+MINIO_* variables. Nothing has a default secret. With
+NOCTORNAL_ENV=production `create_app` refuses to build on a missing or
+development one -- see `noctornal_api.config`.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from noctornal_api import __version__
+from noctornal_api.config import enforce_environment
 from noctornal_api.http.errors import install_error_handlers, problem_response
 from noctornal_api.http.limits import build_limiter, install_rate_limit_middleware
 from noctornal_api.samples import download_cors_headers, origin_split
@@ -164,6 +167,20 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def create_app() -> FastAPI:
+    # First statement in the factory, before the FastAPI object exists,
+    # before the limiter is built and before anything has read a KEK, a
+    # DSN or a bucket credential: a production deployment configured with
+    # a development secret or a missing one is told the whole list here,
+    # rather than discovering it one failed analyst action at a time
+    # (config.py). Does nothing unless NOCTORNAL_ENV=production, so this
+    # line is invisible to a laptop, to CI and to every test in the suite.
+    #
+    # The router imports at the top of this module have already run by the
+    # time anything calls this, so "earliest possible" means earliest
+    # inside the factory. That is the right side of the line that matters:
+    # nothing has bound a port or touched a secret yet.
+    enforce_environment()
+
     # The schema publishes the full route inventory and every request/response
     # shape of a law-enforcement case system, so it is OFF unless explicitly
     # enabled. (The strict CSP below also blocks Swagger's CDN bundle, so the
