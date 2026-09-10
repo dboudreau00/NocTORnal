@@ -10,7 +10,7 @@ where every line of it traces back to an exhibit.
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Postgres 16](https://img.shields.io/badge/postgres-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-1269%20passing-brightgreen.svg)](#verifying-the-install)
+[![CI](https://github.com/dboudreau00/NocTORnal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dboudreau00/NocTORnal/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-alpha%20%C2%B7%20unaudited-orange.svg)](#status)
 
 ![The sociogram](docs/images/01-graph.png)
@@ -213,7 +213,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 54 Alembic migrations
+6. applies all 59 Alembic migrations (Alembic head 0059)
 7. offers to create your first account, printing the password **once** with a QR code to scan
 8. starts the API and opens the console
 
@@ -271,9 +271,12 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **1269 passed, 0 skipped**. **Without `DATABASE_URL` you will see
-roughly 700 skips instead** — half the suite is database-gated by design.
-That is a correct result, not a broken install.
+Expect **every test to pass with 0 skipped** — **1627 tests** (`def test_`
+functions across both pytest roots; 2259 collected items once
+parametrised; a snapshot taken 2026-09-09, the live figure is `pytest
+--co -q`). **Without `DATABASE_URL` roughly half the suite skips
+instead** — it is database-gated by design. That is a correct result,
+not a broken install.
 
 ---
 
@@ -282,7 +285,9 @@ That is a correct result, not a broken install.
 ### Sociogram
 ![Sociogram](docs/images/01-graph.png)
 
-WebGL rendering over `sigma.js`. **Projections decide which edge types
+A hand-written 2D `<canvas>` renderer with a ForceAtlas2 layout in a web
+worker; the sketch's `sigma.js` WebGL renderer was replaced before anything
+was built. **Projections decide which edge types
 count as a social tie** — identity plumbing (`SAME_AS`, `ALIAS_OF`) stays
 out, or whichever persona you researched hardest looks the most central.
 Inferred edges render **dashed** and are excluded from metrics unless a
@@ -510,7 +515,7 @@ test named after it.
 | 2 | **A handle is not a person.** `IDENTITY` ≠ `PERSON`, joined reversibly | trigger rejecting cross-layer `SAME_AS` |
 | 3 | **Machines propose, analysts dispose** | no code path from extractor to graph |
 | 4 | **Inferred edges stay distinct** — dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
-| 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion` |
+| 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion`; a retraction is a one-time stamp on the row, never a rewrite |
 | 6 | **The audit log is append-only** | row *and* statement triggers; `TRUNCATE` refused |
 | 7 | **Credentials never leave the collector** | decrypted only in the worker process |
 | 8 | **TLP gates egress** | one `can_egress`, called by all four outbound paths |
@@ -532,14 +537,15 @@ test named after it.
 | **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** — pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain** — Louvain can produce internally disconnected communities. |
 | **Object store** | MinIO, S3 object lock | COMPLIANCE-mode retention, so the application's own credentials cannot delete an exhibit. GOVERNANCE mode is bypassable and therefore not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
-| **Migrations** | Alembic | 52 revisions, one concern each, all reversible. |
+| **Migrations** | Alembic | 59 revisions (Alembic head 0059), one concern each, all reversible. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction** — no dual write, no lost event. |
 
 ### Frontend
 
 Plain HTML, CSS and ES modules under a strict CSP. **No build step, no
-framework, no `node_modules`.** `graphology` + `sigma.js` (WebGL) render
-the sociogram; a web worker handles layout.
+framework, no `node_modules`.** A hand-written 2D `<canvas>` renderer draws
+the sociogram and a web worker runs the ForceAtlas2 layout; the sketch's
+`graphology` + `sigma.js` (WebGL) pair was replaced before it was built.
 
 A deliberate trade. The console is served same-origin by the API, so there
 is no CORS surface; there is no `unsafe-inline`, so a stored XSS has no
@@ -551,7 +557,8 @@ enforces it.
 
 ### Testing
 
-**1269 tests** across two pytest roots. Every invariant has a test named
+**1627 tests** (`def test_` functions across two pytest roots; 2259 collected
+items once parametrised, snapshot 2026-09-09). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
 
@@ -575,8 +582,8 @@ noctornal/
 │   ├── src/…/definition.py    edit here, regenerate, ship a migration
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
-│   ├── schema.sql             annotated reference schema
-│   └── migrations/versions/   54 Alembic revisions
+│   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
+│   └── migrations/versions/   59 Alembic revisions
 ├── docs/                      00–19, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots

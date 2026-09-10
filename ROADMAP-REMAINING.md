@@ -881,10 +881,12 @@ What this pass hands the owner rather than decides:
   cookie is honestly "not live" until the next sign-in, and the dot says
   so. Accepting the cookie pair on the socket is the change that would
   let the login response stop returning the token at all.
-- **`README.md`** still names a `graphology` + `sigma.js` WebGL renderer (replaced
-  by Canvas 2D), 1269 tests, 52 revisions, and calls `db/schema.sql` an
-  annotated reference.
-  It is the owner's file and this pass did not touch it.
+- **`README.md`** named a `graphology` + `sigma.js` WebGL renderer (replaced
+  by Canvas 2D), 1269 tests, 52 revisions, and called `db/schema.sql` an
+  annotated reference. Refreshed later the same day at the owner's
+  direction, and `test_doc_invariants.py` now holds it like every other
+  document: the removed-stack rule, the test and revision counts and the
+  Alembic head. The exclusion that had shielded it is gone.
 
 **Suite non-idempotence, again.** Under migration 0059 eleven fixtures in
 eight files were writing compartments nobody had registered; several

@@ -1397,3 +1397,20 @@ def test_the_live_client_stops_on_the_policy_close_the_server_documents():
         "live.py must state the client's real policy for 1008")
     assert "backs off\n#: on any close" not in live, (
         "live.py still says the client backs off on ANY close")
+
+
+def test_the_palette_offers_every_pane_the_rail_has():
+    """`TAB_NAMES` is the command palette's "Go to" list. It was written
+    when the rail had six panes and stayed at six while the rail grew to
+    seventeen, so the palette offered a third of the console and the
+    documents called it a way to reach anything (2026-09-09). Held to the
+    rail's `data-tab` set, in rail order, so the next pane cannot be
+    added to one and not the other."""
+    rail = re.findall(r'data-tab="([a-z-]+)"', _html())
+    assert len(rail) >= 17, rail
+    block = re.search(r"const TAB_NAMES = \[(.*?)\];", _js(), re.S)
+    assert block, "app.js has lost TAB_NAMES"
+    palette = re.findall(r"\['([a-z-]+)',", block.group(1))
+    assert palette == rail, (
+        "the palette's Go-to list and the rail disagree:\n"
+        f"  rail:    {rail}\n  palette: {palette}")

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- Body caps: `POST /samples` and `POST /cases/{id}/deception/emails` are
+  enforced by `BodyCappedRoute` at the ASGI receive, like evidence. The
+  routers' private chunked reads, which ran after the multipart parser
+  had spooled the whole body, are gone.
+- The CSRF double-submit compares in constant time (`hmac.compare_digest`
+  over bytes; a non-ASCII header is a 403, not a TypeError).
+- The login audit hashes the address the session is bound to
+  (`client_ip`), not the proxy's.
+- The command palette offers every pane the rail has, in rail order; a
+  test holds the two together.
+- Invariant 5 decided: a retraction is a marked row, stamped once, not a
+  supersession; a test pins that nothing else on the row changes.
+- One session story across QUICKSTART, ARCHITECTURE and SECURITY: the
+  cookie is the session; the login-body token is an in-memory,
+  login-lifetime capability for the websocket and the Lab download until
+  those two paths accept the cookie.
+- CONVENTIONS no longer claims an implemented auto-merge or cursor
+  pagination, and counts 59 revisions. README refreshed (live CI badge,
+  Canvas 2D, 1627 tests, 59 revisions, generated `db/schema.sql`) and now
+  held by `test_doc_invariants.py` like every other document.
+
 ## Alpha 5 — 2026-09-09
 
 Review release. **Still not audited, and still not lawful to operate

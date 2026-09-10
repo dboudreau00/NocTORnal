@@ -10,6 +10,11 @@ The Alpha 4 review named two unbounded body reads:
 - `POST /ingest` did `await request.body()` and checked the key's
   `max_bytes_per_request` AFTER the whole body had been accumulated. The
   cap existed and was useless against the thing a cap is for.
+- `POST /samples` and `POST /cases/{id}/deception/emails` (added here
+  2026-09-09) each read the upload in chunks and stopped at their cap --
+  AFTER FastAPI's multipart parser had spooled the whole body to a
+  temporary file. Memory was bounded; the bytes had all arrived. Both
+  now opt into `BodyCappedRoute` like evidence.
 
 **Why this file drives the app as raw ASGI rather than through TestClient.**
 Starlette's TestClient calls `request.read()` on the httpx request before
@@ -65,6 +70,10 @@ EVIDENCE_CAP = 64 * 1024
 #: The ingest cap is per key, a column on `ingest.api_key`; the test sets
 #: its own key's column.
 INGEST_CAP = 4096
+#: The sample and email caps are module constants read at request time,
+#: shrunk here for the same reason as the evidence cap.
+SAMPLE_CAP = 64 * 1024
+EML_CAP = 64 * 1024
 
 
 @pytest.fixture
@@ -86,7 +95,12 @@ def conn():
         "(SELECT actor_id FROM core.evidence_custody WHERE actor_id IS NOT NULL"
         " UNION SELECT acquired_by FROM core.evidence WHERE acquired_by IS NOT NULL"
         ' UNION SELECT owner_user_id FROM core."case" WHERE owner_user_id IS NOT NULL'
-        ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL)'
+        ' UNION SELECT deputy_user_id FROM core."case" WHERE deputy_user_id IS NOT NULL'
+        # The sample the positive control lands: `submit` writes the
+        # submission itself into `lab.sample_access`, which is append-only,
+        # so neither the sample nor its submitter can ever be deleted. Same
+        # residue policy as custody, keyed on this suite's random prefix.
+        ' UNION SELECT submitted_by FROM lab.sample WHERE submitted_by IS NOT NULL)'
     )
     with c.transaction():
         c.execute(f"DELETE FROM ingest.dead_letter WHERE api_key_id IN {keys}")
@@ -133,6 +147,26 @@ def evidence_cap(monkeypatch):
         "noctornal_api.http.routers.evidence.MAX_EVIDENCE_BYTES", EVIDENCE_CAP,
         raising=False)
     return EVIDENCE_CAP
+
+
+@pytest.fixture
+def sample_cap(monkeypatch):
+    monkeypatch.setattr(
+        "noctornal_api.http.routers.samples.MAX_SAMPLE_BYTES", SAMPLE_CAP,
+        raising=False)
+    # The positive control lands a real row, which the service refuses
+    # until an operator has declared a prohibited-content policy (docs/11).
+    monkeypatch.setenv("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "TEST-POLICY-BCAP")
+    monkeypatch.setenv("NOCTORNAL_DESIGNATED_PERSON", "test designated person")
+    return SAMPLE_CAP
+
+
+@pytest.fixture
+def eml_cap(monkeypatch):
+    monkeypatch.setattr(
+        "noctornal_api.http.routers.deception.MAX_EML_BYTES", EML_CAP,
+        raising=False)
+    return EML_CAP
 
 
 def _make_user(conn, *, global_roles=()):
@@ -248,19 +282,25 @@ def _drive(app, *, method: str, path: str, headers: dict[str, str],
             {k.decode(): v.decode() for k, v in start["headers"]}, payload)
 
 
-def _multipart(payload: bytes) -> tuple[bytes, str]:
-    """A multipart body the way a browser or httpx would encode it."""
+def _multipart(payload: bytes, *, filename: str = "cap.bin") -> tuple[bytes, str]:
+    """A multipart body the way a browser or httpx would encode it. The
+    `title` field is evidence's; the other two forms ignore it."""
     req = httpx.Request(
         "POST", "http://testserver/", data={"title": "cap test"},
-        files={"file": ("cap.bin", payload, "application/octet-stream")})
+        files={"file": (filename, payload, "application/octet-stream")})
     return req.read(), req.headers["content-type"]
 
 
-def _multipart_of_total(total: int) -> tuple[bytes, str]:
+def _multipart_of_total(total: int, *, head: bytes = b"",
+                        filename: str = "cap.bin") -> tuple[bytes, str]:
     """A multipart body of EXACTLY `total` bytes. The cap is on the body,
-    not the file, so the file is sized to make the body land on the number."""
-    overhead = len(_multipart(b"")[0])
-    body, content_type = _multipart(b"x" * (total - overhead))
+    not the file, so the file is sized to make the body land on the number.
+    `head` leads the file's bytes: a message header block, or a nonce for
+    a service that deduplicates on content."""
+    overhead = len(_multipart(b"", filename=filename)[0])
+    fill = total - overhead - len(head)
+    assert fill >= 0, (total, overhead, len(head))
+    body, content_type = _multipart(head + b"x" * fill, filename=filename)
     assert len(body) == total, (len(body), total)
     return body, content_type
 
@@ -342,33 +382,58 @@ def test_an_evidence_body_at_the_cap_is_accepted(conn, app, client, evidence_cap
     assert len(_evidence_objects(case_id)) == 1
 
 
-def test_the_evidence_route_and_the_cap_helper_are_actually_connected():
+@pytest.mark.parametrize("module, path, constant, word", [
+    ("evidence", "/cases/{case_id}/evidence", "MAX_EVIDENCE_BYTES", "evidence"),
+    ("samples", "/samples", "MAX_SAMPLE_BYTES", "sample"),
+    ("deception", "/cases/{case_id}/deception/emails", "MAX_EML_BYTES", "email"),
+])
+def test_each_upload_route_and_the_cap_helper_are_actually_connected(
+        module, path, constant, word):
     """Reads both sides of the contract that crosses two files.
 
     `body_cap` in http/limits.py leaves a marker; `BodyCappedRoute` reads
-    it; routers/evidence.py has to opt into BOTH -- the decorator on the
+    it; each upload router has to opt into BOTH -- the decorator on the
     endpoint and `route_class=` on the router -- or the cap is a docstring.
-    The generator tests above would catch a disconnection too, but they
-    need the stack up; this one runs anywhere and names which half went
-    missing.
+    The generator tests catch a disconnection too, but they need the
+    stack up; this one runs anywhere and names which half went missing.
+    Evidence opted in first; samples and deception followed on 2026-09-09.
     """
+    import importlib
+
     from fastapi.routing import APIRoute
 
     from noctornal_api.http import limits
-    from noctornal_api.http.routers import evidence
 
-    uploads = [r for r in evidence.router.routes
+    mod = importlib.import_module(f"noctornal_api.http.routers.{module}")
+    uploads = [r for r in mod.router.routes
                if isinstance(r, APIRoute) and "POST" in r.methods
-               and r.path == "/cases/{case_id}/evidence"]
-    assert len(uploads) == 1
+               and r.path == path]
+    assert len(uploads) == 1, [r.path for r in mod.router.routes]
     route = uploads[0]
     assert isinstance(route, limits.BodyCappedRoute), (
-        "routers/evidence.py must build its router with route_class=BodyCappedRoute")
+        f"routers/{module}.py must build its router with route_class=BodyCappedRoute")
     marker = getattr(route.endpoint, limits._BODY_CAP_ATTR, None)
-    assert marker is not None, "the upload endpoint has lost its @body_cap marker"
+    assert marker is not None, f"the {module} upload endpoint has lost its @body_cap marker"
     cap_of, what = marker
-    assert cap_of() == evidence.MAX_EVIDENCE_BYTES == 256 * 1024 * 1024
-    assert "evidence" in what
+    assert cap_of() == getattr(mod, constant)
+    assert word in what
+
+
+def test_no_router_keeps_a_private_copy_of_the_chunked_read():
+    """The samples and deception routers each carried a `_read_capped`
+    that read the upload in chunks and stopped at the cap -- after the
+    multipart parser had already spooled the whole body. A copy that
+    comes back is a cap that looks enforced and is not."""
+    from pathlib import Path
+
+    from noctornal_api.http import routers
+
+    here = Path(routers.__file__).parent
+    # A DEFINITION is a copy; the routers may still name the old helper
+    # in the comment that says why it is gone.
+    offenders = [p.name for p in sorted(here.glob("*.py"))
+                 if "def _read_capped(" in p.read_text(encoding="utf-8")]
+    assert offenders == [], offenders
 
 
 # ---------------------------------------------------------------------------
@@ -458,3 +523,136 @@ def test_the_ingest_docstring_and_the_schema_agree_on_the_default_cap(conn):
               AND column_name = 'max_bytes_per_request'""").fetchone()[0]
     assert default is not None and "33554432" in default, default
     assert 33554432 == 32 * 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# Samples
+# ---------------------------------------------------------------------------
+
+def _sample_rows(conn, submitter) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM lab.sample WHERE submitted_by = %s",
+        (submitter,)).fetchone()[0]
+
+
+def test_a_sample_body_one_byte_over_the_cap_is_refused_before_it_is_read(
+        conn, app, client, sample_cap):
+    """Until 2026-09-09 the samples router read the upload in one-megabyte
+    chunks and stopped at the cap -- after FastAPI's multipart parser had
+    spooled the whole body to a temporary file. The chunked read bounded
+    this process's memory; the bytes had all arrived. Before the change
+    this test died in the generator, exactly as the evidence one did."""
+    uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    body, content_type = _multipart_of_total(sample_cap + 1)
+    auth = {"authorization": f"Bearer {token}", "content-type": content_type}
+
+    declared = _Body(body, cap=sample_cap, refuse_any_read=True)
+    status, headers, payload = _drive(
+        app, method="POST", path="/api/v1/samples", body=declared,
+        headers={**auth, "content-length": str(len(body))})
+    assert status == 413, payload
+    assert str(sample_cap) in payload.decode(), payload
+    assert headers.get("content-type", "").startswith("application/problem+json")
+    assert headers.get("connection") == "close"
+    assert declared.delivered == 0
+
+    chunked = _Body(body, cap=sample_cap)
+    status, _headers, payload = _drive(
+        app, method="POST", path="/api/v1/samples", body=chunked, headers=auth)
+    assert status == 413, payload
+    assert str(sample_cap) in payload.decode(), payload
+    assert chunked.delivered == sample_cap + 1
+
+    assert _sample_rows(conn, uid) == 0, "a refused submission must leave no row"
+
+
+def test_a_sample_body_at_the_cap_is_accepted(conn, app, client, sample_cap):
+    """The positive control, through the capped receive and into
+    quarantine. Unique content: the service deduplicates on hash, and a
+    fixed payload would fail the second run on the first run's row."""
+    uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    body, content_type = _multipart_of_total(
+        sample_cap, head=b"MZ\x90\x00not-really-malware-" + uuid4().bytes)
+    status, _headers, payload = _drive(
+        app, method="POST", path="/api/v1/samples", body=_Body(body, cap=None),
+        headers={"authorization": f"Bearer {token}", "content-type": content_type,
+                 "content-length": str(len(body))})
+    assert status == 201, payload
+    assert _sample_rows(conn, uid) == 1
+
+
+# ---------------------------------------------------------------------------
+# Deception: the .eml exhibit
+# ---------------------------------------------------------------------------
+
+def _eml_of_total(total: int) -> tuple[bytes, str]:
+    """A multipart body of exactly `total` bytes whose file part is a
+    parseable RFC 5322 message -- headers, then a text body padded to the
+    number -- so the positive control records an email, not a gap."""
+    head = (b"From: Accounts Payable <ap@victim.example>\r\n"
+            b"To: cfo@victim.example\r\n"
+            b"Subject: Updated bank details\r\n"
+            b"Date: Mon, 20 Jul 2026 09:00:00 +0000\r\n"
+            b"Message-ID: <" + uuid4().hex.encode() + b"@lure.example>\r\n"
+            b"Content-Type: text/plain; charset=us-ascii\r\n\r\n")
+    return _multipart_of_total(total, head=head, filename="lure.eml")
+
+
+def test_an_email_exhibit_one_byte_over_the_cap_is_refused_before_it_is_read(
+        conn, app, client, eml_cap):
+    """Same shape as the samples router, same date, same fix."""
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    body, content_type = _eml_of_total(eml_cap + 1)
+    auth = {"authorization": f"Bearer {token}", "content-type": content_type}
+    path = f"/api/v1/cases/{case_id}/deception/emails"
+
+    declared = _Body(body, cap=eml_cap, refuse_any_read=True)
+    status, headers, payload = _drive(
+        app, method="POST", path=path, body=declared,
+        headers={**auth, "content-length": str(len(body))})
+    assert status == 413, payload
+    assert str(eml_cap) in payload.decode(), payload
+    assert headers.get("connection") == "close"
+    assert declared.delivered == 0
+
+    chunked = _Body(body, cap=eml_cap)
+    status, _headers, payload = _drive(
+        app, method="POST", path=path, body=chunked, headers=auth)
+    assert status == 413, payload
+    assert str(eml_cap) in payload.decode(), payload
+    assert chunked.delivered == eml_cap + 1
+
+    # Nothing lodged: no exhibit row, no object under the case, no message.
+    assert conn.execute(
+        "SELECT count(*) FROM core.evidence WHERE case_id = %s",
+        (case_id,)).fetchone()[0] == 0
+    assert _evidence_objects(case_id) == []
+    assert conn.execute(
+        "SELECT count(*) FROM deception.email_message WHERE case_id = %s",
+        (case_id,)).fetchone()[0] == 0
+
+
+def test_an_email_exhibit_at_the_cap_is_accepted(conn, app, client, eml_cap):
+    """The positive control: the exhibit lands under its lock and the
+    message is recorded from it."""
+    _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _login(client, email, secret)
+    case_id = _create_case(client, token)
+    body, content_type = _eml_of_total(eml_cap)
+    status, _headers, payload = _drive(
+        app, method="POST", path=f"/api/v1/cases/{case_id}/deception/emails",
+        body=_Body(body, cap=None),
+        headers={"authorization": f"Bearer {token}", "content-type": content_type,
+                 "content-length": str(len(body))})
+    assert status == 201, payload
+    assert conn.execute(
+        "SELECT count(*) FROM core.evidence WHERE case_id = %s",
+        (case_id,)).fetchone()[0] == 1
+    assert len(_evidence_objects(case_id)) == 1
+    assert conn.execute(
+        "SELECT count(*) FROM deception.email_message WHERE case_id = %s",
+        (case_id,)).fetchone()[0] == 1

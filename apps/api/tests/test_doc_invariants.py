@@ -324,11 +324,11 @@ _REMOVED_STACK = re.compile(
 #: write a new historical mention, put one of these four on its line.
 _HISTORY_MARKER = re.compile(r"(?i)superseded|removed|replaced|not in the tree")
 
-#: The root README is the owner's document and is not edited by this pass;
-#: its remaining mentions (sigma.js / WebGL, at the time of writing) are
-#: reported to the owner rather than corrected here. Only the ROOT README
-#: is excluded -- `release/README.md` is checked like everything else.
-_STACK_CHECK_EXCLUDED = {"README.md"}
+#: Until 2026-09-09 the root README was excluded here as "the owner's
+#: document", and carried sigma.js / WebGL, 1269 tests and 52 revisions
+#: through five alphas while every other document was held to the tree.
+#: An exclusion for the file a new reader opens first is the defect this
+#: file exists to catch, wearing a shield. Nothing is excluded now.
 
 
 def test_no_document_describes_the_removed_stack():
@@ -340,8 +340,6 @@ def test_no_document_describes_the_removed_stack():
     offenders: list[str] = []
     for doc in _docs():
         rel = doc.relative_to(ROOT).as_posix()
-        if rel in _STACK_CHECK_EXCLUDED:
-            continue
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             if _REMOVED_STACK.search(line) and not _HISTORY_MARKER.search(line):
                 offenders.append(f"{rel}:{lineno}: {line.strip()[:110]}")
@@ -362,18 +360,28 @@ def test_no_document_describes_the_removed_stack():
 # current. A number a reader can check is a claim; these hold the two
 # outward-facing documents' claims to what the tree contains.
 #
-# The root README is again the owner's and is not checked here.
+# The root README joined the list on 2026-09-09 (see the stack rule above),
+# and CONVENTIONS.md with it: the working agreement quoted a revision count
+# one short of the chain the same day.
 
-_COUNTED_DOCS = ("release/README.md", "ARCHITECTURE.md")
+_COUNTED_DOCS = ("release/README.md", "ARCHITECTURE.md", "README.md",
+                 "CONVENTIONS.md")
 
 #: A four-digit number immediately followed by `tests` or `passing`
-#: (`1206 passing`, `**1252 tests passing**`). Three-digit figures are
-#: left alone: the documents quote historical per-phase counts ("it had
-#: 673 passing tests") as narrative, not as the suite's size.
-_TEST_COUNT_CLAIM = re.compile(r"\b(\d{4})\s+(?:tests|passing)\b")
+#: (`1206 passing`, `**1252 tests passing**`), or by `%20` and the same
+#: word inside a badge URL (`tests-1269%20passing`: the README's shield
+#: said 1269 on a 1627-function tree). Three-digit figures are left
+#: alone: the documents quote historical per-phase counts ("it had 673
+#: passing tests") as narrative, not as the suite's size.
+_TEST_COUNT_CLAIM = re.compile(r"\b(\d{4})(?:\s+|%20)(?:tests|passing)\b")
 
 #: `Alembic head 0052` / `Alembic head **0052**`.
 _HEAD_CLAIM = re.compile(r"Alembic head\s+\*{0,2}(\d{4})\*{0,2}")
+
+#: `59 revisions`, `52 Alembic migrations`, `59 Alembic revisions`: a count
+#: of the migration chain, held to the number of version files.
+_REVISION_COUNT_CLAIM = re.compile(
+    r"\b(\d{2,3})\s+(?:Alembic\s+)?(?:revisions|migrations)\b")
 
 #: One `def test_...`, sync or async, at any indentation -- so a test
 #: method inside a class counts, as pytest counts it. This is the
@@ -433,3 +441,25 @@ def test_quoted_alembic_heads_are_the_chain_head():
             if m.group(1) != head:
                 stale.append(f"{name}: '{m.group(0)}'")
     assert not stale, f"documents quote an Alembic head other than {head}: {stale}"
+
+
+def _revision_file_count() -> int:
+    n = len(list((ROOT / "db" / "migrations" / "versions").glob("0*.py")))
+    assert n > 50, f"only {n} version files -- tree moved?"
+    return n
+
+
+def test_quoted_revision_counts_are_the_length_of_the_chain():
+    """`52 revisions` in three places of the README on a 59-file chain,
+    and `58 Alembic revisions (0001-0059)` in CONVENTIONS, on 2026-09-09.
+    A count is checkable in one `ls`; hold it to that."""
+    actual = _revision_file_count()
+    stale: list[str] = []
+    for name in _COUNTED_DOCS:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        for m in _REVISION_COUNT_CLAIM.finditer(text):
+            if int(m.group(1)) != actual:
+                stale.append(f"{name}: '{m.group(0)}'")
+    assert not stale, (
+        f"documents quote a migration count other than the {actual} version "
+        f"files in db/migrations/versions: {stale}")

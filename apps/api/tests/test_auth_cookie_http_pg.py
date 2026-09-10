@@ -373,3 +373,36 @@ def test_a_hand_off_cannot_replace_another_accounts_cookie_session(conn, client)
     fresh = _set_cookies(r)
     assert fresh[SESSION_COOKIE][0] == own_token
     assert fresh[CSRF_COOKIE][0]
+
+
+def test_the_login_audit_names_the_address_the_session_is_bound_to(
+        conn, client, monkeypatch):
+    """Behind a declared proxy `client_ip` is the address the session is
+    bound to (0058) and the limiter meters. Until 2026-09-09 the login
+    audit hashed `request.client.host` instead, so AUTH_SUCCEEDED named
+    the proxy for every analyst behind it -- a split between what the
+    audit said and what the session knew. One address, both places."""
+    import hashlib
+    import time
+
+    from noctornal_api.security import totp
+
+    monkeypatch.setenv("NOCTORNAL_TRUSTED_PROXY_HOPS", "1")
+    uid, email, secret = _make_user(conn)
+    r = client.post("/api/v1/auth/login", json={
+        "email": email, "password": PASSWORD,
+        "totp_code": totp.code_at(secret, int(time.time()))},
+        headers={"x-forwarded-for": "203.0.113.77"})
+    assert r.status_code == 200, r.text
+
+    rows = conn.execute(
+        "SELECT ip_hash FROM audit.event WHERE actor_id = %s "
+        "AND action = 'AUTH_SUCCEEDED'", (uid,)).fetchall()
+    assert len(rows) == 1
+    audited = bytes(rows[0][0])
+    bound = conn.execute(
+        "SELECT host(ip) FROM iam.session WHERE user_id = %s", (uid,)).fetchone()[0]
+    assert bound == "203.0.113.77"
+    assert audited == hashlib.sha256(bound.encode()).digest()
+    assert audited != hashlib.sha256(b"testclient").digest(), (
+        "the audit named the test client's peer address, i.e. the proxy")

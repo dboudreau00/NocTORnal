@@ -58,10 +58,19 @@ class LoginResponse(BaseModel):
 
 
 def _ip_hash(request: Request) -> bytes | None:
-    client = request.client
-    if client is None:
+    """The address the audit row names is the one the session is bound to.
+
+    `client_ip` is the peer, or the outermost trusted proxy's client when
+    `NOCTORNAL_TRUSTED_PROXY_HOPS` says so. Until 2026-09-09 this hashed
+    `request.client.host` while the binding (0058) and the rate limiter
+    read `client_ip`, so behind a proxy every sign-in was audited from
+    the proxy's own address: the log said who signed in from where, and
+    the where was the load balancer.
+    """
+    ip = client_ip(request)
+    if ip is None:
         return None
-    return hashlib.sha256(client.host.encode()).digest()
+    return hashlib.sha256(ip.encode()).digest()
 
 
 def _audit(conn, action: str, actor_id, detail: dict, request: Request) -> None:

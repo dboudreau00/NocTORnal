@@ -4191,11 +4191,27 @@ async function createEdge(event) {
  * on screen is reachable from a keystroke, and nothing here does anything the
  * UI cannot also do — a palette that hides capabilities is a trap. */
 
+/* Every pane in the rail, in rail order. This list was written when
+   the rail had six panes and stayed at six while the rail grew to
+   seventeen, so until 2026-09-09 the palette's "Go to" offered a third
+   of the console and said nothing about the rest. `test_ui_invariants`
+   holds it to the `data-tab` set in index.html, in order. */
 const TAB_NAMES = [
   ['graph', 'Sociogram'],
   ['entities', 'Entity list'],
   ['evidence', 'Evidence'],
+  ['triage', 'Triage'],
+  ['inbox', 'Inbox'],
+  ['analytics', 'Analysis'],
   ['search', 'Search'],
+  ['comms', 'Comms'],
+  ['feeds', 'Feeds'],
+  ['ach', 'ACH'],
+  ['report', 'Report'],
+  ['governance', 'Lifecycle'],
+  ['admin', 'Admin'],
+  ['samples', 'Lab'],
+  ['deception', 'Deception'],
   ['add-node', 'Add entity'],
   ['add-edge', 'Add relationship'],
 ];

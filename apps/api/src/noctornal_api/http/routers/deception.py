@@ -74,9 +74,13 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 
-router = APIRouter(prefix="/cases/{case_id}/deception", tags=["deception"])
+# `route_class=BodyCappedRoute` gives the `@body_cap` marker on
+# `upload_email` its effect (routers/evidence.py explains the mechanism);
+# every other route on this router is untouched by it.
+router = APIRouter(prefix="/cases/{case_id}/deception", tags=["deception"],
+                   route_class=BodyCappedRoute)
 
 
 def _svc(conn: psycopg.Connection) -> DeceptionService:
@@ -373,6 +377,7 @@ def capture_screenshot(
 
 @router.post("/emails", status_code=201,
              dependencies=[Depends(rate_limit("evidence.ingest"))])
+@body_cap(lambda: MAX_EML_BYTES, what="an email exhibit")
 async def upload_email(
     case_id: UUID,
     file: UploadFile = File(...),
@@ -395,7 +400,15 @@ async def upload_email(
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload")
     check_writable_labels(conn, user, classification=classification)
 
-    data = await _read_capped(file, MAX_EML_BYTES)
+    # The body was capped at MAX_EML_BYTES by BodyCappedRoute before the
+    # multipart parser saw it (the marker above); `parse_eml` re-checks
+    # the length as its own precondition. Until 2026-09-09 a private
+    # chunked read did this after the parser had spooled the body whole.
+    # The empty check stays: an empty exhibit is a mistake, and 422 says
+    # which mistake.
+    data = await file.read()
+    if not data:
+        raise Problem(422, "Empty", "no bytes were uploaded")
     svc = EvidenceService(conn, EvidenceStorage())
     result = svc.ingest(
         case_id=case_id,
@@ -566,27 +579,3 @@ def defang_preview(
     """
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     return {"value": value[:4096], "defanged": defang(value[:4096])}
-
-
-async def _read_capped(file: UploadFile, cap: int) -> bytes:
-    """Read the upload, refusing at the first chunk that crosses the cap.
-
-    Same shape and same reason as `routers/samples._read_capped`: an
-    unbounded `await file.read()` accumulates the whole body BEFORE the
-    size check, so the cap is documented, enforced, and useless against
-    exactly the thing a cap is for.
-    """
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > cap:
-            raise Problem(413, "Too large",
-                          f"message exceeds the {cap} byte cap")
-        chunks.append(chunk)
-    if total == 0:
-        raise Problem(422, "Empty", "no bytes were uploaded")
-    return b"".join(chunks)

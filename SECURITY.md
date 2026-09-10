@@ -25,12 +25,25 @@ use**. It has never been operated against real targets. That means:
   promote a machine's proposal without an analyst.
 - **In scope:** authentication, session handling, the five-part access
   gate, and the egress gate.
+- **How a session works, so a report starts from the right model:** the
+  cookie is the session. `POST /auth/login` sets `__Host-session`
+  (HttpOnly) and a readable `__Host-csrf`, and an unsafe method on a
+  cookie session must carry that cookie's value in `x-csrf-token`. The
+  same login response returns the token in its body, and the console
+  holds it in page memory only, as a login-lifetime capability for the
+  two paths that do not read the cookie yet: the live websocket (token
+  in the first frame) and the Lab download from a separate sample
+  origin. The token in web storage, in a URL, or in a log *is* a
+  finding; the token in the login body is not, until those two paths
+  accept the cookie.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md). Please
-  read it before reporting — session IP/UA binding, row-level security
-  under a non-owner database role, WebAuthn and login timing equalisation
-  are all absent *on purpose and on the record*. A report that one of them
-  is missing is not a finding.
+  read it before reporting — row-level security under a non-owner
+  database role, WebAuthn and login timing equalisation are absent *on
+  purpose and on the record*, and session binding is recorded on every
+  session (0058) but enforced only under
+  `NOCTORNAL_SESSION_STRICT_BINDING`. A report that one of them is
+  missing is not a finding.
 - **Out of scope:** the development `docker-compose.yml`. It ships
   `dev_only_change_me` as a password on purpose, publishes ports to
   localhost, and says "development only" in its first line. It is not a

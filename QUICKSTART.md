@@ -226,14 +226,32 @@ deliberate and documented, not hidden:
   them, and run the API under a database role that does *not* own the
   tables — the append-only audit and custody triggers can be disabled by a
   table owner.
-- **No TLS.** The session cookie is `Secure`/`__Host-` prefixed and assumes
-  HTTPS; the UI uses a Bearer token in `sessionStorage` so it works over
-  plain HTTP locally, which is XSS-exposed. Put it behind TLS and switch to
-  the cookie + `X-CSRF-Token` path the API already supports.
-- **Still missing:** session IP/UA binding, WebAuthn, and row-level
-  security under a non-owner database role. Rate limiting (Redis GCRA)
-  and the destination-aware TLP egress gate both shipped. See
-  `docs/17-flagged-for-review.md` for the current list.
+- **No TLS.** The console runs on the API's cookie session: `POST
+  /auth/login` sets `__Host-session` (HttpOnly) and a readable
+  `__Host-csrf`, and every unsafe request copies that cookie into the
+  `x-csrf-token` header. Both are `Secure` and `__Host-` prefixed, which a
+  browser accepts from `localhost` or over HTTPS and from nowhere else; on
+  plain HTTP from any other address the console falls back to the sign-in
+  token held in page memory for the life of the tab, and says so in a
+  banner. Put anything real behind TLS.
+- **The sign-in token is still returned by `POST /auth/login`,** and the
+  console keeps it in memory — never in web storage — as a login-lifetime
+  capability for the two paths that do not read the cookie yet: the live
+  websocket, which authenticates from the token in its first frame, and
+  the Lab download from a separate sample origin, across which no cookie
+  travels. It dies with the tab; a session restored from the cookie after
+  a reload is "not live" until the next sign-in, and the live dot says
+  so. Accepting the cookie pair on those two paths is the change that
+  lets login stop returning the token.
+- **Session binding is recorded, not enforced, unless you say so.** Every
+  session carries the address and client it was minted from (0058);
+  `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a session presented from
+  anywhere else. Behind a proxy, set `NOCTORNAL_TRUSTED_PROXY_HOPS` or the
+  bound address — and the one in the login audit — is the proxy's.
+- **Still missing:** WebAuthn, and row-level security under a non-owner
+  database role. Rate limiting (Redis GCRA) and the destination-aware TLP
+  egress gate both shipped. See `docs/17-flagged-for-review.md` for the
+  current list.
 - **It is unaudited.** `docs/08-governance.md` sets the bar for evidence
   that has to survive a challenge; treat this as a working model of it, not
   as it.

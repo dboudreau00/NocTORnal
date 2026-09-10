@@ -28,8 +28,12 @@ Violating any of these is a bug even if tests pass.
 
 3. **Machines propose, analysts dispose.** Extractors and inference jobs
    write to `proposal`. They never write to `node` or `edge` directly.
-   The only exception is auto-merge on a `is_strong` selector match, and
-   even that creates a reversible merge with an audit event.
+   There is no direct-write exception: a strong (`is_strong`) selector
+   already attributed to another node raises `StrongSelectorConflict` as
+   a merge *lead*, and the merge is made by an analyst (`merges.py`),
+   reversibly and with an audit event. (The 2026-07 text allowed an
+   automatic merge on a strong match; it was never built and is
+   superseded as of 2026-09-09.)
 
 4. **Inferred edges stay visually and structurally distinct.** `is_inferred
    = true` renders dashed and is excluded from metrics unless the
@@ -37,7 +41,15 @@ Violating any of these is a bug even if tests pass.
    an asserted one.
 
 5. **History is superseded, never overwritten.** No destructive `UPDATE` on
-   `assertion`. Set `superseded_at`/`superseded_by` and insert.
+   `assertion`: a claim's own columns are never written again. The one
+   exception, decided 2026-09-09: a retraction is a *marked row*, not a
+   supersession. `retract_assertion` stamps `retracted_at`,
+   `retracted_by` and `retraction_reason` once, from NULL (`WHERE
+   retracted_at IS NULL`; zero rows is an error), and the projection
+   drops the row. There is nothing to supersede it with — a retraction
+   withdraws a claim rather than replacing one. A correction is a new
+   assertion. `superseded_at`/`superseded_by` exist (0007) and the read
+   side honours them, but no code path writes them yet.
 
 6. **The audit log is append-only.** No code, migration or admin tool
    gains `UPDATE` or `DELETE` on `audit.event`.
@@ -98,7 +110,7 @@ half-built model produces a landfill.
 See `docs/02-architecture.md` for the reasoning. What is in the tree, as
 of 2026-09-09:
 
-- Postgres 16 + pgvector as the system of record; 58 Alembic revisions
+- Postgres 16 + pgvector as the system of record; 59 Alembic revisions
   (`0001`–`0059`), `db/schema.sql` regenerated from them
 - Python 3.12+ / FastAPI — **one process**, serving the REST API under
   `/api/v1`, the analyst console under `/ui`, the `/api/v1/live`
@@ -140,7 +152,11 @@ of 2026-09-09:
   default in the database. Nothing sorts on an id. (The 2026-07 convention was UUIDv7 app-side; it was never adopted and is superseded as of 2026-09-09 — `pg_uuidv7` is not installed.)
 - Times: `timestamptz`, UTC in the database, rendered in the user's zone.
 - Money and weights: `numeric`, never float.
-- API: REST under `/api/v1`, cursor pagination, `problem+json` errors.
+- API: REST under `/api/v1`, `limit`-capped pagination (`limit: int =
+  Query(200, le=1000)` in `http/routers/read.py`; no cursors),
+  `problem+json` errors (RFC 9457). (Cursor pagination was the 2026-07
+  convention; it was never implemented and is superseded as of
+  2026-09-09.)
 - Tests: every invariant above has a test named after it.
 - Secrets: environment or Vault. Never a default value in code.
 
