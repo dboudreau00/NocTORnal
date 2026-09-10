@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0059.
+-- GENERATED MIRROR of the schema at Alembic revision 0060.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0059
+-- Alembic revision: 0060
 -- =====================================================================
 
 --

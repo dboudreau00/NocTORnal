@@ -1823,6 +1823,15 @@
             <button id="btn-readiness" type="button" class="btn">Check readiness</button>
             <span id="rdy-summary" class="help"></span>
           </div>
+          <!-- Four of the thirteen checks BLOCK: `POST
+               /collection/sources/{id}/run` refuses while any of them fails
+               (readiness.BLOCKING_CHECKS). They get a banner above the list
+               rather than a row inside it, because the failure that mattered
+               was a red row on a pane nobody had to open. `role="alert"`, and
+               no dismiss control anywhere: this is the one notice on this
+               pane that is not allowed to be scrolled past. Populated by
+               `renderBlockingBanner`; empty and hidden while all four pass. -->
+          <div id="rdy-blocking" class="rdy-blocking" role="alert" hidden></div>
           <div id="rdy-list" class="stack"></div>
         </section>
 

@@ -18,6 +18,18 @@ env:
   # Mirrors infra/docker-compose.yml. These only ever address services
   # inside the runner, and are the same literals the compose file uses.
   DATABASE_URL: postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal
+  # The gate on apps/api/tests/test_app_role_privileges_pg.py, which asserts
+  # what migration 0060 granted the least-privilege runtime role. Same
+  # reasoning as REDIS_URL below: unset, that file skips every test it has
+  # and the "No tests were skipped" gate at the end then fails the build.
+  #
+  # It NAMES a role rather than switching a leg on, so it has to match
+  # 0060's APP_ROLE -- the first test in that file compares the two and
+  # fails on a mismatch rather than asserting nothing about a role the
+  # migration never touched. The role itself is created by the step below;
+  # set here with that step gone, the file FAILS rather than skipping, and
+  # the failure says the role does not exist.
+  NOCTORNAL_APP_DB_ROLE: noctornal_app
   # The rate limiter's Lua runs in Redis, not in Python, so the only way to
   # know the two implementations still agree is to run both. Without this
   # the Redis leg would skip -- and the "No tests were skipped" gate below
@@ -195,6 +207,43 @@ jobs:
         run: |
           PGPASSWORD=dev_only_change_me psql -h localhost -U noctornal \
             -d noctornal -v ON_ERROR_STOP=1 -f db/init/00-extensions.sql
+
+      # The OTHER half of db/init, by name for the same reason as the step
+      # above: this job seeds a service container and never mounts that
+      # directory, so the postgres entrypoint never sources 10-app-role.sh
+      # and `noctornal_app` would not exist. Without it
+      # apps/api/tests/test_app_role_privileges_pg.py skips its whole file,
+      # and "No tests were skipped" below fails the build.
+      #
+      # BEFORE "Migrate to head", which is the load-bearing part: migration
+      # 0060 grants a role that already exists and is a complete no-op when
+      # it does not, so a role created after the migration is a role 0060
+      # has already declined to grant. db/README.md records the ordering.
+      #
+      # The script is RUN, not copied. A hand-written CREATE ROLE here would
+      # be a second declaration of the role's attributes, and it would drift
+      # silently in one direction -- the test checks the five cluster powers
+      # and LOGIN, not NOINHERIT. `sh <file>` rather than `./<file>` because
+      # it is committed 100644 deliberately: the postgres entrypoint SOURCES
+      # a non-executable init script, and git on Windows records no execute
+      # bit to lose.
+      #
+      # PGHOST and PGPASSWORD are the whole difference from a real
+      # deployment, where this runs inside the postgres container against a
+      # unix socket that does not exist on the runner.
+      - name: Create the least-privilege runtime role
+        env:
+          PGHOST: localhost
+          PGPASSWORD: dev_only_change_me
+          POSTGRES_USER: noctornal
+          POSTGRES_DB: noctornal
+          # A throwaway like every other credential here, and unused: the
+          # suite never connects AS this role. It reads the catalog over the
+          # owner's connection, because ten *_pg files need ownership to run
+          # ALTER TABLE ... DISABLE TRIGGER -- which is precisely what this
+          # role exists to be unable to do.
+          NOCTORNAL_APP_DB_PASSWORD: dev_only_change_me
+        run: sh db/init/10-app-role.sh
 
       # The evidence bucket needs OBJECT LOCK, which cannot be enabled
       # after creation -- getting it wrong here would make the WORM tests

@@ -1296,6 +1296,72 @@ select.select { appearance: none; padding-right: 24px; }
 .danger-text { color: var(--danger); }
 .danger-text:hover { border-color: var(--danger); }
 
+/* ── the readiness register's blocking banner ──────────────────────────
+   Red, and the only red block on the admin pane. The checks it can carry
+   are the ones that make the collection run route answer 409, so this is
+   a statement about what the product will REFUSE to do, not a warning
+   that something is untidy — --alert is already carrying the ordinary
+   failed check (`.row-incomplete`) two inches below, and a blocker in the
+   same amber would be indistinguishable from an SMTP host nobody has set.
+   That is the whole colour rule on this pane: --danger for what stops
+   collection, --alert for what merely wants attention. The one amber
+   inside this red box is `.help.warn`, the action line, and it stays
+   amber on the rows below as well: what CLOSES a check is an instruction
+   and reads the same either way. The verdict is what the red carries.
+
+   Not `.banner`: that class is `position: fixed` in the corner stack and
+   is dismissed by its own close button. This one sits in the flow above
+   the list it summarises and has no way to be dismissed.
+
+   The 12% fill is on the HEADING only, and the four failing checks below
+   it sit on the ordinary surface. --alert-wash exists at 7% because
+   "at 12% a paragraph-sized block of it shouts", and this block is four
+   evidence strings and four actions long: filling the whole thing would
+   put the operator's reading — the part they have to act on — on the
+   loudest ground on the pane. The shout belongs on the sentence that
+   says collection is refused. */
+.rdy-blocking {
+  border: 1px solid var(--danger);
+  border-left: 3px solid var(--danger);
+  background: var(--surface-2);
+  border-radius: var(--r-ctl);
+  margin-bottom: var(--s-4);
+  /* So the heading's fill stops at the rounded corner rather than
+     squaring it off. */
+  overflow: hidden;
+}
+.rdy-blocking-head {
+  margin: 0; padding: var(--s-3) var(--s-4);
+  background: var(--danger-soft);
+  font-size: 12px; line-height: 1.6;
+  color: var(--text-secondary);
+}
+.rdy-blocking-head strong { color: var(--danger); }
+.rdy-blocking-list {
+  list-style: none; margin: 0; padding: 0 var(--s-4) var(--s-3);
+}
+.rdy-blocking-item {
+  padding: 8px 0; border-top: 1px solid var(--danger-edge);
+}
+.rdy-blocking-item:first-child { border-top: 0; padding-top: var(--s-3); }
+.rdy-blocking-name {
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: var(--text-primary);
+}
+/* The row in the list below, so the banner and the list agree at a
+   glance. The amber left rule `.row-incomplete` already drew is replaced
+   rather than doubled: two rules of different colours on one card reads
+   as two separate states.
+
+   The row's BLOCKING chip is the third place the same rule lands, and it
+   is set in app.js rather than here because only the row knows whether
+   the check passed: `chip subtle` while it does — grey, a standing fact
+   about which four are the gate, not a warning — and `chip bad`, this
+   rule's own red, the moment it does not. It is never `chip warn`: that
+   is the amber reserved above for the ordinary failed check, and a red
+   rule carrying an amber chip is one card making two claims. */
+.rdy-row-blocking { border-left-color: var(--danger); }
+
 .tag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag-chip { display: inline-flex; align-items: center; gap: 5px; }
 .tag-scope {

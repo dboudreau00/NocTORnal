@@ -32,13 +32,24 @@ honest delta between that plan and the build.
 > researcher should read) spent three days absent from the tree with a
 > fully green suite.
 
-**State (2026-09-09):** branch `main` (the working branch for the review
-pass; byte-identical to `deception-and-release-hardening` except
-`README.md`), Alembic head `0059`, 1565 `def test_` functions across the
-two pytest roots, version 0.5.2
-single-sourced from `pyproject.toml`. FULL-SUITE FIGURE: see the Alpha 5
-entry in `release/CHANGELOG.md`. The counts below this paragraph are the
-dated records they say they are.
+**State (2026-09-10):** branch `main` (the working branch; byte-identical
+to `deception-and-release-hardening` except `README.md`), Alembic head
+`0060`, 1731 tests counted as `def test_` functions across the two pytest
+roots, version 0.5.2 single-sourced from `pyproject.toml`. Those four
+counters are GENERATED: `scripts/refresh_counters.py` writes them and
+`test_doc_invariants` holds them to the tree with no tolerance.
+
+This paragraph itself was the hole in that arrangement until 2026-09-10.
+It wrote its total as ``1565 `def test_` functions``, and the checker's
+shape is a number followed by `tests` or `passing`, so the one live
+paragraph in this file drifted two hundred tests while every other
+document was held exactly. A counter written in a shape nothing checks
+is the same defect as a counter nobody checks, and it is why the figure
+now reads `N tests`.
+
+FULL-SUITE FIGURE: see the newest entry in `release/CHANGELOG.md`.
+Everything from the next `State` paragraph down is a dated record and is
+never rewritten.
 
 **State (2026-08-10):** branch `deception-and-release-hardening`, Alembic
 head `0055`, **1890 passing, 0 failing, 0 skipped** on a live stack —

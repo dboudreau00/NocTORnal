@@ -56,9 +56,17 @@ a constraint that is either wrong or unenforceable.
   real target to develop against and a persona to develop with, and both are
   authorisation questions (docs/16 L3) rather than coding ones. The
   interface is here and the RSS adapter proves the pipeline end to end.
-- **No scheduler process.** `due_sources()` reports and `run_once()` acts;
-  nothing loops. Same reasoning as decisions 30 and 46 -- a collector that
-  runs itself on a timer nobody watches is how a persona gets burnt at 3am.
+- **No scheduler PROCESS.** `due_sources()` still only reports and
+  `run_once()` still only acts; nothing in this module loops, and nothing
+  here runs itself. Same reasoning as decisions 30 and 46 -- a collector
+  that runs itself on a timer nobody watches is how a persona gets burnt
+  at 3am. What exists as of 2026-09-10 is `scripts/collection_poll.py`, a
+  cron ENTRY in the shape of `notify_drain.py`: one process, one
+  connection, one pass, an exit code. It asks `due_sources()` what is
+  ready and polls that, so the operator chooses how often to LOOK and each
+  source's own jittered `next_due_at` still decides when it is polled. A
+  runner that imposed its own cadence would be the timer this bullet
+  refuses.
 - **No SSRF protection yet.** Watch targets are user-supplied URLs, which is
   exactly the SSRF surface docs/09 names. `fetch()` refuses non-HTTP schemes
   and private address literals, which is a floor and not a solution -- DNS
@@ -256,6 +264,18 @@ class CollectionNotFound(CollectionError):
     short to be one) is a 400. Before 2026-09-02 every `CollectionError`
     from a hit route was a 404, so a refused ARGUMENT would have reported
     as a missing ROW."""
+
+
+class CollectionBusy(CollectionError):
+    """Another poll of this same source is in flight, so this call did
+    nothing at all -- no fetch, no rows, not even a `collection_run`.
+
+    A distinct type because "nothing was done" is not "something went
+    wrong": a FAILED run recorded here would libel a source that is being
+    collected from perfectly well at this very moment, and
+    `consecutive_failures` drives the health rollup the Feeds pane shows.
+    The caller decides what to do with it -- `scripts/collection_poll.py`
+    counts it as `skipped` and still exits 0."""
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1011,37 @@ class RunResult:
     warnings: list[str] = field(default_factory=list)
 
 
+#: Serialises the poll of ONE source across processes -- see `run_once`.
+#:
+#: Keyed on the SOURCE rather than one lock for the whole collector,
+#: because two different sources SHOULD poll at the same time: they are
+#: different sites, politeness is already per source (`max_rps` and
+#: `collect.source.last_request_at`), and a single global lock would make
+#: the runner's throughput the slowest feed's fetch timeout -- which is the
+#: shape of failure where a cron entry starts overlapping ITSELF.
+#:
+#: Session-scoped (`pg_try_advisory_lock`), not transaction-scoped, for the
+#: reason `transports._DRAIN_LOCK` states: `db.connect()` is autocommit, so
+#: a `pg_advisory_xact_lock` would be released by the very statement that
+#: took it and would guard nothing. The name is hashed with
+#: `hashtextextended(..., 0)`, the idiom the drain lock and migrations 0013
+#: and 0024 already use, so the lock space is addressed one way across the
+#: codebase.
+_POLL_LOCK = "collect.run_once"
+
+
+def _poll_lock_key(source_id: UUID) -> str:
+    """The lock name for one source.
+
+    The id goes INSIDE the name rather than into a second key argument:
+    `hashtextextended` takes text and returns the single bigint the
+    one-argument form of `pg_try_advisory_lock` wants, and mixing the two
+    forms would split the lock space in two -- the two-argument form has a
+    keyspace of its own, and a lock taken in one is invisible to the other.
+    """
+    return f"{_POLL_LOCK}:{source_id}"
+
+
 class CollectionService:
     """The scheduler's reporting half, one poll, and the read path.
 
@@ -1119,6 +1170,27 @@ class CollectionService:
         in `due_sources`: a collector has no user, and a NULL ceiling read
         as "see nothing" would be a scheduler that polls nothing and
         reports no error.
+
+        ## One poll of one source at a time (2026-09-10)
+
+        There was no lock here at all, and two concurrent polls of the SAME
+        source corrupt each other on an autocommit connection: both
+        `_store_document` (SELECT the digest, SELECT the previous version,
+        INSERT) and `_match_watches` (`_suppressed`'s SELECT, then INSERT
+        into `watch_hit`) are read-then-write with nothing serialising
+        them. The observable damage is two `collect.document` rows claiming
+        the same `version` of one `external_id`, and a watch hit that
+        arrives twice past a suppression window that exists precisely to
+        collapse it. Neither table has a unique index to fall back on.
+
+        This is the ordinary case rather than an exotic one, exactly as it
+        was for the drain: `scripts/collection_poll.py` on a cron overlaps
+        an analyst pressing Run on the Feeds pane, and a poll of a slow
+        feed is measured in the same tens of seconds as the cron interval.
+
+        `pg_try_advisory_lock`, so the loser returns immediately and says
+        so (`CollectionBusy`) instead of blocking a request behind somebody
+        else's fetch timeout.
         """
         source = self._c.execute(
             """SELECT base_url, parser_key, max_rps, classification,
@@ -1136,99 +1208,149 @@ class CollectionService:
             raise CollectionError(
                 f"no adapter registered for parser_key {source[1]!r}")
 
-        run_id = self._c.execute(
-            """INSERT INTO collect.collection_run
-                   (source_id, watch_id, collection_account_id, status,
-                    parser_version)
-               VALUES (%s, %s, %s, 'RUNNING', %s) RETURNING id""",
-            (source_id, watch_id, persona_id, adapter.version)).fetchone()[0]
-        result = RunResult(run_id=run_id)
-
-        self._limiter.wait(source_id, float(source[2] or 1))
+        # Taken AFTER the clearance check above, and it must stay there: if
+        # a caller who is not cleared for this source could tell "busy"
+        # from "no such source", the lock would be the existence oracle
+        # that check closed.
+        held = self._c.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+            (_poll_lock_key(source_id),)).fetchone()[0]
+        if not held:
+            raise CollectionBusy(
+                "this source is already being polled by another runner; "
+                "nothing was done")
         try:
-            fetched = adapter.fetch(base_url=source[0])
-        except Exception as exc:  # noqa: BLE001 - every failure is a row
-            # REDACTED before it is stored. A persona's password lands in an
-            # HTTP error body far more often than anybody expects.
-            message = redact(str(exc))[:2000]
+            run_id = self._c.execute(
+                """INSERT INTO collect.collection_run
+                       (source_id, watch_id, collection_account_id, status,
+                        parser_version)
+                   VALUES (%s, %s, %s, 'RUNNING', %s) RETURNING id""",
+                (source_id, watch_id, persona_id, adapter.version)).fetchone()[0]
+            result = RunResult(run_id=run_id)
+
+            self._limiter.wait(source_id, float(source[2] or 1))
+            try:
+                fetched = adapter.fetch(base_url=source[0])
+            except Exception as exc:  # noqa: BLE001 - every failure is a row
+                # REDACTED before it is stored. A persona's password lands in an
+                # HTTP error body far more often than anybody expects.
+                message = redact(str(exc))[:2000]
+                self._c.execute(
+                    """UPDATE collect.collection_run
+                          SET status = 'FAILED', finished_at = now(),
+                              error_class = %s, error_detail = %s
+                        WHERE id = %s""",
+                    (type(exc).__name__, message, run_id))
+                self._record_failure(source_id, type(exc).__name__)
+                # Rescheduled on failure too. A source that only reschedules on
+                # success is one that retries as fast as the scheduler runs the
+                # moment it breaks -- which is a hammering pattern aimed at a
+                # site that has just started refusing us.
+                self._reschedule(source_id)
+                result.error = message
+                return result
+
+            # Everything after the fetch is inside a handler for the same reason
+            # `analytics_runs` CR9 is: the run row was INSERTed 'RUNNING' on an
+            # autocommit connection, so it is already committed and survives
+            # whatever unwinds above it. The handler here covered `fetch` only,
+            # so a failure in `_store_document` or `_match_watches` -- a NUL
+            # byte in a post, a jsonb adaptation error, a dropped connection
+            # mid-loop -- left the row at RUNNING for ever.
+            #
+            # That is not merely untidy. `due_sources` and the health rollup
+            # read RUNNING as "in flight", so the stranded row reads as a
+            # collector that is still working, and the operator watching the
+            # Feeds pane sees activity rather than a fault. The index
+            # `(status) WHERE status IN ('QUEUED','RUNNING')` exists precisely
+            # to make that set cheap to find, and nothing was keeping it true.
+            #
+            # Re-raised, not swallowed: a fetch failure is an expected outcome
+            # (the site is down) and returns a result; a failure to persist
+            # what was fetched is a defect, and the caller must not be told the
+            # poll succeeded.
+            try:
+                result.items_seen = len(fetched.items)
+                for item in fetched.items:
+                    if self._store_document(source_id, run_id, watch_id, item,
+                                            classification=source[3]):
+                        result.items_new += 1
+                result.watch_hits, result.warnings = self._match_watches(
+                    source_id, run_id, fetched.items)
+            except Exception as exc:  # noqa: BLE001 - re-raised below
+                self._c.execute(
+                    """UPDATE collect.collection_run
+                          SET status = 'FAILED', finished_at = now(),
+                              error_class = %s, error_detail = %s
+                        WHERE id = %s""",
+                    (type(exc).__name__,
+                     f"persist: {redact(str(exc))[:2000]}", run_id))
+                self._record_failure(source_id, type(exc).__name__)
+                self._reschedule(source_id)
+                raise
+
+            # PARTIAL is the honest status when the fetch worked and something
+            # inside it could not be evaluated. It already exists in the
+            # `run_status` enum and nothing was ever writing it -- so a run
+            # carrying a dead watch reported OK, which is the whole finding.
             self._c.execute(
                 """UPDATE collect.collection_run
-                      SET status = 'FAILED', finished_at = now(),
+                      SET status = %s, finished_at = now(), items_seen = %s,
+                          items_new = %s, http_status = %s, etag = %s,
+                          last_modified = %s,
                           error_class = %s, error_detail = %s
                     WHERE id = %s""",
-                (type(exc).__name__, message, run_id))
-            self._record_failure(source_id, type(exc).__name__)
-            # Rescheduled on failure too. A source that only reschedules on
-            # success is one that retries as fast as the scheduler runs the
-            # moment it breaks -- which is a hammering pattern aimed at a
-            # site that has just started refusing us.
+                ("PARTIAL" if result.warnings else "OK",
+                 result.items_seen, result.items_new, fetched.http_status,
+                 fetched.etag, fetched.last_modified,
+                 "WatchPatternError" if result.warnings else None,
+                 "; ".join(result.warnings)[:2000] or None,
+                 run_id))
+            self._c.execute(
+                """UPDATE collect.source
+                      SET last_ok_at = now(), consecutive_failures = 0,
+                          health = 'OK'
+                    WHERE id = %s""", (source_id,))
             self._reschedule(source_id)
-            result.error = message
             return result
+        finally:
+            # A session lock outlives the statement that took it, so an
+            # exception escaping the poll -- the persist handler above
+            # re-raises one on purpose -- would otherwise strand the lock
+            # for the life of the connection, and this source would be
+            # unpollable until the process that held it exited.
+            #
+            # Guarded because this is SQL in a bare `finally`. When the
+            # CONNECTION is what failed -- "a dropped connection mid-loop",
+            # named above as one of the cases the persist handler catches
+            # and deliberately re-raises -- this statement raises too, and an
+            # exception from a `finally` REPLACES the one unwinding through
+            # it: the caller would read an OperationalError from
+            # pg_advisory_unlock and never see the defect that actually
+            # ended the poll, which is this codebase's signature failure
+            # (a failure reported as the wrong thing) standing on the one
+            # line meant to tidy up after it.
+            #
+            # Swallowing is right here rather than merely convenient: a
+            # session lock lives and dies with its session, so a connection
+            # too broken to run this statement has already released the
+            # lock by dying, and there is nothing left to do about it. It
+            # is logged rather than silent because the other way to reach
+            # this handler -- a healthy connection that refuses the unlock
+            # -- would mean the lock really is stranded, and that is worth
+            # knowing about. Function-local import for the reason
+            # `evidence.py` gives at its own swallow site.
+            try:
+                self._c.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                    (_poll_lock_key(source_id),))
+            except Exception:  # noqa: BLE001 - must not mask the real failure
+                import logging
 
-        # Everything after the fetch is inside a handler for the same reason
-        # `analytics_runs` CR9 is: the run row was INSERTed 'RUNNING' on an
-        # autocommit connection, so it is already committed and survives
-        # whatever unwinds above it. The handler here covered `fetch` only,
-        # so a failure in `_store_document` or `_match_watches` -- a NUL
-        # byte in a post, a jsonb adaptation error, a dropped connection
-        # mid-loop -- left the row at RUNNING for ever.
-        #
-        # That is not merely untidy. `due_sources` and the health rollup
-        # read RUNNING as "in flight", so the stranded row reads as a
-        # collector that is still working, and the operator watching the
-        # Feeds pane sees activity rather than a fault. The index
-        # `(status) WHERE status IN ('QUEUED','RUNNING')` exists precisely
-        # to make that set cheap to find, and nothing was keeping it true.
-        #
-        # Re-raised, not swallowed: a fetch failure is an expected outcome
-        # (the site is down) and returns a result; a failure to persist
-        # what was fetched is a defect, and the caller must not be told the
-        # poll succeeded.
-        try:
-            result.items_seen = len(fetched.items)
-            for item in fetched.items:
-                if self._store_document(source_id, run_id, watch_id, item,
-                                        classification=source[3]):
-                    result.items_new += 1
-            result.watch_hits, result.warnings = self._match_watches(
-                source_id, run_id, fetched.items)
-        except Exception as exc:  # noqa: BLE001 - re-raised below
-            self._c.execute(
-                """UPDATE collect.collection_run
-                      SET status = 'FAILED', finished_at = now(),
-                          error_class = %s, error_detail = %s
-                    WHERE id = %s""",
-                (type(exc).__name__,
-                 f"persist: {redact(str(exc))[:2000]}", run_id))
-            self._record_failure(source_id, type(exc).__name__)
-            self._reschedule(source_id)
-            raise
-
-        # PARTIAL is the honest status when the fetch worked and something
-        # inside it could not be evaluated. It already exists in the
-        # `run_status` enum and nothing was ever writing it -- so a run
-        # carrying a dead watch reported OK, which is the whole finding.
-        self._c.execute(
-            """UPDATE collect.collection_run
-                  SET status = %s, finished_at = now(), items_seen = %s,
-                      items_new = %s, http_status = %s, etag = %s,
-                      last_modified = %s,
-                      error_class = %s, error_detail = %s
-                WHERE id = %s""",
-            ("PARTIAL" if result.warnings else "OK",
-             result.items_seen, result.items_new, fetched.http_status,
-             fetched.etag, fetched.last_modified,
-             "WatchPatternError" if result.warnings else None,
-             "; ".join(result.warnings)[:2000] or None,
-             run_id))
-        self._c.execute(
-            """UPDATE collect.source
-                  SET last_ok_at = now(), consecutive_failures = 0,
-                      health = 'OK'
-                WHERE id = %s""", (source_id,))
-        self._reschedule(source_id)
-        return result
+                logging.getLogger(__name__).warning(
+                    "advisory unlock failed for source %s; if the connection "
+                    "is still usable the poll lock is stranded until this "
+                    "process exits", source_id, exc_info=True)
 
     def _store_document(self, source_id: UUID, run_id: UUID,
                         watch_id: UUID | None, item: Item,

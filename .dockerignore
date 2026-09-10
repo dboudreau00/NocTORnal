@@ -1,0 +1,77 @@
+# What must NOT reach the build context.
+#
+# Two separate concerns are in this file and they are not equally serious.
+# Most lines are size: the Dockerfile does one `COPY . /app`, so anything
+# left here is uploaded to the daemon and then baked into a layer. A few
+# lines are DISCLOSURE, and those are marked -- a build context is not a
+# private thing, it lands in an image that gets copied to hosts.
+
+# --- Disclosure ------------------------------------------------------------
+
+# `.env.local` holds this machine's NOCTORNAL_TOTP_KEK, and losing or
+# leaking that key is the whole ballgame: it seals every TOTP secret at
+# rest. Baking it into a production image would ship a development key to
+# a server AND put the dev database DSN one `scripts/_env.py` call away --
+# and `load_env_local()` only declines to override variables that are
+# already set, so a variable compose forgot would silently come from here.
+.env
+.env.*
+.env.local
+
+# Renders of real panes against real case data. A screenshot of an
+# AMBER_STRICT case carries that case's classification and does not look
+# like it does (the same reasoning as .gitignore).
+screenshots/
+shots/
+
+# --- Secrets that live under infra/production ------------------------------
+
+# The operator's real secrets file sits beside the compose file. It is
+# gitignored, which means nothing stops it being COPYed into an image.
+infra/production/secrets.env
+
+# MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
+# this directory into the containers that need it, so nothing is lost by
+# excluding it -- and without this line the private key of the production
+# object store would be baked into every layer of the image and travel with
+# it to wherever the image goes.
+infra/production/tls/
+
+# --- Size and staleness ----------------------------------------------------
+
+# A host virtualenv is the wrong platform's binaries (this repo is
+# developed on Windows) and would shadow nothing useful -- the image
+# installs its own.
+.venv/
+apps/api/.venv/
+
+.git/
+.github/
+
+# Build artefacts of a DIFFERENT distribution channel. `release/` is the
+# hand-installer path (install.sh / INSTALL.md), which a container
+# deployment does not use, and the packaged zip is a copy of the whole
+# repository -- committing it into an image doubles the layer for nothing.
+release/
+dist/
+*.zip
+
+node_modules/
+.next/
+
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# YARA rule sources are cloned into these two directories by
+# scripts/yara_db.py. `yara/sources.json` and `yara/README.md` are the
+# tracked configuration and DO belong in the image; the clones do not.
+yara/vendor/
+yara/dist/
+
+# Editor and agent noise.
+.vscode/
+.idea/
+.claude/
