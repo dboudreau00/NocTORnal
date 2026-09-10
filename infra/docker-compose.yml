@@ -29,9 +29,14 @@ services:
     # init scripts will NOT re-run on restart — postgres comes up "healthy"
     # with a half-loaded schema. Recover with: docker compose down -v
     # (destroys pgdata), then up again.
-    # Initdb runs ONLY db/init (extensions, which need superuser). The
-    # schema itself comes from Alembic: `alembic upgrade head` from the
-    # repo root — one owner of the schema, no drift.
+    # Initdb runs ONLY db/init, which is two scripts: 00-extensions.sql,
+    # because CREATE EXTENSION needs superuser, and 10-app-role.sh, which
+    # creates the production least-privilege role and does NOTHING here —
+    # it wants NOCTORNAL_APP_DB_PASSWORD, this file sets no such variable,
+    # and it says so on stdout rather than failing. So this stack connects
+    # as the owner exactly as it always has. The schema itself comes from
+    # Alembic: `alembic upgrade head` from the repo root — one owner of the
+    # schema, no drift.
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ../db/init:/docker-entrypoint-initdb.d:ro

@@ -1,0 +1,74 @@
+# Caddy for the production deployment. Two site blocks, because invariant
+# 10 is two hostnames: the application and the origin sample bytes are
+# served from. They must be different names, and Caddy is where that
+# becomes true on the wire.
+#
+# {$VAR} is Caddy's own environment placeholder, resolved when the config
+# loads. All three come from infra/production/secrets.env by way of the
+# caddy service's env_file.
+#
+# ## The TLS switch
+#
+# One variable, NOCTORNAL_TLS_MODE, and it is always a single token so the
+# `tls` directive is never left without an argument:
+#
+#   NOCTORNAL_TLS_MODE=internal          Caddy's own CA. Certificates are
+#                                        not publicly trusted, so a browser
+#                                        warns and `curl` needs -k. This is
+#                                        for a local verification run
+#                                        against hostnames in /etc/hosts,
+#                                        and it is the DEFAULT below --
+#                                        forgetting the variable produces a
+#                                        working stack with an untrusted
+#                                        certificate rather than a stack
+#                                        that hammers Let's Encrypt for a
+#                                        hostname that does not resolve.
+#
+#   NOCTORNAL_TLS_MODE=ops@example.org   ACME. The value is the account
+#                                        e-mail Let's Encrypt uses for
+#                                        expiry notices. Both hostnames
+#                                        must already resolve to this host
+#                                        on the public internet and reach
+#                                        port 80, or issuance fails.
+#
+# Issued certificates and the ACME account key live in the caddy-data
+# volume. Destroying it means re-issuing, and issuance is rate-limited per
+# hostname per week.
+#
+# ## X-Forwarded-For
+#
+# Caddy APPENDS the address it actually saw to any X-Forwarded-For the
+# client sent. That is what makes the header trustworthy from the right and
+# untrustworthy from the left, and it is why the application must be told
+# NOCTORNAL_TRUSTED_PROXY_HOPS=1: with one hop it reads the LAST entry --
+# Caddy's own observation -- and a client that invents earlier entries only
+# lengthens a list nothing reads. Set that variable to 0, or leave it
+# unset, and every request appears to come from Caddy: the rate limiter
+# meters the whole internet as one subject, the sign-in audit records the
+# proxy as the origin of every login, and session IP binding pins every
+# session to the same address.
+#
+# There is deliberately no `request_body max_size` here. Evidence and
+# sample uploads are large by nature and the application enforces its own
+# declared-length cap before it reads a byte (http/routers/ingest.py); a
+# second limit in the proxy would refuse those uploads with a 413 that
+# names nothing.
+
+{$NOCTORNAL_HOSTNAME} {
+	tls {$NOCTORNAL_TLS_MODE:internal}
+
+	# The API, the console at /ui and the /api/v1/live WebSocket, which
+	# Caddy upgrades without any extra configuration.
+	reverse_proxy api:8000
+}
+
+{$NOCTORNAL_SAMPLE_HOSTNAME} {
+	tls {$NOCTORNAL_TLS_MODE:internal}
+
+	# A SEPARATE upstream, not a path on the one above. If this ever
+	# pointed at api:8000 the deployment would look correct and every
+	# sample download would be refused by the application itself, because
+	# `origin_split()` decides from configuration and the api process is
+	# configured as the application.
+	reverse_proxy sample-origin:8000
+}

@@ -1,0 +1,831 @@
+# The production deployment. ONE HOST, docker compose, nothing else.
+#
+#   docker compose -p noctornal-prod -f infra/production/compose.yml up -d
+#
+# Read infra/production/README.md first: this file cannot start without
+# infra/production/secrets.env beside it, and a correctly configured stack
+# still comes up with readiness items red that only a human can close --
+# three of them BLOCKING, in `readiness.BLOCKING_CHECKS`' sense, which is
+# that the collection poll route refuses with 409 while they are open.
+#
+# ## How this differs from infra/docker-compose.yml, and why
+#
+# The dev file's header says "do not derive a prod deployment from this
+# file". This is not a derivation; the differences are the point:
+#
+#   * TWO Postgres roles. `noctornal` owns the schema and runs Alembic;
+#     `noctornal_app` is least privilege and is what every runtime process
+#     connects as. The test suite still needs the owner (ten *_pg files run
+#     ALTER TABLE ... DISABLE TRIGGER, which only an owner may do), so this
+#     split exists here and nowhere else.
+#   * Redis runs `noeviction`. Dev runs `allkeys-lru`, and the readiness
+#     register reports that as NOT ready for a reason: an evicted GCRA
+#     meter admits the subject it was refusing, with a full burst.
+#   * The evidence bucket gets a COMPLIANCE default retention. Dev keeps
+#     GOVERNANCE 365d because COMPLIANCE cannot be lifted by anyone,
+#     including the root credential, so a dev bucket would become
+#     resettable only by destroying the volume -- which takes the dev
+#     database with it.
+#   * NOTHING is published except Caddy's 80 and 443. Dev publishes six
+#     ports; here Postgres, Redis, MinIO and both application processes are
+#     reachable only from the compose network.
+#
+# ## What this deployment does NOT give you
+#
+# One host, so no HA and no failover. No backup beyond the named volumes on
+# this machine's disk -- a lost volume is a lost case file. No log
+# aggregation, no metrics, no alerting. docs/16 L1-L5 are unresolved and
+# this file cannot resolve them.
+
+name: noctornal-prod
+
+# --------------------------------------------------------------------------
+# The address Caddy holds on the internal network.
+#
+# It is a fixed literal for ONE reason, and it is a security one.
+#
+# uvicorn's --forwarded-allow-ips decides whose X-Forwarded-For it will
+# believe. Set to "*" it does not merely trust the proxy -- it rewrites
+# `request.client` from the FIRST entry of the header, which is the entry
+# the remote caller wrote. `http/routers/ingest.py` reads
+# `request.client.host` on purpose, under a comment saying an allowlist is
+# only a control if the caller cannot choose the address it is compared
+# against, and `ingest.authenticate` fails closed when the peer is unknown.
+# "*" would hand that address to the caller. Naming one trusted proxy makes
+# uvicorn walk the header from the RIGHT instead and return the address
+# Caddy actually saw, which is unforgeable because Caddy appends its own
+# view after whatever the client sent.
+#
+# The alias below is the single declaration. Three places reference this one
+# node: the network reserves the address for Caddy, and the api and
+# sample-origin services each pass it to uvicorn through
+# NOCTORNAL_TRUSTED_PROXY_IP. A trusted address and a reserved address that
+# had drifted apart would not fail -- uvicorn would simply stop believing
+# Caddy, and every request would meter and audit as coming from the proxy.
+# If you change this, change the subnet under `networks:` to contain it.
+x-caddy-ip: &caddy_ip "172.31.243.10"
+
+# --------------------------------------------------------------------------
+# Everything that runs the application image.
+#
+# All four services carry the build, not just one. Compose builds a given
+# image tag once and the rest hit the cache, and the alternative -- a build
+# on `api` alone -- makes the other three depend on `api` having been built
+# first, which is an ordering nothing in this file enforces.
+#
+# The tag tracks apps/api/pyproject.toml's version, which is the ONE
+# declaration of it. Note that `up -d` reuses an existing local tag: after
+# a code change you want `up -d --build`, or you will redeploy the old
+# image and see no change.
+#
+# `./tls` carries MinIO's certificate. Every application service mounts it
+# read-only and builds a CA bundle from it at start -- see the note above
+# the api service. The migration job does not touch object storage and
+# inherits the mount only because it shares this block.
+x-noctornal-app: &noctornal-app
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: noctornal-api:0.5.2
+  env_file: [secrets.env]
+  networks: [noctornal]
+  restart: unless-stopped
+  volumes:
+    - ./tls:/certs:ro
+
+services:
+
+  # ------------------------------------------------------------------------
+  # The only thing on this host with a published port.
+  #
+  # Caddy terminates TLS for both hostnames and reverse-proxies to the two
+  # application processes. It appends X-Forwarded-For by default, which is
+  # what NOCTORNAL_TRUSTED_PROXY_HOPS=1 tells the application to read.
+  #
+  # 443/udp is NOT published, so HTTP/3 is unavailable from outside. That is
+  # deliberate: the contract for this deployment is that 80 and 443 are the
+  # entire published surface, and an operator counting open ports should
+  # find exactly what the documentation says.
+  #
+  # KNOWN WEAKNESS, stated rather than hidden: this container needs exactly
+  # three variables (the two hostnames and the TLS mode) and receives all of
+  # secrets.env, including NOCTORNAL_TOTP_KEK and both database DSNs.
+  # `env_file` has no filter. Narrowing it means listing those three as
+  # `${...}` interpolations, which then makes `--env-file` mandatory on
+  # every compose command -- including `logs` and `ps`, which would
+  # otherwise emit "variable is not set" warnings and teach an operator to
+  # ignore warnings. That trade was made in favour of the quieter command
+  # line; the process most exposed to the internet is the one holding the
+  # secrets it does not use, and that is worth revisiting.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: [secrets.env]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy-data holds the ACME account key and every issued certificate.
+      # Losing it means re-issuing, and Let's Encrypt rate-limits that per
+      # hostname per week -- so a `down -v` here is not the cheap operation
+      # it looks like.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      noctornal:
+        ipv4_address: *caddy_ip
+    depends_on: [api, sample-origin]
+
+  # ------------------------------------------------------------------------
+  # Same image and same tuning flags as infra/docker-compose.yml, so a query
+  # plan measured in development means something here.
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    networks: [noctornal]
+    env_file: [secrets.env]
+    environment:
+      POSTGRES_DB: noctornal
+      # The OWNER role. Alembic runs as this; nothing at runtime does.
+      # POSTGRES_PASSWORD comes from secrets.env and must be the same
+      # password NOCTORNAL_MIGRATION_DATABASE_URL carries -- two
+      # declarations of one secret, which secrets.env.example says out loud
+      # because nothing here can check it.
+      POSTGRES_USER: noctornal
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c log_min_duration_statement=250
+      -c max_connections=200
+      -c shared_buffers=512MB
+      -c work_mem=32MB
+    # The same ../../db/init mount as dev: CREATE EXTENSION needs superuser,
+    # so extensions load here and the schema comes from Alembic alone.
+    #
+    # This directory is also where the least-privilege role is created:
+    # 10-app-role.sh reads NOCTORNAL_APP_DB_PASSWORD, which reaches this
+    # container through env_file rather than the `environment:` block above,
+    # because it is a secret and secrets live in one file. Absent, that
+    # script creates no role and says so -- which is what every developer
+    # machine and CI want, and NOT what this deployment wants. TWO
+    # consequences an operator has to know:
+    #
+    #   * initdb scripts run ONCE, on an empty data directory. Changing
+    #     NOCTORNAL_APP_DB_PASSWORD later does nothing to an existing
+    #     cluster -- you have to ALTER ROLE by hand.
+    #   * If init fails partway, pgdata keeps the PARTIAL cluster and the
+    #     scripts do NOT re-run. Postgres then reports healthy with a
+    #     half-loaded schema. On a machine with no data yet the recovery is
+    #     `down -v` and up again; after that, restore a backup.
+    volumes:
+      - prod-pgdata:/var/lib/postgresql/data
+      - ../../db/init:/docker-entrypoint-initdb.d:ro
+    # -h 127.0.0.1 is load-bearing and is copied from dev for that reason:
+    # during first-run init the entrypoint's temporary server answers on the
+    # unix socket only, so a socket probe reports healthy while the schema
+    # is still loading -- and the migration job would then start against a
+    # cluster that has no extensions yet.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U noctornal -d noctornal"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+
+  # ------------------------------------------------------------------------
+  # The rate limiter's meter store, and NOT a cache that may be evicted.
+  #
+  # `--maxmemory-policy noeviction` is the whole difference from dev, and
+  # readiness._redis_limiter_store fails the register on any evicting
+  # policy: a GCRA meter deleted under memory pressure admits the subject it
+  # was refusing with a full burst, which is the login-guessing brake
+  # disappearing exactly when the box is loaded.
+  #
+  # `--maxmemory 1gb` stays, but with noeviction it is a circuit breaker
+  # rather than an evictor: at the cap Redis refuses WRITES, the limiter's
+  # backend calls fail, and each limit falls to its own declared
+  # on_backend_failure. That is a visible failure instead of a silent one.
+  #
+  # The password is read from the CONTAINER environment (`$$` keeps compose
+  # from interpolating it) rather than written as ${REDIS_PASSWORD}. Two
+  # reasons: `docker compose config` prints interpolated values, so the
+  # secret would appear in any pasted diagnostic; and the operator would
+  # have to export it into their own shell as well as the secrets file.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [noctornal]
+    env_file: [secrets.env]
+    volumes: [prod-redisdata:/data]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if [ -z "$$REDIS_PASSWORD" ]; then
+          echo 'REDIS_PASSWORD is empty: refusing to start.' >&2
+          echo 'redis-server --requirepass "" means NO password at all, and' >&2
+          echo 'this Redis is reachable by every container on the network.' >&2
+          exit 1
+        fi
+        exec redis-server \
+          --appendonly yes \
+          --maxmemory 1gb \
+          --maxmemory-policy noeviction \
+          --requirepass "$$REDIS_PASSWORD"
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 5s
+      retries: 10
+      start_period: 10s
+
+  # ------------------------------------------------------------------------
+  # Object storage: evidence (WORM), raw captures, samples.
+  #
+  # Neither 9000 nor 9001 is published. The console is still running on
+  # 9001 inside the network, so an operator who needs it forwards a port for
+  # the length of one session rather than leaving it exposed.
+  #
+  # `:latest` matches the dev file. For a deployment you intend to keep,
+  # pin a dated MinIO release tag here: object storage is the one component
+  # where an unattended major upgrade can change how a bucket behaves, and
+  # this file cannot honestly pick a version it has not been tested against.
+  #
+  # ## TLS, and why this hop is encrypted at all
+  #
+  # `config.enforce_environment()` runs before the API serves anything and
+  # REFUSES to start unless MINIO_SECURE and SAMPLE_SECURE are both "true".
+  # Its reasoning is not about the password -- under SigV4 the secret key
+  # never crosses the wire -- it is that every exhibit's bytes do, and that
+  # each request carries a signature anything on the path can lift and
+  # replay against the evidence bucket until it expires. So this hop gets a
+  # certificate even though both ends are containers on one bridge.
+  #
+  # No `--certs-dir` flag: /root/.minio/certs is MinIO's documented DEFAULT
+  # location, so mounting there needs no flag that a future image could
+  # move. It looks for `public.crt` and `private.key` by exactly those
+  # names and enables TLS on 9000 and 9001 when it finds them.
+  #
+  # THE OPERATOR CREATES THESE. infra/production/README.md has the openssl
+  # command; the certificate's subjectAltName must be DNS:minio, because
+  # `minio` is the name MINIO_ENDPOINT uses and the name the client checks.
+  # If ./tls is empty MinIO starts in plain HTTP and every client then
+  # fails its handshake -- loudly, and against the right component. The one
+  # client that did NOT fail loudly was minio-init; see the bounded wait in
+  # its own note below.
+  #
+  # ## the two credential pairs, and the one this server should not hold
+  #
+  # secrets.env carries both. MINIO_ROOT_USER / MINIO_ROOT_PASSWORD are the
+  # server's root credentials. MINIO_ACCESS_KEY / MINIO_SECRET_KEY are what
+  # the API's evidence and raw clients authenticate WITH -- and they are
+  # also MinIO's own pre-2021 names for the first pair, which this image
+  # still reads. `env_file` has no filter, so the SERVER is handed a second
+  # declaration of its own root credential, written for somebody else.
+  #
+  # Measured against RELEASE.2025-09-07T16-13-09Z with the two pairs set to
+  # DIFFERENT values, rather than assumed: the root pair wins, only the root
+  # pair authenticates, and the legacy pair produces one deprecation
+  # warning. So nothing diverges today, and secrets.env.example sets both
+  # pairs to the same values anyway. The collision is one edit away from
+  # mattering -- that file says splitting MINIO_ACCESS_KEY off into a
+  # service account "is worthwhile and has not been done", and on the day
+  # somebody does it this server holds a credential that is not its own,
+  # under a name it recognises, with the precedence decided by whatever
+  # `:latest` resolved to that morning.
+  #
+  # So both are unset before the server is exec'd, which makes the property
+  # checkable rather than argued: an `exec minio env` on the running
+  # container does not name them, and the deprecation warning is gone from
+  # the log. It narrows nothing ELSE -- this container still receives the
+  # whole of secrets.env, the same known weakness the caddy note above
+  # states, and for the same reason.
+  #
+  # ## why not an `environment:` block, the way the dev file does it
+  #
+  # The dev file can write its two values as literals and this one cannot --
+  # they are secrets, so the block would have to interpolate
+  # ${MINIO_ROOT_USER} out of secrets.env, and compose reads that file only
+  # when `--env-file infra/production/secrets.env` is passed. Not one of the
+  # compose commands in infra/production/README.md passes it, and an
+  # operator who forgets does not get a warning worth having: compose
+  # substitutes the empty string, and MinIO with an EMPTY MINIO_ROOT_USER
+  # starts on its BUILT-IN default credentials -- minioadmin:minioadmin, one
+  # WARN line deep in the log, on the store holding the evidence. Measured,
+  # same release. `${MINIO_ROOT_USER:?}` refuses instead, but it refuses
+  # `ps` and `logs` too, and an incident is the wrong moment to be arguing
+  # with an environment file. This is the trade the caddy note above makes,
+  # for the same reason.
+  #
+  # ## what overriding the entrypoint costs
+  #
+  # /usr/bin/docker-entrypoint.sh does two things. It prepends `minio` to
+  # any command whose first word is not `minio`, which is why a `command:`
+  # alone cannot be a shell here -- it would run `minio /bin/sh -c ...`.
+  # Then it switches user when MINIO_USERNAME and MINIO_GROUPNAME are both
+  # set, a path its own comment marks DEPRECATED and unsupported and which
+  # nothing in this deployment sets. The first is reproduced below; the
+  # second is the whole of what is given up.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    networks: [noctornal]
+    env_file: [secrets.env]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        unset MINIO_ACCESS_KEY MINIO_SECRET_KEY
+        exec minio server /data --console-address ":9001"
+    volumes:
+      - prod-miniodata:/data
+      - ./tls:/root/.minio/certs:ro
+
+  # ------------------------------------------------------------------------
+  # Creates the three buckets. Runs once, exits, and is depended on by every
+  # process that touches storage.
+  #
+  # ## restart policy
+  #
+  # This service is `restart: "no"`, unlike the long-running ones. A
+  # successful one-shot container that carried `unless-stopped` would be
+  # restarted forever, because `unless-stopped` restarts on exit 0 too.
+  #
+  # ## object lock
+  #
+  # The evidence bucket is created --with-lock. Object lock CANNOT be
+  # switched on afterwards, so an unlocked evidence bucket has to be
+  # replaced, and `--ignore-existing` does not look: it reports success on
+  # an existing bucket whatever its lock state.
+  #
+  # It does not get past this script silently, though. A default retention
+  # rule cannot be put on a bucket that has no object-lock configuration,
+  # so the `mc retention set` below is what objects, `set -e` takes
+  # minio-init down, and every service waiting on
+  # `service_completed_successfully` never starts. That is loud, but what
+  # the operator sees is one exited container and an S3 error code. The
+  # readiness register's evidence_bucket_object_lock is the entry that
+  # says which bucket, what is wrong with it and that it has to be
+  # replaced rather than repaired.
+  #
+  # ## the COMPLIANCE default, stated honestly
+  #
+  # `EvidenceStorage.put()` ALWAYS passes an explicit per-object COMPLIANCE
+  # retention, which overrides any bucket default. So this default changes
+  # nothing about today's behaviour: it is defence in depth for a future
+  # code path that writes to this bucket and forgets. It is set to 365d to
+  # match EVIDENCE_RETENTION_DAYS' default -- if you raise that variable,
+  # raise this literal too, because nothing keeps the two in step.
+  #
+  # COMPLIANCE, unlike GOVERNANCE, cannot be lifted by anyone at all,
+  # including the root credential. An object written here is undeletable
+  # until its retain-until date, and the only way back is destroying the
+  # volume. That is the intended property for evidence and the reason dev
+  # must keep GOVERNANCE.
+  #
+  # ## the samples bucket is deliberately NOT locked and gets NO default
+  #
+  # docs/11's prohibited-content path has to be able to DESTROY sample
+  # bytes on rejection. A retention rule of any kind would make that
+  # impossible for the whole period. Evidence is locked because an exhibit
+  # must survive; a sample is not, because some samples must not.
+  #
+  # ## the sample service account
+  #
+  # `mc admin user svcacct add` can do this in one shot, so it does: a
+  # separate MinIO credential whose inline policy reaches the samples bucket
+  # and nothing else. That policy is the one very long line below, and it
+  # has to be: it is a single printf FORMAT string, and a shell single-quoted
+  # string cannot be folded across lines without putting real newlines in it.
+  #
+  # SAMPLE_ACCESS_KEY / SAMPLE_SECRET_KEY in secrets.env
+  # are what that account is created AS -- they are not credentials the
+  # operator gets from MinIO, they are credentials the operator chooses and
+  # this container mints. The `svcacct info` guard makes a re-run a no-op;
+  # without it `add` would fail on an existing key and, with `set -e`, take
+  # the whole init container down on every restart.
+  #
+  # ## the folded-scalar trap, and why this block is not folded
+  #
+  # The dev file writes this as `entrypoint: >`, a YAML FOLDED scalar that
+  # joins its lines with spaces -- so a `#` anywhere inside comments out
+  # every command after it, and on 2026-07-26 that silently disabled the
+  # samples-bucket creation. This uses the list form with a LITERAL block
+  # (`|`), which keeps the newlines, cannot fold a comment over the rest of
+  # the script, and -- the reason that matters more here -- survives
+  # embedded double quotes, so every expansion below is quoted and a
+  # generated password containing a space or a `*` cannot break the init.
+  # The explanations still live out here, as they do in the dev file.
+  #
+  # ## trusting MinIO's certificate
+  #
+  # `mc` reads extra CAs from ~/.mc/certs/CAs, so the certificate is COPIED
+  # there rather than bind-mounted straight in. Two reasons. Mounting the
+  # directory would put `private.key` in mc's CA directory as well, and
+  # mounting the single file would mean docker CREATES A DIRECTORY named
+  # public.crt on the host when the operator has not generated the
+  # certificate yet -- which then looks like a file that exists.
+  #
+  # ## why the wait for MinIO is BOUNDED
+  #
+  # It used to be `until mc alias set ...; do sleep 1; done`, and what turns
+  # an unbounded retry into a stack that never converges is the state of
+  # ./tls. Both shapes were measured against RELEASE.2025-09-07T16-13-09Z,
+  # and the `cp` above succeeds in both:
+  #
+  #   * ./tls EMPTY -- README step 3 not done -- and MinIO comes up on plain
+  #     HTTP with nothing in its log to say it declined TLS. mc dials https
+  #     and cannot ever succeed.
+  #   * ./tls holding a pair MinIO cannot read, and it exits FATAL ("Unable
+  #     to load the TLS configuration"), which `restart: unless-stopped`
+  #     turns into a crash loop. mc dials a port that keeps going away.
+  #
+  # Either way this one-shot never exits, so api, sample-origin and cron sit
+  # on `service_completed_successfully` indefinitely while `up -d` returns
+  # clean and `ps` shows minio-init cheerfully "running". Neither is a race,
+  # and no number of retries resolves one.
+  #
+  # 60 attempts a second apart: MinIO's own start here is seconds, so a
+  # minute is generous for a cold host and short enough that the operator is
+  # told rather than left watching. The message names the URL it was dialling
+  # and both causes, because they are indistinguishable from inside this
+  # container -- that address is not speaking TLS, or the root credentials
+  # are not the ones the server started with. `mc alias set` verifies the
+  # credentials, so a rejected pair loops here exactly like a refused
+  # handshake.
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    networks: [noctornal]
+    env_file: [secrets.env]
+    restart: "no"
+    volumes:
+      - ./tls:/certs:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /root/.mc/certs/CAs
+        cp /certs/public.crt /root/.mc/certs/CAs/minio.crt
+        attempts=0
+        until mc alias set local https://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          attempts=$$((attempts + 1))
+          if [ "$$attempts" -ge 60 ]; then
+            echo "minio-init: gave up dialling https://minio:9000 after $$attempts tries." >&2
+            echo "minio-init: either MinIO is not serving TLS there -- ./tls must hold a" >&2
+            echo "minio-init: public.crt and private.key it can read, and an EMPTY ./tls" >&2
+            echo "minio-init: gets plain HTTP with no complaint -- or MINIO_ROOT_USER and" >&2
+            echo "minio-init: MINIO_ROOT_PASSWORD are not what it started with." >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        mc mb --ignore-existing --with-lock "local/$$EVIDENCE_BUCKET"
+        mc mb --ignore-existing "local/$$INGEST_BUCKET"
+        mc mb --ignore-existing "local/$$SAMPLE_BUCKET"
+        mc retention set --default COMPLIANCE 365d "local/$$EVIDENCE_BUCKET"
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::%s"]}]}' "$$SAMPLE_BUCKET" "$$SAMPLE_BUCKET" > /tmp/sample-policy.json
+        mc admin user svcacct info local "$$SAMPLE_ACCESS_KEY" >/dev/null 2>&1 \
+          || mc admin user svcacct add \
+               --access-key "$$SAMPLE_ACCESS_KEY" \
+               --secret-key "$$SAMPLE_SECRET_KEY" \
+               --policy /tmp/sample-policy.json \
+               local "$$MINIO_ROOT_USER"
+        echo 'buckets ready'
+
+  # ------------------------------------------------------------------------
+  # The schema, applied by the OWNER role. One shot, and everything that
+  # speaks to the database waits for it to succeed.
+  #
+  # DATABASE_URL is the ONE variable alembic (db/migrations/env.py) and the
+  # application both read, and they must NOT be the same role: secrets.env
+  # points it at `noctornal_app`, so this service replaces it in-process
+  # with NOCTORNAL_MIGRATION_DATABASE_URL.
+  #
+  # The swap happens in the command because compose has no way to say "set
+  # DATABASE_URL from the value of another variable in the env_file".
+  # Writing `DATABASE_URL: ${NOCTORNAL_MIGRATION_DATABASE_URL}` under
+  # `environment:` would work only if the operator also passed
+  # `--env-file infra/production/secrets.env` on every single compose
+  # command, and forgetting it would set DATABASE_URL to the empty string --
+  # which db.py reports as "set but empty", a message written for exactly
+  # this shape of mistake.
+  #
+  # `restart: "no"` because a failed migration must STOP the deployment.
+  # The API's depends_on below is `service_completed_successfully`, so a
+  # schema that would not apply means an API that never starts -- which is
+  # the correct outcome: code ahead of its schema fails on the first query
+  # touching a new column and reports that as a bug in whatever endpoint
+  # happened to run first.
+  #
+  # The healthcheck is disabled because this image carries one for the HTTP
+  # server (see the Dockerfile) and this container serves no HTTP.
+  migrate:
+    <<: *noctornal-app
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      NOCTORNAL_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        export DATABASE_URL="$$NOCTORNAL_MIGRATION_DATABASE_URL"
+        exec alembic upgrade head
+
+  # ------------------------------------------------------------------------
+  # The application: REST API, the analyst console at /ui, and the
+  # /api/v1/live WebSocket. Connects as `noctornal_app`, which is not the
+  # schema owner and cannot ALTER TABLE ... DISABLE TRIGGER.
+  #
+  # ## why NOCTORNAL_ENV is set here and not only in secrets.env
+  #
+  # It is in secrets.env.example too, but this file is the production
+  # deployment and it should not be possible to turn the boot-time refusals
+  # off by editing a secrets file. Compose's `environment:` wins over
+  # `env_file:`, so this line is the authoritative one.
+  #
+  # ## NOCTORNAL_PUBLIC_ORIGIN
+  #
+  # Left to secrets.env, where it is the application origin. `samples.
+  # origin_split()` then returns the verdict "app" for this process, which
+  # means: this process refuses every sample download and tells the console
+  # to fetch it from NOCTORNAL_SAMPLE_ORIGIN instead. That is invariant 10
+  # working, not a misconfiguration. NOCTORNAL_SAMPLE_ORIGIN is set for BOTH
+  # processes, from secrets.env, because this one needs it to know where to
+  # send the console (and to put that origin in the console's CSP
+  # connect-src) and the other needs it to recognise itself.
+  #
+  # ## workers, and why REDIS_URL is not optional
+  #
+  # Four. Each uvicorn worker is a separate PROCESS, and that is the point:
+  # the analytics endpoints are CPU-bound igraph calls, so with one worker a
+  # single betweenness computation blocks every other request on the box.
+  # Four keeps the console responsive while one is busy, and stays well
+  # inside Postgres' max_connections=200 -- connections here are opened per
+  # request, not pooled, so the ceiling is concurrent requests rather than
+  # workers.
+  #
+  # The cost is that anything held in process memory is held four times
+  # over, and the rate limiter is exactly that: without REDIS_URL the GCRA
+  # meter is per process, so four workers enforce FOUR TIMES the configured
+  # rate and the login brake is a quarter as strong as the number says.
+  # readiness._redis_limiter_store fails on an unset REDIS_URL for this
+  # reason. Two other per-process ceilings simply multiply and are worth
+  # knowing: NOCTORNAL_LIVE_MAX_SOCKETS (200) and the live channel's
+  # pending-message caps are counted per worker.
+  #
+  # ## --proxy-headers / --forwarded-allow-ips
+  #
+  # See the x-caddy-ip note at the top of this file. The literal reaches the
+  # command through NOCTORNAL_TRUSTED_PROXY_IP below, aliased from that one
+  # declaration so the trusted address and the reserved address cannot drift.
+  #
+  # ## SSL_CERT_FILE, and why it is a CONCATENATION
+  #
+  # MinIO is served over TLS with a certificate no public CA issued, so this
+  # process has to be told to trust it. SSL_CERT_FILE is the lever every
+  # client here honours, but they do NOT honour it the same way, and the
+  # difference is the whole reason this is a `cat` rather than a path:
+  #
+  #   * minio-py hands the file to urllib3 as `ca_certs`
+  #     (`minio/api.py`: `ca_certs=os.environ.get('SSL_CERT_FILE') or
+  #     certifi.where()`). urllib3 then calls `load_verify_locations` with
+  #     it and nothing else, so for the evidence, raw and sample clients
+  #     this file IS the entire set of trusted roots.
+  #   * everything else -- `urllib.request.urlopen` in collection.py and
+  #     the webhook channel, `ssl.create_default_context()` in
+  #     transports.py's SMTP, and readiness.py's own bare
+  #     `urllib3.PoolManager` (no ca_certs, so urllib3 calls
+  #     `load_default_certs`) -- goes through OpenSSL's default verify
+  #     PATHS, which are SSL_CERT_FILE *and* SSL_CERT_DIR. The directory
+  #     still defaults to /etc/ssl/certs and the base image ships the
+  #     hashed symlinks, so these clients keep the public roots whatever
+  #     this variable says.
+  #
+  # That second bullet is worth stating because `cert_store_stats()` reads
+  # as if it were not true: point SSL_CERT_FILE at one certificate and the
+  # store reports 1 CA where it reported 150. The hashed directory is
+  # consulted lazily at verification time and is not counted, and a
+  # `urlopen` against an ordinary public host still succeeds -- measured in
+  # this base image, not reasoned about. So the concatenation is not what
+  # keeps RSS collection, webhooks and SMTP working; those were never at
+  # risk here.
+  #
+  # It is kept for the two things it does buy, both cheap at one `cat`:
+  # minio-py gets a bundle that is correct on its own terms rather than one
+  # that happens to be enough while these clients only ever address `minio`,
+  # and none of it depends on a future base image still shipping hashed
+  # symlinks in SSL_CERT_DIR -- a change that would take out every client in
+  # the second bullet at once, days later and nowhere near this file.
+  #
+  # Rebuilt into /tmp on each start (a fresh container each time, and the
+  # source of truth stays the read-only mount).
+  api:
+    <<: *noctornal-app
+    environment:
+      NOCTORNAL_ENV: production
+      NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        exec uvicorn noctornal_api.http.app:app \
+          --host 0.0.0.0 --port 8000 --workers 4 \
+          --proxy-headers --forwarded-allow-ips "$$NOCTORNAL_TRUSTED_PROXY_IP"
+
+  # ------------------------------------------------------------------------
+  # Invariant 10, as a second process: sample bytes are only ever served
+  # from an origin that is not the application's.
+  #
+  # THE SAME IMAGE and the same code. The only thing that makes this the
+  # sample origin is NOCTORNAL_PUBLIC_ORIGIN, and it is DERIVED from
+  # NOCTORNAL_SAMPLE_ORIGIN rather than typed again -- the sample process's
+  # public origin IS the sample origin by definition, and two hand-written
+  # copies of one hostname is a way for them to disagree.
+  #
+  # What each verdict from `samples.origin_split()` means, since this pair
+  # of services is what produces them:
+  #
+  #   "sample"      this process's public origin equals the configured
+  #                 sample origin, so it serves the bytes. Only this
+  #                 service should ever report it.
+  #   "app"         this process is the application. It REFUSES every
+  #                 download and names the sample origin in the refusal.
+  #                 The api service reports this, and that is correct.
+  #   "unconfigured" NOCTORNAL_SAMPLE_ORIGIN is unset. Every download
+  #                 refuses, everywhere. The split is OFF.
+  #   "same_origin" the sample origin and the application origin are the
+  #                 same origin. Refused: two names for one origin is not a
+  #                 split, and serving hostile bytes there is the drive-by
+  #                 that invariant 10 exists to prevent.
+  #   "invalid"     NOCTORNAL_SAMPLE_ORIGIN is not an origin -- most often
+  #                 because somebody wrote a path, and `app.internal/
+  #                 samples` is a location on the application origin, not a
+  #                 separate one.
+  #
+  # Neither process can see the other, and the runtime cannot tell a real
+  # origin split from a CNAME onto the same host (docs/16 C9). That the two
+  # hostnames in secrets.env are genuinely separate names stays a human
+  # confirmation. What this file CAN do is make them two processes.
+  #
+  # It does not have to be trusted to serve only downloads, either: the
+  # application refuses everything else when it is configured as the sample
+  # origin (`_allowed_on_sample_origin` in http/app.py allows the download,
+  # its preflight, /healthz and the readiness register, and nothing more).
+  # So the console, the login form and every case route 404 at the sample
+  # hostname whatever Caddy routes there -- the split is a property of the
+  # process rather than of a proxy allow-list nobody tests.
+  #
+  # 2 workers: this process answers download and refusal, not analytics.
+  #
+  # Honest limitation: it runs with the same environment as the api, so it
+  # also holds the MinIO root credentials that reach the evidence bucket.
+  # Narrowing that means a second least-privilege service account and an
+  # environment override here, and it has not been done.
+  sample-origin:
+    <<: *noctornal-app
+    environment:
+      NOCTORNAL_ENV: production
+      # The same alias the api service carries, for the same reason. It
+      # travels through the environment rather than being written into the
+      # command because a YAML alias cannot be spliced into a string, and
+      # both commands here are shell blocks.
+      NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        export NOCTORNAL_PUBLIC_ORIGIN="$$NOCTORNAL_SAMPLE_ORIGIN"
+        exec uvicorn noctornal_api.http.app:app \
+          --host 0.0.0.0 --port 8000 --workers 2 \
+          --proxy-headers --forwarded-allow-ips "$$NOCTORNAL_TRUSTED_PROXY_IP"
+
+  # ------------------------------------------------------------------------
+  # The two things that have to happen on a timer, in a shell loop.
+  #
+  # There is no worker process and no queue in this build (decision 30):
+  # `transports.dispatch_due()` and the collection runner are functions you
+  # CALL. Until something called them on a schedule, a notification queued
+  # at 17:05 went out when an administrator next pressed the button --
+  # priority 1 "overrides quiet hours" only if something sends it.
+  #
+  # Both are safe to run beside the API, and safe if this loop ever overlaps
+  # itself, because both are guarded by Postgres advisory locks -- at
+  # different granularities, which is worth knowing when reading the log.
+  # `dispatch_due` takes ONE lock across the whole drain, so a second copy
+  # does nothing and no notification is sent twice. The collection runner
+  # locks PER SOURCE, so a source another runner holds -- a second cron, or
+  # an analyst who pressed Run -- is reported `skipped`, which is not a
+  # failure and does not move the exit code.
+  #
+  # ## the cadence, described accurately
+  #
+  # Each script runs roughly every five minutes, staggered by 150 seconds so
+  # they do not contend. "Roughly" is not sloppiness: `sleep` measures the
+  # gap BETWEEN passes, so the period is 300s plus however long the two
+  # passes took, and it drifts.
+  #
+  # That drift does not matter, and it especially does not matter for the
+  # collection poll, which is NOT a timer for the sources it polls. Each
+  # source carries its own `next_due_at`, rolled once with per-source jitter
+  # when a run finishes and stored (Alembic 0042). The jitter is there for
+  # operational security, not politeness -- docs/04: a collector that polls
+  # exactly every 300 seconds is one a competent forum admin can pick out of
+  # an access log in an afternoon, and a burnt persona is expensive and slow
+  # to replace. This loop asks "what is due"; the schedule is the database's.
+  #
+  # ## no `set -e`
+  #
+  # scripts/notify_drain.py exits 1 when any delivery FAILED in that pass,
+  # which is information, not a reason to stop draining the outbox for ever.
+  # The exit code is logged and the loop continues. Anything genuinely
+  # broken shows up as the same non-zero code every five minutes.
+  #
+  # The exit status is captured into `rc` on its own line rather than
+  # interpolated straight into the echo: a `$(date)` in the same command
+  # substitution would overwrite `$?` before it was read, and the log would
+  # cheerfully report exit=0 for every failure.
+  #
+  # Healthcheck disabled: no HTTP server here (see the Dockerfile).
+  cron:
+    <<: *noctornal-app
+    healthcheck:
+      disable: true
+    environment:
+      NOCTORNAL_ENV: production
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        while true; do
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] notify_drain start"
+          python scripts/notify_drain.py; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] notify_drain exit=$$rc"
+          sleep 150
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll start"
+          python scripts/collection_poll.py; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll exit=$$rc"
+          sleep 150
+        done
+
+# --------------------------------------------------------------------------
+# One user-defined bridge, with a fixed subnet so Caddy can hold a fixed
+# address (see x-caddy-ip at the top).
+#
+# The subnet is inside Docker's own default allocation pool (172.16/12), so
+# a network created earlier on this host can already be sitting on it. The
+# symptom is `up` failing at network creation with "Pool overlaps with other
+# one on this address space", not a subtle one -- pick another /24 here and
+# in x-caddy-ip if that happens.
+networks:
+  noctornal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.243.0/24
+
+# --------------------------------------------------------------------------
+# There is no backup here beyond these volumes. prod-pgdata is the case
+# file, prod-miniodata is the evidence, and both live on one disk on one
+# host. Snapshot them somewhere else before you rely on this.
+volumes:
+  prod-pgdata:
+  prod-redisdata:
+  prod-miniodata:
+  caddy-data:
+  caddy-config:
