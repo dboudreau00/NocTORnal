@@ -35,7 +35,7 @@ honest delta between that plan and the build.
 **State (2026-09-09):** branch `main` (the working branch for the review
 pass; byte-identical to `deception-and-release-hardening` except
 `README.md`), Alembic head `0059`, 1565 `def test_` functions across the
-two pytest roots (~2170 collected items on a live stack), version 0.5.0
+two pytest roots (~2170 collected items on a live stack), version 0.5.1
 single-sourced from `pyproject.toml`. FULL-SUITE FIGURE: see the Alpha 5
 entry in `release/CHANGELOG.md`. The counts below this paragraph are the
 dated records they say they are.
