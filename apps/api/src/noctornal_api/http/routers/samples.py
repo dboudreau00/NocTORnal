@@ -66,7 +66,7 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 from noctornal_api.samples import (
     MAX_SAMPLE_BYTES,
     PolicyNotDeclared,
@@ -77,7 +77,16 @@ from noctornal_api.samples import (
     policy_declared,
 )
 
-router = APIRouter(prefix="/samples", tags=["samples"])
+# `route_class=BodyCappedRoute` is what makes the `@body_cap` marker on
+# `submit` do anything (routers/evidence.py, which opted in first,
+# explains the mechanism): the class wraps the ASGI receive that
+# FastAPI's multipart parser reads through, and only for endpoints
+# carrying the marker. Until 2026-09-09 the cap here was a private
+# `_read_capped` that read the upload in chunks AFTER the parser had
+# spooled the whole body to a temporary file: it bounded this process's
+# memory, and the bytes had all arrived.
+router = APIRouter(prefix="/samples", tags=["samples"],
+                   route_class=BodyCappedRoute)
 
 
 def _svc(conn: psycopg.Connection) -> SampleService:
@@ -121,37 +130,6 @@ def _out(s: Sample) -> SampleOut:
     )
 
 
-async def _read_capped(file: UploadFile) -> bytes:
-    """Read the upload, refusing as soon as it exceeds the cap.
-
-    `await file.read()` with no argument buffers the WHOLE body first and
-    the service checks the size afterwards — so a caller could hand the API
-    four gigabytes and the refusal arrived only once four gigabytes had
-    been accumulated. The cap was documented, enforced, and useless against
-    the thing a cap is for.
-
-    Chunked, and it stops at the first chunk that crosses the line. The
-    limit is `MAX_SAMPLE_BYTES` itself rather than a second number, because
-    two limits drift and the one that drifts is the one nobody is looking
-    at.
-    """
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_SAMPLE_BYTES:
-            raise Problem(
-                413, "Payload too large",
-                f"a sample submission is capped at {MAX_SAMPLE_BYTES} bytes; "
-                f"anything larger is a disk image or a mistake. The upload "
-                f"was refused at the cap rather than buffered whole.")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 @router.get("/policy", response_model=dict)
 def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
     """Whether an operator has declared a prohibited-content policy, and
@@ -193,6 +171,7 @@ def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
 
 @router.post("", response_model=SampleOut, status_code=201,
              dependencies=[Depends(rate_limit("evidence.ingest"))])
+@body_cap(lambda: MAX_SAMPLE_BYTES, what="a sample submission")
 async def submit(
     request: Request,
     file: UploadFile = File(...),
@@ -206,6 +185,14 @@ async def submit(
     """Land a sample in QUARANTINE. Nothing reaches the RE queue until
     triage has run, and nothing is accepted at all until a
     prohibited-content policy has been declared.
+
+    The request body is capped at `MAX_SAMPLE_BYTES`, enforced by
+    `BodyCappedRoute` on the bytes as they arrive: a declared length over
+    the cap is refused before a byte is read, a chunked body on the chunk
+    that crosses, and the 413 names the cap. Nothing below runs for a
+    refused upload. Until 2026-09-09 the cap was a chunked read of the
+    upload in this router, which ran after FastAPI's multipart parser had
+    spooled the whole body to a temporary file.
 
     `sample.submit` is a GLOBAL permission — `require_global` resolves the
     verb, the active account and step-up freshness, and knows nothing about
@@ -239,7 +226,10 @@ async def submit(
         authorize_object(conn, user, case_id=case_id,
                          permission_key="sample.submit",
                          classification=classification, compartments=parsed)
-    data = await _read_capped(file)
+    # Bounded before it starts: the route class refused anything over the
+    # cap at the receive. The service re-checks the length as its own
+    # precondition.
+    data = await file.read()
     clearance, held = user_ceiling(conn, user.user_id)
     try:
         return _out(_svc(conn).submit(

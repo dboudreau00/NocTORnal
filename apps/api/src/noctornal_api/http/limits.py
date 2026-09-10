@@ -521,10 +521,13 @@ def install_rate_limit_middleware(app) -> None:
 #   memory, which is the one thing a cap exists to prevent.
 #
 # `samples._read_capped` was the one path that stopped at the cap, and it
-# lived in the samples router where nothing else could reach it. This is
-# that idea, shared, in the module that already owns the other request
-# ceilings. Two mechanisms, because the two routes read their bodies
-# differently:
+# lived in the samples router where nothing else could reach it (the
+# deception router carried a copy). This is that idea, shared, in the
+# module that already owns the other request ceilings -- and since
+# 2026-09-09 the two donors use it too. Their chunked reads ran AFTER
+# the multipart parser had spooled the whole body to a temporary file,
+# so they bounded the process's memory and nothing else; both are gone.
+# Two mechanisms, because the routes read their bodies differently:
 #
 # `read_body_capped` is for a handler that reads the raw body itself.
 # `BodyCappedRoute` + `body_cap` is for a handler whose body FastAPI parses
