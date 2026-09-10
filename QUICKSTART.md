@@ -219,8 +219,18 @@ MinIO console: <http://localhost:9001>. Mailpit: <http://localhost:8025>.
 
 ## Before anything real
 
-This is a dev deployment, and the gap between it and a defensible one is
-deliberate and documented, not hidden:
+**`infra/production/` is the real one.** One host, docker compose, no
+orchestrator: Caddy terminating TLS in front of the API and the sample
+origin, nothing else publishing a port, secrets from a root-owned file
+the process refuses to start without, a database role that does not own
+the tables it writes, and the two timed jobs actually running.
+`infra/production/README.md` is the procedure and says what it still
+does not give you. Start there rather than hardening the file below.
+
+Everything from here down describes the DEVELOPMENT stack
+(`infra/docker-compose.yml`), which is a laptop convenience. The gap
+between it and a defensible deployment is deliberate and documented,
+not hidden:
 
 - **The compose passwords are `dev_only_change_me`** and are in git. Replace
   them, and run the API under a database role that does *not* own the

@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased
+
+### Wave 1: it can be deployed as a service rather than run as a script
+
+Until now the only way to run this was `scripts/launch.ps1` on a laptop:
+one uvicorn process bound to loopback, the schema's owner as the database
+role, the object store over plain HTTP, and a compose file whose first
+line says not to derive a deployment from it. There was no Dockerfile in
+the tree at all.
+
+**`infra/production/` is the real one, and QUICKSTART now says so.** One
+host, docker compose, no orchestrator. Caddy terminates TLS for the
+application and the sample origin and is the only thing that publishes a
+port; Postgres, Redis and MinIO are reachable only on the compose network.
+A one-shot `migrate` job runs Alembic as the schema owner and everything
+else waits for it. `infra/production/README.md` is the operator procedure,
+including what this deployment still does not give you.
+
+**The API no longer owns the tables it writes.** `noctornal_app` is
+created at initdb -- the only place `CREATE ROLE` can live, since this
+tree forbids the migration role from being a superuser -- and migration
+0060 grants it. Verified against a running stack: the API connects as
+`noctornal_app`, `core.node` is owned by `noctornal`, and
+`ALTER TABLE audit.event DISABLE TRIGGER USER` comes back **"must be owner
+of table event"**. That is the append-only audit and custody chain
+defended by the database rather than by the application's good manners.
+
+0060 is a complete no-op when the role is absent, because ten `*_pg` test
+files need ownership to run `ALTER TABLE ... DISABLE TRIGGER`, and CI runs
+both the upgrade and the downgrade round trip. CI creates the role by
+running `db/init/10-app-role.sh` itself, so the ten new privilege tests run
+there rather than skipping.
+
+**A production process refuses to start on a development secret.**
+`config.verify_environment()` reports every problem at once, each with what
+it costs, and only when `NOCTORNAL_ENV=production` -- a laptop and CI are
+untouched, which is why the check is still there in a week. Measured: a
+container given `dev_only_change_me` in its DSN, `SMTP_ALLOW_PLAINTEXT`
+and `NOCTORNAL_ENABLE_DOCS` names all three and does not boot.
+
+**The readiness register now refuses a quiet green.** Four of the thirteen
+checks are blocking, `report()` carries `blocking_failures`, and two things
+consult it: `POST /collection/sources/{id}/run` answers 409, and so does
+the unattended cron path. That second one was found by adversarial review
+after the first had shipped in this same change -- a gate on the attended
+route only would have let the cron poll real sources on a deployment whose
+blockers were red, which is precisely the claim the tier is making. Two new
+checks: `ingest_pepper_set` and `app_db_role_not_owner`.
+
+**The sample origin is a compose service.** The same image, a second
+process, its own hostname. Verified: `origin_split()` answers `app` on one
+and `sample` on the other, from the server process's own environment.
+
+**Things that run on a timer now run.** A `cron` service runs
+`scripts/notify_drain.py` and the new `scripts/collection_poll.py`. The
+collection runner respects each source's jittered `next_due_at` rather than
+imposing a cadence -- docs/04 and docs/18 both name a scheduler on a
+regular tick as an operational-security failure -- and a new per-source
+advisory lock stops two runners corrupting one source.
+
+**Known, and not fixed here.** No real SMTP relay exists on the build
+machine, so "a priority-1 notification leaves the building" is the one line
+in this wave that is wired and documented but unproven. The websocket and
+the Lab download still authenticate from the login-body token, so a
+reloaded session is still not live and the login response still returns a
+token; that is Wave 2. `docker exec` does not inherit a variable exported
+inside a container's entrypoint, which made two verification probes report
+failures the deployment did not have -- both were the probe, and
+`/proc/1/environ` is what to read instead.
+
 ## Alpha 5.2 — 2026-09-10
 
 The b-revision of Alpha 5.1, closing what a re-read of it found. Alpha 5.1

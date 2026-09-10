@@ -154,6 +154,21 @@ CHECKED: dict[str, str | None] = {
 }
 
 
+def _say(line: str) -> None:
+    """Print a line of a document without dying on it.
+
+    The lines this tool echoes are prose it just rewrote, and one of them is
+    inside README.md's directory tree, which is drawn with box characters.
+    On a Windows console stdout is cp1252, so `print` raised
+    UnicodeEncodeError on U+2502 and took the whole refresh down AFTER it
+    had already written three of the five files -- a tool that reports what
+    it did, failing at the reporting step, in a half-applied state. The
+    encoding of a terminal is not a reason to stop.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(line.encode(encoding, "replace").decode(encoding, "replace"))
+
+
 def _live_region(text: str, marker: str | None) -> int:
     """Index one past the last character of the live region."""
     if marker is None:
@@ -223,9 +238,9 @@ def refresh(check: bool = False) -> int:
             for before, after in zip(live.splitlines(),
                                      new_live.splitlines(), strict=False):
                 if before != after:
-                    print(f"  {name}")
-                    print(f"    - {before.strip()[:100]}")
-                    print(f"    + {after.strip()[:100]}")
+                    _say(f"  {name}")
+                    _say(f"    - {before.strip()[:100]}")
+                    _say(f"    + {after.strip()[:100]}")
             if not check:
                 out = new_live + history
                 path.write_text(out.replace("\n", "\r\n") if crlf else out,
