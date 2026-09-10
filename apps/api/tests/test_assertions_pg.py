@@ -296,3 +296,46 @@ def test_ontology_still_enforced_on_service_writes(conn, case):
         svc.create_edge(case_id=case_id, edge_type="VOUCHED_FOR",
                         src_node_id=grp, dst_node_id=idn, created_by=uid,
                         assertion=_obs(uid))
+
+
+def test_invariant_5_a_retraction_is_one_stamp_and_rewrites_nothing(conn, case):
+    """CONVENTIONS invariant 5 as decided on 2026-09-09: a retraction is a
+    marked row, not a supersession. The three stamp columns are written
+    once, from NULL, and every other column of the claim is exactly what
+    it was; a second retraction is refused and changes nothing, so the
+    stamp cannot be rewritten either. Column names come from the catalogue
+    rather than a list here, so a column added later is held to the same
+    rule without anyone remembering to add it."""
+    from noctornal_api.graph import GraphWriteError, GraphWriteService
+    case_id, uid = case
+    svc = GraphWriteService(conn)
+    node_id = svc.create_node(case_id=case_id, node_type="IDENTITY", label="w",
+                              created_by=uid, assertion=_obs(uid))
+    aid = conn.execute(
+        "SELECT id FROM core.assertion WHERE node_id = %s", (node_id,)
+    ).fetchone()[0]
+    stamp = ("retracted_at", "retracted_by", "retraction_reason")
+    columns = [r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'core' AND table_name = 'assertion' "
+        "ORDER BY ordinal_position")]
+    assert set(stamp) <= set(columns)
+    kept = ", ".join(c for c in columns if c not in stamp)
+    before = conn.execute(
+        f"SELECT {kept} FROM core.assertion WHERE id = %s", (aid,)).fetchone()
+
+    svc.retract_assertion(aid, retracted_by=uid, reason="source burned", at=NOW)
+
+    after = conn.execute(
+        f"SELECT {kept} FROM core.assertion WHERE id = %s", (aid,)).fetchone()
+    assert after == before, "a retraction rewrote a column that is not the stamp"
+    assert conn.execute(
+        "SELECT retracted_at, retracted_by, retraction_reason "
+        "FROM core.assertion WHERE id = %s", (aid,)).fetchone() == (
+            NOW, uid, "source burned")
+
+    with pytest.raises(GraphWriteError, match="already retracted"):
+        svc.retract_assertion(aid, retracted_by=uid, reason="again", at=NOW)
+    assert conn.execute(
+        "SELECT retraction_reason FROM core.assertion WHERE id = %s",
+        (aid,)).fetchone()[0] == "source burned"

@@ -578,7 +578,7 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 
 | Item | Consequence today |
 |---|---|
-| Session IP/UA binding | A stolen token is portable |
+| Session binding enforcement | Every session records the address and client it was minted from (0058) and `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a mismatch with an audit row; the flag is off by default, so until an operator sets it a stolen token is portable |
 | Non-owner DB role + RLS | The API connects as the table owner, so RLS is a no-op behind it |
 | Real SSRF protection | `collection.fetch()` blocks non-HTTP schemes and private literals; **DNS rebinding is not addressed** |
 | Login timing equalisation | A missing account returns faster than a wrong password |
