@@ -422,7 +422,8 @@ def test_the_redactor_does_not_touch_the_host_the_ssrf_guard_names(conn):
         "why the poll route needs its own ceiling check")
 
 
-def test_the_run_route_refuses_a_source_above_the_ceiling(conn, client):
+def test_the_run_route_refuses_a_source_above_the_ceiling(
+        conn, client, monkeypatch):
     """Both halves of the poll contract in one test.
 
     The service filter is worth nothing unless the ROUTE resolves the
@@ -432,6 +433,21 @@ def test_the_run_route_refuses_a_source_above_the_ceiling(conn, client):
     fix -- that the RED source's hostname appears nowhere in the response
     the AMBER caller gets.
     """
+    # Since 2026-09-10 this route consults the readiness register first and
+    # answers 409 before the ceiling is resolved at all. Nothing in this
+    # file settles the four blocking checks -- two of them are database
+    # facts no development or CI database has arranged -- so without this
+    # stub every request below is answered by the gate and the ceiling is
+    # never asked. Stubbed rather than accommodated: relaxing the
+    # assertions to accept whichever refusal arrives first would turn a
+    # test of the CEILING into a test of the GATE, and the thing this one
+    # exists to prove -- that an over-ceiling source and an unknown id read
+    # alike -- would go unproven while the file stayed green. The gate's
+    # own behaviour is `test_readiness_blocking`'s, which stubs it the
+    # same way for the same reason.
+    import noctornal_api.http.routers.collection as route_module
+    monkeypatch.setattr(route_module, "blocking_failures", lambda conn: [])
+
     red = _source(conn, classification="RED")
     roles = ("ANALYST", "COLLECTOR")  # COLLECTOR holds collection.run
     _, amber_email, amber_secret = _user(conn, clearance="AMBER", roles=roles)
