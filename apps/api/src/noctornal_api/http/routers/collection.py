@@ -61,6 +61,36 @@ which closes the existence oracle in the old 400-versus-200 split as
 well, and stops a sub-cleared caller from making the collector touch a
 forum on their say-so.
 
+## The one route that reads the readiness register
+
+`/sources/{id}/run` refuses with 409 while any BLOCKING readiness check
+fails, naming them. It is the only route here that does, because it is
+the only one that puts this software in front of somebody else's system:
+every other route reports on what already happened.
+
+The four (readiness.BLOCKING_CHECKS) are the ones an operator must
+settle before real material arrives -- no prohibited-content policy and
+no named person to escalate to, retention periods still on their seeded
+placeholders, no security officer to review a break-glass or read the
+audit trail, no sample origin so nothing collected can be retrieved.
+Running a covert poll against a real target on a deployment in that
+state is not a configuration mistake that can be tidied up afterwards;
+the material is in the building and the decisions were never taken.
+
+Until 2026-09-10 the register was a pane and nothing more: every one of
+those four could be red for a month and this route would poll happily,
+because the only consequence of a failed check was a row nobody had to
+open. `blocking_failures` runs only the four, so a poll does not wait on
+a Redis PING or a MinIO round trip to find out whether it may proceed.
+
+The gate is not this route's alone, and it must not become so.
+`scripts/collection_poll.py` -- the cron in infra/production/compose.yml,
+which polls every due source every five minutes with nobody reading the
+output -- asks the same question once per pass and refuses the whole pass
+in the same words. A gate on the attended path only would stop the
+analyst who pressed a button and wave the unattended runner through,
+which is the collection nobody is watching.
+
 `/personas/{id}/status` was the last route here that took no ceiling,
 and it was a WRITE: an AMBER holder of `collection_account.manage` could
 burn, lock or clear the cooldown on a persona whose source the listing
@@ -83,6 +113,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api.collection import (
+    CollectionBusy,
     CollectionError,
     CollectionNotFound,
     CollectionService,
@@ -98,6 +129,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.readiness import blocking_failures
 
 router = APIRouter(prefix="/collection", tags=["collection"])
 
@@ -195,7 +227,41 @@ def run_once(
     exactly what the label protects. The 400-versus-200 split was an
     existence oracle on top of it, and the poll itself ran against a
     source the caller was not cleared to know about.
+
+    409 while any BLOCKING readiness check fails, before anything else is
+    read or written. See "The one route that reads the readiness
+    register" above for which four and why; the refusal names them and
+    sends the caller to `GET /admin/readiness` for the evidence and the
+    action behind each, because a refusal an operator cannot act on is
+    just an outage.
+
+    409 also for a persona that is not usable, and for a source another
+    runner is already polling -- all three are "you are allowed, this
+    cannot run right now", and the detail says which. Only the last is
+    worth retrying immediately.
     """
+    # BEFORE the ceiling lookup on purpose: this is a fact about the
+    # deployment and not about the caller or the source, so resolving a
+    # clearance first would spend a query to answer a question that
+    # cannot change the outcome. It is not an oracle either -- the caller
+    # already holds global `collection.run`, and the answer is the same
+    # for every source id including ones that do not exist.
+    #
+    # 409 is also what an unusable persona and an already-running poll get
+    # below. All three are "you are allowed, something else is not ready";
+    # the detail says which, and naming the failing checks is what makes
+    # this one distinguishable to a caller who is not reading this file.
+    unsettled = blocking_failures(conn)
+    if unsettled:
+        raise Problem(
+            409, "Conflict",
+            "This deployment is not ready to collect. Blocking readiness "
+            "checks failing: " + ", ".join(unsettled) + ". These are the "
+            "ones an operator settles before real material enters the "
+            "system, and a covert poll against a real target must not run "
+            "while they are open; retrying will not close them. GET "
+            "/admin/readiness (user.manage) carries the evidence and the "
+            "action for each. " + L3_NOTICE)
     clearance, _ = user_ceiling(conn, user.user_id)
     try:
         result = CollectionService(conn).run_once(
@@ -204,6 +270,18 @@ def run_once(
     except PersonaUnavailable as exc:
         # 409 rather than 403: the caller is allowed, the persona is not
         # usable -- suspended, burnt, or cooling down.
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except CollectionBusy as exc:
+        # ABOVE `except CollectionError` and it must stay there: CollectionBusy
+        # is a subclass, so until 2026-09-10 it was caught below and answered
+        # 400 "Invalid request" -- for a request that was entirely valid and
+        # did nothing at all. The case that produces it is the ordinary one
+        # the lock exists for and `run_once`'s docstring names: an analyst
+        # double-clicking Run, or this pane overlapping the cron in
+        # scripts/collection_poll.py. 409 says the true thing, which is that
+        # the poll is already happening; 400 told them to fix a request that
+        # had nothing wrong with it, and left retrying -- the correct
+        # response -- looking like the wrong one.
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc

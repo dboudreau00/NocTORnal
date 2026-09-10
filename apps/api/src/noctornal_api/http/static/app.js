@@ -7052,6 +7052,27 @@ function deliveryRow(d) {
  * deployment with its evidence beside it, and a failed check carries the
  * action that closes it -- an "action" on a passing check would be noise,
  * so the server sends none and this renders none.
+ *
+ * Four of the checks carry `blocking: true` (readiness.BLOCKING_CHECKS) and
+ * the collection run route refuses while any of them fails. Until
+ * 2026-09-10 this pane rendered all of them identically, which made the
+ * register a list rather than a control: an operator could read "4 of 11
+ * check(s) need attention", learn nothing about which four stopped the
+ * product from being usable, and close the tab. The failing blockers now
+ * get a banner above the list, with each one's own evidence and action,
+ * and it has no dismiss control.
+ *
+ * The report is deliberately NOT kept on `state`. It was for a day, for a
+ * second pane that would explain a collection run's 409 from the last
+ * report rather than ask again -- and that pane cannot be written
+ * honestly. The Feeds operator holds `collection.run` and generally not
+ * `user.manage`, so the copy is null in exactly the session that wanted
+ * it; where it is not null it is a snapshot taken BEFORE the refusal it
+ * would be shown beside, which is the stale-report defect the catch below
+ * exists to prevent. The 409 names the failing checks in its own detail,
+ * so there is nothing a copy here would add that the refusal has not
+ * already said. Recorded because an absent field reads as an oversight
+ * until somebody has worked out why it is absent.
  */
 async function loadReadiness() {
   const list = $('rdy-list');
@@ -7063,6 +7084,10 @@ async function loadReadiness() {
     body = await api('/admin/readiness');
   } catch (err) {
     clear(list);
+    /* A refused read leaves NO banner standing. A stale "3 blocking checks
+       failing" beside a refusal is a claim about a report this pane did
+       not get, and the operator cannot tell it from a fresh one. */
+    renderBlockingBanner(null);
     summary.textContent = refusalText(err,
       'The readiness register needs user.manage.');
     return;
@@ -7075,16 +7100,103 @@ async function loadReadiness() {
   summary.textContent = body.ready
     ? 'Every code-side check passes.'
     : failed + ' of ' + body.checks.length + ' check(s) need attention.';
+  renderBlockingBanner(body);
   for (const c of body.checks) list.appendChild(readinessRow(c));
+}
+
+/** The banner that cannot be missed while a blocking check fails.
+ *
+ *  Built from the CHECK ROWS rather than from `blocking_failures` alone,
+ *  because the rows are what carry the evidence and the action and a
+ *  banner that named a check without saying what to do about it would send
+ *  the operator hunting down the same list it sits on top of. The server's
+ *  own summary is still read: any name in `blocking_failures` that no row
+ *  explained is listed too, bare. The two are the same fact counted twice
+ *  and they cannot be allowed to disagree silently -- the failure to avoid
+ *  is a blocking failure that appears in neither.
+ *
+ *  `null` clears it. There is deliberately no close button: this is the
+ *  one notice on the pane whose entire job is to still be there.
+ */
+function renderBlockingBanner(body) {
+  const box = $('rdy-blocking');
+  clear(box);
+  if (!body) { show(box, false); return; }
+  const failing = (body.checks || []).filter((c) => c.blocking && !c.ok);
+  const named = new Set(failing.map((c) => c.check));
+  const orphans = (body.blocking_failures || []).filter((n) => !named.has(n));
+  const total = failing.length + orphans.length;
+  if (!total) { show(box, false); return; }
+
+  /* Unhidden BEFORE anything is appended, and that ordering is the whole
+     of what `role="alert"` buys. `hidden` is `display: none`, which takes
+     the element out of the accessibility tree, and a live region that is
+     not in the tree does not observe the insertions made into it: build
+     first and reveal afterwards and a screen reader announces nothing at
+     all. The operator this banner was written for would then open the
+     admin pane, be told nothing, and read on. Revealed first, every
+     append below is a mutation inside a region already being watched. */
+  show(box, true);
+
+  const head = el('p', 'rdy-blocking-head');
+  head.appendChild(el('strong', null, total + ' BLOCKING check(s) failing'));
+  head.appendChild(document.createTextNode(
+    ' — the collection poll route is refused. POST '
+    + '/collection/sources/{id}/run answers 409 while any of these is red, '
+    + 'because a covert poll against a real target must not run on a '
+    + 'deployment where these are unsettled. Named as the ROUTE and not as '
+    + '"collection", because that is what the register actually stops: '
+    + 'anything that calls CollectionService.run_once without going through '
+    + 'the API is not gated by this. Each is a decision somebody has to '
+    + 'take; none of them is closed by restarting anything.'));
+  box.appendChild(head);
+
+  const items = el('ul', 'rdy-blocking-list');
+  for (const c of failing) {
+    const li = el('li', 'rdy-blocking-item');
+    li.appendChild(el('span', 'rdy-blocking-name', c.check));
+    li.appendChild(el('p', 'why', c.evidence));
+    if (c.action) li.appendChild(el('p', 'help warn', c.action));
+    items.appendChild(li);
+  }
+  for (const name of orphans) {
+    const li = el('li', 'rdy-blocking-item');
+    li.appendChild(el('span', 'rdy-blocking-name', name));
+    li.appendChild(el('p', 'why',
+      'The server lists this as a blocking failure and sent no check row '
+      + 'for it. Read GET /admin/readiness directly.'));
+    items.appendChild(li);
+  }
+  box.appendChild(items);
 }
 
 function readinessRow(c) {
   const card = el('div', 'card row-card compact'
-    + (c.ok ? '' : ' row-incomplete'));
+    + (c.ok ? '' : ' row-incomplete')
+    + (c.blocking && !c.ok ? ' rdy-row-blocking' : ''));
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', c.check));
   head.appendChild(el('span', 'chip ' + (c.ok ? 'good' : 'bad'),
     c.ok ? 'PASS' : 'ATTENTION'));
+  /* Marked on the PASSING blockers too, quietly. Which four are the gate
+     is a standing fact about the register, and an operator who only ever
+     sees the chip on a red row learns that "blocking" is a synonym for
+     "failed" -- then reads a green pane and does not know what would have
+     stopped the product had it gone the other way.
+
+     `subtle` while it passes, because a standing fact is not a warning,
+     and `bad` (--danger: the banner's red, and this card's own left
+     rule) the moment it does not. Never `warn`: amber on this pane is the
+     ORDINARY failed check's colour (`.row-incomplete`), and a blocker in
+     that amber says "untidy" about the one thing that makes the poll
+     route answer 409. The `help warn` action line below is the one amber
+     that crosses the line, in the banner as well as here -- it is the
+     instruction, not the verdict. app.css argues the same from its end,
+     above `.rdy-blocking` and `.rdy-row-blocking`. */
+  if (c.blocking) {
+    head.appendChild(el('span', 'chip ' + (c.ok ? 'subtle' : 'bad'),
+      'BLOCKING'));
+  }
   card.appendChild(head);
   card.appendChild(el('p', 'why', c.evidence));
   if (c.action) card.appendChild(el('p', 'help warn', c.action));
@@ -9324,6 +9436,12 @@ function adminUserRow(u) {
 
 function initAdmin() {
   $('adm-refresh').addEventListener('click', loadAdminUsers);
+  /* The button has been in the markup since the register shipped and was
+     wired to nothing: `selectTab('admin')` called loadReadiness once and
+     the control that says "Check readiness" did nothing at all when
+     pressed. An operator who had just changed a variable and restarted the
+     API had no way to re-ask short of reloading the console. */
+  $('btn-readiness').addEventListener('click', loadReadiness);
   $('adm-create').addEventListener('submit', async (e) => {
     e.preventDefault();
     setMsg($('adm-create-error'), '');

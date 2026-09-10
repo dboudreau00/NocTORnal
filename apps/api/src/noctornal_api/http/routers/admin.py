@@ -210,9 +210,16 @@ def readiness(
     user: CurrentUser = Depends(require_global("user.manage")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """What the deployment can establish about itself, as `{ready,
-    checks}` with evidence per check. See `readiness.py` for what is
-    checked and why.
+    """What the deployment can establish about itself, as `{ready, checks,
+    blocking_failures}` with evidence per check. See `readiness.py` for
+    what is checked and why.
+
+    `blocking_failures` names the failing checks a caller may REFUSE on
+    (`readiness.BLOCKING_CHECKS`); `POST /collection/sources/{id}/run` and
+    the collection cron are the callers that do, and they name these same
+    checks back to whoever they refused. It is derived from the run that
+    produced the rows above it rather than from a second probe pass, so it
+    cannot name a check those rows show as passing.
 
     Deliberately NOT "the code-side half of the legal register": that
     phrasing was removed from `readiness.py` on 2026-09-02 because two of

@@ -52,10 +52,12 @@ EXPECTED_CHECKS = (
     "security_officer_present",
     "sys_admin_present",
     "totp_kek_set",
+    "ingest_pepper_set",
     "rate_limiting_enabled",
     "redis_limiter_store",
     "evidence_bucket_object_lock",
     "migrations_at_head",
+    "app_db_role_not_owner",
     "smtp_configured",
 )
 
@@ -164,7 +166,8 @@ def test_every_check_is_listed_with_evidence_and_a_verdict(conn, client):
     names = [c["check"] for c in body["checks"]]
     assert names == list(EXPECTED_CHECKS), names
     for check in body["checks"]:
-        assert set(check) == {"check", "ok", "evidence", "action"}, check
+        assert set(check) == {"check", "ok", "evidence", "action",
+                              "blocking"}, check
         assert isinstance(check["ok"], bool), check
         assert isinstance(check["evidence"], str) and check["evidence"].strip(), (
             f"{check['check']} reported no evidence; a verdict without "
