@@ -19,6 +19,7 @@ Two rules that adversarial review forced into this file:
 """
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Iterator
@@ -111,7 +112,12 @@ def session_token(
     if request.method in _UNSAFE_METHODS:
         sent = request.headers.get(CSRF_HEADER)
         expected = request.cookies.get(CSRF_COOKIE)
-        if not sent or not expected or sent != expected:
+        # Constant-time, the way `security/totp.py` compares a code: `!=`
+        # on two strings returns at the first differing character. Over
+        # bytes, because `hmac.compare_digest` raises TypeError on a
+        # non-ASCII str and the header is text the caller chose.
+        if not sent or not expected or not hmac.compare_digest(
+                sent.encode(), expected.encode()):
             raise Problem(403, "Forbidden", "missing or invalid CSRF token")
     return cookie
 
