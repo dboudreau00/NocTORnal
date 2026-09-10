@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import base64
 import os
-import time
 from uuid import uuid4
 
 import pytest
@@ -101,22 +100,42 @@ def _make_user(conn, *, global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _admin_token(conn, client) -> str:
+def _admin_token(conn) -> str:
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    return _login(client, email, secret)
+    return _session(conn, email)
 
 
 def _by_name(body: dict) -> dict:
@@ -151,7 +170,7 @@ def no_active_officers(conn):
 def test_readiness_refuses_the_unauthenticated_and_the_analyst(conn, client):
     assert client.get("/api/v1/admin/readiness").status_code == 401
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    r = client.get("/api/v1/admin/readiness", headers=_auth(_login(client, email, secret)))
+    r = client.get("/api/v1/admin/readiness", headers=_auth(_session(conn, email)))
     assert r.status_code == 403
     assert "user.manage" in r.json()["detail"]
 
@@ -159,7 +178,7 @@ def test_readiness_refuses_the_unauthenticated_and_the_analyst(conn, client):
 # --- the shape -------------------------------------------------------------
 
 def test_every_check_is_listed_with_evidence_and_a_verdict(conn, client):
-    r = client.get("/api/v1/admin/readiness", headers=_auth(_admin_token(conn, client)))
+    r = client.get("/api/v1/admin/readiness", headers=_auth(_admin_token(conn)))
     assert r.status_code == 200, r.text
     body = r.json()
     assert isinstance(body["ready"], bool)
@@ -187,14 +206,14 @@ def test_the_service_and_the_router_agree_on_the_check_names(conn, client):
     and the names the wire carries, against the literal list above."""
     from noctornal_api import readiness
     assert tuple(readiness.CHECK_NAMES) == EXPECTED_CHECKS
-    r = client.get("/api/v1/admin/readiness", headers=_auth(_admin_token(conn, client)))
+    r = client.get("/api/v1/admin/readiness", headers=_auth(_admin_token(conn)))
     assert [c["check"] for c in r.json()["checks"]] == list(readiness.CHECK_NAMES)
 
 
 # --- flipping one input flips exactly its check --------------------------
 
 def test_unsetting_the_policy_variables_flips_that_check(conn, client, monkeypatch):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
 
     monkeypatch.setenv("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "POL-2026-014")
     monkeypatch.setenv("NOCTORNAL_DESIGNATED_PERSON", "the.dp@example.test")
@@ -218,7 +237,7 @@ def test_unsetting_the_policy_variables_flips_that_check(conn, client, monkeypat
 
 def test_deactivating_every_security_officer_flips_that_check(
         conn, client, no_active_officers):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     body = client.get("/api/v1/admin/readiness", headers=_auth(token)).json()
     check = _by_name(body)["security_officer_present"]
     assert check["ok"] is False, check
@@ -232,7 +251,7 @@ def test_reactivating_an_officer_restores_the_check(conn, client):
     """The positive half, so the previous test cannot pass by reporting
     every deployment as officer-less."""
     officer, _, _ = _make_user(conn, global_roles=("SECURITY_OFFICER",))
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     check = _by_name(client.get("/api/v1/admin/readiness",
                                 headers=_auth(token)).json())["security_officer_present"]
     assert check["ok"] is True, check
@@ -244,7 +263,7 @@ def test_the_sys_admin_check_counts_the_caller_in(conn, client):
     """The caller holds user.manage, which the seed grants to SYS_ADMIN
     alone, so this check can never honestly be false for whoever is
     reading it -- and it says how many there are, not just 'yes'."""
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     check = _by_name(client.get("/api/v1/admin/readiness",
                                 headers=_auth(token)).json())["sys_admin_present"]
     assert check["ok"] is True
@@ -252,7 +271,7 @@ def test_the_sys_admin_check_counts_the_caller_in(conn, client):
 
 
 def test_retention_check_counts_confirmed_over_total(conn, client):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     check = _by_name(client.get("/api/v1/admin/readiness",
                                 headers=_auth(token)).json())["retention_rules_confirmed"]
     confirmed, total = conn.execute(
@@ -266,7 +285,7 @@ def test_retention_check_counts_confirmed_over_total(conn, client):
 # --- a down service is a failed check, never a 500 -----------------------
 
 def test_a_down_redis_and_minio_are_failed_checks_not_a_500(conn, client, monkeypatch):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     # Port 1 refuses immediately on every host this runs on, so the probes
     # fail fast and the failure is the connection, not a timeout.
     monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1/0")
@@ -290,7 +309,7 @@ def test_a_down_redis_and_minio_are_failed_checks_not_a_500(conn, client, monkey
 
 def test_unset_redis_and_minio_are_failed_checks_with_the_variable_named(
         conn, client, monkeypatch):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("MINIO_ENDPOINT", raising=False)
     checks = _by_name(client.get("/api/v1/admin/readiness", headers=_auth(token)).json())
@@ -307,7 +326,7 @@ def test_the_rate_limit_check_reads_the_same_off_switch_as_the_limiter(
     would eventually disagree, and a deployment would be reported ready
     with a limiter that never built."""
     from noctornal_api.http.limits import rate_limiting_disabled
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     monkeypatch.setenv("NOCTORNAL_RATELIMIT", "off")
     assert rate_limiting_disabled() is True
     check = _by_name(client.get("/api/v1/admin/readiness",
@@ -322,7 +341,7 @@ def test_the_rate_limit_check_reads_the_same_off_switch_as_the_limiter(
 
 
 def test_migrations_check_compares_the_database_to_the_script_head(conn, client):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     check = _by_name(client.get("/api/v1/admin/readiness",
                                 headers=_auth(token)).json())["migrations_at_head"]
     db_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
@@ -388,7 +407,7 @@ def test_the_kek_check_agrees_with_the_envelope_on_the_same_value(
     so tightening `_load_kek` later moves this check with it instead of
     silently reopening the gap.
     """
-    token = _admin_token(conn, client)   # minted while the KEK still works
+    token = _admin_token(conn)   # minted while the KEK still works
     monkeypatch.setenv("NOCTORNAL_TOTP_KEK", raw)
     works = _envelope_round_trips()
     check = _by_name(client.get("/api/v1/admin/readiness",
@@ -399,7 +418,7 @@ def test_the_kek_check_agrees_with_the_envelope_on_the_same_value(
 
 
 def test_an_unset_kek_flips_that_check(conn, client, monkeypatch):
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     monkeypatch.delenv("NOCTORNAL_TOTP_KEK", raising=False)
     assert _envelope_round_trips() is False
     body = client.get("/api/v1/admin/readiness", headers=_auth(token)).json()
@@ -415,7 +434,7 @@ def test_a_kek_of_the_wrong_length_flips_that_check(conn, client, monkeypatch):
     """Well-formed base64 of the wrong size: the envelope refuses it, so
     the register must too, and must say what it got rather than only that
     something is wrong."""
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     monkeypatch.setenv("NOCTORNAL_TOTP_KEK", base64.b64encode(b"K" * 16).decode())
     assert _envelope_round_trips() is False
     check = _by_name(client.get("/api/v1/admin/readiness",
@@ -430,7 +449,7 @@ def test_a_kek_the_lenient_decoder_still_rejects_flips_that_check(
     so `_load_kek` raises binascii.Error rather than its own RuntimeError.
     The check must report that as a failed check with evidence, not let it
     escape as an unhandled exception."""
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     monkeypatch.setenv("NOCTORNAL_TOTP_KEK", "not a key")
     assert _envelope_round_trips() is False
     r = client.get("/api/v1/admin/readiness", headers=_auth(token))
@@ -446,7 +465,7 @@ def test_the_kek_never_appears_in_the_register(conn, client, monkeypatch):
     KEK that leaked into the evidence would leak every TOTP secret with
     it, so no branch of the check may quote the value -- including the
     failing ones, which is where a naive `repr(raw)` would end up."""
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
     for raw in (_KEK_CLEAN, _KEK_CLEAN + "\n",
                 base64.b64encode(b"K" * 16).decode(), "not a key"):
         monkeypatch.setenv("NOCTORNAL_TOTP_KEK", raw)
@@ -470,7 +489,7 @@ def test_the_sample_origin_check_reads_the_same_value_download_does(
     the reader `download()` itself consults.
     """
     from noctornal_api.samples import sample_origin
-    token = _admin_token(conn, client)
+    token = _admin_token(conn)
 
     monkeypatch.delenv("NOCTORNAL_SAMPLE_ORIGIN", raising=False)
     assert sample_origin() == ""

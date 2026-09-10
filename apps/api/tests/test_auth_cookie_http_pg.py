@@ -31,6 +31,14 @@ review on 2026-09-09:
   re-mint its pair (that is how a tab left with the session cookie and no
   readable half recovers).
 
+Since 2026-09-10 the pair is the WHOLE of a successful login: `POST
+/auth/login` answers 204 and returns no token in a body, because the two
+paths that could not read the cookie -- the live websocket and the
+cross-origin Lab download -- now take the cookie and a one-shot ticket
+instead. This file is where that is asserted, and it is the reason the
+"the cookie IS the token" claim below is now made against `iam.session`
+rather than against a second field of the same response.
+
 Cookies are passed as an explicit `cookie` header rather than through the
 client's jar: httpx will not send a `Secure` cookie over the test client's
 plain-http base URL, and a test that silently sent no cookie would pass
@@ -96,7 +104,11 @@ def _login(client, email, secret):
     r = client.post("/api/v1/auth/login", json={
         "email": email, "password": PASSWORD,
         "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
+    # 204 since 2026-09-10: the pair IS the response. Asserted on the
+    # status alone here and on the body itself below, because a handler
+    # that answered 204 and set no cookie would be a login that signed
+    # nobody in and said nothing about it.
+    assert r.status_code == 204, r.text
     return r
 
 
@@ -127,15 +139,31 @@ def test_login_sets_both_host_cookies_as_designed(conn, client):
     readable on purpose; both carry what the `__Host-` prefix demands
     (Secure, Path=/, no Domain) and SameSite=strict. The cookie IS the
     bearer token -- one session, two transports -- which is what lets the
-    console adopt a bearer hand-off as a cookie without a second login."""
+    console adopt a bearer hand-off as a cookie without a second login.
+
+    "The cookie IS the token" was asserted against the login body until
+    2026-09-10, when the body went (Wave 2). The claim did not go with
+    it, so it is now asserted against the row: the cookie's value,
+    hashed, is the `token_hash` of this analyst's live session. That is
+    the stronger reading of the same fact -- the old one only ever proved
+    that two halves of one response agreed with each other, and would
+    have passed just as well if BOTH had been some other string.
+    """
     from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
-    _, email, secret = _make_user(conn)
+    from noctornal_api.security.tokens import hash_token
+    from noctornal_api.stores import PgSessionStore
+    uid, email, secret = _make_user(conn)
     r = _login(client, email, secret)
+    assert not r.content, f"a 204 login answered with a body: {r.content!r}"
     cookies = _set_cookies(r)
     assert {SESSION_COOKIE, CSRF_COOKIE} <= set(cookies), cookies
 
     value, attrs = cookies[SESSION_COOKIE]
-    assert value == r.json()["token"]
+    record = PgSessionStore(conn).get_by_token_hash(hash_token(value))
+    assert record is not None, (
+        "the session cookie does not resolve to a session; whatever it "
+        "carries, it is not the token this login minted")
+    assert record.user_id == uid
     assert "secure" in attrs and "httponly" in attrs
     assert attrs.get("samesite", "").lower() == "strict"
     assert attrs.get("path") == "/"
@@ -393,7 +421,7 @@ def test_the_login_audit_names_the_address_the_session_is_bound_to(
         "email": email, "password": PASSWORD,
         "totp_code": totp.code_at(secret, int(time.time()))},
         headers={"x-forwarded-for": "203.0.113.77"})
-    assert r.status_code == 200, r.text
+    assert r.status_code == 204, r.text
 
     rows = conn.execute(
         "SELECT ip_hash FROM audit.event WHERE actor_id = %s "

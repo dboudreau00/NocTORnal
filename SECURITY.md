@@ -26,16 +26,28 @@ use**. It has never been operated against real targets. That means:
 - **In scope:** authentication, session handling, the five-part access
   gate, and the egress gate.
 - **How a session works, so a report starts from the right model:** the
-  cookie is the session. `POST /auth/login` sets `__Host-session`
-  (HttpOnly) and a readable `__Host-csrf`, and an unsafe method on a
-  cookie session must carry that cookie's value in `x-csrf-token`. The
-  same login response returns the token in its body, and the console
-  holds it in page memory only, as a login-lifetime capability for the
-  two paths that do not read the cookie yet: the live websocket (token
-  in the first frame) and the Lab download from a separate sample
-  origin. The token in web storage, in a URL, or in a log *is* a
-  finding; the token in the login body is not, until those two paths
-  accept the cookie.
+  cookie is the session, and since 2026-09-10 it is the *only* thing a
+  sign-in hands a browser. `POST /auth/login` answers **204** and sets
+  `__Host-session` (HttpOnly) and a readable `__Host-csrf`; an unsafe
+  method on a cookie session must carry that cookie's value in
+  `x-csrf-token`. There is no token in the response body. The two paths
+  that used to need one both take the cookie now: the live websocket
+  reads `__Host-session` off the upgrade (where a double-submit is
+  impossible, so `SameSite=Strict` plus an `Origin` check against the
+  configured origin stands in for it), and the Lab download — which is
+  cross-origin by design, so no `__Host-` cookie can reach it — crosses
+  on a **one-shot ticket** minted on the application origin under the
+  cookie session: 60 seconds, one sample, one redemption, and it buys an
+  archive rather than the case file. A session token in web storage, in
+  a URL, or in a log *is* a finding, and after a form sign-in there is
+  nowhere in the browser it exists at all outside the HttpOnly cookie.
+  One legitimate exception remains, and it is not a sign-in:
+  `scripts/bootstrap.py session` mints a bearer directly for a host
+  whose clock TOTP cannot live with and prints it in a URL *fragment*,
+  which the console erases from the address bar, holds in page memory
+  (never storage) and exchanges once for the pair through `POST
+  /auth/cookie`. `deps.session_token` still accepts `Authorization:
+  Bearer`, for clients that are not browsers.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md). Please
   read it before reporting — row-level security under a non-owner

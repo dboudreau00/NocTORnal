@@ -581,6 +581,47 @@ LIMITS: dict[str, Limit] = {
         "comms.verify", quota=60, per_seconds=3600, scope=Scope.USER, burst=10,
         on_backend_failure=OnBackendFailure.DENY,
     ),
+    # The sample-origin download, and the only limit here that meters a
+    # route reachable with NO credential at all once it is deployed.
+    #
+    # Since 0061 the credential on that route may be a one-shot ticket in
+    # the request BODY, so the sample process cannot tell an authorised
+    # caller from a stranger until it has looked one up -- and every
+    # look-up that failed appended a row to `audit.event`, which is
+    # append-only, hash-chained and serialised by an advisory lock. Anyone
+    # who could reach the sample origin could therefore grow a table
+    # nothing can delete from, one `ticket=x` at a time. A ticket matching
+    # no row is a sampled warning rather than a row now (`samples.py`),
+    # and this limit is the other half of the fix: the refusals that DO
+    # still audit each name a real minted ticket, so replaying one spent
+    # ticket in a loop would otherwise write one undeletable row per
+    # attempt.
+    #
+    # Keyed on the peer address because that is the only subject that
+    # exists before a ticket has been validated. A body-borne credential
+    # cannot be the key for `credential_subject`'s reason -- a caller who
+    # mints their own subject is subdivided by a limit, never bounded by
+    # one.
+    #
+    # 120 per five minutes, 30 at once. The burst is the shape of real
+    # use: an analyst pulling the samples for one intrusion clicks through
+    # a handful in a few seconds. The sustained rate -- one every 2.5
+    # seconds from a WHOLE egress address, since a customer is a unit
+    # behind one -- is an order of magnitude above any lab's real download
+    # rate and far below what the route costs to serve, because
+    # `SampleService.download` reads the object whole, XORs it byte by
+    # byte in Python, re-hashes it and ZIPs it.
+    #
+    # DENY on backend failure, with the other security-sensitive limits:
+    # an unmetered sample origin is the audit-write amplifier above, and
+    # the cost of failing closed is an analyst waiting for a download.
+    # `audit_every_seconds` is left at its default and is inert here --
+    # the dependency in `routers/samples.py` deliberately passes no
+    # connection, so a denial on this route is logged and never written.
+    "sample.download": Limit(
+        "sample.download", quota=120, per_seconds=300, scope=Scope.IP,
+        burst=30, on_backend_failure=OnBackendFailure.DENY,
+    ),
 }
 
 

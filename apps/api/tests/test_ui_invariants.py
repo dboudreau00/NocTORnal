@@ -1304,10 +1304,16 @@ def test_a_fragment_token_never_replaces_the_session_the_browser_holds():
     409 and an audit row -- the line that holds when the console is wrong
     (`test_auth_cookie_http_pg` drives that refusal against Postgres).
 
-    Also holds the header comment to the code: the token IS readable from
-    script after a form sign-in (`state.token`, kept for the websocket's
-    first frame), and the header must say so rather than claim it cannot
-    be lifted.
+    Also holds the header comment to the code. When this was written the
+    token WAS readable from script after a form sign-in, and the header
+    had to say so rather than claim it could not be lifted. Since
+    2026-09-10 a form sign-in hands the page nothing at all -- login
+    answers 204 -- and the `#token=` hand-off this test is about is the
+    one thing left that fills `state.token`; the socket's first frame is
+    where that token is spent, on a host whose browser refused the Secure
+    pair. So both literals below are still required and still true, and
+    the assertion still does its job: it stops the header claiming that
+    nothing in this page is readable when one hand-off still is.
     """
     js = _js()
     body = _js_function("adoptSessionFromFragment")
@@ -1322,8 +1328,16 @@ def test_a_fragment_token_never_replaces_the_session_the_browser_holds():
     header = js[:js.index("'use strict'")]
     assert "cannot lift the token" not in header, (
         "the header still claims the credential is unreadable from script")
-    assert "state.token" in header and "first frame" in header, (
-        "the header does not say the body token stays in memory for the websocket")
+    # Whitespace-flattened before the match, because this is prose in a
+    # block comment and prose gets rewrapped. On 2026-09-10 it was, and
+    # "first frame" landed either side of a line break -- so this
+    # assertion failed for a header that says exactly what it must. An
+    # assertion about what a comment SAYS must not double as a detector
+    # of where its lines happen to end.
+    flat = re.sub(r"\s+", " ", header)
+    assert "state.token" in flat and "first frame" in flat, (
+        "the header does not say where a hand-off token is held and what "
+        "still spends it")
 
     auth_src = (SRC / "http" / "routers" / "auth.py").read_text(encoding="utf-8")
     fn = auth_src[auth_src.index("def adopt_cookie("):auth_src.index("\ndef _set_session_cookies")]
@@ -1347,6 +1361,19 @@ def test_the_sample_download_presents_the_credential_the_sample_origin_preflight
     sides: the header the preflight admits is the one the console forces,
     and a session restored from the cookie -- which holds no token -- is
     told so instead of sending a request that cannot be authenticated.
+
+    UPDATED 2026-09-10, and the update is the point of the original: the
+    console now presents NO header there at all. 0061's download ticket
+    replaced the forced Bearer, and a ticket cannot be a header for the
+    reason this test was written -- `authorization` is the only one this
+    preflight admits, and inventing a second would fail it exactly as the
+    CSRF header did. With no custom header and a form body the redemption
+    is a SIMPLE cross-origin request, which is not preflighted at all. So
+    the assertion flips rather than the subject: the header set app.py
+    admits is still read from app.py, and what the console must NOT send
+    is read from the console. The `if (!state.token)` refusal this test
+    used to require went with the Bearer -- there is no longer a session
+    this pane cannot download on.
     """
     app_src = (SRC / "http" / "app.py").read_text(encoding="utf-8")
     m = re.search(r'"Access-Control-Allow-Headers":\s*"([^"]+)"', app_src)
@@ -1356,13 +1383,14 @@ def test_the_sample_download_presents_the_credential_the_sample_origin_preflight
 
     body = _js_function("downloadSample")
     assert "fetchFromSampleOrigin(" in body, "the download no longer goes to the sample origin"
-    assert "authHeaders('POST', state.token)" in body, (
-        "the download does not force the bearer; authHeaders('POST') sends "
-        "the CSRF header once a cookie pair exists, which the preflight refuses")
     assert "credentials: 'omit'" in body
-    assert "if (!state.token)" in body, (
-        "a cookie-restored session sends a download request it cannot authenticate")
-    assert body.index("if (!state.token)") < body.index("fetchFromSampleOrigin(")
+    cross = body[body.index("fetchFromSampleOrigin("):]
+    for banned in ("headers", "authHeaders(", "Authorization", "state.token"):
+        assert banned not in cross, (
+            f"the cross-origin download sends {banned!r}: the sample origin's "
+            f"preflight admits `authorization` alone, so any header at all "
+            f"turns a simple request into one this deployment refuses before "
+            f"the server sees it")
 
 # ---------------------------------------------------------------------------
 # The live socket's policy close is honoured by the client that receives it
@@ -1414,3 +1442,298 @@ def test_the_palette_offers_every_pane_the_rail_has():
     assert palette == rail, (
         "the palette's Go-to list and the rail disagree:\n"
         f"  rail:    {rail}\n  palette: {palette}")
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 (2026-09-10): the console asks for no credential it can read
+#
+# Two paths kept a session token in page memory after the cookie session
+# landed. The live socket authenticated from a token in its first frame
+# and read no cookie; the Lab download is cross-origin by design, so no
+# `__Host-` cookie can reach it and the console forced the login body's
+# token there as a Bearer. Neither takes the session token now: the
+# socket takes `__Host-session` itself, which is HttpOnly and cannot be
+# lifted from this page at all, and the download takes a one-shot ticket
+# minted on THIS origin under the cookie session -- readable by the page,
+# and deliberately so, but worth one archive for sixty seconds rather
+# than the case file for the life of a session.
+#
+# Every test below reads both sides, because each of these contracts
+# exists only in the gap between two files and each half is silently
+# useless alone -- a console that opens a socket the server would refuse
+# reports "not live" and nothing else, and a server that accepts a cookie
+# no client sends is a feature nobody reaches.
+# ---------------------------------------------------------------------------
+
+
+def _live_py() -> str:
+    return (SRC / "http" / "routers" / "live.py").read_text(encoding="utf-8")
+
+
+def _samples_router() -> str:
+    return (SRC / "http" / "routers" / "samples.py").read_text(encoding="utf-8")
+
+
+def test_the_live_socket_opens_on_the_cookie_and_is_not_gated_on_a_token():
+    """The socket reads `__Host-session` off the upgrade, so `connectLive`
+    must not refuse to open one for a session that holds only the cookie.
+
+    Until 2026-09-10 it did, and the refusal was the honest state of that
+    build: the server took a token from the first frame and read no
+    cookie, so after a reload there was nothing to authenticate with. Both
+    halves had to move together, and this test is what stops one of them
+    moving back -- a `connectLive` that still gates on `state.token`
+    against this `_handshake` is a console that never goes live after a
+    reload and says only "not live" while doing it.
+
+    The frame's `token` survives as a FALLBACK and is sent only when the
+    tab actually holds one (a console the browser refused the Secure
+    cookies on; `scripts/bootstrap.py session` in a shell). Sending it
+    unconditionally would be sending `null` on every socket a signed-in
+    browser opens, which is a token field this page has no reason to fill.
+    """
+    live = _live_py()
+    assert re.search(
+        r"token\s*=\s*ws\.cookies\.get\(SESSION_COOKIE\)\s*or\s*frame_token",
+        live), (
+        "live.py no longer prefers the session cookie over the first "
+        "frame, so a cookie-only console cannot authenticate this socket")
+
+    body = _js_function("connectLive")
+    preamble = body[:body.index("new WebSocket(")]
+    assert "state.token" not in preamble, (
+        "connectLive still decides whether to open the socket by looking at "
+        "the in-memory token; the credential is the cookie, which this "
+        "script cannot see")
+    assert "const hello = { case_id: state.caseId };" in body, (
+        "the hello no longer carries the case id, which has nowhere else to go")
+    assert "if (state.token) hello.token" in body, (
+        "the frame token is unconditional again: a signed-in browser would "
+        "send a null token field it has no reason to fill")
+
+    js = _js()
+    assert "still needs the sign-in" not in js, (
+        "the console still explains that the live channel needs the sign-in "
+        "token; it has not since 2026-09-10, and an honest-sounding stale "
+        "sentence is worse than the plain 'not live' the dot carries")
+    assert re.search(r"function liveStatus\(state_\)", js), (
+        "liveStatus takes a per-call reason again -- the only caller that "
+        "ever passed one was the refusal that has been deleted")
+
+
+def test_the_policy_close_still_stops_the_client_that_now_reconnects_more():
+    """The 1008 rule is untouched by Wave 2 and must stay that way.
+
+    `connectLive` opens a socket in strictly more situations than it used
+    to, so the one close code that means "the server has decided" carries
+    more weight, not less: without the return the console would retry six
+    times against a hub that refused it, which reads as an attack in the
+    audit log. Held here as well as in
+    `test_the_live_client_stops_on_the_policy_close_the_server_documents`
+    because the line immediately below it is one this change edited.
+
+    That neighbour is the retry gate, and it had to move from
+    `state.token` to the session: a null token stopped meaning "no
+    session" the moment the socket started taking the cookie, and a gate
+    left as it was would have made the reconnect the one thing still
+    refusing a cookie-only session.
+    """
+    body = _js_function("connectLive")
+    stop = re.search(r"event\.code\s*===\s*1008\)\s*return", body)
+    assert stop, "the close handler no longer returns on the policy close"
+    assert stop.start() < body.index("setTimeout(connectLive"), (
+        "the handler schedules a reconnect before it reads the close code")
+    assert "!signedIn() || _wsRetry >= 6" in body, (
+        "the retry gate is not the session; `state.token` here would stop a "
+        "cookie-only console from ever reconnecting")
+    assert "!state.token ||" not in body
+    assert "_CLOSE_POLICY = 1008" in _live_py()
+
+
+def test_the_lab_download_crosses_the_origin_on_a_ticket_and_not_on_the_session():
+    """0061. The console mints a one-shot ticket on the application origin
+    and spends it at the sample origin, so the credential that crosses is
+    good for one sample, one redemption and sixty seconds -- instead of
+    the session token, which is what crossed until 2026-09-10 and is the
+    reason the login body's token had to be readable from script at all.
+
+    Both sides, because the shape of the redemption is a contract and not
+    a preference: the route takes the ticket as a FORM field, and
+    `application/x-www-form-urlencoded` is CORS-safelisted, so the
+    redemption is a simple cross-origin request. A console that sent JSON
+    instead would need `content-type` added to `app._preflight`'s
+    `Access-Control-Allow-Headers` and would fail as "the request did not
+    complete" until somebody did.
+
+    The ticket is never assembled into a URL, on either side. A query
+    string reaches the access log, the browser history and the `Referer`,
+    and this one buys a live binary.
+    """
+    samples_src = _samples_router()
+    assert '@router.post("/{sample_id}/download-ticket"' in samples_src, (
+        "the mint route is gone; the console has nothing to mint from")
+    assert re.search(r"ticket: str \| None = Form\(", samples_src), (
+        "the download no longer takes a ticket in the form body, so the "
+        "console's redemption is either refused or preflighted")
+    assert "download_url: str" in samples_src, (
+        "the mint no longer returns the absolute URL to redeem at, and a "
+        "console assembling one from location.origin is how this pane came "
+        "to fetch the application origin in the first place")
+
+    body = _js_function("downloadSample")
+    mint = body.index("'/download-ticket'")
+    fetch = body.index("fetchFromSampleOrigin(")
+    assert mint < fetch, "the console fetches the archive before it has a ticket"
+    assert "fetchFromSampleOrigin(minted.download_url" in body, (
+        "the redemption goes somewhere other than the URL the server minted")
+    assert "new URLSearchParams({ ticket: minted.ticket })" in body, (
+        "the ticket does not travel as a form body: JSON would need a "
+        "content-type the sample origin's preflight does not admit")
+    assert "JSON.stringify" not in body
+
+    assert not re.search(r"[?&]ticket=", _js()), (
+        "a ticket was put in a query string; it is a credential, and a URL "
+        "reaches the access log, the history and the Referer")
+
+
+def test_the_download_ticket_is_minted_on_the_path_that_carries_the_double_submit():
+    """The mint is the whole reason this is safe to hand out, so it is
+    reached the ordinary way: `api()`, which sends the cookie and copies
+    `__Host-csrf` into `x-csrf-token` on an unsafe method. Three files
+    have to agree for that sentence to be true -- the console must POST
+    through `api()`, `deps` must count POST as unsafe, and the route must
+    be declared POST -- and a GET mint would be exempt from the
+    double-submit while remaining something a prefetcher or a link scanner
+    can fire.
+    """
+    body = _js_function("downloadSample")
+    assert "await api('/samples/'" in body, (
+        "the ticket is not minted through api(), so it does not carry the "
+        "cookie session's double-submit header")
+    assert "fetchFromSampleOrigin(" in body
+    assert body.index("await api('/samples/'") < body.index("fetchFromSampleOrigin("), (
+        "the mint is not the same-origin leg")
+    mint_call = body[body.index("await api('/samples/'"):body.index("} catch (err)")]
+    assert "method: 'POST'" in mint_call, "the mint is not an unsafe method"
+
+    headers = _js_function("authHeaders")
+    assert "headers[CSRF_HEADER] = csrf" in headers
+    assert "/^(GET|HEAD|OPTIONS)$/i" in headers, (
+        "authHeaders no longer decides the CSRF header by method")
+
+    from noctornal_api.http.deps import _UNSAFE_METHODS
+    assert "POST" in _UNSAFE_METHODS, (
+        "deps no longer demands the double-submit on a POST, so the mint "
+        "is reachable from another origin's page with the cookie alone")
+
+    samples_src = _samples_router()
+    assert '@router.get("/{sample_id}/download-ticket"' not in samples_src
+    fn = samples_src[samples_src.index("def mint_download_ticket("):
+                     samples_src.index('"""A one-shot')]
+    assert "Depends(_REQUIRE_DOWNLOAD)" in fn, (
+        "the mint no longer states the download's own permission gate")
+    assert "Depends(require_step_up)" in fn, (
+        "the mint is not step-up gated, so the fresh second factor the "
+        "download has always demanded is no longer asked of anybody")
+    assert '_REQUIRE_DOWNLOAD = require_global("sample.download")' in samples_src
+
+
+def test_both_legs_of_the_download_report_the_servers_own_sentence():
+    """A refusal from either leg has to reach the analyst as the server
+    wrote it. The two legs fail for different reasons and only the server
+    knows which: the mint refuses an expired step-up, a clearance that
+    does not reach the sample, or a misconfigured origin split; the
+    redemption refuses a ticket that has been spent, has expired, or was
+    issued for another sample -- and that one sentence ends by saying to
+    ask for another, which is the only thing the analyst can act on.
+
+    `refusalText` is the function that puts `detail` first; three strings
+    in this file once asserted a role fact instead and told the holder of
+    a permission that they did not hold it. The cross-origin leg does not
+    come through `api()`, so its refusal is not an `ApiError` until this
+    code makes one -- and a hand-rolled second spelling of "it was
+    refused" on that path is exactly the divergence `refusalText` exists
+    to prevent.
+    """
+    body = _js_function("downloadSample")
+    assert body.count("refusalText(") >= 2, (
+        "one of the two legs reports a refusal without the server's sentence")
+    assert "new ApiError(res.status, p.title, p.detail)" in body, (
+        "the cross-origin refusal never becomes an ApiError, so refusalText "
+        "cannot read the detail the sample origin sent")
+    assert body.index("refusalText(") < body.index("fetchFromSampleOrigin("), (
+        "the mint's refusal does not go through refusalText")
+
+    helper = _js_function("refusalText")
+    assert "return detail + (context" in helper, (
+        "refusalText no longer puts the server's detail first")
+
+
+def test_a_sign_in_hands_the_browser_a_cookie_and_nothing_it_can_read(monkeypatch):
+    """The last step of Wave 2, and the one with no other test in the pure
+    suite: `POST /auth/login` answers 204 with the cookie pair and NO body.
+
+    Everything above is why that became possible; this is the property it
+    was for. Until 2026-09-10 the response carried the raw session token
+    beside the `Set-Cookie`, so `HttpOnly` bought the console nothing --
+    any script that got a foothold on this origin read the same
+    credential out of the login response or out of `state.token`, and a
+    reload was the only thing that ever removed it.
+
+    Held from three sides, because a regression would look different from
+    each. The OPENAPI document is the contract a client is written
+    against, and a `LoginResponse` reappearing there is the change to
+    catch before anybody writes against it. The DECORATOR is what that
+    document is generated from, and is asserted separately so a failure
+    says which of the two moved. And the CONSOLE must not read a token
+    off that response:
+    the assignment that stood there survived the server change by one
+    session and threw a TypeError on every form sign-in, because
+    `_fetch` returns null for a 204 -- a sign-in the server had completed,
+    reported to the analyst as an unexpected error.
+
+    `state.token` itself is deliberately NOT asserted away. The `#token=`
+    hand-off still fills it (`adoptSessionFromFragment`), and
+    `scripts/bootstrap.py session` still mints a bearer directly; what
+    ended is LOGIN handing one out.
+    """
+    import json
+
+    # The neighbours' environment: enough for `create_app()` to build, and
+    # a DSN in TEST-NET-1 that nothing here ever dials. No route is called
+    # -- the document and the route table are read off the object.
+    monkeypatch.setenv("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@192.0.2.1:5432/x")
+    from noctornal_api.http.app import API_PREFIX, create_app
+    app = create_app()
+    schema = app.openapi()
+
+    path = f"{API_PREFIX}/auth/login"
+    responses = schema["paths"][path]["post"]["responses"]
+    assert "200" not in responses, (
+        "the login route declares a 200 again; a sign-in that answers with "
+        "a body is a sign-in that hands the page a readable credential")
+    assert "204" in responses, responses
+    assert "content" not in responses["204"], (
+        f"the 204 declares a body: {responses['204']!r}")
+    assert "LoginResponse" not in json.dumps(schema), (
+        "LoginResponse is back in the OpenAPI document")
+
+    auth_src = (SRC / "http" / "routers" / "auth.py").read_text(encoding="utf-8")
+    assert 'status_code=204' in auth_src[auth_src.index('@router.post("/login"'):
+                                         auth_src.index("def login(")], (
+        "the login route does not declare 204; the document above is "
+        "generated from this decorator and would follow it back to a body")
+    assert "class LoginResponse" not in auth_src
+    assert "_set_session_cookies(response, token)" in auth_src, (
+        "the login no longer sets the cookie pair, which is now the whole "
+        "of what a successful sign-in produces")
+
+    body = _js_function("doLogin")
+    assert not re.search(r"^\s*state\.token\s*=", body, re.M), (
+        "doLogin assigns state.token again. The login response has no body "
+        "to take one from -- `_fetch` returns null for a 204 -- so the "
+        "assignment throws and the analyst is told 'Unexpected error' for a "
+        "sign-in the server completed")
+    assert not re.search(r"^\s*const\s+\w+\s*=\s*await api\('/auth/login'", body, re.M), (
+        "doLogin binds the login response to a name; there is nothing in it")

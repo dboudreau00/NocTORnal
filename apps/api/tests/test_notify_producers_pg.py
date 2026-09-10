@@ -20,7 +20,6 @@ Env-gated on DATABASE_URL; the evidence legs also need MINIO_ENDPOINT.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date, timedelta
 from uuid import UUID, uuid4
 
@@ -126,13 +125,33 @@ def _make_user(conn, *, clearance="AMBER", global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -166,7 +185,7 @@ def _inbox(conn, user_id, kind):
 
 def _owner_case_and_tampered_exhibit(conn, client):
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     up = client.post(
         f"/api/v1/cases/{case_id}/evidence", headers=_auth(token),
@@ -187,7 +206,7 @@ def test_an_explicit_verify_that_fails_raises_the_alarm_and_the_audit_row(conn, 
     owner, case_id, ev_id = _owner_case_and_tampered_exhibit(conn, client)
     verifier, v_email, v_secret = _make_user(conn)
     _assign(conn, case_id, verifier, "ANALYST", owner)
-    v_token = _login(client, v_email, v_secret)
+    v_token = _session(conn, v_email)
 
     r = client.post(f"/api/v1/cases/{case_id}/evidence/{ev_id}/verify",
                     headers=_auth(v_token))
@@ -318,11 +337,11 @@ def test_re_reading_a_tampered_exhibit_does_not_mint_another_alarm(conn, client)
 
 def test_a_capture_that_queues_proposals_tells_the_owner(conn, client):
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     uploader, u_email, u_secret = _make_user(conn)
     _assign(conn, case_id, uploader, "ANALYST", owner)
-    u_token = _login(client, u_email, u_secret)
+    u_token = _session(conn, u_email)
 
     r = client.post(f"/api/v1/cases/{case_id}/proposals/capture",
                     headers=_auth(u_token),
@@ -364,11 +383,11 @@ def test_a_capture_notification_failure_is_null_not_false(conn, client, monkeypa
     monkeypatch.setattr(notify_events, "proposals_queued", boom)
 
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     uploader, u_email, u_secret = _make_user(conn)
     _assign(conn, case_id, uploader, "ANALYST", owner)
-    u_token = _login(client, u_email, u_secret)
+    u_token = _session(conn, u_email)
 
     r = client.post(f"/api/v1/cases/{case_id}/proposals/capture",
                     headers=_auth(u_token),

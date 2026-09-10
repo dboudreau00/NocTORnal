@@ -63,6 +63,24 @@ here is load-bearing for correctness, and it must never become so — a
 push-based UI that silently stops pushing is worse than one that never
 pushed, because people stop refreshing.
 
+## The socket takes the session COOKIE, and therefore checks `Origin`
+
+The browser authenticates this socket with `__Host-session`, the cookie
+it presents to every REST call; the first-frame token remains only as
+the fallback for a caller with no cookie jar (`scripts/bootstrap.py
+session`, which mints in a shell for a browser it has never met).
+
+That changes what a cross-site upgrade is worth. A page on any origin
+may open a WebSocket to this one — there is no preflight and no
+same-origin rule on the handshake — and the browser attaches this host's
+cookies to it. Before, such a socket carried a credential this file did
+not read and gained nothing; now it carries one that authenticates.
+`SameSite=strict` stops a compliant browser attaching the cookie on a
+cross-SITE upgrade, and `_cross_site_upgrade` covers what that leaves:
+SameSite is scoped to the registrable domain, so a page on a SIBLING
+SUBDOMAIN of this one is same-site and the cookie travels. There the
+origin comparison is not a second control, it is the only one.
+
 ## A socket is COUNTED FROM `accept()`, not from authentication
 
 Until 2026-09-09 the only ceiling in this file, `_MAX_SOCKETS`, was
@@ -91,8 +109,9 @@ import psycopg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from noctornal_api.db import connect
-from noctornal_api.http.deps import refuse_unbound_session
+from noctornal_api.http.deps import SESSION_COOKIE, refuse_unbound_session
 from noctornal_api.http.limits import client_ip
+from noctornal_api.samples import normalise_origin, origin_split, public_origin
 from noctornal_api.security.access import evaluate
 from noctornal_api.security.sessions import SessionService
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
@@ -393,14 +412,211 @@ def _live_enabled() -> bool:
     return os.environ.get("NOCTORNAL_LIVE", "1").lower() not in {"0", "false"}
 
 
+def _request_origin(ws: WebSocket) -> str | None:
+    """The origin this upgrade actually arrived on, or None.
+
+    Built from the `Host` the request carried and the scheme it came
+    in on -- `x-forwarded-proto` first, because behind the production
+    Caddy the socket reaches uvicorn as plain `ws` while the browser
+    is speaking `wss`, and comparing an `https` Origin against a `ws`
+    scheme would refuse every socket the terminator forwards.
+
+    ## Why the Host header is trusted HERE and is not trusted in
+    ## `samples.origin_split`
+
+    That function used to read `request.url` -- which Starlette builds
+    from `Host` -- to decide WHICH ROLE a process was playing, so a
+    caller could name the sample origin in a header and be served
+    hostile bytes by the application process. A header decided a
+    security property on its own. It reads only configuration now.
+
+    Nothing is decided on its own here. `Host` is only ever COMPARED
+    with `Origin`, and the whole point of the comparison is that a
+    cross-site page cannot make the two agree: the browser writes the
+    attacker's origin into `Origin` and the victim's authority into
+    `Host`, and script can set neither on an upgrade. A caller who can
+    forge both is not a browser, and a non-browser holding the cookie
+    already holds a session token it could have sent in the first
+    frame -- so there is nothing on the other side of this check for
+    it to gain.
+    """
+    host = ws.headers.get("host")
+    if not host:
+        return None
+    proto = (ws.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if not proto:
+        # `ws`/`wss` are the upgrade's own schemes; the Origin header is
+        # always written with the http/https pair, so map before comparing.
+        proto = "https" if ws.url.scheme in ("wss", "https") else "http"
+    if proto not in ("http", "https"):
+        return None
+    return normalise_origin(f"{proto}://{host}")
+
+
+def _cross_site_upgrade(ws: WebSocket) -> str | None:
+    """Why this upgrade must be refused, or None to let it through.
+
+    Cross-site WebSocket hijacking. A page on ANY origin may open a socket
+    to this one: the upgrade is not a `fetch`, so there is no preflight,
+    no CORS answer to withhold and no same-origin rule on the handshake —
+    the browser connects and hands script the frames. Every cookie the
+    browser holds for this host rides along, and since the socket started
+    reading `__Host-session` one of those cookies is a credential it
+    ACCEPTS. An attacker's page would then hold a socket the analyst's own
+    session authenticated, and `_stream` would push that case's activity
+    down it.
+
+    `SameSite=strict` on the pair (`deps.COOKIE_ATTRS`) stops a compliant
+    browser attaching the cookie to a cross-SITE upgrade. Read that as
+    "so this check is only for the browser that ignores SameSite" and the
+    next person deletes it: SameSite's unit is the registrable domain,
+    not the origin. A page on `evil.example.gov` opening a socket to
+    `console.example.gov` is SAME-site, so a compliant browser attaches
+    the host-only `__Host-session` to it and SameSite refuses nothing --
+    and a sibling subdomain is the shape a compromised internal host, a
+    wildcard DNS entry or any other service on the domain actually takes.
+    Against that the comparison below is the whole defence. It covers the
+    non-compliant browser as well, which is the smaller half. None of
+    this mattered before the cookie was read here: a hijacked socket
+    carried a credential this file did not use and got nothing for it.
+
+    Three ways the rule is deliberately narrow, each of which a naive
+    reading would take for a hole:
+
+    - It fires on the cookie being PRESENT, not on the cookie having been
+      used, because the decision is made before `accept()` and the first
+      frame does not exist yet. Not a gap: `_handshake` prefers the cookie
+      over the frame token, so a cookie that is present IS the credential
+      that will be used.
+    - It compares against `public_origin()` — the origin THIS process is
+      served at — and not `app_origin()`. For the application process the
+      two are the same string, since `public_origin()` falls back to it;
+      they differ exactly where `app_origin()` would be wrong. A process
+      configured as the sample origin serves nothing but the download,
+      but the 404 that enforces that is an `@app.middleware("http")`
+      (`http/app.py`) and middleware never runs for a `websocket` scope,
+      so `/live` is routable there. Comparing against `app_origin()` on
+      such a process would accept an `Origin` naming a host it does not
+      serve and refuse the one it does. `live()` now refuses that process
+      its socket outright, so nothing here decides a real upgrade on one
+      any more; `public_origin()` stays because it is what "this origin"
+      means on EVERY process, and a comparison that is only correct while
+      a check somewhere else holds is a comparison waiting to be wrong.
+    - No `Origin` header at all is allowed through. A browser always sends
+      one on an upgrade and cannot be made to omit it, so its absence
+      means the caller is not a browser: a shell, a curl, an integration
+      test. Such a caller holds the cookie value only because it was given
+      it, and that value IS the session token it could have put in the
+      first frame instead — refusing it would protect nothing and would
+      break the token path this file still needs.
+
+    An `Origin` matching EITHER the configured origin or the origin the
+    request arrived on is accepted (`_request_origin`). The second half
+    was added after the first was measured: on the shipped laptop
+    configuration the launcher binds `127.0.0.1:8000`,
+    `NOCTORNAL_BASE_URL` keeps its matching default, the console is
+    opened at `localhost:8000`, and every live socket was refused. Two
+    origins, correctly distinguished, and the result was that live
+    updates were off for every developer -- refused before `accept()`,
+    which reaches a browser as a bare failure with neither code nor
+    reason (see `live()`), so the console runs out its six retries and
+    reports only that live is off. A control whose ordinary failure mode
+    is invisible is one somebody deletes. The refusal still names our
+    origin, and the log line still names both, because a deployment CAN
+    still be refused -- by a genuinely foreign origin, which is the case
+    the check is for.
+    """
+    if not ws.cookies.get(SESSION_COOKIE):
+        return None
+    origin = ws.headers.get("origin")
+    if origin is None:
+        return None
+    # Both sides through `normalise_origin`, so "the same origin" means
+    # here what it means to the download check and the console's CSP:
+    # case-folded host, default port dropped. `allow_path` on ours alone —
+    # `NOCTORNAL_BASE_URL` may carry a path prefix for a deployment
+    # mounted under one, an `Origin` header may not, so a header carrying
+    # a path normalises to None and is refused. So is `Origin: null`, the
+    # opaque origin a sandboxed frame or a redirected navigation sends:
+    # "the browser will not tell you who this is" is not a match.
+    here = normalise_origin(public_origin(), allow_path=True)
+    arrived = _request_origin(ws)
+    if here is None and arrived is None:
+        return "cross-origin upgrade refused: this process has no valid origin"
+    theirs = normalise_origin(origin)
+    # EITHER the origin this deployment is configured to be, OR the one
+    # the request actually arrived on. Configuration alone was the whole
+    # rule until it was measured: the shipped launcher binds
+    # 127.0.0.1:8000 and leaves NOCTORNAL_BASE_URL at that default, a
+    # developer opens localhost:8000, and every live socket is refused --
+    # before `accept()`, so the browser gets no code and no reason and
+    # the console can only say live is off. A control whose ordinary
+    # failure mode is 'the feature is silently gone' is a control that
+    # gets deleted. The second half needs no configuration to be right
+    # and is not weaker: see `_request_origin` for why a cross-site page
+    # cannot satisfy it.
+    if theirs is not None and theirs in (here, arrived):
+        return None
+    # OUR origin, not theirs: theirs they already have, and ours is the
+    # one fact a developer reading a refused socket cannot see. Not an
+    # echo of the header for the same reason no other close reason in
+    # this file interpolates a caller's string -- RFC 6455 leaves 123
+    # bytes for a reason, and a caller chooses the length of anything
+    # echoed into it. The caller's origin goes in the log line instead,
+    # where nothing is truncating it and both halves can sit together.
+    return ("cross-origin upgrade refused: this socket is served at "
+            f"{here or arrived}")
+
+
 @router.websocket("/live")
 async def live(ws: WebSocket) -> None:
     """Stream change hints for one case.
 
-    The token arrives in the first message rather than in a query string:
-    a URL lands in proxy logs, browser history and `Referer`, and this one
-    would carry a session bearer token. WebSocket has no header API in the
-    browser, so the first frame is the only place left.
+    ## The credential is the COOKIE; the first frame is the fallback
+
+    A browser authenticates this socket with `__Host-session`, the same
+    cookie it presents to every REST call — an upgrade is an ordinary HTTP
+    request until the server agrees to switch protocols, so the browser
+    attaches cookies to it like any other. Until Wave 2 this file read no
+    cookie and took a token from the first frame only, which is why the
+    console had to keep the login-body token in page memory: the one
+    credential that survives a reload was the one credential the live
+    channel would not take.
+
+    The first frame remains for the caller that has no cookie jar — see
+    `_handshake`. What has never been permitted, and still is not, is the
+    token in the QUERY STRING: a URL lands in proxy logs, browser history
+    and `Referer`, and this one would carry a session bearer token.
+    WebSocket has no header API in the browser, so for a token holder that
+    is not a browser the first frame is the only place left.
+
+    Accepting a cookie is why `_cross_site_upgrade` exists; its refusal is
+    sent with the other credential-free ones, before `accept()`.
+
+    ## The SAMPLE ORIGIN process opens no socket at all
+
+    Invariant 10 puts hostile bytes on a second origin so that no page
+    carrying an analyst's session ever runs beside them, and
+    `_allowed_on_sample_origin` (`http/app.py`) is what makes that a
+    property of the process rather than of a proxy allow-list: a process
+    configured as the sample origin 404s everything but the download.
+    That gate is an `@app.middleware("http")`, and Starlette runs http
+    middleware for an `http` scope only -- a `websocket` scope goes
+    straight to the router. So the gate has never seen an upgrade.
+    Measured on the assembled app rather than reasoned about: the same
+    sample-origin process answers `GET /api/v1/cases` with the
+    middleware's 404 and takes an upgrade on `/live` all the way to
+    `accept()`. `test_live_origin` puts both scopes through one
+    `create_app()` so that stays a measurement.
+
+    What that bought an attacker is not a stray route. The socket
+    authenticates, subscribes to a case and streams that case's activity
+    -- out of the one process whose whole purpose is to be an isolated
+    byte server with no session in it. The check below is therefore not a
+    second copy of the middleware's rule; for this route it is the only
+    copy, which is why it reads `origin_split().serves_here`, the same
+    verdict the middleware reads, rather than a fresh comparison the two
+    files could come to disagree about.
 
     ## Counted from `accept()`, not from authentication
 
@@ -446,9 +662,15 @@ async def live(ws: WebSocket) -> None:
     reachable from one address, with no session, with no limit. A
     PRE-accept close on that backend is an HTTP 403 and an immediate
     `transport.close()`: no frame, no echo to wait for, nothing held. The
-    code-and-reason argument bought nothing in any case; the shipped
-    client (`connectLive` in `app.js`) reconnects with the same backoff
-    on every close and never reads the code. What remains is stated on
+    code-and-reason argument bought nothing in any case, and less than it
+    looked: a 403 carries no close code, so a browser reports 1006 and
+    NEITHER the code nor the reason sent here reaches one. (The clause
+    that used to sit here said the shipped client never reads the code.
+    It did not then; `connectLive` in `app.js` has returned on 1008
+    rather than retrying since later the same day, and
+    `test_ui_invariants` holds both files to that. The argument stands on
+    the transport instead: what is refused before `accept()` arrives at a
+    browser with nothing to read.) What remains is stated on
     `_PendingBudget` so it is not mistaken for fixed: a socket refused
     AFTER `accept()` still lingers for the server's ten seconds after its
     slot is handed back. Measured on 2026-09-09 under uvicorn 0.52.4 with
@@ -469,15 +691,65 @@ async def live(ws: WebSocket) -> None:
     # session binding check; computing it differently here would make the
     # binding comparison fail for every deployment behind a proxy.
     ip = client_ip(ws)
-    # None of these three has called `accept()`. That is the whole fix
+    # None of these five has called `accept()`. That is the whole fix
     # (see the docstring): a close sent now is an HTTP 403 and a dropped
-    # transport, not a frame the peer can decline to answer.
+    # transport, not a frame the peer can decline to answer. The origin
+    # refusal joined them rather than being made a post-hello check for
+    # the same reason as the other four -- and it is a refusal that a
+    # hostile PAGE causes, so a version of it that lingered would be one
+    # any visited site could aim at this server.
     if not _live_enabled():
         await ws.close(code=_CLOSE_BUSY, reason="live updates are disabled")
+        return
+    # Invariant 10, and the ONLY place it can be held for an upgrade: the
+    # gate that keeps a sample-origin process to the download alone is an
+    # `@app.middleware("http")` (`_allowed_on_sample_origin`, `http/app.py`),
+    # and Starlette passes a `websocket` scope to the router without
+    # running http middleware at all, so that gate has never seen one.
+    # Delete this as redundant with the middleware and a process serving
+    # hostile bytes quietly starts streaming case activity again; the
+    # docstring has the measurement. `origin_split().serves_here` is the
+    # middleware's own verdict rather than a second comparison, so the two
+    # cannot come to disagree about which process this is -- and it is
+    # False for a deployment whose split is unconfigured or broken, so a
+    # misconfigured sample origin refuses downloads without also taking
+    # the console's live channel down with it.
+    #
+    # No `_refused` line, for the reason the off switch above has none:
+    # the answer is decided by this process's configuration and not by the
+    # caller, so it is the same for every socket that arrives and a line
+    # each would record the deployment rather than a campaign.
+    if origin_split().serves_here:
+        await ws.close(code=_CLOSE_BUSY,
+                       reason="this process is the sample origin and serves "
+                              "sample downloads only")
         return
     if _hub.count >= _MAX_SOCKETS:
         _refused("too many live subscribers", ip)
         await ws.close(code=_CLOSE_BUSY, reason="too many live subscribers")
+        return
+    # BEFORE the pending reserve, not after: a cross-site flood that took
+    # a slot on its way to being refused would spend the budget analysts
+    # need, and this check reads two headers and one environment variable
+    # -- nothing the budget is there to protect.
+    cross_site = _cross_site_upgrade(ws)
+    if cross_site is not None:
+        # BOTH origins in one line, because the two readers of it need
+        # different halves: the security officer wants the origin that
+        # tried it, the operator of a deployment that refuses its own
+        # console wants what this process thinks it serves. The peer sees
+        # neither -- a pre-accept close is a 403 with no reason -- so this
+        # line is where the answer exists.
+        #
+        # `!r` and a slice on the header: it is text the caller chose and
+        # this is a log line, so repr escapes a newline that would
+        # otherwise forge a second line and the slice stops one header
+        # being the whole line. The sampler bounds how MANY lines a peer
+        # can cause, not how long each one is.
+        _refused(f"cross-origin upgrade from "
+                 f"{(ws.headers.get('origin') or '')[:100]!r}: {cross_site}",
+                 ip)
+        await ws.close(code=_CLOSE_POLICY, reason=cross_site)
         return
     if not _pending.reserve(ip):
         _refused("too many pending sockets", ip)
@@ -546,8 +818,40 @@ async def _handshake(ws: WebSocket, ip: str | None):
             await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
         return None
 
-    token = (hello or {}).get("token")
+    frame_token = (hello or {}).get("token")
     raw_case = (hello or {}).get("case_id")
+    # THE COOKIE FIRST, the first frame second, and nothing downstream
+    # changes: `__Host-session` holds the RAW session token
+    # (`routers/auth._set_session_cookies`), so the string taken from it
+    # is the same string `_authenticate` has always validated. A
+    # `WebSocket` is an `HTTPConnection`, so `ws.cookies` is parsed from
+    # the upgrade's headers exactly as it is for a request -- there was
+    # never anything to build here, only a cookie nobody read.
+    #
+    # The cookie first because a browser that has signed in HAS it: it
+    # survives the reload the page memory does not, it is `HttpOnly` so
+    # no script on any origin can read it back out, and `SameSite=strict`
+    # plus `_cross_site_upgrade` keep another origin's page from making
+    # the browser attach it. The frame token is the one a browser could
+    # be made to leak, because it exists in page memory at all.
+    #
+    # The frame stays as the FALLBACK, and is now the ONLY reason this
+    # protocol has a token field: `scripts/bootstrap.py session` mints a
+    # session through `SessionService` in a shell, for a browser it has
+    # never met, and a shell has no cookie jar to put it in. That is the
+    # operator recovery path for a machine whose clock TOTP cannot live
+    # with; it has no other way in, so the field does not go with the
+    # login-body token.
+    #
+    # The frame itself is still REQUIRED of everyone, cookie or not: it
+    # carries the case id, and there is nowhere else for a subscriber to
+    # say which case it wants. A hello whose case id is missing OR null
+    # gets a socket subscribed to notifications alone -- which is what the
+    # console holds while no case is open: `state.caseId` is null there,
+    # so the object it stringifies carries `"case_id": null` rather than
+    # dropping the key. Both spellings arrive as `raw_case = None`, which
+    # is why neither needs handling of its own.
+    token = ws.cookies.get(SESSION_COOKIE) or frame_token
     if not isinstance(token, str) or not token:
         await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
         return None

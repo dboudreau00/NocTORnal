@@ -2,6 +2,83 @@
 
 ## Unreleased
 
+### Wave 2: the console holds no credential
+
+The console kept the login-body token in page memory for exactly two paths
+that could not read the cookie: the live websocket, which authenticated
+from a token in its first frame, and the Lab download, which is
+cross-origin so no `__Host-` cookie can reach it. Both are closed, and the
+login response no longer carries a token at all.
+
+**The websocket takes the cookie.** `ws.cookies` is readable on an upgrade
+and the cookie value IS a session token, so `_handshake` prefers it and
+keeps the first frame only for `scripts/bootstrap.py session`, which mints
+in a shell and has no cookie jar. A browser cannot set a header on an
+upgrade, so the CSRF double-submit is impossible there; `SameSite=strict`
+plus an explicit `Origin` check refused before `accept()` is what stands in
+its place. Measured in a browser: sign in, open a case, reload, reopen —
+the dot stays live, `sessionStorage` and `localStorage` are both empty, and
+the only cookie script can see is `__Host-csrf`.
+
+**The Lab download is a one-shot ticket.** Minted on the application origin
+under the cookie session, so the double-submit applies to the mint; stored
+as a hash (migration 0061, `lab.download_ticket`); redeemed exactly once by
+a single conditional `UPDATE`, so two simultaneous redemptions cannot both
+win; sent in the POST body rather than a URL, because a URL reaches the
+access log, the Referer and the history. Sixty seconds, because it is a
+hand-off between two requests the browser makes back to back.
+
+**Then the token went.** `POST /auth/login` answers 204 with the cookie
+pair and nothing else. `deps.session_token` still accepts a Bearer, which
+is how a script client and the `#token=` hand-off work; what is gone is
+login handing one out. Twenty-seven test files that read the token from
+that response now mint a session directly, the way `bootstrap.py` does.
+
+**What the review caught, and it was not small.** Sign-in was completely
+broken: `doLogin` still read `out.token` from a response that had become a
+204, `_fetch` returns null for a 204, and every form sign-in threw, was
+swallowed by the catch, and told the analyst "Unexpected error" while the
+server had in fact signed them in and set the cookies. Three reviewers
+found it independently. There is now a pure test that login answers 204
+with no body, which nothing had covered.
+
+Two security defects were closed after the first pass. The redemption
+audited every failed presentation including one that matched no row — a
+path reachable on the sample origin with no credential at all, writing into
+an append-only hash-chained log — so an unknown ticket is now a sampled
+warning and the route carries a named rate limit. And the redemption
+re-checked the sample's labels but not the ACCOUNT, so inside the
+sixty-second window a deactivated analyst still got the archive; it now
+re-derives the account and the permission, and the residual is stated
+exactly where it is bounded.
+
+A third finding predates this wave: `/api/v1/live` is routable on a process
+configured as the sample origin, because the middleware that makes that
+process serve bytes and nothing else never runs for a websocket scope. The
+upgrade is refused there now.
+
+**A control that would have shipped silently broken.** The `Origin` check
+compared only against the configured origin. The shipped launcher binds
+`127.0.0.1:8000`, `NOCTORNAL_BASE_URL` keeps its matching default, the
+console is opened at `localhost:8000` — two genuinely different origins,
+correctly distinguished, and the result was that every live socket was
+refused for every developer, before `accept()`, which reaches a browser
+with neither code nor reason. It was found by opening the console, not by
+reasoning. The rule now also accepts the origin the request arrived on,
+which is the ordinary same-origin test, needs no configuration, and is not
+weaker: a cross-site page cannot make `Origin` and `Host` agree.
+
+**Known.** The one residual on the ticket is stated in `0061` and in
+docs/17 F22: a ticket minted under a session revoked inside the following
+sixty seconds can still be redeemed, by a holder whose account is still
+active, still permitted, and for a sample they may still read. Separately,
+and not introduced here: a `NOCTORNAL_TOTP_KEK` that does not match the one
+an account was enrolled under makes `POST /auth/login` answer 500 rather
+than refusing cleanly, and the `totp_kek_set` readiness check cannot see
+it, because it verifies the key decodes and not that it decrypts anything.
+Met while setting up the browser verification, and worth a refusal of its
+own.
+
 ### Wave 1: it can be deployed as a service rather than run as a script
 
 Until now the only way to run this was `scripts/launch.ps1` on a laptop:
@@ -62,10 +139,12 @@ advisory lock stops two runners corrupting one source.
 
 **Known, and not fixed here.** No real SMTP relay exists on the build
 machine, so "a priority-1 notification leaves the building" is the one line
-in this wave that is wired and documented but unproven. The websocket and
-the Lab download still authenticate from the login-body token, so a
-reloaded session is still not live and the login response still returns a
-token; that is Wave 2. `docker exec` does not inherit a variable exported
+in this wave that is wired and documented but unproven. (The next clause
+said the websocket and the Lab download still authenticated from the
+login-body token and that a reloaded session was not live. Wave 2 above
+closed all three, and since this section is an unreleased note rather than
+a dated record, correcting it is the point.) `docker exec` does not
+inherit a variable exported
 inside a container's entrypoint, which made two verification probes report
 failures the deployment did not have -- both were the probe, and
 `/proc/1/environ` is what to read instead.

@@ -127,13 +127,33 @@ def _user(conn):
 
 
 def _login(client, email, secret, ua: str) -> str:
+    """A real sign-in, and it has to be: the binding under test is written
+    BY the login handler, which hands `SessionService.create` the address
+    and the User-Agent of THIS request. A session minted from a shell is
+    unbound and would prove nothing here (the test that says so is
+    below).
+
+    The token comes off `Set-Cookie` since 2026-09-10, because login
+    answers 204 and there is no body to read it from. It is the same
+    string either way -- `auth._set_session_cookies` puts the RAW session
+    token in `__Host-session` -- so what these tests then replay from
+    another address is exactly what the browser was handed. Read from the
+    header rather than through the client's jar: httpx will not attach a
+    `Secure` cookie over the test client's plain-http base URL, and a
+    lookup that quietly returned nothing would fail as a KeyError here
+    rather than as a session that never existed.
+    """
+    from noctornal_api.http.deps import SESSION_COOKIE
     from noctornal_api.security import totp
     r = client.post("/api/v1/auth/login", json={
         "email": email, "password": PASSWORD,
         "totp_code": totp.code_at(secret, int(time.time()))},
         headers={"User-Agent": ua})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+    assert r.status_code == 204, r.text
+    jar = {name: value for name, value in
+           (raw.split(";")[0].split("=", 1)
+            for raw in r.headers.get_list("set-cookie"))}
+    return jar[SESSION_COOKIE]
 
 
 def _me(client, token: str, ua: str):

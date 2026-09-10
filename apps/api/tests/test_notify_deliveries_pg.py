@@ -19,7 +19,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from uuid import uuid4
 
 import pytest
@@ -81,13 +80,33 @@ def _make_user(conn, *, clearance="AMBER", global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -158,7 +177,7 @@ def test_the_ledger_is_readable_with_reason_and_address(conn, client):
         raise TransportError("relay refused the connection")
     _drain_until_attempted(conn, n.id, boom)
 
-    token = _login(client, a_email, a_secret)
+    token = _session(conn, a_email)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token),
                    params={"kind": "MERGE_PERFORMED", "limit": 50})
     assert r.status_code == 200, r.text
@@ -192,7 +211,7 @@ def test_refused_only_hides_what_was_delivered(conn, client):
     n = _raise(conn, recipient, actor, classification="AMBER_STRICT")
     _drain_until_attempted(conn, n.id, lambda m: None)
 
-    token = _login(client, a_email, a_secret)
+    token = _session(conn, a_email)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token),
                    params={"refused_only": "true", "limit": 100})
     assert r.status_code == 200, r.text
@@ -229,7 +248,7 @@ def test_refused_only_shows_a_revocation_but_not_a_channel_the_recipient_turned_
     counters = dispatch_due(conn, send_mail=lambda m: None)
     assert counters["revoked"] >= 1, counters
 
-    token = _login(client, a_email, a_secret)
+    token = _session(conn, a_email)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token),
                    params={"refused_only": "true", "limit": 100})
     assert r.status_code == 200, r.text
@@ -244,7 +263,7 @@ def test_refused_only_shows_a_revocation_but_not_a_channel_the_recipient_turned_
 
 def test_the_ledger_is_newest_first_and_capped(conn, client):
     admin, a_email, a_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, a_email, a_secret)
+    token = _session(conn, a_email)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token),
                    params={"limit": 501})
     assert r.status_code == 422, "limit is capped at 500"
@@ -263,7 +282,7 @@ def test_the_ledger_is_behind_integration_manage(conn, client):
     """An analyst must not learn who is notified of what across every case
     from a table that is not case-scoped."""
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/notifications/deliveries", headers=_auth(token))
     assert r.status_code == 403, r.text
 
@@ -337,7 +356,7 @@ def test_disabling_an_unconfigured_channel_is_always_allowed(conn, monkeypatch):
 
 def test_the_refusal_reaches_the_client_as_a_400(conn, client):
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.put("/api/v1/notifications/preferences/JIRA", headers=_auth(token),
                    json={"enabled": True})
     assert r.status_code == 400, r.text

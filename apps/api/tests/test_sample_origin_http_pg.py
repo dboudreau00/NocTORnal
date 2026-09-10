@@ -21,8 +21,14 @@ The fix: three configured origins (`samples.origin_split()`), one verdict
 read by the download, the CSP, the cross-origin answer, the policy
 endpoint and the register; a process configured as the sample origin
 serves the download and nothing else; the console fetches the sample
-origin with its Bearer token. Every test here fails against the previous
-code, and the ones marked "both sides" read two files that must agree.
+origin across the split. Every test here fails against the previous code,
+and the ones marked "both sides" read two files that must agree.
+
+The console's credential for that fetch changed on 2026-09-10 -- a
+one-shot ticket minted on the application origin (0061), not the session
+token as a Bearer, which is why the login response no longer carries one.
+The Bearer path the tests below drive is still routed, for a caller that
+is not a browser; `test_download_ticket_pg.py` drives the ticket.
 
 Email prefix `so-`. Env-gated on DATABASE_URL.
 """
@@ -31,7 +37,6 @@ from __future__ import annotations
 import io
 import os
 import re
-import time
 import zipfile
 from pathlib import Path
 from uuid import uuid4
@@ -74,6 +79,13 @@ def conn():
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'so-%@noctornal.test')"
     ssub = f"(SELECT id FROM lab.sample WHERE submitted_by IN {sub})"
     with c.transaction():
+        # Nothing in this file mints a download ticket, and this sweep is
+        # here so that stays true of the failure mode rather than of the
+        # cleanup: 0061's `sample_id` names `lab.sample` with no ON
+        # DELETE, so the first test that does mint one would fail its
+        # teardown on a table it had never heard of. Cheap now, opaque
+        # later.
+        c.execute(f"DELETE FROM lab.download_ticket WHERE sample_id IN {ssub}")
         # The custody ledger is append-only by trigger (docs/11 wants
         # exactly that); the test rows are removed the way
         # test_samples_pg does it, by lifting the trigger for the sweep.
@@ -145,27 +157,40 @@ def _user(conn, *, roles=(), clearance="RED"):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    """Login mints the session with `mfa_satisfied=True`, so step-up is
-    fresh for the download that follows."""
-    from noctornal_api.security import totp
-    r = client.post(f"{API}/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A session minted directly, the way `scripts/bootstrap.py session`
+    does, with `mfa_satisfied=True` as login passes -- `sample.download`
+    is step-up gated, and a session that never satisfied MFA would refuse
+    every download below for a reason that is not what is under test.
+
+    Not `POST /auth/login`, and not only because it answers 204 with the
+    token in `__Host-session` since 2026-09-10: a process configured as
+    the sample origin serves no login route at all, which is the point of
+    this file. Signing in therefore meant lifting
+    NOCTORNAL_PUBLIC_ORIGIN, signing in against the application process
+    and putting it back -- three lines of environment choreography around
+    a request none of these tests are about.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _analyst(conn, client):
-    """A MALWARE_ANALYST (sample.download, step-up) logged in, plus a
-    sample they submitted through the service into the shared store."""
+def _analyst(conn):
+    """A MALWARE_ANALYST (sample.download, step-up) with a live session,
+    plus a sample they submitted through the service into the shared
+    store."""
     from noctornal_api.samples import SampleService
     uid, email, secret = _user(conn, roles=("MALWARE_ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     import noctornal_api.samples as samples
     sample = SampleService(conn, samples.SampleStorage()).submit(
         b"MZ\x90\x00not-really-malware-" + uuid4().bytes,
@@ -182,18 +207,19 @@ def _is_archive(body: bytes) -> bool:
     return zipfile.is_zipfile(io.BytesIO(body))
 
 
-def _readiness(conn, client, monkeypatch) -> dict:
-    """The register as a fresh SYS_ADMIN sees it. The login happens on the
-    APPLICATION process -- a process configured as the sample origin
-    serves no login route, which is the point of it -- so
-    NOCTORNAL_PUBLIC_ORIGIN is lifted for the login and put back for the
-    read."""
+def _readiness(conn, client) -> dict:
+    """The register as a fresh SYS_ADMIN sees it, read with whatever
+    NOCTORNAL_PUBLIC_ORIGIN the caller set -- /admin/readiness is one of
+    the four things a sample-role process still serves.
+
+    Until 2026-09-10 this lifted NOCTORNAL_PUBLIC_ORIGIN and put it back
+    around a `POST /auth/login`, because a sample-role process serves no
+    login route. `_session` mints without HTTP, so the choreography is
+    gone and the environment this reads under is exactly the one the test
+    configured -- which is what this file is about.
+    """
     _, email, secret = _user(conn, roles=("SYS_ADMIN",))
-    public = os.environ.get("NOCTORNAL_PUBLIC_ORIGIN")
-    monkeypatch.delenv("NOCTORNAL_PUBLIC_ORIGIN", raising=False)
-    token = _login(client, email, secret)
-    if public is not None:
-        monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", public)
+    token = _session(conn, email)
     body = client.get(f"{API}/admin/readiness", headers=_auth(token)).json()
     return {c["check"]: c for c in body["checks"]} | {"__ready__": body["ready"]}
 
@@ -210,7 +236,7 @@ def test_the_download_grants_on_configuration_not_on_the_host_header(
     that has not been configured as the sample origin refuses whatever
     the client writes in Host."""
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "http://samples.example")
-    token, sample = _analyst(conn, client)
+    token, sample = _analyst(conn)
 
     r = _download(client, token, sample.id,
                   headers={"Host": "samples.example"})
@@ -234,7 +260,7 @@ def test_a_process_configured_as_the_sample_origin_serves_the_archive(
     not the sample origin, and nothing else was consulted."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
-    token, sample = _analyst(conn, client)   # logged in on the app process
+    token, sample = _analyst(conn)   # a session, minted without HTTP
     monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", SAMPLES)
 
     r = _download(client, token, sample.id)
@@ -260,7 +286,7 @@ def test_the_application_process_refuses_and_names_the_sample_origin(
     refusal said only "never from the application origin"."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
-    token, sample = _analyst(conn, client)
+    token, sample = _analyst(conn)
 
     r = _download(client, token, sample.id)
     assert r.status_code == 409, r.text
@@ -279,14 +305,14 @@ def test_the_sample_origin_may_not_be_the_application_origin(
     origin."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", "http://app.example")
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "http://app.example")
-    token, sample = _analyst(conn, client)
+    token, sample = _analyst(conn)
 
     r = _download(client, token, sample.id, headers={"Host": "app.example"})
     assert r.status_code == 409, r.text
     assert not _is_archive(r.content)
     assert "not a split" in r.json()["detail"]
 
-    check = _readiness(conn, client, monkeypatch)["sample_origin_configured"]
+    check = _readiness(conn, client)["sample_origin_configured"]
     assert check["ok"] is False, check
     assert "not a split" in check["evidence"]
 
@@ -300,7 +326,7 @@ def test_readiness_reports_the_control_off_when_the_origin_is_unset(
     problem instead of a bare false, and the download refuses. The old
     evidence said the variable was "not set", which is a fact about the
     environment rather than a statement about the invariant."""
-    checks = _readiness(conn, client, monkeypatch)
+    checks = _readiness(conn, client)
     check = checks["sample_origin_configured"]
     assert check["ok"] is False, check
     assert "CONTROL OFF" in check["evidence"]
@@ -308,7 +334,7 @@ def test_readiness_reports_the_control_off_when_the_origin_is_unset(
     assert "NOCTORNAL_PUBLIC_ORIGIN" in check["action"]
     assert checks["__ready__"] is False
 
-    token, sample = _analyst(conn, client)
+    token, sample = _analyst(conn)
     policy = client.get(f"{API}/samples/policy", headers=_auth(token)).json()
     assert policy["sample_origin_configured"] is False
     assert policy["sample_origin"] is None
@@ -326,14 +352,14 @@ def test_readiness_says_which_origin_this_process_is(conn, client, monkeypatch):
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
 
-    check = _readiness(conn, client, monkeypatch)["sample_origin_configured"]
+    check = _readiness(conn, client)["sample_origin_configured"]
     assert check["ok"] is True, check
     assert "application origin" in check["evidence"]
     assert "refuses every download" in check["evidence"]
     assert SAMPLES in check["evidence"] and "human confirmation" in check["evidence"]
 
     monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", SAMPLES)
-    check = _readiness(conn, client, monkeypatch)["sample_origin_configured"]
+    check = _readiness(conn, client)["sample_origin_configured"]
     assert check["ok"] is True, check
     assert "as the sample origin" in check["evidence"]
     assert "nothing else" in check["evidence"]
@@ -365,7 +391,7 @@ def test_the_console_can_reach_the_origin_the_download_is_served_from(
     assert csp.replace(f"connect-src 'self' {SAMPLES}", "connect-src 'self'") == _UI_CSP, (
         "the sample origin is the ONLY thing the configured CSP adds")
 
-    token, _ = _analyst(conn, client)
+    token, _ = _analyst(conn)
     policy = client.get(f"{API}/samples/policy", headers=_auth(token)).json()
     assert policy["sample_origin"] == SAMPLES == origin_split().sample
     assert policy["sample_origin_configured"] is True
@@ -375,20 +401,63 @@ def test_the_console_can_reach_the_origin_the_download_is_served_from(
 def test_the_lab_pane_downloads_from_the_policys_sample_origin():
     """The console's half of the same contract, read from the file.
 
-    `downloadSample` must build its URL from `smpPolicy.sample_origin` --
-    the value the policy endpoint reports and the CSP names -- and it is
-    the one call in app.js that leaves the page's origin, under its own
-    name, exactly once. Until 2026-09-09 it was `fetch(API + ...)` like
-    every other call, which is the application origin, which refuses.
+    It is the one call in app.js that leaves the page's origin, under
+    its own name, exactly once. Until 2026-09-09 it was `fetch(API +
+    ...)` like every other call, which is the application origin, which
+    refuses every download by design.
+
+    WHAT CHANGED IN WAVE 2, and why this test was rewritten rather than
+    relaxed. It used to assemble the URL itself, from
+    `smpPolicy.sample_origin` plus the API prefix, and this test pinned
+    that spelling. The console now sends the URL the MINT returned
+    (`download_url`), so the origin is named by the process that knows
+    the split rather than reassembled by the page. That is a better
+    arrangement and a different one, and a test that pins a spelling
+    fails on an improvement -- so what is pinned here now is the set of
+    properties that matter about a cross-origin request carrying a
+    credential, which is a longer list than the old single regex.
+
+    A URL taken from a response needs a bound, and the bound is the CSP:
+    `connect-src` names 'self' and the configured sample origin and
+    nothing else, which the test above this one asserts. The two halves
+    are deliberately in one file.
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     body = js[js.index("async function downloadSample("):]
     body = body[:body.index("\nasync function loadSamplePolicy(")]
+
+    # The policy's origin is still consulted, for the refusal the
+    # analyst gets without a round trip when the split is unusable.
     assert "smpPolicy.sample_origin" in body
-    assert re.search(
-        r"fetchFromSampleOrigin\(\s*origin \+ API \+ '/samples/'", body), (
-        "the download must be rooted at the sample origin the policy "
-        "endpoint reported, then the API prefix")
+
+    # The cross-origin fetch sends the mint's own URL, not one built here.
+    assert re.search(r"fetchFromSampleOrigin\(\s*minted\.download_url", body), (
+        "the download must go to the URL the mint returned; assembling one "
+        "from the page is how this pane came to fetch the application "
+        "origin, which refuses")
+
+    # The ticket is a credential, so it travels in the BODY. A URL
+    # reaches the access log, the Referer and the history.
+    assert re.search(r"body:\s*new URLSearchParams\(\{\s*ticket:", body), (
+        "the ticket must be sent in the request body")
+    assert "ticket=" not in body, (
+        "a ticket in a query string is a credential in every access log "
+        "between here and the sample origin")
+
+    # No cookie crosses, and no bearer either -- the ticket is the whole
+    # credential. The forced Authorization header this replaced is the
+    # reason the login response used to carry a token at all.
+    assert re.search(r"credentials:\s*'omit'", body), (
+        "the sample origin reads no cookie and must be offered none")
+    assert "Authorization" not in body and "Bearer" not in body, (
+        "the cross-origin download carries no bearer since Wave 2")
+
+    # The mint is a POST on the ordinary path, which is what brings the
+    # CSRF double-submit with it. A GET would not.
+    assert re.search(r"api\('/samples/' \+ encodeURIComponent\([^)]*\)\s*\n?"
+                     r"\s*\+ '/download-ticket', \{ method: 'POST' \}\)", body), (
+        "the ticket must be minted through api() with POST, so the "
+        "double-submit applies")
     assert "fetch(API + '/samples/'" not in body, (
         "a same-origin download is one the application process refuses")
     assert js.count("fetchFromSampleOrigin(") == 1, (
@@ -414,7 +483,7 @@ def test_the_sample_process_answers_the_consoles_preflight_for_the_app_origin_on
     can read a 401 as well as an archive."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
-    token, sample = _analyst(conn, client)   # logged in on the app process
+    token, sample = _analyst(conn)   # a session, minted without HTTP
     monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", SAMPLES)
     path = f"{API}/samples/{sample.id}/download"
 
@@ -461,7 +530,7 @@ def test_the_sample_process_serves_downloads_and_nothing_else(
     readiness register."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
-    token, sample = _analyst(conn, client)   # logged in on the app process
+    token, sample = _analyst(conn)   # a session, minted without HTTP
     monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", SAMPLES)
 
     for path in ("/ui/", "/", f"{API}/samples", f"{API}/samples/{sample.id}",
@@ -473,7 +542,7 @@ def test_the_sample_process_serves_downloads_and_nothing_else(
     assert r.status_code == 404, r.text
     assert client.get("/healthz").status_code == 200
     assert _download(client, token, sample.id).status_code == 200
-    check = _readiness(conn, client, monkeypatch)["sample_origin_configured"]
+    check = _readiness(conn, client)["sample_origin_configured"]
     assert "as the sample origin" in check["evidence"], check
 
 
@@ -521,7 +590,7 @@ def test_a_path_on_the_sample_origin_is_reported_not_silently_dropped(
     problem, distinct from "unset": the register says what was typed and
     why it is refused, rather than reporting the variable as missing."""
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://app.example/samples")
-    check = _readiness(conn, client, monkeypatch)["sample_origin_configured"]
+    check = _readiness(conn, client)["sample_origin_configured"]
     assert check["ok"] is False, check
     assert "https://app.example/samples" in check["evidence"]
     assert "not an origin" in check["evidence"]

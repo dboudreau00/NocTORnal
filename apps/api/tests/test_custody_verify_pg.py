@@ -50,7 +50,6 @@ suites, never need to delete a custody row to clean up.
 from __future__ import annotations
 
 import os
-import time
 from uuid import UUID, uuid4
 
 import pytest
@@ -644,13 +643,33 @@ def _make_user(conn, *, global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> dict:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return {"Authorization": f"Bearer {r.json()['token']}"}
+def _session_headers(conn, email) -> dict:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_the_endpoint_reports_what_the_service_reports(conn, client):
@@ -666,7 +685,7 @@ def test_the_endpoint_reports_what_the_service_reports(conn, client):
     from noctornal_api.custody_verify import verify_custody_chain
 
     _, email, secret = _make_user(conn, global_roles=("SECURITY_OFFICER",))
-    headers = _login(client, email, secret)
+    headers = _session_headers(conn, email)
 
     r = client.get("/api/v1/audit/custody/verify", headers=headers)
     assert r.status_code == 200, r.text
@@ -777,7 +796,7 @@ def test_the_endpoint_is_gated_on_audit_read(conn, client):
     and by nobody else (0021). An analyst with every case role and no
     global one gets a 403, not a chain report."""
     _, email, secret = _make_user(conn)
-    headers = _login(client, email, secret)
+    headers = _session_headers(conn, email)
     r = client.get("/api/v1/audit/custody/verify", headers=headers)
     assert r.status_code == 403, r.text
     assert client.get("/api/v1/audit/custody/verify").status_code == 401

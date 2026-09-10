@@ -20,7 +20,7 @@ values are recorded either way, for the audit trail.
 
 WHICH sessions actually carry them is a shorter list than "a session
 now carries" suggested, and saying it that way was a claim this module
-could not keep. There are exactly two create sites:
+could not keep. The product mints a session in exactly two places:
 
 - `http/routers/auth.py` (the login handler) passes both, so every
   session a person signs in for is bound;
@@ -30,6 +30,13 @@ could not keep. There are exactly two create sites:
   binding that session is refused on first use -- deliberately, since
   "cannot verify" is not "verified" -- and the command says so before it
   prints the URL.
+
+The suite is not a third kind: many tests build a `SessionService` and
+call `create` to get a token without going through login, and not one of
+them passes an address or a User-Agent, so every session they mint sits
+with bootstrap's. That is why a strict-mode test sets the flag and then
+asserts the REFUSAL -- an unbound session is what the suite produces by
+default, not the exception it has to arrange.
 
 A session minted before 0058 is in the same position and is refused for
 the same reason. `deps.refuse_unbound_session` records `unbound` in the

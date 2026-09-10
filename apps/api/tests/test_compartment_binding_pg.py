@@ -36,7 +36,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import time
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
@@ -150,13 +149,33 @@ def _user(conn, *global_roles, clearance="AMBER", compartments=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -498,7 +517,7 @@ def test_the_database_refusal_reaches_the_client_with_the_service_status(
 
     # -- ingest: no bypass needed ------------------------------------------
     admin_id, admin_email, admin_secret = _user(conn, "SYS_ADMIN", clearance="RED")
-    admin = _login(client, admin_email, admin_secret)
+    admin = _session(conn, admin_email)
     typo = _key()
     r = client.post("/api/v1/ingest/keys", headers=_auth(admin), json={
         "name": "stealer feed (binding test)", "declared_category": "STEALER_LOG",
@@ -526,7 +545,7 @@ def test_the_database_refusal_reaches_the_client_with_the_service_status(
 
     # -- cases: the service checks bypassed, the database still refuses ---
     owner_id, owner_email, owner_secret = _user(conn, "CASE_OWNER")
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     monkeypatch.setattr(CaseService, "_require_registered",
                         lambda self, compartments: None)
     monkeypatch.setattr(CaseService, "_require_compartments",

@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0060.
+-- GENERATED MIRROR of the schema at Alembic revision 0061.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0060
+-- Alembic revision: 0061
 -- =====================================================================
 
 --
@@ -2478,6 +2478,29 @@ CREATE TABLE lab.detonation (
 );
 
 --
+-- Name: download_ticket; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.download_ticket (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    token_hash bytea NOT NULL,
+    sample_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    session_id uuid,
+    issued_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    redeemed_at timestamp with time zone,
+    ip_hash bytea,
+    CONSTRAINT download_ticket_expiry_after_issue CHECK ((expires_at > issued_at))
+);
+
+--
+-- Name: TABLE download_ticket; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON TABLE lab.download_ticket IS 'One-shot, sixty-second authority to download ONE sample from the sample origin, minted on the application origin under a cookie session. Exhausted state, not a ledger: lab.sample_access is the custody record and audit.event carries the issue and the redemption.';
+
+--
 -- Name: sample; Type: TABLE; Schema: lab; Owner: -
 --
 
@@ -3296,6 +3319,20 @@ ALTER TABLE ONLY ingest.victim_credential
 
 ALTER TABLE ONLY lab.detonation
     ADD CONSTRAINT detonation_pkey PRIMARY KEY (id);
+
+--
+-- Name: download_ticket download_ticket_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.download_ticket
+    ADD CONSTRAINT download_ticket_pkey PRIMARY KEY (id);
+
+--
+-- Name: download_ticket download_ticket_token_hash_key; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.download_ticket
+    ADD CONSTRAINT download_ticket_token_hash_key UNIQUE (token_hash);
 
 --
 -- Name: sample_access sample_access_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
@@ -4174,6 +4211,18 @@ CREATE INDEX victim_credential_service_idx ON ingest.victim_credential USING btr
 --
 
 CREATE INDEX detonation_sample_idx ON lab.detonation USING btree (sample_id, requested_at DESC);
+
+--
+-- Name: download_ticket_live_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX download_ticket_live_idx ON lab.download_ticket USING btree (expires_at) WHERE (redeemed_at IS NULL);
+
+--
+-- Name: download_ticket_sample_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX download_ticket_sample_idx ON lab.download_ticket USING btree (sample_id, issued_at DESC);
 
 --
 -- Name: sample_access_actor_idx; Type: INDEX; Schema: lab; Owner: -
@@ -5810,6 +5859,20 @@ ALTER TABLE ONLY lab.detonation
 
 ALTER TABLE ONLY lab.detonation
     ADD CONSTRAINT detonation_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
+
+--
+-- Name: download_ticket download_ticket_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.download_ticket
+    ADD CONSTRAINT download_ticket_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
+
+--
+-- Name: download_ticket download_ticket_user_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.download_ticket
+    ADD CONSTRAINT download_ticket_user_id_fkey FOREIGN KEY (user_id) REFERENCES iam.app_user(id);
 
 --
 -- Name: sample_access sample_access_actor_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -

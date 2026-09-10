@@ -139,7 +139,42 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Most of this file needs an authenticated caller and is not about the
+    sign-in path, and since 2026-09-10 `POST /auth/login` answers 204 with
+    the token only in `__Host-session`. Driving a login for every test
+    would mean unpicking a Set-Cookie header for a value handed straight
+    back as a Bearer -- and would keep the constraint that shaped this
+    file: TOTP codes are single-use, so two sign-ins for one account
+    inside one 30-second step failed on the code, not on the thing under
+    test. The tests that ARE about signing in -- the audit rows, the
+    failure meter, the cookie the browser is left holding -- still call
+    `_login`.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
+
+
+def _login(client, email, secret):
+    """A real sign-in, for the tests that are about one. Returns the
+    RESPONSE: since 2026-09-10 a login answers 204 and the token exists
+    only as `__Host-session`, so a caller that needs the credential reads
+    it out of the jar with `_cookie_jar`."""
     import time
 
     from noctornal_api.security import totp
@@ -147,8 +182,22 @@ def _login(client, email, secret) -> str:
         "email": email, "password": PASSWORD,
         "totp_code": totp.code_at(secret, int(time.time())),
     })
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+    assert r.status_code == 204, r.text
+    return r
+
+
+def _cookie_jar(r) -> dict[str, str]:
+    """name -> value over the response's `Set-Cookie` headers.
+
+    Read from the header rather than from the client's cookie jar: httpx
+    will not send a `Secure` cookie over the test client's plain-http base
+    URL, so a test leaning on the jar would send no cookie at all and pass
+    for the wrong reason. `test_auth_cookie_http_pg.py` is the file that
+    reads the attributes as well; here only the values are wanted.
+    """
+    return {name: value for name, value in
+            (raw.split(";")[0].split("=", 1)
+             for raw in r.headers.get_list("set-cookie"))}
 
 
 def _auth(token: str) -> dict:
@@ -179,9 +228,21 @@ def test_login_requires_totp(conn, client):
 
 
 def test_login_then_me(conn, client):
+    """The browser's own path end to end: sign in, then be recognised by
+    the cookie the sign-in set, with nothing carried across by hand.
+
+    It reads that way because the login response is 204 and the pair is
+    all of it (2026-09-10). Until then this sent the body token as a
+    Bearer -- which proved a transport `POST /auth/login` no longer
+    issues, while the transport every browser actually uses went
+    untested here.
+    """
+    from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
     uid, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
-    r = client.get("/api/v1/auth/me", headers=_auth(token))
+    jar = _cookie_jar(_login(client, email, secret))
+    assert {SESSION_COOKIE, CSRF_COOKIE} <= jar.keys(), jar
+    r = client.get("/api/v1/auth/me",
+                   headers={"cookie": f"{SESSION_COOKIE}={jar[SESSION_COOKIE]}"})
     assert r.status_code == 200 and r.json()["user_id"] == str(uid)
 
 
@@ -192,7 +253,7 @@ def test_bad_token_rejected(client):
 
 def test_logout_revokes_session(conn, client):
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     assert client.post("/api/v1/auth/logout", headers=_auth(token)).status_code == 204
     assert client.get("/api/v1/auth/me", headers=_auth(token)).status_code == 401
 
@@ -203,7 +264,7 @@ def test_case_create_requires_global_permission(conn, client):
     """A user with no global role cannot create a case (403), even
     authenticated — case.create is a global verb."""
     _, email, secret = _make_user(conn)  # no global roles
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/cases", headers=_auth(token), json={
         "code": f"OP-E2E-{uuid4().hex[:6]}", "title": "nope",
         "legal_basis": "x", "retention_until": "2028-01-01",
@@ -217,7 +278,7 @@ def test_full_journey_case_node_edge_search(conn, client):
     """Create a case, add two nodes and an edge (each carrying an
     assertion), then find one by full-text search — the Phase 1 bar."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
 
     n1 = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
@@ -254,7 +315,7 @@ def test_illegal_edge_is_400_not_500(conn, client):
     """An ontology violation surfaces as problem+json 400, not a leaked
     stack trace or SQL error."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     grp = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
                       json={"node_type": "GROUP", "label": "crew"}).json()["id"]
@@ -271,7 +332,7 @@ def test_illegal_edge_is_400_not_500(conn, client):
 
 def test_selector_recorded_and_found_normalised(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     rec = client.post(f"/api/v1/cases/{case_id}/selectors", headers=_auth(token),
                       json={"selector_type": "TELEGRAM_USER", "raw_value": "@DarkVendor"})
@@ -290,11 +351,11 @@ def test_outsider_cannot_read_or_detect_another_users_case(conn, client):
     EXISTS: the response for a real case they are not assigned to is
     identical to the response for a random id."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
 
     _, out_email, out_secret = _make_user(conn)
-    out_token = _login(client, out_email, out_secret)
+    out_token = _session(conn, out_email)
     real = client.get(f"/api/v1/cases/{case_id}", headers=_auth(out_token))
     fake = client.get(f"/api/v1/cases/{uuid4()}", headers=_auth(out_token))
     assert real.status_code == fake.status_code == 404
@@ -306,13 +367,13 @@ def test_read_only_assignee_cannot_write(conn, client):
     """READ_ONLY may read the case but not create nodes (verb check)."""
     from noctornal_api.cases import CaseService
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
 
     reader_id, reader_email, reader_secret = _make_user(conn)
     CaseService(conn).assign_user(case_id, reader_id, "READ_ONLY",
                                  granted_by=reader_id)
-    reader_token = _login(client, reader_email, reader_secret)
+    reader_token = _session(conn, reader_email)
     assert client.get(f"/api/v1/cases/{case_id}",
                       headers=_auth(reader_token)).status_code == 200
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(reader_token),
@@ -325,19 +386,19 @@ def test_under_cleared_assignee_denied_by_lattice(conn, client):
     AMBER case is denied (the TLP check), even with the right verb."""
     from noctornal_api.cases import CaseService
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)  # AMBER
 
     green_id, green_email, green_secret = _make_user(conn, clearance="GREEN")
     CaseService(conn).assign_user(case_id, green_id, "ANALYST", granted_by=green_id)
-    green_token = _login(client, green_email, green_secret)
+    green_token = _session(conn, green_email)
     assert client.get(f"/api/v1/cases/{case_id}",
                       headers=_auth(green_token)).status_code == 403
 
 
 def test_unknown_case_is_404(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get(f"/api/v1/cases/{uuid4()}", headers=_auth(token))
     assert r.status_code == 404
 
@@ -348,11 +409,11 @@ def test_under_cleared_assignee_is_not_listed(conn, client):
     code, title and legal basis."""
     from noctornal_api.cases import CaseService
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)          # AMBER
     green_id, green_email, green_secret = _make_user(conn, clearance="GREEN")
     CaseService(conn).assign_user(case_id, green_id, "ANALYST", granted_by=green_id)
-    green_token = _login(client, green_email, green_secret)
+    green_token = _session(conn, green_email)
     assert client.get(f"/api/v1/cases/{case_id}",
                       headers=_auth(green_token)).status_code == 403
     assert client.get("/api/v1/cases", headers=_auth(green_token)).json() == []
@@ -377,7 +438,7 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
         "'Compartmented Op (e2e test)') ON CONFLICT (key) DO NOTHING")
     owner_id, owner_email, owner_secret = _make_user(
         conn, clearance="AMBER", global_roles=("CASE_OWNER",), compartments=("OP_X",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     r = client.post("/api/v1/cases", headers=_auth(owner_token), json={
         "code": f"OP-E2E-{uuid4().hex[:6]}", "title": "Compartmented Op",
         "legal_basis": "warrant", "retention_until": str(date(2028, 1, 1)),
@@ -388,7 +449,7 @@ def test_compartmented_case_hidden_from_uncompartmented_assignee(conn, client):
 
     plain_id, plain_email, plain_secret = _make_user(conn, clearance="AMBER")
     CaseService(conn).assign_user(case_id, plain_id, "ANALYST", granted_by=owner_id)
-    plain_token = _login(client, plain_email, plain_secret)
+    plain_token = _session(conn, plain_email)
     assert client.get(f"/api/v1/cases/{case_id}",
                       headers=_auth(plain_token)).status_code == 403
     assert client.get("/api/v1/cases", headers=_auth(plain_token)).json() == []
@@ -420,7 +481,7 @@ def test_cannot_create_case_in_a_compartment_you_lack(conn, client):
                  "('OP_SECRET', 'Secret Op (e2e test)') "
                  "ON CONFLICT (key) DO NOTHING")
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/cases", headers=_auth(token), json={
         "code": f"OP-E2E-{uuid4().hex[:6]}", "title": "nope",
         "legal_basis": "x", "retention_until": str(date(2028, 1, 1)),
@@ -434,7 +495,7 @@ def test_cannot_author_above_your_clearance(conn, client):
     would immediately be unable to read back."""
     _, email, secret = _make_user(conn, clearance="AMBER",
                                   global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
         "node_type": "IDENTITY", "label": "too secret", "classification": "RED",
@@ -448,7 +509,7 @@ def test_over_classified_element_is_invisible_in_search(conn, client):
     from noctornal_api.cases import CaseService
     owner_id, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)          # AMBER case
     red = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(owner_token),
                       json={"node_type": "IDENTITY", "label": "informant truename",
@@ -457,7 +518,7 @@ def test_over_classified_element_is_invisible_in_search(conn, client):
 
     amber_id, amber_email, amber_secret = _make_user(conn, clearance="AMBER")
     CaseService(conn).assign_user(case_id, amber_id, "ANALYST", granted_by=owner_id)
-    amber_token = _login(client, amber_email, amber_secret)
+    amber_token = _session(conn, amber_email)
     hits = client.get(f"/api/v1/cases/{case_id}/search/nodes",
                       headers=_auth(amber_token), params={"q": "informant"})
     assert hits.status_code == 200
@@ -481,7 +542,7 @@ def test_db_error_does_not_leak_schema_internals(conn, client):
     """An unknown node type must not return the constraint name, the
     offending value, or PL/pgSQL context."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
                     json={"node_type": "NOT_A_TYPE", "label": "x"})
@@ -495,7 +556,7 @@ def test_db_error_does_not_leak_schema_internals(conn, client):
 def test_session_rejection_reason_is_not_disclosed(conn, client):
     """A revoked token and a nonsense token must be indistinguishable."""
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     client.post("/api/v1/auth/logout", headers=_auth(token))
     revoked = client.get("/api/v1/auth/me", headers=_auth(token))
     bogus = client.get("/api/v1/auth/me", headers=_auth("nonsense-token"))
@@ -506,18 +567,13 @@ def test_session_rejection_reason_is_not_disclosed(conn, client):
 
 def test_logout_revokes_only_the_presenting_session(conn, client):
     """Closing one device must not evict the analyst everywhere."""
-    from uuid import uuid4 as _uuid4
-
-    from noctornal_api.security.sessions import SessionService
-    from noctornal_api.stores import PgSessionStore
-    uid, email, secret = _make_user(conn)
-    desktop = _login(client, email, secret)
-    # The second session is minted directly: logging in twice would need a
-    # fresh TOTP step (the replay guard is doing its job), and sleeping 30s
-    # to prove an unrelated property is not worth the wall clock.
-    _, laptop = SessionService(PgSessionStore(conn)).create(
-        _uuid4(), uid, mfa_satisfied=True
-    )
+    _, email, secret = _make_user(conn)
+    # Two sessions for one account, both minted rather than signed in: two
+    # logins inside one 30-second step would fail on the TOTP replay guard
+    # (which is doing its job), and sleeping 30s to prove an unrelated
+    # property is not worth the wall clock. The second one carried this
+    # comment alone until 2026-09-10; now both do, for the same reason.
+    desktop, laptop = _session(conn, email), _session(conn, email)
     assert client.post("/api/v1/auth/logout",
                        headers=_auth(desktop)).status_code == 204
     assert client.get("/api/v1/auth/me", headers=_auth(desktop)).status_code == 401
@@ -525,7 +581,13 @@ def test_logout_revokes_only_the_presenting_session(conn, client):
 
 
 def test_login_events_are_audited(conn, client):
-    """Authentication success and failure both reach the audit chain."""
+    """Authentication success and failure both reach the audit chain.
+
+    A real sign-in, necessarily: `_session` mints through `SessionService`
+    and writes no AUTH_SUCCEEDED, because the audit row belongs to the
+    handler that authenticated somebody. (`bootstrap.py session` writes
+    its own, marked `mfa: bypassed`, for the same reason.)
+    """
     uid, email, secret = _make_user(conn)
     client.post("/api/v1/auth/login",
                 json={"email": email, "password": "wrong", "totp_code": "000000"})
@@ -540,12 +602,12 @@ def test_login_events_are_audited(conn, client):
 def test_authz_denial_is_audited(conn, client):
     """A denied request records WHICH checks failed, server-side only."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
     reader_id, reader_email, reader_secret = _make_user(conn)
     from noctornal_api.cases import CaseService
     CaseService(conn).assign_user(case_id, reader_id, "READ_ONLY", granted_by=reader_id)
-    reader_token = _login(client, reader_email, reader_secret)
+    reader_token = _session(conn, reader_email)
     client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(reader_token),
                 json={"node_type": "IDENTITY", "label": "nope"})
     row = conn.execute(
@@ -559,7 +621,7 @@ def test_authz_denial_is_audited(conn, client):
 
 def test_negative_limit_is_422_not_500(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.get(f"/api/v1/cases/{case_id}/search/nodes", headers=_auth(token),
                    params={"q": "x", "limit": -1})
@@ -569,7 +631,7 @@ def test_negative_limit_is_422_not_500(conn, client):
 def test_cross_case_selector_node_rejected(conn, client):
     """A selector cannot be attributed to a node in another case."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_a = _create_case(client, token)
     case_b = _create_case(client, token)
     node_b = client.post(f"/api/v1/cases/{case_b}/nodes", headers=_auth(token),
@@ -582,7 +644,7 @@ def test_cross_case_selector_node_rejected(conn, client):
 
 def test_status_transition_and_illegal_transition(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     ok = client.post(f"/api/v1/cases/{case_id}/status", headers=_auth(token),
                      json={"status": "ACTIVE"})
@@ -597,7 +659,7 @@ def test_status_transition_and_illegal_transition(conn, client):
 @pytest.mark.skipif(not MINIO, reason="MINIO_ENDPOINT required")
 def test_evidence_upload_download_custody_and_link(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     node_id = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
                           json={"node_type": "IDENTITY", "label": "subject"}).json()["id"]
@@ -640,7 +702,7 @@ def test_export_requires_fresh_mfa_step_up(conn, client):
     session, and 403s once the session's MFA clock goes stale — the fifth
     gate check, over HTTP."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     up = client.post(
         f"/api/v1/cases/{case_id}/evidence", headers=_auth(token),
@@ -649,7 +711,8 @@ def test_export_requires_fresh_mfa_step_up(conn, client):
     )
     ev_id = up.json()["evidence_id"]
 
-    # Fresh MFA (set at login) → allowed.
+    # Fresh MFA (`mfa_satisfied=True` on the mint, as login sets it) →
+    # allowed.
     assert client.post(f"/api/v1/cases/{case_id}/evidence/{ev_id}/export",
                        headers=_auth(token)).status_code == 200
 
@@ -672,7 +735,7 @@ def test_red_evidence_export_refused(conn, client):
     """Invariant 8 over HTTP: RED evidence may not cross the boundary,
     even for a fully cleared owner with fresh MFA."""
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/cases", headers=_auth(token), json={
         "code": f"OP-E2E-{uuid4().hex[:6]}", "title": "Red Op",
         "legal_basis": "warrant", "retention_until": str(date(2028, 1, 1)),
@@ -785,7 +848,7 @@ def test_a_successful_login_does_not_move_the_failure_meter(conn, client):
         "auth.login_failed": _tiny("auth.login_failed", quota=1, per_seconds=300,
                                    burst=1)})
     _, email, secret = _make_user(conn)
-    _login(client, email, secret)  # asserts 200 internally
+    _login(client, email, secret)  # asserts 204 internally
 
     bad = {"email": email, "password": "wrong", "totp_code": "000000"}
     assert client.post("/api/v1/auth/login", json=bad).status_code == 401,         "the success must not have spent the failure budget"
@@ -829,7 +892,7 @@ def test_analytics_is_rate_limited_per_user(conn, client):
         "analytics.suite": _tiny("analytics.suite", quota=3, per_seconds=300,
                                  burst=3)})
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
     codes = [client.get(f"/api/v1/cases/{case_id}/analytics",
@@ -849,7 +912,7 @@ def test_one_analysts_flood_does_not_lock_out_another(conn, client):
                                       global_roles=("CASE_OWNER",))
     _, email_b, secret_b = _make_user(conn, clearance="RED",
                                       global_roles=("CASE_OWNER",))
-    token_a = _login(client, email_a, secret_a)
+    token_a = _session(conn, email_a)
     case_a = _create_case(client, token_a)
     _seed_small_graph(client, token_a, case_a)
     for _ in range(4):
@@ -857,7 +920,7 @@ def test_one_analysts_flood_does_not_lock_out_another(conn, client):
     assert client.get(f"/api/v1/cases/{case_a}/analytics",
                       headers=_auth(token_a)).status_code == 429
 
-    token_b = _login(client, email_b, secret_b)
+    token_b = _session(conn, email_b)
     case_b = _create_case(client, token_b)
     _seed_small_graph(client, token_b, case_b)
     assert client.get(f"/api/v1/cases/{case_b}/analytics",
@@ -869,7 +932,7 @@ def test_successful_responses_carry_the_limit_headers(conn, client):
     it."""
     from noctornal_api.ratelimit import LIMITS
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
     r = client.get(f"/api/v1/cases/{case_id}/analytics", headers=_auth(token))
@@ -912,7 +975,7 @@ def test_dual_control_is_off_by_default_so_a_merge_still_works(conn, client):
     daily work of this tool; a second signature on every merge is a control
     that gets switched off in week two."""
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     src, dst = _two_identities(client, token, case_id)
 
@@ -926,7 +989,7 @@ def test_dual_control_is_off_by_default_so_a_merge_still_works(conn, client):
 
 def test_with_dual_control_on_a_lone_analyst_cannot_merge(conn, client):
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     src, dst = _two_identities(client, token, case_id)
     _set_dual_control(client, token, case_id, True)
@@ -939,7 +1002,7 @@ def test_with_dual_control_on_a_lone_analyst_cannot_merge(conn, client):
 
 def test_you_cannot_approve_your_own_request(conn, client):
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     src, dst = _two_identities(client, token, case_id)
     _set_dual_control(client, token, case_id, True)
@@ -963,13 +1026,13 @@ def test_the_full_two_analyst_merge(conn, client):
     uid_a, email_a, secret_a = _make_user(conn, clearance="RED",
                                           global_roles=("CASE_OWNER",))
     uid_b, email_b, secret_b = _make_user(conn, clearance="RED")
-    token_a = _login(client, email_a, secret_a)
+    token_a = _session(conn, email_a)
     case_id = _create_case(client, token_a)
     src, dst = _two_identities(client, token_a, case_id)
     _set_dual_control(client, token_a, case_id, True)
 
     _assign(conn, case_id, uid_b, uid_a)
-    token_b = _login(client, email_b, secret_b)
+    token_b = _session(conn, email_b)
 
     payload = {"source_node_id": src, "target_node_id": dst,
                "reason": "same PGP fingerprint", "basis_selector_id": None}
@@ -1004,14 +1067,14 @@ def test_the_merge_executes_the_approved_parameters_not_the_posted_ones(conn, cl
     uid_a, email_a, secret_a = _make_user(conn, clearance="RED",
                                           global_roles=("CASE_OWNER",))
     uid_b, email_b, secret_b = _make_user(conn, clearance="RED")
-    token_a = _login(client, email_a, secret_a)
+    token_a = _session(conn, email_a)
     case_id = _create_case(client, token_a)
     approved_src, approved_dst = _two_identities(client, token_a, case_id)
     other_src, other_dst = _two_identities(client, token_a, case_id)
     _set_dual_control(client, token_a, case_id, True)
 
     _assign(conn, case_id, uid_b, uid_a)
-    token_b = _login(client, email_b, secret_b)
+    token_b = _session(conn, email_b)
 
     req = client.post(f"/api/v1/cases/{case_id}/approvals", headers=_auth(token_a),
                       json={"operation": "node.merge",
@@ -1041,7 +1104,7 @@ def test_turning_dual_control_off_is_audited(conn, client):
     """When did this case stop requiring two signatures, is a question
     somebody eventually needs answered."""
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _set_dual_control(client, token, case_id, True)
     _set_dual_control(client, token, case_id, False)
@@ -1058,14 +1121,14 @@ def test_an_approval_from_another_case_is_refused(conn, client):
     uid_a, email_a, secret_a = _make_user(conn, clearance="RED",
                                           global_roles=("CASE_OWNER",))
     uid_b, email_b, secret_b = _make_user(conn, clearance="RED")
-    token_a = _login(client, email_a, secret_a)
+    token_a = _session(conn, email_a)
     case_one = _create_case(client, token_a)
     case_two = _create_case(client, token_a)
     src, dst = _two_identities(client, token_a, case_one)
     _set_dual_control(client, token_a, case_two, True)
 
     _assign(conn, case_one, uid_b, uid_a)
-    token_b = _login(client, email_b, secret_b)
+    token_b = _session(conn, email_b)
 
     req = client.post(f"/api/v1/cases/{case_one}/approvals", headers=_auth(token_a),
                       json={"operation": "node.merge",
@@ -1086,7 +1149,7 @@ def test_reversal_is_not_dual_controlled(conn, client):
     """Undoing a merge restores the pre-merge state. Requiring two humans to
     correct a mistake is how mistakes stay in a case file."""
     _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     src, dst = _two_identities(client, token, case_id)
     merged = client.post(f"/api/v1/cases/{case_id}/merges", headers=_auth(token),

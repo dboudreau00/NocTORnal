@@ -42,7 +42,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date
 from uuid import uuid4
 
@@ -149,13 +148,33 @@ def _make_user(conn, *, clearance="RED", global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -235,7 +254,7 @@ def _global_tag(conn, *, name=None) -> tuple:
 def owner(conn, client):
     """A logged-in CASE_OWNER (so: `curation.manage`) with a case."""
     uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     return uid, token, _create_case(client, token)
 
 
@@ -769,7 +788,7 @@ def test_a_role_without_curation_manage_can_read_but_not_write(
 
     reader_id, reader_email, reader_secret = _make_user(conn)
     _assign(conn, case_id, reader_id, role=role)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
     base = f"/api/v1/cases/{case_id}/curation"
 
     # Reads: allowed.
@@ -803,7 +822,7 @@ def test_an_unassigned_caller_gets_404_not_403(conn, client, owner):
     # A global CASE_OWNER role and no assignment to THIS case: the gate
     # reads the verb off the assignment, so the role buys nothing here.
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    stranger = _login(client, email, secret)
+    stranger = _session(conn, email)
     base = f"/api/v1/cases/{case_id}/curation"
 
     assert client.get(f"{base}/tags", headers=_auth(stranger)).status_code == 404
@@ -831,7 +850,7 @@ def test_an_amber_analyst_cannot_tag_a_red_node(conn, client):
     """
     _, owner_email, owner_secret = _make_user(conn, clearance="RED",
                                               global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
     red_node = _node(client, owner_token, case_id, "red subject",
                      classification="RED")
@@ -842,7 +861,7 @@ def test_an_amber_analyst_cannot_tag_a_red_node(conn, client):
 
     analyst_id, analyst_email, analyst_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, analyst_id, role="ANALYST")
-    analyst = _login(client, analyst_email, analyst_secret)
+    analyst = _session(conn, analyst_email)
     base = f"/api/v1/cases/{case_id}/curation"
 
     refused = client.post(f"{base}/tags/{tag_id}/nodes", headers=_auth(analyst),
@@ -870,7 +889,7 @@ def test_a_tag_count_does_not_disclose_red_nodes(conn, client):
     not allowed to see."""
     _, owner_email, owner_secret = _make_user(conn, clearance="RED",
                                               global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
     red_node = _node(client, owner_token, case_id, "red subject",
                      classification="RED")
@@ -881,7 +900,7 @@ def test_a_tag_count_does_not_disclose_red_nodes(conn, client):
 
     analyst_id, analyst_email, analyst_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, analyst_id, role="ANALYST")
-    analyst = _login(client, analyst_email, analyst_secret)
+    analyst = _session(conn, analyst_email)
 
     seen = client.get(f"/api/v1/cases/{case_id}/curation/tags",
                       headers=_auth(analyst)).json()
@@ -903,7 +922,7 @@ def test_a_member_the_caller_cannot_see_is_withheld_not_dropped(conn, client):
     """
     _, owner_email, owner_secret = _make_user(conn, clearance="RED",
                                               global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
     red_node = _node(client, owner_token, case_id, "RED-LABEL-CANARY",
                      classification="RED")
@@ -916,7 +935,7 @@ def test_a_member_the_caller_cannot_see_is_withheld_not_dropped(conn, client):
 
     analyst_id, analyst_email, analyst_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, analyst_id, role="ANALYST")
-    analyst = _login(client, analyst_email, analyst_secret)
+    analyst = _session(conn, analyst_email)
 
     r = client.get(f"/api/v1/cases/{case_id}/curation/sets/{set_id}/members",
                    headers=_auth(analyst))
@@ -1277,7 +1296,7 @@ def test_a_merged_away_node_is_listed_separately_not_counted_as_a_member(
     """
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",), clearance="RED")
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     keep = _node(client, owner, case_id, "keep-me")
@@ -1340,7 +1359,7 @@ def test_assigning_the_same_tag_twice_is_a_no_op_not_a_conflict(conn, client):
 
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",), clearance="RED")
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     node_id = _node(client, owner, case_id, "twice-tagged")
     tag_id = _tag(client, owner, case_id)

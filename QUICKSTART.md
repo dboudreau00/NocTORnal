@@ -237,22 +237,27 @@ not hidden:
   tables — the append-only audit and custody triggers can be disabled by a
   table owner.
 - **No TLS.** The console runs on the API's cookie session: `POST
-  /auth/login` sets `__Host-session` (HttpOnly) and a readable
-  `__Host-csrf`, and every unsafe request copies that cookie into the
-  `x-csrf-token` header. Both are `Secure` and `__Host-` prefixed, which a
-  browser accepts from `localhost` or over HTTPS and from nowhere else; on
-  plain HTTP from any other address the console falls back to the sign-in
-  token held in page memory for the life of the tab, and says so in a
-  banner. Put anything real behind TLS.
-- **The sign-in token is still returned by `POST /auth/login`,** and the
-  console keeps it in memory — never in web storage — as a login-lifetime
-  capability for the two paths that do not read the cookie yet: the live
-  websocket, which authenticates from the token in its first frame, and
-  the Lab download from a separate sample origin, across which no cookie
-  travels. It dies with the tab; a session restored from the cookie after
-  a reload is "not live" until the next sign-in, and the live dot says
-  so. Accepting the cookie pair on those two paths is the change that
-  lets login stop returning the token.
+  /auth/login` answers 204 and sets `__Host-session` (HttpOnly) and a
+  readable `__Host-csrf`, and every unsafe request copies that cookie
+  into the `x-csrf-token` header. Both are `Secure` and `__Host-`
+  prefixed, which a browser accepts from `localhost` or over HTTPS and
+  from nowhere else. On plain HTTP from any other address the browser
+  refuses the pair, and since 2026-09-10 there is no body token to fall
+  back on, so a sign-in there leaves the tab holding nothing: use
+  `bootstrap.py session` (above), whose `#token=` link the tab keeps for
+  its own life, or put the console behind TLS — which is what you should
+  do with anything real anyway.
+- **A sign-in returns no token at all** (2026-09-10). It used to, for
+  the two paths that could not read the cookie, and both now can: the
+  live websocket authenticates from `__Host-session` on the upgrade, and
+  the Lab download — cross-origin by design, so no `__Host-` cookie
+  reaches it — crosses on a one-shot ticket minted under the cookie
+  session, good for one sample, one redemption and sixty seconds. A
+  session restored from the cookie after a reload is therefore live and
+  can download, with no second sign-in. What still hands out a bearer is
+  `scripts/bootstrap.py session`, deliberately: it is the way in when the
+  host clock makes TOTP impossible, and the console exchanges its token
+  once for the cookie pair.
 - **Session binding is recorded, not enforced, unless you say so.** Every
   session carries the address and client it was minted from (0058);
   `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a session presented from

@@ -68,13 +68,36 @@ def _make_user(conn, *, global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. This is how the ADMINISTRATOR
+    driving the panel gets a session, and none of that is about signing
+    in, so it takes the short honest route rather than driving a login
+    and unpicking a Set-Cookie header for a value it would hand straight
+    back as a Bearer. It also drops the constraint the login helper
+    carried: TOTP codes are single-use, so two sign-ins for one account
+    inside one 30-second step failed on the code, not on the thing under
+    test. The one sign-in this file genuinely needs -- proving that an
+    account provisioned through the panel can actually get in -- is still
+    a real `POST /auth/login`, below.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -139,7 +162,7 @@ def test_admin_routes_refuse_the_unauthenticated(client):
 
 def test_admin_routes_refuse_an_analyst(conn, client):
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/admin/users", headers=_auth(token))
     assert r.status_code == 403
     assert "user.manage" in r.json()["detail"]
@@ -149,7 +172,7 @@ def test_admin_routes_refuse_an_analyst(conn, client):
 
 def test_an_admin_can_provision_and_manage_an_analyst(conn, client):
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
 
     # Create: 201, one-time credentials, and the warning that they are.
     r = client.post("/api/v1/admin/users", headers=_auth(token), json={
@@ -186,15 +209,25 @@ def test_an_admin_can_provision_and_manage_an_analyst(conn, client):
     assert r.json()["totp_secret"] != created["totp_secret"]
 
     # The created analyst can actually sign in with the re-enrolled secret.
+    # 204 and the cookie pair since 2026-09-10, so the proof that the
+    # provisioned credentials work is the SESSION COOKIE and not a body
+    # this response no longer has -- asserted here rather than left as a
+    # bare status, because a 204 is also what a handler that authenticated
+    # nobody would return if the cookie were ever dropped.
+    from noctornal_api.http.deps import SESSION_COOKIE
     from noctornal_api.security import totp as totp_mod
     r = client.post("/api/v1/auth/login", json={
         "email": created["email"], "password": created["password"],
         "totp_code": totp_mod.code_at(
             client.post(base + "/totp", headers=_auth(token)).json()["totp_secret"],
             int(time.time()))})
-    assert r.status_code == 200, (
+    assert r.status_code == 204, (
         "an account provisioned through the panel cannot sign in: "
         + r.text)
+    assert not r.content, "a 204 login answered with a body"
+    signed_in = [c for c in r.headers.get_list("set-cookie")
+                 if c.startswith(f"{SESSION_COOKIE}=")]
+    assert signed_in, r.headers.get_list("set-cookie")
 
     # Deactivate: their next login is refused; reactivate restores it.
     assert client.post(base + "/deactivate",
@@ -207,7 +240,7 @@ def test_an_admin_can_provision_and_manage_an_analyst(conn, client):
 
 def test_an_admin_cannot_deactivate_their_own_account_over_http(conn, client):
     uid, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post(f"/api/v1/admin/users/{uid}/deactivate",
                     headers=_auth(token))
     assert r.status_code == 409

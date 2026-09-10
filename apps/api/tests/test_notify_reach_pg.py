@@ -25,7 +25,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date
 from uuid import UUID, uuid4
 
@@ -92,13 +91,33 @@ def _make_user(conn, *, clearance="AMBER", global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -142,7 +161,7 @@ def test_a_request_that_reached_nobody_is_201_with_zero_reach_and_a_warning(conn
     N1 that was a 201 indistinguishable from one that reached three
     approvers."""
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     below, _, _ = _make_user(conn, clearance="GREEN")
     _assign(conn, case_id, below, "ANALYST", owner)
@@ -159,7 +178,7 @@ def test_a_request_that_reached_nobody_is_201_with_zero_reach_and_a_warning(conn
 
 def test_a_request_that_reached_an_approver_reports_the_count_and_no_warning(conn, client):
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     approver, _, _ = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, approver, "ANALYST", owner)
@@ -181,7 +200,7 @@ def test_a_failed_request_notification_is_201_not_500(conn, client, monkeypatch)
     monkeypatch.setattr(notify_events, "approval_requested", boom)
 
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     approver, _, _ = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, approver, "ANALYST", owner)
@@ -202,13 +221,13 @@ def test_a_failed_request_notification_is_201_not_500(conn, client, monkeypatch)
 
 def _raise_and_get_decider(conn, client):
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     approver, a_email, a_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, approver, "ANALYST", owner)
     r = _request(client, token, case_id)
     assert r.status_code == 201, r.text
-    return case_id, r.json()["id"], _login(client, a_email, a_secret)
+    return case_id, r.json()["id"], _session(conn, a_email)
 
 
 def test_deciding_reports_whether_the_requester_was_told(conn, client):

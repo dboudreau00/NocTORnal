@@ -46,17 +46,6 @@ class LoginBody(BaseModel):
     totp_code: str | None = None
 
 
-class LoginResponse(BaseModel):
-    # The opaque session token, for `Authorization: Bearer <token>`. The
-    # SAME token is set as the `__Host-session` cookie (see `login`), so a
-    # client picks a transport rather than a session. It stays in the body
-    # for every client because `routers/live.py` authenticates the
-    # websocket from a token in its first frame and reads no cookie; a
-    # browser client that could drop the body token would need that
-    # socket to accept the cookie pair first.
-    token: str
-
-
 def _ip_hash(request: Request) -> bytes | None:
     """The address the audit row names is the one the session is bound to.
 
@@ -83,12 +72,18 @@ def _audit(conn, action: str, actor_id, detail: dict, request: Request) -> None:
     )
 
 
-@router.post("/login", response_model=LoginResponse,
+@router.post("/login", status_code=204,
              dependencies=[Depends(rate_limit("auth.login")),
                            Depends(rate_limit_peek("auth.login_failed"))])
-def login(body: LoginBody, request: Request, response: Response,
-          conn: psycopg.Connection = Depends(get_conn)) -> LoginResponse:
-    """Metered twice, both IP-scoped, and both checked before the Argon2id
+def login(body: LoginBody, request: Request,
+          conn: psycopg.Connection = Depends(get_conn)) -> Response:
+    """204 and the cookie pair; since 2026-09-10 there is no body at all.
+
+    The credential leaves here as `__Host-session` and nowhere else. What
+    that closed, what it did not, and why it could not be done sooner are
+    at the set itself, below.
+
+    Metered twice, both IP-scoped, and both checked before the Argon2id
     verify.
 
     The order is the point: password hashing is deliberately expensive, so
@@ -127,17 +122,39 @@ def login(body: LoginBody, request: Request, response: Response,
         ip=client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     _audit(conn, "AUTH_SUCCEEDED", result.user_id, {}, request)
-    # The cookie pair, on EVERY login and with no switch in the body: the
-    # HttpOnly session cookie for browser clients and the readable CSRF
-    # cookie that is the double-submit half docs/05 requires
-    # (`deps.session_token` demands the matching header on a
-    # cookie-authenticated unsafe method). A script client that only wants
-    # the body token loses nothing by also receiving cookies it never
-    # sends. The analyst console has run on this pair since 2026-09-09;
-    # before that it held the body token in sessionStorage and the pair
-    # was set for nobody.
+    response = Response(status_code=204)
+    # The pair is the WHOLE of a successful login now: the HttpOnly
+    # session cookie, and the readable CSRF cookie that is the
+    # double-submit half docs/05 requires (`deps.session_token` demands
+    # the matching header on a cookie-authenticated unsafe method).
+    #
+    # The same token was returned in the body as well, to every client,
+    # until 2026-09-10. It had to be: two console paths could not read the
+    # cookie -- the live websocket authenticated from a token in its first
+    # frame, and the Lab download is cross-origin, so no `__Host-` cookie
+    # can reach it. Both are closed (`routers/live.py` `_handshake` now
+    # prefers `__Host-session` off the upgrade; the download crosses on a
+    # one-shot ticket minted under the cookie session, 0061), and a body
+    # token nothing needs is a session credential that any script on this
+    # origin can read -- the exact property HttpOnly exists to deny. The
+    # order was load-bearing: deleting it first would have taken the
+    # console's live pane and every Lab download with it.
+    #
+    # This is not the end of bearer tokens, and reading it that way is the
+    # mistake to avoid. `deps.session_token` still prefers `Authorization:
+    # Bearer`; `scripts/bootstrap.py session` still mints one through
+    # `SessionService` directly, never through here, and the `#token=`
+    # link it prints is still exchanged at `POST /auth/cookie`. What went
+    # away is LOGIN handing one out.
+    #
+    # Nor is the token withheld from the client that just signed in: the
+    # cookie value IS the raw session token, so a script client reads it
+    # off `Set-Cookie` and may send it as either transport. The property
+    # gained is narrower and is the one that matters here -- script in the
+    # analyst's browser cannot read an HttpOnly cookie, so after this
+    # there is nowhere in a browser that the session token is legible.
     _set_session_cookies(response, token)
-    return LoginResponse(token=token)
+    return response
 
 
 @router.post("/logout", status_code=204)
@@ -167,6 +184,18 @@ def adopt_cookie(request: Request,
                  user: CurrentUser = Depends(current_user),
                  conn: psycopg.Connection = Depends(get_conn)) -> Response:
     """Set the cookie pair for the session the caller is already presenting.
+
+    Kept deliberately after login stopped returning a token (2026-09-10),
+    because the hand-off it serves does not come from login and never
+    did. A browser can no longer be handed a bearer by signing in, but
+    `scripts/bootstrap.py session` still mints one through
+    `SessionService` directly -- the recovery path for a host whose clock
+    TOTP cannot live with -- and this route is the only way that token
+    becomes a session the browser keeps across a reload. Without it that
+    hand-off would either die or have to write the token into web
+    storage, which is what the cookie pair replaced. What did change is
+    the population: nothing arrives here holding a login-body token,
+    because there is no longer any such thing.
 
     For the `#token=` hand-off: `scripts/bootstrap.py session` mints a
     session from a shell and hands the token to the browser in the URL

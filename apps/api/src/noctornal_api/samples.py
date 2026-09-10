@@ -59,6 +59,24 @@ consistent and wrong together. Now the UI CSP names the sample origin,
 the sample process answers the console's cross-origin request, and the
 verdict comes from the three variables above.
 
+**What crosses to that origin is a TICKET, not a session** (0061). The
+cookie pair is `__Host-` prefixed and `SameSite=strict`, so none of it
+can reach the sample origin -- that is the point of the split -- and the
+console therefore forced the login-body token there as a Bearer: a
+standing session credential, held in page memory, posted to a second
+origin, on the one path that puts working malware on somebody's disk.
+`issue_download_ticket` replaces it. The ticket is minted on the
+APPLICATION origin under the ordinary cookie session (so the
+`x-csrf-token` double-submit applies), is good for one sample and one
+redemption within `DOWNLOAD_TICKET_TTL_SECONDS`, and carries no standing
+authority: what it buys is the archive the analyst was already
+downloading. Nor does it outlive the authority it was minted under -- the
+redemption re-reads the holder's ACCOUNT (active, still holding
+`sample.download`) and their live clearance before a byte moves, so a
+revocation inside the window bites. The session behind the mint is the
+one thing not re-derived there, and 0061 says exactly that. The Bearer
+path still works; removing it is a later step.
+
 **When `NOCTORNAL_SAMPLE_ORIGIN` is unset the control is OFF**, and the
 readiness register, the router docstring and `GET /samples/policy` all
 say so in those words: every download refuses, on every process, and no
@@ -104,22 +122,36 @@ the archive comment itself.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
+import logging
 import math
 import os
 import secrets
 import struct
+import threading
+import time
 import zlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
 from psycopg.types.json import Json
 
+# The one existing spelling of "does this ACTIVE account hold this global
+# permission", used at redemption. See `_still_authorised`.
+from noctornal_api.iam_admin import IamAdminService
 from noctornal_api.security import envelope
 from noctornal_api.security.access import AccessResolutionError, tlp_from_name
+# The one spelling of "hash an opaque token" in this codebase. A download
+# ticket is the same kind of secret as a session token -- high-entropy,
+# presented once, stored only as its digest -- and giving it a second
+# hashing function would mean two places to get the encoding wrong.
+from noctornal_api.security.tokens import hash_token
+
+log = logging.getLogger("noctornal.samples")
 
 SUBMITTED = "SUBMITTED"
 QUARANTINED = "QUARANTINED"
@@ -137,6 +169,94 @@ ARCHIVE_PASSWORD = b"infected"
 #: either way it does not belong in a quarantine queue behind an HTTP
 #: request.
 MAX_SAMPLE_BYTES = 256 * 1024 * 1024
+
+#: How long a download ticket is good for (0061).
+#:
+#: Sixty seconds, and the number is chosen against what the ticket
+#: actually spans: the gap between two requests ONE browser makes back to
+#: back -- mint on the application origin, then redeem on the sample
+#: origin -- with a preflight and a click's worth of latency between them.
+#: It is not a session and must not be sized like one. The generous
+#: reading of that gap is a slow link and a busy laptop, which is seconds;
+#: sixty leaves an order of magnitude of headroom and still means a ticket
+#: copied out of a proxy log or a crash dump is inert by the time anybody
+#: reads it. The other half of the bound is that the ticket is single-use,
+#: so the window is not "how long is it valid" but "how long may it sit
+#: unused before the analyst has to click again".
+DOWNLOAD_TICKET_TTL_SECONDS = 60
+
+#: The verb both doors into a sample's bytes state, in ONE place because
+#: two of them now read it: `routers/samples.py` gates the download and
+#: the mint on it through `require_global`, and the redemption re-reads it
+#: on the sample origin (`_still_authorised`). Two spellings of the key
+#: would mean a permission renamed in the seed silently ungating one door
+#: while the other kept refusing.
+DOWNLOAD_PERMISSION = "sample.download"
+
+#: The refusal reason, from `_ticket_refusal`, that names nobody: a
+#: presented string that matched no row at all. It is the one refusal an
+#: unauthenticated caller can produce on demand, and it is therefore the
+#: one that is counted rather than written down. Named rather than
+#: repeated so the producer and the consumer cannot drift.
+_UNKNOWN_TICKET = "unknown_ticket"
+
+#: What EVERY refused redemption says, whatever the reason. One string,
+#: used by every raise on that path, because the whole point is that a
+#: caller cannot tell the four ticket-state refusals from each other or
+#: from the account one: "already redeemed" would tell the holder of a
+#: stolen ticket that it was real and that somebody else got there first.
+#: It enumerates the possibilities instead, so a legitimate analyst is not
+#: sent looking at the wrong one, and the audit records which it was.
+_TICKET_REFUSED = (
+    "this download ticket is not valid: it has been used, it has expired, "
+    "it was not issued for this sample, or the account it was issued to "
+    "may no longer download samples. Tickets are good for one download "
+    f"within {DOWNLOAD_TICKET_TTL_SECONDS} seconds -- ask the console for "
+    "another."
+)
+
+#: How often the unknown-ticket warning may be written, in seconds. The
+#: peer chooses how often that event happens, so a line per event lets the
+#: peer choose how fast the log grows -- the same reasoning, and the same
+#: mechanism, as the pre-accept refusal sampler in `routers/live.py`.
+_UNKNOWN_TICKET_LOG_SECONDS = 30.0
+
+
+class _SampledWarning:
+    """At most one log line per window, carrying the count of everything
+    the window swallowed, so an operator reads "412 since the last line"
+    rather than 412 lines.
+
+    A deliberate second, smaller copy of the class in
+    `http/routers/live.py`. A service module must not import a router --
+    the dependency runs the other way and closing that loop for a
+    twelve-line helper would be the wrong trade -- and the shared home for
+    it is a new module, which is a change to make on purpose rather than
+    inside a security fix. `threading.Lock` because the ASGI threadpool
+    runs these handlers on more than one thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last: float | None = None
+        self._since = 0
+
+    def note(self) -> int | None:
+        """Count one event. Returns how many the due line stands for -- on
+        the first ever, and on the first after each window -- and None when
+        this one is to be swallowed into the next line's count."""
+        now = time.monotonic()
+        with self._lock:
+            self._since += 1
+            if (self._last is not None
+                    and now - self._last < _UNKNOWN_TICKET_LOG_SECONDS):
+                return None
+            self._last = now
+            n, self._since = self._since, 0
+            return n
+
+
+_unknown_tickets = _SampledWarning()
 
 
 class SampleError(Exception):
@@ -360,9 +480,14 @@ def download_cors_headers(origin_header: str | None) -> dict[str, str]:
     The allowed origin is the CONFIGURED application origin, never an echo
     of the header: a page on any other origin gets no
     `Access-Control-Allow-Origin` and the browser withholds the response.
-    No `Access-Control-Allow-Credentials`, so no cookie ever crosses; the
-    console authenticates the download with its Bearer token, which is
-    the credential a cross-origin page cannot forge.
+    No `Access-Control-Allow-Credentials`, so no cookie ever crosses --
+    which is why the console proves itself there with something that is
+    neither: a one-shot download ticket in the FORM BODY (0061), minted
+    on the application origin under the cookie session. It carried a
+    Bearer until 2026-09-10, and that is the credential this comment used
+    to name. The redemption sends no header of its own at all, because
+    one outside the CORS safelist would make it a preflighted request and
+    `app._preflight` admits `authorization` alone.
 
     Exists at all because a CSP that names the sample origin is only half
     of letting the Lab pane download: without this answer the browser
@@ -691,6 +816,34 @@ class Sample:
     assigned_to: UUID | None
     classification: str
     compartments: frozenset[str]
+
+
+@dataclass(frozen=True)
+class DownloadTicket:
+    """What a mint hands back. `raw` exists in this object and in the
+    response that carries it, and nowhere else: the row holds
+    `hash_token(raw)`, and no audit detail, log line or URL ever repeats
+    it (0061).
+
+    `expires_at` comes back from the INSERT rather than being computed
+    here, because the expiry is set by the DATABASE clock and compared
+    against the database clock at redemption. A Python `datetime.now()`
+    would introduce a second clock into a sixty-second window, which is
+    how a control ends up refusing valid tickets on one host and
+    accepting expired ones on another.
+    """
+
+    id: UUID
+    raw: str
+    sample_id: UUID
+    user_id: UUID
+    expires_at: datetime
+
+
+def new_download_ticket() -> str:
+    """256 bits, URL-safe, from the CSPRNG -- the same construction as a
+    session token, because a ticket is guessed the same way one is."""
+    return secrets.token_urlsafe(32)
 
 
 class SampleService:
@@ -1025,7 +1178,8 @@ class SampleService:
     def download(self, sample_id: UUID, *, actor_id: UUID,
                  request_origin: str | None = None,
                  clearance: str | None = None,
-                 compartments: frozenset[str] = frozenset()
+                 compartments: frozenset[str] = frozenset(),
+                 ticket_id: UUID | None = None
                  ) -> tuple[bytes, str]:
         """The encrypted archive, and only from the separate origin.
 
@@ -1062,42 +1216,29 @@ class SampleService:
         with nothing to catch it -- `lab.sample` has no `enforce_tlp_floor`
         trigger, unlike node, edge and evidence. Both directions are
         handled here because neither is handled anywhere else.
+
+        `ticket_id` names the one-shot ticket that authorised this copy,
+        when one did (0061). It is recorded in the custody row and
+        nowhere else: "who took a copy of a live binary" is the question
+        `lab.sample_access` exists to answer, and HOW they proved they
+        could is part of that answer. The clearance handed in is always
+        the live one -- for a ticket that means the ticket-holder's
+        ceiling read at redemption, not the one that was true when the
+        ticket was minted a minute ago.
         """
-        if clearance is None:
-            raise SampleError(
-                "download() hands over live malware and needs the caller's "
-                "clearance. Defaulting would make every caller that forgets "
-                "silently maximally privileged, which is how this path came "
-                "to have no label check at all.")
+        # Ahead of the origin split, and it has to stay ahead of it: a
+        # caller who forgot the argument must be told THAT, not handed a
+        # deployment refusal about origins that sends them to the
+        # environment. `_downloadable` asks again -- the guard belongs to
+        # the decision, and the mint reaches the decision by another door.
+        _require_clearance(clearance)
         split = origin_split(this=request_origin)
         if not split.serves_here:
             raise SampleError(split.refusal)
         configured = split.sample
 
-        # The labels are applied IN the query, and the case's are composed
-        # with the sample's -- stricter classification, union of
-        # compartments, exactly as `deps.effective_labels` does for a node.
-        # A caller who may not read it gets "no such sample", the same
-        # answer a nonexistent id gets, because a status code must not be
-        # an existence oracle.
-        row = self._c.execute(
-            """SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
-                      s.sha256, s.state
-                 FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.id = %s
-                  AND greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                      <= %s::core.tlp
-                  AND (s.compartments
-                       || coalesce(c.compartments, '{}')) <@ %s""",
-            (sample_id, clearance, list(compartments))).fetchone()
-        if row is None:
-            raise SampleError("no such sample")
-        if row[4] == REJECTED:
-            raise SampleError("this sample was rejected and its bytes destroyed")
-        if not row[1]:
-            raise SampleError("this sample has no data key; it cannot be read")
+        row = self._downloadable(sample_id, clearance=clearance,
+                                 compartments=compartments)
         if self._storage is None:
             raise SampleError("sample storage is not configured")
 
@@ -1144,9 +1285,359 @@ class SampleService:
                 "error — it has been written to the custody ledger and the "
                 "audit log, and the bytes have NOT been served.")
 
-        self._access(sample_id, actor_id, "DOWNLOADED",
-                     {"origin": configured}, archive_format="ZIP_INFECTED")
+        # `via` is derived rather than passed: a ticket id present means
+        # the authority was a ticket, and two parameters that can disagree
+        # about one fact is how a custody row comes to say something that
+        # is not so.
+        custody = {"origin": configured}
+        if ticket_id is not None:
+            custody["via"] = "ticket"
+            custody["ticket_id"] = str(ticket_id)
+        self._access(sample_id, actor_id, "DOWNLOADED", custody,
+                     archive_format="ZIP_INFECTED")
         return archive(data, digest.hex()), digest.hex()
+
+    def _downloadable(self, sample_id: UUID, *, clearance: str | None,
+                      compartments: frozenset[str] = frozenset()) -> tuple:
+        """The decision that stands between a caller and a live binary, in
+        ONE place because two endpoints now make it.
+
+        Returns `(storage_key, data_key_ciphertext, data_key_id, sha256,
+        state)` for a sample this caller may take a copy of, and raises
+        otherwise. `issue_download_ticket` calls it and throws the row
+        away: what it needs is the refusal, so that a ticket can never be
+        minted for a sample its holder could not have downloaded directly.
+        Restating the predicate there would have been the same defect this
+        method's own history is made of -- `download()` had no label check
+        at all while `detail()` twenty lines away 404'd the same sample.
+
+        Five parts, and each one has been wrong here at some point:
+
+        1. the caller's clearance is stated rather than assumed;
+        2. the sample exists, and is readable at that clearance -- with
+           its CASE's labels composed in, stricter classification and
+           union of compartments, exactly as `deps.effective_labels` does
+           for a node. Applied IN the query, so a caller who may not read
+           it gets "no such sample", the same answer a nonexistent id
+           gets: a status code must not be an existence oracle;
+        3. its compartments are ones the caller is read into;
+        4. it was not REJECTED, whose bytes are destroyed by definition;
+        5. it still has a data key, without which there is nothing to
+           decrypt.
+        """
+        _require_clearance(clearance)
+        row = self._c.execute(
+            """SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
+                      s.sha256, s.state
+                 FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.id = %s
+                  AND greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                      <= %s::core.tlp
+                  AND (s.compartments
+                       || coalesce(c.compartments, '{}')) <@ %s""",
+            (sample_id, clearance, list(compartments))).fetchone()
+        if row is None:
+            raise SampleError("no such sample")
+        if row[4] == REJECTED:
+            raise SampleError("this sample was rejected and its bytes destroyed")
+        if not row[1]:
+            raise SampleError("this sample has no data key; it cannot be read")
+        return row
+
+    # -- the hand-off between the two origins (0061) -----------------------
+
+    def issue_download_ticket(self, sample_id: UUID, *, actor_id: UUID,
+                              clearance: str | None = None,
+                              compartments: frozenset[str] = frozenset(),
+                              session_id: UUID | None = None,
+                              ip_hash: bytes | None = None,
+                              request_origin: str | None = None
+                              ) -> DownloadTicket:
+        """Mint a one-shot, sixty-second authority to download ONE sample.
+
+        Minted on the APPLICATION origin, under the caller's ordinary
+        session, and redeemed on the sample origin -- which is the whole
+        point. A `__Host-` cookie cannot travel to the sample origin, so
+        until now the console forced the login-body token there as a
+        Bearer: a standing session credential, held in page memory,
+        presented to a second origin. The ticket confers authority over
+        this sample and nothing else, once, and expires whether it is used
+        or not.
+
+        Refuses on two configuration grounds before it looks at anything:
+
+        - `split_problem` -- the control is off, or the configured value
+          is not an origin, or it is a second name for the application's.
+          A ticket whose `download_url` points at an origin that refuses
+          every download is a worse answer than a refusal here, because
+          the failure would surface as the console's "did not complete";
+        - this process IS the sample origin. The sample origin exists so
+          that no analyst session runs there; minting on it would put the
+          session it is minted under exactly where the split says none may
+          be. `app.py`'s `_allowed_on_sample_origin` already 404s this
+          path on that process -- the ticket path is not the download path
+          and is not in its allow-list -- and this is the check that does
+          not depend on a regular expression in another file agreeing.
+
+        Then the SAME decision `download()` makes, through
+        `_downloadable`, so the mint cannot authorise what the download
+        would refuse.
+        """
+        split = origin_split(this=request_origin)
+        if split.split_problem is not None:
+            raise SampleError(split.split_problem)
+        if split.serves_here:
+            raise SampleError(
+                "download tickets are minted on the application origin and "
+                "redeemed here. This process is configured as the sample "
+                f"origin ({split.sample}), which serves sample bytes and "
+                f"nothing else; ask {split.app} for a ticket.")
+        self._downloadable(sample_id, clearance=clearance,
+                           compartments=compartments)
+
+        raw = new_download_ticket()
+        # The expiry is set BY THE DATABASE and compared against the
+        # database clock at redemption. Computing it here would put a
+        # second clock inside a sixty-second window -- the API host's --
+        # and two clocks a few seconds apart mean a ticket that is expired
+        # on arrival or one that outlives its own audit row.
+        # The TTL crosses as a `timedelta`, which psycopg adapts to
+        # `interval` -- so the addition is `timestamptz + interval` with
+        # nothing for the planner to guess at. `make_interval(secs => %s)`
+        # would have left an integer parameter to be resolved against an
+        # overloaded function's `double precision` argument.
+        row = self._c.execute(
+            """INSERT INTO lab.download_ticket
+                   (token_hash, sample_id, user_id, session_id, expires_at,
+                    ip_hash)
+               VALUES (%s, %s, %s, %s, now() + %s, %s)
+               RETURNING id, expires_at""",
+            (hash_token(raw), sample_id, actor_id, session_id,
+             timedelta(seconds=DOWNLOAD_TICKET_TTL_SECONDS),
+             ip_hash)).fetchone()
+        # Audited as an ISSUE, not as custody. `lab.sample_access` is the
+        # record of who took a copy, its action set is closed, and a
+        # ticket is not a copy -- the custody row is written when the
+        # bytes are actually served, and it names this ticket.
+        self._audit("SAMPLE_DOWNLOAD_TICKET_ISSUED", actor_id=actor_id,
+                    sample_id=sample_id, session_id=session_id,
+                    ip_hash=ip_hash,
+                    detail={"ticket_id": str(row[0]),
+                            "expires_at": row[1].isoformat(),
+                            "ttl_seconds": DOWNLOAD_TICKET_TTL_SECONDS,
+                            "sample_origin": split.sample})
+        return DownloadTicket(id=row[0], raw=raw, sample_id=sample_id,
+                              user_id=actor_id, expires_at=row[1])
+
+    def redeem_download_ticket(self, presented: str, *, sample_id: UUID,
+                               ip_hash: bytes | None = None
+                               ) -> tuple[UUID, UUID]:
+        """Spend a ticket. Returns `(user_id, ticket_id)`; raises on
+        anything else.
+
+        ONE statement decides it. The predicate and the write are the same
+        `UPDATE ... RETURNING`, so two simultaneous presentations of the
+        same ticket cannot both find `redeemed_at IS NULL` -- the row lock
+        the UPDATE takes serialises them and exactly one gets a row back.
+        A `SELECT` then an `UPDATE` would have been the readable version
+        and would have handed the archive to both halves of a race, which
+        is precisely what "one-shot" must not mean.
+
+        `sample_id` is part of the predicate, not a check afterwards: a
+        ticket presented on the path of a DIFFERENT sample matches no row
+        at all, so it is refused and -- deliberately -- not spent. Burning
+        it would let anyone who could reach this endpoint invalidate a
+        ticket they cannot use by guessing the wrong sample.
+
+        Expiry is `expires_at > now()`, the database's clock on both
+        sides of the hand-off, and the row is not deleted: an exhausted
+        ticket is evidence for as long as the retention pass leaves it.
+
+        ## The ACCOUNT is re-read here; the session is not
+
+        A live ticket is not an authority on its own, and treating it as
+        one meant that inside the sixty-second window an account which had
+        just been DEACTIVATED, or had `sample.download` revoked, still
+        received the archive. Sixty seconds is short and that is still the
+        wrong answer on the one path that puts working malware on a disk,
+        so `_still_authorised` re-asks the question the mint asked --
+        active account, verb held through a global role -- on this
+        process, before the bytes move. The other half of the mint's
+        decision, the sample's labels against the holder's LIVE ceiling,
+        has always been re-read: `routers/samples.download` calls
+        `user_ceiling` and `_downloadable` runs again.
+
+        What is deliberately NOT re-derived is the SESSION -- whether it
+        still exists, has been revoked, has expired, or would satisfy
+        step-up freshness now. That is the residual 0061 states, and it is
+        a different question from this one: the session is a credential
+        this origin cannot resolve without a third copy of a check
+        `http/deps.py` keeps in exactly two places, whereas the account is
+        one row and one join away from the ticket the caller just
+        presented.
+        """
+        digest = hash_token(presented or "")
+        row = self._c.execute(
+            """UPDATE lab.download_ticket
+                  SET redeemed_at = now()
+                WHERE token_hash = %s
+                  AND sample_id = %s
+                  AND redeemed_at IS NULL
+                  AND expires_at > now()
+            RETURNING id, user_id, session_id, token_hash""",
+            (digest, sample_id)).fetchone()
+        if row is None:
+            # WHY it failed goes in the audit and never in the answer. The
+            # caller learns only that the ticket is not usable: "already
+            # redeemed" tells a holder of a stolen ticket that it was real
+            # and that someone else got there first, which is exactly the
+            # oracle `deps.current_user` refuses to be about sessions.
+            reason, holder = self._ticket_refusal(digest, sample_id)
+            if reason == _UNKNOWN_TICKET:
+                # ...and one of the five reasons is not audited at all.
+                #
+                # An unknown ticket names nobody and evidences nothing: a
+                # string that matched no row. It is also the ONE refusal a
+                # caller with no credential of any kind can produce on
+                # demand, by posting `ticket=x` at this origin -- so
+                # writing a row for it made `audit.event`, which is
+                # append-only by design, hash-chained and serialised by an
+                # advisory lock, appendable by anyone who could reach the
+                # sample process, with nothing able to remove what they
+                # wrote. That is the shape `RateLimiter.should_audit`
+                # already refuses on its own denials, for the same reason.
+                #
+                # The honest record of "somebody sent a string" is a
+                # counted log line, the way `routers/live.py` records a
+                # pre-accept refusal, and the `sample.download` limit
+                # bounds how many strings one source may send. The other
+                # four reasons each name a REAL minted ticket and a real
+                # user; those still write a row, because those are events
+                # a security officer must be able to find years later.
+                counted = _unknown_tickets.note()
+                if counted is not None:
+                    log.warning(
+                        "download ticket presented that matches no row (%d "
+                        "since the last line). Unaudited by design: this "
+                        "refusal needs no credential, so a row per attempt "
+                        "would let the caller append to the audit chain at "
+                        "will.", counted)
+            else:
+                self._audit("SAMPLE_DOWNLOAD_TICKET_REFUSED", actor_id=holder,
+                            sample_id=sample_id, outcome="DENIED",
+                            ip_hash=ip_hash, detail={"reason": reason})
+            raise SampleError(_TICKET_REFUSED)
+        if not hmac.compare_digest(bytes(row[3]), digest):
+            # Cannot fire against the predicate above, and that is the
+            # point of writing it: the equality that granted this row was
+            # the database's, inside an index, and this is the comparison
+            # THIS process makes on the bytes it got back before it serves
+            # a live binary. The day somebody loosens that WHERE clause --
+            # a prefix lookup, a join, a LIKE -- a partial match stops
+            # here instead of becoming a download.
+            self._audit("SAMPLE_DOWNLOAD_TICKET_REFUSED", actor_id=row[1],
+                        sample_id=sample_id, outcome="DENIED", ip_hash=ip_hash,
+                        detail={"reason": "hash_mismatch_after_lookup"})
+            raise SampleError(_TICKET_REFUSED)
+        # The ticket is already SPENT at this point, and the account check
+        # below can still refuse. That ordering is deliberate in both
+        # directions. Spending first is what makes the one-shot property a
+        # single statement, which is the only way two simultaneous
+        # presentations cannot both succeed; and a ticket presented by a
+        # holder who has just lost their authority is a ticket that should
+        # not survive to be presented again if the deactivation is
+        # reversed. Nothing is lost by burning it: unlike a wrong-sample
+        # guess, this presentation could only be made by somebody actually
+        # holding the string.
+        holder = row[1]
+        if not self._still_authorised(holder):
+            self._audit("SAMPLE_DOWNLOAD_TICKET_REFUSED", actor_id=holder,
+                        sample_id=sample_id, session_id=row[2],
+                        outcome="DENIED", ip_hash=ip_hash,
+                        detail={"reason": self._authority_refusal(holder),
+                                # The row was spent by the UPDATE above, so
+                                # the ledger and the audit agree about a
+                                # ticket that reads as redeemed and served
+                                # nothing.
+                                "ticket_id": str(row[0]), "spent": True})
+            raise SampleError(_TICKET_REFUSED)
+        self._audit("SAMPLE_DOWNLOAD_TICKET_REDEEMED", actor_id=holder,
+                    sample_id=sample_id, session_id=row[2], ip_hash=ip_hash,
+                    detail={"ticket_id": str(row[0])})
+        return holder, row[0]
+
+    def _still_authorised(self, user_id: UUID) -> bool:
+        """Is the ticket's holder still an ACTIVE account holding
+        `sample.download` through a global role?
+
+        `IamAdminService.holds_global_permission` is that question already
+        written down -- its own docstring calls it "the same question
+        `deps.require_global` asks, WITHOUT the step-up freshness clause".
+        Reused rather than restated: a second copy of the join would be the
+        defect this whole path is made of, where `download()` had no label
+        check while `detail()` twenty lines away had one.
+
+        Its docstring also says it must not authorise a WRITE, because a
+        write is what step-up exists to re-challenge. This is not a write
+        and the step-up it omits was not skipped: `require_global` and
+        `require_step_up` both ran at the mint, less than
+        `DOWNLOAD_TICKET_TTL_SECONDS` ago, and sixty seconds is a tighter
+        assurance bound than the fifteen minutes `STEP_UP_FRESHNESS`
+        would have allowed. What could not be re-asked here is whether the
+        SESSION that satisfied it is still live, and that -- not the
+        account -- is the residual 0061 states.
+        """
+        return IamAdminService(self._c).holds_global_permission(
+            user_id, DOWNLOAD_PERMISSION)
+
+    def _authority_refusal(self, user_id: UUID) -> str:
+        """Which half of `_still_authorised` said no, for the audit only.
+
+        A second read on the refusal path alone, for `_ticket_refusal`'s
+        reason: "the account was disabled and a download was attempted
+        thirty seconds later" and "this analyst's download permission was
+        revoked" are two different things to go and ask somebody about,
+        and a single reason string would send a security officer to the
+        wrong one.
+        """
+        row = self._c.execute(
+            "SELECT is_active FROM iam.app_user WHERE id = %s",
+            (user_id,)).fetchone()
+        if row is None or not row[0]:
+            return "account_deactivated"
+        return "download_permission_revoked"
+
+    def _ticket_refusal(self, digest: bytes,
+                        sample_id: UUID) -> tuple[str, UUID | None]:
+        """Why a redemption matched nothing, for the audit row only.
+
+        A second read, on the refusal path alone, because "a ticket was
+        refused" is not a useful thing for a security officer to find:
+        replay, a stale tab and a ticket aimed at the wrong sample are
+        three different events and only one of them is an attack. The
+        holder comes back too, so the audit row names a user when there is
+        one to name.
+        """
+        row = self._c.execute(
+            """SELECT user_id, sample_id, redeemed_at, expires_at <= now()
+                 FROM lab.download_ticket WHERE token_hash = %s""",
+            (digest,)).fetchone()
+        if row is None:
+            # The one reason with no user behind it, and the one the
+            # caller reaches with no credential -- so it is counted rather
+            # than audited. Named, because its consumer branches on it.
+            return _UNKNOWN_TICKET, None
+        if row[2] is not None:
+            return "already_redeemed", row[0]
+        if row[3]:
+            return "expired", row[0]
+        if row[1] != sample_id:
+            return "issued_for_another_sample", row[0]
+        # Live, unspent, for this sample, and the UPDATE still matched
+        # nothing: another request redeemed it between the two statements.
+        return "redeemed_concurrently", row[0]
 
     def request_detonation(self, sample_id: UUID, *, requested_by: UUID,
                            target: str, exposure_level: str,
@@ -1320,6 +1811,30 @@ class SampleService:
                VALUES (%s, %s, %s, %s, %s)""",
             (sample_id, actor_id, action, archive_format, Json(detail)))
 
+    def _audit(self, action: str, *, sample_id: UUID, detail: dict,
+               actor_id: UUID | None = None, outcome: str = "SUCCESS",
+               session_id: UUID | None = None,
+               ip_hash: bytes | None = None) -> None:
+        """The hash-chained audit log, for the ticket events.
+
+        Distinct from `_access`: `lab.sample_access` is the CUSTODY
+        ledger and its `action` set is closed by a CHECK constraint to
+        the seven things that can happen to a sample, of which minting a
+        ticket is not one. A ticket is an authorisation; the custody row
+        is written when bytes are served, and names the ticket that
+        authorised them.
+
+        `actor_kind` follows `deps.audit_auth_event`: a refusal with no
+        identifiable holder is SYSTEM, not a USER row with a null actor.
+        """
+        self._c.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, object_id,
+                    outcome, detail, ip_hash, session_id)
+               VALUES (%s, %s, %s, 'sample', %s, %s, %s, %s, %s)""",
+            (actor_id, "USER" if actor_id else "SYSTEM", action, sample_id,
+             outcome, Json(detail), ip_hash, session_id))
+
 
 def _xor_stream(data: bytes, key: bytes) -> bytes:
     """Encrypt the sample at rest under its per-sample key.
@@ -1358,6 +1873,22 @@ _COLUMNS = ("id, case_id, sha256, sha1, md5, original_filename, byte_size, "
 _SAMPLE_COLUMNS = ", ".join("s." + c.strip() for c in _COLUMNS.split(","))
 
 
+def _require_clearance(clearance: str | None) -> None:
+    """Refuse a caller who did not say what they are cleared for.
+
+    One message for the two doors into a sample's bytes -- the download
+    and the ticket that authorises one -- because a defaulted clearance
+    is how this path came to have no label check at all, and a second
+    spelling of the refusal is a second chance to get the default wrong.
+    """
+    if clearance is None:
+        raise SampleError(
+            "download() hands over live malware and needs the caller's "
+            "clearance. Defaulting would make every caller that forgets "
+            "silently maximally privileged, which is how this path came "
+            "to have no label check at all.")
+
+
 def _may_see(classification: str, compartments, clearance: str | None,
              held: frozenset[str]) -> bool:
     """Would this caller have been shown a row with these labels?
@@ -1390,11 +1921,14 @@ def _record(r) -> Sample:
 
 
 __all__ = [
-    "ARCHIVE_PASSWORD", "ASSIGNED", "IN_ANALYSIS", "MAX_SAMPLE_BYTES",
+    "ARCHIVE_PASSWORD", "ASSIGNED", "DOWNLOAD_PERMISSION",
+    "DOWNLOAD_TICKET_TTL_SECONDS",
+    "IN_ANALYSIS", "MAX_SAMPLE_BYTES",
     "QUARANTINED", "REJECTED", "REPORTED", "SUBMITTED", "TRIAGED",
-    "OriginSplit", "PolicyNotDeclared", "Sample", "SampleError",
-    "SampleService", "Triage", "app_origin", "archive",
-    "download_cors_headers", "file_type_of", "normalise_origin",
+    "DownloadTicket", "OriginSplit", "PolicyNotDeclared", "Sample",
+    "SampleError", "SampleService", "Triage", "app_origin", "archive",
+    "download_cors_headers", "file_type_of", "new_download_ticket",
+    "normalise_origin",
     "origin_split", "policy_declared", "public_origin", "sample_origin",
     "SampleStorage", "shannon_entropy", "triage",
 ]

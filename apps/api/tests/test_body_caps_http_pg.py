@@ -44,7 +44,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import time
 from datetime import date
 from uuid import uuid4
 
@@ -185,13 +184,33 @@ def _make_user(conn, *, global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _create_case(client, token) -> str:
@@ -326,7 +345,7 @@ def test_an_evidence_body_one_byte_over_the_cap_is_refused_before_it_is_read(
     COMPLIANCE lock before anything asked how big it was.
     """
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     body, content_type = _multipart_of_total(evidence_cap + 1)
     auth = {"authorization": f"Bearer {token}", "content-type": content_type}
@@ -367,7 +386,7 @@ def test_an_evidence_body_at_the_cap_is_accepted(conn, app, client, evidence_cap
     exhibit -- through the capped receive, in chunks, with the length
     declared the way a browser declares it."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     body, content_type = _multipart_of_total(evidence_cap)
     status, _headers, payload = _drive(
@@ -543,7 +562,7 @@ def test_a_sample_body_one_byte_over_the_cap_is_refused_before_it_is_read(
     this process's memory; the bytes had all arrived. Before the change
     this test died in the generator, exactly as the evidence one did."""
     uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     body, content_type = _multipart_of_total(sample_cap + 1)
     auth = {"authorization": f"Bearer {token}", "content-type": content_type}
 
@@ -572,7 +591,7 @@ def test_a_sample_body_at_the_cap_is_accepted(conn, app, client, sample_cap):
     quarantine. Unique content: the service deduplicates on hash, and a
     fixed payload would fail the second run on the first run's row."""
     uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     body, content_type = _multipart_of_total(
         sample_cap, head=b"MZ\x90\x00not-really-malware-" + uuid4().bytes)
     status, _headers, payload = _drive(
@@ -604,7 +623,7 @@ def test_an_email_exhibit_one_byte_over_the_cap_is_refused_before_it_is_read(
         conn, app, client, eml_cap):
     """Same shape as the samples router, same date, same fix."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     body, content_type = _eml_of_total(eml_cap + 1)
     auth = {"authorization": f"Bearer {token}", "content-type": content_type}
@@ -640,7 +659,7 @@ def test_an_email_exhibit_at_the_cap_is_accepted(conn, app, client, eml_cap):
     """The positive control: the exhibit lands under its lock and the
     message is recorded from it."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     body, content_type = _eml_of_total(eml_cap)
     status, _headers, payload = _drive(
