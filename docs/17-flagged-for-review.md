@@ -324,6 +324,43 @@ this may mean one person wearing both hats, which defeats the separation.
 **Decide whether to enforce it or accept the risk explicitly**, rather
 than discovering the gap in an audit. docs/16 D7.
 
+### F21 — The live websocket authenticates from the session cookie, and
+no double-submit can protect it
+
+Added 2026-09-10, with Wave 2. `_handshake` now prefers `__Host-session`
+off the upgrade, and that is what let `POST /auth/login` stop returning a
+token at all: the one credential surviving a reload had been the one
+credential the live channel would not take.
+
+A cookie-derived credential elsewhere in this codebase is only accepted
+on an unsafe method alongside the `x-csrf-token` header
+`deps.session_token` demands. That defence is **unavailable here by
+construction** — a browser cannot set a header on a websocket upgrade, so
+there is no double-submit to make. Two things stand in its place:
+`SameSite=Strict`, which stops the cookie travelling on a cross-SITE
+upgrade, and an explicit `Origin` check that refuses a cookie-carrying
+upgrade whose origin is not the configured public origin, refused before
+`accept()` so a flood spends no budget.
+
+Those two are not belt and braces, and the judgement below depends on not
+reading them that way. SameSite is scoped to the registrable domain, so a
+page on a SIBLING SUBDOMAIN of the console is same-site: a compliant
+browser attaches the host-only `__Host-session` to its upgrade and
+SameSite refuses nothing. Against a compromised internal host, a wildcard
+DNS entry, or any other service on the domain, the `Origin` check is the
+only control there is.
+
+**The trade:** the socket is one-way after the hello frame — it fans out
+change hints and takes no writes — so what an attacker would gain is a
+live feed, not an action, and every delivery is re-checked against the
+case assignment. **Confirm that reading is a small enough prize to accept
+a cookie-authenticated channel with no double-submit.** Confirm the
+second thing too: the configured origin must be the one analysts actually
+type. A mismatch refuses every cookie-authenticated socket, and because
+the refusal is pre-accept the browser reports 1006 rather than the policy
+close, so the console says only "not live" and the server log is the one
+place the answer exists.
+
 ---
 
 ## 🔵 ACCEPTED COST
@@ -367,6 +404,67 @@ the output looks complete.
 Decision 42. There are no annotations to check against. Adding them is a
 large, low-yield change to a codebase whose invariants are enforced by
 database constraints rather than by types.
+
+### F22 — What deleting the login-body token cost
+
+Three costs, all accepted on 2026-09-10 and all preferable to what they
+replaced. The third is a cost of the ticket rather than of the deletion,
+found by adversarial review of it the same day and recorded here because
+this is where the ticket's residuals live.
+
+**The Lab download's ticket is readable by script, on purpose.** The
+download is cross-origin by design, so no `__Host-` cookie can reach it
+and nothing HttpOnly can cross. It now crosses on a one-shot ticket
+minted on the application origin under the cookie session (0061), and
+that ticket is legible to any script on the page — as the session token
+was, until this. The difference is what a lift is worth: one sample, one
+redemption, sixty seconds, against the case file for twelve hours.
+
+What the redemption re-derives, on the sample origin, before a byte
+moves: that the ticket is live, unspent and issued for that sample; that
+the holder's **account** is still active and still holds
+`sample.download` through a global role; and that the sample's labels
+still compose against the holder's **live** clearance and compartments.
+The account half was missing until the hardening pass of the same day, so
+a deactivated account — or one whose download permission had just been
+revoked — could still pull the archive for the rest of the minute.
+
+Two residuals remain, stated in the code rather than closed. The first is
+narrow and exact: **a ticket minted under a session that is revoked in
+the following sixty seconds can still be redeemed**, by a holder whose
+account is still active and still permitted, for a sample they may still
+read. The session is the one thing left because it is the one this origin
+cannot answer — re-deriving session validity there would be a third copy
+of a check `deps.py` keeps in exactly two places, on the very process the
+split exists to keep sessions away from. The second is that nothing
+sweeps spent ticket rows yet; the partial index the sweep wants exists.
+
+**A refusal that names no ticket is counted, not audited.** The
+redemption used to write a hash-chained `audit.event` row for every
+failed presentation, including a string matching no row at all — a
+refusal reachable on the sample origin with no credential whatsoever. So
+anyone who could reach that origin could append to an append-only,
+advisory-locked table at will, one `ticket=x` at a time, with nothing
+able to remove what they wrote. Unknown tickets are now a sampled warning
+carrying the count (the shape `routers/live.py` uses for pre-accept
+refusals), and the route is metered per peer address
+(`sample.download`, 120 per five minutes, burst 30, fails closed). The
+accepted cost is twofold: a campaign of pure ticket-guessing leaves log
+lines rather than an evidential record, and that limit's own denials are
+not audited either, because the dependency deliberately takes no database
+connection — auditing them would reopen, in a smaller way, the hole being
+closed. The four refusals that name a real minted ticket still write a
+row.
+
+**A form sign-in over plain HTTP now leaves the tab holding nothing.** A
+browser refuses `Secure` and `__Host-` cookies from any non-`localhost`
+address over plain HTTP, and there is no body token to fall back on any
+more, so on such a host the console signs in and has no credential. This
+is not a defect to patch in the console: it is the honest shape of a
+client whose only credential is a cookie the browser will not accept. The
+way in on such a host is `scripts/bootstrap.py session`, whose `#token=`
+the tab keeps for its own life; the way out of it is TLS, which every
+document already tells the operator to use for anything real.
 
 ---
 

@@ -88,9 +88,16 @@ including step-up re-challenge and the invariant-8 export refusal.
 
 ## Not yet done
 
-- **CSRF** — cookie auth is set but there is no double-submit token yet, so
-  browser clients should use the Bearer token until it lands (docs/05).
-- **Egress gate** — `export` enforces the AMBER_STRICT/RED floor, but the
-  destination-aware gate is Phase 5 (docs/07).
-- Node/edge **read** endpoints, assertion listing, and the neighbourhood /
-  subgraph queries the sociogram needs are Phase 2.
+- **Jira** — `notifications.JIRA` is a channel and `egress.Destination.JIRA`
+  a ceiling, but `transports.dispatch_due` has no branch for it: a
+  jira-channel row fails into `notify.delivery` rather than being sent. The
+  signed webhook transport it would specialise is built; the API mapping —
+  and a Jira to verify it against — is not (docs/07).
+- **No worker process.** `POST /notifications/dispatch` drains the outbox
+  once, driven by an operator, a cron entry (`scripts/notify_drain.py`, so
+  the drain does not need step-up) or a test. Decision 30 set that
+  precedent for analytics: a queue adds a process, a runtime and a failure
+  mode, and a thread that dies silently at 3am is worse than a call you
+  have to make.
+- **WebAuthn** — `security/` covers passwords, TOTP and recovery codes.
+  Hardware keys are named in docs/05 and are not built.

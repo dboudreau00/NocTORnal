@@ -34,7 +34,7 @@ honest delta between that plan and the build.
 
 **State (2026-09-10):** branch `main` (the working branch; byte-identical
 to `deception-and-release-hardening` except `README.md`), Alembic head
-`0060`, 1731 tests counted as `def test_` functions across the two pytest
+`0060`, 1775 tests counted as `def test_` functions across the two pytest
 roots, version 0.5.2 single-sourced from `pyproject.toml`. Those four
 counters are GENERATED: `scripts/refresh_counters.py` writes them and
 `test_doc_invariants` holds them to the tree with no tolerance.
@@ -887,11 +887,17 @@ What this pass hands the owner rather than decides:
   (disk images, full exports) need a decision and probably an override.
 - **A registered compartment cannot be deleted or renamed** while any
   row carries it, and there is no route for either.
-- **The websocket still authenticates from the sign-in token in its
+- ~~**The websocket still authenticates from the sign-in token in its
   first frame** and reads no cookie, so a session restored from the
   cookie is honestly "not live" until the next sign-in, and the dot says
   so. Accepting the cookie pair on the socket is the change that would
-  let the login response stop returning the token at all.
+  let the login response stop returning the token at all.~~
+  **Closed 2026-09-10** — `_handshake` prefers `__Host-session` off the
+  upgrade (the first frame remains for a caller with no cookie jar), the
+  Lab download crosses on a one-shot ticket instead of a Bearer, and
+  `POST /auth/login` therefore answers 204 with the pair and no body. The
+  order was load-bearing and is recorded at the cookie set in
+  `routers/auth.py`; what the cookie on an upgrade costs is docs/17 F21.
 - **`README.md`** named a `graphology` + `sigma.js` WebGL renderer (replaced
   by Canvas 2D), 1269 tests, 52 revisions, and called `db/schema.sql` an
   annotated reference. Refreshed later the same day at the owner's
