@@ -213,7 +213,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 59 Alembic migrations (Alembic head 0059)
+6. applies all 60 Alembic migrations (Alembic head 0060)
 7. offers to create your first account, printing the password **once** with a QR code to scan
 8. starts the API and opens the console
 
@@ -271,7 +271,7 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped** — **1643 tests** (`def test_`
+Expect **every test to pass with 0 skipped** — **1731 tests** (`def test_`
 functions across both pytest roots; 2259 collected items once
 parametrised; a snapshot taken 2026-09-09, the live figure is `pytest
 --co -q`). **Without `DATABASE_URL` roughly half the suite skips
@@ -538,7 +538,7 @@ test named after it.
 | **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** — pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain** — Louvain can produce internally disconnected communities. |
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
-| **Migrations** | Alembic | 59 revisions (Alembic head 0059), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 60 revisions (Alembic head 0060), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction** — no dual write, no lost event. |
 
 ### Frontend
@@ -558,7 +558,7 @@ enforces it.
 
 ### Testing
 
-**1643 tests** (`def test_` functions across two pytest roots; 2259 collected
+**1731 tests** (`def test_` functions across two pytest roots; 2259 collected
 items once parametrised, snapshot 2026-09-09). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -584,7 +584,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   59 Alembic revisions
+│   └── migrations/versions/   60 Alembic revisions
 ├── docs/                      00–19, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
