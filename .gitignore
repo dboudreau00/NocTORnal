@@ -65,3 +65,12 @@ infra/production/secrets.env
 # public.crt is here only because a certificate and its key belong
 # together and a half-committed pair invites somebody to regenerate one.
 infra/production/tls/
+
+# The packaged release. `scripts/package_release.ps1 -Ref <tag> -Zip`
+# regenerates it from any tag, and every GitHub release carries its own
+# copy as an attachment, so the repository never needs one. A 3.8 MB
+# build artefact WAS tracked here until the owner deleted it on
+# 2026-09-10, and the scripts that move work between this tree's two
+# unrelated histories use `git add -A`, which would have put it back.
+NocTORnal - Alpha Release.zip
+NocTORnal-Alpha-*.zip
