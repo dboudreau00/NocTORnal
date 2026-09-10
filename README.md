@@ -271,7 +271,7 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped** — **1627 tests** (`def test_`
+Expect **every test to pass with 0 skipped** — **1643 tests** (`def test_`
 functions across both pytest roots; 2259 collected items once
 parametrised; a snapshot taken 2026-09-09, the live figure is `pytest
 --co -q`). **Without `DATABASE_URL` roughly half the suite skips
@@ -306,8 +306,9 @@ rather than ranking them 1 and 2.
 ### Evidence and chain of custody
 ![Evidence](docs/images/03-evidence.png)
 
-SHA-256 and BLAKE3 at ingest; MinIO object lock in **COMPLIANCE** mode, so
-not even a root credential can alter an exhibit before retention expires;
+SHA-256 and BLAKE3 at ingest; every exhibit written under a per-object
+MinIO **COMPLIANCE** lock, so not even a root credential can alter it
+before retention expires (the compose bucket DEFAULT is `GOVERNANCE 365d`);
 an append-only hash-chained custody ledger that records every touch,
 **including reads**.
 
@@ -517,7 +518,7 @@ test named after it.
 | 4 | **Inferred edges stay distinct** — dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
 | 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion`; a retraction is a one-time stamp on the row, never a rewrite |
 | 6 | **The audit log is append-only** | row *and* statement triggers; `TRUNCATE` refused |
-| 7 | **Credentials never leave the collector** | decrypted only in the worker process |
+| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process — there is no separate collector — so this bounds the shape of the code, not the blast radius of a compromised host |
 | 8 | **TLP gates egress** | one `can_egress`, called by all four outbound paths |
 | 9 | **Durable identifiers, not displayed ones** | per-type normalisers; `durable_selector_type` |
 | 10 | **Samples never render, never execute** | separate origin, encryption at rest, `is_hostile_markup` |
@@ -535,9 +536,9 @@ test named after it.
 | **System of record** | Postgres 16 + pgvector | The graph, the assertion ledger and the audit log live in **one transactional store**, so an inference and its justification commit or fail together. A separate graph database makes that a distributed-transaction problem, which is how provenance gets lost. |
 | **API** | Python 3.12+ / FastAPI | Async, typed, OpenAPI for free. |
 | **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** — pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain** — Louvain can produce internally disconnected communities. |
-| **Object store** | MinIO, S3 object lock | COMPLIANCE-mode retention, so the application's own credentials cannot delete an exhibit. GOVERNANCE mode is bypassable and therefore not a WORM guarantee. |
+| **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
-| **Migrations** | Alembic | 59 revisions (Alembic head 0059), one concern each, all reversible. |
+| **Migrations** | Alembic | 59 revisions (Alembic head 0059), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction** — no dual write, no lost event. |
 
 ### Frontend
@@ -557,7 +558,7 @@ enforces it.
 
 ### Testing
 
-**1627 tests** (`def test_` functions across two pytest roots; 2259 collected
+**1643 tests** (`def test_` functions across two pytest roots; 2259 collected
 items once parametrised, snapshot 2026-09-09). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -654,7 +655,7 @@ fully green 953-test suite. They are fixed, and each leaves a rule:
 
 **Determination D8 is now CLOSED.** A Telegram channel id and an unrelated
 user id could normalise to the same durable value — a strong selector, so
-it fed auto-merge. The Bot-API encoding is arithmetic
+it fed the merge lead an analyst is asked to confirm. The Bot-API encoding is arithmetic
 (`chat_id = -(10¹² + id)`), not a text prefix, and the old code stripped
 the characters `100`, which inverts it only for a ten-digit channel id.
 Decoding is now arithmetic and namespaced by id space (`u:`/`c:`/`g:`);

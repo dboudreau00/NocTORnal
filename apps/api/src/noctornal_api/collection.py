@@ -10,7 +10,7 @@ arrives LAST among the buildable phases on purpose. docs/09:
 
 ## Invariant 7 is the shape of this module
 
-    Credentials never leave the collector. `collection_account.secret_*`
+    Credentials never leave the vault. `collection_account.secret_*`
     is decrypted only inside the collection worker, never in the API
     process, never serialised to a response, never logged.
 

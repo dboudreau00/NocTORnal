@@ -154,9 +154,9 @@ of 2026-09-09:
 - Money and weights: `numeric`, never float.
 - API: REST under `/api/v1`, `limit`-capped pagination (`limit: int =
   Query(200, le=1000)` in `http/routers/read.py`; no cursors),
-  `problem+json` errors (RFC 9457). (Cursor pagination was the 2026-07
-  convention; it was never implemented and is superseded as of
-  2026-09-09.)
+  `problem+json` errors (RFC 9457).
+  (Cursor pagination was never implemented: it was the 2026-07 convention
+  and is superseded as of 2026-09-09.)
 - Tests: every invariant above has a test named after it.
 - Secrets: environment or Vault. Never a default value in code.
 

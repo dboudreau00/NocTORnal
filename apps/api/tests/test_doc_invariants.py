@@ -411,24 +411,61 @@ def _alembic_head() -> str:
     return ScriptDirectory.from_config(cfg).get_current_head()
 
 
-def test_quoted_test_counts_are_within_five_percent_of_the_tree():
-    """A quoted total may lag the tree by a few dozen tests between
-    refreshes; it may not lag by three hundred. Fails on the 1206 and
-    1252 the documents carried on 2026-09-09 against a tree of ~1550."""
-    actual = _test_function_count()
-    tolerance = 0.05 * actual
+def _refresher():
+    """`scripts/refresh_counters.py`, imported by path.
+
+    The script is the single definition of what a live counter looks like
+    and what its value is; this file only asserts that running it would
+    change nothing. Two copies of the rule would drift, which is the
+    defect under discussion.
+    """
+    import importlib.util
+
+    path = ROOT / "scripts" / "refresh_counters.py"
+    assert path.exists(), "scripts/refresh_counters.py is missing"
+    spec = importlib.util.spec_from_file_location("refresh_counters", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_quoted_counter_is_the_tree_exactly():
+    """No tolerance, because a tolerance is where the defect lives.
+
+    This check allowed five per cent on the test total until 2026-09-10 --
+    eighty tests at this size -- on the reasoning that a hand-maintained
+    number cannot track a tree that gains tests every commit. The release
+    that introduced the check then shipped a README claiming 1627 against
+    a tree of 1639: stale, and green, because the drift fitted inside the
+    band. The numbers are generated now, so the band is unnecessary and
+    gone. `scripts/refresh_counters.py` defines which shapes are live
+    claims, which regions of a document are history, and what each value
+    is; this asserts only that running it would change nothing.
+    """
+    refresher = _refresher()
+    values = refresher._values()
     stale: list[str] = []
-    for name in _COUNTED_DOCS:
+    seen_total = 0
+    for name, marker in refresher.CHECKED.items():
         doc = ROOT / name
         assert doc.exists(), f"{name} is missing"
-        for m in _TEST_COUNT_CLAIM.finditer(doc.read_text(encoding="utf-8")):
-            claimed = int(m.group(1))
-            if abs(claimed - actual) > tolerance:
-                stale.append(f"{name}: '{m.group(0)}' (tree has {actual})")
+        text = doc.read_text(encoding="utf-8").replace("\r\n", "\n")
+        cut = refresher._live_region(text, marker)
+        rewritten, seen = refresher._rewrite(text[:cut], values)
+        seen_total += seen
+        if rewritten != text[:cut]:
+            for before, after in zip(text[:cut].splitlines(),
+                                     rewritten.splitlines(), strict=False):
+                if before != after:
+                    stale.append(f"{name}: {before.strip()[:90]}")
+    assert seen_total >= 10, (
+        f"only {seen_total} counter claims matched -- the shapes moved and "
+        f"this test is checking nothing")
+    quoted = ", ".join(f"{k}={v}" for k, v in sorted(values.items()))
     assert not stale, (
-        "documents quote a test total more than 5% away from the tree's "
-        f"{actual} `def test_` functions (both pytest roots): {stale}. Refresh the "
-        "figure and its snapshot date, or point at `pytest --co -q`.")
+        f"documents quote counters the tree does not have ({quoted}):\n  "
+        + "\n  ".join(stale)
+        + "\nRun `python scripts/refresh_counters.py` -- these are generated.")
 
 
 def test_quoted_alembic_heads_are_the_chain_head():
@@ -463,3 +500,208 @@ def test_quoted_revision_counts_are_the_length_of_the_chain():
     assert not stale, (
         f"documents quote a migration count other than the {actual} version "
         f"files in db/migrations/versions: {stale}")
+
+
+# ---------------------------------------------------------------------------
+# One completion figure
+# ---------------------------------------------------------------------------
+
+def test_every_quoted_completion_figure_is_the_one_the_roadmap_computes():
+    """Three documents quoted three different overall figures on 2026-09-09:
+    92.8% in the roadmap, ~92% in ARCHITECTURE, ~95% in release/README, and
+    a stray 92.7 inside the roadmap's own explanation of the 92.8.
+
+    Only `ROADMAP-REMAINING.md` WORKS the number out, as the unweighted mean
+    of its ten per-phase rows. Everywhere else quotes it, and quoting is what
+    drifted, so the quotations are generated from it.
+    """
+    refresher = _refresher()
+    authority = refresher.completion_figure()
+    wrong: list[str] = []
+    for name, marker in refresher.CHECKED.items():
+        text = (ROOT / name).read_text(encoding="utf-8").replace("\r\n", "\n")
+        cut = refresher._live_region(text, marker)
+        for line in text[:cut].splitlines():
+            if not refresher._COMPLETION_LINE.search(line):
+                continue
+            found = refresher._PERCENT.search(line)
+            if found and found.group(1) != authority:
+                wrong.append(f"{name}: {line.strip()[:90]}")
+    assert not wrong, (
+        f"documents quote an overall completion other than {authority}% (the "
+        f"mean ROADMAP-REMAINING.md computes):\n  " + "\n  ".join(wrong))
+
+
+# ---------------------------------------------------------------------------
+# The twelve invariants say the same twelve things in all three documents
+# ---------------------------------------------------------------------------
+#
+# On 2026-09-09 CONVENTIONS and ARCHITECTURE were reworded so that invariant 7
+# says credentials never leave the VAULT, and that the vault runs inside the
+# API process because there is no collector. The README -- the invariant table
+# a new reader actually meets -- kept saying "never leave the collector ...
+# decrypted only in the worker process", naming two processes this build does
+# not have. The release that put the README under this linter did not catch
+# it, because the linter was looking for sigma.js.
+#
+# So this is not another list of forbidden words. Each invariant carries the
+# one word that distinguishes it, and all three documents must use that word.
+# A row reworded into something else fails whatever it was reworded to, which
+# is the property a register of examples cannot have.
+
+#: invariant number -> the word its statement must contain, in every document
+#: that states it. Add a row here when an invariant is added.
+_INVARIANT_KEYWORD = {
+    1: "fact", 2: "person", 3: "propose", 4: "inferred",
+    5: "overwritten", 6: "append-only", 7: "vault", 8: "egress",
+    9: "durable", 10: "render", 11: "write-only", 12: "dropped",
+}
+
+
+def _table_rows(text: str) -> dict[int, str]:
+    """`| 7 | ... | ... |` rows of a markdown table, by number."""
+    out: dict[int, str] = {}
+    for line in text.splitlines():
+        m = re.match(r"\|\s*(\d{1,2})\s*\|(.*)$", line)
+        if not m:
+            continue
+        number = int(m.group(1))
+        if number in _INVARIANT_KEYWORD and number not in out:
+            out[number] = m.group(2)
+    return out
+
+
+def _numbered_items(text: str) -> dict[int, str]:
+    """`7. **Credentials never leave the vault.** ...` items, by number, each
+    running to the next numbered item."""
+    out: dict[int, str] = {}
+    starts = [(int(m.group(1)), m.start())
+              for m in re.finditer(r"(?m)^(\d{1,2})\.\s+\*\*", text)
+              if int(m.group(1)) in _INVARIANT_KEYWORD]
+    for i, (number, start) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(text)
+        out.setdefault(number, text[start:end])
+    return out
+
+
+def test_the_three_invariant_statements_agree():
+    """README's table, CONVENTIONS' numbered list and ARCHITECTURE's table
+    state the same twelve invariants, so each must use the word that
+    distinguishes its own. A statement reworded into something the tree does
+    not do fails here rather than in a reader's review."""
+    sources = {
+        "README.md": _table_rows(
+            (ROOT / "README.md").read_text(encoding="utf-8")),
+        "ARCHITECTURE.md": _table_rows(
+            (ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")),
+        "CONVENTIONS.md": _numbered_items(
+            (ROOT / "CONVENTIONS.md").read_text(encoding="utf-8")),
+    }
+    missing: list[str] = []
+    for name, rows in sources.items():
+        absent = sorted(set(_INVARIANT_KEYWORD) - set(rows))
+        assert not absent, f"{name} states no invariant {absent}"
+        for number, keyword in _INVARIANT_KEYWORD.items():
+            if keyword.lower() not in rows[number].lower():
+                missing.append(
+                    f"{name} invariant {number} does not say '{keyword}': "
+                    f"{rows[number].strip()[:90]}")
+    assert not missing, (
+        "the invariant statements have drifted apart:\n  " + "\n  ".join(missing)
+        + "\nAll three documents state the same twelve invariants; a rewording "
+        "that drops the distinguishing word is how invariant 7 came to name a "
+        "collector process this build does not have.")
+
+
+# ---------------------------------------------------------------------------
+# Things that are not true of the tree, in prose OR in source
+# ---------------------------------------------------------------------------
+#
+# `_REMOVED_STACK` above covers the 2026-07 sketch's libraries. This covers
+# the other half of the same class: behaviour that was DESIGNED and never
+# built, which the tree went on describing in the present tense. The
+# maintenance rule, stated so it is not guesswork: when a decision record
+# says a thing was never built, add it here.
+
+_NEVER_BUILT = re.compile(r"(?i)auto-?merge|cursor pagination")
+
+#: A line may name one of them only if it also says, on that same line, that
+#: it is not what the code does.
+_NEVER_BUILT_MARKER = re.compile(
+    r"(?i)superseded|removed|replaced|not in the tree|never built|"
+    r"never implemented|"
+    r"not\W{0,4}implemented|not automatic|merge lead|never auto-?merge|"
+    r"must never|cannot auto-?merge|clustering only|as designed|"
+    r"designed and never|it never was|never a")
+
+#: Invariant 7 stated as though a separate process existed. A flat ban: the
+#: honest phrasings name the VAULT and the API process.
+_INVARIANT_7_MISSTATED = re.compile(
+    r"(?i)credentials? never leaves? the collector"
+    r"|decrypt\w* only in(?:side)? the (?:collector|worker)"
+    r"|decryption happens only in the collector")
+
+#: A decision record may QUOTE the superseded wording, which is how a
+#: reader learns it was superseded -- decision 53 does exactly that.
+_QUOTING_THE_OLD_WORDING = re.compile(
+    r"(?i)reworded|superseded|corrected|invariant 7 said|until 2026|no separate collector|there is no collector")
+
+#: Dated records: a changelog entry and a migration describe the day they
+#: were written and are never rewritten.
+_HISTORY_FILES = ("release/CHANGELOG.md", "db/migrations/")
+
+
+def _prose_and_source() -> list[Path]:
+    """Every live document, every source and test file, and the console.
+
+    Not this file: it has to spell the forbidden phrases out to look for
+    them, and a checker that fails on its own patterns is a checker
+    somebody deletes."""
+    out = [d for d in _docs()
+           if not any(h in d.relative_to(ROOT).as_posix() for h in _HISTORY_FILES)]
+    for root in (_SRC, _TESTS, ROOT / "packages" / "ontology" / "src",
+                 ROOT / "packages" / "ontology" / "tests"):
+        out.extend(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
+    out.append(_SRC / "http" / "static" / "app.js")
+    here = Path(__file__).resolve()
+    return [p for p in out if p.resolve() != here]
+
+
+def test_nothing_describes_a_behaviour_that_was_never_built():
+    """Auto-merge is the case that survived the 2026-09-09 pass: CONVENTIONS
+    was corrected, and the ontology definition, the Telegram normaliser, a
+    comms test and the README went on saying `is_strong` feeds it. Cursor
+    pagination is the same shape. Source and tests are read too, because
+    that is where these four lived."""
+    offenders: list[str] = []
+    for path in _prose_and_source():
+        rel = path.relative_to(ROOT).as_posix()
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            if _NEVER_BUILT.search(line) and not _NEVER_BUILT_MARKER.search(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()[:100]}")
+    assert not offenders, (
+        "these lines describe behaviour that was designed and never built, "
+        "without saying so on the line (a strong-selector collision is a "
+        "merge LEAD an analyst confirms; pagination is `limit`-capped):\n  "
+        + "\n  ".join(offenders))
+
+
+def test_invariant_7_is_never_stated_as_a_separate_process():
+    """There is no collector process and no worker process. `PersonaVault`
+    runs inside the API process, so invariant 7 bounds the shape of the code
+    and not the blast radius of a compromised host -- which is what
+    CONVENTIONS, ARCHITECTURE and docs/05 say, and what the README's
+    invariant table did not say until 2026-09-10."""
+    offenders: list[str] = []
+    for path in _prose_and_source():
+        rel = path.relative_to(ROOT).as_posix()
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            if (_INVARIANT_7_MISSTATED.search(line)
+                    and not _QUOTING_THE_OLD_WORDING.search(line)):
+                offenders.append(f"{rel}:{lineno}: {line.strip()[:100]}")
+    assert not offenders, (
+        "invariant 7 is stated as though the credentials lived in a separate "
+        "process; name the VAULT, and say it runs inside the API process:\n  "
+        + "\n  ".join(offenders))

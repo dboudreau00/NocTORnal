@@ -152,7 +152,10 @@ centrality calculation.
 Merging is the operation most likely to quietly corrupt a case.
 
 **Rules:**
-- Auto-merge only on a single `is_strong` selector match (PGP fingerprint,
+- **Designed, never built.** A strong-selector collision raises
+  `StrongSelectorConflict` — a merge *lead* — and every merge is
+  analyst-initiated. The rule as designed read: auto-merge (never built)
+  only on a single `is_strong` selector match (PGP fingerprint,
   Telegram numeric ID, forum UID). Never on nickname similarity.
 - Every merge is reversible: the losing node sets `merged_into_id` rather
   than being deleted, and its edges are re-pointed with a record of the

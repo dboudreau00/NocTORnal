@@ -35,7 +35,7 @@ honest delta between that plan and the build.
 **State (2026-09-09):** branch `main` (the working branch for the review
 pass; byte-identical to `deception-and-release-hardening` except
 `README.md`), Alembic head `0059`, 1565 `def test_` functions across the
-two pytest roots (~2170 collected items on a live stack), version 0.5.1
+two pytest roots, version 0.5.2
 single-sourced from `pyproject.toml`. FULL-SUITE FIGURE: see the Alpha 5
 entry in `release/CHANGELOG.md`. The counts below this paragraph are the
 dated records they say they are.
@@ -157,7 +157,7 @@ meant 90.8%; nobody had recomputed it after the per-phase numbers were
 revised downward in the honesty pass that introduced the four-dimension
 weighting. A summary figure that nothing recomputes is the same defect
 this file catalogues everywhere else, so it is now stated with the
-numbers it is the mean of. The rise to 92.7 is Phases 4, 5 and 6.
+numbers it is the mean of. The rise to 92.8 is Phases 4, 5 and 6.
 
 The earlier +11 came from three things:
 

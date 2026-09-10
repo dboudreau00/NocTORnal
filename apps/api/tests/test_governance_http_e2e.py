@@ -421,7 +421,7 @@ def test_the_dead_letter_list_does_not_return_the_raw_fragment(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_no_collection_endpoint_returns_a_persona_secret(conn, client):
-    """Invariant 7: credentials never leave the collector. `PersonaVault`
+    """Invariant 7: credentials never leave the vault. `PersonaVault`
     has no method that could serve one -- `use()` hands the plaintext to a
     callback and never returns it."""
     _, email, secret = _make_user(conn, global_roles=("COLLECTOR",))

@@ -303,7 +303,7 @@ class TestTelegramIdNorm:
         assert self.N("-1012345678901") == "c:12345678901"
 
     def test_a_channel_and_a_user_with_the_same_number_stay_apart(self):
-        """TELEGRAM_ID is is_strong, so a collision here is an auto-merge
+        """TELEGRAM_ID is is_strong, so a collision here is a merge lead
         of a channel and a person onto one actor."""
         assert self.N("-1001234567890") != self.N("1234567890")
 

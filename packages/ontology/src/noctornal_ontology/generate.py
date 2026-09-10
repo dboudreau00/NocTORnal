@@ -97,7 +97,7 @@ export interface EdgeTypeDef {
 export interface SelectorTypeDef {
   key: SelectorTypeKey;
   displayName: string;
-  /** Strong enough to auto-merge identities on its own. */
+  /** Strong enough to raise a merge lead on its own (merges are analyst-initiated). */
   isStrong: boolean;
   isPii: boolean;
   /** Name of the normaliser (implemented in Python; mirror before use). */

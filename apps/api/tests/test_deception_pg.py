@@ -500,7 +500,7 @@ def test_targeted_was_widened_rather_than_duplicated(conn):
 
 
 def test_the_new_selectors_carry_the_right_strength(conn):
-    """`is_strong` drives auto-merge candidacy, and a false merge is worse
+    """`is_strong` drives merge-lead candidacy, and a false merge is worse
     than a missed one. A Message-ID fingerprints the sending kit, and a
     favicon hash on a stock framework would merge half the internet."""
     rows = dict(conn.execute(

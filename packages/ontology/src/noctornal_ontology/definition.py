@@ -8,8 +8,10 @@ a new data migration.
 
 Field semantics mirror the DB columns exactly — see db/schema.sql
 section 1 for the reasoning behind each flag (is_social_tie keeps
-identity plumbing out of centrality; is_strong drives auto-merge
-candidacy and a false merge is worse than a missed one).
+identity plumbing out of centrality; is_strong raises a MERGE LEAD --
+`StrongSelectorConflict` for an analyst, never an automatic merge, which
+was designed and never built -- and a false merge is worse than a missed
+one).
 """
 from dataclasses import dataclass
 

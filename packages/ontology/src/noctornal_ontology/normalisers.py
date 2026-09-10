@@ -182,8 +182,10 @@ def telegram_id_norm(v: str) -> str:
     """Telegram numeric IDs, decoded arithmetically and namespaced by type.
 
     Three Telegram id spaces overlap numerically and must never collide in
-    `norm_value`, because `TELEGRAM_ID` is `is_strong` and therefore feeds
-    auto-merge — where a false merge is worse than a missed one:
+    `norm_value`, because `TELEGRAM_ID` is `is_strong` and a collision
+    therefore raises a MERGE LEAD an analyst is asked to confirm (the
+    automatic merge on a strong match was designed and never built)
+    — where a false merge is worse than a missed one:
 
         u:<id>   user
         c:<id>   channel / supergroup
@@ -205,7 +207,7 @@ def telegram_id_norm(v: str) -> str:
       meet.
     - A ten-digit channel id normalised to bare digits equal to an
       unrelated USER id — and with a strong selector, that is a channel
-      and a person auto-merged onto one row.
+      and a person offered to an analyst as one row to merge.
 
     Namespacing also removes a whole class of collision the arithmetic
     alone would not: a user id and a channel id may be the same number and

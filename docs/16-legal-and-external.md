@@ -83,7 +83,8 @@ the subjects of the investigation.
 ### L3 — Persona operation and computer-misuse exposure
 
 **Built:** Phase 4 (`collection.py`, persona vault). Credentials are
-envelope-encrypted and decrypted only in the collector (invariant 7).
+envelope-encrypted and decrypted only inside `PersonaVault.use()`, which
+runs in the API process — there is no separate collector (invariant 7).
 
 **Assumes nothing about authority.** The software will happily drive an
 account into a forum. Whether *you* may is not a software question.

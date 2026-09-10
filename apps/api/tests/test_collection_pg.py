@@ -131,7 +131,7 @@ class StubAdapter:
         return self.result
 
 
-# --- invariant 7: credentials never leave the collector -----------------
+# --- invariant 7: credentials never leave the vault ---------------------
 
 def test_the_vault_has_no_way_to_RETURN_a_secret(conn):
     """A shape rather than a rule.

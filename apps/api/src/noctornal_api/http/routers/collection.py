@@ -232,7 +232,7 @@ def personas(
 ) -> dict:
     """Persona HEALTH. Never a secret.
 
-    Invariant 7: credentials never leave the collector. There is no route
+    Invariant 7: credentials never leave the vault. There is no route
     that returns `secret_*`, and `PersonaVault.use()` hands the plaintext
     to a callback rather than returning it, so no caller here could serve
     one even by mistake.
