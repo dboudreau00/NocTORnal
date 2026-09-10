@@ -43,7 +43,6 @@ this.
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -136,13 +135,33 @@ def _http_user(conn, *, clearance="RED", roles=("CASE_OWNER",)):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -466,7 +485,7 @@ def test_suppress_over_http_goes_through_the_case_gate_and_the_service(conn, cli
     case = _case(conn, owner)
     src = _source(conn)
     hit = _hit(conn, _watch(conn, src, case, owner), _doc(conn, src))
-    hdr = _auth(_login(client, email, secret))
+    hdr = _auth(_session(conn, email))
     base = f"/api/v1/cases/{case}/collection/watch-hits/{hit}"
 
     r = client.post(f"{base}/suppress", headers=hdr, json={"reason": "dup"})
@@ -524,7 +543,7 @@ def test_an_invalid_triage_state_is_refused_and_is_a_400_over_http(conn, client)
         CollectionService(conn).set_document_triage(
             doc, "ARCHIVED", actor_id=owner, clearance="RED")
 
-    hdr = _auth(_login(client, email, secret))
+    hdr = _auth(_session(conn, email))
     r = client.post(f"/api/v1/collection/documents/{doc}/triage", headers=hdr,
                     json={"state": "ARCHIVED"})
     assert r.status_code == 400, r.text

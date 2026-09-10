@@ -21,7 +21,6 @@ Email prefix `al-`, unique to this file. Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date, datetime
 from uuid import uuid4
 
@@ -96,13 +95,33 @@ def _make_user(conn, *, clearance="RED", global_roles=("CASE_OWNER",)):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -145,7 +164,7 @@ def _latest(client, token, case_id, **params):
 
 def test_latest_is_404_before_any_run_and_the_run_afterwards(conn, client):
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
 
@@ -181,7 +200,7 @@ def test_latest_follows_the_projection_not_the_case(conn, client):
     """Two presets are two projections; a run under one says nothing about
     the other, and the pane asks for the one it is showing."""
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
     assert client.get(f"/api/v1/cases/{case_id}/analytics", headers=_auth(token),
@@ -194,7 +213,7 @@ def test_latest_follows_the_projection_not_the_case(conn, client):
 
 def test_latest_returns_the_most_recent_run_not_the_first(conn, client):
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
     first = client.get(f"/api/v1/cases/{case_id}/analytics", headers=_auth(token)).json()
@@ -210,7 +229,7 @@ def test_latest_never_crosses_a_clearance_boundary(conn, client):
     path: a run computed at RED is not the latest run for an AMBER analyst
     on the same case, even when both graphs happen to be identical."""
     owner_id, email, secret = _make_user(conn, clearance="RED")
-    owner = _login(client, email, secret)
+    owner = _session(conn, email)
     case_id = _create_case(client, owner)
     _seed_small_graph(client, owner, case_id)
     assert client.get(f"/api/v1/cases/{case_id}/analytics",
@@ -222,7 +241,7 @@ def test_latest_never_crosses_a_clearance_boundary(conn, client):
         """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
            VALUES (%s, %s, 'ANALYST', %s)""",
         (case_id, amber_id, owner_id))
-    amber = _login(client, amber_email, amber_secret)
+    amber = _session(conn, amber_email)
 
     assert _latest(client, amber, case_id).status_code == 404
     # ...and not because the analyst cannot reach the case: they can run
@@ -237,7 +256,7 @@ def test_latest_never_crosses_a_clearance_boundary(conn, client):
 
 def test_latest_rejects_an_unknown_preset_like_the_suite_does(conn, client):
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = _latest(client, token, case_id, preset="nonsense")
     assert r.status_code == 400
@@ -289,7 +308,7 @@ def test_latest_never_claims_the_graph_is_unchanged(conn, client):
     bytes came from. `latest` answers `current: null` -- NOT CHECKED.
     """
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
 
@@ -337,7 +356,7 @@ def test_the_currency_verdict_is_on_every_analytics_response(conn, client):
     whichever other keys happen to be there, which is the habit that
     produced the defect."""
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
 

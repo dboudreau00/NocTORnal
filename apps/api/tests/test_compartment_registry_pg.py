@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import time
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
@@ -115,13 +114,33 @@ def _user(conn, *global_roles, clearance="AMBER", compartments=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -169,7 +188,7 @@ def test_a_case_cannot_enter_a_compartment_until_it_is_registered(conn, client):
     key = _key()
     owner_id, owner_email, owner_secret = _user(conn, "CASE_OWNER")
     admin_id, admin_email, admin_secret = _user(conn, "SYS_ADMIN")
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
 
     r = client.post("/api/v1/cases", headers=_auth(owner), json=_case_body([key]))
     assert r.status_code == 400, r.text
@@ -181,7 +200,7 @@ def test_a_case_cannot_enter_a_compartment_until_it_is_registered(conn, client):
         'SELECT count(*) FROM core."case" WHERE owner_user_id = %s',
         (owner_id,)).fetchone()[0] == 0
 
-    admin = _login(client, admin_email, admin_secret)
+    admin = _session(conn, admin_email)
     made = client.post("/api/v1/compartments", headers=_auth(admin),
                        json={"key": key, "label": "Alpha (test)"})
     assert made.status_code == 201, made.text
@@ -250,7 +269,7 @@ def test_the_listing_shows_only_the_callers_own_read_ins(conn, client):
     svc.register_compartment(key=unheld, label="Not held", actor_id=admin_id)
 
     _, analyst_email, analyst_secret = _user(conn, compartments=(held,))
-    analyst = _login(client, analyst_email, analyst_secret)
+    analyst = _session(conn, analyst_email)
     body = client.get("/api/v1/compartments", headers=_auth(analyst))
     assert body.status_code == 200, body.text
     # The disclosure itself first, so a regression here fails saying what
@@ -267,7 +286,7 @@ def test_the_listing_shows_only_the_callers_own_read_ins(conn, client):
     assert body.json()["count"] == 1
 
     # The account that maintains the registry sees the registry.
-    admin = _login(client, admin_email, admin_secret)
+    admin = _session(conn, admin_email)
     whole = client.get("/api/v1/compartments", headers=_auth(admin))
     assert whole.status_code == 200, whole.text
     assert whole.json()["scope"] == "all"
@@ -335,7 +354,7 @@ def test_set_compartments_refuses_a_typo_and_a_stranding_removal(conn, client):
         svc.set_compartments(uuid4(), [key], actor_id=admin_id)
 
     # Over the wire: same refusals, same words, under user.manage.
-    admin = _login(client, admin_email, admin_secret)
+    admin = _session(conn, admin_email)
     r = client.put(f"/api/v1/compartments/users/{owner_id}", headers=_auth(admin),
                    json={"compartments": [key, typo]})
     assert r.status_code == 409, r.text
@@ -347,7 +366,7 @@ def test_set_compartments_refuses_a_typo_and_a_stranding_removal(conn, client):
                    json={"compartments": [key]})
     assert r.status_code == 404, r.text
     _, plain_email, plain_secret = _user(conn)
-    plain = _login(client, plain_email, plain_secret)
+    plain = _session(conn, plain_email)
     assert client.put(f"/api/v1/compartments/users/{owner_id}", headers=_auth(plain),
                       json={"compartments": []}).status_code == 403
 
@@ -419,7 +438,7 @@ def test_the_key_format_is_enforced_on_every_way_in(conn, client):
     for bad in ("alpha-t6-x", "ALPHA T6", "A", "X" * 33, ""):
         with pytest.raises(AdminError, match="A-Z0-9"):
             svc.register_compartment(key=bad, label="x", actor_id=admin_id)
-    admin = _login(client, admin_email, admin_secret)
+    admin = _session(conn, admin_email)
     r = client.post("/api/v1/compartments", headers=_auth(admin),
                     json={"key": "alpha-t6-lower", "label": "x"})
     assert r.status_code == 409, r.text

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import time
 from datetime import date
 from uuid import uuid4
 
@@ -103,13 +102,33 @@ def _make_user(conn, *, clearance="RED", global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -130,7 +149,7 @@ def _create_case(client, token) -> str:
 def analyst(conn, client):
     """A logged-in case owner with a case."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     return token, _create_case(client, token)
 
 
@@ -274,7 +293,7 @@ def test_the_global_stoplist_route_cannot_write_a_case_entry(conn, client):
     """A globally-gated endpoint must not be able to write into a case the
     caller may not be able to see."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/comms/stoplist", headers=_auth(token), json={
         "value": f"escrow@{STOP_DOMAIN}", "role": "ESCROW",
         "platform_key": "XMPP", "case_id": str(uuid4())})
@@ -303,7 +322,7 @@ def test_a_conversation_from_another_case_cannot_be_minimised(client, conn):
     ownership check the conversation id could come from anywhere, and be
     minimised under an authorisation that never covered it."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     mine, theirs = _create_case(client, token), _create_case(client, token)
 
     r = client.post(f"/api/v1/cases/{theirs}/comms/conversations",
@@ -343,7 +362,7 @@ def test_a_seized_device_conversation_needs_a_written_authority(client, analyst)
 
 def test_a_contact_block_from_another_case_is_not_readable(client, conn):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     mine, theirs = _create_case(client, token), _create_case(client, token)
     block = client.post(
         f"/api/v1/cases/{theirs}/comms/contact-blocks", headers=_auth(token),
@@ -373,7 +392,7 @@ def test_comms_routes_need_authentication(client):
 def test_a_reader_cannot_write_a_binding(conn, client):
     """READ_ONLY holds comms.read and deliberately not comms.bind."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
 
     owner_id = conn.execute(
@@ -385,7 +404,7 @@ def test_a_reader_cannot_write_a_binding(conn, client):
                (case_id, user_id, role_key, granted_by)
            VALUES (%s, %s, 'READ_ONLY', %s)""",
         (case_id, reader_id, owner_id))
-    reader_token = _login(client, reader_email, reader_secret)
+    reader_token = _session(conn, reader_email)
 
     assert client.get(f"/api/v1/cases/{case_id}/comms/contact-graph",
                       headers=_auth(reader_token)).status_code == 200
@@ -398,10 +417,10 @@ def test_a_reader_cannot_write_a_binding(conn, client):
 def test_an_unassigned_case_is_404_not_403(conn, client):
     """A caller with NO relationship to a case must not learn it exists."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    case_id = _create_case(client, _login(client, owner_email, owner_secret))
+    case_id = _create_case(client, _session(conn, owner_email))
 
     _, stranger_email, stranger_secret = _make_user(conn)
-    stranger = _login(client, stranger_email, stranger_secret)
+    stranger = _session(conn, stranger_email)
     assert client.get(f"/api/v1/cases/{case_id}/comms/contact-graph",
                       headers=_auth(stranger)).status_code == 404
 
@@ -430,7 +449,7 @@ def test_an_amber_reader_cannot_read_a_red_contact_block(conn, client):
     """
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     block = client.post(
@@ -445,7 +464,7 @@ def test_an_amber_reader_cannot_read_a_red_contact_block(conn, client):
 
     reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, reader_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
 
     # Same 404 a nonexistent block gives: a status code must not be an
     # existence oracle.
@@ -459,7 +478,7 @@ def test_an_amber_reader_cannot_read_a_red_contact_block(conn, client):
 def test_an_amber_reader_does_not_correlate_a_red_binding(conn, client):
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     assert client.post(
         f"/api/v1/cases/{case_id}/comms/bindings", headers=_auth(owner),
@@ -468,7 +487,7 @@ def test_an_amber_reader_does_not_correlate_a_red_binding(conn, client):
 
     reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, reader_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
 
     r = client.get(f"/api/v1/cases/{case_id}/comms/correlate",
                    headers=_auth(reader),
@@ -486,7 +505,7 @@ def test_an_amber_reader_does_not_see_a_red_conversation_in_the_contact_graph(
         conn, client):
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     conv = client.post(f"/api/v1/cases/{case_id}/comms/conversations",
                        headers=_auth(owner),
@@ -500,7 +519,7 @@ def test_an_amber_reader_does_not_see_a_red_conversation_in_the_contact_graph(
 
     reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, reader_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
 
     r = client.get(f"/api/v1/cases/{case_id}/comms/contact-graph",
                    headers=_auth(reader))
@@ -526,7 +545,7 @@ def test_impersonation_does_not_reach_a_case_the_gate_would_refuse(conn, client)
     """
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     mine, secret_case = _create_case(client, owner), _create_case(client, owner)
 
     # Two copies of one block in the case that will be raised to RED --
@@ -548,7 +567,7 @@ def test_impersonation_does_not_reach_a_case_the_gate_would_refuse(conn, client)
     analyst_id, analyst_email, analyst_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, mine, analyst_id)
     _assign(conn, secret_case, analyst_id)
-    analyst = _login(client, analyst_email, analyst_secret)
+    analyst = _session(conn, analyst_email)
     assert client.get(f"/api/v1/cases/{secret_case}/comms/contact-graph",
                       headers=_auth(analyst)).status_code in (403, 404)
 
@@ -573,7 +592,7 @@ def test_a_publisher_identity_from_another_case_is_refused(conn, client):
     class once already.
     """
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     mine, theirs = _create_case(client, token), _create_case(client, token)
 
     foreign_node = client.post(
@@ -596,7 +615,7 @@ def test_an_unknown_object_id_is_a_400_not_a_500(conn, client):
     ContactBlockError and so escaped as a 500 -- making 201-vs-500 an
     existence oracle for any id a caller can name."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post(f"/api/v1/cases/{case_id}/comms/contact-blocks",
                     headers=_auth(token),
@@ -619,7 +638,7 @@ def test_the_global_retire_route_cannot_retire_a_case_entry(conn, client):
     """
     _, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     entry = client.post(f"/api/v1/cases/{case_id}/comms/stoplist",
                         headers=_auth(owner),
@@ -632,7 +651,7 @@ def test_the_global_retire_route_cannot_retire_a_case_entry(conn, client):
     # A user with a global REVIEWER role and NO assignment to that case.
     _, outsider_email, outsider_secret = _make_user(
         conn, global_roles=("REVIEWER",))
-    outsider = _login(client, outsider_email, outsider_secret)
+    outsider = _session(conn, outsider_email)
     r = client.post(f"/api/v1/comms/stoplist/{entry_id}/retire",
                     headers=_auth(outsider),
                     json={"reason": "not mine to retire"})
@@ -678,7 +697,7 @@ def test_a_verification_citing_a_red_binding_is_not_listed_to_an_amber_reader(
     """
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     binding = client.post(
@@ -694,7 +713,7 @@ def test_a_verification_citing_a_red_binding_is_not_listed_to_an_amber_reader(
 
     reader_id, reader_email, reader_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, reader_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
 
     r = client.get(f"/api/v1/cases/{case_id}/comms/pgp", headers=_auth(reader))
     assert r.status_code == 200

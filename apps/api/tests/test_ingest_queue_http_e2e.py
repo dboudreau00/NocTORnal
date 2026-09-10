@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from datetime import date
 from uuid import uuid4
 
@@ -118,13 +117,33 @@ def _make_user(conn, *, clearance="RED", compartments=(), global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -164,7 +183,7 @@ def test_the_queue_is_ordered_by_priority_not_arrival(conn, client):
     seconds and a generic combo list should sink silently to the bottom."""
     from noctornal_api.ingest import IngestService
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
 
     _ingest(conn, owner, case_id=case_id, payloads=[
@@ -204,7 +223,7 @@ def test_the_queue_is_ordered_by_priority_not_arrival(conn, client):
 def test_the_queue_never_returns_a_payload(conn, client):
     """A record can hold a whole stealer log. This is a queue."""
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _ingest(conn, owner, case_id=case_id,
             payloads=[{"note": "a-very-distinctive-string"}])
@@ -219,7 +238,7 @@ def test_a_compartmented_record_is_not_in_a_blind_callers_queue(conn, client):
     /ingest/records/{id}/credentials."""
     owner, email, secret = _make_user(
         conn, compartments=("STEALER-2026",), global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     _ingest(conn, owner, case_id=case_id, category="STEALER_LOG",
             compartment="STEALER-2026",
@@ -231,7 +250,7 @@ def test_a_compartmented_record_is_not_in_a_blind_callers_queue(conn, client):
     # Same case, same role, no compartment.
     _blind_id, blind_email, blind_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    blind = _login(client, blind_email, blind_secret)
+    blind = _session(conn, blind_email)
     r = client.get(f"/api/v1/ingest/records?case_id={case_id}",
                    headers=_auth(blind))
     # 404 on the case, because they are not on it -- and even if they were,
@@ -251,7 +270,7 @@ def test_quarantine_is_its_own_endpoint_with_its_own_verb(conn, client):
     system exists to avoid.
     """
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     _ingest(conn, owner, payloads=[{"note": "unattached"}])   # no case_id
 
     seen = client.get("/api/v1/ingest/records", headers=_auth(token)).json()
@@ -261,7 +280,7 @@ def test_quarantine_is_its_own_endpoint_with_its_own_verb(conn, client):
                       headers=_auth(token)).status_code == 403
 
     _, op_email, op_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    op = _login(client, op_email, op_secret)
+    op = _session(conn, op_email)
     body = client.get("/api/v1/ingest/quarantine", headers=_auth(op))
     assert body.status_code == 200, body.text
     assert any(rec["quarantined"] for rec in body.json()["records"])
@@ -274,7 +293,7 @@ def test_near_duplicates_are_folded_and_counted_not_dropped(conn, client):
     """Invariant 12. "The same leak post from nine sources" is the failure
     this prevents; silently discarding the other eight is a different one."""
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     post = {"victim": "ACME Ltd", "deadline": "2026-08-01",
             "note": "data will be published unless payment is received"}
@@ -297,7 +316,7 @@ def test_near_duplicates_are_folded_and_counted_not_dropped(conn, client):
 def test_a_key_listing_never_contains_a_secret(conn, client):
     """The secret exists once, at issue. `ingest.api_key` stores an HMAC."""
     owner, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/ingest/keys", headers=_auth(token), json={
         "name": "e2e feed", "declared_category": "IOC_FEED"})
     assert r.status_code == 201, r.text
@@ -316,7 +335,7 @@ def test_a_key_listing_needs_the_operator_verb(conn, client):
     """Which feeds exist, where they point and what they are cleared for is
     operational intelligence about the deployment."""
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     assert client.get("/api/v1/ingest/keys",
                       headers=_auth(token)).status_code == 403
 
@@ -324,7 +343,7 @@ def test_a_key_listing_needs_the_operator_verb(conn, client):
 def test_rescoring_a_record_you_cannot_read_is_a_404(conn, client):
     _, email, secret = _make_user(conn, clearance="GREEN",
                                   global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post(f"/api/v1/ingest/records/{uuid4()}/score",
                     headers=_auth(token))
     assert r.status_code == 404
@@ -363,7 +382,7 @@ def test_rescoring_a_QUARANTINED_record_is_refused(conn, client):
 
     _, email, secret = _make_user(conn, clearance="GREEN",
                                   global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post(f"/api/v1/ingest/records/{record_id}/score",
                     headers=_auth(token))
     # 404, the same answer a nonexistent id gets: the code must not be an
@@ -386,7 +405,7 @@ def test_the_operator_can_still_rescore_quarantine(conn, client):
         """SELECT id FROM ingest.record
             WHERE case_id IS NULL AND compartments @> ARRAY['STEALER-2026']
             ORDER BY created_at DESC LIMIT 1""").fetchone()[0]
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post(f"/api/v1/ingest/records/{record_id}/score",
                     headers=_auth(token))
     assert r.status_code == 200, r.text
@@ -407,7 +426,7 @@ def test_an_operator_without_the_compartment_is_still_refused(conn, client):
             ORDER BY created_at DESC LIMIT 1""").fetchone()[0]
 
     _, blind_email, blind_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, blind_email, blind_secret)
+    token = _session(conn, blind_email)
     r = client.post(f"/api/v1/ingest/records/{record_id}/score",
                     headers=_auth(token))
     assert r.status_code == 404, r.text

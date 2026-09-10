@@ -27,7 +27,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date
 from uuid import uuid4
 
@@ -112,13 +111,33 @@ def _make_user(conn, *, clearance="RED", global_roles=(), mfa=True):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -145,7 +164,7 @@ def test_placeholder_retention_rules_are_surfaced_not_hidden(conn, client):
     people who are not under investigation. A placeholder that is never
     surfaced becomes policy by default."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/retention/rules", headers=_auth(token))
     assert r.status_code == 200, r.text
     body = r.json()
@@ -160,7 +179,7 @@ def test_a_purge_does_not_destroy_by_default(conn, client):
     """An endpoint whose default is destruction will eventually be called
     by a script that meant to ask a question."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post("/api/v1/retention/purge", headers=_auth(token),
                     json={"case_id": case_id,
@@ -175,7 +194,7 @@ def test_a_purge_reports_what_storage_refused_to_delete(conn, client):
     to satisfy a deletion order, and a purge that reports success while
     the bytes remain is worse than one that fails loudly."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post("/api/v1/retention/purge", headers=_auth(token),
                     json={"case_id": case_id, "dry_run": True,
@@ -186,7 +205,7 @@ def test_a_purge_reports_what_storage_refused_to_delete(conn, client):
 
 def test_a_purge_needs_a_written_authority(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     assert client.post("/api/v1/retention/purge", headers=_auth(token),
                        json={"case_id": case_id,
@@ -204,7 +223,7 @@ def test_out_of_schedule_purge_requires_a_four_eyes_approval(conn, client):
     approval id is a required field rather than something the router may
     make optional."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post("/api/v1/retention/purge/out-of-schedule",
                     headers=_auth(token),
@@ -218,7 +237,7 @@ def test_the_due_list_flags_held_items_rather_than_hiding_them(conn, client):
     """"Nothing is due" and "eleven things are due and all of them are
     frozen by a court order" are different answers."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/retention/due", headers=_auth(token))
     assert r.status_code == 200
     assert "on_legal_hold" in r.json()
@@ -230,12 +249,12 @@ def test_a_global_retention_role_does_not_reach_an_unrelated_case(conn, client):
     what was destroyed."""
     _, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     _, other_email, other_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    outsider = _login(client, other_email, other_secret)
+    outsider = _session(conn, other_email)
     r = client.get("/api/v1/retention/tombstones", headers=_auth(outsider),
                    params={"case_id": case_id})
     assert r.status_code == 404
@@ -267,7 +286,7 @@ def test_break_glass_refuses_when_nobody_can_review_it(conn, client):
                      " WHERE id = ANY(%s)", (officers,))
     try:
         _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-        token = _login(client, email, secret)
+        token = _session(conn, email)
         r = client.post("/api/v1/break-glass", headers=_auth(token), json={
             "justification": "Incident 2026-0042: the on-call analyst needs "
                              "access to the case file to contain an active "
@@ -284,7 +303,7 @@ def test_a_short_justification_is_refused(conn, client):
     """This is the text a security officer reads, and "urgent" is not
     reviewable."""
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/break-glass", headers=_auth(token),
                     json={"justification": "urgent"})
     assert r.status_code == 422, (
@@ -296,12 +315,12 @@ def test_only_a_security_officer_reaches_the_review_queue(conn, client):
     """A team that can review its own emergencies has the separation on
     paper only."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER", "SYS_ADMIN"))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     assert client.get("/api/v1/break-glass/unreviewed",
                       headers=_auth(token)).status_code == 403
 
     _, so_email, so_secret = _make_user(conn, global_roles=("SECURITY_OFFICER",))
-    so = _login(client, so_email, so_secret)
+    so = _session(conn, so_email)
     assert client.get("/api/v1/break-glass/unreviewed",
                       headers=_auth(so)).status_code == 200
 
@@ -311,7 +330,7 @@ def test_anyone_signed_in_can_ask_whether_they_are_under_break_glass(
     """An interface that cannot tell you that is one where you forget you
     are."""
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/break-glass/mine", headers=_auth(token))
     assert r.status_code == 200
     assert r.json()["live"] is False
@@ -325,7 +344,7 @@ def test_an_ingest_key_can_write_and_cannot_read_anything(conn, client):
     """Invariant 11: a leaked ingest key means junk data, never the case
     file. The key path reaches exactly one endpoint."""
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     # Registered before the key is issued under it. Since 2026-09-09
     # (migration 0059) `ingest.api_key.forced_compartment` is bound to
     # `iam.compartment`, so a stealer-log key under a key nobody
@@ -368,7 +387,7 @@ def test_an_ingest_key_can_write_and_cannot_read_anything(conn, client):
 
 def test_the_secret_is_returned_once_and_never_again(conn, client):
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     issued = client.post("/api/v1/ingest/keys", headers=_auth(token),
                          json={"name": "once-only-test"})
     assert issued.status_code == 201, issued.text
@@ -395,7 +414,7 @@ def test_you_cannot_authorise_your_own_pii_reveal(conn, client):
     it."""
     uid, email, secret = _make_user(
         conn, global_roles=("SECURITY_OFFICER", "CASE_OWNER"))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post("/api/v1/ingest/pii-authorisations", headers=_auth(token),
                     json={"case_id": case_id, "granted_to": str(uid),
@@ -410,7 +429,7 @@ def test_the_dead_letter_list_does_not_return_the_raw_fragment(conn, client):
     """The fragment is unparsed attacker-supplied bytes. A triage list
     should summarise it rather than render it."""
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/ingest/dead-letters", headers=_auth(token))
     assert r.status_code == 200
     assert "raw_fragment" not in r.text
@@ -425,7 +444,7 @@ def test_no_collection_endpoint_returns_a_persona_secret(conn, client):
     has no method that could serve one -- `use()` hands the plaintext to a
     callback and never returns it."""
     _, email, secret = _make_user(conn, global_roles=("COLLECTOR",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/collection/personas", headers=_auth(token))
     assert r.status_code == 200, r.text
     for forbidden in ("secret_ciphertext", "secret_nonce", "secret_key_id"):
@@ -437,7 +456,7 @@ def test_collection_says_the_blocking_legal_item_out_loud(conn, client):
     """The software will drive an account into a forum. Whether you may is
     not a software question."""
     _, email, secret = _make_user(conn, global_roles=("COLLECTOR",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get("/api/v1/collection/sources/due", headers=_auth(token))
     assert r.status_code == 200
     assert "L3" in r.json()["notice"]
@@ -446,7 +465,7 @@ def test_collection_says_the_blocking_legal_item_out_loud(conn, client):
 
 def test_a_reader_cannot_run_a_collection_poll(conn, client):
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     assert client.get("/api/v1/collection/sources/unhealthy",
                       headers=_auth(token)).status_code == 200
     r = client.post(f"/api/v1/collection/sources/{uuid4()}/run",
@@ -478,7 +497,7 @@ def test_a_purge_cannot_be_run_without_naming_a_case(conn, client):
     Reproduced live: a holder of a global CASE_OWNER role destroyed an
     exhibit in another owner's compartmented case."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/retention/purge", headers=_auth(token),
                     json={"authority": "scheduled retention run",
                           "dry_run": False})
@@ -487,10 +506,10 @@ def test_a_purge_cannot_be_run_without_naming_a_case(conn, client):
 
 def test_a_purge_of_someone_elses_case_is_refused(conn, client):
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    victim_case = _create_case(client, _login(client, owner_email, owner_secret))
+    victim_case = _create_case(client, _session(conn, owner_email))
 
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    attacker = _login(client, email, secret)
+    attacker = _session(conn, email)
     r = client.post("/api/v1/retention/purge", headers=_auth(attacker),
                     json={"case_id": victim_case, "dry_run": True,
                           "authority": "scheduled retention run"})
@@ -502,7 +521,7 @@ def test_legal_hold_is_bound_to_the_exhibits_own_case(conn, client):
     of the global role could LIFT a court-ordered hold on any exhibit in
     the deployment and then purge it. Reproduced live."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/retention/legal-hold", headers=_auth(token),
                     json={"evidence_id": str(uuid4()), "on": False})
     # 404, not 403: a status code must not be an existence oracle.
@@ -515,11 +534,11 @@ def test_due_and_tombstones_do_not_span_the_deployment(conn, client):
     case at all read the object ids, deadlines and hold reasons of an
     AMBER_STRICT exhibit in a compartmented case. Reproduced live."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    victim_case = _create_case(client, _login(client, owner_email, owner_secret))
+    victim_case = _create_case(client, _session(conn, owner_email))
 
     _, email, secret = _make_user(conn, clearance="GREEN",
                                   global_roles=("ANALYST",))
-    stranger = _login(client, email, secret)
+    stranger = _session(conn, email)
 
     r = client.get("/api/v1/retention/due", headers=_auth(stranger))
     assert r.status_code == 200
@@ -536,7 +555,7 @@ def test_out_of_schedule_purge_refuses_exhibits_outside_its_case(conn, client):
     help: its payload hash covers the id LIST, so it proves the approver
     saw those UUIDs, not that they belong to the case approved."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post("/api/v1/retention/purge/out-of-schedule",
                     headers=_auth(token),
@@ -557,10 +576,10 @@ def test_break_glass_serialises_instead_of_500ing(conn, client):
     it. The e2e suite missed it because the only queue test asserted 200
     against an EMPTY queue, where the comprehension never runs."""
     _, so_email, so_secret = _make_user(conn, global_roles=("SECURITY_OFFICER",))
-    officer = _login(client, so_email, so_secret)
+    officer = _session(conn, so_email)
 
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/break-glass", headers=_auth(token), json={
         "justification": "Incident 2026-0042: the on-call analyst needs "
                          "access to contain an active intrusion right now."})
@@ -585,7 +604,7 @@ def test_a_record_from_another_case_is_not_readable(conn, client):
     compartmented record. Reproduced live."""
     _, email, secret = _make_user(conn, clearance="GREEN",
                                   global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.get(f"/api/v1/ingest/records/{uuid4()}/credentials",
                    headers=_auth(token))
     assert r.status_code == 404
@@ -598,7 +617,7 @@ def test_parsing_a_batch_refuses_rather_than_shredding_nuls(conn, client):
     would parse to zero records and mark the batch PARSED, silently losing
     it (invariant 12)."""
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post(f"/api/v1/ingest/batches/{uuid4()}/parse",
                     headers=_auth(token), json={})
     assert r.status_code == 404

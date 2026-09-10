@@ -21,7 +21,6 @@ Email prefix `rc-`, unique to this file. Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from uuid import uuid4
 
 import pytest
@@ -81,13 +80,33 @@ def _make_user(conn, *, global_roles=("SYS_ADMIN",)):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -115,7 +134,7 @@ def _age_second_factor(conn, uid) -> None:
 
 def test_a_fresh_step_up_session_confirms_a_rule_and_the_row_says_who(conn, client):
     uid, email, secret = _make_user(conn)
-    token = _login(client, email, secret)   # login satisfies MFA: fresh
+    token = _session(conn, email)   # login satisfies MFA: fresh
     category = f"TEST_HTTP_{uuid4().hex[:6].upper()}"
 
     r = client.post(f"/api/v1/retention/rules/{category}", headers=_auth(token),
@@ -151,7 +170,7 @@ def test_a_session_whose_second_factor_has_aged_is_refused(conn, client):
     assert requires_step_up is True
 
     uid, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     _age_second_factor(conn, uid)
     category = f"TEST_HTTP_{uuid4().hex[:6].upper()}"
 
@@ -170,7 +189,7 @@ def test_the_permission_gates_the_route_not_just_the_step_up(conn, client):
     is refused for the permission, so the refusal names the right
     thing."""
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/retention/rules/TEST_HTTP_ANALYST", headers=_auth(token),
                     json={"retain_days": 45, "rationale": RATIONALE})
     assert r.status_code == 403
@@ -180,7 +199,7 @@ def test_the_permission_gates_the_route_not_just_the_step_up(conn, client):
 
 def test_a_non_positive_period_is_a_400_not_a_write(conn, client):
     _, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/retention/rules/TEST_HTTP_ZERO", headers=_auth(token),
                     json={"retain_days": 0, "rationale": RATIONALE})
     assert r.status_code in (400, 422), r.text

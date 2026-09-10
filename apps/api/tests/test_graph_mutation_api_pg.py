@@ -46,7 +46,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
@@ -142,27 +141,47 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _owner(conn, client, clearance="AMBER"):
+def _owner(conn, clearance="AMBER"):
     """A CASE_OWNER, signed in. Case creation grants them CASE_OWNER on the
     case in the same transaction, which is what puts the graph-write verbs
     in reach — role permissions come from the CASE ASSIGNMENT, not from the
     global role."""
     uid, email, secret = _make_user(conn, clearance=clearance,
                                     global_roles=("CASE_OWNER",))
-    return uid, _login(client, email, secret)
+    return uid, _session(conn, email)
 
 
 def _create_case(client, token) -> str:
@@ -251,7 +270,7 @@ def test_a_node_from_another_case_is_404_not_403_and_not_200(conn, client):
     404 rather than 403 so the status code cannot be used to confirm that a
     guessed id exists somewhere in the deployment.
     """
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_a = _create_case(client, token)
     case_b = _create_case(client, token)
     node_b = _new_node(client, token, case_b, "lives in b")
@@ -269,7 +288,7 @@ def test_a_node_from_another_case_is_404_not_403_and_not_200(conn, client):
 
 
 def test_an_edge_from_another_case_is_404_not_403_and_not_200(conn, client):
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_a = _create_case(client, token)
     case_b = _create_case(client, token)
     src = _new_node(client, token, case_b, "src")
@@ -290,7 +309,7 @@ def test_retiring_through_the_wrong_case_leaves_the_node_and_its_edges_live(
     `soft_delete_node` retires every live edge touching the node in the
     same transaction, so a missing same-case check would let a caller
     dissolve a subgraph in a case they were never assigned to."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_a = _create_case(client, token)
     case_b = _create_case(client, token)
     hub = _new_node(client, token, case_b, "hub")
@@ -309,7 +328,7 @@ def test_the_404_is_the_same_for_another_case_and_for_a_nonexistent_id(
     """No existence oracle: the response for a REAL id in another case and
     the response for an id that exists nowhere must be indistinguishable,
     body included."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_a = _create_case(client, token)
     case_b = _create_case(client, token)
     node_b = _new_node(client, token, case_b, "real, elsewhere")
@@ -336,7 +355,7 @@ def test_a_read_only_assignee_can_neither_correct_nor_retire(conn, client):
     graph-write verbs. All four endpoints must refuse, and the elements
     must be exactly as they were."""
     from noctornal_api.cases import CaseService
-    owner_id, owner_token = _owner(conn, client)
+    owner_id, owner_token = _owner(conn)
     case_id = _create_case(client, owner_token)
     a = _new_node(client, owner_token, case_id, "alpha")
     b = _new_node(client, owner_token, case_id, "bravo")
@@ -345,7 +364,7 @@ def test_a_read_only_assignee_can_neither_correct_nor_retire(conn, client):
     reader_id, reader_email, reader_secret = _make_user(conn)
     CaseService(conn).assign_user(case_id, reader_id, "READ_ONLY",
                                   granted_by=owner_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
 
     # It can read the case — so this is the VERB failing, not the
     # relationship.
@@ -371,14 +390,14 @@ def test_a_refused_correction_is_audited(conn, client):
     server-side only; the client is told neither."""
     from noctornal_api.cases import CaseService
     from noctornal_api.security.access import CHECK_ROLE
-    owner_id, owner_token = _owner(conn, client)
+    owner_id, owner_token = _owner(conn)
     case_id = _create_case(client, owner_token)
     a = _new_node(client, owner_token, case_id, "alpha")
 
     reader_id, reader_email, reader_secret = _make_user(conn)
     CaseService(conn).assign_user(case_id, reader_id, "READ_ONLY",
                                   granted_by=owner_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
     r = _patch(client, reader, case_id, "nodes", a, {"label": "nope"})
     assert r.status_code == 403
     assert CHECK_ROLE not in r.text, "the failed check is audited, never disclosed"
@@ -395,12 +414,12 @@ def test_a_stranger_to_the_case_gets_404_not_403(conn, client):
     """A caller with no relationship to the case must not learn it exists.
     `authorize_object` turns a failed assignment check into the same 404 a
     nonexistent case gives."""
-    _, owner_token = _owner(conn, client)
+    _, owner_token = _owner(conn)
     case_id = _create_case(client, owner_token)
     a = _new_node(client, owner_token, case_id, "alpha")
 
     _, out_email, out_secret = _make_user(conn)
-    outsider = _login(client, out_email, out_secret)
+    outsider = _session(conn, out_email)
 
     real = _patch(client, outsider, case_id, "nodes", a, {"label": "x"})
     fake = _patch(client, outsider, str(uuid4()), "nodes", a, {"label": "x"})
@@ -421,7 +440,7 @@ def test_an_under_cleared_caller_cannot_correct_or_retire_a_red_element(
     reachable by a caller who could not see what they are destroying.
     """
     from noctornal_api.cases import CaseService
-    owner_id, owner_token = _owner(conn, client, clearance="RED")
+    owner_id, owner_token = _owner(conn, clearance="RED")
     case_id = _create_case(client, owner_token)              # AMBER case
     red = _new_node(client, owner_token, case_id, "informant truename",
                     classification="RED")
@@ -429,7 +448,7 @@ def test_an_under_cleared_caller_cannot_correct_or_retire_a_red_element(
     amber_id, amber_email, amber_secret = _make_user(conn, clearance="AMBER")
     CaseService(conn).assign_user(case_id, amber_id, "ANALYST",
                                   granted_by=owner_id)
-    amber = _login(client, amber_email, amber_secret)
+    amber = _session(conn, amber_email)
 
     # The ANALYST role does grant the verb, and the case is AMBER, so the
     # case-level `require(...)` passes. Only the element's own label stops
@@ -461,7 +480,7 @@ def test_these_routes_need_authentication(client):
 def test_retiring_a_node_sets_deleted_at_and_destroys_nothing(conn, client):
     """The row survives, its assertions survive, and the act is attributed.
     Clearing the column would bring the node back."""
-    uid, token = _owner(conn, client)
+    uid, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "wrong entity")
     assert _assertion_count(conn, "node_id", a) == 1
@@ -486,7 +505,7 @@ def test_retiring_a_node_sets_deleted_at_and_destroys_nothing(conn, client):
 
 
 def test_retiring_an_edge_sets_deleted_at_and_destroys_nothing(conn, client):
-    uid, token = _owner(conn, client)
+    uid, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
@@ -514,7 +533,7 @@ def test_retiring_a_node_retires_its_incident_edges_and_says_how_many(
     transaction — and the count comes back, because retiring one actor can
     remove six ties and an analyst must not have to discover that later
     (invariant 12)."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     hub = _new_node(client, token, case_id, "hub")
     a = _new_node(client, token, case_id, "alpha")
@@ -550,7 +569,7 @@ def test_a_retired_node_leaves_the_live_graph_and_as_of_views_of_the_past(
     REGARDLESS of as_of. Reaching for the wrong one either rewrites history
     or fails to remove a mistake."""
     from noctornal_api.projections import GraphService, Projection
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     hub = _new_node(client, token, case_id, "hub")
     a = _new_node(client, token, case_id, "alpha")
@@ -580,7 +599,7 @@ def test_a_second_retirement_is_a_409_not_a_silent_success(conn, client):
     """"Already retired" is a fact about an element the caller has just
     been cleared for, so saying it discloses nothing new — and a silent
     200 would let a script believe it had retired something twice."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     assert _retire(client, token, case_id, "nodes", a).status_code == 200
@@ -593,7 +612,7 @@ def test_a_second_retirement_is_a_409_not_a_silent_success(conn, client):
 def test_a_retired_element_cannot_be_corrected(conn, client):
     """Editing something already out of the case file writes an assertion
     nobody will ever see rendered."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
@@ -611,7 +630,7 @@ def test_a_retirement_needs_a_written_reason(conn, client):
     """Retiring a node dissolves every tie it carries, and the one thing a
     reviewer cannot reconstruct six months later is what the analyst was
     thinking. `reason` is required and may not be empty."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     path = f"/api/v1/cases/{case_id}/graph/nodes/{a}"
@@ -629,7 +648,7 @@ def test_a_merged_node_cannot_be_retired(conn, client):
     so retiring a merged-away node would leave the reversal restoring live
     edges onto a deleted endpoint: a merge that reports itself reversed
     while being irreversible in effect."""
-    uid, token = _owner(conn, client)
+    uid, token = _owner(conn)
     case_id = _create_case(client, token)
     loser = _new_node(client, token, case_id, "loser")
     winner = _new_node(client, token, case_id, "winner")
@@ -647,7 +666,7 @@ def test_a_correction_to_a_merged_node_says_it_will_not_appear(conn, client):
     """The edit is allowed — unmerging restores the node with whatever
     label it now carries — but a 200 the analyst reads as "done" and then
     cannot find on the canvas is a silent drop (invariant 12)."""
-    uid, token = _owner(conn, client)
+    uid, token = _owner(conn)
     case_id = _create_case(client, token)
     loser = _new_node(client, token, case_id, "loser")
     winner = _new_node(client, token, case_id, "winner")
@@ -670,7 +689,7 @@ def test_invariant_1_a_correction_carries_its_own_assertion(conn, client):
     """"We corrected this" is a claim about the world and needs a basis
     like any other. The original assertion stays, so the SEQUENCE of
     assertions is the audit of what this element has been called."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "basterlord")
     assert _assertion_count(conn, "node_id", a) == 1
@@ -702,7 +721,7 @@ def test_invariant_5_the_overwritten_label_reaches_the_audit_log(conn, client):
     the old label. The new value is recoverable from the assertion; the old
     one is recoverable from nowhere else, so for this column the audit row
     IS the superseded history."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "typo", attrs={"role": "broker"})
 
@@ -718,7 +737,7 @@ def test_the_previous_edge_weight_is_recorded_without_rounding(conn, client):
     """`weight` is numeric(14,4). Rounding it to a float to get it into the
     audit row would corrupt the very value the row exists to preserve —
     CONVENTIONS: weights are numeric, never float."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
@@ -741,7 +760,7 @@ def test_an_empty_correction_is_refused_and_leaves_no_assertion(conn, client):
     """Invariant 12. Accepting it silently would leave an assertion behind
     claiming a correction that never happened, and an audit row saying the
     same."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
 
@@ -761,7 +780,7 @@ def test_attrs_is_whole_object_replacement_not_a_merge(conn, client):
     """The service's semantics (`COALESCE(%s, attrs)`), pinned here because
     the alternative reading — "PATCH merges" — is the one a caller assumes
     from the verb, and assuming it silently deletes attributes."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha",
                   attrs={"role": "broker", "country": "RU"})
@@ -786,7 +805,7 @@ def test_sign_is_not_reachable_through_the_correction_verb(conn, client):
     fix: `analytics.py` re-derives every triad from `sign`, and the
     disagreement should survive as its own edge. `UpdateEdgeBody` has no
     `sign` and no `edge_type` field, so neither can arrive through here."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
@@ -810,7 +829,7 @@ def test_a_negative_or_oversized_weight_is_422(conn, client):
     the balance and centrality arithmetic. The bounds mirror
     numeric(14,4), so an out-of-range value is a sentence rather than a
     driver overflow."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
@@ -825,7 +844,7 @@ def test_a_negative_or_oversized_weight_is_422(conn, client):
 
 def test_an_unknown_confidence_is_refused_without_leaking_the_schema(
         conn, client):
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
@@ -852,7 +871,7 @@ def test_an_exhibit_outside_this_case_cannot_be_cited(conn, client):
     what this test does not do is construct one, because ingesting a real
     exhibit needs MinIO and this suite is DATABASE_URL-only.
     """
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
 
@@ -870,7 +889,7 @@ def test_classification_is_not_editable_through_a_correction(conn, client):
     may leave the platform — an egress decision (invariant 8), not a typo
     fix. Folding it into the same call as "correct the spelling" would let
     a routine edit silently widen distribution."""
-    _, token = _owner(conn, client)
+    _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")     # AMBER
 
@@ -899,7 +918,7 @@ def test_classification_is_not_editable_through_a_correction(conn, client):
 def test_retiring_is_refused_when_a_tie_is_above_the_callers_clearance(
         conn, client):
     """AMBER analyst, AMBER case, one RED edge. Nothing may happen."""
-    _uid, token = _owner(conn, client, clearance="AMBER")
+    _uid, token = _owner(conn, clearance="AMBER")
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "visible-a")
     b = _new_node(client, token, case_id, "visible-b")
@@ -934,7 +953,7 @@ def test_a_cleared_caller_can_still_retire_the_same_node(conn, client):
     Without this the test above passes against a `soft_delete_node` that
     refuses everything, which would be a worse product and a green suite.
     """
-    _uid, token = _owner(conn, client, clearance="RED")
+    _uid, token = _owner(conn, clearance="RED")
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "red-a")
     b = _new_node(client, token, case_id, "red-b")

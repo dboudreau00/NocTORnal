@@ -40,7 +40,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -157,10 +156,14 @@ def empty_role(conn):
 def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     """A user with TOTP enrolled, returning (user_id, email, totp_secret).
 
-    Every user here may log in AT MOST ONCE per test: the TOTP counter
-    advance is a compare-and-set that rejects a replay, so a second login
-    inside the same 30-second step fails on the code, not on the policy
-    under test.
+    The secret is still enrolled because an account without a second
+    factor is not the account this file is about, but nothing here signs
+    in with it any more: `_session` mints. That lifts a constraint this
+    file used to carry -- a user could log in AT MOST ONCE per test,
+    because the TOTP counter advance is a compare-and-set that rejects a
+    replay, so a second login inside the same 30-second step failed on
+    the code rather than on the policy under test. Two sessions for one
+    account are now free.
     """
     from noctornal_api.security import totp
     from noctornal_api.stores import PgUserStore
@@ -189,13 +192,33 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -281,7 +304,7 @@ def test_creating_a_case_needs_the_global_verb(conn, client):
     """`case.create` is global — there is no case to be assigned to yet —
     so authentication alone must not reach it."""
     _, email, secret = _make_user(conn)          # no global roles
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     r = client.post("/api/v1/cases", headers=_auth(token), json={
         "code": f"OP-CLC-{uuid4().hex[:6]}", "title": "nope",
         "legal_basis": "x", "retention_until": str(date(2028, 1, 1)),
@@ -296,7 +319,7 @@ def test_a_new_case_is_a_draft_its_creator_owns_and_can_read(conn, client):
     `case.owner_user_id`, so without that the owner could not act on their
     own case."""
     uid, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
 
     got = client.get(f"/api/v1/cases/{case_id}", headers=_auth(token))
@@ -313,10 +336,10 @@ def test_an_outsider_neither_lists_nor_detects_another_case(conn, client):
     answer for a real case is byte-identical to the answer for a random
     id."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    case_id = _create_case(client, _login(client, owner_email, owner_secret))
+    case_id = _create_case(client, _session(conn, owner_email))
 
     _, out_email, out_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    outsider = _login(client, out_email, out_secret)
+    outsider = _session(conn, out_email)
 
     real = client.get(f"/api/v1/cases/{case_id}", headers=_auth(outsider))
     fake = client.get(f"/api/v1/cases/{uuid4()}", headers=_auth(outsider))
@@ -335,7 +358,7 @@ def test_a_metadata_edit_applies_and_is_audited_exactly_once(conn, client):
     the write, and two rows per action — one of which can commit without
     the other — is worse than one."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
 
     r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
@@ -361,7 +384,7 @@ def test_lowering_the_classification_is_refused(conn, client):
     """
     _, email, secret = _make_user(conn, clearance="RED",
                                   global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token, classification="RED")
 
     r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
@@ -382,7 +405,7 @@ def test_raising_the_classification_names_who_it_evicts(conn, client):
     from noctornal_api.cases import CaseService
     owner_id, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)                       # AMBER
 
     analyst_id, analyst_email, analyst_secret = _make_user(conn, clearance="AMBER")
@@ -398,7 +421,7 @@ def test_raising_the_classification_names_who_it_evicts(conn, client):
     assert str(owner_id) not in lost, "the RED-cleared owner keeps the case"
 
     # And the eviction is real, not just reported.
-    analyst = _login(client, analyst_email, analyst_secret)
+    analyst = _session(conn, analyst_email)
     assert client.get(f"/api/v1/cases/{case_id}",
                       headers=_auth(analyst)).status_code == 403
     assert client.get("/api/v1/cases", headers=_auth(analyst)).json() == []
@@ -411,7 +434,7 @@ def test_a_raise_is_capped_by_the_callers_own_clearance(conn, client):
     for."""
     _, email, secret = _make_user(conn, clearance="AMBER",
                                   global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)                       # AMBER
 
     r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
@@ -427,7 +450,7 @@ def test_an_unknown_classification_is_400_not_500(conn, client):
     psycopg InvalidTextRepresentation and comes back as a 500 — which also
     means the request got as far as the write."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
 
     r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
@@ -442,7 +465,7 @@ def test_a_no_op_patch_is_refused_rather_than_answered_200(conn, client):
     changed, so each of these would otherwise answer 200 having done
     nothing and left no trace it was attempted (invariant 12)."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)                       # AMBER
     url = f"/api/v1/cases/{case_id}"
 
@@ -464,7 +487,7 @@ def test_an_empty_title_is_refused(conn, client):
     """`update_metadata` treats None as "not supplied", so an empty string
     is NOT a no-op — it would write an untitled case."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
                      json={"title": ""})
@@ -481,7 +504,7 @@ def test_the_durable_identifier_and_the_status_are_not_metadata(conn, client):
     Pydantic ignores them — the assertion is that they do NOT take
     effect."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     before = client.get(f"/api/v1/cases/{case_id}", headers=_auth(token)).json()
 
@@ -501,7 +524,7 @@ def test_a_purged_case_cannot_be_edited(conn, client):
     rewrites the very metadata a retention review reads to justify the
     purge."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     for status in ("ARCHIVED", "PURGED"):
         step = client.post(f"/api/v1/cases/{case_id}/status", headers=_auth(token),
@@ -526,11 +549,11 @@ def test_editing_another_users_case_is_404_and_changes_nothing(conn, client):
     learn that it exists, and PATCH is a mutation, so a 403 here would also
     be a free existence probe on a write path."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     _, out_email, out_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    outsider = _login(client, out_email, out_secret)
+    outsider = _session(conn, out_email)
 
     body = {"title": "hijacked", "classification": "RED"}
     real = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(outsider), json=body)
@@ -551,13 +574,13 @@ def test_an_assignee_without_the_verb_is_403_not_404(conn, client):
     from noctornal_api.cases import CaseService
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     reader_id, reader_email, reader_secret = _make_user(conn)
     CaseService(conn).assign_user(case_id, reader_id, "READ_ONLY",
                                   granted_by=owner_id)
-    reader = _login(client, reader_email, reader_secret)
+    reader = _session(conn, reader_email)
 
     # READ_ONLY holds case.read and nothing else on this case.
     assert client.get(f"/api/v1/cases/{case_id}",
@@ -583,7 +606,7 @@ def test_a_grant_reports_what_it_confers_and_what_it_replaced(conn, client):
     user_id) DO UPDATE`, so demoting a colleague looks identical to adding
     a new one unless the replaced grade is named."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     analyst_id, _, _ = _make_user(conn, clearance="AMBER")
 
@@ -609,7 +632,7 @@ def test_an_unknown_role_is_400_and_writes_nothing(conn, client):
     """`_grant` inserts straight into `case_assignment`, so an unknown
     role_key trips a foreign key and would surface as a 500."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     victim_id, _, _ = _make_user(conn)
 
@@ -624,7 +647,7 @@ def test_a_role_that_confers_nothing_is_refused(conn, client, empty_role):
     """A grant that appears to succeed and confers nothing is worse than a
     refusal: it reads as access in the roster and behaves as none."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     victim_id, _, _ = _make_user(conn)
 
@@ -640,7 +663,7 @@ def test_an_under_cleared_assignee_is_refused(conn, client):
     ceiling, so a GREEN analyst on an AMBER case is a row every listing
     then quietly filters away."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)                       # AMBER
     green_id, _, _ = _make_user(conn, clearance="GREEN")
 
@@ -658,7 +681,7 @@ def test_an_assignee_outside_the_compartment_is_refused(conn, client):
     _, owner_email, owner_secret = _make_user(
         conn, clearance="AMBER", global_roles=("CASE_OWNER",),
         compartments=(TEST_COMPARTMENT,))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner, compartments=[TEST_COMPARTMENT])
     plain_id, _, _ = _make_user(conn, clearance="AMBER")        # no compartments
 
@@ -673,7 +696,7 @@ def test_a_deactivated_account_cannot_be_assigned(conn, client):
     """`list_for_user` and the gate both require `is_active`, so this
     writes a row no code path will ever honour."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     gone_id, _, _ = _make_user(conn)
     conn.execute("UPDATE iam.app_user SET is_active = false WHERE id = %s", (gone_id,))
@@ -687,7 +710,7 @@ def test_a_deactivated_account_cannot_be_assigned(conn, client):
 
 def test_an_unknown_assignee_is_404_not_a_500(conn, client):
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     r = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
                     json={"user_id": str(uuid4()), "role_key": "ANALYST"})
@@ -699,7 +722,7 @@ def test_a_grant_cannot_be_born_already_dead(conn, client):
     realistic typo rather than an exotic one — and it commits an assignment
     that is expired the instant it is written."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     analyst_id, _, _ = _make_user(conn, clearance="AMBER")
 
@@ -738,7 +761,7 @@ def test_an_expiry_with_no_offset_is_refused_and_not_guessed(conn, client):
     nothing in the response saying which reading was taken.
     """
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     analyst_id, _, _ = _make_user(conn, clearance="AMBER")
 
@@ -771,7 +794,7 @@ def test_the_owner_cannot_be_regraded_out_of_their_own_case(conn, client):
     by different routes."""
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     r = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
@@ -795,7 +818,7 @@ def test_granting_access_needs_a_fresh_second_factor(conn, client):
     hand-rolled step-up call in the router, so this is the only thing
     proving the flag is read."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     analyst_id, _, _ = _make_user(conn, clearance="AMBER")
 
@@ -815,11 +838,11 @@ def test_granting_on_another_users_case_is_404(conn, client):
     how an attacker would write themselves in — so it must be the same
     non-oracle 404 as everything else."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    case_id = _create_case(client, _login(client, owner_email, owner_secret))
+    case_id = _create_case(client, _session(conn, owner_email))
 
     attacker_id, att_email, att_secret = _make_user(
         conn, clearance="AMBER", global_roles=("CASE_OWNER",))
-    attacker = _login(client, att_email, att_secret)
+    attacker = _session(conn, att_email)
 
     body = {"user_id": str(attacker_id), "role_key": "CASE_OWNER"}
     real = client.post(f"/api/v1/cases/{case_id}/users",
@@ -848,7 +871,7 @@ def test_the_roster_answers_the_whole_gate_not_one_check(conn, client):
     """
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)                       # AMBER
 
     expired_id, _, _ = _make_user(conn, clearance="AMBER")
@@ -886,7 +909,7 @@ def test_the_roster_is_not_the_staff_directory(conn, client):
     handing out everybody's mailbox."""
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
     analyst_id, analyst_email, _ = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, analyst_id, "ANALYST", owner_id)
@@ -904,10 +927,10 @@ def test_the_roster_of_another_case_is_404(conn, client):
     thing a caller with no relationship to the case must not be able to
     confirm the existence of."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    case_id = _create_case(client, _login(client, owner_email, owner_secret))
+    case_id = _create_case(client, _session(conn, owner_email))
 
     _, out_email, out_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    outsider = _login(client, out_email, out_secret)
+    outsider = _session(conn, out_email)
     real = client.get(f"/api/v1/cases/{case_id}/users", headers=_auth(outsider))
     fake = client.get(f"/api/v1/cases/{uuid4()}/users", headers=_auth(outsider))
     assert real.status_code == fake.status_code == 404
@@ -920,7 +943,7 @@ def test_the_roster_of_another_case_is_404(conn, client):
 
 def test_the_lifecycle_moves_and_refuses_an_illegal_move(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
 
     ok = client.post(f"/api/v1/cases/{case_id}/status", headers=_auth(token),
@@ -952,12 +975,12 @@ def test_marking_a_case_purged_is_regated_onto_case_delete(
     """
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     closer_id, closer_email, closer_secret = _make_user(conn, clearance="AMBER")
     _assign(conn, case_id, closer_id, closer_role, owner_id)
-    closer = _login(client, closer_email, closer_secret)
+    closer = _session(conn, closer_email)
 
     # Holds case.close: the ordinary lifecycle works, with FRESH MFA, so
     # the refusal below cannot be blamed on step-up staleness.
@@ -995,7 +1018,7 @@ def test_purging_demands_a_fresh_second_factor_when_closing_does_not(conn, clien
     authoriser can still mark a case PURGED.
     """
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     archived_case = _create_case(client, token)
     draft_case = _create_case(client, token)
     assert client.post(f"/api/v1/cases/{archived_case}/status", headers=_auth(token),
@@ -1018,7 +1041,7 @@ def test_an_unknown_status_is_400_not_500(conn, client):
     """`case_status` is a Postgres enum; an unvalidated value reaching the
     UPDATE would be an InvalidTextRepresentation and a 500."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post(f"/api/v1/cases/{case_id}/status", headers=_auth(token),
                     json={"status": "DELETED"})
@@ -1028,11 +1051,11 @@ def test_an_unknown_status_is_400_not_500(conn, client):
 
 def test_changing_the_status_of_another_users_case_is_404(conn, client):
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner = _login(client, owner_email, owner_secret)
+    owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
 
     _, out_email, out_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    outsider = _login(client, out_email, out_secret)
+    outsider = _session(conn, out_email)
 
     real = client.post(f"/api/v1/cases/{case_id}/status", headers=_auth(outsider),
                        json={"status": "ACTIVE"})
@@ -1073,7 +1096,7 @@ def test_every_case_route_needs_a_session(client):
 
 def _open_case(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     return token, _create_case(client, token)
 
 

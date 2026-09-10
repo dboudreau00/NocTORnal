@@ -20,7 +20,6 @@ other suite's teardown pattern matches either.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
@@ -90,13 +89,33 @@ def _user(conn, *, clearance="RED", roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -225,7 +244,7 @@ def test_the_search_router_returns_documents_only_to_collection_readers(conn, cl
            VALUES (%s, %s, 'READ_ONLY', %s)""", (case, reader, owner))
 
     r = client.get(f"/api/v1/cases/{case}/search?q={token}",
-                   headers=_auth(_login(client, owner_email, owner_secret)))
+                   headers=_auth(_session(conn, owner_email)))
     assert r.status_code == 200, r.text
     body = r.json()
     assert str(doc) in _hits(body["hits"], "document")
@@ -233,7 +252,7 @@ def test_the_search_router_returns_documents_only_to_collection_readers(conn, cl
     assert "documents" not in body["omitted"]
 
     r = client.get(f"/api/v1/cases/{case}/search?q={token}",
-                   headers=_auth(_login(client, reader_email, reader_secret)))
+                   headers=_auth(_session(conn, reader_email)))
     assert r.status_code == 200, r.text
     body = r.json()
     assert str(doc) not in _hits(body["hits"], "document")

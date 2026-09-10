@@ -15,7 +15,6 @@ Email prefix `me-`, unique to this file. Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from uuid import uuid4
 
 import pytest
@@ -66,13 +65,33 @@ def _make_user(conn):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -81,7 +100,7 @@ def _auth(token: str) -> dict:
 
 def test_me_carries_display_name_and_email(conn, client):
     uid, email, secret = _make_user(conn)
-    r = client.get("/api/v1/auth/me", headers=_auth(_login(client, email, secret)))
+    r = client.get("/api/v1/auth/me", headers=_auth(_session(conn, email)))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["user_id"] == str(uid)
@@ -94,7 +113,7 @@ def test_me_keeps_every_field_it_already_had(conn, client):
     read; adding a name must not cost it."""
     _, email, secret = _make_user(conn)
     body = client.get("/api/v1/auth/me",
-                      headers=_auth(_login(client, email, secret))).json()
+                      headers=_auth(_session(conn, email))).json()
     assert body["recovery_codes_remaining"] == 0
     assert {"user_id", "recovery_codes_remaining", "display_name", "email"} <= set(body)
 
@@ -107,7 +126,7 @@ def test_the_response_model_and_the_wire_agree(conn, client):
     from noctornal_api.http.routers.auth import Me
     _, email, secret = _make_user(conn)
     body = client.get("/api/v1/auth/me",
-                      headers=_auth(_login(client, email, secret))).json()
+                      headers=_auth(_session(conn, email))).json()
     assert set(body) == set(Me.model_fields)
     assert {"display_name", "email"} <= set(Me.model_fields)
 
@@ -116,7 +135,7 @@ def test_me_reflects_a_renamed_account(conn, client):
     """Read live from the row, not from anything cached in the session, so
     an administrator's correction shows up on the analyst's next load."""
     uid, email, secret = _make_user(conn)
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     conn.execute("UPDATE iam.app_user SET display_name = 'Mia Corrected' WHERE id = %s",
                  (uid,))
     body = client.get("/api/v1/auth/me", headers=_auth(token)).json()

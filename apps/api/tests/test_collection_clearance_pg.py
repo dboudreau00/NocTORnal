@@ -48,7 +48,6 @@ Cases are `OP-K1-` and are swept by owner, for the same reason.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -136,13 +135,33 @@ def _user(conn, *, clearance, roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -333,8 +352,8 @@ def test_the_routers_pass_the_callers_own_ceiling_to_the_service(conn, client):
     roles = ("ANALYST", "COLLECTOR")  # collection.read + collection_account.manage
     _, amber_email, amber_secret = _user(conn, clearance="AMBER", roles=roles)
     _, red_email, red_secret = _user(conn, clearance="RED", roles=roles)
-    amber = _auth(_login(client, amber_email, amber_secret))
-    red_hdr = _auth(_login(client, red_email, red_secret))
+    amber = _auth(_session(conn, amber_email))
+    red_hdr = _auth(_session(conn, red_email))
 
     def get(path, headers):
         r = client.get(f"{API}{path}", headers=headers)
@@ -452,8 +471,8 @@ def test_the_run_route_refuses_a_source_above_the_ceiling(
     roles = ("ANALYST", "COLLECTOR")  # COLLECTOR holds collection.run
     _, amber_email, amber_secret = _user(conn, clearance="AMBER", roles=roles)
     _, red_email, red_secret = _user(conn, clearance="RED", roles=roles)
-    amber = _auth(_login(client, amber_email, amber_secret))
-    red_hdr = _auth(_login(client, red_email, red_secret))
+    amber = _auth(_session(conn, amber_email))
+    red_hdr = _auth(_session(conn, red_email))
 
     r = client.post(f"{API}/sources/{red}/run", json={}, headers=amber)
     assert r.status_code == 404, r.text
@@ -584,8 +603,8 @@ def test_the_status_route_refuses_a_persona_above_the_ceiling(conn, client):
     roles = ("ANALYST", "COLLECTOR")  # COLLECTOR holds collection_account.manage
     _, amber_email, amber_secret = _user(conn, clearance="AMBER", roles=roles)
     _, red_email, red_secret = _user(conn, clearance="RED", roles=roles)
-    amber = _auth(_login(client, amber_email, amber_secret))
-    red_hdr = _auth(_login(client, red_email, red_secret))
+    amber = _auth(_session(conn, amber_email))
+    red_hdr = _auth(_session(conn, red_email))
     body = {"status": "BURNED", "reason": "admin asked for a phone number"}
 
     r = client.post(f"{API}/personas/{persona}/status", json=body, headers=amber)

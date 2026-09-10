@@ -35,7 +35,6 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
-import time
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
@@ -119,13 +118,33 @@ def _make_user(conn, *, clearance="RED", compartments=(), global_roles=()):
     return uid, email, secret
 
 
-def _login(client, email, secret) -> str:
-    from noctornal_api.security import totp
-    r = client.post("/api/v1/auth/login", json={
-        "email": email, "password": PASSWORD,
-        "totp_code": totp.code_at(secret, int(time.time()))})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+def _session(conn, email) -> str:
+    """A signed-in caller, minted the way `scripts/bootstrap.py session`
+    mints one: the account looked up by email, then `SessionService`
+    against the same store the API validates against. Unbound -- no
+    address, no User-Agent, because nothing here has one to give -- which
+    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    is off in these tests.
+
+    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
+    the token only in `__Host-session`. Nothing in this file is about the
+    sign-in path, so this takes the short honest route to a session
+    rather than driving a login and unpicking a Set-Cookie header for a
+    value it would hand straight back as a Bearer. It also drops the
+    constraint the login helper carried: TOTP codes are single-use, so
+    two sign-ins for one account inside one 30-second step failed on the
+    code, not on the thing under test.
+    """
+    from noctornal_api.security.sessions import SessionService
+    from noctornal_api.stores import PgSessionStore
+    uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
+                       (email,)).fetchone()[0]
+    # mfa_satisfied=True, as both real mint sites pass: a session that
+    # never satisfied MFA is refused by every step-up gated route, which
+    # would make this helper quietly narrower than the login it replaces.
+    _, token = SessionService(PgSessionStore(conn)).create(
+        uuid4(), uid, mfa_satisfied=True)
+    return token
 
 
 def _auth(token: str) -> dict:
@@ -185,8 +204,8 @@ def test_each_case_reader_sees_only_their_own_cases_dead_letters(conn, client):
     and nothing in it asked which case a batch had fed."""
     one, one_email, one_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     two, two_email, two_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    one_token = _login(client, one_email, one_secret)
-    two_token = _login(client, two_email, two_secret)
+    one_token = _session(conn, one_email)
+    two_token = _session(conn, two_email)
     case_one = _create_case(client, one_token)
     case_two = _create_case(client, two_token)
     _key_one, dead_one = _feed(conn, one, ATTACHED, case_id=case_one, name="feed one")
@@ -216,7 +235,7 @@ def test_an_amber_holder_does_not_see_a_red_dead_letter_on_their_own_case(conn, 
     keeping the other. A dead letter inherits the issuing key's ceiling
     (`IngestService._dead_letter`), so a RED key makes a RED row."""
     owner, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
     _key, dead_red = _feed(conn, owner, ATTACHED, case_id=case_id, ceiling="RED")
     assert dead_red in _ids(_listing(client, owner_token)), "RED owner sees RED"
@@ -226,7 +245,7 @@ def test_an_amber_holder_does_not_see_a_red_dead_letter_on_their_own_case(conn, 
     conn.execute(
         """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
            VALUES (%s, %s, 'ANALYST', %s)""", (case_id, amber, owner))
-    amber_token = _login(client, amber_email, amber_secret)
+    amber_token = _session(conn, amber_email)
     seen = _listing(client, amber_token)
     assert seen["scope"]["cases"] == [case_id], "the case predicate passes..."
     assert dead_red not in _ids(seen), "...and the ceiling still hides the row"
@@ -240,7 +259,7 @@ def test_unattached_dead_letters_are_for_the_operator_verb(conn, client):
     `ingest.manage` and NOT `ingest.read` -- could not open the listing at
     all."""
     owner, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    owner_token = _login(client, owner_email, owner_secret)
+    owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
     _k1, attached = _feed(conn, owner, ATTACHED, case_id=case_id)
     _k2, unattached = _feed(conn, owner, UNATTACHED)
@@ -250,7 +269,7 @@ def test_unattached_dead_letters_are_for_the_operator_verb(conn, client):
     assert by_owner["scope"]["unattached"] is False
 
     _op, op_email, op_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    op_token = _login(client, op_email, op_secret)     # TOTP login: step-up fresh
+    op_token = _session(conn, op_email)     # TOTP login: step-up fresh
     by_operator = _listing(client, op_token)
     assert unattached in _ids(by_operator), "the operator sees the unattached row"
     assert attached not in _ids(by_operator), "and not the case's"
@@ -267,7 +286,7 @@ def test_a_stale_step_up_withholds_the_unattached_rows_out_loud(conn, client):
     Neither gets a listing that looks complete and is not."""
     both, both_email, both_secret = _make_user(
         conn, global_roles=("CASE_OWNER", "SYS_ADMIN"))
-    both_token = _login(client, both_email, both_secret)
+    both_token = _session(conn, both_email)
     case_id = _create_case(client, both_token)
     _k1, attached = _feed(conn, both, ATTACHED, case_id=case_id)
     _k2, unattached = _feed(conn, both, UNATTACHED)
@@ -281,7 +300,7 @@ def test_a_stale_step_up_withholds_the_unattached_rows_out_loud(conn, client):
     assert stale["scope"]["unattached_withheld"] == "re-authentication required"
 
     op, op_email, op_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    op_token = _login(client, op_email, op_secret)
+    op_token = _session(conn, op_email)
     conn.execute("UPDATE iam.session SET mfa_satisfied_at = now() - interval '1 hour' "
                  "WHERE user_id = %s", (op,))
     r = client.get("/api/v1/ingest/dead-letters", headers=_auth(op_token))
@@ -295,8 +314,8 @@ def test_a_key_filter_for_a_feed_outside_your_cases_is_a_404(conn, client):
     feeds (deps.py rule 2), and not an empty 200 with the rate attached."""
     one, one_email, one_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     two, two_email, two_secret = _make_user(conn, global_roles=("CASE_OWNER",))
-    one_token = _login(client, one_email, one_secret)
-    two_token = _login(client, two_email, two_secret)
+    one_token = _session(conn, one_email)
+    two_token = _session(conn, two_email)
     case_one = _create_case(client, one_token)
     key_one, dead_one = _feed(conn, one, ATTACHED, case_id=case_one)
 
@@ -311,7 +330,7 @@ def test_a_key_filter_for_a_feed_outside_your_cases_is_a_404(conn, client):
 
     # The operator is not bounded by cases and may ask about any key.
     _op, op_email, op_secret = _make_user(conn, global_roles=("SYS_ADMIN",))
-    op_token = _login(client, op_email, op_secret)
+    op_token = _session(conn, op_email)
     assert "dead_letter_rate_24h" in _listing(client, op_token, api_key_id=key_one)
 
 
@@ -331,14 +350,14 @@ def test_the_console_and_the_endpoint_agree_on_the_contract(conn, client):
     assert "err.status === 403" in fn and "ingest.read" in fn
 
     _, email, secret = _make_user(conn, global_roles=("ANALYST",))
-    token = _login(client, email, secret)
+    token = _session(conn, email)
     body = _listing(client, token)
     assert body["dead_letters"] == [] and body["count"] == 0
     assert body["scope"] == {"cases": [], "unattached": False,
                              "unattached_withheld": None}
 
     _, none_email, none_secret = _make_user(conn, global_roles=())
-    none_token = _login(client, none_email, none_secret)
+    none_token = _session(conn, none_email)
     r = client.get("/api/v1/ingest/dead-letters", headers=_auth(none_token))
     assert r.status_code == 403, r.text
     assert "ingest.read" in r.json()["detail"]
