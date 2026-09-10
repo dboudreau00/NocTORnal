@@ -666,6 +666,19 @@ def _version(conn) -> str:
     return conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
 
 
+def _chain_head() -> str:
+    """The head Alembic would upgrade to, read from the scripts.
+
+    The round trip below used to name 0059 as the place it returns to.
+    That is the revision it was written against, not the thing it is
+    testing, and 0060 made the literal wrong -- the test skipped, and
+    the build fails on a skip.
+    """
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(_alembic()).get_current_head()
+
+
 def _binding_count(conn) -> int:
     return conn.execute(
         """SELECT count(*) FROM pg_trigger
@@ -684,18 +697,28 @@ def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
     statement that fixes it. That statement is then run, and the upgrade
     completes.
 
-    Guarded twice so a failure cannot leave the schema behind: it runs
-    only when the database is exactly at 0059 (downgrading from a later
-    head would revert migrations this test does not own), and only when
-    the pre-check is already empty (otherwise the upgrade would refuse for
-    reasons this test did not create). The `finally` puts the schema back
-    to head whatever happened in between.
+    Guarded so a failure cannot leave the schema behind: it runs only
+    when the database is AT THE CHAIN HEAD -- wherever that is, so a new
+    migration does not switch this off -- and only when the pre-check is
+    already empty (otherwise the upgrade would refuse for reasons this
+    test did not create). The `finally` puts the schema back to head
+    whatever happened in between.
+
+    It used to demand exactly 0059 and skip otherwise, on the reasoning
+    that a later migration's test owns its own round trip. That is not a
+    rule that holds: what is exercised here is 0059's refusal across
+    0058's boundary, which no later migration inherits, and the skip
+    fails the build anyway because CI refuses a skipped test. Migration
+    0060 is what proved it, by turning this green test into a red
+    pipeline that named neither.
     """
     from alembic import command
     m = _m0059()
-    if _version(conn) != "0059":
-        pytest.skip("round-trip is only meaningful from 0059; a later "
-                    "migration's test owns its own")
+    head = _chain_head()
+    assert _version(conn) == head, (
+        f"the database is at {_version(conn)} and the chain head is {head}; "
+        "run `alembic upgrade head` before this suite, because the round "
+        "trip below has to know where to put the schema back")
     assert conn.execute(m.UNREGISTERED_SQL).fetchall() == [], (
         "the database already holds an unregistered value; the upgrade "
         "would refuse for it, so clean it up before running this test")
@@ -733,14 +756,14 @@ def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
         assert conn.execute("SELECT compartments FROM iam.app_user WHERE id = %s",
                             (uid,)).fetchone()[0] == [good]
         command.upgrade(cfg, "head")
-        assert _version(conn) == "0059"
+        assert _version(conn) == head
         assert _binding_count(conn) == len(m.BOUND_COLUMNS) + 1
         # And the hole is closed again on the row the upgrade found.
         with pytest.raises(psycopg.errors.RaiseException, match=typo):
             conn.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s",
                          ([typo], uid))
     finally:
-        if _version(conn) != "0059":
+        if _version(conn) != head:
             conn.execute("DELETE FROM iam.app_user WHERE email LIKE %s",
                          (EMAIL_LIKE,))
             command.upgrade(cfg, "head")
