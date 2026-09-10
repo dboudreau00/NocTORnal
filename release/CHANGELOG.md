@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## Alpha 5.1 — 2026-09-09
+
+Follow-up release. **Still not audited, and still not lawful to operate
+against real material until the five blocking items in
+[docs/16](../docs/16-legal-and-external.md) are settled by somebody
+outside this codebase.** Eight items from the owner's review of Alpha 5,
+each with a test that fails on the tree as it was:
 
 - Body caps: `POST /samples` and `POST /cases/{id}/deception/emails` are
   enforced by `BodyCappedRoute` at the ASGI receive, like evidence. The
@@ -22,6 +28,21 @@
   pagination, and counts 59 revisions. README refreshed (live CI badge,
   Canvas 2D, 1627 tests, 59 revisions, generated `db/schema.sql`) and now
   held by `test_doc_invariants.py` like every other document.
+
+**Known.** CI on the release commit: 2273 passed, 0 skipped, on a fresh
+database. On the development box the Redis GCRA agreement test
+(`test_redis_and_python_agree_request_for_request`) fails at its usual
+iteration 23 every run — clock drift between the WSL container and the
+host, the injected-clock refactor still owed. The samples positive
+control leaves one quarantined 64 KB `cap.bin` per full-suite run in a
+reused database, because a submission writes to the append-only access
+ledger and can never be deleted; the same residue policy as custody.
+
+Not in this release, by decision: the cookie pair on the websocket and
+the sample origin, a `key_id` that selects a KEK, a COMPLIANCE bucket
+default, the Telegram bare-positive refusal, the confidence-threshold
+alignment, RLS under a non-owner role, a collector process — and
+nothing of L1–L5 in software.
 
 ## Alpha 5 — 2026-09-09
 

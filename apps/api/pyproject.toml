@@ -10,7 +10,7 @@ name = "noctornal-api"
 # and nothing read both, so the packaging metadata and the OpenAPI document
 # disagreed for three releases. apps/api/tests/test_version_contract.py holds
 # every reporter of the version to this line.
-version = "0.5.0"
+version = "0.5.1"
 description = "NocTORnal API: FastAPI service. Session 3 lands authentication (Argon2id + TOTP + server-side sessions)."
 requires-python = ">=3.12"
 dependencies = [
