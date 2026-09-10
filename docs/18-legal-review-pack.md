@@ -54,7 +54,7 @@ pressure.
 | | |
 |---|---|
 | **Capability blocked** | Nothing. The collector will drive an account into a forum on request. |
-| **What the software does** | Encrypts persona credentials so they are decrypted only inside the collector (invariant 7), distinguishes passive from active engagement so the authorisation *can* be modelled, jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. It asserts nothing about authority. |
+| **What the software does** | Encrypts persona credentials so they are decrypted only inside `PersonaVault.use()` in the API process, as there is no separate collector (invariant 7), distinguishes passive from active engagement so the authorisation *can* be modelled, jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. It asserts nothing about authority. |
 | **Decide** | (1) Authority to operate a covert persona against each target, per jurisdiction — in several, using credentials registered under a false identity engages computer-misuse law regardless of intent. (2) Whether passive and active collection are separately authorised. (3) Entrapment / agent-provocateur exposure for active engagement. (4) Terms-of-service breach as a risk independent of criminal exposure. (5) Whether the collector may present a browser user-agent; it currently identifies itself honestly as `NocTORnal-collector/1`, which is a choice with a legal dimension either way. |
 | **If unanswered** | Every poll is an unreviewed act. |
 | **Determination** | |

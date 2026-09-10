@@ -92,7 +92,8 @@ management problem with an operational-security problem wrapped around it.
 - Envelope encryption: AES-256-GCM data key, wrapped by a KMS/Vault master
   key. Ciphertext in `collection_account.secret_ciphertext`, master key
   never in the database.
-- Decryption happens only in the collector process, only at use time.
+- Decryption happens only inside `PersonaVault.use()`, only at use time.
+  That is in the API process: there is no separate collector process.
 - The API never returns plaintext. `collection_account.reveal` exists as a
   permission but requires step-up *and* dual control, and fires a
   high-priority audit alert.

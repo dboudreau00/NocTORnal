@@ -6644,7 +6644,7 @@ async function loadSources() {
     section('/collection/personas', 'src-personas', 'src-personas-empty',
       (b) => b.personas, personaRow,
       'Personas belong to the collector role. Credentials never leave the '
-      + 'collector (invariant 7), and neither does the roster.'),
+      + 'vault (invariant 7), and neither does the roster.'),
     section('/collection/runs?limit=25', 'src-runs', 'src-runs-empty',
       (b) => b.runs, runRow, 'Run history needs collection.read.'),
   ]);
