@@ -47,6 +47,11 @@ def conn():
     ssub = f"(SELECT id FROM lab.sample WHERE submitted_by IN {sub})"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     with c.transaction():
+        # Swept first although no test here issues a ticket: 0061 points
+        # `sample_id` at `lab.sample` with no ON DELETE, so whoever adds
+        # the first download test would otherwise watch this teardown
+        # fail on a foreign key naming a table their case never touched.
+        c.execute(f"DELETE FROM lab.download_ticket WHERE sample_id IN {ssub}")
         c.execute("ALTER TABLE lab.sample_access DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_access WHERE sample_id IN {ssub}")
         c.execute("ALTER TABLE lab.sample_access ENABLE TRIGGER USER")

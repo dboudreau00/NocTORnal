@@ -39,6 +39,27 @@ problem in `sample_origin_problem`, and `GET /admin/readiness` fails the
 `sample_origin_configured` check with the action. No document may say
 invariant 10 holds for such a deployment; the code does not back it.
 
+## The credential that crosses to the sample origin (0061)
+
+Because a `__Host-` cookie cannot reach a second origin -- the point of
+the split -- the console used to send the token the login response handed
+it, as a Bearer, to the sample process. `POST
+/samples/{id}/download-ticket` replaced that on 2026-09-10: minted HERE,
+on the application origin, under the ordinary cookie session and its CSRF
+double-submit, it authorises ONE download of ONE sample within a minute
+and is spent by the first redemption -- which re-reads the holder's
+account and their live clearance before serving, so an authority
+withdrawn inside that minute bites. The download takes it in the form
+body, and that is now the only thing the console presents there. The
+Bearer path is unchanged and still works, for callers that are not the
+console; nothing in the shipped client sends one.
+
+That body is also why the download is metered on the peer address
+(`sample.download` in the limit catalogue, applied by `_meter_download`):
+a credential in the body means this process cannot tell an authorised
+caller from a stranger until it has looked one up, and every look-up that
+fails used to append to the hash-chained audit log.
+
 ## Two permissions that do not imply each other
 
 `sample.read` is case-side: an analyst may see that a sample exists and
@@ -49,6 +70,7 @@ access at all.
 """
 from __future__ import annotations
 
+import hashlib
 from uuid import UUID
 
 import psycopg
@@ -56,6 +78,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFil
 from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import (
+    SESSION_COOKIE,
     CurrentUser,
     authorize_object,
     check_writable_labels,
@@ -63,10 +86,18 @@ from noctornal_api.http.deps import (
     get_conn,
     require_global,
     require_step_up,
+    session_token,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
+from noctornal_api.http.limits import (
+    BodyCappedRoute,
+    body_cap,
+    client_ip,
+    enforce,
+    rate_limit,
+)
+from noctornal_api.ratelimit import ip_subject
 from noctornal_api.samples import (
     MAX_SAMPLE_BYTES,
     PolicyNotDeclared,
@@ -92,6 +123,69 @@ router = APIRouter(prefix="/samples", tags=["samples"],
 def _svc(conn: psycopg.Connection) -> SampleService:
     from noctornal_api.samples import SampleStorage
     return SampleService(conn, SampleStorage())
+
+
+def _ticket_svc(conn: psycopg.Connection) -> SampleService:
+    """The service with NO storage, for the two steps that decide who may
+    have bytes without ever touching any.
+
+    `SampleStorage()` raises when the bucket is unconfigured, so building
+    one here would make a decision about ACCESS fail on the absence of a
+    credential it would never use -- and the mint runs on the application
+    process, which is not the one that serves malware. Neither minting
+    nor redeeming reads a sample; the route that serves one builds the
+    store for itself, a line later.
+    """
+    return SampleService(conn)
+
+
+#: The gate the download has always carried, hoisted so the ticket mint
+#: states the same one and so the download can apply it by CALL rather
+#: than by `Depends`. FastAPI resolves every declared dependency, so a
+#: route that authenticates two ways cannot express either of them as a
+#: dependency -- see `download`.
+#:
+#: The key is spelled out rather than taken from `samples.
+#: DOWNLOAD_PERMISSION`, which is the same string and is what the
+#: redemption re-reads on the other origin: `test_ui_invariants` pins this
+#: line literally, so that "the mint states the download's own gate" is
+#: checked against source text a rename cannot quietly satisfy. The two
+#: spellings are held equal by a test rather than by an import.
+_REQUIRE_DOWNLOAD = require_global("sample.download")
+
+#: A ticket is 43 URL-safe characters, so 2 KB of form body is room for it
+#: and nothing worth having. The download parses a body now, and a route
+#: that parses a body bounds one: without this the sample origin would
+#: buffer whatever an unauthenticated caller sent before deciding it was
+#: not a ticket.
+_TICKET_BODY_CAP = 2 * 1024
+
+
+def _ip_hash(request: Request) -> bytes | None:
+    """The peer address, hashed, for the ticket row and its audit.
+
+    `client_ip` rather than `request.client.host`, for the reason
+    `routers/auth.py` records against the same three lines: behind a
+    proxy the latter is the load balancer, so every event was attributed
+    to the address of the thing in front of the application.
+    """
+    ip = client_ip(request)
+    return hashlib.sha256(ip.encode()).digest() if ip else None
+
+
+def _download_url(sample_origin: str, sample_id: UUID) -> str:
+    """Where the ticket is to be redeemed.
+
+    `API_PREFIX` lives in `http/app.py`, which imports this module, so the
+    import is deferred to call time -- the same shape `_svc` uses for
+    `SampleStorage`. Built from it rather than written out, because the
+    URL handed to the console must be a path this deployment actually
+    serves: `app._DOWNLOAD_PATH`, the pattern the sample process's
+    allow-list and its CORS answer both match on, is built from the same
+    constant.
+    """
+    from noctornal_api.http.app import API_PREFIX
+    return f"{sample_origin}{API_PREFIX}/samples/{sample_id}/download"
 
 
 class SampleOut(BaseModel):
@@ -303,11 +397,216 @@ def detail(
             "custody": svc.custody(sample_id)}
 
 
-@router.post("/{sample_id}/download")
+class DownloadTicketOut(BaseModel):
+    #: Returned exactly once. The row holds its SHA-256 and nothing else,
+    #: so this string exists in this response and in the page that asked
+    #: for it, and nowhere a log, a backup or a Referer can reach.
+    ticket: str
+    expires_at: str
+    #: Absolute, on the SAMPLE origin: the console must not have to
+    #: assemble it, because assembling it from `location.origin` is how
+    #: the Lab pane came to fetch the application origin in the first
+    #: place -- the one place the download is guaranteed to refuse.
+    download_url: str
+
+
+@router.post("/{sample_id}/download-ticket", response_model=DownloadTicketOut,
+             status_code=201)
+def mint_download_ticket(
+    sample_id: UUID,
+    request: Request,
+    user: CurrentUser = Depends(_REQUIRE_DOWNLOAD),
+    _fresh: None = Depends(require_step_up),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> DownloadTicketOut:
+    """A one-shot, sixty-second authority to download ONE sample from the
+    sample origin.
+
+    ## Why this exists
+
+    `__Host-` cookies are `Secure`, `Path=/`, no `Domain`,
+    `SameSite=strict`: they cannot reach the sample origin, and that is
+    the POINT of the split rather than a limitation of it. So the console
+    forced the token from the login response there as a Bearer -- the
+    session credential itself, held in page memory, posted to a second
+    origin, on the one path that puts working malware on a disk. This
+    endpoint is what lets that stop: the credential that crosses is good
+    for one sample, one redemption and sixty seconds, and buys the
+    archive the analyst was already downloading rather than the case file.
+
+    ## Why it is a POST, and what the CSRF header does and does not buy
+
+    It is authenticated by the ORDINARY session dependency, which means a
+    caller presenting the cookie must also send the `x-csrf-token`
+    double-submit (`deps.session_token`), and only an unsafe method
+    demands it -- a GET would be exempt, which is the first reason this
+    mint is a POST. The second is that a GET minting a credential is one
+    a prefetcher, a link scanner or a chat unfurl can trigger.
+
+    The double-submit is what a page on ANOTHER origin cannot satisfy: it
+    can make the browser send the cookie, but CORS will not let it set a
+    custom header on a request that carries one, and `SameSite=strict`
+    stops the cookie travelling in the first place. Stated precisely
+    because the tempting shorter claim is false: a script injected into
+    the console's OWN origin reads the CSRF cookie like any other script
+    and can forge the header. Nothing in a browser stops that, which is
+    exactly why what this hands back is scoped to one sample and expires
+    in a minute instead of being the session token it replaces.
+
+    ## The decision is the download's, not a second copy of it
+
+    `SampleService.issue_download_ticket` runs the same
+    `_downloadable` check `download()` runs -- clearance stated, sample
+    readable at it with its case's labels composed in, compartments held,
+    not REJECTED, data key present -- so a ticket can never be minted for
+    a sample the caller could not have downloaded directly. It also
+    refuses on this process being the sample origin, and on the split
+    being unusable at all.
+    """
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    try:
+        ticket = _ticket_svc(conn).issue_download_ticket(
+            sample_id, actor_id=user.user_id, clearance=clearance.name,
+            compartments=compartments,
+            # Which session asked, for the audit chain. Recorded, never
+            # re-checked at redemption: see 0061.
+            session_id=user.session_id, ip_hash=_ip_hash(request))
+    except SampleError as exc:
+        if "no such sample" in str(exc):
+            # 404, and the same 404 `detail()` gives: "this sample exists
+            # but is not yours" is itself a disclosure about a
+            # compartmented case.
+            raise Problem(404, "Not found", "no such sample") from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    # Not None: every split whose `sample` is unset was refused above,
+    # by the service, before a row was written.
+    sample_origin = origin_split().sample or ""
+    return DownloadTicketOut(
+        ticket=ticket.raw,
+        expires_at=ticket.expires_at.isoformat(),
+        download_url=_download_url(sample_origin, sample_id))
+
+
+def _meter_download(request: Request, response: Response) -> None:
+    """Meter the download on the PEER ADDRESS, before anything else runs.
+
+    The subject is the address because it is the only one that exists at
+    this point: since 0061 the credential may be a ticket in the body, so
+    nothing is known about the caller until a ticket has been looked up,
+    and the caller cannot mint an address the way `credential_subject`
+    warns they can mint a token.
+
+    Declared as a route-level dependency rather than a handler parameter
+    so it is solved FIRST -- FastAPI inserts these at the front of the
+    dependant -- and declared with no connection of its own, which is the
+    whole reason it is written out here instead of using
+    `limits.rate_limit("sample.download")`. That factory's IP branch takes
+    `Depends(get_conn)` so it can audit a denial, and taking it would open
+    a database connection for every request to this route including the
+    tokenless ones `_credential_presented` exists to refuse without one --
+    `db.connect()` is a real connect, not a pool checkout. The trade is
+    stated rather than hidden: a denial here is logged by `enforce` and
+    never written to `audit.event`. That is the right way round on this
+    particular route, where the whole defect being closed was an
+    unauthenticated caller's ability to cause audit writes.
+    """
+    enforce(request, response, "sample.download",
+            ip_subject(client_ip(request)))
+
+
+def _credential_presented(request: Request) -> None:
+    """Refuse a request that presents nothing, before a connection opens.
+
+    `deps.session_token` is declared ahead of `get_conn` on purpose, and
+    says why: a tokenless request must 401 without ever opening a database
+    connection, so an unauthenticated flood costs no connections and an
+    outage still answers 401. The ticket path would have quietly ended
+    that -- a ticket travels in the BODY, so this route can no longer
+    decide from headers alone, and `get_conn` would resolve for every
+    caller including one presenting nothing at all.
+
+    So the cheap question is asked first and from the headers only: is
+    there a credential of ANY kind here? A body counts as one without
+    being read, because reading it here to look for the ticket would
+    parse it twice. A caller who sends junk in a body therefore costs a
+    connection -- exactly as one who sends junk in `Authorization`
+    always has.
+    """
+    if (request.headers.get("authorization")
+            or request.cookies.get(SESSION_COOKIE)
+            or request.headers.get("transfer-encoding")):
+        return
+    if (request.headers.get("content-length") or "0") != "0":
+        return
+    raise Problem(401, "Unauthenticated",
+                  "no session token and no download ticket")
+
+
+def _download_actor(request: Request, conn: psycopg.Connection,
+                    sample_id: UUID, ticket: str | None) -> tuple[UUID, UUID | None]:
+    """Who is downloading, and the ticket that proved it if one did.
+
+    The two authentications cannot both be `Depends`: FastAPI resolves
+    every dependency a route declares, so `Depends(_REQUIRE_DOWNLOAD)`
+    would 401 a perfectly good ticket before this function ever ran. They
+    are therefore composed by hand -- and they are composed out of the
+    SAME callables the rest of the API uses (`session_token`,
+    `current_user`, the hoisted `sample.download` gate, `require_step_up`),
+    not reimplemented, because a second spelling of "is this session
+    allowed" is how two halves of one control come to disagree.
+
+    Ticket first, and only when one is actually presented: the session
+    path is unchanged for every caller who sends a Bearer, which since
+    2026-09-10 is every caller except the console. A request carrying
+    BOTH spends the ticket, because this branch is the first one.
+
+    The two branches check the same three things, by two routes. The
+    session branch calls the gates above. The ticket branch gets the
+    account half from `redeem_download_ticket`, which re-reads the
+    holder's `is_active` and their `sample.download` through the same
+    `holds_global_permission` `require_global` is built on -- in the
+    SERVICE, so a second caller cannot skip it, exactly as the origin and
+    label checks live there -- and the label half from `download()` below,
+    which reads `user_ceiling` live. What the ticket branch does not and
+    will not re-derive is the SESSION: that is the stated residual (0061,
+    docs/17 F22), and it is a question about a credential this origin
+    cannot resolve, not about the account.
+    """
+    if ticket:
+        try:
+            return _ticket_svc(conn).redeem_download_ticket(
+                ticket, sample_id=sample_id, ip_hash=_ip_hash(request))
+        except SampleError as exc:
+            # 401 and not 403: a ticket is the credential on this path,
+            # and a spent or expired one is an expired credential. One
+            # answer for all four refusal reasons, because "already
+            # redeemed" would tell the holder of a stolen ticket that it
+            # was real and that somebody else got there first.
+            raise Problem(401, "Unauthenticated", safe_detail(exc)) from exc
+    raw = session_token(request, request.headers.get("authorization"))
+    user = current_user(request, raw, conn)
+    _REQUIRE_DOWNLOAD(user, conn)
+    require_step_up(user, conn)
+    return user.user_id, None
+
+
+@router.post("/{sample_id}/download",
+             dependencies=[Depends(_meter_download)])
+@body_cap(_TICKET_BODY_CAP, what="a download ticket")
 def download(
     sample_id: UUID,
-    user: CurrentUser = Depends(require_global("sample.download")),
-    _fresh: None = Depends(require_step_up),
+    request: Request,
+    #: The one-shot ticket, in the FORM BODY. Not a query parameter: a URL
+    #: reaches the access log, the Referer and the browser history, and
+    #: this one is a credential. Not JSON either, and that is not taste --
+    #: `application/x-www-form-urlencoded` is a CORS-safelisted content
+    #: type, so a ticket redemption is a SIMPLE cross-origin request that
+    #: needs no preflight, while `application/json` would need
+    #: `content-type` in `app._preflight`'s `Access-Control-Allow-Headers`
+    #: and would fail with the console's "the request did not complete"
+    #: until somebody added it.
+    ticket: str | None = Form(default=None),
+    _presented: None = Depends(_credential_presented),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> Response:
     """The encrypted archive. The ONLY endpoint that touches sample bytes.
@@ -324,16 +623,37 @@ def download(
     something upstream decided to serve this as HTML, `sandbox` in the CSP
     means the browser will not execute it, and `nosniff` means it will not
     guess.
+
+    ## Two ways to prove who you are
+
+    A session (Bearer, or the cookie plus its CSRF header) is the original
+    path and still works, for every caller that is not the console. A
+    one-shot `ticket` in the form body is the other, minted on the
+    application origin by `download-ticket`: the split means no `__Host-`
+    cookie can reach this process, so the alternative to a ticket was the
+    console carrying its session token to a second origin -- which it did
+    until 2026-09-10 and does not do now. `_download_actor` composes both
+    out of the same callables the rest of the API uses.
+
+    Whichever proved it, the identity for the rest of this route is one
+    user: the ticket's holder is the actor the labels are checked against,
+    the audit names, and the custody row records.
     """
+    actor_id, ticket_id = _download_actor(request, conn, sample_id, ticket)
     # The caller's ceiling, exactly as `detail()` twenty lines above already
     # does. Its absence here was the worst defect found in this codebase:
     # `detail()` 404'd an over-classified sample and this endpoint handed
     # the same caller its bytes one request later.
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    #
+    # Read LIVE, and on the ticket path that matters: the ticket was
+    # minted against this ceiling up to a minute ago, and a clearance
+    # withdrawn in between must bite before the bytes move.
+    clearance, compartments = user_ceiling(conn, actor_id)
     try:
         blob, digest = _svc(conn).download(
-            sample_id, actor_id=user.user_id,
-            clearance=clearance.name, compartments=compartments)
+            sample_id, actor_id=actor_id,
+            clearance=clearance.name, compartments=compartments,
+            ticket_id=ticket_id)
     except SampleError as exc:
         if "no such sample" in str(exc):
             # 404, not 409: "this sample exists but is not yours" is itself
