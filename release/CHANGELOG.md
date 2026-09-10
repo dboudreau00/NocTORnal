@@ -1,5 +1,75 @@
 # Changelog
 
+## Alpha 5.2 — 2026-09-10
+
+The b-revision of Alpha 5.1, closing what a re-read of it found. Alpha 5.1
+wrote a linter for the previous review's examples; this closes the classes
+those examples belonged to.
+
+### The counters are generated, and the tolerance is gone
+
+`test_doc_invariants` allowed a quoted test total to sit within five per
+cent of the tree. At this size that is eighty tests of slack, and Alpha
+5.1 shipped a README claiming 1627 against a tree of 1639 — stale, and
+green, because the drift fitted inside the band. `scripts/refresh_counters.py`
+now writes every live counter (tests, revisions, Alembic head, version,
+completion) from the tree, the test asserts that running it would change
+nothing, and the tolerance is zero. Same arrangement as `db/schema.sql`.
+
+Two numbers that nothing can derive are gone rather than unchecked: the
+"collected items" totals, which need a pytest collection, now live only in
+these per-release entries, where they are dated records of one run.
+
+### The invariant tables are held to each other
+
+Alpha 5 reworded invariant 7 in CONVENTIONS and ARCHITECTURE — credentials
+never leave the **vault**, which runs inside the API process, because there
+is no collector. The README's table, the one a new reader meets first, went
+on saying "never leave the collector, decrypted only in the worker process":
+two processes this build does not have, on the front page, under a linter
+that was looking for the removed `sigma.js`. All three statements of each
+invariant are
+now held to a distinguishing word, so a row reworded into something the
+tree does not do fails whatever it was reworded to.
+
+### Behaviour that was designed and never built
+
+Auto-merge survived the Alpha 5 pass in the ontology definition, the
+Telegram normaliser, the generated TypeScript, a comms test and the README,
+all describing it in the present tense. A strong-selector collision raises
+`StrongSelectorConflict` — a merge *lead* an analyst confirms. The register
+that catches this now reads source and tests as well as prose, and carries
+its maintenance rule: when a decision record says a thing was never built,
+add it here.
+
+### Smaller, same shape
+
+- `retract_assertion`'s own docstring still said "history is superseded,
+  not overwritten" above the stamp-in-place UPDATE that Alpha 5.1 decided
+  was a marked row.
+- `apps/api/pyproject.toml` described itself as "Session 3 lands
+  authentication" — packaging metadata of a 0.5.1 release, in no linter.
+- README claimed 59 revisions "all reversible". They are reversible on an
+  EMPTY database, which is what the round-trip test proves; a downgrade
+  past `0017` on a populated one is refused on purpose.
+- README sold COMPLIANCE-mode WORM without saying the shipped compose file
+  sets the bucket DEFAULT to `GOVERNANCE 365d`. The per-object COMPLIANCE
+  lock `EvidenceStorage.put()` applies is the guarantee; the bucket default
+  is the floor for anything written by another path.
+- Three overall completion figures — 92.8%, ~92%, ~95% — are now one, and
+  only `ROADMAP-REMAINING.md` works it out.
+
+**Known.** The first run of `refresh_counters.py` rewrote two dated records
+it walked past: "it had 673 passing tests" and "surveyed at revision 0052".
+Both were restored, the shapes were narrowed to four-digit totals and the
+`Alembic head` phrase, and the tool now prints every line it changes. A
+generator loose in prose is a new way to lose history, and it is on the
+first page of that script.
+
+The Redis GCRA agreement test still fails on the development box every run
+and passes on CI: clock drift between the WSL container and the host, and
+the injected-clock refactor is still owed.
+
 ## Alpha 5.1 — 2026-09-09
 
 Follow-up release. **Still not audited, and still not lawful to operate
