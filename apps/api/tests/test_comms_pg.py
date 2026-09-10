@@ -199,7 +199,7 @@ def test_a_telegram_channel_id_is_durable_and_is_not_called_a_username():
     # caller that knows says so with an explicit prefix.
     assert normalise("TELEGRAM", "1234567890").durable == "u:1234567890"
     # A basic-group chat id keeps its own space, or it collides with a
-    # user id — and TELEGRAM_ID is is_strong, so that is an auto-merge.
+    # user id — and TELEGRAM_ID is is_strong, so that is a merge lead.
     assert normalise("TELEGRAM", "-4881234").durable == "g:4881234"
     assert normalise("TELEGRAM", "4881234").durable != \
         normalise("TELEGRAM", "-4881234").durable

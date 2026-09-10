@@ -91,7 +91,8 @@ two-step login. Found by the session-3 adversarial review.
 
 **A. Venue-scoped FORUM_UID.** A forum UID is unique per forum, not
 globally; unscoped it is a wrong-merge factory, so it is currently weak.
-To restore auto-merge we need the ingest layer to produce a venue-scoped
+To make auto-merge safe enough to build — it never was — we need the
+ingest layer to produce a venue-scoped
 norm form (e.g. `<forum-slug>:42`), which means selector matching gains a
 venue dimension. Decide when the collection layer is designed.
 

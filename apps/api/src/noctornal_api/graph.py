@@ -451,8 +451,15 @@ class GraphWriteService:
     def retract_assertion(
         self, assertion_id: UUID, *, retracted_by: UUID, reason: str, at: datetime
     ) -> None:
-        """Retract (never delete) an assertion. History is superseded, not
-        overwritten (invariant 5); the projection drops retracted rows."""
+        """Retract (never delete) an assertion.
+
+        Invariant 5, as decided 2026-09-09: this is a MARKED ROW, not a
+        supersession. One UPDATE stamps `retracted_at`/`retracted_by`/
+        `retraction_reason` from NULL and writes no other column, so the
+        claim itself is never rewritten; the projection drops the row.
+        There is nothing to supersede it with — a retraction withdraws a
+        claim rather than replacing one, and a correction is a new
+        assertion."""
         try:
             with self._c.transaction():
                 cur = self._c.execute(
