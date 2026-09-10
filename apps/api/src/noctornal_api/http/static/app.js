@@ -15,14 +15,19 @@
  * header -- the double-submit `deps.session_token` demands. What that
  * buys, stated exactly: after a RELOAD the session is cookie-only, so
  * script on this origin can act as the analyst while the tab lives and
- * holds no token it could replay from anywhere else. After a form
- * sign-in or a `#token=` hand-off the body token stays in `state.token`
- * for the life of the page, because `routers/live.py` authenticates the
- * websocket from a token in its first frame and reads no cookie, and
- * script on this origin can read that. "The credential is unreadable
- * from script" becomes true of every session only once that socket
- * accepts the cookie pair and the body token is dropped -- not this
- * round.
+ * holds no token it could replay from anywhere else. Since 2026-09-10
+ * that is true from the first request as well, not only after a reload:
+ * `POST /auth/login` answers 204 with the pair and NO BODY, so a form
+ * sign-in leaves nothing for `state.token` to hold. The two paths that
+ * forced a readable token had to be closed first, and were: the live
+ * websocket authenticates from `__Host-session` itself
+ * (`routers/live.py` `_handshake` prefers the cookie over the first
+ * frame it used to insist on), and the Lab download crosses to the
+ * sample origin on a one-shot ticket minted here under the cookie
+ * session instead of carrying the session token there as a Bearer.
+ * Those two were the whole reason a token had to be readable from
+ * script; what is still allowed to put one in memory is below, and a
+ * form sign-in is not it.
  *
  * Sign-out asks the server to revoke the session and delete both cookies
  * (with the attributes they were set with -- a `__Host-` deletion without
@@ -42,18 +47,28 @@
  * deployment "should instead" use the cookie -- a claim the code did not
  * back, which is the shape of defect the Alpha 4 review kept finding.
  *
- * The body token is held IN MEMORY (`state.token`, never storage) for
- * two narrow uses: the live websocket above, which after a reload is
- * honestly "off" until the next sign-in; and a console served over plain
- * HTTP from a non-localhost address, where the browser refuses Secure
- * cookies and the sign-in falls back to the in-memory bearer for the life
- * of the page, with a banner saying so. `scripts/bootstrap.py session`
- * hands a token over in the URL fragment; `adoptSessionFromFragment`
- * exchanges it once for the cookie pair through `POST /auth/cookie` --
- * and only when this browser holds no usable session already, because a
- * link must never replace the session the browser has (the server refuses
- * a different account with 409 regardless). The token is never logged,
- * never put in a URL by this page, and never rendered.
+ * ONE thing still puts a token in memory (`state.token`, never
+ * storage), and it is not a sign-in: the `#token=` hand-off, which must
+ * present the NEW token rather than the cookie the tab already holds.
+ * Where the browser accepts the pair, the exchange below is that token's
+ * last use in this page. Where it does not -- plain HTTP from a
+ * non-localhost address, where `Secure` cookies are refused outright --
+ * the handed-over token IS the session for the life of the tab:
+ * `authHeaders` falls back to it, and the socket's hello -- its
+ * first frame -- carries it, which is the only thing that keeps such a
+ * console live. A FORM sign-in on that host produces no credential at all,
+ * and `doLogin` says exactly that instead of opening an app that could
+ * not read anything (docs/17 F22). The token field is in the socket's
+ * protocol for the same caller: `scripts/bootstrap.py session` mints in
+ * a shell, for a browser it has never met, and a shell has no cookie jar.
+ *
+ * That script hands its token over in the URL fragment;
+ * `adoptSessionFromFragment` exchanges it once for the cookie pair
+ * through `POST /auth/cookie` -- and only when this browser holds no
+ * usable session already, because a link must never replace the session
+ * the browser has (the server refuses a different account with 409
+ * regardless). The token is never logged, never put in a URL by this
+ * page, and never rendered.
  *
  * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
  * everything is measured against a PROJECTION — a named, parameterised view.
@@ -567,7 +582,10 @@ function csrfCookie() {
 function signedIn() { return !!state.userId; }
 
 /** Which credential a request carries, decided in ONE place for `api()`
- *  and the two direct blob downloads.
+ *  and the report download, which fetches a blob outside it. The sample
+ *  download used to be the second of those and is not any more: it
+ *  crosses to another origin on a ticket minted through `api()`, and
+ *  nothing this function returns would survive that preflight.
  *
  *  Cookie session first: the browser attaches `__Host-session` itself,
  *  and an unsafe method copies the CSRF cookie into the header the server
@@ -731,7 +749,7 @@ async function doLogin(event) {
   const btn = $('login-submit');
   btn.disabled = true;
   try {
-    const out = await api('/auth/login', {
+    await api('/auth/login', {
       method: 'POST',
       json: {
         email: $('login-email').value.trim(),
@@ -739,23 +757,35 @@ async function doLogin(event) {
         totp_code: $('login-totp').value.trim(),
       },
     });
-    /* In memory only -- never storage. The server has set the cookie pair
-       on this response; from here on `api()` rides the cookie and the
-       token serves the live socket (see the header comment). */
-    state.token = out.token;
     $('login-password').value = '';
     $('login-totp').value = '';
-    await startApp();
+    /* Nothing comes back and nothing is kept from it. `POST /auth/login`
+       has answered 204 with the cookie pair and no body since
+       2026-09-10, and `_fetch` returns null for a 204 -- so the
+       `state.token = out.token` that stood here threw a TypeError on
+       every form sign-in, which `catch` below reported as an unexpected
+       error while the server had in fact signed the analyst in and set
+       their cookies. Deleted rather than guarded: there is no token in
+       that response to guard for.
+
+       Which makes the pair the only thing a form sign-in produces, and
+       that is checked BEFORE the app starts. A browser that refused the
+       Secure cookies leaves this tab holding nothing at all, and
+       `startApp`'s /auth/me would 401 straight into `endSession` --
+       "Session ended", a sentence about an expiry, for a session created
+       a second ago that the browser will simply not keep. */
     if (!csrfCookie()) {
-      /* The browser refused the Secure cookies: this console is reached
-         over plain HTTP from an address it does not treat as secure. Say
-         so, rather than letting the next reload look like an expiry. */
       banner('Session cookie refused by the browser',
         'This console is served over plain HTTP from a non-localhost '
-        + 'address, so the sign-in lasts only until the tab is reloaded. '
-        + 'Serve the console over HTTPS for a session that survives a '
-        + 'reload.', 'warn');
+        + 'address, so the browser refused the Secure session cookies. A '
+        + 'sign-in no longer returns a token to fall back on, so this tab '
+        + 'holds no credential and nothing was opened. Serve the console '
+        + 'over HTTPS, reach it at localhost, or use a '
+        + 'scripts/bootstrap.py session link -- whose token this tab does '
+        + 'keep, for its own life.', 'warn');
+      return;
     }
+    await startApp();
   } catch (err) {
     inlineProblem(errBox, err);
   } finally {
@@ -10208,24 +10238,49 @@ async function copyText(text, btn) {
  *  exactly that. Sample bytes are the exception invariant 10 makes: they
  *  come from a separate origin or not at all, so the server names that
  *  origin in connect-src, answers this page's cross-origin request there
- *  (and only there, and only for this origin), and the download is built
- *  from the origin the policy endpoint reported. Bound under its own
- *  name so the rule "fetch() is rooted at API" stays true of every call
- *  spelled fetch(, and the one deliberate exception is greppable.
+ *  (and only there, and only for this origin), and the URL fetched is the
+ *  absolute one the ticket mint returned. Bound under its own name so the
+ *  rule "fetch() is rooted at API" stays true of every call spelled
+ *  fetch(, and the one deliberate exception is greppable.
  */
 const fetchFromSampleOrigin = window.fetch.bind(window);
 
-/** POST to the SAMPLE origin, then hand the browser a blob.
+/** Mint a one-shot ticket HERE, spend it at the SAMPLE origin, then hand
+ *  the browser a blob.
  *
- *  A plain <a href> would be a GET, and this endpoint is a POST behind
- *  step-up on purpose: a GET that puts malware on a disk is one that a
- *  prefetcher, a link scanner or a chat unfurl can trigger.
+ *  A plain <a href> would be a GET, and both legs are POSTs on purpose: a
+ *  GET that puts working malware on a disk is one a prefetcher, a link
+ *  scanner or a chat unfurl can fire without a human, and the step-up
+ *  this download is gated on is asked for at the mint.
  *
- *  The Bearer token goes with it: the sample origin shares the session
- *  store, and a header is the credential a cross-origin page cannot
- *  forge, which is why the server accepts no cookie on that path.
+ *  TWO legs because no single credential can do both (2026-09-10). A
+ *  `__Host-` cookie cannot reach the sample origin -- that is the POINT
+ *  of the split, not a limitation of it -- so this request used to carry
+ *  the login body's session token there as a Bearer, which was the whole
+ *  reason a token had to sit in `state.token` where script can read it.
+ *  Now `POST /samples/{id}/download-ticket` goes through `api()` on THIS
+ *  origin, so it rides the cookie and the `x-csrf-token` double-submit
+ *  like every other write, and what crosses is good for one sample, one
+ *  redemption and sixty seconds.
+ *
+ *  The second leg sends NO header at all, which is not tidiness. Setting
+ *  one the CORS safelist does not cover turns this into a preflighted
+ *  request, and the sample process answers a preflight with
+ *  `Access-Control-Allow-Headers: authorization` alone (`app.py`
+ *  `_preflight`) -- so a ticket carried in a header of its own would be
+ *  refused before the server ever saw the request, and would surface
+ *  here as "did not complete", which is how the CSRF header did when the
+ *  cookie session landed. With no header of ours and a form body
+ *  (`application/x-www-form-urlencoded` is safelisted) this is a SIMPLE
+ *  cross-origin request and is not preflighted at all. The ticket
+ *  travels in that body for the same reason it never travels in the URL:
+ *  a query string reaches the access log, the history and the Referer,
+ *  and this one buys a live binary.
  */
 async function downloadSample(s, msg) {
+  /* The mint refuses an unusable split itself, with the reason. This
+     asks first only so the analyst gets that reason without a round trip
+     -- the button next to this message is already disabled for it. */
   const origin = smpPolicy && smpPolicy.sample_origin;
   if (!origin) {
     setMsg(msg, (smpPolicy && smpPolicy.sample_origin_problem)
@@ -10233,41 +10288,53 @@ async function downloadSample(s, msg) {
     msg.className = 'msg bad';
     return;
   }
-  /* The bearer, FORCED (2026-09-09). This is the one request the console
-     sends to another origin: `__Host-` cookies are SameSite=Strict and
-     scoped to this host, so none travel there, and the sample process
-     answers the preflight with `Access-Control-Allow-Headers:
-     authorization` alone (`app.py` `_preflight`) -- a CSRF header, which
-     is what `authHeaders('POST')` prefers once the cookie pair exists,
-     would fail the preflight and surface as "did not complete". So the
-     credential is the in-memory token, and a session restored from the
-     cookie after a reload holds none: say that, rather than sending a
-     request that cannot be authenticated. */
-  if (!state.token) {
-    setMsg(msg, 'This session was restored from the session cookie, and the '
-      + 'sample origin accepts only the sign-in token, which this tab no '
-      + 'longer holds. Sign out and in again to download.');
+  setMsg(msg, 'Requesting a download ticket…');
+  msg.className = 'msg';
+  let minted;
+  try {
+    minted = await api('/samples/' + encodeURIComponent(s.id)
+      + '/download-ticket', { method: 'POST' });
+  } catch (err) {
+    /* Through `refusalText`, so the SERVER's sentence arrives: this leg
+       carries the refusals an analyst is least able to guess at -- a
+       step-up that has expired, a clearance that does not reach this
+       sample, a split that is configured wrong -- and each of them is
+       written as a sentence there. The fallback is for a failure with no
+       `detail` at all, because an empty message box is the one answer
+       that is never right. */
+    setMsg(msg, refusalText(err, '') || 'The ticket request was refused.');
     msg.className = 'msg bad';
     return;
   }
-  setMsg(msg, 'Requesting…');
-  msg.className = 'msg';
-  const headers = authHeaders('POST', state.token);
+  setMsg(msg, 'Fetching the archive…');
   let res;
   try {
-    /* `omit`, spelled out: the sample origin reads no cookie, and this
-       page has no business offering one there. */
-    res = await fetchFromSampleOrigin(
-      origin + API + '/samples/' + encodeURIComponent(s.id) + '/download',
-      { method: 'POST', headers, credentials: 'omit' });
+    /* `credentials: 'omit'`, spelled out: the sample origin reads no
+       cookie, the ticket is the entire credential, and this page has no
+       business offering one there. The URL is the server's own
+       (`download_url`), not one assembled here from `location.origin` --
+       assembling it is exactly how this pane came to fetch the
+       application origin, which every download refuses by design. What
+       bounds a URL taken from a response is the CSP: `connect-src` names
+       'self' and the configured sample origin and nothing else. */
+    res = await fetchFromSampleOrigin(minted.download_url, {
+      method: 'POST',
+      body: new URLSearchParams({ ticket: minted.ticket }),
+      credentials: 'omit',
+    });
   } catch (_e) {
     setMsg(msg, 'The request did not complete.');
     msg.className = 'msg bad';
     return;
   }
   if (!res.ok) {
+    /* The sample origin's own sentence too, through the same
+       `refusalText` rather than a second spelling of "it was refused":
+       a spent or expired ticket says so and says to ask for another,
+       which is the one thing the analyst can act on. */
     const p = await problemOf(res);
-    setMsg(msg, p.detail || p.title);
+    const err = new ApiError(res.status, p.title, p.detail);
+    setMsg(msg, refusalText(err, '') || p.title);
     msg.className = 'msg bad';
     return;
   }
@@ -10403,11 +10470,16 @@ const _refetchSoon = debounce(async () => {
 
 const _badgeSoon = debounce(() => { refreshInboxBadge(); }, 400);
 
-function liveStatus(state_, reason) {
+/* One sentence per state, and no per-call override: the only caller that
+   ever passed one was `connectLive` refusing to open a socket for a
+   cookie-only session, which it no longer does. A parameter kept for a
+   caller that has gone is a parameter the next person fills in with a
+   guess. */
+function liveStatus(state_) {
   const dot = $('live-dot');
   if (!dot) return;
   dot.className = 'live-dot live-' + state_;
-  dot.title = reason || {
+  dot.title = {
     live: 'Live. Changes to this case by other analysts arrive without a '
       + 'refresh.',
     connecting: 'Connecting to the live channel…',
@@ -10417,20 +10489,17 @@ function liveStatus(state_, reason) {
   }[state_] || '';
 }
 
+/** Open the socket. NOT gated on `state.token` (2026-09-10): the upgrade
+ *  is an ordinary HTTP request until the server switches protocols, so
+ *  the browser attaches `__Host-session` to it, and `_handshake` in
+ *  `routers/live.py` now reads that cookie in preference to the frame.
+ *  A session restored from the cookie after a reload therefore goes live
+ *  like any other; the gate that used to stand here refused to open a
+ *  socket the server would have accepted, and the reason it printed --
+ *  "sign out and in again to go live" -- is now deleted rather than
+ *  demoted, because a stale sentence that sounds informed is worse than
+ *  the plain "not live" the dot already carries. */
 function connectLive() {
-  if (!state.token) {
-    /* The session is the HttpOnly cookie (this page was reloaded, or
-       signed in before a reload) and `routers/live.py` authenticates the
-       socket from a token in its first frame, reading no cookie. Saying
-       WHY the dot is off is the difference between "live is broken" and
-       "sign in again to go live" -- and the honest state of this build. */
-    liveStatus('off', 'Not live: this session was restored from the '
-      + 'session cookie, and the live channel still needs the sign-in '
-      + 'token in its first message. Sign out and in again to go live. '
-      + 'The console works normally; refresh to see another analyst\'s '
-      + 'changes.');
-    return;
-  }
   if (!window.WebSocket) { liveStatus('off'); return; }
   disconnectLive();
   liveStatus('connecting');
@@ -10445,11 +10514,22 @@ function connectLive() {
   _ws = ws;
 
   ws.addEventListener('open', () => {
-    /* The token goes in the FIRST FRAME, never the URL. A URL lands in
-       proxy logs, browser history and Referer, and this one would carry a
-       session bearer token. WebSocket has no header API in the browser,
-       so the first frame is the only place left. */
-    ws.send(JSON.stringify({ token: state.token, case_id: state.caseId }));
+    /* The frame is REQUIRED of everyone, because the case id has nowhere
+       else to go: a hello without one subscribes to notifications alone.
+       The credential is the cookie the browser just attached to the
+       upgrade, so `token` is sent only when this tab actually holds one
+       -- a console the browser refused the Secure pair on (plain HTTP,
+       non-localhost), where there IS no cookie for `_handshake` to
+       prefer. Absent rather than null: a null would still be a token
+       field this page did not need to fill.
+
+       Never the URL, on any path. A URL lands in proxy logs, browser
+       history and Referer, and this one would carry a session token;
+       WebSocket has no header API in a browser, so the first frame is
+       the only place left. */
+    const hello = { case_id: state.caseId };
+    if (state.token) hello.token = state.token;
+    ws.send(JSON.stringify(hello));
   });
 
   ws.addEventListener('message', (event) => {
@@ -10473,7 +10553,10 @@ function connectLive() {
        reconnected with a backoff, and given up after a while rather than
        hammering a server that may be down. */
     if (event && event.code === 1008) return;
-    if (!state.token || _wsRetry >= 6) return;
+    /* The session, not the token: this asks whether there is still
+       anything to reconnect FOR, and a null token stopped meaning "no
+       session" when the socket started taking the cookie. */
+    if (!signedIn() || _wsRetry >= 6) return;
     const delay = Math.min(30000, 1000 * Math.pow(2, _wsRetry));
     _wsRetry += 1;
     _wsTimer = setTimeout(connectLive, delay);
