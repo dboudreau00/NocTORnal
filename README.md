@@ -250,7 +250,7 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped** — **1775 tests** (`def test_`
+Expect **every test to pass with 0 skipped** — **1809 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -538,7 +538,7 @@ enforces it.
 
 ### Testing
 
-**1775 tests** (`def test_` functions across two pytest roots, maintained by
+**1809 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.

@@ -87,6 +87,25 @@ entity type. Recorded as **docs/16 D8**.
 > prefix. The entry is kept above as written: the register's value is that
 > it does not lose history.
 
+> **Update 2026-09-11 — the residual is closed at the normaliser.** A bare
+> positive id is now REFUSED: `telegram_id_norm` returns nothing durable
+> for it, `noctornal_ontology.refusal()` says why in one sentence naming
+> `u:<id>` and `c:<id>`, and the same sentence is what `SelectorStore`
+> raises, what `comms.normalise` returns as its note, and therefore what
+> the contact-block parser records beside an unresolved `Telegram:` line.
+> The typed forms are the only way in, at every door. Two things this
+> does not do. It cannot recompute a type that was never observed: rows
+> recorded under the assumption keep their `u:`, and
+> `scripts/telegram_bare_ids.py` lists them per case for an analyst to
+> confirm against the source and re-record typed where a channel is
+> wearing a user's row. And no Telegram collector exists to supply a
+> prefix from an observation (docs/16 L3), so today a typed id is a
+> human's statement. Closing this also closed a hole beside it:
+> `SelectorStore.record` stored whatever the normaliser returned, and for
+> anything it could not reduce that was `''` — one row per case per type
+> for every unreducible observation, a merge lead between strangers on a
+> strong type. An empty canonical form is refused now.
+
 ### F2 — `REJECTED` samples are destroyed, and that is the wrong default
 somewhere
 

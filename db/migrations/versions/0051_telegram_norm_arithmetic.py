@@ -68,8 +68,11 @@ def run(sql: str):
 #: The new norm, expressed once in SQL over `raw_value`. Mirrors
 #: `noctornal_ontology.normalisers.telegram_id_norm` exactly, including the
 #: rule that a bare positive is ambiguous between a user and an MTProto
-#: channel and is assumed `u:` — the same assumption the live code makes,
-#: so migration and runtime agree.
+#: channel and is assumed `u:` — the assumption the live code made until
+#: 2026-09-11, when it began REFUSING a bare positive (docs/17 F1). This
+#: SQL is pinned to what 0051 did on 2026-07-26 and is not changed: a
+#: migration keeps doing what it did, and `scripts/telegram_bare_ids.py`
+#: lists the rows it typed by assumption.
 _NEW_NORM = r"""
     CASE
       WHEN lower(raw_value) ~ '^[ucg]:' THEN
