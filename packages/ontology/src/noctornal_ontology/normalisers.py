@@ -213,21 +213,24 @@ def telegram_id_norm(v: str) -> str:
     alone would not: a user id and a channel id may be the same number and
     are not the same thing.
 
-    ## A bare positive integer is genuinely ambiguous, and stays that way
+    ## A bare positive integer is genuinely ambiguous, and is REFUSED
 
     In MTProto, user ids and channel ids are separate spaces and both
     positive, so `1234567890` alone cannot be resolved — it is a user id
-    or a channel id and nothing in the string says which. This function
-    assumes `u:`, because a bare positive in the wild is overwhelmingly a
-    user, and **accepts an explicit `u:`/`c:`/`g:` prefix from a caller
-    that knows better**. A scraper recording an MTProto channel should pass
-    `c:1234567890`, and it will then meet the Bot-API observation
-    `-1001234567890` on the same `c:` row.
-
-    Guessing instead of separating is what the old version did, and it is
-    the wrong trade for a strong selector: a missed merge is an analyst's
-    afternoon, a false merge is a channel and a person fused into one
-    actor.
+    or a channel id and nothing in the string says which. Until
+    2026-09-11 this function assumed `u:`, on the reasoning that a bare
+    positive in the wild is overwhelmingly a user. On a strong selector
+    that is the wrong trade in the same way the string-strip was: a
+    missed merge is an analyst's afternoon, a false merge is a channel
+    and a person fused into one actor, and "overwhelmingly" is a guess
+    written into a merge lead. So a bare positive now normalises to ''
+    -- nothing durable -- and `refusal()` says why in a sentence a caller
+    may show. A caller that knows the type says so with an explicit
+    `u:`/`c:`/`g:` prefix: a scraper recording an MTProto channel passes
+    `c:1234567890` and meets the Bot-API observation `-1001234567890` on
+    the same `c:` row; an analyst typing a user id passes `u:1234567890`.
+    The Bot-API negative encodings carry their own type and decode as
+    before.
     """
     s = v.strip()
     for prefix in ("u:", "c:", "g:"):
@@ -239,7 +242,9 @@ def telegram_id_norm(v: str) -> str:
     if not digits_only:
         return ""
     if not negative:
-        return "u:" + str(int(digits_only))
+        # Refused, not guessed (2026-09-11): see the docstring, and
+        # `refusal()` for the sentence a caller shows.
+        return ""
 
     value = int(digits_only)
     # Bot-API supergroup/channel: -(10**12 + id). The MTProto form of the
@@ -249,6 +254,36 @@ def telegram_id_norm(v: str) -> str:
     # A bare negative is a basic-group chat id. Distinct space, kept
     # distinct — it is not a channel and it is not a user.
     return "g:" + str(value)
+
+
+#: Why a bare positive Telegram id yields nothing. One sentence, shared by
+#: the selector store, `comms.normalise` and the contact-block parser, so
+#: an analyst reads the same reason at every door.
+TELEGRAM_BARE_POSITIVE = (
+    "a bare positive Telegram id is ambiguous: MTProto user ids and channel "
+    "ids are separate spaces and both positive, so the number alone does not "
+    "say which it is. Record it as u:<id> for a user or c:<id> for a channel "
+    "or supergroup (a Bot-API chat id, -100..., decodes on its own).")
+
+_BARE_POSITIVE = re.compile(r"^\s*\+?\d[\d\s]*$")
+
+
+def is_bare_positive_telegram_id(v: str) -> bool:
+    return bool(_BARE_POSITIVE.match(v))
+
+
+def refusal(selector_type_key: str, raw_value: str) -> str:
+    """Why `normalise(selector_type_key, raw_value)` returned '' -- one
+    sentence a caller may show. Meaningful only when it did. Normalisers
+    stay total and silent (README: they never raise); this is the reason
+    kept beside the rule, so the three places that refuse an empty
+    canonical form do not each invent their own."""
+    if selector_type_key == "TELEGRAM_ID" and is_bare_positive_telegram_id(raw_value):
+        return TELEGRAM_BARE_POSITIVE
+    shown = raw_value.strip()
+    if len(shown) > 60:
+        shown = shown[:57] + "..."
+    return f"{shown!r} cannot be reduced to a canonical {selector_type_key} value"
 
 
 def tlsh_norm(v: str) -> str:

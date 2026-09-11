@@ -62,7 +62,8 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 EMAIL_LIKE = "bcap-%@noctornal.test"
 
-#: Small on purpose. The real evidence cap is 256 MiB; a test that has to
+#: Small on purpose. The real evidence cap defaults to 256 MiB (a deployment
+#: declares its own, `config.declared_cap`); a test that has to
 #: send 256 MiB to prove a 413 is a test nobody runs. `MAX_EVIDENCE_BYTES`
 #: is read at request time precisely so it can be shrunk here.
 EVIDENCE_CAP = 64 * 1024

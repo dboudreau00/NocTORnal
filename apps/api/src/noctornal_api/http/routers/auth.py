@@ -33,7 +33,7 @@ from noctornal_api.http.limits import (
     rate_limit,
     rate_limit_peek,
 )
-from noctornal_api.security.auth import AuthService
+from noctornal_api.security.auth import AuthOutcome, AuthService
 from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
 from noctornal_api.stores import PgSessionStore, PgUserStore
 
@@ -72,6 +72,17 @@ def _audit(conn, action: str, actor_id, detail: dict, request: Request) -> None:
     )
 
 
+#: Says what happened and what to do, and nothing about which key: the
+#: register names that, to somebody who may read it.
+SECOND_FACTOR_UNAVAILABLE = (
+    "the second factor for this account cannot be checked: the key that "
+    "sealed its authenticator secret is not available to this deployment. "
+    "Nothing about the credentials was wrong. An operator must read the "
+    "readiness register (kek_ring_opens_stored_secrets) and restore or "
+    "retire that key."
+)
+
+
 @router.post("/login", status_code=204,
              dependencies=[Depends(rate_limit("auth.login")),
                            Depends(rate_limit_peek("auth.login_failed"))])
@@ -105,6 +116,17 @@ def login(body: LoginBody, request: Request,
     result = AuthService(PgUserStore(conn)).authenticate(
         body.email, body.password, body.totp_code
     )
+    if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
+        # The password verified; the stored second factor could not be
+        # opened under any key this process holds. Not a credential
+        # failure, so the failure meter is not consumed and no lockout
+        # attempt was burnt; audited under its own reason; answered as
+        # the server fault it is, naming the readiness check that
+        # explains it. Until 2026-09-11 this was an InvalidTag out of the
+        # store and a 500 to the analyst.
+        _audit(conn, "AUTH_FAILED", result.user_id,
+               {"reason": result.audit_reason, "email": body.email}, request)
+        raise Problem(503, "Service unavailable", SECOND_FACTOR_UNAVAILABLE)
     if not result.ok:
         consume_on_failure(request, "auth.login_failed")
         # The specific cause is audited server-side and NEVER returned —

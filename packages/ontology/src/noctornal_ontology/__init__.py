@@ -13,7 +13,7 @@ from noctornal_ontology.definition import (
     NodeType,
     SelectorType,
 )
-from noctornal_ontology.normalisers import NORMALISERS, normalise
+from noctornal_ontology.normalisers import NORMALISERS, normalise, refusal
 
 __version__ = "0.1.0"
 
@@ -26,5 +26,6 @@ __all__ = [
     "SelectorType",
     "NORMALISERS",
     "normalise",
+    "refusal",
     "__version__",
 ]

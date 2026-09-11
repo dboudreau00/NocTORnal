@@ -2,6 +2,108 @@
 
 ## Unreleased
 
+### Roadmap items 8 to 13: a size policy, a key ring, a refusal, one alpha, and the gate on dead letters
+
+**8. The exhibit size cap is a declared policy.** It was a module constant
+-- 256 MiB, changed by editing source -- on an upload whose every accepted
+byte is locked under COMPLIANCE for the retention period, which is a
+decision about a permanent commitment nobody in the deployment had taken.
+`NOCTORNAL_MAX_EVIDENCE_BYTES` declares it (bytes, or `512MiB`), read once
+by the router through `config.declared_cap`; a production boot refuses
+without it, and refuses either cap declared unusably; the readiness check
+`evidence_size_cap_declared` reports what THIS process enforces and says
+"restart" when the environment has been edited underneath it; the console
+reads `GET /cases/{id}/evidence/policy` once and prints the cap beside the
+picker, and refuses a larger file before the upload starts (the server
+stays the authority). The sample cap is declared the same way
+(`NOCTORNAL_MAX_SAMPLE_BYTES`, on `/samples/policy`), without the boot
+insisting, because that bucket is not locked. docs/08 owns the policy and
+says what to do above the cap: not split the exhibit.
+
+**9. The envelope's `key_id` selects a key.** It was written beside every
+blob and read by nothing: `decrypt` accepted it and used the one
+environment key regardless, docs/05 promised a rotation runbook nothing
+could run, and a KEK that changed under a live database surfaced as an
+`InvalidTag` out of a login -- a 500 to the analyst -- while the register
+stayed green because its only KEK check asked whether the value was 32
+bytes. Now a ring: `NOCTORNAL_TOTP_KEK` is the active key under
+`NOCTORNAL_TOTP_KEK_ID` (default `env:v1`), `NOCTORNAL_TOTP_KEK_RETIRED`
+holds `id=base64` keys that only open, and `decrypt` selects by the
+blob's recorded id. The readiness check `kek_ring_opens_stored_secrets`
+opens up to a thousand rows per (table, key id) across the five sealed
+columns and COUNTS -- because before the ring every blob was recorded as
+`env:v1` whatever key sealed it, and one row's verdict is not a group's
+-- and says which of the two faults it found: no key of that id, or a key
+of that id that does not open the blob. Login answers **503 by name**
+(`AuthOutcome.SECOND_FACTOR_UNAVAILABLE`), after the password verified,
+burning no lockout attempt and naming the check. `scripts/rewrap_secrets.py
+--apply` re-seals every row under the active key, compare-and-set per row,
+and `--legacy-key-file` brings home rows a pre-ring key sealed under the
+same id. The four-step runbook is in `security/envelope.py`, the template
+and the production README.
+
+The development database this was written against is the case the check
+exists for: 93 enrolled accounts and 153 samples, all `env:v1`, of which
+65 accounts and 69 samples opened under no key on the machine -- test
+rows left by killed runs on 2026-09-10, sealed by a `.env.local` that has
+since been regenerated. The register on that machine is red on the new
+check until they are deleted, which is the correct answer; CI's fresh
+database is green. The ring test rotates AWAY from whatever key it finds
+and back again in a `finally`, so it can run on that database too.
+
+**10. A bare positive Telegram id is refused.** docs/17 F1's residual
+since 2026-07-26: `1234567890` was assumed `u:` on a strong selector, so
+an MTProto channel observed as a bare number merged with a same-numbered
+user. `telegram_id_norm` now returns nothing durable for it and
+`noctornal_ontology.refusal()` says why in one sentence naming `u:<id>`
+and `c:<id>` -- the sentence `SelectorStore` raises, `comms.normalise`
+returns as its note (it also accepts the typed forms now, which it did
+not) and the contact-block parser records beside an unresolved
+`Telegram:` line. Closing it exposed a hole beside it: `SelectorStore.
+record` stored whatever the normaliser returned, and for anything it
+could not reduce that was `''` -- one row per case per type for every
+unreducible observation, a merge lead between strangers on a strong type.
+An empty canonical form is refused. Rows typed by assumption before today
+keep their `u:` (nothing can recompute a type that was never observed);
+`scripts/telegram_bare_ids.py` lists them per case.
+
+**11. The canvas dims by the theme's steps.** `confAlpha` in app.js
+carried its own 1 / 0.72 / 0.45. The theme had raised `--conf-low` to 0.58
+for contrast (Alpha 5) and the sociogram never noticed, so the inspector
+printed one opacity and the edge was painted at another, and docs/06
+still said 0.45. `loadPaint` reads the three tokens through `cssVar` like
+every other painter, `paintIsComplete` reports one that does not resolve,
+and a test holds app.js, theme.css and docs/06 to one number.
+
+**12. The dead-letter listing's decisions are `evaluate()`'s.** `GET
+/ingest/dead-letters` decided access three ways of its own: a SQL
+restatement of `require_global`, a SQL restatement of four of the five
+case checks, and label predicates in the query -- correct on the day they
+were written, and every authorization defect this tree has shipped was a
+query that never called the gate. `PgAccessResolver.resolve_global`
+resolves a global verb into an `AccessContext` (the relationship check
+satisfied by construction, stated); `_holds_global` reads the verb and
+step-up checks off the decision; the caller's cases are the ones the gate
+allows one at a time; and every RETURNED row is put to the gate against
+its own labels, through its case or through the global verb for an
+unattached row. The SQL predicates only bound the fetch. Three tests
+replace `evaluate` with a verdict of their own and watch rows appear and
+vanish with it.
+
+**13. One scheduler, one adapter -- "only if you collect".** The
+scheduler half is Wave 1: the cron sidecar in the production compose runs
+`scripts/collection_poll.py` on a five-minute resolution and each source
+keeps its own jittered cadence. The adapter half is unchanged: RSS is the
+one adapter, and XenForo/MyBB/Telegram stay behind docs/16 L3 and the
+owner's own condition on the item. Not built, and said so rather than
+built untested.
+
+**Also.** `scripts/refresh_counters.py`'s head pattern was a lookbehind on
+a single space, and the roadmap's live paragraph wraps between "head" and
+the number, so that one paragraph said `0060` on a `0061` tree while every
+other document was held exactly -- the defect the tool exists to kill,
+inside the tool. The pattern crosses a line break now.
+
 ### Wave 2: the console holds no credential
 
 The console kept the login-body token in page memory for exactly two paths
@@ -71,13 +173,12 @@ weaker: a cross-site page cannot make `Origin` and `Host` agree.
 **Known.** The one residual on the ticket is stated in `0061` and in
 docs/17 F22: a ticket minted under a session revoked inside the following
 sixty seconds can still be redeemed, by a holder whose account is still
-active, still permitted, and for a sample they may still read. Separately,
-and not introduced here: a `NOCTORNAL_TOTP_KEK` that does not match the one
-an account was enrolled under makes `POST /auth/login` answer 500 rather
-than refusing cleanly, and the `totp_kek_set` readiness check cannot see
-it, because it verifies the key decodes and not that it decrypts anything.
-Met while setting up the browser verification, and worth a refusal of its
-own.
+active, still permitted, and for a sample they may still read. (This paragraph
+also recorded, as not fixed, that a `NOCTORNAL_TOTP_KEK` mismatching the one
+an account was enrolled under made `POST /auth/login` answer 500 and that
+the `totp_kek_set` readiness check could not see it. The key ring above
+closed both on 2026-09-11; as with Wave 1's note, this is an unreleased
+section and correcting it is the point.)
 
 ### Wave 1: it can be deployed as a service rather than run as a script
 

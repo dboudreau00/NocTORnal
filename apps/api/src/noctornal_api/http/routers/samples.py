@@ -97,6 +97,7 @@ from noctornal_api.http.limits import (
     enforce,
     rate_limit,
 )
+from noctornal_api.config import SAMPLE_CAP_ENV, cap_is_declared
 from noctornal_api.ratelimit import ip_subject
 from noctornal_api.samples import (
     MAX_SAMPLE_BYTES,
@@ -252,6 +253,9 @@ def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
         "sample_origin_configured": usable,
         "sample_origin": split.sample if usable else None,
         "sample_origin_problem": split.split_problem,
+        # The cap `submit` enforces on THIS process, for the picker.
+        "max_sample_bytes": MAX_SAMPLE_BYTES,
+        "max_sample_bytes_declared": cap_is_declared(SAMPLE_CAP_ENV),
         "counsel_review_required": True,
         "notice": (
             "Counsel must review this deployment before it is used in any "

@@ -126,7 +126,11 @@ class PgUserStore(UserStore):
         ).fetchone()
         if row is None or row[0] is None:
             return None
-        return envelope.decrypt(bytes(row[0]), key_id=row[1] or "env:v1")
+        # The recorded id selects the key (a NULL is the pre-ring default
+        # inside the envelope). What comes back on a key the ring does not
+        # hold, or holds wrongly, is `envelope.UNOPENABLE`, and
+        # `AuthService.authenticate` answers that by name.
+        return envelope.decrypt(bytes(row[0]), key_id=row[1])
 
     def advance_totp_counter(self, user_id: UUID, new_counter: int) -> bool:
         # Compare-and-set: only advances if strictly greater than the stored
@@ -308,6 +312,62 @@ class PgAccessResolver:
             user_clearance=user_clearance,
             object_classification=tlp_from_name(object_classification),
             user_compartments=user_compartments,
+            object_compartments=object_compartments,
+            mfa_satisfied_at=mfa_satisfied_at,
+        )
+
+    def resolve_global(
+        self,
+        *,
+        user_id: UUID,
+        permission_key: str,
+        object_classification: str,
+        object_compartments: frozenset[str],
+        mfa_satisfied_at: datetime | None,
+    ) -> AccessContext:
+        """The five-part context for a verb held through a GLOBAL role
+        (`iam.user_role`), against an object that belongs to no case.
+
+        `require_global` checks three of the five facts in its own SQL --
+        the verb through a global role, the account active, step-up
+        freshness -- and until 2026-09-11 the one route that lists objects
+        with no case (an unattached dead letter) applied the lattice and
+        need-to-know predicates in its query. This resolves the same facts
+        for `evaluate()`, so a global decision is the same evaluator's
+        decision, with the relationship check satisfied by construction:
+        there is no case to be assigned to, and the verb IS the
+        relationship. Break-glass is not consulted: a grant raises the
+        clearance for case reads, and an object with no case has no case
+        the grant could name.
+        """
+        perm_row = self._c.execute(
+            "SELECT requires_step_up FROM iam.permission WHERE key = %s",
+            (permission_key,),
+        ).fetchone()
+        if perm_row is None:
+            raise AccessResolutionError(f"unknown permission: {permission_key!r}")
+        user = self._c.execute(
+            "SELECT tlp_clearance, compartments FROM iam.app_user "
+            "WHERE id = %s AND is_active",
+            (user_id,),
+        ).fetchone()
+        if user is None:
+            raise AccessResolutionError(f"unknown or inactive user: {user_id}")
+        perms = self._c.execute(
+            """SELECT rp.permission_key
+                 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                WHERE ur.user_id = %s""",
+            (user_id,),
+        ).fetchall()
+        return AccessContext(
+            permission_key=permission_key,
+            permission_requires_step_up=bool(perm_row[0]),
+            role_permissions=frozenset(p[0] for p in perms),
+            has_unexpired_assignment=True,
+            user_clearance=tlp_from_name(user[0]),
+            object_classification=tlp_from_name(object_classification),
+            user_compartments=frozenset(user[1] or []),
             object_compartments=object_compartments,
             mfa_satisfied_at=mfa_satisfied_at,
         )

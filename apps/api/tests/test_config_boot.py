@@ -49,6 +49,7 @@ def _production() -> dict[str, str]:
         "SAMPLE_SECURE": "true",
         "SMTP_HOST": "smtp.example.gov",
         "SMTP_PASSWORD": "Td5mJ1cV",
+        "NOCTORNAL_MAX_EVIDENCE_BYTES": "268435456",
     }
 
 
@@ -331,6 +332,7 @@ _ALL_BROKEN_NAMES = (
     "SMTP_ALLOW_PLAINTEXT", "MINIO_SECURE", "SAMPLE_SECURE",
     "NOCTORNAL_BASE_URL", "NOCTORNAL_SESSION_STRICT_BINDING",
     "NOCTORNAL_ENABLE_DOCS", "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY",
+    "NOCTORNAL_MAX_EVIDENCE_BYTES",
 )
 
 
@@ -345,6 +347,7 @@ def _all_broken() -> dict[str, str]:
         "SMTP_ALLOW_PLAINTEXT": "1",
         "NOCTORNAL_ENABLE_DOCS": "true",
         "NOCTORNAL_BASE_URL": "http://noctornal.example.gov",
+        "NOCTORNAL_MAX_EVIDENCE_BYTES": "lots",
     }
 
 
@@ -367,7 +370,7 @@ _REFUSED_ON_AN_EMPTY_ENVIRONMENT = (
     "NOCTORNAL_TOTP_KEK", "NOCTORNAL_INGEST_PEPPER", "REDIS_URL",
     "MINIO_SECURE", "SAMPLE_SECURE", "NOCTORNAL_BASE_URL",
     "NOCTORNAL_SESSION_STRICT_BINDING", "SAMPLE_ACCESS_KEY",
-    "SAMPLE_SECRET_KEY",
+    "SAMPLE_SECRET_KEY", "NOCTORNAL_MAX_EVIDENCE_BYTES",
 )
 
 
@@ -376,7 +379,7 @@ def test_bare_production_environment_is_refused_on_every_count():
     -- or never ran them -- would pass every other test in this file by
     returning `[]`, and would be a boot refusal in name only.
 
-    It names the nine rather than asserting a floor, because a floor is
+    It names the ten rather than asserting a floor, because a floor is
     the weaker half of the same guard: `>= 8` goes on passing after
     somebody deletes a rule, which is the case this test exists for."""
     problems = verify_environment({"NOCTORNAL_ENV": "production"})
@@ -490,3 +493,64 @@ def test_enforce_does_nothing_in_this_process():
     here: it pins the precondition those suites depend on without
     borrowing their imports to do it."""
     enforce_environment()
+
+
+# --- the key ring (2026-09-11) ------------------------------------------------
+
+def test_a_complete_ring_is_accepted():
+    env = _production()
+    env["NOCTORNAL_TOTP_KEK_ID"] = "env:v2"
+    env["NOCTORNAL_TOTP_KEK_RETIRED"] = "env:v1=" + base64.b64encode(b"r" * 32).decode()
+    assert verify_environment(env) == []
+
+
+@pytest.mark.parametrize("retired, fragment", [
+    ("not-an-entry", "entry 1 is not `id=base64`"),
+    ("env:v1=" + base64.b64encode(b"r" * 32).decode(), "reuses the ACTIVE key id"),
+    ("env:v0=" + base64.b64encode(b"r" * 16).decode(), "32 bytes"),
+])
+def test_an_unusable_ring_is_refused_by_position(retired, fragment):
+    env = _production()
+    env["NOCTORNAL_TOTP_KEK_RETIRED"] = retired
+    problem = _only(verify_environment(env), "NOCTORNAL_TOTP_KEK_RETIRED")
+    assert fragment in problem, problem
+    assert base64.b64encode(b"r" * 32).decode() not in problem
+
+
+def test_the_ring_is_not_reported_twice_when_the_active_key_is_the_fault():
+    """One variable, one refusal: a missing active key must not ALSO
+    produce a ring refusal about the same thing."""
+    env = _production()
+    del env["NOCTORNAL_TOTP_KEK"]
+    env["NOCTORNAL_TOTP_KEK_RETIRED"] = "env:v0=" + base64.b64encode(b"r" * 32).decode()
+    assert "not set" in _only(verify_environment(env), "NOCTORNAL_TOTP_KEK")
+
+
+# --- the exhibit size policy (2026-09-11) --------------------------------------
+
+def test_an_undeclared_evidence_cap_is_refused():
+    env = _production()
+    del env["NOCTORNAL_MAX_EVIDENCE_BYTES"]
+    problem = _only(verify_environment(env), "NOCTORNAL_MAX_EVIDENCE_BYTES")
+    assert "not set" in problem and "COMPLIANCE" in problem
+
+
+@pytest.mark.parametrize("variable", ["NOCTORNAL_MAX_EVIDENCE_BYTES",
+                                      "NOCTORNAL_MAX_SAMPLE_BYTES"])
+@pytest.mark.parametrize("value, fragment", [
+    ("lots", "not a size"), ("1", "between 1 MiB and 64 GiB"), ("100GiB", "between"),
+])
+def test_an_unusable_cap_is_refused_before_the_router_would_refuse_to_import(
+        variable, value, fragment):
+    env = _production()
+    env[variable] = value
+    problem = _only(verify_environment(env), variable)
+    assert fragment in problem, problem
+
+
+@pytest.mark.parametrize("value", ["268435456", "512MiB", "512M", "1GiB", "2 g"])
+def test_every_spelling_of_a_size_the_reader_accepts_is_accepted(value):
+    env = _production()
+    env["NOCTORNAL_MAX_EVIDENCE_BYTES"] = value
+    env["NOCTORNAL_MAX_SAMPLE_BYTES"] = value
+    assert verify_environment(env) == []

@@ -118,7 +118,12 @@ def test_the_register_names_are_unique_and_in_register_order():
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    assert len(readiness.CHECK_NAMES) == 13, readiness.CHECK_NAMES
+    assert len(readiness.CHECK_NAMES) == 15, readiness.CHECK_NAMES
+    # 2026-09-11: `kek_ring_opens_stored_secrets` (the ring opens what is
+    # stored, counted) and `evidence_size_cap_declared` (the cap is a
+    # declaration, and the enforced value is the environment's).
+    assert "kek_ring_opens_stored_secrets" in readiness.CHECK_NAMES
+    assert "evidence_size_cap_declared" in readiness.CHECK_NAMES
     # The two added with the tier. `ingest_pepper_set` had no entry at all
     # before, so an unset pepper passed the whole register and failed at
     # the first ingest key operation; `app_db_role_not_owner` reports

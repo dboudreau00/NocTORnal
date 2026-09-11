@@ -177,7 +177,12 @@ makes it safe.
   not about a network boundary, and a compromised API host is a
   compromised vault. Splitting a collector out is a deliberate not-yet
   (`docs/02`).
-- Key rotation runbook with re-wrap, not re-encrypt
+- Key rotation runbook with re-wrap, not re-encrypt — **shipped
+  2026-09-11**: the envelope selects the key by each blob's recorded
+  `key_id`, retired keys stay in `NOCTORNAL_TOTP_KEK_RETIRED` until
+  `scripts/rewrap_secrets.py --apply` has moved every row under the
+  active key, and the readiness check `kek_ring_opens_stored_secrets`
+  says when that is (the runbook is in `security/envelope.py`)
 - Backups encrypted, restore tested quarterly, backup access separately
   permissioned
 

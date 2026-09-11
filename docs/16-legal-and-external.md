@@ -240,6 +240,12 @@ just access.
 >
 > The original text is kept below because the *reasoning* is still the
 > record of why a normaliser cannot disambiguate alone.
+>
+> **2026-09-11:** the `u:` assumption for a bare positive is withdrawn.
+> A bare positive now normalises to nothing and is refused with a note
+> naming the typed forms; only `u:`/`c:`/`g:` is accepted. The rows typed
+> by assumption between the two dates are listed by
+> `scripts/telegram_bare_ids.py` (docs/17 F1).
 
 Added 2026-07-25. **This was a known correctness defect that was
 reported rather than fixed, and it needed a decision.**

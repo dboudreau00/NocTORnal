@@ -66,7 +66,11 @@ python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 ```
 
 Losing that key means every user must re-enrol their authenticator. Back it
-up somewhere that is not this host.
+up somewhere that is not this host. Rotating it does not: the envelope
+keeps a ring (`NOCTORNAL_TOTP_KEK_RETIRED`, see the template), the
+readiness check `kek_ring_opens_stored_secrets` says whether every stored
+secret still opens, and `scripts/rewrap_secrets.py --apply` moves them
+under the new key.
 
 Then lock the file down. It holds every password in the deployment:
 
@@ -238,7 +242,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Thirteen checks, each with the evidence behind it and, when it fails, the
+Fifteen checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -262,7 +266,7 @@ working.
 
 ### What stays red, and what a red check refuses
 
-Four of the thirteen are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the fifteen are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important — everything in the register is important. It
@@ -283,6 +287,16 @@ blocking — `readiness.py` says why at length: it is an operability failure
 rather than a decision taken too late, and refusing on it would land on
 somebody who cannot act on the refusal, because the register that explains
 it needs `user.manage` and `SYS_ADMIN` is the only role that holds it.
+
+Two more are green on a correctly written secrets file and worth knowing
+by name. `evidence_size_cap_declared` is red until
+`NOCTORNAL_MAX_EVIDENCE_BYTES` is declared — the boot refuses without it,
+so in this deployment you cannot reach the register with it unset — and
+goes red again if the variable is edited without a restart, because the
+cap is read once at start. `kek_ring_opens_stored_secrets` opens stored
+secrets with the key ring and is the check that catches a KEK that
+changed under its id; it is green on a fresh stack and stays so through a
+rotation done as the template describes.
 
 **1. `prohibited_content_policy`** — `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
