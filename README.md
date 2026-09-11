@@ -271,7 +271,7 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped** — **1775 tests** (`def test_`
+Expect **every test to pass with 0 skipped** — **1809 tests** (`def test_`
 functions across both pytest roots; 2259 collected items once
 parametrised; a snapshot taken 2026-09-09, the live figure is `pytest
 --co -q`). **Without `DATABASE_URL` roughly half the suite skips
@@ -558,7 +558,7 @@ enforces it.
 
 ### Testing
 
-**1775 tests** (`def test_` functions across two pytest roots; 2259 collected
+**1809 tests** (`def test_` functions across two pytest roots; 2259 collected
 items once parametrised, snapshot 2026-09-09). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
