@@ -344,3 +344,34 @@ def test_no_element_dims_a_colour_that_is_already_dim():
         body = m.group(1)
         assert "--text-tertiary" not in body or "opacity" not in body, (
             f"{sel} sets both a dim colour and an opacity: {body.strip()}")
+
+
+def test_the_canvas_reads_confidence_alpha_from_the_theme_and_docs_06_agrees():
+    """Three sides of one number.
+
+    `confAlpha` in app.js carried its own steps -- 1 / 0.72 / 0.45 -- so
+    when the theme raised `--conf-low` to 0.58 for contrast (the test
+    above), the DOM chips dimmed by the new step and the sociogram kept
+    drawing the old one: the inspector printed one opacity and the edge
+    was painted at another. docs/06 meanwhile still said 0.45. So: the
+    function carries no literal step, reads the three tokens through
+    `cssVar` like every other painter, and docs/06's table equals
+    theme.css exactly.
+    """
+    js = APP_JS.read_text(encoding="utf-8")
+    start = js.index("function confAlpha(")
+    body = js[start:js.index("\n}\n", start)]
+    assert not re.search(r"\b\d+\.\d+\b", body), (
+        "confAlpha carries a literal confidence step; the theme owns them")
+    assert "PAINT.conf" in body
+    for token in ("--conf-high", "--conf-moderate", "--conf-low"):
+        assert f"cssVar('{token}')" in js, f"the canvas never reads {token}"
+
+    theme = _strip_comments(_theme_css())
+    docs = (Path(__file__).resolve().parents[3]
+            / "docs" / "06-interface.md").read_text(encoding="utf-8")
+    for token in ("--conf-high", "--conf-moderate", "--conf-low"):
+        in_theme = float(re.search(rf"{token}:\s*([0-9.]+)", theme).group(1))
+        in_docs = float(re.search(rf"^{token}\s+([0-9.]+)", docs, re.M).group(1))
+        assert in_theme == in_docs, (
+            f"{token}: theme.css says {in_theme}, docs/06 says {in_docs}")

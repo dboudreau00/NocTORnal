@@ -47,6 +47,7 @@ from noctornal_api.http.deps import (
     audit_auth_event,
     authorize_object,
     current_user,
+    effective_labels,
     get_conn,
     require_global,
     require_step_up,
@@ -61,8 +62,16 @@ from noctornal_api.ingest import (
     IngestService,
 )
 from noctornal_api.rawstore import MissingObject, RawBatchStorage, RawStoreError
-from noctornal_api.security.access import tlp_from_name
+from noctornal_api.security.access import (
+    CHECK_ROLE,
+    CHECK_STEP_UP,
+    AccessResolutionError,
+    Decision,
+    evaluate,
+    tlp_from_name,
+)
 from noctornal_api.security.sessions import STEP_UP_FRESHNESS
+from noctornal_api.stores import PgAccessResolver
 
 
 def _with_raw(conn: psycopg.Connection, **kw) -> IngestService:
@@ -195,56 +204,79 @@ def _authorise_record(conn: psycopg.Connection, user: CurrentUser,
     return case_id
 
 
+def _decision_global(conn: psycopg.Connection, user: CurrentUser,
+                     permission_key: str, *, classification: str = "CLEAR",
+                     compartments: frozenset[str] = frozenset()) -> Decision | None:
+    """The five-part gate on a GLOBAL verb, as a question.
+
+    `PgAccessResolver.resolve_global` gathers the facts -- the verb through
+    a global role, the account active, step-up, and the caller's labels
+    against the object's -- and `evaluate()` decides, so a decision about
+    an object with no case is the same evaluator's decision as every
+    other. None when the context cannot be resolved (an inactive account,
+    an unknown permission), which every caller treats as denied.
+    """
+    try:
+        ctx = PgAccessResolver(conn).resolve_global(
+            user_id=user.user_id, permission_key=permission_key,
+            object_classification=classification,
+            object_compartments=compartments,
+            mfa_satisfied_at=user.session_mfa_at)
+    except AccessResolutionError:
+        return None
+    return evaluate(ctx)
+
+
 def _holds_global(conn: psycopg.Connection, user: CurrentUser,
                   permission_key: str) -> tuple[bool, bool]:
-    """(held, fresh): `require_global`'s three checks asked as a question.
+    """(held, fresh): `require_global`'s facts, read off the one gate.
 
-    `require_global` is a dependency that REFUSES; this returns the same
-    facts -- the verb through a global role on an active account, and
-    whether step-up freshness (where the permission demands it) is
-    satisfied -- so an endpoint whose scope is the UNION of two verbs can
-    decide per row instead of per route. `fresh` is True whenever the
-    permission does not require step-up at all.
+    Until 2026-09-11 this was its own three-way SQL -- a second copy of a
+    rule `evaluate()` owns, in the router whose every shipped authz defect
+    was a query that never called the gate. It now asks the gate with no
+    object (CLEAR, no compartments) and reads two named checks off the
+    decision: the verb, and step-up freshness. `fresh` is True whenever
+    the permission does not require step-up, exactly as before.
     """
-    row = conn.execute(
-        """SELECT bool_or(p.requires_step_up)
-             FROM iam.user_role ur
-             JOIN iam.role_permission rp ON rp.role_key = ur.role_key
-             JOIN iam.permission p ON p.key = rp.permission_key
-             JOIN iam.app_user u ON u.id = ur.user_id
-            WHERE ur.user_id = %s AND rp.permission_key = %s
-              AND u.is_active""", (user.user_id, permission_key)).fetchone()
-    if row is None or row[0] is None:
+    decision = _decision_global(conn, user, permission_key)
+    if decision is None:
         return False, False
-    if not row[0]:
-        return True, True
-    fresh = (
-        user.session_mfa_at is not None
-        and (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
-        < STEP_UP_FRESHNESS)
-    return True, fresh
+    return (CHECK_ROLE not in decision.failed_checks,
+            CHECK_STEP_UP not in decision.failed_checks)
+
+
+def _case_allows(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                 permission_key: str, *, classification: str | None = None,
+                 compartments: frozenset[str] = frozenset()) -> bool:
+    """The five-part gate on one case, as a question: `authorize_object`
+    without the refusal and the audit row, for a listing that answers
+    what the caller may see rather than refusing the whole request.
+    Element labels compose with the case's exactly as `authorize_object`
+    composes them (`effective_labels`). A resolution failure -- or a case
+    that no longer exists -- is False: it fails closed."""
+    try:
+        eff_cls, eff_comp = effective_labels(conn, case_id, classification, compartments)
+        ctx = PgAccessResolver(conn).resolve(
+            user_id=user.user_id, case_id=case_id, permission_key=permission_key,
+            object_classification=eff_cls, object_compartments=eff_comp,
+            mfa_satisfied_at=user.session_mfa_at)
+    except (AccessResolutionError, Problem):
+        return False
+    return evaluate(ctx).allowed
 
 
 def _authorised_cases_for_ingest(conn: psycopg.Connection,
                                  user: CurrentUser) -> list[UUID]:
-    """Cases where the full five-part gate would allow `ingest.read`."""
-    rows = conn.execute(
-        """SELECT c.id
-             FROM iam.case_assignment ca
-             JOIN core."case" c ON c.id = ca.case_id
-             JOIN iam.app_user u ON u.id = ca.user_id
-            WHERE ca.user_id = %s
-              AND (ca.expires_at IS NULL OR ca.expires_at > now())
-              AND u.is_active
-              AND EXISTS (SELECT 1 FROM iam.role_permission rp
-                           WHERE rp.role_key = ca.role_key
-                             AND rp.permission_key = 'ingest.read')
-              AND c.classification <= u.tlp_clearance
-              AND c.compartments <@ u.compartments""",
+    """Cases where the five-part gate allows `ingest.read` -- asked of the
+    gate, one case at a time (2026-09-11). Until then this was a SQL
+    restatement of four of the five checks, which was correct on the day
+    it was written and had no way to stay so: a check added to
+    `evaluate()` would not have been added here."""
+    candidates = conn.execute(
+        "SELECT case_id FROM iam.case_assignment WHERE user_id = %s ORDER BY case_id",
         (user.user_id,)).fetchall()
-    return [r[0] for r in rows]
-
-
+    return [row[0] for row in candidates
+            if _case_allows(conn, user, row[0], "ingest.read")]
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +548,11 @@ def dead_letters(
     changed their format -- and it is invisible unless somebody looks,
     which is what this endpoint is for.
 
+    **Every decision here is `evaluate()`'s, since 2026-09-11.** The verb
+    (`_holds_global`), the caller's cases (`_authorised_cases_for_ingest`)
+    and each returned row against its own labels (`visible`, below) are
+    the one gate's answers; the SQL predicates only bound the fetch.
+
     **Scope, since 2026-09-09.** Until then this listed EVERY case's dead
     letters to any holder of the global `ingest.read` verb, filtered only
     by the caller's clearance ceiling. An ANALYST on one case read the
@@ -595,7 +632,8 @@ def dead_letters(
                   dl.retain_until, k.name, k.key_id,
                   ARRAY(SELECT DISTINCT r.case_id FROM ingest.record r
                          WHERE r.batch_id = dl.batch_id
-                           AND r.case_id = ANY(%s::uuid[]))
+                           AND r.case_id = ANY(%s::uuid[])),
+                  dl.compartments
              FROM ingest.dead_letter dl
              LEFT JOIN ingest.api_key k ON k.id = dl.api_key_id
             WHERE (%s::uuid IS NULL OR dl.api_key_id = %s)
@@ -611,6 +649,40 @@ def dead_letters(
             ORDER BY dl.occurred_at DESC LIMIT %s""",
         (allowed, api_key_id, api_key_id, clearance.name, list(compartments),
          allowed, unattached, limit)).fetchall()
+
+    # The decision on each ROW is the gate's, not the query's (2026-09-11).
+    # The predicates above bound the fetch and the LIMIT; what is returned
+    # is what `evaluate()` allows against the row's own labels -- through
+    # its case for a row whose batch fed one, and through the global verb
+    # for an unattached row. So a predicate left off this SELECT, which is
+    # the shape of every authz defect this router has shipped, is a row
+    # the gate still refuses. Decided once per (case, labels): a feed's
+    # dead letters share both, so this is a handful of resolutions, not
+    # one per row.
+    decided: dict[tuple, bool] = {}
+
+    def visible(row) -> bool:
+        labels = (row[9], frozenset(row[14] or []))
+        for case in (row[13] or []):
+            key = (case, labels)
+            if key not in decided:
+                decided[key] = _case_allows(
+                    conn, user, case, "ingest.read",
+                    classification=labels[0], compartments=labels[1])
+            if decided[key]:
+                return True
+        if row[13]:
+            return False
+        key = (None, labels)
+        if key not in decided:
+            decision = _decision_global(conn, user, "ingest.manage",
+                                        classification=labels[0],
+                                        compartments=labels[1])
+            decided[key] = bool(unattached and decision is not None
+                                and decision.allowed)
+        return decided[key]
+
+    rows = [row for row in rows if visible(row)]
     out = {"dead_letters": [
         {"id": str(r[0]), "batch_id": str(r[1]) if r[1] else None,
          "error_class": r[2], "error_detail": r[3],

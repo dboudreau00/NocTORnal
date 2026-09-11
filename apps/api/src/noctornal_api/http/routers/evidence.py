@@ -15,6 +15,7 @@ import psycopg
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 from pydantic import BaseModel
 
+from noctornal_api.config import EVIDENCE_CAP_ENV, cap_is_declared, declared_cap
 from noctornal_api.evidence import EvidenceService, EvidenceStorage
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -34,16 +35,20 @@ from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"],
                    route_class=BodyCappedRoute)
 
-#: 256 MiB, the same number and the same shape as `samples.MAX_SAMPLE_BYTES`:
-#: a module constant, changed on purpose by a deployment that needs larger
-#: exhibits. It bounds two things at once. Storage, because every exhibit
+#: Declared by NOCTORNAL_MAX_EVIDENCE_BYTES (`config.declared_cap`), 256 MiB
+#: when a development deployment leaves it unset; a production boot refuses
+#: without the declaration (docs/08, "Exhibit size policy"), because the
+#: number is a decision about a permanent commitment and a module constant
+#: -- which this was until 2026-09-11 -- is a decision nobody in the
+#: deployment took. The same shape as `samples.MAX_SAMPLE_BYTES`. It bounds
+#: two things at once. Storage, because every exhibit
 #: is written under a COMPLIANCE object lock that no credential can
 #: shorten, so an accepted byte is a byte kept for the whole retention
 #: period whatever anyone later decides. Memory, because `EvidenceService.
 #: ingest` holds the exhibit as one `bytes` and then reads it back whole
 #: to verify the store, so one request costs the process roughly twice
 #: the upload. There was NO cap here until 2026-09-09.
-MAX_EVIDENCE_BYTES = 256 * 1024 * 1024
+MAX_EVIDENCE_BYTES = declared_cap(EVIDENCE_CAP_ENV)
 
 
 def _svc(conn: psycopg.Connection) -> EvidenceService:
@@ -131,6 +136,31 @@ async def upload(
     )
     return IngestOut(evidence_id=str(res.evidence_id), sha256=res.sha256_hex,
                      deduplicated=res.deduplicated)
+
+
+@router.get("/policy", response_model=dict)
+def size_policy(case_id: UUID,
+                user: CurrentUser = Depends(current_user)) -> dict:
+    """What this deployment accepts as one exhibit, so the console can say
+    so BEFORE the analyst picks a file rather than after a 413.
+
+    The case in the path is not consulted: the cap is the deployment's,
+    not the case's, and knowing it discloses nothing about any case. Any
+    signed-in account may read it, which is why `current_user` and not the
+    case gate. `max_bytes` is the value `upload` enforces on THIS process
+    -- the same module constant -- so the two cannot disagree.
+    """
+    return {
+        "max_bytes": MAX_EVIDENCE_BYTES,
+        "declared": cap_is_declared(EVIDENCE_CAP_ENV),
+        "notice": (
+            "Every accepted byte is written once under an object lock for "
+            "the retention period. Above the cap there is no partial path: "
+            "do not split an exhibit, because the digest of the whole is "
+            "what custody attests; either the deployment raises its declared "
+            "cap or the object is held under the unit's exhibit procedure "
+            "with its hash recorded as a case note (docs/08)."),
+    }
 
 
 @router.get("/{evidence_id}/content")

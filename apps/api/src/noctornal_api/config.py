@@ -64,6 +64,7 @@ value is written in exactly one file that ships with this repository.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from urllib.parse import urlsplit
@@ -179,6 +180,77 @@ def _truthy(value: str) -> bool:
     return value.lower() in {"1", "true"}
 
 
+# ---------------------------------------------------------------------------
+# Upload caps: a policy, not a tunable (docs/08, "Exhibit size policy")
+# ---------------------------------------------------------------------------
+#
+# Every accepted evidence byte is written once under a COMPLIANCE object
+# lock that no credential can shorten, so the largest exhibit a deployment
+# accepts is a decision about a permanent storage commitment. Until
+# 2026-09-11 it was a module constant -- 256 MiB, changed by editing
+# source -- which is a decision nobody in the deployment took. It is now
+# DECLARED: read here, once, by the two upload routers at import; refused
+# at a production boot when absent (`verify_environment`); reported by the
+# readiness check `evidence_size_cap_declared`, which compares what the
+# environment says now with what this process started with; and shown to
+# the analyst beside the file picker (`GET .../evidence/policy`).
+EVIDENCE_CAP_ENV = "NOCTORNAL_MAX_EVIDENCE_BYTES"
+SAMPLE_CAP_ENV = "NOCTORNAL_MAX_SAMPLE_BYTES"
+#: What a development deployment gets when it declares nothing.
+DEFAULT_UPLOAD_CAP = 256 * 1024 * 1024
+#: Below a mebibyte nothing real fits; above 64 GiB the number is a typo
+#: about to become a permanent commitment.
+CAP_FLOOR = 1024 * 1024
+CAP_CEILING = 64 * 1024 * 1024 * 1024
+
+#: Bytes, or a whole number with K, M or G -- binary, whatever suffix
+#: follows the letter: `256MiB`, `256M`, `256MB` are all 256 * 2**20.
+_SIZE = re.compile(r"^\s*(\d+)\s*(?:([KMG])(?:I?B)?|B)?\s*$", re.I)
+_UNIT = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+
+
+def parse_size(text: str) -> int:
+    """`268435456`, `256MiB`, `1GiB`, `512 M` -> bytes. ValueError otherwise."""
+    match = _SIZE.match(text)
+    if not match:
+        raise ValueError(f"not a size: {text.strip()!r}")
+    return int(match.group(1)) * _UNIT[(match.group(2) or "").upper()]
+
+
+def cap_problem(name: str) -> str | None:
+    """Why the declaration in `name` cannot be used, or None (unset counts
+    as usable here: whether it may be unset is the caller's rule)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = parse_size(raw)
+    except ValueError:
+        return (f"{name} is not a size (bytes, or a whole number with K, M or "
+                f"G -- binary -- such as 512MiB)")
+    if not CAP_FLOOR <= value <= CAP_CEILING:
+        return f"{name} must be between 1 MiB and 64 GiB"
+    return None
+
+
+def cap_is_declared(name: str) -> bool:
+    return bool(os.environ.get(name, "").strip())
+
+
+def declared_cap(name: str, default: int = DEFAULT_UPLOAD_CAP) -> int:
+    """The cap `name` declares, or `default` when it is unset.
+
+    A value that is set and unusable raises at import, which is the loud
+    direction: a typo in a cap must not quietly become 256 MiB.
+    """
+    problem = cap_problem(name)
+    if problem:
+        raise RuntimeError(
+            f"{problem}; refusing to start with a cap this process cannot state")
+    raw = os.environ.get(name, "").strip()
+    return parse_size(raw) if raw else default
+
+
 def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     """Every reason this environment must not run a production deployment.
 
@@ -225,12 +297,14 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     # refusals (unset, not 32 bytes) and lets binascii.Error -- a
     # ValueError -- through for a value even its lenient base64 decoder
     # cannot parse.
-    from noctornal_api.security.envelope import _load_kek
+    from noctornal_api.security.envelope import _load_kek, ring
 
+    kek_usable = True
     with _borrowing(env, "NOCTORNAL_TOTP_KEK"):
         try:
             _load_kek()
         except (RuntimeError, ValueError):
+            kek_usable = False
             if not env.get("NOCTORNAL_TOTP_KEK"):
                 problems.append(
                     "NOCTORNAL_TOTP_KEK is not set, so no TOTP secret can be "
@@ -242,6 +316,24 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
                     "(it must be base64 decoding to exactly 32 bytes), so every "
                     "enrolment and every second factor fails at the point of "
                     "use rather than here.")
+
+    # The rest of the ring, through its own reader and only once the
+    # active key is usable (a second refusal about the same variable
+    # would read as two faults). `ring()` refuses a retired entry that is
+    # not `id=base64`, one that reuses the active id, or one whose key is
+    # not 32 bytes -- by position and id, never by value.
+    if kek_usable:
+        with _borrowing(env, "NOCTORNAL_TOTP_KEK", "NOCTORNAL_TOTP_KEK_ID",
+                        "NOCTORNAL_TOTP_KEK_RETIRED"):
+            try:
+                ring()
+            except (RuntimeError, ValueError) as exc:
+                problems.append(
+                    f"the key ring is not usable ({exc}), so every blob sealed "
+                    f"under a retired key -- every TOTP secret, persona credential "
+                    f"and sample data key from before a rotation -- opens for "
+                    f"nobody, and the process would otherwise start and find that "
+                    f"out at the first login.")
 
     # `.strip()` because `ingest._pepper` strips: a pepper of one space is
     # unset as far as key issuance is concerned, and must be unset here.
@@ -364,6 +456,28 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
                 f"evidence bucket's credentials -- docs/11 requires the sample "
                 f"bucket to have its own, and nothing at runtime reports the "
                 f"fallback.")
+
+    # docs/08, "Exhibit size policy". Every accepted evidence byte is
+    # written once under a COMPLIANCE lock no credential can shorten, so
+    # the largest exhibit a deployment accepts is a decision about a
+    # permanent commitment, not a tunable with a sensible default. Refused
+    # when it is not DECLARED, and when either cap is declared unusably --
+    # the second through the routers' own reader, so this and the import
+    # that follows it cannot disagree about what a size is.
+    for name in (EVIDENCE_CAP_ENV, SAMPLE_CAP_ENV):
+        with _borrowing(env, name):
+            problem = cap_problem(name)
+        if problem:
+            problems.append(
+                f"{problem}, so the upload route would refuse to import at all "
+                f"rather than start with a cap it cannot state.")
+    if not env.get(EVIDENCE_CAP_ENV, "").strip():
+        problems.append(
+            f"{EVIDENCE_CAP_ENV} is not set, so the largest exhibit this "
+            f"deployment accepts -- and locks under COMPLIANCE for the whole "
+            f"retention period, which no credential can shorten -- is a "
+            f"default nobody here decided; declare it (docs/08, exhibit size "
+            f"policy).")
 
     return problems
 

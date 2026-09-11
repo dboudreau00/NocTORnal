@@ -94,6 +94,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_ontology import normalise as _canonical
+from noctornal_ontology import refusal
 
 #: Which ontology selector type carries the canonical form for a platform's
 #: durable identifier. A platform absent from this map has no canonical
@@ -296,6 +297,10 @@ def _normalise_tox(value: str) -> Normalised:
         "64 hex (the public key alone)")
 
 
+#: `u:123` / `c:123` / `g:123`: the caller names the id space.
+_TYPED_TELEGRAM = re.compile(r"^([ucg]):\s*(\d+)$", re.I)
+_TELEGRAM_SPACE = {"u": "user", "c": "channel", "g": "group"}
+
 _NOT_DURABLE_TELEGRAM = (
     "a Telegram @username is NOT durable -- usernames are recycled, and "
     "matching on one can attribute a new person's traffic to an old "
@@ -315,10 +320,22 @@ def _normalise_telegram(value: str) -> Normalised:
     that its MTProto form does not (strip it, or one channel is two), and
     a basic-group chat id carries a bare minus that must SURVIVE, or a
     chat id collides with an unrelated user id.
+
+    A bare POSITIVE id is refused (2026-09-11) with the ontology's own
+    sentence: MTProto user and channel ids are separate spaces and both
+    positive, and on a strong selector a guess is a merge lead. The
+    typed forms `u:<id>`, `c:<id>` and `g:<id>` are the way in for a
+    caller that knows.
     """
     cleaned = value.strip()
     if cleaned.startswith("@"):
         return Normalised(None, _NOT_DURABLE_TELEGRAM)
+    typed = _TYPED_TELEGRAM.match(cleaned)
+    if typed:
+        return Normalised(
+            _canonical("TELEGRAM_ID", cleaned),
+            f"indexed in the {_TELEGRAM_SPACE[typed.group(1).lower()]} "
+            f"namespace, as typed by the caller")
     digits = cleaned[1:] if cleaned.startswith("-") else cleaned
     # ASCII digits ONLY. `str.isdigit()` is Unicode-aware and accepts
     # fullwidth and Arabic-Indic forms; migration 0036's `^[0-9]+$` is
@@ -328,6 +345,8 @@ def _normalise_telegram(value: str) -> Normalised:
     # refusing the rest costs nothing real.
     if not digits or not all("0" <= ch <= "9" for ch in digits):
         return Normalised(None, _NOT_DURABLE_TELEGRAM)
+    if not cleaned.startswith("-"):
+        return Normalised(None, refusal("TELEGRAM_ID", cleaned))
     canonical = _canonical("TELEGRAM_ID", cleaned)
     if cleaned.startswith("-100") and len(cleaned) > 4:
         # RESOLVED by CR3 (2026-07-26). docs/16 D8 is closed.
@@ -355,8 +374,8 @@ def _normalise_telegram(value: str) -> Normalised:
             "a Bot-API channel id, decoded to its MTProto form and indexed "
             "in the channel namespace. It can no longer collide with the "
             "user id of the same number (CR3). A BARE positive number "
-            "observed elsewhere is still ambiguous between a user and a "
-            "channel; record which, if the collector knows.")
+            "observed elsewhere is refused for that reason (2026-09-11); "
+            "record it as u:<id> or c:<id> when the collector knows.")
     if cleaned.startswith("-"):
         return Normalised(
             canonical,

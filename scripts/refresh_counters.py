@@ -132,7 +132,11 @@ SUBSTITUTIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # script rewrote that 673 to the current total before anyone read the
     # diff. A generator loose in prose destroys the records it walks past.
     ("tests", re.compile(r"\b(\d{4,5})(?=(?:\s|%20)(?:tests|passing)\b)")),
-    ("head", re.compile(r"(?<=Alembic head )([`*]{0,2})(\d{4})")),
+    # `Alembic head` followed by whitespace INCLUDING a newline: the roadmap's
+    # live paragraph wraps between the two words, and a lookbehind on a
+    # single space walked past it -- so that one paragraph read 0060 on a
+    # 0061 tree while every other document was held exactly (2026-09-11).
+    ("head", re.compile(r"(Alembic head\s+[`*]{0,2})(\d{4})")),
     # `at revision NNNN` is NOT here for the same reason: ARCHITECTURE
     # says "surveyed ... at revision 0052; refreshed ... at revision
     # 0059", and both are dated records of when a section was written.

@@ -59,10 +59,14 @@ high-betweenness node, the visualisation stops working.
 --artefact-malware #C46E8A
 --context         #7F8A9B
 
-/* Confidence encodes as opacity, not hue — hue is already spent */
---conf-high       1.00
---conf-moderate   0.72
---conf-low        0.45
+/* Confidence encodes as opacity, not hue — hue is already spent.
+   theme.css owns these three numbers and app.js reads them from the
+   computed style, so the canvas and the DOM dim by the same steps.
+   The floor is 0.58, not 0.45: at 0.45 the lowest step composited
+   below 4.5:1 on a card (test_theme_contract holds it). */
+--conf-high       1
+--conf-moderate   0.74
+--conf-low        0.58
 ```
 
 ## Type

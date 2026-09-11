@@ -361,3 +361,76 @@ def test_the_console_and_the_endpoint_agree_on_the_contract(conn, client):
     r = client.get("/api/v1/ingest/dead-letters", headers=_auth(none_token))
     assert r.status_code == 403, r.text
     assert "ingest.read" in r.json()["detail"]
+
+
+# --- the decisions are the gate's (2026-09-11) --------------------------------
+#
+# Each test below replaces `evaluate` in the router module with a verdict of
+# its own. If the SQL predicates were still deciding, the replacement would
+# change nothing; the rows appearing and vanishing with the fake verdict is
+# the proof that the gate is what answers.
+
+
+def test_the_verb_is_the_gates_answer(conn, client, monkeypatch):
+    from noctornal_api.http.routers import ingest as ingest_router
+    from noctornal_api.security.access import CHECK_ROLE, Decision
+    owner, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _session(conn, owner_email)
+    case_id = _create_case(client, token)
+    _k, dead = _feed(conn, owner, ATTACHED, case_id=case_id)
+    assert dead in _ids(_listing(client, token))
+
+    monkeypatch.setattr(ingest_router, "evaluate",
+                        lambda ctx, **kw: Decision(False, (CHECK_ROLE,)))
+    r = client.get("/api/v1/ingest/dead-letters", headers=_auth(token))
+    assert r.status_code == 403, r.text
+    assert "ingest.read" in r.json()["detail"]
+
+
+def test_each_row_is_the_gates_answer_against_its_own_labels(conn, client, monkeypatch):
+    """A RED dead letter in an AMBER case, for a RED-cleared owner: the SQL
+    predicate (`classification <= clearance`) passes it, and a gate that
+    refuses RED objects hides it while still listing the case. That split
+    -- case in scope, row withheld -- can only come from a per-row
+    decision."""
+    from noctornal_api.http.routers import ingest as ingest_router
+    from noctornal_api.security.access import CHECK_CLEARANCE, Decision
+    owner, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
+    token = _session(conn, owner_email)
+    case_id = _create_case(client, token)
+    _k, dead_red = _feed(conn, owner, ATTACHED, case_id=case_id, ceiling="RED")
+    real = ingest_router.evaluate
+    assert dead_red in _ids(_listing(client, token)), "the real gate allows it"
+
+    def red_refused(ctx, **kw):
+        if ctx.object_classification.name == "RED":
+            return Decision(False, (CHECK_CLEARANCE,))
+        return real(ctx, **kw)
+
+    monkeypatch.setattr(ingest_router, "evaluate", red_refused)
+    body = _listing(client, token)
+    assert body["scope"]["cases"] == [case_id], "the AMBER case itself is still allowed"
+    assert dead_red not in _ids(body), "the RED row is the gate's refusal, not the SQL's"
+
+
+def test_an_unattached_row_is_the_global_gates_answer(conn, client, monkeypatch):
+    """No case to go through: the row is put to `evaluate()` on the global
+    `ingest.manage` context, against its own labels."""
+    from noctornal_api.http.routers import ingest as ingest_router
+    from noctornal_api.security.access import CHECK_CLEARANCE, Decision
+    owner, _, _ = _make_user(conn, global_roles=("CASE_OWNER",))
+    _k, unattached_red = _feed(conn, owner, UNATTACHED, ceiling="RED")
+    _op, op_email, _ = _make_user(conn, global_roles=("SYS_ADMIN",))
+    op_token = _session(conn, op_email)
+    real = ingest_router.evaluate
+    assert unattached_red in _ids(_listing(client, op_token))
+
+    def red_refused(ctx, **kw):
+        if ctx.object_classification.name == "RED":
+            return Decision(False, (CHECK_CLEARANCE,))
+        return real(ctx, **kw)
+
+    monkeypatch.setattr(ingest_router, "evaluate", red_refused)
+    body = _listing(client, op_token)
+    assert body["scope"]["unattached"] is True, "the verb is still held"
+    assert unattached_red not in _ids(body)

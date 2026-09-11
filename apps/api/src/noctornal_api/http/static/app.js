@@ -180,6 +180,7 @@ const state = {
   nodes: [],                 // whole case, unprojected (entity list, pickers)
   edges: [],                 // whole case, unprojected
   evidence: [],
+  evidencePolicy: null,      // GET /cases/{id}/evidence/policy, read once
   selection: null,           // {kind:'node'|'edge', id}
   includeRetracted: false,
   inspSeq: 0,
@@ -1876,6 +1877,9 @@ function paintIsComplete() {
   for (const [k, v] of Object.entries(PAINT.hues || {})) {
     if (v === '') missing.push('hues.' + k);
   }
+  for (const [k, v] of Object.entries(PAINT.conf || {})) {
+    if (!Number.isFinite(v)) missing.push('conf.' + k);
+  }
   if (missing.length) {
     console.error('theme tokens did not resolve: ' + missing.join(', ') +
                   ' -- the canvas will paint with the browser default, '
@@ -1901,6 +1905,17 @@ function loadPaint() {
   PAINT.font = '11px ' + (cssVar('--ui') || 'sans-serif');
   PAINT.monoFont = '10px ' + (cssVar('--mono') || 'monospace');
   PAINT.signFont = '600 13px ' + (cssVar('--mono') || 'monospace');
+  /* Confidence is opacity (docs/06), and the three steps are theme
+     tokens, so the canvas reads the same numbers the DOM's `.conf-*`
+     rules apply. The sociogram carried its own 1 / 0.72 / 0.45 until
+     2026-09-11: the theme had raised --conf-low to 0.58 for contrast
+     and the canvas never noticed, so the inspector said one opacity
+     and the edge was drawn at another. */
+  PAINT.conf = {
+    HIGH: parseFloat(cssVar('--conf-high')),
+    MODERATE: parseFloat(cssVar('--conf-moderate')),
+    LOW: parseFloat(cssVar('--conf-low')),
+  };
   PAINT.hues = {};
   for (const h of ['actor-persona', 'actor-person', 'actor-group',
                    'artefact-infra', 'artefact-finance', 'artefact-malware',
@@ -2279,10 +2294,12 @@ function edgeColour(sign) {
   return sign > 0 ? PAINT.pos : (sign < 0 ? PAINT.neg : PAINT.neu);
 }
 function confAlpha(confidence) {
-  if (confidence === 'HIGH') return 1;
-  if (confidence === 'MODERATE') return 0.72;
-  if (confidence === 'LOW') return 0.45;
-  return 1;                      // no confidence recorded: do not fake one
+  /* The theme's steps, read once in loadPaint. No confidence recorded:
+     full opacity, never a fake one. An unknown grade is the same, and a
+     token that did not resolve is reported by paintIsComplete rather
+     than papered over here with a literal. */
+  const a = PAINT.conf && PAINT.conf[confidence];
+  return Number.isFinite(a) ? a : 1;
 }
 function nodeColour(n) {
   return PAINT.hues[hueClass(n.ref.node_type).slice(4)] || PAINT.hues.context;
@@ -2880,12 +2897,28 @@ function renderEntities() {
 
 async function loadEvidence() {
   try {
+    if (!state.evidencePolicy) {
+      /* The cap is the deployment's, not the case's, so it is read once
+         and shown beside the picker: an analyst learns the limit before
+         choosing a file, not from a 413 after the upload. */
+      state.evidencePolicy = await api(cpath('/evidence/policy'));
+      renderEvidencePolicy();
+    }
     state.evidence = await api(cpath('/evidence-list?limit=200'));
     renderEvidence();
     // E1: keep the entity/relationship exhibit pickers in step, so an
     // exhibit uploaded a moment ago is immediately attachable.
     refreshEvidencePickers();
   } catch (err) { fail(err); }
+}
+
+function renderEvidencePolicy() {
+  const p = state.evidencePolicy;
+  setMsg($('ev-cap'), !p ? '' :
+    'Exhibits up to ' + fmtBytes(p.max_bytes) + '. Every accepted byte is '
+    + 'written once and locked for the retention period; the cap is '
+    + (p.declared ? 'this deployment\'s declared policy.'
+                  : 'the default, which this deployment has not declared.'));
 }
 
 function renderEvidence() {
@@ -2989,6 +3022,16 @@ async function uploadEvidence(event) {
   const title = $('ev-title').value.trim();
   if (!file) { setMsg(errBox, 'Choose a file to lodge as an exhibit.'); return; }
   if (!title) { setMsg(errBox, 'An exhibit needs a title.'); return; }
+  const cap = state.evidencePolicy && state.evidencePolicy.max_bytes;
+  if (cap && file.size > cap) {
+    /* The server refuses this before reading a byte (413); saying so
+       here saves the upload. The server stays the authority: a stale
+       policy here changes a sentence, never what is accepted. */
+    setMsg(errBox, 'This file is ' + fmtBytes(file.size) + '; this deployment '
+      + 'accepts an exhibit up to ' + fmtBytes(cap) + ' and would refuse it. '
+      + 'Do not split it: the digest of the whole is what custody attests.');
+    return;
+  }
   const form = new FormData();
   form.append('file', file);
   form.append('title', title);
@@ -10381,6 +10424,10 @@ async function loadSamplePolicy() {
   }
   show(banner, true);
 
+  setMsg($('smp-cap'), Number.isFinite(smpPolicy.max_sample_bytes)
+    ? 'Samples up to ' + fmtBytes(smpPolicy.max_sample_bytes)
+      + '. Larger is a disk image or a mistake, and is refused before a byte is read.'
+    : '');
   const originBox = $('smp-origin');
   clear(originBox);
   originBox.appendChild(el('strong', null, 'This deployment: '));
@@ -10399,6 +10446,14 @@ async function submitSample() {
   const file = $('smp-file').files[0];
   if (!file) {
     setMsg(msg, 'Choose a file first.');
+    msg.className = 'msg bad';
+    return;
+  }
+  const cap = smpPolicy && smpPolicy.max_sample_bytes;
+  if (cap && file.size > cap) {
+    setMsg(msg, 'This file is ' + fmtBytes(file.size) + '; this deployment '
+      + 'accepts a sample up to ' + fmtBytes(cap) + ' and would refuse it '
+      + 'before reading a byte.');
     msg.className = 'msg bad';
     return;
   }

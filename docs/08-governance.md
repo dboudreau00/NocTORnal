@@ -106,6 +106,29 @@ explicitly, with a review flag. "We assume the same PGP key means the same
 operator" is an assumption that has been wrong, and if it is written down
 it can be challenged.
 
+## Exhibit size policy
+
+Every exhibit is written once into object-locked (COMPLIANCE) storage, so
+an accepted byte is kept for the whole retention period and no credential
+can shorten that. The largest exhibit a deployment accepts is therefore a
+decision, not a tunable: `NOCTORNAL_MAX_EVIDENCE_BYTES` declares it
+(bytes, or a number with K, M or G — binary, `512MiB`), the upload route
+refuses a larger body with a 413 before a byte of it is read, the console
+shows the cap beside the file picker and refuses a larger file before the
+upload starts, and the readiness check `evidence_size_cap_declared` stays
+red until the variable is set — a production boot refuses without it. The
+default, when a development deployment declares nothing, is 256 MiB.
+Samples have their own cap (`NOCTORNAL_MAX_SAMPLE_BYTES`, same default)
+and the sample bucket is deliberately not locked (docs/11), so that one is
+about memory and the quarantine queue rather than permanent storage.
+
+Above the cap there is no partial path. Do not split an exhibit into
+pieces to get it under: the digest of the whole is what custody attests.
+Either raise the cap for that deployment, deliberately and with the
+storage consequence understood, or hold the object under the unit's
+existing exhibit procedure and record its hash and location as a case
+note.
+
 ## Disclosure and defensibility
 
 If a case reaches a court, the questions are predictable. Build the

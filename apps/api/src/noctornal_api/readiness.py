@@ -117,6 +117,8 @@ from pathlib import Path
 
 import psycopg
 
+from noctornal_api.config import EVIDENCE_CAP_ENV
+
 log = logging.getLogger("noctornal.readiness")
 
 #: Where the migration scripts live relative to this file: the repository
@@ -313,6 +315,61 @@ def _totp_kek_set(conn: psycopg.Connection) -> Check:
         return Check("totp_kek_set", False, str(exc), action)
     return Check("totp_kek_set", True,
                  f"{_TOTP_KEK_ENV} is set and decodes to {len(key)} bytes")
+
+
+def _kek_ring_opens_stored_secrets(conn: psycopg.Connection) -> Check:
+    """Does the ring open every key id the database actually holds?
+
+    `totp_kek_set` proves the active key DECODES. This proves the keys
+    OPEN things: up to `sealed.SAMPLE_ROWS` blobs per (table, key id)
+    across the five sealed columns (`security/sealed.SEALED_COLUMNS`),
+    through `envelope.can_open`, which is `decrypt` with the plaintext
+    thrown away -- and COUNTED, because before the ring every blob was
+    recorded under one id whatever key sealed it, so one row's verdict
+    is not a group's (`sealed.py` says how that was found). The distinction is the whole finding it exists for: until
+    2026-09-11 a KEK that had changed under a live database -- rotated,
+    or restored from the wrong backup -- left this register green while
+    every login answered 500, because the only KEK check there was asked
+    whether the value was 32 bytes.
+
+    Failure evidence names the table, the row count and the key id, and
+    says which of the two faults it is: no key of that id in the ring, or
+    a key of that id that does not open the blob (the key changed and the
+    id did not). It never prints key material; ids are labels.
+
+    Not blocking. It is an operability failure -- nobody can sign in --
+    of the kind the tier note above says belongs to `sys_admin_present`'s
+    class, not to the decisions that cannot wait.
+    """
+    from noctornal_api.security import envelope
+    from noctornal_api.security.sealed import inventory
+
+    name = "kek_ring_opens_stored_secrets"
+    action = (
+        "add the key that sealed those rows to NOCTORNAL_TOTP_KEK_RETIRED as "
+        "id=base64 (or restore it as NOCTORNAL_TOTP_KEK), restart, then run "
+        "scripts/rewrap_secrets.py --apply to move every row under the active "
+        "key; security/envelope.py has the runbook")
+    try:
+        ids = envelope.key_ids()
+    except (RuntimeError, ValueError) as exc:
+        return Check(name, False, str(exc), action)
+    active, retired = ids[0], ids[1:]
+    ring = f"active {active}" + (
+        f", retired {', '.join(retired)}" if retired else ", no retired keys")
+    groups = inventory(conn)
+    if not groups:
+        return Check(name, True, f"ring: {ring}; no sealed rows yet")
+    bad = [g for g in groups if not g.opens]
+    if bad:
+        detail = "; ".join(g.describe() for g in bad)
+        return Check(name, False, f"ring: {ring}; cannot open: {detail}", action)
+    held = ", ".join(g.describe() for g in groups)
+    evidence = f"ring: {ring}; every checked row opens ({held})"
+    if any(g.key_id != active for g in groups):
+        evidence += ("; rows under a retired id remain -- run "
+                     "scripts/rewrap_secrets.py --apply before dropping it")
+    return Check(name, True, evidence)
 
 
 def _ingest_pepper_set(conn: psycopg.Connection) -> Check:
@@ -672,6 +729,65 @@ def _evidence_bucket_object_lock(conn: psycopg.Connection) -> Check:
         f"bucket {bucket} at {endpoint}: object lock enabled, {default}")
 
 
+def _evidence_size_cap_declared(conn: psycopg.Connection) -> Check:
+    """Is the exhibit size cap a decision or a default -- and is the value
+    this process ENFORCES the one the environment now says?
+
+    Two facts, because either can be wrong on its own. The declaration
+    (docs/08): every accepted exhibit byte is locked under COMPLIANCE for
+    the retention period, so a cap left at the 256 MiB default is a
+    permanent commitment nobody here decided. And the enforced value: the
+    routers read the declaration ONCE, at import, so an operator who edits
+    the variable and does not restart has a register that would otherwise
+    report a cap the process is not applying. The check reads the routers'
+    own constants and says "restart" when they and the environment differ.
+
+    Both caps are read through `config`, the reader the routers use, for
+    the reason `_totp_kek_set` gives at length. Not blocking: an exhibit
+    accepted under the default is expensive, not unlawful.
+    """
+    from noctornal_api import samples
+    from noctornal_api.config import (
+        SAMPLE_CAP_ENV,
+        cap_is_declared,
+        cap_problem,
+        declared_cap,
+    )
+    from noctornal_api.http.routers import evidence as evidence_router
+
+    name = "evidence_size_cap_declared"
+    action = (
+        f"declare {EVIDENCE_CAP_ENV} (bytes, or 512MiB) in the API's "
+        f"environment and restart it; every accepted exhibit byte is locked "
+        f"under COMPLIANCE for the retention period (docs/08)")
+
+    def mib(n: int) -> str:
+        return f"{n / (1 << 20):g} MiB"
+
+    enforced = (f"this process accepts exhibits up to "
+                f"{mib(evidence_router.MAX_EVIDENCE_BYTES)} and samples up to "
+                f"{mib(samples.MAX_SAMPLE_BYTES)}")
+    for env_name, in_force in ((EVIDENCE_CAP_ENV, evidence_router.MAX_EVIDENCE_BYTES),
+                               (SAMPLE_CAP_ENV, samples.MAX_SAMPLE_BYTES)):
+        problem = cap_problem(env_name)
+        if problem:
+            return Check(name, False, f"{problem}; {enforced}", action)
+        if declared_cap(env_name) != in_force:
+            return Check(
+                name, False,
+                f"{env_name} now reads {mib(declared_cap(env_name))} but this "
+                f"process started with {mib(in_force)} and enforces that; "
+                f"restart it", action)
+    if not cap_is_declared(EVIDENCE_CAP_ENV):
+        return Check(name, False,
+                     f"{EVIDENCE_CAP_ENV} is unset: {enforced}, the default, "
+                     f"which nobody in this deployment decided", action)
+    evidence = f"{EVIDENCE_CAP_ENV} declared; {enforced}"
+    if not cap_is_declared(SAMPLE_CAP_ENV):
+        evidence += f" ({SAMPLE_CAP_ENV} unset, default)"
+    return Check(name, True, evidence)
+
+
 def _migrations_at_head(conn: psycopg.Connection) -> Check:
     """The database's stamped revision against the head of the scripts on
     disk. A deployment whose code is ahead of its schema fails on the
@@ -752,6 +868,9 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "active account"),
     ("totp_kek_set", _totp_kek_set,
      f"set {_TOTP_KEK_ENV} to a base64-encoded 32-byte key"),
+    ("kek_ring_opens_stored_secrets", _kek_ring_opens_stored_secrets,
+     "the sealed tables could not be read; once they can, every key id they "
+     "hold must be in the ring (NOCTORNAL_TOTP_KEK / _RETIRED)"),
     ("ingest_pepper_set", _ingest_pepper_set,
      f"set {_PEPPER_ENV} to a long random string, once, and keep it"),
     ("rate_limiting_enabled", _rate_limiting_enabled,
@@ -762,6 +881,10 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("evidence_bucket_object_lock", _evidence_bucket_object_lock,
      "fix MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY or start the "
      "object store; the evidence bucket must be created with object lock"),
+    ("evidence_size_cap_declared", _evidence_size_cap_declared,
+     f"declare {EVIDENCE_CAP_ENV} (bytes, or 512MiB) and restart the API; "
+     "every accepted exhibit byte is locked under COMPLIANCE for the "
+     "retention period (docs/08)"),
     ("migrations_at_head", _migrations_at_head,
      "run `alembic upgrade head` from the repository root with DATABASE_URL "
      "set to this database"),

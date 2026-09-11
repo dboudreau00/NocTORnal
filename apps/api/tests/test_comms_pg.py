@@ -141,7 +141,8 @@ def test_a_bare_public_key_is_accepted_as_already_durable():
     ("XMPP", "JABBER", "Vendor@TheSecure.biz/Conversations.A1b2"),
     ("SESSION", "SESSION_ID", "05" + "Ab" * 32),
     ("MATRIX", "MATRIX_MXID", "@Alice:Example.ORG"),
-    ("TELEGRAM", "TELEGRAM_ID", "123456789"),
+    ("TELEGRAM", "TELEGRAM_ID", "u:123456789"),
+    ("TELEGRAM", "TELEGRAM_ID", "c:123456789"),
     ("TELEGRAM", "TELEGRAM_ID", "-1001234567890"),
     ("DISCORD", "DISCORD_ID", "123456789012345678"),
     ("THREEMA", "THREEMA_ID", "ABCD1234"),
@@ -195,13 +196,17 @@ def test_a_telegram_channel_id_is_durable_and_is_not_called_a_username():
     # exactly-ten-digit channel id, and this test used one.
     assert normalise("TELEGRAM", "-1001234567890").durable == "c:1234567890"
     # A bare positive is genuinely ambiguous between a user and an MTProto
-    # channel, so it is NOT silently merged with the channel above. A
-    # caller that knows says so with an explicit prefix.
-    assert normalise("TELEGRAM", "1234567890").durable == "u:1234567890"
+    # channel, so it is REFUSED (2026-09-11) rather than assumed to be the
+    # user; a caller that knows says so with an explicit prefix.
+    bare = normalise("TELEGRAM", "1234567890")
+    assert bare.durable is None and "u:<id>" in bare.note
+    assert normalise("TELEGRAM", "u:1234567890").durable == "u:1234567890"
+    assert normalise("TELEGRAM", "c:1234567890").durable == "c:1234567890"
+    assert "as typed by the caller" in normalise("TELEGRAM", "c:1234567890").note
     # A basic-group chat id keeps its own space, or it collides with a
     # user id — and TELEGRAM_ID is is_strong, so that is a merge lead.
     assert normalise("TELEGRAM", "-4881234").durable == "g:4881234"
-    assert normalise("TELEGRAM", "4881234").durable != \
+    assert normalise("TELEGRAM", "u:4881234").durable != \
         normalise("TELEGRAM", "-4881234").durable
     # The two lengths the old string-strip got wrong.
     assert normalise("TELEGRAM", "-1000123456789").durable == "c:123456789"
@@ -226,9 +231,12 @@ def test_a_telegram_username_yields_NO_durable_value():
     assert "recycled" in result.note
 
 
-def test_a_telegram_numeric_id_is_durable():
+def test_a_telegram_numeric_id_is_durable_when_its_space_is_named():
     from noctornal_api.comms import normalise
-    assert normalise("TELEGRAM", "123456789").durable == "u:123456789"
+    assert normalise("TELEGRAM", "u:123456789").durable == "u:123456789"
+    # Bare, it is refused: the note says how to record it.
+    assert normalise("TELEGRAM", "123456789").durable is None
+    assert "c:<id>" in normalise("TELEGRAM", "123456789").note
 
 
 def test_a_username_binding_does_not_correlate_to_anything(conn, svc):

@@ -149,6 +149,7 @@ from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 # ticket is the same kind of secret as a session token -- high-entropy,
 # presented once, stored only as its digest -- and giving it a second
 # hashing function would mean two places to get the encoding wrong.
+from noctornal_api.config import SAMPLE_CAP_ENV, declared_cap
 from noctornal_api.security.tokens import hash_token
 
 log = logging.getLogger("noctornal.samples")
@@ -165,10 +166,14 @@ REJECTED = "REJECTED"
 #: It is a safety interlock, not a secret.
 ARCHIVE_PASSWORD = b"infected"
 
-#: 256 MB. A sample larger than this is a disk image or a mistake, and
-#: either way it does not belong in a quarantine queue behind an HTTP
-#: request.
-MAX_SAMPLE_BYTES = 256 * 1024 * 1024
+#: Declared by NOCTORNAL_MAX_SAMPLE_BYTES, 256 MiB when unset (the same
+#: reader as the evidence cap, `config.declared_cap`). A sample larger
+#: than this is a disk image or a mistake, and either way it does not
+#: belong in a quarantine queue behind an HTTP request. The sample bucket
+#: is deliberately NOT object-locked (docs/11), so unlike the evidence cap
+#: this one is about memory and the queue rather than permanent storage,
+#: and a production boot does not insist on the declaration.
+MAX_SAMPLE_BYTES = declared_cap(SAMPLE_CAP_ENV)
 
 #: How long a download ticket is good for (0061).
 #:

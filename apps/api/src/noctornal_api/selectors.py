@@ -41,7 +41,7 @@ from uuid import UUID
 
 import psycopg
 
-from noctornal_ontology import SELECTOR_TYPES, normalise
+from noctornal_ontology import SELECTOR_TYPES, normalise, refusal
 
 # Types strong enough to be merge evidence (docs/01). Nicknames/handles are
 # deliberately excluded — the "admin/support/shop" reuse trap is a weak-type
@@ -87,7 +87,19 @@ class SelectorStore:
     def _norm(self, selector_type: str, raw_value: str) -> str:
         if selector_type not in _VALID_TYPES:
             raise SelectorError(f"unknown selector type: {selector_type!r}")
-        return normalise(selector_type, raw_value)
+        norm = normalise(selector_type, raw_value)
+        if not norm.strip():
+            # An empty canonical form is not a value, and storing it as one
+            # is how unrelated observations collide: '' is a value to
+            # UNIQUE (case_id, selector_type, norm_value), so every
+            # observation that normalised to nothing shared ONE row -- and
+            # on a strong type that row is a merge lead between strangers.
+            # Refused with the ontology's own reason (a bare positive
+            # Telegram id, refused since 2026-09-11, is the case that made
+            # this explicit; `comms._durable_or_none` closed the same hole
+            # on its side earlier).
+            raise SelectorError(refusal(selector_type, raw_value))
+        return norm
 
     def record(
         self,

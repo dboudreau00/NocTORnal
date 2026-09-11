@@ -287,7 +287,9 @@ class TestTelegramIdNorm:
     N = staticmethod(NORMALISERS["telegram_id_norm"])
 
     def test_user_id_digits(self):
-        assert self.N(" 777000 ") == "u:777000"
+        # A bare positive is refused (2026-09-11); typed, it is a user.
+        assert self.N(" 777000 ") == ""
+        assert self.N(" u:777000 ") == "u:777000"
 
     def test_bot_api_supergroup_decoded_arithmetically(self):
         assert self.N("-1001234567890") == "c:1234567890"
@@ -304,12 +306,15 @@ class TestTelegramIdNorm:
 
     def test_a_channel_and_a_user_with_the_same_number_stay_apart(self):
         """TELEGRAM_ID is is_strong, so a collision here is a merge lead
-        of a channel and a person onto one actor."""
-        assert self.N("-1001234567890") != self.N("1234567890")
+        of a channel and a person onto one actor. The bare positive is
+        REFUSED rather than assumed to be the user (2026-09-11)."""
+        assert self.N("-1001234567890") == "c:1234567890"
+        assert self.N("1234567890") == ""
+        assert self.N("u:1234567890") != self.N("c:1234567890")
 
     def test_basic_group_keeps_its_own_namespace(self):
         assert self.N("-987654321") == "g:987654321"
-        assert self.N("-987654321") != self.N("987654321")
+        assert self.N("-987654321") != self.N("u:987654321")
         assert self.N("-987654321") != self.N("-1000987654321")
 
     def test_an_explicit_type_prefix_is_honoured(self):
@@ -317,12 +322,30 @@ class TestTelegramIdNorm:
         then meets the Bot-API observation of the same channel."""
         assert self.N("c:1234567890") == self.N("-1001234567890")
         assert self.N("C: 1234567890") == "c:1234567890"
-        assert self.N("u:777000") == self.N("777000")
+        assert self.N("u:777000") == "u:777000"
+        assert self.N("777000") == ""          # a bare positive is refused
 
     def test_empty_input_is_empty_not_a_crash(self):
         assert self.N("") == ""
         assert self.N("   ") == ""
         assert self.N("not a number") == ""
+
+    def test_a_bare_positive_is_refused_and_the_reason_names_the_fix(self):
+        """The residual docs/17 F1 carried from 2026-07-26: a bare positive
+        was ASSUMED `u:` on a strong selector, so a channel that reached
+        the normaliser as a bare number merged with a same-numbered user.
+        Refused now, with the sentence every door shows."""
+        from noctornal_ontology import refusal
+        for bare in ("1234567890", " 1234567890 ", "+1234567890", "12 34"):
+            assert self.N(bare) == "", bare
+            note = refusal("TELEGRAM_ID", bare)
+            assert "u:<id>" in note and "c:<id>" in note, note
+
+    def test_the_refusal_is_generic_for_other_junk(self):
+        from noctornal_ontology import refusal
+        assert "canonical TELEGRAM_ID" in refusal("TELEGRAM_ID", "not a number")
+        assert "u:<id>" not in refusal("TELEGRAM_ID", "not a number")
+        assert len(refusal("TOX_PK", "x" * 500)) < 140
 
 
 class TestTlshNorm:
