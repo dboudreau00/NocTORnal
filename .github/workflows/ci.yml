@@ -137,16 +137,24 @@ jobs:
       # moved their public catalogue and the tag went away, which failed CI
       # on a repository whose own code had not changed.
       #
-      # The obvious fix -- switch to `minio/minio:latest`, which is what
-      # infra/docker-compose.yml has always used -- does not work as a
-      # service container: that image needs the argument `server /data`, and
-      # GitHub Actions service containers cannot specify a command. Bitnami
-      # was chosen originally precisely because its entrypoint needs none.
+      # The obvious fix -- switch to the image infra/docker-compose.yml uses
+      # -- does not work as a service container: that image needs the
+      # argument `server /data`, and GitHub Actions service containers
+      # cannot specify a command. Bitnami was chosen originally precisely
+      # because its entrypoint needs none.
       #
       # So it runs as an explicit `docker run` instead. That gets the SAME
       # image the compose file uses (CI and local should not disagree about
-      # what they are testing), full control of the command, and no
-      # dependence on a third party continuing to publish a repackage.
+      # what they are testing) and full control of the command.
+      #
+      # IT HAPPENED AGAIN ON 2026-09-16, to the replacement. Docker Hub's
+      # `minio/minio:latest` began answering "pull access denied for
+      # minio/minio, repository does not exist or may require 'docker
+      # login'" to an unauthenticated puller, and this step failed in one
+      # second on a commit that had touched documentation and nothing else.
+      # Both outages have the same shape: an unpinned tag on a registry
+      # somebody else controls. It now pulls from quay.io, which MinIO
+      # publishes to directly, at a pinned RELEASE tag.
 
     steps:
       - uses: actions/checkout@v4
@@ -167,7 +175,7 @@ jobs:
             -p 9000:9000 \
             -e MINIO_ROOT_USER=noctornal \
             -e MINIO_ROOT_PASSWORD=dev_only_change_me \
-            minio/minio:latest server /data
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
           # Wait for readiness rather than sleeping: a fixed sleep is either
           # too short on a slow runner or wasted on a fast one.
           for i in $(seq 1 40); do

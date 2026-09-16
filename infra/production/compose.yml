@@ -328,7 +328,20 @@ services:
   # nothing in this deployment sets. The first is reproduced below; the
   # second is the whole of what is given up.
   minio:
-    image: minio/minio:latest
+    # The registry, and the tag, are both deliberate. This is the SECOND time
+    # an unpinned MinIO image has failed CI on a repository whose own code had
+    # not changed: `bitnami/minio:latest` stopped resolving on 2026-07-26 when
+    # Bitnami moved their catalogue, and on 2026-09-16 `minio/minio:latest` on
+    # Docker Hub began answering "pull access denied for minio/minio,
+    # repository does not exist or may require 'docker login'" to an
+    # unauthenticated puller. Reproduced locally the same day, on a machine
+    # that had pulled it a week earlier.
+    #
+    # So: quay.io, which MinIO publishes to directly, and a RELEASE tag rather
+    # than `latest`, because the lesson of both outages is that an unpinned
+    # third-party tag is a dependency on somebody else's decisions that arrives
+    # as a red build with no local change to explain it.
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     restart: unless-stopped
     networks: [noctornal]
     env_file: [secrets.env]
@@ -455,7 +468,7 @@ services:
   # credentials, so a rejected pair loops here exactly like a refused
   # handshake.
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on: [minio]
     networks: [noctornal]
     env_file: [secrets.env]

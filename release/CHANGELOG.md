@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### The MinIO image moved, for the second time
+
+CI went red on a commit that changed documentation and nothing else. The
+step that failed was `Start MinIO`, in one second, which is a pull failure
+rather than a readiness timeout. Reproduced on the build machine the same
+day: `docker pull minio/minio:latest` answers **"pull access denied for
+minio/minio, repository does not exist or may require 'docker login'"** to
+an unauthenticated puller, on a host that had pulled that image a week
+earlier. `minio/mc:latest` is gone the same way.
+
+This is the second time an unpinned MinIO image has done this. The CI file
+already carried a comment about the first: `bitnami/minio:latest` stopped
+resolving on 2026-07-26 when Bitnami moved their catalogue, and the fix
+then was to switch to Docker Hub's own `minio/minio:latest`, which is the
+image that has now gone.
+
+All four references (the CI step, and the server and `mc` images in both
+compose files) now pull from **quay.io, which MinIO publishes to directly,
+at a pinned RELEASE tag**. Both were verified by pulling and running them,
+and the development stack was recreated on them: buckets created, object
+lock configured, full suite green. `latest` is what both outages have in
+common, so neither pin is `latest`.
+
 ### The documentation pass
 
 Two thousand lines lighter, with nothing true removed.
