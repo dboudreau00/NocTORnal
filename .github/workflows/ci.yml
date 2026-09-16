@@ -256,23 +256,41 @@ jobs:
       # The evidence bucket needs OBJECT LOCK, which cannot be enabled
       # after creation -- getting it wrong here would make the WORM tests
       # pass against a bucket with no WORM.
+      # `mc` came from https://dl.min.io until 2026-09-16, when that host
+      # began answering 410 Gone: "The open-source MinIO Server, MinIO
+      # Client (mc) and MinIO KES projects are archived and no longer
+      # maintained ... These files are no longer served from this site."
+      # `curl` without `-f` saves that notice as the binary and exits 0, so
+      # the failure arrived sixty seconds later as thirty alias retries.
+      #
+      # It runs from the same pinned image the compose files use instead.
+      # `MC_HOST_<alias>` is the alias-free form, which matters here
+      # because each `docker run --rm` is a fresh container and an alias
+      # written by one would not survive to the next.
+      #
+      # THE ARCHIVING IS A DECISION FOR THE OWNER, not a CI detail: this
+      # build's WORM evidence store is now an unmaintained upstream that
+      # will receive no security fix. Recorded in docs/17 and docs/16 C6.
       - name: Create the object-store buckets
         run: |
-          curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
-          chmod +x /tmp/mc
+          mc() {
+            docker run --rm --network host \
+              -e MC_HOST_local="http://noctornal:dev_only_change_me@localhost:9000" \
+              quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z "$@"
+          }
           for i in $(seq 1 30); do
-            /tmp/mc alias set local http://localhost:9000 noctornal dev_only_change_me && break
+            mc ls local >/dev/null 2>&1 && break
             sleep 2
           done
-          /tmp/mc mb --ignore-existing --with-lock local/noctornal-evidence
-          /tmp/mc retention set --default GOVERNANCE 365d local/noctornal-evidence
-          /tmp/mc mb --ignore-existing local/noctornal-raw
+          mc mb --ignore-existing --with-lock local/noctornal-evidence
+          mc retention set --default GOVERNANCE 365d local/noctornal-evidence
+          mc mb --ignore-existing local/noctornal-raw
           # R10 (2026-07-26): the samples bucket. CI had the same gap the
           # compose file did -- nothing created it, so the first test to
           # exercise a real sample upload would have got NoSuchBucket.
           # NOT --with-lock: docs/11's rejection path must be able to
           # destroy sample bytes, which an object lock would prevent.
-          /tmp/mc mb --ignore-existing local/noctornal-samples
+          mc mb --ignore-existing local/noctornal-samples
 
       - name: Migrate to head
         run: alembic upgrade head

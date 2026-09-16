@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-### The MinIO image moved, for the second time
+### MinIO's open source is archived, and CI found out first
 
 CI went red on a commit that changed documentation and nothing else. The
 step that failed was `Start MinIO`, in one second, which is a pull failure
@@ -22,8 +22,30 @@ All four references (the CI step, and the server and `mc` images in both
 compose files) now pull from **quay.io, which MinIO publishes to directly,
 at a pinned RELEASE tag**. Both were verified by pulling and running them,
 and the development stack was recreated on them: buckets created, object
-lock configured, full suite green. `latest` is what both outages have in
-common, so neither pin is `latest`.
+lock configured, full suite green at 2519 passed. `latest` is what both
+outages have in common, so neither pin is `latest`.
+
+**Then the repin failed on the next step, and that is the real finding.**
+CI fetched `mc` from `https://dl.min.io`, which now answers 410 Gone: *"The
+open-source MinIO Server, MinIO Client (mc) and MinIO KES projects are
+archived and no longer maintained. MinIO does not provide product support,
+security updates, or security advisories for them, and does not accept or
+process vulnerability reports concerning them."* `curl` without `-f` saved
+that notice as the binary and exited 0, so the failure surfaced sixty
+seconds later as thirty alias retries rather than as a download error. The
+step runs `mc` from the pinned image now, through `MC_HOST_local` because
+each `docker run --rm` is a fresh container and an alias would not survive
+to the next one. Rehearsed locally against a throwaway MinIO on the port CI
+uses: three buckets, GOVERNANCE 365d on evidence, and no lock on samples,
+which is what docs/11's destruction path requires.
+
+**The archiving itself is the owner's decision, not a CI chore.** The WORM
+guarantee under every exhibit in this system now rests on software that
+will receive no security fix, and that is a sentence a disclosure process
+will eventually ask about. It is recorded as `docs/17` F24, with the three
+options and their costs, and against `docs/16` C2, which is the
+confirm-externally item it changes. Nothing is broken today and nothing
+here should be settled by whoever next sees a red build.
 
 ### The documentation pass
 
