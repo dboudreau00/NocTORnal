@@ -1,4 +1,4 @@
-# 08 — Governance and tradecraft
+# 08. Governance and tradecraft
 
 These are product features, not paperwork. Every one of them is something a
 real unit will be asked for, usually at the worst possible moment, and each
@@ -10,15 +10,15 @@ is far cheaper to build in now than to retrofit.
 Inheritance flows down from the case, and a child may be *more* restricted
 than its parent but never less. Enforce that in a constraint.
 
-- `CLEAR` — freely shareable
-- `GREEN` — community, not public
-- `AMBER` — organisation and clients, need to know
-- `AMBER+STRICT` — organisation only
-- `RED` — named recipients only, never forwarded
+- `CLEAR`, freely shareable
+- `GREEN`, community, not public
+- `AMBER`, organisation and clients, need to know
+- `AMBER+STRICT`, organisation only
+- `RED`, named recipients only, never forwarded
 
 **Compartments** are additive need-to-know locks on top of TLP. A case may
 be AMBER but compartmented to `OPERATION-X`; clearance alone is not enough.
-Use them sparingly — over-compartmentalisation destroys the analytic value
+Use them sparingly, over-compartmentalisation destroys the analytic value
 of having the data in one place, which is the whole point of the platform.
 
 ## Legal basis and proportionality
@@ -46,7 +46,7 @@ date should be visibly flagged in the case list, not silently rolling on.
 - Purge writes a tombstone to the audit log: what was destroyed, under what
   authority, by whom. The record of destruction survives the data.
 - Documents supporting an accepted assertion are pinned past source
-  retention — otherwise you delete the evidence and leave the conclusion,
+  retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome
 
 ## Subject rights and minimisation
@@ -55,7 +55,7 @@ Even in criminal intelligence, incidental third parties exist and have
 rights in most jurisdictions.
 
 - Flag nodes as `is_incidental` where the person is not a subject of
-  interest — a victim, a family member, a bystander in a group chat
+  interest, a victim, a family member, a bystander in a group chat
 - Minimisation review at case closure: incidental entities are deleted
   unless specifically justified
 - A subject access request procedure, even if the answer is usually a
@@ -72,7 +72,7 @@ usually analytic failures, not collection failures.
 - What is assessed, and with what confidence
 - What is assumed
 
-The assertion model does this structurally. The UI has to keep it visible —
+The assertion model does this structurally. The UI has to keep it visible,
 a report that renders all four the same way has thrown away the model's
 main benefit.
 
@@ -82,19 +82,19 @@ reader:
 
 | Term | Band |
 |---|---|
-| Almost certainly / nearly certain | 95–99% |
-| Very likely / highly probable | 80–95% |
-| Likely / probable | 55–80% |
-| Roughly even chance | 45–55% |
-| Unlikely / improbable | 20–45% |
-| Very unlikely / highly improbable | 5–20% |
-| Almost certainly not / remote | 1–5% |
+| Almost certainly / nearly certain | 95-99% |
+| Very likely / highly probable | 80-95% |
+| Likely / probable | 55-80% |
+| Roughly even chance | 45-55% |
+| Unlikely / improbable | 20-45% |
+| Very unlikely / highly improbable | 5-20% |
+| Almost certainly not / remote | 1-5% |
 
 **Analysis of Competing Hypotheses.** The `hypothesis` and
 `hypothesis_evidence` tables support the classic matrix: list hypotheses,
-score each piece of evidence for **diagnosticity** — does it discriminate
+score each piece of evidence for **diagnosticity** (does it discriminate
 between hypotheses, or is it consistent with all of them and therefore
-useless? — and seek to *disconfirm* rather than confirm.
+useless?) and seek to *disconfirm* rather than confirm.
 
 Cybercrime attribution is exactly where confirmation bias does the most
 damage. A team that has spent eight months on one theory will read every
@@ -112,11 +112,11 @@ Every exhibit is written once into object-locked (COMPLIANCE) storage, so
 an accepted byte is kept for the whole retention period and no credential
 can shorten that. The largest exhibit a deployment accepts is therefore a
 decision, not a tunable: `NOCTORNAL_MAX_EVIDENCE_BYTES` declares it
-(bytes, or a number with K, M or G — binary, `512MiB`), the upload route
+(bytes, or a number with K, M or G, binary, `512MiB`), the upload route
 refuses a larger body with a 413 before a byte of it is read, the console
 shows the cap beside the file picker and refuses a larger file before the
 upload starts, and the readiness check `evidence_size_cap_declared` stays
-red until the variable is set — a production boot refuses without it. The
+red until the variable is set, a production boot refuses without it. The
 default, when a development deployment declares nothing, is 256 MiB.
 Samples have their own cap (`NOCTORNAL_MAX_SAMPLE_BYTES`, same default)
 and the sample bucket is deliberately not locked (docs/11), so that one is
@@ -153,13 +153,13 @@ redaction log.
 
 ## Bias and quality controls
 
-- **Source diversity indicator** per case — a network built entirely from
+- **Source diversity indicator** per case, a network built entirely from
   one forum is a picture of that forum, not of the criminal ecosystem
-- **Coverage gaps** on the timeline — visible collection outages, so a
+- **Coverage gaps** on the timeline, visible collection outages, so a
   quiet period is not misread as inactivity
 - **Single-source assertions** flagged in the UI. Not wrong, but they
   should be visible as what they are.
-- **Stale confidence** — an assertion graded HIGH three years ago with no
+- **Stale confidence**, an assertion graded HIGH three years ago with no
   corroboration since should decay to a review prompt
 - **Peer review** workflow on high-consequence assessments: attribution of
   a persona to a named person should require a second analyst, in the same

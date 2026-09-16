@@ -1,7 +1,7 @@
 # noctornal-api
 
 The FastAPI service. Phase 1 surface: authentication, cases, graph writes,
-selectors, evidence, search — every case-scoped request through the
+selectors, evidence, search, every case-scoped request through the
 five-part access gate, every graph write carrying an assertion.
 
 ## Run it
@@ -29,7 +29,7 @@ security/    passwords (Argon2id), totp (RFC 6238 + replay), sessions,
              tokens, envelope (AES-GCM), access (the five-part gate)
 stores.py    Postgres implementations of the store protocols + the
              access-context resolver
-graph.py     GraphWriteService — the ONLY sanctioned node/edge write path
+graph.py     GraphWriteService: the ONLY sanctioned node/edge write path
 selectors.py selector storage, normalised via the ontology package
 evidence.py  WORM ingest, dual-hash, custody
 cases.py     case CRUD, lifecycle, assignment
@@ -41,8 +41,8 @@ http/        app factory, deps (auth + gate), routers
 
 1. **Case-scoped endpoints depend on `require("<permission>")`** (or call
    `authorize_object` when the object is an element whose classification
-   can be stricter than its case). Never re-implement an access decision —
-   there is exactly one `evaluate()`.
+   can be stricter than its case). Never re-implement an access decision.
+   There is exactly one `evaluate()`.
 2. **Graph writes go through `GraphWriteService`**, so the assertion lands
    in the same transaction. The database rejects an assertion-less node or
    edge at commit anyway (invariant 1), but going around the service means
@@ -68,7 +68,7 @@ full reasoning is decision 43. Four things worth knowing before touching it:
   cost-bearing ones return 503 rather than run unmetered; the blanket
   ceiling fails open so that a Redis restart is not an outage. A test
   asserts the blanket ceiling is the *only* fail-open entry.
-- **Login is metered twice** — a generous limit on attempts (so a NAT'd
+- **Login is metered twice**, a generous limit on attempts (so a NAT'd
   organisation can sign on) and a tight one on *failures* (which only a
   guesser produces).
 - **`NOCTORNAL_RATELIMIT=off`** disables everything. It exists for tests
@@ -88,16 +88,16 @@ including step-up re-challenge and the invariant-8 export refusal.
 
 ## Not yet done
 
-- **Jira** — `notifications.JIRA` is a channel and `egress.Destination.JIRA`
+- **Jira**, `notifications.JIRA` is a channel and `egress.Destination.JIRA`
   a ceiling, but `transports.dispatch_due` has no branch for it: a
   jira-channel row fails into `notify.delivery` rather than being sent. The
-  signed webhook transport it would specialise is built; the API mapping —
-  and a Jira to verify it against — is not (docs/07).
+  signed webhook transport it would specialise is built; the API mapping,
+  and a Jira to verify it against, is not (docs/07).
 - **No worker process.** `POST /notifications/dispatch` drains the outbox
   once, driven by an operator, a cron entry (`scripts/notify_drain.py`, so
   the drain does not need step-up) or a test. Decision 30 set that
   precedent for analytics: a queue adds a process, a runtime and a failure
   mode, and a thread that dies silently at 3am is worse than a call you
   have to make.
-- **WebAuthn** — `security/` covers passwords, TOTP and recovery codes.
+- **WebAuthn**, `security/` covers passwords, TOTP and recovery codes.
   Hardware keys are named in docs/05 and are not built.

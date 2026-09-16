@@ -1,4 +1,4 @@
-# Production deployment — one host, docker compose
+# Production deployment: one host, docker compose
 
 This directory is the whole deployment: a reverse proxy, Postgres, Redis,
 MinIO, the API, a second process serving the sample origin, and a cron
@@ -15,7 +15,7 @@ on this for casework. It is short and it is the honest part.
 You need:
 
 * A Linux host with Docker Engine and the Compose v2 plugin, and root on it.
-* **Two** DNS names pointing at that host — one for the console, one for
+* **Two** DNS names pointing at that host: one for the console, one for
   sample downloads. They must be genuinely separate names. Invariant 10
   puts hostile bytes on an origin that holds no analyst session, and the
   runtime cannot tell a real split from a CNAME onto the same host
@@ -26,7 +26,7 @@ You need:
 * A checkout of this repository on the host. Every command below is run
   from the repository root.
 
-Counsel has work to do before an analyst signs in — see
+Counsel has work to do before an analyst signs in. See
 [What stays red, and what a red check refuses](#what-stays-red-and-what-a-red-check-refuses).
 Doing it after the stack is up is fine; doing it after the first ingest is
 not, and the collection route refuses to poll until it is done.
@@ -53,12 +53,12 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 **The TOTP key-encrypting key** is the one value with a shape requirement.
-It must be base64 that decodes to **exactly 32 bytes** — this is the method
+It must be base64 that decodes to **exactly 32 bytes**. This is the method
 `release/install.sh` uses, and it checks the length for a reason. In this
 deployment the boot check catches a bad one for you: `NOCTORNAL_ENV` is
 `production`, so the API runs the envelope's own reader before it serves
 anything and refuses to start, by name. Everywhere else the first thing to
-notice is a second factor that cannot be sealed or opened — a different
+notice is a second factor that cannot be sealed or opened, a different
 program, long after anyone would connect the two.
 
 ```sh
@@ -93,7 +93,7 @@ failing to authenticate, which reads like a bug in the migration.
 
 There are two Postgres roles on purpose. `noctornal` owns the schema and is
 the only thing that ever runs Alembic. `noctornal_app` is least privilege,
-is not the owner, and cannot `ALTER TABLE ... DISABLE TRIGGER` — which is
+is not the owner, and cannot `ALTER TABLE ... DISABLE TRIGGER`, which is
 precisely what a compromised API process would want in order to write
 around the audit and custody chains. The app role is created by
 `db/init/10-app-role.sh` **at initdb**, and initdb scripts run once against
@@ -106,7 +106,7 @@ nothing to an existing cluster, and you have to `ALTER ROLE` by hand.
 
 The API refuses to start unless `MINIO_SECURE` and `SAMPLE_SECURE` are both
 `true` (`apps/api/src/noctornal_api/config.py`). The argument is not about
-the password — under SigV4 the secret key never crosses the wire — it is
+the password (under SigV4 the secret key never crosses the wire) it is
 that every exhibit's bytes do, and each request carries a signature
 anything on the path can lift and replay against the evidence bucket until
 it expires.
@@ -138,8 +138,8 @@ the result.
 It is a concatenation rather than the certificate alone because the clients
 in this build do not read that variable the same way. The MinIO client
 hands it to urllib3 as `ca_certs`, which makes that file the *entire* set of
-roots the evidence, raw and sample clients will trust. Everything else —
-RSS collection, the webhook channel, SMTP, the readiness probe — goes
+roots the evidence, raw and sample clients will trust. Everything else,
+RSS collection, the webhook channel, SMTP, the readiness probe, goes
 through OpenSSL's default verify paths, which are `SSL_CERT_FILE` **and**
 `SSL_CERT_DIR`; the directory still points at `/etc/ssl/certs` and the image
 ships the hashed symlinks, so those clients keep the public roots either
@@ -166,7 +166,7 @@ The order is enforced by the file, not by you: Postgres reaches a real TCP
 healthcheck, the migration job runs `alembic upgrade head` as the owner and
 must succeed, MinIO's buckets are created, and only then do the API, the
 sample origin and the cron loop start. A migration that will not apply
-means an API that never starts, which is the correct outcome — code ahead
+means an API that never starts, which is the correct outcome, code ahead
 of its schema fails on the first query touching a new column and reports
 that as a bug in whatever endpoint happened to run first.
 
@@ -184,7 +184,7 @@ should reach `healthy`.
 ### If the API refuses to start
 
 It will print every reason at once, each naming a variable and what it
-costs. That list is the whole fix — there is no second problem waiting
+costs. That list is the whole fix. There is no second problem waiting
 behind the first. It never quotes a value, so the output is safe to read
 over someone's shoulder.
 
@@ -193,18 +193,18 @@ over someone's shoulder.
 `Pool overlaps with other one on this address space` means another Docker
 network on this host already holds `172.31.243.0/24`. Pick a free /24 and
 change it in **two** places in `compose.yml`: the `networks:` block at the
-bottom and the `x-caddy-ip` alias at the top. They must agree — the second
+bottom and the `x-caddy-ip` alias at the top. They must agree. The second
 is the address uvicorn is told to trust for `X-Forwarded-For`.
 
 ---
 
 ## 5. Create the first account
 
-While `iam.app_user` is empty — and only then — one unauthenticated route
+While `iam.app_user` is empty (and only then) one unauthenticated route
 creates the first administrator. It hands out `SYS_ADMIN`,
 `SECURITY_OFFICER`, `CASE_OWNER` and `ANALYST`, which is right for a
 single-operator install and clears the two account-shaped readiness items
-in one call — `security_officer_present`, which is blocking, and
+in one call, `security_officer_present`, which is blocking, and
 `sys_admin_present`, which is not. It answers 409 forever afterwards, and
 it counts every row, active or not.
 
@@ -269,7 +269,7 @@ working.
 Four of the fifteen are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
-not a synonym for important — everything in the register is important. It
+not a synonym for important, everything in the register is important. It
 means a caller refuses on it: `POST /api/v1/collection/sources/{id}/run`
 answers 409 and names the failing checks while any of the four is open, so
 a covert poll against a real target cannot run before somebody has settled
@@ -283,22 +283,22 @@ decisions nobody but a human can take and the third needs an account that
 does not exist yet.
 
 `sys_admin_present` is also red on a fresh stack and is deliberately **not**
-blocking — `readiness.py` says why at length: it is an operability failure
+blocking, `readiness.py` says why at length: it is an operability failure
 rather than a decision taken too late, and refusing on it would land on
 somebody who cannot act on the refusal, because the register that explains
 it needs `user.manage` and `SYS_ADMIN` is the only role that holds it.
 
 Two more are green on a correctly written secrets file and worth knowing
 by name. `evidence_size_cap_declared` is red until
-`NOCTORNAL_MAX_EVIDENCE_BYTES` is declared — the boot refuses without it,
-so in this deployment you cannot reach the register with it unset — and
+`NOCTORNAL_MAX_EVIDENCE_BYTES` is declared (the boot refuses without it,
+so in this deployment you cannot reach the register with it unset) and
 goes red again if the variable is edited without a restart, because the
 cap is read once at start. `kek_ring_opens_stored_secrets` opens stored
 secrets with the key ring and is the check that catches a KEK that
 changed under its id; it is green on a fresh stack and stays so through a
 rotation done as the template describes.
 
-**1. `prohibited_content_policy`** — `docs/16` L1. Sample ingest is refused
+**1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
 `NOCTORNAL_DESIGNATED_PERSON` are set, and setting them is a declaration,
 not a control: a false one produces a working system and an unlawful
@@ -310,7 +310,7 @@ operating jurisdictions, and whether you are authorised to hold known-
 material hash sets at all. Then point the variable at something an auditor
 can follow and restart the API.
 
-**2. `retention_rules_confirmed`** — `docs/16` D3. Six retention rules ship
+**2. `retention_rules_confirmed`**, `docs/16` D3. Six retention rules ship
 as placeholders. The periods are jurisdictional and this build cannot
 choose them, so each one waits for a named human to attach a rationale:
 
@@ -320,19 +320,19 @@ POST /api/v1/retention/rules/{category} {"retain_days": N, "rationale": "..."}
 ```
 
 `retention.manage` is step-up gated. The point of the confirmation is not
-the number — it is that somebody's id is attached to it, and that the
+the number. It is that somebody's id is attached to it, and that the
 rationale answers "why does this category expire when it does" to somebody
 who was not in the room.
 
 **3. `security_officer_present`** (blocking) and **`sys_admin_present`**
-(not) — both are cleared by step 5, which is why that step grants both
+(not), both are cleared by step 5, which is why that step grants both
 roles. `audit.read` and break-glass review are held by `SECURITY_OFFICER`
 alone, and `user.manage` by `SYS_ADMIN` alone: with neither, the only
 repair path is a database shell.
 
 `smtp_configured` will also be red until `SMTP_HOST` names a relay that
 speaks TLS. That one is configuration rather than a decision, and
-`SMTP_ALLOW_PLAINTEXT` must stay unset — it exists for a development
+`SMTP_ALLOW_PLAINTEXT` must stay unset. It exists for a development
 Mailpit, and a production deployment carrying it sends case summaries in
 the clear on the day STARTTLS fails.
 
@@ -348,8 +348,8 @@ docker compose -p noctornal-prod -f infra/production/compose.yml logs -f cron
 ```
 
 The cron container prints a timestamped start and exit code for each pass.
-`notify_drain` exits 1 when a delivery failed in that pass — information,
-not a reason to stop draining — so a persistent non-zero every five minutes
+`notify_drain` exits 1 when a delivery failed in that pass (information,
+not a reason to stop draining), so a persistent non-zero every five minutes
 is the thing to look at. The failed deliveries are in the ledger with their
 reasons at `GET /api/v1/notifications/deliveries?refused_only=true`.
 
@@ -362,7 +362,7 @@ git pull
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
-**Backups — nothing here does this for you.** Two things must be copied off
+**Backups, nothing here does this for you.** Two things must be copied off
 this host, together, or a restore gives you a case file whose exhibits are
 missing:
 
@@ -379,7 +379,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgre
 #   mc mirror --overwrite local/noctornal-raw      /your/backup/raw
 #
 # The samples bucket is deliberately NOT in this list. It holds live
-# malware, and docs/11's rejection path DESTROYS sample bytes — a mirror
+# malware, and docs/11's rejection path DESTROYS sample bytes. A mirror
 # of it puts a destroyed sample somewhere that path cannot reach, which
 # is the one outcome the whole prohibited-content decision exists to
 # prevent. Copy it only if counsel has said to, and to somewhere the
@@ -397,7 +397,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml down
 
 Never add `-v` to that unless you mean it. It destroys `prod-pgdata` (the
 case file), `prod-miniodata` (the evidence) and `caddy-data` (the ACME
-account and every issued certificate — and issuance is rate-limited per
+account and every issued certificate, and issuance is rate-limited per
 hostname per week). The evidence bucket's objects are written under a
 COMPLIANCE object lock, which nobody can lift, including the root
 credential: destroying the volume is the only way to remove them, which is
@@ -416,13 +416,13 @@ the property evidence is supposed to have.
   what analysts do inside it. Nothing here records who ran `docker compose`,
   edited `secrets.env` or read a volume.
 * **No monitoring.** No metrics, no alerting, no log aggregation. The
-  readiness register answers when you ask it and tells nobody otherwise —
+  readiness register answers when you ask it and tells nobody otherwise,
   nothing anywhere reads its verdict on a schedule.
 * **No secrets management.** `secrets.env` is a file on disk in plain text.
   There is no Vault, no KMS, and the TOTP key-encrypting key sits in it.
   Every container built from the application image receives the whole file,
   and so does Caddy, which needs three of its variables.
-* **`docs/16` L1–L5 are unresolved.** Prohibited content in the sample
+* **`docs/16` L1-L5 are unresolved.** Prohibited content in the sample
   store, stealer logs and third-party personal data at scale, persona
   operation and computer-misuse exposure, message content capture, and
   active capture of attacker infrastructure. Every one of them is a

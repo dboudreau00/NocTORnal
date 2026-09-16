@@ -1,12 +1,13 @@
-# 12 — Ingest API keys and feed categorisation
+# 12. Ingest API keys and feed categorisation
 
-**Status: concept. Not implementation-ready.**
+**Status: BUILT** (Phase 9, migrations 0033 onward). This document is the
+domain reasoning; `ARCHITECTURE.md` describes what was built.
 
 Two distinct things share the word "key" and should not share an
 implementation:
 
-- **Inbound keys** (`sk_`) — machines push data *into* NocTORnal
-- **Outbound credentials** — NocTORnal pulls *from* third-party APIs
+- **Inbound keys** (`sk_`), machines push data *into* NocTORnal
+- **Outbound credentials**, NocTORnal pulls *from* third-party APIs
 
 Different threat models. Inbound keys are held by parties you do not
 control and will leak. Outbound credentials are yours to protect and sit
@@ -14,7 +15,7 @@ in the vault described in `docs/04`.
 
 ---
 
-## Part 1 — Inbound ingest keys
+## Part 1: Inbound ingest keys
 
 ### Key format
 
@@ -41,7 +42,7 @@ noct_sk_live_<key_id:8><secret:24>
 ```
 
 Look up by `key_id`, then constant-time compare the HMAC of the presented
-secret. Do **not** bcrypt/Argon2 the whole key — a per-request KDF at
+secret. Do **not** bcrypt/Argon2 the whole key, a per-request KDF at
 ingest volume will melt the API, and you cannot index a slow hash so you
 would be scanning the table on every request.
 
@@ -73,7 +74,7 @@ both work, the old one goes read-only-warning, then dies on schedule. A
 rotation that requires a coordinated cutover will not happen, and the key
 will live for three years instead.
 
-Surface `last_used_at` and alert on keys unused for 30 days — those are
+Surface `last_used_at` and alert on keys unused for 30 days. Those are
 either dead integrations or someone else's.
 
 ### Request handling
@@ -92,7 +93,7 @@ either dead integrations or someone else's.
 
 ---
 
-## Part 2 — Parsing and categorisation
+## Part 2: Parsing and categorisation
 
 ```
 POST → auth → limits → raw persist → format detect → schema map
@@ -101,8 +102,8 @@ POST → auth → limits → raw persist → format detect → schema map
        └── unparseable → DEAD LETTER (never dropped)
 ```
 
-**Persist raw before parsing, always.** When the parser is wrong — and it
-will be — you re-parse from the original rather than asking a partner to
+**Persist raw before parsing, always.** When the parser is wrong (and it
+will be) you re-parse from the original rather than asking a partner to
 resend three months of feed.
 
 ### Format detection
@@ -113,14 +114,14 @@ syslog, CEF/LEEF, plain text, ZIP or 7z of any of the above.
 
 ### Categories
 
-`document.category` — the taxonomy that makes the bucket navigable:
+`document.category`, the taxonomy that makes the bucket navigable:
 
 | Category | Notes |
 |---|---|
 | `STEALER_LOG` | High volume, high value, **high risk**. See below |
 | `CREDENTIAL_DUMP` | Combo lists, breach data |
 | `DATABASE_LEAK` | Structured dumps, often forum databases |
-| `RANSOM_LEAK_POST` | Leak site listings — victim, deadline, sample data |
+| `RANSOM_LEAK_POST` | Leak site listings, victim, deadline, sample data |
 | `MARKET_LISTING` | Shop and vendor listings |
 | `FORUM_POST` | The default from forum collectors |
 | `CHAT_EXPORT` | From `docs/10` channels |
@@ -138,7 +139,7 @@ Categorisation is: declared by the key → refined by structure → refined by
 content classifier. Keep the confidence and let analysts correct it;
 corrections are training data.
 
-### Triage scoring — the part that makes it usable
+### Triage scoring: the part that makes it usable
 
 Volume is the enemy. Score every record for review priority:
 
@@ -166,8 +167,8 @@ error, and the parser version. Visible in admin, with a repair-and-replay
 action.
 
 Silent drops are how you discover six months later that a feed has been
-half-failing. Alert when a key's dead-letter rate crosses a threshold —
-that is usually the partner changing their schema without telling you.
+half-failing. Alert when a key's dead-letter rate crosses a threshold.
+That is usually the partner changing their schema without telling you.
 
 ---
 
@@ -186,7 +187,7 @@ Handle differently from everything else:
 - Own compartment, tighter than the parent case
 - Victims as `VICTIM` nodes flagged `is_incidental`
 - **No free-text search across victim PII** without a specific, logged
-  authorisation — otherwise the platform is a credential lookup service
+  authorisation, otherwise the platform is a credential lookup service
   and someone will use it as one
 - Session tokens and live credentials **never rendered in the UI**. Mask
   by default, reveal is a step-up action with an audit event
@@ -200,7 +201,7 @@ ever exposing the credential contents. Design for that.
 
 ---
 
-## Part 3 — Outbound credentials
+## Part 3: Outbound credentials
 
 Keys NocTORnal uses to pull from third parties: VirusTotal, Shodan,
 Censys, urlscan, HIBP, chain analytics, CTI vendors, Telegram bot tokens.
@@ -215,18 +216,18 @@ Additional concerns unique to outbound:
 - **Query attribution leaks.** Looking up a hash or domain on some
   services tells the *provider*, and occasionally the wider world, what
   you are interested in. Some are effectively public. Mark each provider
-  with an exposure level and require confirmation for the leaky ones —
+  with an exposure level and require confirmation for the leaky ones,
   the same treatment as sandbox detonation in `docs/11`.
 - Cache aggressively. Enrichment results are stable and quotas are not.
 
 ## Draft schema
 
 `ingest.api_key`, `ingest.batch`, `ingest.record`, `ingest.dead_letter`,
-`ingest.category_rule` — see `db/schema_concept.sql`.
+`ingest.category_rule`, shipped; see `db/schema.sql`.
 
 ## Open questions
 
-1. Who holds inbound keys — internal scripts only, or external partners?
+1. Who holds inbound keys, internal scripts only, or external partners?
    External changes the support burden and the abuse model substantially.
 2. Expected volume per day? Under ~10k records/day, Postgres and Redis are
    fine. Above ~1M, the bucket needs a different storage tier.

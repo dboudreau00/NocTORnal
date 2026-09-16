@@ -1,4 +1,4 @@
-# 07 — Integrations and notifications
+# 07. Integrations and notifications
 
 ## The rule that governs all of them
 
@@ -29,12 +29,12 @@ watch_hit / graph event / review request
 A platform that emails on every hit gets muted in week two, and then the
 one alert that mattered is also muted. Build the hygiene in from the start:
 
-- **Suppression window** per watch — repeated hits on the same thread
+- **Suppression window** per watch, repeated hits on the same thread
   collapse into one notification with a running count
-- **Digest mode** — hourly or daily rollup, default for anything below
+- **Digest mode**, hourly or daily rollup, default for anything below
   priority 2
 - **Quiet hours** per user, with priority-1 override
-- **Escalation** — an unacknowledged priority-1 hit escalates to the case
+- **Escalation**, an unacknowledged priority-1 hit escalates to the case
   owner after a configured interval
 - **Acknowledgement** tracked on `watch_hit`, so a hit someone has already
   looked at stops nagging everyone else
@@ -45,7 +45,7 @@ Configuration lives in the admin surface; secrets in Vault.
 
 - Explicit TLS (STARTTLS on 587) or implicit (465). Never plaintext.
 - DKIM signing, SPF-aligned envelope sender
-- Per-recipient rate limit and a global hourly cap — a runaway loop must
+- Per-recipient rate limit and a global hourly cap, a runaway loop must
   not fire ten thousand emails
 - Bounce and complaint handling; hard bounces deactivate delivery and
   raise an admin alert
@@ -53,11 +53,11 @@ Configuration lives in the admin surface; secrets in Vault.
 **Content rules.** Email is the least trustworthy channel you have. It sits
 in inboxes, gets forwarded, is often synced to phones.
 
-- Subject line carries **no intelligence**. `[NocTORnal] Watch hit — OP-KESTREL-24 — priority 1` and nothing more. Never the matched keyword, never the handle.
+- Subject line carries **no intelligence**. `[NocTORnal] Watch hit: OP-KESTREL-24, priority 1` and nothing more. Never the matched keyword, never the handle.
 - Body carries a summary and a deep link, not the content. The recipient
   authenticates and reads it in the platform.
 - TLP marking in the body, always.
-- Deep links are single-use, short-TTL, and land on the login page — they
+- Deep links are single-use, short-TTL, and land on the login page. They
   are not an access-control bypass.
 - Optional: refuse to send anything above AMBER, notify in-app only.
 
@@ -89,7 +89,7 @@ config with a sane default of GREEN.
 - Store the mapping in a `jira_link` table (object id ↔ issue key ↔ last
   sync hash), not in a Jira custom field alone
 - Webhook receiver verifies the signature and validates the payload
-  against expected issue keys — an unauthenticated webhook endpoint is a
+  against expected issue keys, an unauthenticated webhook endpoint is a
   write primitive into your platform
 - Idempotency keys on issue creation; retry storms otherwise create
   duplicate tickets
@@ -127,5 +127,4 @@ Do not build this in the MVP, but keep the door open:
 
 Keeping node and edge types aligned to STIX vocabulary *where it does not
 distort the model* costs nothing now and saves a mapping layer later. Where
-STIX would distort the model — its actor/identity conflation, for instance
-— keep your model and eat the mapping cost.
+STIX would distort the model (its actor/identity conflation, for instance) keep your model and eat the mapping cost.

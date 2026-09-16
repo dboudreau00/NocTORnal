@@ -18,7 +18,7 @@ This project is **alpha, unaudited, and not certified for evidential
 use**. It has never been operated against real targets. That means:
 
 - **In scope:** anything that breaches one of the twelve invariants in
-  the [README](README.md#the-twelve-invariants) — a path that writes a
+  the [README](README.md#the-twelve-invariants), a path that writes a
   graph element without an assertion, a way to read across a TLP or
   compartment boundary, a way to make the audit log or a custody ledger
   lose a row, a way to get sample or DOM bytes to render, a way to
@@ -34,8 +34,8 @@ use**. It has never been operated against real targets. That means:
   that used to need one both take the cookie now: the live websocket
   reads `__Host-session` off the upgrade (where a double-submit is
   impossible, so `SameSite=Strict` plus an `Origin` check against the
-  configured origin stands in for it), and the Lab download — which is
-  cross-origin by design, so no `__Host-` cookie can reach it — crosses
+  configured origin stands in for it), and the Lab download (which is
+  cross-origin by design, so no `__Host-` cookie can reach it) crosses
   on a **one-shot ticket** minted on the application origin under the
   cookie session: 60 seconds, one sample, one redemption, and it buys an
   archive rather than the case file. A session token in web storage, in
@@ -50,7 +50,7 @@ use**. It has never been operated against real targets. That means:
   Bearer`, for clients that are not browsers.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md). Please
-  read it before reporting — row-level security under a non-owner
+  read it before reporting, row-level security under a non-owner
   database role, WebAuthn and login timing equalisation are absent *on
   purpose and on the record*, and session binding is recorded on every
   session (0058) but enforced only under
@@ -73,7 +73,7 @@ is a valid report regardless of what CI says.
 
 Two things sit outside the software and cannot be fixed inside it:
 
-1. **The five blocking legal items** (L1–L5 in the
+1. **The five blocking legal items** (L1-L5 in the
    [README](README.md#five-blocking-items-none-of-them-a-software-problem)).
    The build refuses several operations until an operator *declares* a
    policy, and **a declaration is a string this software stores, not a
@@ -86,6 +86,6 @@ Two things sit outside the software and cannot be fixed inside it:
 
 ## Handling of your report
 
-There is no bounty. There is no SLA — this is not a staffed product. You
+There is no bounty. There is no SLA. This is not a staffed product. You
 will get an acknowledgement and, if the finding is real, a fix and a
 credit in the changelog unless you would rather not be named.

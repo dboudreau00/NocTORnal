@@ -1,4 +1,4 @@
-# CONVENTIONS.md — working agreement for this repo
+# CONVENTIONS.md: working agreement for this repo
 
 Read this before writing code. Read `docs/00-decisions.md` before proposing
 architecture changes.
@@ -46,7 +46,7 @@ Violating any of these is a bug even if tests pass.
    supersession. `retract_assertion` stamps `retracted_at`,
    `retracted_by` and `retraction_reason` once, from NULL (`WHERE
    retracted_at IS NULL`; zero rows is an error), and the projection
-   drops the row. There is nothing to supersede it with — a retraction
+   drops the row. There is nothing to supersede it with, a retraction
    withdraws a claim rather than replacing one. A correction is a new
    assertion. `superseded_at`/`superseded_by` exist (0007) and the read
    side honours them, but no code path writes them yet.
@@ -61,22 +61,22 @@ Violating any of these is a bug even if tests pass.
    one block, drops it and audits the use. There is no `get_secret()`,
    nothing serialises a plaintext into a response, and every adapter error
    is `redact()`-ed before it is stored. **The vault runs inside the API
-   process** — there is no separate collector — so this is a guarantee
+   process** (there is no separate collector), so this is a guarantee
    about the SHAPE of the code, not about a network boundary: a
    compromised API host is a compromised vault. (Reworded 2026-09-09.
    Until then this read "never leave the collector, never in the API
    process", which the topology has never backed. Splitting collection
-   into its own process is a deliberate not-yet — `docs/02`.)
+   into its own process is a deliberate not-yet (`ARCHITECTURE.md`).)
 
-8. **TLP gates egress.** Every outbound path — SMTP, Jira, webhook,
-   export — checks classification first. `AMBER_STRICT` and `RED` never
+8. **TLP gates egress.** Every outbound path (SMTP, Jira, webhook,
+   export) checks classification first. `AMBER_STRICT` and `RED` never
    leave the boundary. Write the check once, in one place, and call it
    from every integration.
 
 9. **Durable identifiers, not displayed ones.** Tox indexes on the 64-hex
    public key, never the 76-hex ID (nospam is rotatable). Telegram
    indexes on the numeric ID, never `@username` (recycled). See
-   `comms.platform.durable_selector_type` — it exists for this reason.
+   `comms.platform.durable_selector_type`. It exists for this reason.
 
 10. **Samples never render, never execute.** The binary is only ever an
     encrypted archive download from a *separate origin*. Sample metadata
@@ -93,31 +93,31 @@ Violating any of these is a bug even if tests pass.
 
 ## Concept vs decided
 
-`docs/00`–`09` are decided, and `db/schema.sql` is a generated mirror of
-the decided schema (the migrations are authoritative; `db/README.md`).
-`docs/10`–`12` and `db/concept/schema_concept.sql` are sketches — read the
-open questions at the end of each before implementing, and expect to
-change the schema.
+`docs/00`-`19` carry the domain reasoning: why an identifier is durable
+or displayed, why a capture is or is not lawful, what an analyst is
+actually doing. The migrations are authoritative for the schema and
+`db/schema.sql` is a generated mirror of them (`db/README.md`).
 
 ## Build order
 
-Follow `docs/09-roadmap.md`. Do not start the collection layer before the
-graph and assertion layer are working end to end — a firehose into a
-half-built model produces a landfill.
+All ten phases are built. `docs/09-roadmap.md` is what each was for and
+the exit criterion it was held to; `ROADMAP-REMAINING.md` is what is left
+of each. The ordering principle still applies to anything new: nothing
+feeds the graph before the graph and assertion layer work end to end. A
+firehose into a half-built model produces a landfill.
 
 ## Stack
 
-See `docs/02-architecture.md` for the reasoning. What is in the tree, as
-of 2026-09-09:
+`ARCHITECTURE.md` holds the reasoning. What is in the tree:
 
 - Postgres 16 + pgvector as the system of record; 61 Alembic revisions
-  (`0001`–`0061`), `db/schema.sql` regenerated from them
-- Python 3.12+ / FastAPI — **one process**, serving the REST API under
+  (`0001`-`0061`), `db/schema.sql` regenerated from them
+- Python 3.12+ / FastAPI, **one process**, serving the REST API under
   `/api/v1`, the analyst console under `/ui`, the `/api/v1/live`
   WebSocket, and running the collectors, the analytics and the
   notification drain itself. There is no worker process and no queue
   (decision 30; `dispatch_due()` and `run_once` are called, not scheduled)
-- `igraph` (C core) + `leidenalg` for SNA maths — not NetworkX, which will
+- `igraph` (C core) + `leidenalg` for SNA maths, not NetworkX, which will
   not hold up
 - A vanilla HTML/CSS/JS console: no framework, no build step, no bundler,
   served same-origin under a strict CSP (`script-src 'self'`, no inline
@@ -128,18 +128,18 @@ of 2026-09-09:
 - MinIO (S3 + object lock) for evidence, raw captures and samples
 - Mailpit as the development SMTP sink
 - Authorisation is the five-part gate in `security/access.py`, answered
-  from `iam.*` in Postgres — no external authorisation engine
+  from `iam.*` in Postgres, no external authorisation engine
 - The 2026-07 sketch's Next.js, sigma.js/WebGL, OpenFGA/SpiceDB, NATS and Arq/Celery are not in the tree; they were superseded (decisions 8, 9, 30, 37; compose R13 removed OpenFGA and NATS on 2026-07-26)
 
 ## Conventions
 
 - Migrations: Alembic, one concern per migration, reversible on an EMPTY
-  database — which is the contract CI proves, by round-tripping
+  database, which is the contract CI proves, by round-tripping
   `head → base → head` before the suite runs.
   **Reversible does not mean reversible on a database with data in it, and
   it is not meant to.** Downgrading past `0017` unwinds the ontology and
   role seed, and five foreign keys into those seeded rows have no
-  `ON DELETE CASCADE` — `iam.case_assignment.role_key` and
+  `ON DELETE CASCADE`, `iam.case_assignment.role_key` and
   `iam.user_role.role_key` among them, with a second instance in `0031`.
   So the downgrade stops with a foreign-key violation on any deployment
   that has ever assigned a case or a role. That refusal is the DESIGNED
@@ -147,9 +147,9 @@ of 2026-09-09:
   data to make a rollback succeed, which is data destruction wearing a
   rollback's name, and it would drive straight through the soft-delete-only
   invariant. If you need to go back past 0017 on a live database, restore a
-  backup — do not make the downgrade "work".
-- IDs: v4 UUIDs — `uuid4()` app-side, `gen_random_uuid()` as the column
-  default in the database. Nothing sorts on an id. (The 2026-07 convention was UUIDv7 app-side; it was never adopted and is superseded as of 2026-09-09 — `pg_uuidv7` is not installed.)
+  backup. Do not make the downgrade "work".
+- IDs: v4 UUIDs, `uuid4()` app-side, `gen_random_uuid()` as the column
+  default in the database. Nothing sorts on an id. (The 2026-07 convention was UUIDv7 app-side; it was never adopted and is superseded as of 2026-09-09, `pg_uuidv7` is not installed.)
 - Times: `timestamptz`, UTC in the database, rendered in the user's zone.
 - Money and weights: `numeric`, never float.
 - API: REST under `/api/v1`, `limit`-capped pagination (`limit: int =
@@ -164,5 +164,5 @@ of 2026-09-09:
 
 Ask before: changing the assertion model, adding a node or edge type that
 duplicates an existing one, weakening an access check, or adding a
-dependency that touches evidence handling. Everything else, use judgement
+dependency that touches evidence handling. Everything else: use judgement
 and leave a note in `docs/00-decisions.md`.

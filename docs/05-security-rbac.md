@@ -1,4 +1,4 @@
-# 05 — Security, RBAC and hardening
+# 05. Security, RBAC and hardening
 
 ## Why plain RBAC is not enough
 
@@ -23,18 +23,18 @@ endpoints is how access-control bugs get shipped.
 
 This is relationship-shaped authorisation, the shape Zanzibar-style
 engines exist for, and the 2026-07 sketch of this document said to use one
-rather than hand-roll it (decision 8: OpenFGA or SpiceDB — superseded, see below).
+rather than hand-roll it (decision 8: OpenFGA or SpiceDB, superseded, see below).
 What shipped is the hand-rolled version done the way that warning demands.
 ONE pure function, `evaluate(ctx) -> Decision` in
 `apps/api/src/noctornal_api/security/access.py`, runs all five checks with
 no short-circuit, so `failed_checks` names every reason a request failed.
 ONE resolver, `PgAccessResolver` in `stores.py`, reads the inputs from
-`iam.*` — `permission.requires_step_up`, `app_user.tlp_clearance` and
+`iam.*`, `permission.requires_step_up`, `app_user.tlp_clearance` and
 `.compartments`, `case_assignment` with its expiry, `role_permission`.
 Every case-scoped router depends on it through `require()`,
 `require_global()` or `require_step_up` in `http/deps.py`.
-`authorize_object` composes the labels first — the STRICTER classification
-of case and element and the UNION of their compartments — so an element is
+`authorize_object` composes the labels first (the STRICTER classification
+of case and element and the UNION of their compartments), so an element is
 never less protected than its case (decision 29). Anything unresolvable
 raises `AccessResolutionError`, which the HTTP layer turns into a 403:
 resolution fails closed, never 500. A failed assignment check answers 404,
@@ -42,10 +42,10 @@ not 403, so a status code is not an existence oracle.
 
 ### Why not the engine (recorded 2026-09-09)
 
-OpenFGA — removed from the compose file on 2026-07-26 (R13), with NATS — had
+OpenFGA (removed from the compose file on 2026-07-26 (R13), with NATS) had
 sat there for six weeks, provisioned and never called by a line of the API.
-The relationship the engine would have modelled — *assigned to the case
-that owns it* — is one row in `iam.case_assignment` and one leg of the
+The relationship the engine would have modelled (*assigned to the case
+that owns it*) is one row in `iam.case_assignment` and one leg of the
 gate, and TLP and compartments are ordinal and set comparisons that would
 have sat outside the engine as an application-side filter regardless. An
 engine earns its place when relationships nest (folders, teams,
@@ -54,7 +54,7 @@ a second source of truth for a single join. If nested relationships arrive,
 decision 8 is where to reopen the question. The model sketch is kept below
 for that day.
 
-### The 2026-07 OpenFGA model sketch (superseded — kept for history)
+### The 2026-07 OpenFGA model sketch (superseded: kept for history)
 
 ```
 type user
@@ -87,12 +87,12 @@ type evidence
 ```
 
 TLP and compartments would have layered on top as an application-side
-filter, because they are ordinal/set comparisons rather than relationships
-— which is how the shipped gate treats them too (legs 3 and 4 above).
+filter, because they are ordinal/set comparisons rather than relationships,
+which is how the shipped gate treats them too (legs 3 and 4 above).
 
 ## Roles
 
-Seeded in `db/seed_ontology.sql`. The two worth calling out:
+Seeded in Alembic revision `0021_role_permissions.py`. The two worth calling out:
 
 **SECURITY_OFFICER** reads the audit trail and reviews break-glass events
 but has **no case content access**. Separation of duties: the person
@@ -107,7 +107,7 @@ model it from the start.
 
 **MFA is mandatory.** Not optional, not admin-only.
 
-- **WebAuthn / passkeys** preferred — phishing-resistant, and this user
+- **WebAuthn / passkeys** preferred, phishing-resistant, and this user
   population is a phishing target
 - **TOTP (RFC 6238)** as the floor: 30 s step, SHA-1 for authenticator
   compatibility, ±1 window drift, secret encrypted at rest with the same
@@ -118,7 +118,7 @@ model it from the start.
 - Passwords: Argon2id (t=3, m=64 MiB, p=4), breach-list checked at set
   time, no rotation policy, no composition rules
 
-**Step-up authentication** for sensitive operations — identity merge,
+**Step-up authentication** for sensitive operations, identity merge,
 evidence export, persona reveal, user management, case deletion. Session
 carries `mfa_satisfied_at`; if the permission requires step-up and that
 timestamp is older than 15 minutes, re-challenge. This is what stops a
@@ -166,18 +166,18 @@ makes it safe.
 **Data**
 - Postgres TDE or encrypted volumes at rest
 - Field-level envelope encryption for persona credentials, TOTP secrets,
-  egress endpoints — shipped (`security/envelope.py`, AES-256-GCM under
+  egress endpoints, shipped (`security/envelope.py`, AES-256-GCM under
   `NOCTORNAL_TOTP_KEK`)
 - **Persona credentials, invariant 7 as it actually holds (reworded
   2026-09-09):** decrypted only inside `PersonaVault.use()`, which yields
   the plaintext to one block, drops it and audits the use; no
   `get_secret()`, no plaintext in a response, adapter errors redacted
-  before storage. The vault runs INSIDE the API process — there is no
-  separate collector — so this is a guarantee about the shape of the code,
+  before storage. The vault runs INSIDE the API process (there is no
+  separate collector), so this is a guarantee about the shape of the code,
   not about a network boundary, and a compromised API host is a
   compromised vault. Splitting a collector out is a deliberate not-yet
   (`docs/02`).
-- Key rotation runbook with re-wrap, not re-encrypt — **shipped
+- Key rotation runbook with re-wrap, not re-encrypt, **shipped
   2026-09-11**: the envelope selects the key by each blob's recorded
   `key_id`, retired keys stay in `NOCTORNAL_TOTP_KEK_RETIRED` until
   `scripts/rewrap_secrets.py --apply` has moved every row under the
@@ -187,7 +187,7 @@ makes it safe.
   permissioned
 
 **Network**
-- Collectors in their own segment with egress-only rules — **not yet**:
+- Collectors in their own segment with egress-only rules, **not yet**:
   today the collectors are the API process (above). This line describes
   the segment a split-out collector would get, not one that exists
 - Database reachable only from the API tier
