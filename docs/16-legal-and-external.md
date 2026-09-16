@@ -306,6 +306,21 @@ COMPLIANCE mode is compatible with D4's purge obligations, **it is not, in
 general**, and that tension is real: an object under compliance lock cannot
 be deleted before its retention expires *even to satisfy a deletion order*.
 
+> **2026-09-16: the upstream is archived.** `https://dl.min.io` now answers
+> 410 Gone with "The open-source MinIO Server, MinIO Client (mc) and MinIO
+> KES projects are archived and no longer maintained. MinIO does not
+> provide product support, security updates, or security advisories for
+> them, and does not accept or process vulnerability reports concerning
+> them." The Docker Hub images went with it; quay.io still serves the last
+> community builds, which is what this tree now pins.
+>
+> That is a second question for the same reviewer, and a harder one. The
+> WORM guarantee under every exhibit rests on software that will receive no
+> security fix, and "the evidence store has a known unpatched
+> vulnerability" is a disclosure answer nobody wants to give. It is not
+> urgent in the sense of breaking anything today, and it does not become
+> less true by waiting. See docs/17.
+
 ### C3: Prohibited-content hash sets
 
 No automated screening is built. The reasoning is that holding known-material

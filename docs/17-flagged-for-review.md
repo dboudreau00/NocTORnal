@@ -75,6 +75,33 @@ deliberately excluded, because docs/05 wants break-glass available and
 people route around the system during an incident, which is worse than the
 access; too broad and the review queue becomes noise nobody reads.
 
+### F24: the evidence store's upstream is archived
+
+**Found 2026-09-16,** by a CI failure on a commit that changed only
+documentation. `https://dl.min.io` answers 410 Gone: the open-source MinIO
+server, client and KES are archived, unmaintained, and explicitly outside
+security support, with vulnerability reports not accepted. The Docker Hub
+images are no longer pullable anonymously either. quay.io still serves the
+last community builds, and the CI step and both compose files now pin
+those, so nothing is broken today.
+
+**Why it is a judgement and not a chore.** Invariant 8 and the whole
+custody story rest on object-lock WORM in this store. An evidence system
+whose object store will never receive another security fix has to answer
+for that in the same breath as it claims a defensible chain of custody, and
+the answer "we pinned the last community build" is only good for as long
+as nobody finds anything in it.
+
+**Decide,** roughly in increasing cost: stay on the pinned build and accept
+the risk in writing (it is an internal, non-internet-facing service in the
+production compose, which bounds the exposure); move to a maintained
+S3-compatible store that implements object lock, which is a storage-adapter
+change rather than a model change because `EvidenceStorage` already speaks
+S3; or move to a vendor-operated S3, which changes where the evidence
+physically sits and is therefore a docs/16 question before it is a
+technical one. Nothing here should be decided by whoever next sees a red
+build. docs/16 C2.
+
 ### F16: `victim_pii.reveal` is granted to no role
 
 The permission exists, the endpoint is wired, and nothing holds it, so the
