@@ -33,7 +33,7 @@ workstation's ESET quarantined mid-clone:
 - **Rules only.** `fetch` prunes every file that is not `.yar`/`.yara` (keeping
   `.git` for updates) immediately after each clone, so no sample, dropper,
   script or document persists. Threat-intel/IOC dumps are excluded from
-  `sources.json` — add rule repositories only.
+  `sources.json`. Add rule repositories only.
 - **Off the cloud.** Set `NOCTORNAL_YARA_HOME` to a path OUTSIDE any
   OneDrive/Dropbox/synced tree, and add an antivirus exclusion for it, before
   fetching. Live rules routinely contain malicious byte patterns as strings;

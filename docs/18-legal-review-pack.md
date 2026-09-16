@@ -1,6 +1,6 @@
-# 18 — Legal review pack
+# 18. Legal review pack
 
-**A document to hand to counsel.** `docs/16` is the engineering register —
+**A document to hand to counsel.** `docs/16` is the engineering register,
 every place the build stopped because the next step is a legal question. It
 is organised the way the code is. This file is organised the way a review
 is: by what has to be decided, in what order, with the option set and the
@@ -18,7 +18,7 @@ one turns on, and what the software currently does while it waits.
    default and will do whatever it is told instead; the risk is that a
    default nobody chose becomes policy by inheritance.
 3. **Section C** are factual claims to verify with an authoritative source.
-4. **Section D** is the retrospective — things already recorded that may
+4. **Section D** is the retrospective, things already recorded that may
    need remediation rather than a forward-looking decision.
 
 Answers go in the **Determination** row. Date and initial them. A decision
@@ -27,7 +27,7 @@ pressure.
 
 ---
 
-## Section A — blocking. Do not process real material until these are closed
+## Section A: blocking. Do not process real material until these are closed
 
 ### A1. Prohibited content in the sample store  *(docs/16 L1)*
 
@@ -35,7 +35,7 @@ pressure.
 |---|---|
 | **Capability blocked** | Malware sample ingest. `samples.py` refuses until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and `NOCTORNAL_DESIGNATED_PERSON` are set. |
 | **What the software does** | Records a *declaration* that a policy exists. **It cannot verify one.** A false declaration produces a working system and an unlawful deployment. |
-| **Decide** | (1) Notification: who, how fast, what channel, when screening trips. (2) What `REJECTED` does with the bytes — destroy, quarantine, or **preserve under instruction**. These conflict; the build destroys, which is wrong where preservation is required. `reject(purge_bytes=False)` exists and nothing selects it automatically. (3) Reporting duties in **both** operating jurisdictions (decision 13: US and Canada — they differ). (4) Who may view a quarantined item, under what authority. (5) Whether you may **hold** known-material hash sets at all — in most jurisdictions this needs specific authorisation, which is why no automated screening exists (C3). (6) How analyst exposure is limited, logged and supported. |
+| **Decide** | (1) Notification: who, how fast, what channel, when screening trips. (2) What `REJECTED` does with the bytes, destroy, quarantine, or **preserve under instruction**. These conflict; the build destroys, which is wrong where preservation is required. `reject(purge_bytes=False)` exists and nothing selects it automatically. (3) Reporting duties in **both** operating jurisdictions (decision 13: US and Canada. They differ). (4) Who may view a quarantined item, under what authority. (5) Whether you may **hold** known-material hash sets at all, in most jurisdictions this needs specific authorisation, which is why no automated screening exists (C3). (6) How analyst exposure is limited, logged and supported. |
 | **If unanswered** | Sample ingest stays refused. That is the intended failure mode. |
 | **Determination** | |
 
@@ -43,9 +43,9 @@ pressure.
 
 | | |
 |---|---|
-| **Capability blocked** | Nothing, technically — stealer logs are in scope by operator direction of 2026-07-25 and the pipeline runs. **This is the single largest exposure in the platform and the one most likely to be discovered by an incident rather than by a review.** |
-| **What the software does** | Compartments the material, models victims as `VICTIM` nodes flagged `is_incidental`, masks credential values with a step-up audited reveal, gives each category its own retention clock independent of the case, and makes free-text search across victim PII *impossible* rather than merely forbidden — there is no index to run it against. |
-| **Decide** | (1) **The lawful basis for holding data about thousands of people who are not under investigation.** (2) Whether victim **notification** obligations attach, and to whom. (3) The retention period per category — the build's numbers are placeholders (B3). (4) Whether **session tokens and live credentials** may be held at all, as against their metadata: the architecture is designed so almost all analytic value is available from metadata alone. (5) Cross-border transfer, if any analyst or partner is in a third country. (6) What "minimisation review at closure" must produce. (7) Who may perform a reveal (B7). |
+| **Capability blocked** | Nothing, technically, stealer logs are in scope by operator direction of 2026-07-25 and the pipeline runs. **This is the single largest exposure in the platform and the one most likely to be discovered by an incident rather than by a review.** |
+| **What the software does** | Compartments the material, models victims as `VICTIM` nodes flagged `is_incidental`, masks credential values with a step-up audited reveal, gives each category its own retention clock independent of the case, and makes free-text search across victim PII *impossible* rather than merely forbidden. There is no index to run it against. |
+| **Decide** | (1) **The lawful basis for holding data about thousands of people who are not under investigation.** (2) Whether victim **notification** obligations attach, and to whom. (3) The retention period per category, the build's numbers are placeholders (B3). (4) Whether **session tokens and live credentials** may be held at all, as against their metadata: the architecture is designed so almost all analytic value is available from metadata alone. (5) Cross-border transfer, if any analyst or partner is in a third country. (6) What "minimisation review at closure" must produce. (7) Who may perform a reveal (B7). |
 | **If unanswered** | The material accumulates lawfully or unlawfully depending on an answer nobody has given. The software cannot tell the difference. |
 | **Determination** | |
 
@@ -55,7 +55,7 @@ pressure.
 |---|---|
 | **Capability blocked** | Nothing. The collector will drive an account into a forum on request. |
 | **What the software does** | Encrypts persona credentials so they are decrypted only inside `PersonaVault.use()` in the API process, as there is no separate collector (invariant 7), distinguishes passive from active engagement so the authorisation *can* be modelled, jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. It asserts nothing about authority. |
-| **Decide** | (1) Authority to operate a covert persona against each target, per jurisdiction — in several, using credentials registered under a false identity engages computer-misuse law regardless of intent. (2) Whether passive and active collection are separately authorised. (3) Entrapment / agent-provocateur exposure for active engagement. (4) Terms-of-service breach as a risk independent of criminal exposure. (5) Whether the collector may present a browser user-agent; it currently identifies itself honestly as `NocTORnal-collector/1`, which is a choice with a legal dimension either way. |
+| **Decide** | (1) Authority to operate a covert persona against each target, per jurisdiction, in several, using credentials registered under a false identity engages computer-misuse law regardless of intent. (2) Whether passive and active collection are separately authorised. (3) Entrapment / agent-provocateur exposure for active engagement. (4) Terms-of-service breach as a risk independent of criminal exposure. (5) Whether the collector may present a browser user-agent; it currently identifies itself honestly as `NocTORnal-collector/1`, which is a choice with a legal dimension either way. |
 | **If unanswered** | Every poll is an unreviewed act. |
 | **Determination** | |
 
@@ -64,7 +64,7 @@ pressure.
 | | |
 |---|---|
 | **Capability blocked** | Nothing. Message-level capture is built (decision 35). |
-| **What the software does** | `conversation.provenance_class` records whether a persona was a party to the conversation, and refuses to be null — so the legally decisive distinction is always recorded even though the authority is external. |
+| **What the software does** | `conversation.provenance_class` records whether a persona was a party to the conversation, and refuses to be null, so the legally decisive distinction is always recorded even though the authority is external. |
 | **Decide** | (1) Interception law: capturing a conversation a persona is a party to is legally distinct from capturing one it is not, and both vary by jurisdiction. (2) One-party vs two-party consent. (3) Whether content of **uninvolved third parties in a group channel** is retainable, and for how long. |
 | **Determination** | |
 
@@ -73,8 +73,8 @@ pressure.
 > **This entry was missing from this pack until 2026-07-26.** The
 > capability shipped with the deception subsystem, and the constraint was
 > written into the schema and into README, SECURITY.md, ARCHITECTURE.md
-> and docs/19 — but neither this pack nor docs/16 carried it, so a reviewer
-> working from A1–A4 would have cleared the platform without ever being
+> and docs/19, but neither this pack nor docs/16 carried it, so a reviewer
+> working from A1-A4 would have cleared the platform without ever being
 > asked the question below. Flagged here rather than quietly inserted: if
 > an earlier version of this pack has already been reviewed, **this item
 > was not covered by that review.**
@@ -82,30 +82,30 @@ pressure.
 | | |
 |---|---|
 | **Capability blocked** | Nothing is blocked outright. Two things are gated: any non-passive capture needs an egress profile, and recording that input was submitted to a phishing page needs a written authority reference. |
-| **What the software does** | `deception.capture` carries `submitted_input boolean` with the CHECK `capture_submission_needs_authority`, which refuses the row unless `submission_authority_ref` is present (`0048_deception_capture.py:135`); `capture_active_needs_egress_profile` refuses a non-passive method with no egress profile. **No credential submission is automated** — there is a column recording that a human did it under authority, and no code that does it. |
-| **Decide** | (1) That fetching attacker-controlled infrastructure is authorised at all — an attributable fetch discloses the investigation to the kit operator. (2) Separately and more seriously: whether **entering any input into a phishing page — including canary or fabricated credentials — is covered.** That may constitute unauthorised access and may be an offence under computer-misuse statutes in several jurisdictions. (3) Whether a captured page rendering a **targeted person's own data** is retainable on case terms or falls under A2's regime. |
+| **What the software does** | `deception.capture` carries `submitted_input boolean` with the CHECK `capture_submission_needs_authority`, which refuses the row unless `submission_authority_ref` is present (`0048_deception_capture.py:135`); `capture_active_needs_egress_profile` refuses a non-passive method with no egress profile. **No credential submission is automated**. There is a column recording that a human did it under authority, and no code that does it. |
+| **Decide** | (1) That fetching attacker-controlled infrastructure is authorised at all, an attributable fetch discloses the investigation to the kit operator. (2) Separately and more seriously: whether **entering any input into a phishing page (including canary or fabricated credentials) is covered.** That may constitute unauthorised access and may be an offence under computer-misuse statutes in several jurisdictions. (3) Whether a captured page rendering a **targeted person's own data** is retainable on case terms or falls under A2's regime. |
 | **Determination** | |
 
 ---
 
-## Section B — operator determinations. A default nobody chose becomes policy
+## Section B: operator determinations. A default nobody chose becomes policy
 
 | # | Question | Ships as | The trade-off | Determination |
 |---|---|---|---|---|
-| **B1** | Dual control on entity merge *(D1)* | **OFF** | A merge here is a reversible ledger, and docs/05 scopes dual control to the genuinely irreversible. On, it slows every merge; off, one analyst can conflate two actors unilaterally — reversibly, but the derived analysis in the meantime is wrong. | |
-| **B2** | Withheld-material disclosure *(D2)* | **PRESENCE** — the existence of withheld material is disclosed, not its content | The alternative hides even the existence. Disclosure regimes differ on whether concealing the *fact* of withheld material is permissible. | |
-| **B3** | Retention periods *(D3)* | STEALER_LOG 90d · CREDENTIAL_DUMP 180d · DATABASE_LEAK 365d · CHAT_EXPORT 730d · PASTE 365d · TELEMETRY 180d — **all six flagged unconfirmed in the UI** | Numbers somebody typed, not numbers anyone chose. They govern data about uninvolved people. Confirming a rule in the Lifecycle pane is what turns a placeholder into a policy with a name against it. | |
+| **B1** | Dual control on entity merge *(D1)* | **OFF** | A merge here is a reversible ledger, and docs/05 scopes dual control to the genuinely irreversible. On, it slows every merge; off, one analyst can conflate two actors unilaterally, reversibly, but the derived analysis in the meantime is wrong. | |
+| **B2** | Withheld-material disclosure *(D2)* | **PRESENCE**, the existence of withheld material is disclosed, not its content | The alternative hides even the existence. Disclosure regimes differ on whether concealing the *fact* of withheld material is permissible. | |
+| **B3** | Retention periods *(D3)* | STEALER_LOG 90d · CREDENTIAL_DUMP 180d · DATABASE_LEAK 365d · CHAT_EXPORT 730d · PASTE 365d · TELEMETRY 180d, **all six flagged unconfirmed in the UI** | Numbers somebody typed, not numbers anyone chose. They govern data about uninvolved people. Confirming a rule in the Lifecycle pane is what turns a placeholder into a policy with a name against it. | |
 | **B4** | Purge destroys or preserves *(D4)* | **Destroys**, leaving an append-only tombstone | Object lock is COMPLIANCE-mode on evidence, so it can refuse a delete even to satisfy a deletion order (C2 / decision 50). The purge reports what storage refused rather than claiming success. | |
 | **B5** | Detonation exposure *(D5)* | **Nothing detonates.** The authorisation record exists; nothing submits | docs/11: integrate a sandbox, do not build one. Submitting a sample to a third-party sandbox may disclose it. | |
 | **B6** | Ingest key holders *(D6)* | Keys are write-only by construction (invariant 11, CHECK-enforced), max TTL 365d, default 90d | A leaked key means junk data, never the case file. The question is who may hold one and under what agreement. | |
-| **B7** | Who may reveal a victim credential *(D7 / docs/17 F16)* | **Nobody.** `victim_pii.reveal` is granted to no role, so the endpoint 403s for everyone | Deliberate. **When you grant it, do not give it to `SECURITY_OFFICER`:** that role grants the *authorisation*, and `grant_pii_authorisation` refuses `granted_to == granted_by`, so one role holding both collapses two humans into one. The shape that works is a case role (`ANALYST` or `CASE_OWNER`) holding `reveal` while `SECURITY_OFFICER` keeps `authorise` — then a reveal is always two people by construction. | |
+| **B7** | Who may reveal a victim credential *(D7 / docs/17 F16)* | **Nobody.** `victim_pii.reveal` is granted to no role, so the endpoint 403s for everyone | Deliberate. **When you grant it, do not give it to `SECURITY_OFFICER`:** that role grants the *authorisation*, and `grant_pii_authorisation` refuses `granted_to == granted_by`, so one role holding both collapses two humans into one. The shape that works is a case role (`ANALYST` or `CASE_OWNER`) holding `reveal` while `SECURITY_OFFICER` keeps `authorise`, then a reveal is always two people by construction. | |
 | **B8** | Break-glass reviewer *(D7)* | `SECURITY_OFFICER` only; invoke granted to `SYS_ADMIN` and `CASE_OWNER` | docs/05 wants emergency access "available, loud and short". Too narrow and people route around the system during an incident; too broad and the review queue becomes noise. | |
-| **B9** | Dead-letter retention | **90 days**, the shortest rule rather than the 365-day default | A dead letter's category is unknown *by construction* — the parse failed, so nothing assessed the content. Short is the safe default for unassessed third-party data. Confirm it is short enough. | |
+| **B9** | Dead-letter retention | **90 days**, the shortest rule rather than the 365-day default | A dead letter's category is unknown *by construction*, the parse failed, so nothing assessed the content. Short is the safe default for unassessed third-party data. Confirm it is short enough. | |
 | **B10** | Telegram channel/user id collision *(D8)* | Both index on the numeric id and can collide | A model change, recorded and not yet made. Until then a channel id and a user id could in principle resolve to the same durable selector. | |
 
 ---
 
-## Section C — factual claims to verify with an authoritative source
+## Section C: factual claims to verify with an authoritative source
 
 These are things the build **relies on** that came from documentation,
 convention or reasoning rather than from an authority. Each one is a place
@@ -126,19 +126,19 @@ where being wrong is quiet.
 | **C11** | A gpg-verified signature is evidentially meaningful, and the verifier version is recorded | The only cryptographic-evidence path in the system. |
 | **C12** | The GLOBAL service stoplist holds identifiers of real people who are not subjects | It exists to stop attributing a forum's escrow to a vendor; it is itself a small set of personal data. |
 | **C13** | Co-participation manufactures ties, including for uninvolved third parties in a room | An inferred edge about someone who was merely present. |
-| **C14** | **Third-party YARA rule licensing** (added 2026-07-25) | A parallel workstream began pulling a public YARA corpus. Several sources (`signature-base`, `elastic-protections`) carry non-permissive terms and are flagged for review. A prosecution-grade tool must not silently inherit the licence of every third-party rule. **See Section D3 — that workstream also pulled live malware onto a workstation.** |
+| **C14** | **Third-party YARA rule licensing** (added 2026-07-25) | A parallel workstream began pulling a public YARA corpus. Several sources (`signature-base`, `elastic-protections`) carry non-permissive terms and are flagged for review. A prosecution-grade tool must not silently inherit the licence of every third-party rule. **See Section D3, that workstream also pulled live malware onto a workstation.** |
 
 ---
 
-## Section D — retrospective. Things already recorded that may need remediation
+## Section D: retrospective. Things already recorded that may need remediation
 
-**This section is different from the others.** A–C are decisions about what
+**This section is different from the others.** A. C are decisions about what
 to do. D is about what has already happened.
 
 ### D1. The dead-letter queue held victim credentials unlabelled
 
-**What happened.** `ingest.dead_letter` — the table that records fragments
-that failed to parse — stored the raw fragment **verbatim**, in a table
+**What happened.** `ingest.dead_letter` (the table that records fragments
+that failed to parse) stored the raw fragment **verbatim**, in a table
 with no classification, no compartments and no retention clock. The route
 in was routine rather than adversarial: any record with a top-level
 `email` + `password` classifies as `CREDENTIAL_DUMP`, only `STEALER_LOG`
@@ -147,8 +147,8 @@ dead-letters their entire feed.
 
 **Fixed 2026-07-25.** Migration 0040 labels the table, backfills the
 labels from the issuing key and puts every row on a clock. Fragments are
-now structurally redacted before storage — keys, types and lengths, never
-values — and a database constraint refuses any new unredacted row.
+now structurally redacted before storage (keys, types and lengths, never
+values) and a database constraint refuses any new unredacted row.
 
 **Checked 2026-07-26 on the development database: nothing to repair
 here.** All three dead-letter rows present are `redacted = true`, labelled
@@ -173,7 +173,7 @@ concluding anything.
    the affected rows are development data; on any deployment that has
    processed real feeds, this is a question for counsel and not for the
    engineer who found it. **Still open, and the check above does not touch
-   it** — "we found nothing left on this machine" is not an answer to
+   it**, "we found nothing left on this machine" is not an answer to
    "was anything disclosed".
 3. Confirm B9 (the 90-day dead-letter clock).
 
@@ -185,7 +185,7 @@ concluding anything.
 **What happened.** docs/12 requires the raw payload to be persisted
 *before* parsing, so a wrong parser is recoverable without asking a partner
 to resend. `IngestService.accept()` wrote the bytes only when constructed
-with a storage adapter, and every construction passed none — so it returned
+with a storage adapter, and every construction passed none, so it returned
 202, wrote a batch row whose `raw_key` pointed at nothing, and dropped the
 payload. Silently.
 
@@ -242,9 +242,9 @@ choices, not gaps:
 
 | Not built | Why |
 |---|---|
-| Automated prohibited-content screening | A1(5) — needs an authorised hash set |
-| Sandbox detonation | B5 — integrate, do not build; nothing submits |
-| Victim notification | A2(2) — an obligation to determine, not a feature to add |
+| Automated prohibited-content screening | A1(5), needs an authorised hash set |
+| Sandbox detonation | B5, integrate, do not build; nothing submits |
+| Victim notification | A2(2), an obligation to determine, not a feature to add |
 | Free-text search across victim PII | Refused by design. There is no index to run it against; the authorisation path is narrow and logged |
 | Archive expansion in the sample pipeline | Uncapped is a zip bomb; capped is real work and is not done |
 | Deep links with tokens in email | A bearer credential in the least trustworthy channel available |

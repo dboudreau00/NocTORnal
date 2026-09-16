@@ -1,4 +1,4 @@
-# NocTORnal — Alpha Release
+# NocTORnal: Alpha Release
 
 A HUMINT and social-network-analysis platform for cybercrime investigation.
 Analysts build a graph of criminal actors, personas, groups and the trust
@@ -7,7 +7,7 @@ custody.
 
 ---
 
-# ⚠ LEGAL STATUS — READ BEFORE INSTALLING
+# ⚠ LEGAL STATUS: READ BEFORE INSTALLING
 
 ## This is an ALPHA. It has not been audited, and it must not be operated against real material until four external decisions are taken.
 
@@ -22,20 +22,20 @@ a software defect, and none of them can be closed by writing more code.
 
 | | What must be decided | Why the software cannot decide it |
 |---|---|---|
-| **L1** | **A prohibited-content policy for the malware store, and a named designated person.** | A store of attacker-supplied binaries *will* eventually receive material whose possession alone is an offence. The handling rules differ between jurisdictions. The build refuses sample ingest until you declare a policy reference and a person — but **that is a declaration it records, not one it can verify.** A false declaration produces a working system and an unlawful deployment. |
+| **L1** | **A prohibited-content policy for the malware store, and a named designated person.** | A store of attacker-supplied binaries *will* eventually receive material whose possession alone is an offence. The handling rules differ between jurisdictions. The build refuses sample ingest until you declare a policy reference and a person, but **that is a declaration it records, not one it can verify.** A false declaration produces a working system and an unlawful deployment. |
 | **L2** | **A lawful basis, a victim-notification position and a real retention period for stealer-log data.** | This holds personal data about thousands of people who are not under investigation. The shipped 90-day retention is a **placeholder somebody has to confirm or replace.** |
 | **L3** | **Authority to operate a covert persona against each target.** | The software will drive an account into a forum. Whether you may do that, against whom, and under what authority, is not a software question. |
 | **L4** | **Interception law and consent for message capture.** | The system records *which kind* of provenance a message has (`provenance_class`). The authority to capture it in the first place is external. |
 
 **A 100% complete build is still one that must not be switched on until
-L1–L4 are settled.** Phase 8 (sample handling) is the clearest case: it has
+L1-L5 are settled.** Phase 8 (sample handling) is the clearest case: it has
 a reviewed model, a gated API and a working analyst interface, and it must
 not be operated.
 
 Sample ingest is **refused by default** and returns HTTP 451 (*Unavailable
 for legal reasons*) rather than a 400, so that the refusal reads as what it
 is. Turning that off is a deliberate act by an operator, and the reference
-they supply is written into the audit trail — so "nobody knew" is not
+they supply is written into the audit trail, so "nobody knew" is not
 available afterwards.
 
 ### Everything else that needs an answer
@@ -46,13 +46,13 @@ consequence of each, the current default, and a row to write the answer in.
 **It is the file to hand a reviewer.** It holds:
 
 - the **4 blocking items** above,
-- **10 operator determinations** — defaults nobody has chosen, which become
+- **10 operator determinations**, defaults nobody has chosen, which become
   policy if they are never surfaced,
 - **14 factual claims to confirm with an authoritative source**, including
   evidence-authenticity standards that were reasoned from rule text rather
   than from a practitioner, and object-lock semantics on your actual
   storage,
-- **3 retrospective items** — things already recorded that may need
+- **3 retrospective items**, things already recorded that may need
   remediation.
 
 ### What "alpha" means here, specifically
@@ -90,17 +90,17 @@ and never committed.
   excluded from metrics unless a projection opts in.
 - **History is superseded, never overwritten**, and the audit log is
   append-only.
-- **Classification gates every outbound path** — email, webhook, export,
-  report — through one function.
+- **Classification gates every outbound path** (email, webhook, export,
+  report) through one function.
 
 Comparable to Maltego, i2 Analyst's Notebook and SL Crimewall, with
 UCINET-grade network mathematics.
 
 ## Getting it running
 
-**[INSTALL.md](INSTALL.md)** — one command on Windows, macOS or Linux.
+**[INSTALL.md](INSTALL.md)**: one command on Windows, macOS or Linux.
 
-**[MANUAL.md](MANUAL.md)** — the analyst manual: what each pane is for,
+**[MANUAL.md](MANUAL.md)**, the analyst manual: what each pane is for,
 what the numbers mean, and the traps.
 
 ## Status at this release
@@ -109,7 +109,7 @@ what the numbers mean, and the traps.
 |---|---|
 | Completion | 92.8% on a four-dimension measure (model and tests 45%, HTTP API 15%, analyst UI 25%, adversarial review 15%), the unweighted mean of the ten per-phase figures in `ROADMAP-REMAINING.md` |
 | Tests | 1809 tests (`def test_` functions across the two pytest roots, `apps/api/tests` and `packages/ontology/tests`), generated by `scripts/refresh_counters.py` and held to the tree exactly by `test_doc_invariants`. Tests parametrise, so the COLLECTED total is larger and is recorded per release in `CHANGELOG.md` |
-| Database | PostgreSQL 16 + pgvector, Alembic head 0061 (61 revisions, `0001`–`0061`) |
+| Database | PostgreSQL 16 + pgvector, Alembic head 0061 (61 revisions, `0001`-`0061`) |
 | Reviewed | Every phase has had at least one hostile pass; Phase 6's is partial |
 | Audited | **No** |
-| Lawful to operate | **Not until L1–L4 are settled** |
+| Lawful to operate | **Not until L1-L5 are settled** |

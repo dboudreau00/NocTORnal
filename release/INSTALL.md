@@ -22,7 +22,7 @@ chmod +x release/install.sh && ./release/install.sh
 
 Neither prefix is decoration (R6). The default Windows client
 ExecutionPolicy is `Restricted`, and a file extracted from a downloaded
-zip additionally carries Mark-of-the-Web — bare `.\install.ps1` is
+zip additionally carries Mark-of-the-Web, bare `.\install.ps1` is
 blocked either way. A `.sh` out of a zip has no execute bit, so `./` fails
 with "permission denied" before bash ever sees it.
 
@@ -64,7 +64,7 @@ Nothing hidden, in this order:
    either is missing or too old.
 2. **Creates a virtual environment** at `.venv` and installs the API and
    the ontology package into it.
-3. **Generates secrets** into `.env.local` — a TOTP key-encryption key and
+3. **Generates secrets** into `.env.local`, a TOTP key-encryption key and
    an ingest pepper, both random, both 32 bytes. *It never writes a default
    secret.* If the file already exists it is left alone.
 4. **Starts the containers** and waits for Postgres to report healthy.
@@ -74,7 +74,7 @@ Nothing hidden, in this order:
 
    > **Windows note (R8).** `install.ps1` hands off to `launch.ps1`, which
    > prints a banner telling you to run `create-user` in a second terminal
-   > — and then starts uvicorn, whose log scrolls that banner off the
+   >, and then starts uvicorn, whose log scrolls that banner off the
    > screen within seconds. If you reach the sign-in page with no
    > credentials, that is why. Run:
    >
@@ -102,7 +102,7 @@ you scan into an authenticator app.
 ### If TOTP will not accept your code
 
 TOTP is a function of **absolute time**, so it fails on a machine whose
-clock is wrong — and it fails in a way that looks like a bad secret. Check
+clock is wrong, and it fails in a way that looks like a bad secret. Check
 the clock before debugging anything else.
 
 For a machine whose clock cannot be fixed, there is an explicit bypass:
@@ -113,7 +113,7 @@ For a machine whose clock cannot be fixed, there is an explicit bypass:
 ```
 
 It prints a URL carrying a session token. **It is recorded in the audit
-trail as an MFA-bypassed login**, deliberately — it exists to get you
+trail as an MFA-bypassed login**, deliberately. It exists to get you
 working on a broken host, not as the normal way in.
 
 ---
@@ -130,7 +130,7 @@ docker compose -f infra/docker-compose.yml down
 ```
 
 Data lives in Docker volumes and survives `down`. To destroy it
-completely, add `-v` — which deletes every case, exhibit and audit row,
+completely, add `-v`, which deletes every case, exhibit and audit row,
 irreversibly.
 
 ---
@@ -162,23 +162,23 @@ The ones worth knowing:
 
 ## Troubleshooting
 
-**"port 8000 is already in use"** — an earlier copy of the API is still
+**"port 8000 is already in use"**, an earlier copy of the API is still
 running. Stop it, or pass `-Port 8001` / `--port 8001`.
 
-**"No 'script_location' key found in configuration"** — you ran `alembic`
+**"No 'script_location' key found in configuration"**, you ran `alembic`
 from `db/`. It must run from the repository root, where `alembic.ini`
 lives. This reads as a broken install and is not one.
 
-**A new route returns 404 after you changed the code** — the API runs
+**A new route returns 404 after you changed the code**, the API runs
 without `--reload`. Static files (the UI) are served from disk and update
 immediately; Python does not. Restart it.
 
-**The graph does not update when a colleague writes** — check the dot in
+**The graph does not update when a colleague writes**. Check the dot in
 the header. Grey means the live channel is not connected, and the console
 falls back to manual refresh. That is a convenience feature, not a
 correctness one; nothing is lost.
 
-**PGP tests fail rather than skip** — that is deliberate. The only
+**PGP tests fail rather than skip**. That is deliberate. The only
 cryptographic-evidence path in the system should break the build if it
 goes untested. Put `gpg` on `PATH`.
 
@@ -205,12 +205,12 @@ very different (R7):**
 | | |
 |---|---|
 | the containers are **up** | `docker compose -f infra/docker-compose.yml ps` |
-| `DATABASE_URL` is **exported in this shell** | the installers persist it to `.env.local`, but pytest does not read that file — hence the explicit assignment above |
+| `DATABASE_URL` is **exported in this shell** | the installers persist it to `.env.local`, but pytest does not read that file, hence the explicit assignment above |
 | both directories are given | the suite spans two pytest roots; running one gives a number that matches nothing in the documentation |
 
 **Without `DATABASE_URL` you will see roughly 700 skips**, because 37 test
 files are `skipif`-gated on it. That is a correct result and not a broken
-install — the core of the suite is deliberately database-free so it can
+install, the core of the suite is deliberately database-free so it can
 run anywhere.
 
 The 12 remaining skips are optional-dependency paths. If `gpg` is not on
@@ -222,6 +222,6 @@ the full suite green.
 
 > Running the suite **with** `DATABASE_URL` set writes permanent rows into
 > the append-only tables (`audit.event`, custody ledgers) of the database
-> you point it at. That is by design — those tables refuse deletion — but
+> you point it at. That is by design (those tables refuse deletion) but
 > it is startling on a fresh install, and it is a reason not to point the
 > test suite at anything you care about.

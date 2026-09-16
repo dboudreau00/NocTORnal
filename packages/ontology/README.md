@@ -16,7 +16,7 @@ generated/seed_ontology.sql             SQL seed (ontology tables only)
 - **Change the definition → regenerate → ship a new data migration.**
   `python -m noctornal_ontology.generate` rewrites `generated/`;
   `--check` exits 1 on drift (use in CI). Alembic revision 0017 seeded
-  the initial vocabulary; later vocabulary changes are NEW revisions —
+  the initial vocabulary; later vocabulary changes are NEW revisions,
   never edits to 0017.
 - **Normalisers are total, best-effort `str -> str`.** They never raise;
   weird input comes back best-effort. Validation is a separate concern
@@ -24,7 +24,7 @@ generated/seed_ontology.sql             SQL seed (ontology tables only)
   tested invariant.
 - **Strength is conservative** (invariant: a false merge silently invents
   relationships between two real people). Rotatable or recycled
-  identifiers — Telegram @usernames, the 76-hex Tox ID, handles — are
+  identifiers (Telegram @usernames, the 76-hex Tox ID, handles) are
   never `is_strong`.
 
 ## Known normaliser limits (deliberate, revisit when the app layer lands)
@@ -47,5 +47,5 @@ Unit tests always run. `test_db_parity.py` is integration-gated on
 `DATABASE_URL` and asserts the definition equals the live seed
 row-for-row. The rotated-nospam test
 (`TestToxPubkey::test_rotated_nospam_same_norm_value`) is the invariant-9
-regression test — the 76-hex Tox ID truncates to its 64-hex public key so
+regression test, the 76-hex Tox ID truncates to its 64-hex public key so
 a rotated nospam still collides with the same actor.

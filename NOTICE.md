@@ -4,7 +4,7 @@ NocTORnal is licensed under the **GNU Affero General Public License,
 version 3 or later** (AGPL-3.0-or-later). The full text is in
 [`LICENSE`](LICENSE).
 
-    NocTORnal — HUMINT / social network analysis for cybercrime investigation
+    NocTORnal, HUMINT / social network analysis for cybercrime investigation
     Copyright (C) 2026 elemosecurity
 
     This program is free software: you can redistribute it and/or modify it
@@ -28,7 +28,7 @@ version 3 or later** (AGPL-3.0-or-later). The full text is in
 
 | Dependency | Licence | Why it is here |
 |---|---|---|
-| [`python-igraph`](https://python.igraph.org/) | **GPL-2.0-or-later** | Betweenness, brokerage, k-core, components. `docs/02`: "igraph, not NetworkX" — NetworkX is pure Python and falls over around 50k edges when you ask for betweenness. |
+| [`python-igraph`](https://python.igraph.org/) | **GPL-2.0-or-later** | Betweenness, brokerage, k-core, components. `docs/02`: "igraph, not NetworkX". NetworkX is pure Python and falls over around 50k edges when you ask for betweenness. |
 | [`leidenalg`](https://github.com/vtraag/leidenalg) | **GPL-3.0-or-later** | Leiden community detection. `docs/03`: not Louvain, which can produce internally disconnected communities. |
 
 Both are imported directly by `apps/api/src/noctornal_api/analytics.py`.

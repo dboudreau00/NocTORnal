@@ -1,150 +1,49 @@
-# 14 — Enhancement map
+# 14. Enhancement map
 
-Written 2026-07-25, after Phase 2 shipped and after a first real session of
-hand-building a case (OP-NIGHTJAR-26 and OP-Test-3). Ordered by payoff
-against cost, and grounded in what actually happened when the tool was used
-rather than in what the roadmap assumed.
+Written 2026-07-25, after the first real session of hand-building a case,
+and ordered then by payoff against cost. It is kept because the code cites
+these item numbers as the provenance of a decision: `docs/14 U2` is why an
+under-cleared analyst is told that something was withheld, and eight call
+sites say so.
 
-## What the first real session revealed
+Status is what the tree does now, not what the item asked for.
 
-**A bug the roadmap could not have predicted.** `OP-Test-3` was created
-AMBER_STRICT and stayed empty. The entity forms defaulted an element's
-classification to a hardcoded AMBER, which is *below* an AMBER_STRICT case's
-floor, so the database refused every entity and the UI showed an opaque 400.
-Fixed: the forms now default to the case's own classification and offer only
-legal values. The general lesson is that **any UI default that can violate a
-database constraint will**, and the constraint is right — the default was
-wrong.
+## What the first session revealed
 
-**Zero evidence, in a system whose thesis is chain of custody.** Seven
-entities, seven relationships, fourteen assertions, three selectors — and no
-exhibits. The evidence path works (it is tested end to end), but nothing in
-the interface *asks* for an exhibit, so nothing got attached. See E1 below;
-this is the single biggest gap between the product as built and the product
-as pitched.
+Two findings that no roadmap would have predicted, and both changed the code.
 
-**The grading axes were used properly.** Ten distinct
-basis/reliability/credibility/confidence combinations across fourteen
-assertions, including two `ANALYST_INFERENCE` claims with rationales. The
-Admiralty model is not being defaulted away, which is the main risk with a
-two-axis grading scheme.
+**A UI default that could violate a database constraint did.** A case created
+`AMBER_STRICT` stayed empty: the entity forms defaulted an element's
+classification to a hardcoded `AMBER`, which is below that case's floor, so
+the database refused every entity and the interface showed an opaque 400. The
+forms now default to the case's own classification and offer only legal
+values. The general rule is that any UI default that can violate a constraint
+will, and the constraint is right, so the default was wrong.
 
-**The Communication projection is empty.** Not a bug — a finding. No
-communication ties have been recorded, so the preset correctly shows nothing.
-That is exactly what projections are for, and it argues for C1.
+**Seven entities, fourteen assertions and no exhibits**, in a system whose
+thesis is chain of custody. The evidence path worked and was tested end to
+end; nothing in the interface ASKED for an exhibit, so nothing got attached.
+That is item E1, and it is why attaching evidence is now part of the forms
+rather than a separate errand.
 
-**A broker signature is already visible.** `spectre_lynx` has degree 3 and
-local clustering 0.0 — its neighbours do not know each other. High degree
-with low clustering is the structural signature Burt's constraint measures
-properly, and it is the thing docs/13 says the market does badly. Phase 3
-should lead with it.
+## The items
 
----
-
-## E — Evidence and provenance (highest payoff)
-
-**E1. Make evidence the path of least resistance, not a separate tab.**
-Today an analyst creates an entity, then must navigate elsewhere to upload an
-exhibit and elsewhere again to link it. Instead: an "attach exhibit" affordance
-inside the entity and relationship forms, and an assertion that can carry a
-file at the moment the claim is made. The assertion model already has
-`evidence_id`; nothing in the UI uses it. *Cost: small. Payoff: the
-difference between a graph of opinions and a graph of evidence.*
-
-**E2. Show provenance strength on the graph, not only in the inspector.**
-Confidence is already encoded as node opacity, but an analyst cannot see
-which edges are *unevidenced*. Ring or hatch elements whose assertions have
-no `evidence_id`. A case is defensible in proportion to how much of it is
-evidenced, and that should be visible at a glance.
-
-**E3. Retraction, in the interface.** `retract_assertion` exists in the
-service and is exposed nowhere. Retracting a source and watching the network
-dissolve is the demo that sells the assertion model, and it is currently
-impossible to do from the UI.
-
-**E4. Recovery codes.** docs/05 specifies ten single-use Argon2id-hashed
-codes and they were never built. The TOTP lockout during this session had no
-proper escape hatch — `bootstrap session` is a development workaround, not
-an answer. *Cost: small. This is a correctness gap against the spec.*
-
-## C — Collection and coverage
-
-**C1. Coverage indicators, so absence of data reads as absence of data.**
-docs/06 asks for density markers on the scrubber for exactly this reason. An
-empty Communication projection must be visibly "not collected", never
-mistakenly "no communication". Extend to the entity level: an actor on a
-platform with no viable collection route should read UNMONITORED.
-
-**C2. Manual capture before adapters.** Decision 18 put Telegram *capture*
-in scope and deferred monitoring. A paste-a-conversation-export path that
-lands a document, extracts selectors with offsets, and proposes graph
-changes would exercise the whole proposal pipeline without any of the
-persona-management risk.
-
-## A — Analytics (Phase 3, and the differentiators)
-
-**A1. Burt's constraint and effective size.** docs/03 calls it arguably the
-most useful metric here, and docs/13 notes almost no competing tool surfaces
-it. The clustering signal above is a hint of it; the real measure is the
-product's sharpest claim.
-
-**A2. Betweenness with the low-degree/high-betweenness callout.** The UI
-should teach the pattern, not just print a number.
-
-**A3. Signed structural balance.** Unbalanced triads are leads, and the data
-model already carries signs. `spectre_lynx` being both vouched for and
-accused is precisely the shape to surface.
-
-**A4. Key player (KPP-Neg) with a fragmentation preview.** "Which n actors,
-removed, break this network" is a different answer from "the top n central
-actors", and that surprise is the value.
-
-Note the honest constraint: these need igraph in an analytics worker. The
-local metrics shipped in Phase 2 (degree, weighted, signed, clustering,
-k-core) are exact and synchronous because the graphs are small; betweenness
-and community detection are not, and pretending otherwise would produce slow
-requests and wrong numbers.
-
-## U — Interface debt
-
-**U1. sigma.js and ForceAtlas2 in a worker — superseded (recorded 2026-09-09).**
-The 2026-07 sketch of docs/02 specified sigma.js; it is not in the tree and never was,
-and docs/02 no longer specifies it. What was built instead (decision 37): a
-hand-written ForceAtlas2 with Barnes-Hut repulsion in a Web Worker
-(`layout-worker.js`), measured at 400 nodes / 1,187 edges in about a second
-off-thread, with the main-thread spring loop kept for interactive drag. The
-sentence this entry used to carry — "adequate at tens of nodes and will not
-hold at thousands" — described the pre-worker canvas and stopped being true
-when the worker landed. What is still open is the ceiling: Canvas 2D will
-not reach the 50–100k nodes a GPU-backed renderer does, and adopting one
-means adopting a bundler under the strict CSP. That is the real decision,
-and it is recorded here rather than left implicit.
-
-**U2. Why is this hidden?** An under-cleared analyst sees a smaller graph
-with no indication that anything was withheld. A non-disclosing count
-("3 elements not shown at your clearance") preserves need-to-know while
-removing the impression that the case is smaller than it is. Needs care: the
-count itself is a weak signal, so it may need to be a per-case setting.
-
-**U3. Temporal replay needs temporal data.** The scrubber works, but nothing
-sets `valid_from`/`valid_to`, so there is nothing to replay. The entity and
-relationship forms should ask for the interval — "was in LockBit until
-March" is the normal case, not the exception.
-
-**U4. Bulk entry.** Hand-typing seven entities was tolerable; seventy will
-not be. A paste-a-list path, and duplicate detection against existing
-labels and selectors before creating anything.
-
-## O — Operational
-
-**O1. CI.** Phase 0 lists lint, typecheck, test and a migration round-trip;
-all four are run by hand today.
-
-**O2. The deferred security items**, unchanged and still deliberate: rate
-limiting, session IP/UA binding, the destination-aware TLP egress gate, the
-API running as a non-owner database role, and a compartment registry. All
-recorded in `apps/api/README.md` and `docs/00-decisions.md`.
-
-**O3. The host clock.** This machine's clock is unsynchronised, which is why
-TOTP cannot work against a phone here. Worth fixing at the environment level
-rather than routing around forever.
+| | Asked for | Status |
+|---|---|---|
+| **E1** | Evidence as the path of least resistance, not a separate tab: attach an exhibit from inside the entity and relationship forms | **Built.** The assertion carries `evidence_id` at the moment the claim is made, and the exhibit pickers refresh as soon as one is lodged |
+| **E2** | Provenance strength on the graph, not only in the inspector: show which edges are unevidenced | **Built.** The provenance scrubber hollows unevidenced entities and fades the ties that rest on no exhibit. An unevidenced tie is drawn fainter and never dashed, because dashed already means inferred |
+| **E3** | Retraction in the interface. Retracting a source and watching the network dissolve is the demo that sells the assertion model | **Built.** Retract from the selected element, with the tie cascade reported |
+| **E4** | Recovery codes: ten single-use Argon2id-hashed codes, per docs/05 | **Built,** and accepted in the sign-in field, which is what makes them a real escape hatch rather than a stored secret nobody can spend |
+| **C1** | Coverage indicators, so an absence of data reads as an absence of data rather than as an absence of activity | **Built** for comms (SimpleX returns no durable value and says why) and for samples (the triage gaps render before any finding). Not general |
+| **C2** | Manual capture before adapters: paste a conversation, get selectors, get proposals | **Built** (`extraction.py`), and it is still the first producer of proposals |
+| **A1** | Burt's constraint and effective size | **Built** |
+| **A2** | Betweenness with the low-degree, high-betweenness callout | **Built** |
+| **A3** | Signed structural balance: unbalanced triads are leads | **Built** |
+| **A4** | Key player (KPP-Neg) with a fragmentation preview | **Built** |
+| **U1** | sigma.js with ForceAtlas2 in a worker | **Superseded** (decision 37). sigma.js is not in the tree and never was. What was built is a hand-written ForceAtlas2 with Barnes-Hut repulsion in a Web Worker, measured at 400 nodes and 1,187 edges in about a second off-thread, with the main-thread spring loop kept for interactive drag. **What is still open is the ceiling:** Canvas 2D will not reach the 50-100k nodes a GPU-backed renderer does, and adopting one means adopting a bundler under the strict CSP. That is the real decision |
+| **U2** | "Why is this hidden?" An under-cleared analyst sees a smaller graph with no indication that anything was withheld | **Built,** as a per-case setting (`withheld_disclosure`, migration 0030), because the count is itself a weak signal: `NONE`, `PRESENCE` or `COUNT` |
+| **U3** | Temporal replay needs temporal data. The scrubber works and nothing sets `valid_from`/`valid_to` | **Open.** Still nothing in the forms asks for the interval, so trust decay and the scrubber have little to work with. "Was in LockBit until March" is the normal case, not the exception |
+| **U4** | Bulk entry, with duplicate detection against existing labels and selectors before creating anything | **Open.** Hand-typing seven entities was tolerable; seventy will not be |
+| **O1** | CI: lint, typecheck, test and a migration round trip, all four run by hand at the time | **Built,** minus the typecheck, which is a deliberate absence (decision 42) |
+| **O2** | The deferred security items | Tracked in `docs/17-flagged-for-review.md` and `ROADMAP-REMAINING.md`, which are where they belong |
+| **O3** | The host clock, unsynchronised, which is why TOTP cannot work against a phone on the build machine | Still true of that machine. `bootstrap.py session` is the documented way round it, and it is audited as MFA-bypassed |

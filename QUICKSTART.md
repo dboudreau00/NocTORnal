@@ -1,4 +1,4 @@
-# Quickstart — run NocTORnal locally
+# Quickstart: run NocTORnal locally
 
 Everything below is a **local development instance**. It is not hardened for
 real case material: see "Before anything real" at the bottom.
@@ -18,22 +18,22 @@ Bypass` is needed because this machine's policy is `Restricted`; a bare
 The launcher is safe to re-run. It:
 
 1. starts Docker Desktop if it is not already running, and waits for it;
-2. brings up Postgres, Redis, MinIO and Mailpit — the whole stack; the
+2. brings up Postgres, Redis, MinIO and Mailpit, the whole stack; the
    API process runs everything else itself (`docs/02`);
-3. creates `.env.local` with a fresh `NOCTORNAL_TOTP_KEK` on first run —
+3. creates `.env.local` with a fresh `NOCTORNAL_TOTP_KEK` on first run,
    **keep that file.** It seals every TOTP secret; lose it and all users
    must re-enrol;
 4. applies migrations (`alembic upgrade head`);
 5. serves the API and UI at <http://127.0.0.1:8000/ui/>.
 
 Stop it with Ctrl-C. Add `-SkipDocker` if the stack is already up, or
-`-Port 8010` to move the API. (Not 8080 — it is among the most contended
+`-Port 8010` to move the API. (Not 8080. It is among the most contended
 ports on a workstation; it was also OpenFGA's published port until that service was removed from the compose file on 2026-07-26.)
 
 ## 2. Create your account (first run only)
 
 **The easy way:** open <http://127.0.0.1:8000/ui/>. While no account
-exists, the sign-in screen offers **First-run setup** instead — enter an
+exists, the sign-in screen offers **First-run setup** instead, enter an
 email and a display name, and it creates the administrator (SYS_ADMIN +
 SECURITY_OFFICER + CASE_OWNER + ANALYST, clearance RED) and shows the
 password and TOTP secret **once**. Put the secret in any authenticator app
@@ -44,7 +44,7 @@ account is created from **Admin** in the rail, or with `bootstrap.py`.
 Once you are in, the **Admin** tab (rail, bottom group) creates further
 analysts, grants and revokes global roles, sets clearance, unlocks
 accounts after failed logins, and re-issues a TOTP secret for an analyst
-whose phone is gone. It needs `user.manage` — SYS_ADMIN holds it, and it
+whose phone is gone. It needs `user.manage`. SYS_ADMIN holds it, and it
 is step-up, so a stale session is re-challenged.
 
 **The shell way** (works even with accounts present), in a second
@@ -60,7 +60,7 @@ right now so you can confirm your authenticator agrees before you reach the
 login screen. Scan it with any TOTP app (Aegis, 1Password, Google
 Authenticator).
 
-MFA is mandatory — there is no password-only path, by design.
+MFA is mandatory. There is no password-only path, by design.
 
 ### Just get me in
 
@@ -70,14 +70,14 @@ Once the stack is up, this signs you in and opens the browser:
 powershell -ExecutionPolicy Bypass -File "scripts\open-ui.ps1"
 ```
 
-No arguments needed if there is only one account — it finds it. Otherwise
+No arguments needed if there is only one account, it finds it. Otherwise
 pass `-Email you@example.com`. `-PrintOnly` prints the URL instead of
 launching a browser, and `-Port N` if you moved the API.
 
 It starts nothing: if the API is not running it tells you to run
 `launch.ps1` instead. The token rides in the URL fragment, so it never
 reaches the server or an access log, and the page strips it from the
-address bar on load — but it *is* recorded in the audit trail as an
+address bar on load, but it *is* recorded in the audit trail as an
 MFA-bypassed login, because a session that appeared from nowhere would be
 worse than no session. It is the way in when the host clock makes TOTP
 impossible (see below), not the everyday door.
@@ -99,8 +99,8 @@ For the **Analysis** tab, seed the other demo case as well:
 ```
 
 `OP-LATTICEWORK-26` is fifteen personas in three crews joined by a handful
-of brokers. `OP-NIGHTJAR-26` is deliberately a star — every edge touches one
-actor — which makes it a fine first case but useless for structural
+of brokers. `OP-NIGHTJAR-26` is deliberately a star (every edge touches one
+actor), which makes it a fine first case but useless for structural
 analysis: a star has no triangles, so balance and communities have nothing
 to find and betweenness is trivially maximal at the centre. The latticework
 case has a sole bridge, a redundant pair of bridges, a balanced triad, an
@@ -112,8 +112,8 @@ and whether TOTP is enrolled.
 
 ## If you cannot log in
 
-Login returns one generic "invalid credentials" for every cause — wrong
-password, wrong code, locked account — deliberately, so it cannot be used
+Login returns one generic "invalid credentials" for every cause (wrong
+password, wrong code, locked account) deliberately, so it cannot be used
 as an oracle. That means the screen will not tell you what went wrong, but
 the audit trail will:
 
@@ -124,21 +124,21 @@ docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d
 `reason` is one of `bad_password`, `bad_totp`, `locked`, `no_totp`,
 `not_enrolled`, `unknown_user`, `replay`.
 
-- **`bad_totp` with the right password** — almost always a mistyped secret.
+- **`bad_totp` with the right password**, almost always a mistyped secret.
   Re-show the enrolment as a scannable QR:
   `bootstrap.py reenrol-totp --email you@example.com`. Add `--new-secret`
   to issue a fresh one (the old authenticator entry then stops working).
   The command prints the code that is valid right now: if your app shows
   something different, the entry is wrong.
-- **`locked`** — five failures locks the account for 15 minutes. Clear it
+- **`locked`**: five failures locks the account for 15 minutes. Clear it
   with `bootstrap.py unlock --email you@example.com`.
-- **`bad_totp` on codes you are sure of** — ask the server which is wrong,
+- **`bad_totp` on codes you are sure of**. Ask the server which is wrong,
   the secret or the clock. Enter the six digits your app is showing:
   `bootstrap.py totp-diagnose --email you@example.com --code 123456`. It
   searches two hours either side and tells you whether it found a match
   (clock drift, with the exact offset) or none at all (the app holds a
   different secret, so re-scan).
-- **Locked out and needing in now** — on a local dev box you can have the
+- **Locked out and needing in now**, on a local dev box you can have the
   server print a valid code:
   `bootstrap.py totp-code --email you@example.com`. This needs the database
   and the KEK, so it grants nothing that access did not already grant; it
@@ -146,7 +146,7 @@ docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d
   the authenticator with `reenrol-totp`.
 
 The server's TOTP is checked against the RFC 6238 test vectors, so if a
-code is rejected the disagreement is on the authenticator's side — a
+code is rejected the disagreement is on the authenticator's side, a
 mistyped secret, or the two clocks disagreeing.
 
 ### The host clock
@@ -160,7 +160,7 @@ w32tm /query /status
 ```
 
 `Leap Indicator: 3(not synchronized)` with `Stratum: 0` means this machine
-has never reached a time server — normal on an offline or sandboxed box, and
+has never reached a time server, normal on an offline or sandboxed box, and
 fatal for TOTP against a phone that *is* on real time.
 
 **On such a host, stop fighting TOTP and issue a session directly:**
@@ -172,8 +172,8 @@ fatal for TOTP against a phone that *is* on real time.
 It prints a URL that opens the UI already signed in. The token rides in the
 URL *fragment*, so it is never sent to the server and appears in no access
 log, and the page erases it from the address bar on load. The session is an
-ordinary one — same 12 hour absolute and 30 minute idle expiry, same
-revocation — and it is recorded in the audit trail as an MFA-bypassed login.
+ordinary one (same 12 hour absolute and 30 minute idle expiry, same
+revocation) and it is recorded in the audit trail as an MFA-bypassed login.
 
 The alternatives are to correct the host clock (`w32tm /resync`, having
 enabled automatic time) or to use `totp-code`, which reads the same clock the
@@ -185,18 +185,18 @@ issues.
 
 Open <http://127.0.0.1:8000/ui/> and sign in.
 
-- **Graph** — the sociogram. Node colour is node type, edge colour is sign
+- **Graph**, the sociogram. Node colour is node type, edge colour is sign
   (green vouch / red dispute), and inferred edges are **dashed** because an
   inferred edge must never look asserted. Drag to reposition, click to
   select, arrow keys move the selection.
-- **Entities / Evidence / Search** — tables, WORM upload with the
+- **Entities / Evidence / Search**, tables, WORM upload with the
   server-computed SHA-256, integrity verification, the custody log, and
   full-text search.
-- **Inspector** (right) — the point of the whole product. Select anything
+- **Inspector** (right), the point of the whole product. Select anything
   and it answers *why do we believe this*: each assertion's basis, its
   Admiralty grading (e.g. "B2" = usually reliable / probably true), the
   ICD-203 analytic confidence, the rationale, and the source reference.
-- **Add entity / Add relationship** — both require the assertion fields,
+- **Add entity / Add relationship**, both require the assertion fields,
   because nothing is a fact. Edge types are filtered to those the ontology
   permits between the endpoints you chose, so an illegal edge cannot be
   attempted.
@@ -234,7 +234,7 @@ not hidden:
 
 - **The compose passwords are `dev_only_change_me`** and are in git. Replace
   them, and run the API under a database role that does *not* own the
-  tables — the append-only audit and custody triggers can be disabled by a
+  tables, the append-only audit and custody triggers can be disabled by a
   table owner.
 - **No TLS.** The console runs on the API's cookie session: `POST
   /auth/login` answers 204 and sets `__Host-session` (HttpOnly) and a
@@ -245,13 +245,13 @@ not hidden:
   refuses the pair, and since 2026-09-10 there is no body token to fall
   back on, so a sign-in there leaves the tab holding nothing: use
   `bootstrap.py session` (above), whose `#token=` link the tab keeps for
-  its own life, or put the console behind TLS — which is what you should
+  its own life, or put the console behind TLS, which is what you should
   do with anything real anyway.
 - **A sign-in returns no token at all** (2026-09-10). It used to, for
   the two paths that could not read the cookie, and both now can: the
   live websocket authenticates from `__Host-session` on the upgrade, and
-  the Lab download — cross-origin by design, so no `__Host-` cookie
-  reaches it — crosses on a one-shot ticket minted under the cookie
+  the Lab download (cross-origin by design, so no `__Host-` cookie
+  reaches it) crosses on a one-shot ticket minted under the cookie
   session, good for one sample, one redemption and sixty seconds. A
   session restored from the cookie after a reload is therefore live and
   can download, with no second sign-in. What still hands out a bearer is
@@ -262,7 +262,7 @@ not hidden:
   session carries the address and client it was minted from (0058);
   `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a session presented from
   anywhere else. Behind a proxy, set `NOCTORNAL_TRUSTED_PROXY_HOPS` or the
-  bound address — and the one in the login audit — is the proxy's.
+  bound address (and the one in the login audit) is the proxy's.
 - **Still missing:** WebAuthn, and row-level security under a non-owner
   database role. Rate limiting (Redis GCRA) and the destination-aware TLP
   egress gate both shipped. See `docs/17-flagged-for-review.md` for the

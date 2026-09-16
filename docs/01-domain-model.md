@@ -1,4 +1,4 @@
-# 01 — Domain model
+# 01. Domain model
 
 The model is the product. Everything else is plumbing around it.
 
@@ -6,7 +6,7 @@ The model is the product. Everything else is plumbing around it.
 
 You asked for "profiles for crime groups and sub-profiles for actors."
 That framing is the natural one, and it is a trap. It assumes a stable
-hierarchy — group contains actors, actors are people — and cybercrime
+hierarchy (group contains actors, actors are people) and cybercrime
 networks are not built that way. Three things break the naive model
 immediately:
 
@@ -14,7 +14,7 @@ immediately:
 not observe a human. Between the two sits an attribution assessment that
 may be strong, weak, contested, or wrong. If you store the handle and the
 person in the same record, you have hard-coded the assessment as a fact,
-and when it turns out to be wrong you cannot cleanly unwind it — every
+and when it turns out to be wrong you cannot cleanly unwind it, every
 edge you drew now points at the wrong thing with no record of why.
 
 **Groups are not stable containers.** Crews rebrand under pressure, split
@@ -47,12 +47,12 @@ loses that; role as a property of the membership edge keeps it.
                      forum uid
 ```
 
-- **Selector** — an atomic observable. Normalised, exact-matchable, the
+- **Selector**, an atomic observable. Normalised, exact-matchable, the
   join key for entity resolution.
-- **Identity** — a persona. What actually posts, trades, vouches. Most
+- **Identity**, a persona. What actually posts, trades, vouches. Most
   analysis happens here, and much of it never needs to reach the layer
   above.
-- **Person** — an assessed natural human. Created only when you have an
+- **Person**, an assessed natural human. Created only when you have an
   attribution worth recording. Many cases never create one, and that is
   a healthy sign, not a gap.
 
@@ -87,7 +87,7 @@ assertions**. This buys you four things that are extremely hard to retrofit:
 ### Admiralty grading
 
 Two independent axes, per the NATO/UK standard. Do not average them into a
-single star rating — the whole point is that they vary independently.
+single star rating. The whole point is that they vary independently.
 
 | Reliability | | Credibility | |
 |---|---|---|---|
@@ -106,8 +106,8 @@ source on a novel claim usually should not.
 
 Two clocks, everywhere:
 
-- **Valid time** (`valid_from`, `valid_to`) — when it was true in the world.
-- **System time** (`recorded_at`, `superseded_at`) — when you believed it.
+- **Valid time** (`valid_from`, `valid_to`), when it was true in the world.
+- **System time** (`recorded_at`, `superseded_at`), when you believed it.
 
 This is what makes the "replay the network over time" feature possible, and
 it is why the sociogram can animate a group fragmenting after an arrest.
@@ -125,7 +125,7 @@ ties throws away the most diagnostic signal in the data.
 
 With signs you can apply structural balance theory: triads that are
 unbalanced (A vouches for B, B vouches for C, A accuses C) are unstable and
-tend to resolve. Unbalanced triads are therefore excellent leads — either
+tend to resolve. Unbalanced triads are therefore excellent leads, either
 your data is wrong, or a relationship is about to break, or someone is
 running a persona split. This is a genuinely differentiating feature and
 almost nothing in the commercial market does it well.
@@ -138,8 +138,8 @@ mutating the stored weight.
 
 UCINET's core strength, and worth matching. Actor × forum, actor × wallet,
 actor × campaign are all bipartite. You project them to one-mode
-co-affiliation networks — "these two identities posted in the same eleven
-threads" — which is often how you find a cell that never communicates
+co-affiliation networks ("these two identities posted in the same eleven
+threads"), which is often how you find a cell that never communicates
 directly on the record.
 
 Keep the bipartite structure in the graph (`POSTS_ON`, `PARTICIPATED_IN`)
@@ -153,7 +153,7 @@ Merging is the operation most likely to quietly corrupt a case.
 
 **Rules:**
 - **Designed, never built.** A strong-selector collision raises
-  `StrongSelectorConflict` — a merge *lead* — and every merge is
+  `StrongSelectorConflict` (a merge *lead*) and every merge is
   analyst-initiated. The rule as designed read: auto-merge (never built)
   only on a single `is_strong` selector match (PGP fingerprint,
   Telegram numeric ID, forum UID). Never on nickname similarity.
@@ -187,7 +187,7 @@ authoritative and gets acted on.
 
 The middle path, which is what you actually want: the system *may* compute
 **link predictions** (co-occurrence, shared infrastructure, temporal
-co-presence, stylometric similarity) and surface them as **hypotheses** —
+co-presence, stylometric similarity) and surface them as **hypotheses**,
 dashed, confidence-shaded, excluded from metrics by default, each with an
 explanation of the signal that generated it. An analyst promotes one to an
 asserted edge by supplying evidence. The visual distinction between

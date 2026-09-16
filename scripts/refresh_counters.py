@@ -140,7 +140,11 @@ SUBSTITUTIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `at revision NNNN` is NOT here for the same reason: ARCHITECTURE
     # says "surveyed ... at revision 0052; refreshed ... at revision
     # 0059", and both are dated records of when a section was written.
-    ("head", re.compile(r"(?<=`0001`–`)(\d{4})(?=`)")),
+    # `0001`-`0061`, and `db/migrations/versions/0001`-`0061`. This was a
+    # fixed-width lookbehind on an EN DASH until 2026-09-15, so it matched
+    # neither form once the dashes went, and it had never matched the
+    # prefixed one: ARCHITECTURE quoted 0059 on a 0061 tree, uncaught.
+    ("head", re.compile(r"(0001`\s*[-–—]\s*`)(\d{4})")),
     ("revisions", re.compile(
         r"\b(\d{2,3})(?=\s+(?:Alembic\s+)?(?:revisions|migrations)\b)")),
     ("version", re.compile(r"(?<=\bversion )(\d+\.\d+\.\d+)\b")),

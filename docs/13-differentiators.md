@@ -1,4 +1,4 @@
-# 13 — Differentiators
+# 13. Differentiators
 
 Everything in this scaffold that the commercial market handles badly or
 not at all, consolidated. Scored honestly: several are cheap and decisive,
@@ -12,7 +12,7 @@ people, and their analytics stop at degree and betweenness.
 
 ---
 
-## Tier 1 — Headline capabilities
+## Tier 1: Headline capabilities
 
 Build these. They are the answer to "why not just buy Maltego?"
 
@@ -24,7 +24,7 @@ diagnostic signal in a criminal marketplace.
 
 With signs you get structural balance theory. **Unbalanced triads are
 leads**: A vouches for B, B vouches for C, A accuses C. That configuration
-is unstable and means one of three things — your data is wrong, a
+is unstable and means one of three things, your data is wrong, a
 relationship is about to break, or someone is running two personas. All
 three are worth an analyst's attention, and the system can surface them
 automatically.
@@ -37,12 +37,12 @@ Structural holes theory identifies actors who span otherwise disconnected
 clusters and profit from the gap. In cybercrime that is precisely the
 initial access broker, the launderer, the escrow provider.
 
-**Low constraint plus low degree is the broker signature** — few
+**Low constraint plus low degree is the broker signature**, few
 connections, but the only ones bridging two worlds. That person is usually
 more consequential and less replaceable than the loudest poster, and no
 mainstream link-analysis tool exposes the metric.
 
-*Cost: low — igraph computes it. Payoff: high.*
+*Cost: low, igraph computes it. Payoff: high.*
 
 ### 3. Key player analysis
 
@@ -50,7 +50,7 @@ mainstream link-analysis tool exposes the metric.
 
 The question every disruption operation actually asks, and the one no
 commercial tool answers. Critically, **the optimal removal set is usually
-not the top-n individually central actors** — two high-betweenness nodes
+not the top-n individually central actors**: two high-betweenness nodes
 often broker the same two clusters, so taking both is redundant.
 
 Greedy seeding plus local search over the fragmentation objective finds
@@ -67,7 +67,7 @@ Competing products bake links in as facts. When a source turns out to be a
 rip artist, they have no mechanism beyond hand-auditing hundreds of edges,
 which nobody does, so the bad data stays.
 
-*Cost: high — it shapes the whole schema. Payoff: very high. Impossible to
+*Cost: high, it shapes the whole schema. Payoff: very high. Impossible to
 retrofit.*
 
 ### 5. Temporal replay with visible coverage gaps
@@ -85,7 +85,7 @@ and serious analytic error.
 
 ---
 
-## Tier 2 — Structural advantages
+## Tier 2: Structural advantages
 
 Model decisions that make everything above possible. Individually
 unglamorous, collectively the reason the product holds up.
@@ -94,7 +94,7 @@ unglamorous, collectively the reason the product holds up.
 
 `IDENTITY` is what you observed. `PERSON` is who you assess them to be.
 Joined by a confidence-scored, reversible edge. Collapse them and a wrong
-attribution can never be cleanly unwound — every edge now points at the
+attribution can never be cleanly unwound, every edge now points at the
 wrong thing with no record of why.
 
 ### 7. Reversible merges
@@ -110,7 +110,7 @@ building the projection rather than mutating stored weights, so the
 underlying observation stays intact and the decay parameter stays
 adjustable per case.
 
-### 9. Machines propose, analysts dispose — with explanations
+### 9. Machines propose, analysts dispose: with explanations
 
 Extractors and inference jobs write proposals, never graph elements.
 Every suggestion carries a plain-language reason: *"these two personas
@@ -129,7 +129,7 @@ the record. UCINET does this; the link-analysis tools mostly do not.
 ### 11. Structural equivalence and blockmodelling
 
 Two actors who never interact but occupy the same structural position are
-playing the same role. **This finds the replacement** — the second
+playing the same role. **This finds the replacement**, the second
 launderer, the developer who took over. Available in UCINET, absent from
 every investigative platform.
 
@@ -142,13 +142,13 @@ the competing hypothesis in the same view is a structural correction.
 
 ---
 
-## Tier 3 — Craft details
+## Tier 3: Craft details
 
 Cheap, specific, and each one prevents a real and common error.
 
 ### 13. Tox nospam-invariant indexing
 
-Index the first 64 hex of a Tox ID — the public key — not the full 76.
+Index the first 64 hex of a Tox ID (the public key) not the full 76.
 Users rotate nospam to shed contacts, which changes the ID string but not
 the identity. Tools that key on the whole string silently lose the actor.
 
@@ -166,14 +166,14 @@ them.
 
 ### 16. Contact-block parsing with role awareness
 
-Co-declaration — an actor publishing several selectors together — is
+Co-declaration (an actor publishing several selectors together) is
 strong identity evidence, because *they* are asserting the linkage. But
 parse block structure, not loose selectors: contact blocks routinely
 include the escrow's Jabber and the guarantor's Tox. Attributing those to
 the vendor is an easy and serious error.
 
-Paired with `CLAIMED` vs `CONFIRMED` control, so impersonation — scammers
-copy vendors' contact blocks wholesale — is representable rather than
+Paired with `CLAIMED` vs `CONFIRMED` control, so impersonation (scammers
+copy vendors' contact blocks wholesale) is representable rather than
 silently resolved the wrong way.
 
 ### 17. PM provenance classes
@@ -199,8 +199,8 @@ handling normally lives in a separate lab tool where this pivot is lost.
 
 ### 20. Exposure-aware external actions
 
-Sandbox detonation and some enrichment lookups tell the provider — and
-sometimes the world — what you are interested in. Operators watch public
+Sandbox detonation and some enrichment lookups tell the provider (and
+sometimes the world) what you are interested in. Operators watch public
 sandboxes for their own samples. Mark providers with an exposure level and
 say so in the confirmation dialogue, in plain words.
 
@@ -212,7 +212,7 @@ from nine feeds and burying the queue.
 
 ### 22. Single-source and stale-confidence flagging
 
-Assertions resting on one source are marked as such — not wrong, but
+Assertions resting on one source are marked as such, not wrong, but
 visible. Confidence graded HIGH three years ago with no corroboration
 since decays into a review prompt rather than sitting there looking solid.
 
@@ -229,7 +229,7 @@ an afternoon.
 
 ---
 
-## Tier 4 — Later, high value
+## Tier 4: Later, high value
 
 - **Disclosure pack generator.** Given a case and a date range: every
   assertion with its provenance chain, evidence manifest with hashes, the
@@ -238,7 +238,7 @@ an afternoon.
 - **Change-point detection on network structure.** Sharp shifts in density
   or modularity usually mean an arrest, a dispute or an exit scam.
 - **Cross-case pivoting with compartment respect.** "There is a match in a
-  case you cannot see — request access from its owner." Enormously useful
+  case you cannot see, request access from its owner." Enormously useful
   and a genuine compartment risk. Policy decision, see `docs/00` Q5.
 - **Cyrillic homoglyph-aware handle matching.** Latin/Cyrillic lookalikes
   in handles are a real attribution problem in this specific domain.
