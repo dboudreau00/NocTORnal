@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+### The documentation pass
+
+Two thousand lines lighter, with nothing true removed.
+
+**Four documents were doing no work.** `TestFlight.md` was a dated record of
+installing an artefact three releases old, at 52 migrations and 1269 tests,
+whose three defects were all fixed within the week; the procedure it followed
+is `release/INSTALL.md`. `db/concept/` was a 467-line SQL sketch for comms,
+the lab and ingest, all three of which shipped and migrated past it, and it
+had already misled one reader: the 2026-07-25 survey reported the write-only
+ingest constraint as concept-only when it had been live since migration 0033.
+`db/seed_ontology.sql` was a third copy of the ontology, marked REFERENCE
+ONLY and asking to be kept in sync by hand; measured, it was 6 node types, 22
+edge types and 44 selector types behind the generated seed and held nothing
+the generated one lacked. All three are gone.
+
+**Two registers had become archives.** `ROADMAP-REMAINING.md` was 1,020 lines,
+of which perhaps 150 said what was left; the rest was nine dated narratives of
+review passes, and a table of nine gaps every one of which was marked closed.
+`docs/17-flagged-for-review.md` was 717 lines, over half of it entries that had
+been fixed. Both now carry what is open, and the closed entries survive as a
+one-line index each with the date that closed them. The history they held is in
+this file, which is where a dated record belongs.
+
+**Three documents were nearly deleted and should not have been.**
+`docs/02-architecture.md`, `docs/09-roadmap.md` and `docs/14-enhancement-map.md`
+looked like duplicates of ARCHITECTURE and the roadmap. They are cited 85 times
+by the code as the provenance of a rule: `docs/14 U2` is why an under-cleared
+analyst is told that something was withheld, and eight call sites say so. They
+were restored and cut instead, to the brief, the phase exit criteria and the
+enhancement items, and the division of labour is now stated at the top of each:
+docs/02 is what was specified and why, `ARCHITECTURE.md` is what was built.
+
+**Every em dash and en dash is gone,** 1,272 of them, replaced by the
+punctuation the dash was standing in for: a full stop where an independent
+clause followed, a comma for a qualifying phrase, a colon before a definition,
+parentheses for an aside, a hyphen for a range. Three passes were needed. The
+first classified line by line, and these documents are hard-wrapped, so it read
+the clause after a break as a phrase when the verb was on the next line. The
+second bounded a block at a blank line, so an aside opened inside one bullet and
+closed inside the next, leaving a parenthesis unbalanced. The third reads whole
+blocks, bounds them at list items and table rows, refuses to touch code, and
+asserts that the parenthesis count it changed is balanced.
+
+**And the stale claims each of those exposed.** `docs/10`, `docs/11` and
+`docs/12` still opened with "Status: concept. Not implementation-ready." for
+three phases that had shipped. `docs/17` still listed login timing
+equalisation as deferred, a year after a test pinned it, and the deferred table
+described the API as connecting as the table owner, which the production
+deployment stopped doing in Wave 1. `docs/02` said there was no production
+manifest. `ARCHITECTURE.md` cited two documents by line number, and said
+`docs/16` holds **four** blocking legal items where it holds five: the same
+undercount the 2026-07-26 correction caught in the roadmap and the counsel
+pack, still sitting in the third document.
+
+**And one the pass caused and then caught.** The generated head counter
+matched `` `0001`-`0061` `` through a fixed-width lookbehind on the en dash,
+so removing the dash turned that check off silently. Repairing it found
+that the same pattern had never matched the prefixed form,
+`` `db/migrations/versions/0001`-`0061` ``, which had been quoting 0059 on a
+0061 tree the whole time. A counter written in a shape nothing checks is the
+defect this tree keeps finding in itself; this is the third instance.
+
 ### Roadmap items 8 to 13: a size policy, a key ring, a refusal, one alpha, and the gate on dead letters
 
 **8. The exhibit size cap is a declared policy.** It was a module constant
@@ -118,8 +181,8 @@ keeps the first frame only for `scripts/bootstrap.py session`, which mints
 in a shell and has no cookie jar. A browser cannot set a header on an
 upgrade, so the CSRF double-submit is impossible there; `SameSite=strict`
 plus an explicit `Origin` check refused before `accept()` is what stands in
-its place. Measured in a browser: sign in, open a case, reload, reopen —
-the dot stays live, `sessionStorage` and `localStorage` are both empty, and
+its place. Measured in a browser: sign in, open a case, reload, reopen.
+The dot stays live, `sessionStorage` and `localStorage` are both empty, and
 the only cookie script can see is `__Host-csrf`.
 
 **The Lab download is a one-shot ticket.** Minted on the application origin
@@ -145,9 +208,9 @@ found it independently. There is now a pure test that login answers 204
 with no body, which nothing had covered.
 
 Two security defects were closed after the first pass. The redemption
-audited every failed presentation including one that matched no row — a
+audited every failed presentation including one that matched no row (a
 path reachable on the sample origin with no credential at all, writing into
-an append-only hash-chained log — so an unknown ticket is now a sampled
+an append-only hash-chained log), so an unknown ticket is now a sampled
 warning and the route carries a named rate limit. And the redemption
 re-checked the sample's labels but not the ACCOUNT, so inside the
 sixty-second window a deactivated analyst still got the archive; it now
@@ -162,7 +225,7 @@ upgrade is refused there now.
 **A control that would have shipped silently broken.** The `Origin` check
 compared only against the configured origin. The shipped launcher binds
 `127.0.0.1:8000`, `NOCTORNAL_BASE_URL` keeps its matching default, the
-console is opened at `localhost:8000` — two genuinely different origins,
+console is opened at `localhost:8000`: two genuinely different origins,
 correctly distinguished, and the result was that every live socket was
 refused for every developer, before `accept()`, which reaches a browser
 with neither code nor reason. It was found by opening the console, not by
@@ -250,7 +313,7 @@ inside a container's entrypoint, which made two verification probes report
 failures the deployment did not have -- both were the probe, and
 `/proc/1/environ` is what to read instead.
 
-## Alpha 5.2 — 2026-09-10
+## Alpha 5.2: 2026-09-10
 
 The b-revision of Alpha 5.1, closing what a re-read of it found. Alpha 5.1
 wrote a linter for the previous review's examples; this closes the classes
@@ -260,7 +323,7 @@ those examples belonged to.
 
 `test_doc_invariants` allowed a quoted test total to sit within five per
 cent of the tree. At this size that is eighty tests of slack, and Alpha
-5.1 shipped a README claiming 1627 against a tree of 1639 — stale, and
+5.1 shipped a README claiming 1627 against a tree of 1639, stale, and
 green, because the drift fitted inside the band. `scripts/refresh_counters.py`
 now writes every live counter (tests, revisions, Alembic head, version,
 completion) from the tree, the test asserts that running it would change
@@ -272,7 +335,7 @@ these per-release entries, where they are dated records of one run.
 
 ### The invariant tables are held to each other
 
-Alpha 5 reworded invariant 7 in CONVENTIONS and ARCHITECTURE — credentials
+Alpha 5 reworded invariant 7 in CONVENTIONS and ARCHITECTURE, credentials
 never leave the **vault**, which runs inside the API process, because there
 is no collector. The README's table, the one a new reader meets first, went
 on saying "never leave the collector, decrypted only in the worker process":
@@ -287,7 +350,7 @@ tree does not do fails whatever it was reworded to.
 Auto-merge survived the Alpha 5 pass in the ontology definition, the
 Telegram normaliser, the generated TypeScript, a comms test and the README,
 all describing it in the present tense. A strong-selector collision raises
-`StrongSelectorConflict` — a merge *lead* an analyst confirms. The register
+`StrongSelectorConflict`, a merge *lead* an analyst confirms. The register
 that catches this now reads source and tests as well as prose, and carries
 its maintenance rule: when a decision record says a thing was never built,
 add it here.
@@ -298,7 +361,7 @@ add it here.
   not overwritten" above the stamp-in-place UPDATE that Alpha 5.1 decided
   was a marked row.
 - `apps/api/pyproject.toml` described itself as "Session 3 lands
-  authentication" — packaging metadata of a 0.5.1 release, in no linter.
+  authentication", packaging metadata of a 0.5.1 release, in no linter.
 - README claimed 59 revisions "all reversible". They are reversible on an
   EMPTY database, which is what the round-trip test proves; a downgrade
   past `0017` on a populated one is refused on purpose.
@@ -306,7 +369,7 @@ add it here.
   sets the bucket DEFAULT to `GOVERNANCE 365d`. The per-object COMPLIANCE
   lock `EvidenceStorage.put()` applies is the guarantee; the bucket default
   is the floor for anything written by another path.
-- Three overall completion figures — 92.8%, ~92%, ~95% — are now one, and
+- Three overall completion figures (92.8%, ~92%, ~95%) are now one, and
   only `ROADMAP-REMAINING.md` works it out.
 
 **Known.** The first run of `refresh_counters.py` rewrote two dated records
@@ -320,7 +383,7 @@ The Redis GCRA agreement test still fails on the development box every run
 and passes on CI: clock drift between the WSL container and the host, and
 the injected-clock refactor is still owed.
 
-## Alpha 5.1 — 2026-09-09
+## Alpha 5.1: 2026-09-09
 
 Follow-up release. **Still not audited, and still not lawful to operate
 against real material until the five blocking items in
@@ -352,7 +415,7 @@ each with a test that fails on the tree as it was:
 **Known.** CI on the release commit: 2273 passed, 0 skipped, on a fresh
 database. On the development box the Redis GCRA agreement test
 (`test_redis_and_python_agree_request_for_request`) fails at its usual
-iteration 23 every run — clock drift between the WSL container and the
+iteration 23 every run, clock drift between the WSL container and the
 host, the injected-clock refactor still owed. The samples positive
 control leaves one quarantined 64 KB `cap.bin` per full-suite run in a
 reused database, because a submission writes to the append-only access
@@ -361,10 +424,10 @@ ledger and can never be deleted; the same residue policy as custody.
 Not in this release, by decision: the cookie pair on the websocket and
 the sample origin, a `key_id` that selects a KEK, a COMPLIANCE bucket
 default, the Telegram bare-positive refusal, the confidence-threshold
-alignment, RLS under a non-owner role, a collector process — and
-nothing of L1–L5 in software.
+alignment, RLS under a non-owner role, a collector process (and
+nothing of L1)L5 in software.
 
-## Alpha 5 — 2026-09-09
+## Alpha 5: 2026-09-09
 
 Review release. **Still not audited, and still not lawful to operate
 against real material until the five blocking items in
@@ -392,7 +455,7 @@ history. `README.md` is the owner's and was left alone.
 
 The version is single-sourced from `pyproject.toml` (it said 0.1.0 while
 the package said 0.4.0). `db/schema.sql` is generated from a migrated
-database and diffed in CI — it had named five of eleven schemas under a
+database and diffed in CI. It had named five of eleven schemas under a
 docstring calling it a mirror. Test and migration counts are dated
 snapshots held to the tree by a test, and a document that quotes an
 Alembic head must quote the real one.
@@ -410,7 +473,7 @@ Alembic head must quote the real one.
   with a readable CSRF half; nothing is written to web storage; logout's
   cookie deletions carry `Secure`, which browsers had been ignoring. A
   `#token=` link can no longer replace a session the browser already holds
-  (it did, browser-wide, in the first cut of this change — caught by the
+  (it did, browser-wide, in the first cut of this change, caught by the
   adversarial review), and the server refuses to adopt a cookie for a
   different account with a 409 and an audit row. The websocket still
   authenticates from a token in its first frame, so a session restored
@@ -431,14 +494,14 @@ Alembic head must quote the real one.
   verdicts now decide it; the UI CSP names the sample origin; unset means
   the control is OFF and every download refuses, in the readiness register
   and in every document that describes it. The sample origin is a second
-  process of this code — a deployment decision recorded, not made.
+  process of this code, a deployment decision recorded, not made.
 - **The persona status write has a ceiling and checks its rowcount**; it
   had burned a RED persona for any holder of the global verb who knew the
   id, and returned 200 for an id that did not exist.
 - **Credential-free websocket handshakes are refused before `accept()`**
   and bounded per peer. The first cut refused after accepting, which under
   uvicorn's websockets backend let a hostile peer hold the transport for
-  ten seconds uncounted — measured, not reasoned, by the review that
+  ten seconds uncounted, measured, not reasoned, by the review that
   caught it.
 - **Migration 0059 binds every compartment column, and the ingest key's
   forced compartment, to the registry.** A raw UPDATE or a psql typo can
@@ -464,11 +527,11 @@ fails deterministically on the development box and has since July; its
 docstring records the injected-clock refactor it needs.
 
 Full suite on the release commit, both pytest roots, migration 0059:
-**2255 passed, 3 failed** — that Redis flake, and the two version-contract
+**2255 passed, 3 failed**, that Redis flake, and the two version-contract
 tests, which failed in the recording run because the version was bumped
 while it ran and pass on the final tree.
 
-## Alpha 4 — 2026-09-02
+## Alpha 4: 2026-09-02
 
 Completion release. **Still not audited, and still not lawful to operate
 against real material until the five blocking items in
@@ -482,7 +545,7 @@ that claimed more than the code did.
 ### The custody ledger is verified for the first time
 
 `core.evidence_custody` has been hash-chained since migration 0024, under
-a docstring invoking FRE 902(13)–(14) — and nothing had ever recomputed
+a docstring invoking FRE 902(13), (14), and nothing had ever recomputed
 it. The internal audit log had a verifier, a CI step and a UI button; the
 record actually produced to a court had none of the three.
 
@@ -490,7 +553,7 @@ It now has all three: `custody_verify.py`, `GET /audit/custody/verify`
 under `audit.read`, a CI step beside the audit chain, and a control in
 Governance → Audit chain. It checks LINK, CONTENT, FORK and GENESIS
 across the whole ledger, and because the chain is global, naming an
-exhibit narrows what is *reported* and never what is checked — the scoped
+exhibit narrows what is *reported* and never what is checked. The scoped
 answer says so rather than reading like a completeness pass.
 
 **What it still cannot see is a tail truncation.** Deleting the newest
@@ -498,8 +561,8 @@ rows orphans nothing and needs no rehash, so the ledger still agrees with
 itself. That is the first entry in the module's own list of what it cannot
 see, and the response carries `last_id`, `checked` and `tail_row_hash` so
 an operator recording them out of band can catch a decrease. A run-to-run
-equality check on the hash is *not* the defence it looks like — the hash
-changes on every honest append — and the docstring says which two checks
+equality check on the hash is *not* the defence it looks like (the hash
+changes on every honest append) and the docstring says which two checks
 do work.
 
 ### Break-glass raises something
@@ -512,17 +575,17 @@ zero.
 
 ### Controls that existed and could not be reached
 
-- **The readiness register** — `GET /admin/readiness`, and an Admin
-  section — answers what this deployment can establish about itself, with
+- **The readiness register** (`GET /admin/readiness`, and an Admin
+  section) answers what this deployment can establish about itself, with
   the evidence beside each line. It is the code-side half only: the
   docs/16 items that need a human are named as out of scope, and two items
   it *can* partly check say so in their passing evidence rather than
   leaving the operator to infer it.
-- **The delivery ledger** — `notify.delivery` has recorded every refusal
+- **The delivery ledger**, `notify.delivery` has recorded every refusal
   since 0029 and every destination since 0044, and nothing read it. There
   is now a route and an Inbox → Deliveries view. It carries kinds,
   channels, addresses and reasons; never subjects or summaries.
-- **The assumptions register** (migration 0056) — the last named feature
+- **The assumptions register** (migration 0056), the last named feature
   gap in Phase 6. An assumption is what the analysis takes for granted,
   and writing it down is what makes it reviewable. Open and confirmed
   statements reach the report; withdrawn and refuted ones do not.
@@ -539,7 +602,7 @@ Compartments were free text, so a typo was a case nobody could see. They
 are now registered, and every write site validates against the registry.
 
 The migration refuses to run rather than silently skipping a value it
-cannot register — and the decision about what to do with a legacy value
+cannot register, and the decision about what to do with a legacy value
 that cannot satisfy the format is stated in its docstring rather than
 left to be discovered.
 
@@ -550,7 +613,7 @@ left to be discovered.
   locked bucket and returns success. The purge now calls
   `delete_all_versions`, marks only rows whose objects the store confirmed
   gone, and counts exhibit ROWS in the operator-facing counter rather than
-  object VERSIONS — which two docstrings had claimed it already did.
+  object VERSIONS, which two docstrings had claimed it already did.
 - **The evidence integrity alarm was an outbound-email amplifier.** It
   re-fired on every read of a corrupt exhibit, on a route with no rate
   limit, and each alarm then fanned out to every security officer. It is
@@ -561,7 +624,7 @@ left to be discovered.
 - **`/sources/{id}/run` returned a RED source's hostname** in its error
   string, under a module docstring certifying that route as safe.
 - **`/analytics/latest` claimed `cached: true`** with no hash check, and
-  the console rendered that as "unchanged since the last run" — staleness
+  the console rendered that as "unchanged since the last run", staleness
   reported as freshness, on the pane that names people.
 - The collection listing endpoints filter on the caller's ceiling;
   `suppressed` and `triage_state` have writers; search reaches
@@ -586,14 +649,14 @@ own box.
 ### Documentation is now checked against the tree
 
 `test_doc_invariants.py` proved that a cited *document* exists. The
-roadmap is written mostly in three other currencies — source files, test
-names and endpoints — and none of them were checked. Three new tests
+roadmap is written mostly in three other currencies (source files, test
+names and endpoints) and none of them were checked. Three new tests
 close that: a cited module must be in the tree, a cited test must be
 defined, and a cited endpoint must be routed.
 
 The scoreboard's overall figure was corrected from ~95% to 92.7%. It had
 never been recomputed after the per-phase numbers were revised downward,
-so the summary and the table it summarised disagreed — which is the same
+so the summary and the table it summarised disagreed, which is the same
 defect the document catalogues everywhere else.
 
 ### Known
@@ -604,7 +667,7 @@ passes alone and fails when an earlier test in the same session has left a
 case with expired retention and unpurged evidence. It is a property of the
 fixture estate, not of the purge, and a fresh database does not show it.
 
-## Alpha 3 — 2026-09-01
+## Alpha 3: 2026-09-01
 
 Interface release. **Still not audited, and still not lawful to operate
 against real material until the five blocking items in
@@ -617,7 +680,7 @@ Elevation now comes from LIGHT rather than paint: a translucent wash and a
 hairline over a gradient ground, instead of a ladder of five opaque greys.
 That is what makes a panel read as lit rather than filled, and it is the
 single largest visual change here. It brings a radius scale (4/8/12/14 and
-a pill), a 4px spacing scale, a shadow scale and motion tokens — the first
+a pill), a 4px spacing scale, a shadow scale and motion tokens, the first
 cut had six ad-hoc radii between 3px and 10px, which is what made the
 console look a decade older than it is.
 
@@ -636,7 +699,7 @@ app.css and twelve hard-coded hexes in app.js, four of them duplicating
 tokens the theme already defined and nothing used.
 
 The app.js case was the worse one. The canvas painters read a token and
-fell back to a literal — `PAINT.surface2 || '#2D2030'` — and `cssVar()`
+fell back to a literal (`PAINT.surface2 || '#2D2030'`) and `cssVar()`
 returns `''` for a token that does not resolve. `''` is falsy, so a renamed
 token did not fail: it silently painted the PREVIOUS theme onto the canvas
 while the DOM around it painted the new one.
@@ -652,11 +715,11 @@ scale, and the colour rules the theme file declares load-bearing.
 - `--danger` sat at 3.70:1 while being the colour that says a thing will be
   destroyed. Now 4.99:1.
 - `.chip.conf-LOW` and `.st-none` set a dim colour AND inherited a dim
-  opacity, compositing to 1.83:1 — a confidence label nobody could read.
+  opacity, compositing to 1.83:1, a confidence label nobody could read.
   Confidence stays encoded as opacity; the floor moved to 0.58.
 - Form controls had no boundary: `--hairline` measures 1.48:1 against the
   card a field sits on. A dedicated `--field-edge` measures 3.30:1. This
-  cannot be fixed with a fill — the ground is near-black, so a recessed
+  cannot be fixed with a fill. The ground is near-black, so a recessed
   field reaches only 1.18:1 however dark it goes.
 - `--artefact-finance` and `--alert` were 4.4 degrees apart, which violated
   the theme file's own stated rule that the two must not converge. Now 17.0.
@@ -671,8 +734,8 @@ is a column of seventeen tabs needing ~900px, and it used to `overflow:
 hidden` and simply amputate the last few with no way to reach them.
 
 The app bar no longer wraps its buttons onto two lines, and no longer
-scrolls the page sideways. `#hdr-user` was 326px of that bar — a third of
-it — because `/auth/me` returned a user_id and nothing else, so the pill
+scrolls the page sideways. `#hdr-user` was 326px of that bar (a third of
+it) because `/auth/me` returned a user_id and nothing else, so the pill
 could only render a raw UUID. (`/auth/me` carries `display_name` and
 `email` as of Alpha 4, and the bar now renders the name.)
 
@@ -688,7 +751,7 @@ could only render a raw UUID. (`/auth/me` carries `display_name` and
   release: brokerage, Burt constraint, effective size, communities and the
   key-player cut set are computed and shown.
 
-## Alpha 2 — 2026-08-25
+## Alpha 2: 2026-08-25
 
 Second packaged release. **Still not audited, and still not lawful to
 operate against real material until the five blocking items in
@@ -702,7 +765,7 @@ outside this codebase.** No amount of code closes them.
   now an **Admin** pane: create analysts with one-shot credentials, grant
   and revoke global roles, set clearance, deactivate (which revokes their
   sessions), unlock after failed logins, and re-issue a TOTP secret for
-  the analyst whose phone is gone. Behind `user.manage` — SYS_ADMIN only,
+  the analyst whose phone is gone. Behind `user.manage`, SYS_ADMIN only,
   step-up enforced.
 - **First-run setup in the browser.** A fresh install offers setup on the
   sign-in screen instead of demanding the CLI. The door is gated on the
@@ -766,7 +829,7 @@ outside this codebase.** No amount of code closes them.
 | Adversarial passes | 9, each of which found a real defect |
 
 
-## Alpha 1 — 2026-07-26
+## Alpha 1: 2026-07-26
 
 First packaged release. **Not audited; not lawful to operate against real
 material until the four items in [README.md](README.md) are settled.**
@@ -777,34 +840,34 @@ Every phase has a service, a test suite, an HTTP API gated by the
 five-part access check, an analyst pane, and at least one adversarial
 review.
 
-- **Graph and assertions** — nothing is written without a graded source.
+- **Graph and assertions**, nothing is written without a graded source.
 - **Sociogram** with projections, ego networks, shortest path, and an
   as-of timeline. **Live**: another analyst's changes now arrive without a
   refresh.
-- **Analytics** — centralities, Leiden communities, Burt constraint, cut
+- **Analytics**, centralities, Leiden communities, Burt constraint, cut
   vertices, key-player sets, signed balance. Computed over the projection
   and labelled as such.
-- **Collection** — adapter interface, scheduler, persona vault, watch
+- **Collection**, adapter interface, scheduler, persona vault, watch
   matching, and a proposal review gate.
-- **Notification and egress** — one classification gate on every outbound
+- **Notification and egress**: one classification gate on every outbound
   path, quiet hours, digests, HMAC webhooks, and a delivery ledger that
   records refusals with their reason.
-- **Tradecraft** — reversible entity merge, dual control, ACH, redacted
+- **Tradecraft**, reversible entity merge, dual control, ACH, redacted
   report builder, retention and purge, break-glass with mandatory review.
-- **Comms** — durable-identifier normalisation across 15 platforms,
+- **Comms**, durable-identifier normalisation across 15 platforms,
   contact-block parsing, PGP verification with three outcome classes, and
   co-participation into the sociogram.
-- **Samples** — separate-origin download, encrypted at rest, quarantine to
+- **Samples**, separate-origin download, encrypted at rest, quarantine to
   RE queue, static triage with recorded gaps, and a detonation
   authorisation record.
-- **Ingest** — write-only keys, raw-before-parse, category classification,
+- **Ingest**. Write-only keys, raw-before-parse, category classification,
   triage scoring, near-duplicate folding, and a dead-letter queue.
 
 ### Notable in this release
 
 - **Live change push.** Postgres `LISTEN`/`NOTIFY`, statement-level, so a
   400-row write wakes a client once. The socket carries **no case
-  content** — it is a hint to refetch through the gated endpoints, which
+  content**. It is a hint to refetch through the gated endpoints, which
   is why it needs no filtering logic of its own.
 - **The Lab pane.** Invariant 10 as a screen: metadata renders, bytes
   never do. No preview, no hex view, no `innerHTML` and no iframe anywhere
@@ -825,14 +888,14 @@ full list.
 - WebAuthn is not implemented; authentication is password + TOTP.
 - Fuzzy hashing (imphash, ssdeep, TLSH), YARA matching and sandbox
   detonation are **not built**. Each absence is recorded on the sample row
-  with its reason — a NULL imphash reads as "no imports", a recorded gap
+  with its reason, a NULL imphash reads as "no imports", a recorded gap
   reads as "nobody looked".
 - Deferred hardening: session IP/UA binding, RLS under a non-owner
   database role, DNS-rebinding-proof SSRF protection, login timing
   equalisation.
 - Phase 6's adversarial review is partial: ACH has had one; merges,
   retention, approvals and break-glass have not.
-- No collection scheduler process — collection runs when invoked.
+- No collection scheduler process, collection runs when invoked.
 - Metric history is not charted, and CONCOR is not implemented.
 
 ### Verification at release
