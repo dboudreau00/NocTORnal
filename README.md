@@ -4,7 +4,7 @@
 
 **HUMINT and social network analysis for cybercrime investigation.**
 
-Build the graph of actors, personas, groups and the trust between them, 
+Build the graph of actors, personas, groups and the trust between them,
 where every line of it traces back to an exhibit.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
@@ -242,7 +242,7 @@ optional YARA rule fetch.
 The installer leaves you at a sign-in page with the account it created.
 
 ```bash
-# A second terminal needs no exports — bootstrap.py reads .env.local.
+# A second terminal needs no exports: bootstrap.py reads .env.local.
 .venv/bin/python scripts/bootstrap.py create-user \
     --email you@example.org --name "Your Name"
 ```
@@ -421,7 +421,7 @@ point of entry: there is no "add it now, justify it later" path.
 
 ```mermaid
 flowchart TB
-    subgraph collect["COLLECTION — machines"]
+    subgraph collect["COLLECTION · machines"]
         F["Monitored forums,<br/>channels, feeds"] --> X["Extractors"]
         I["Ingest API<br/>write-only keys"] --> X
         U["Analyst paste,<br/>upload, capture"] --> X
@@ -434,7 +434,7 @@ flowchart TB
     T -->|reject| P
     T -->|accept| A
 
-    subgraph model["THE MODEL — analysts"]
+    subgraph model["THE MODEL · analysts"]
         A[("assertion ledger<br/>source · Admiralty · time")]
         A -->|"trigger-enforced"| G[("graph<br/>nodes + edges")]
         E[("evidence<br/>WORM + custody")] --> A
@@ -465,7 +465,7 @@ flowchart LR
     R["Request"] --> V{"1 · verb<br/>role grants it?"}
     V -->|no| D403["403"]
     V --> AS{"2 · assignment<br/>on this case?"}
-    AS -->|no| D404["404 — not 403"]
+    AS -->|no| D404["404, not 403"]
     AS --> C{"3 · clearance<br/>TLP dominates?"}
     C -->|no| D403
     C --> K{"4 · compartments<br/>read into all?"}
@@ -585,7 +585,7 @@ noctornal/
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
 │   └── migrations/versions/   61 Alembic revisions
-├── docs/                      00–19, the reasoning
+├── docs/                      00-19, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
 └── infra/docker-compose.yml   Postgres, Redis, MinIO, Mailpit
