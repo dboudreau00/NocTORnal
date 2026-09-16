@@ -4,7 +4,7 @@
 
 **HUMINT and social network analysis for cybercrime investigation.**
 
-Build the graph of actors, personas, groups and the trust between them —
+Build the graph of actors, personas, groups and the trust between them, 
 where every line of it traces back to an exhibit.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
@@ -23,7 +23,7 @@ phone number in it is fiction.</sub>
 
 ---
 
-> ## ⚠ READ THIS FIRST — capability is not authorisation
+> ## ⚠ READ THIS FIRST, capability is not authorisation
 >
 > **This software is unaudited, has never been operated against real
 > targets, and is not certified for evidential use. Nothing in it grants
@@ -31,13 +31,13 @@ phone number in it is fiction.</sub>
 >
 > Every capability here was built to a specification, not to a legal
 > authority. The build refuses several operations until an operator
-> *declares* a policy — and **a declaration is a string this software
+> *declares* a policy, and **a declaration is a string this software
 > stores, not a fact it verifies.** A false or absent declaration produces
 > a working system and an unlawful deployment, and the difference is
 > invisible from inside the code.
 >
 > **If you are the person who has to sign this off, go straight to
-> [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md)** — the
+> [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md)**, the
 > register reorganised as a decision document: every question, its option
 > set, the consequence of each choice, what the build does while it waits,
 > and a row to write the answer in.
@@ -50,15 +50,15 @@ phone number in it is fiction.</sub>
 
 | | What is built | What is assumed, and is not true until somebody makes it true |
 |---|---|---|
-| **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, written with counsel, covering preservation-vs-destruction. Given enough attacker-chosen files, one will eventually contain material whose *possession alone* is an offence — that is the normal failure mode of the problem domain, not a hypothetical. `REJECTED` currently **destroys the bytes**, which is the wrong answer where preservation is required; `reject(purge_bytes=False)` exists and nothing selects it automatically. |
+| **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, written with counsel, covering preservation-vs-destruction. Given enough attacker-chosen files, one will eventually contain material whose *possession alone* is an offence. That is the normal failure mode of the problem domain, not a hypothetical. `REJECTED` currently **destroys the bytes**, which is the wrong answer where preservation is required; `reject(purge_bytes=False)` exists and nothing selects it automatically. |
 | **L2** | Stealer-log ingest holding data on thousands of uninvolved people | That a lawful basis exists, that victim-notification duties are understood, and that the retention period is real. **90 days is a placeholder somebody typed.** |
 | **L3** | A persona vault that will drive a covert account into a forum | That operating that persona is authorised in each jurisdiction. Accessing a system with credentials registered under a false identity engages computer-misuse law in several jurisdictions regardless of intent. |
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
-| **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and — separately — that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
+| **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and (separately) that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
 
 Plus **eight operator determinations** and **thirteen factual claims that
-came from documentation or reasoning rather than an authoritative source**
-— including platform identifier mappings, which change, and where a stale
+came from documentation or reasoning rather than an authoritative source**,
+including platform identifier mappings, which change, and where a stale
 mapping produces *confident false attribution* rather than a visible
 error. See [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).
 
@@ -80,7 +80,7 @@ Analysts working organised cybercrime spend most of their time on a
 question that is social, not technical: **who trusts whom, and why?**
 Which broker vouched for which affiliate. Which escrow both sides accept.
 Which handle on this forum is the same human as that handle on that
-channel — and how confident is anyone, really.
+channel, and how confident is anyone, really.
 
 NocTORnal is the case system for that work. It is closest in spirit to
 Maltego's pivoting and i2 Analyst's Notebook's link charts, with UCINET's
@@ -91,7 +91,7 @@ skipped.**
 Every node attribute and every relationship is anchored to a row in an
 assertion ledger carrying a source, an Admiralty reliability/credibility
 grading and a timestamp. There is no code path that writes a graph element
-without one — enforced by a database trigger, not a convention. Ask any
+without one, enforced by a database trigger, not a convention. Ask any
 node on the chart *"why do you say that?"* and you get a chain back to a
 WORM-locked exhibit with an unbroken custody log.
 
@@ -116,7 +116,7 @@ three forums and a leak site. Who is the same person? Who vouched for
 whom, and when did that vouch turn into a rip-off accusation? NocTORnal
 keeps `IDENTITY` (the handle you observed) separate from `PERSON` (the
 human you assessed) and joins them with a reversible attribution carrying
-a confidence — so "we think these five handles are one operator" is a
+a confidence, so "we think these five handles are one operator" is a
 claim you can show your working for, and withdraw without losing the
 underlying observations.
 
@@ -130,15 +130,15 @@ two by centrality", and it is the one that matters operationally.
 **3 · Business email compromise.** A finance team paid an invoice to the
 wrong account. You have the mail, a phishing page and a phone call. The
 `Received` chain gives you the sender's real IP *as observed by your own
-relay* — with the trust boundary drawn, so nobody attributes the case to a
+relay*, with the trust boundary drawn, so nobody attributes the case to a
 forged upstream hop. The capture ties the screenshot to the redirect chain
 and the TLS certificate. The call record keeps the spoofed caller ID and
 the carrier's attestation apart, so the bank's real number never lands on
 the attacker's node.
 
 **4 · Fraud and mule networks.** The transactions are the easy part. The
-social layer above them — who recruited whom, which escrow both sides
-accept, which guarantor turns up in unrelated disputes — is what the
+social layer above them (who recruited whom, which escrow both sides
+accept, which guarantor turns up in unrelated disputes) is what the
 sociogram is for.
 
 ### A session, start to finish
@@ -147,18 +147,18 @@ sociogram is for.
    date and a TLP classification. Every element inside inherits that floor.
 2. **Put in what you have.** Paste a forum profile, upload an exhibit,
    drop in a vendor contact block, attach a `.eml`. Extraction runs and
-   raises *proposals* — it does not touch the graph.
+   raises *proposals*. It does not touch the graph.
 3. **Triage.** Accept, reject or defer. An acceptance writes an assertion
    carrying the machine's rationale and an Admiralty grading, so the graph
    never forgets a machine suggested it.
-4. **Look at the shape.** Choose a projection — which edge types count as
-   a social tie — and run the metrics. Drag the timeline to see what was
+4. **Look at the shape.** Choose a projection (which edge types count as
+   a social tie) and run the metrics. Drag the timeline to see what was
    believed last month.
 5. **Test your explanation.** Put the competing hypotheses in the ACH
    matrix and score them against the evidence. The one that survives is
    the finding; the ones that did not go in the report beside it.
 6. **Release it.** Build the report at a target classification. Anything
-   above it is structurally withheld — not redacted afterwards. The egress
+   above it is structurally withheld, not redacted afterwards. The egress
    gate decides whether the document may leave, and records the decision
    either way.
 
@@ -168,14 +168,14 @@ sociogram is for.
 |---|---|
 | **vs. Maltego** | Maltego is better at breadth-first OSINT pivoting from a transform marketplace. NocTORnal is a *case system*: it keeps the assertion ledger, the custody chain and the classification model that a disclosure exercise needs. |
 | **vs. i2 Analyst's Notebook** | i2 has the mature chart-drawing and decades of trained analysts. NocTORnal makes provenance non-optional and ships the SNA maths (Leiden, Burt, key-player) rather than leaving it to a separate tool. |
-| **vs. a Neo4j project** | A graph database gives you the graph. Everything here that is hard — the assertion layer, the five-part access gate, TLP-gated egress, WORM custody, retention and legal hold — is the part you would then have to build. |
+| **vs. a Neo4j project** | A graph database gives you the graph. Everything here that is hard (the assertion layer, the five-part access gate, TLP-gated egress, WORM custody, retention and legal hold) is the part you would then have to build. |
 | **vs. a spreadsheet** | Honestly, a spreadsheet is fine for ten actors. The moment somebody asks "why do you say that?" about row 400, it is not. |
 
 ### What it is *not*
 
 - **Not an OSINT collection suite.** It ingests; it is not a scraper farm.
   Collection adapters exist for RSS and the ingest API, and the rest is
-  deliberately your problem — see the legal items above.
+  deliberately your problem. See the legal items above.
 - **Not an attribution oracle.** There is no "is this the same person?"
   button. There is a model that makes your reasoning explicit and
   reversible.
@@ -261,7 +261,7 @@ every screenshot below comes from:
 > `bootstrap.py session`, which prints a URL that opens the console already
 > signed in. That login is recorded in the audit trail as MFA-bypassed,
 > because a session that appeared from nowhere would be worse than no
-> session at all — and step-up-gated actions (merge, export, purge, sample
+> session at all, and step-up-gated actions (merge, export, purge, sample
 > download) stay refused until you have a real TOTP login.
 
 ### Verifying the install
@@ -271,11 +271,11 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped** — **1809 tests** (`def test_`
+Expect **every test to pass with 0 skipped**, **1809 tests** (`def test_`
 functions across both pytest roots; 2259 collected items once
 parametrised; a snapshot taken 2026-09-09, the live figure is `pytest
 --co -q`). **Without `DATABASE_URL` roughly half the suite skips
-instead** — it is database-gated by design. That is a correct result,
+instead**. It is database-gated by design. That is a correct result,
 not a broken install.
 
 ---
@@ -288,7 +288,7 @@ not a broken install.
 A hand-written 2D `<canvas>` renderer with a ForceAtlas2 layout in a web
 worker; the sketch's `sigma.js` WebGL renderer was replaced before anything
 was built. **Projections decide which edge types
-count as a social tie** — identity plumbing (`SAME_AS`, `ALIAS_OF`) stays
+count as a social tie**, identity plumbing (`SAME_AS`, `ALIAS_OF`) stays
 out, or whichever persona you researched hardest looks the most central.
 Inferred edges render **dashed** and are excluded from metrics unless a
 projection opts in. The bar along the bottom is world time: drag it and
@@ -320,7 +320,7 @@ alternatives that were **ruled out** beside the one that was not. An
 analytic line without its rejected competitors is an assertion, not an
 assessment.
 
-### Deception — phishing, BEC and vishing
+### Deception: phishing, BEC and vishing
 ![Deception](docs/images/14-deception.png)
 
 Captures where the screenshot, redirect chain and TLS certificate are
@@ -328,7 +328,7 @@ Captures where the screenshot, redirect chain and TLS certificate are
 recipient-first and its **trust boundary marked**, because everything
 above that hop is attacker-writable. Call records that keep the spoofable
 caller ID and the durable carrier attestation in separate, separately
-labelled blocks — collapsing them is how a crime gets attributed to
+labelled blocks, collapsing them is how a crime gets attributed to
 whoever's number the attacker picked. Every URL defanged and
 non-clickable. See [`docs/19`](docs/19-social-engineering-evidence.md).
 
@@ -338,7 +338,7 @@ non-clickable. See [`docs/19`](docs/19-social-engineering-evidence.md).
 Metadata renders; bytes never do. Samples are encrypted at rest and
 downloadable only from a **separate origin**. Detonation requests that
 would send anything outside the boundary require a named authoriser and a
-written reason — a database `CHECK`, not a code review.
+written reason, a database `CHECK`, not a code review.
 
 ### Channels and contact blocks
 ![Comms](docs/images/08-comms.png)
@@ -367,7 +367,7 @@ still rests on a live assertion.
 ### Capture and triage
 ![Capture and triage](docs/images/04-triage.png)
 
-Paste an observation — a forum profile, a vendor advert, a contact block —
+Paste an observation (a forum profile, a vendor advert, a contact block)
 and extraction raises **proposals**. Nothing here writes to the graph.
 Accept, reject or defer; a deferral parks the ambiguous item as DISPUTED
 rather than forcing a yes/no on something that does not deserve one yet.
@@ -386,7 +386,7 @@ previous review.
 
 Filtered by your own clearance and compartments, so an over-classified
 element is *invisible* rather than discoverable-then-403. The two columns
-load independently — one failing does not blank the other.
+load independently: one failing does not blank the other.
 
 ### Feeds and ingest
 ![Feeds and ingest](docs/images/09-feeds.png)
@@ -399,7 +399,7 @@ half-failing.
 ### Report
 ![Report](docs/images/11-report.png)
 
-Build at a target classification — the redaction is *structural*, so
+Build at a target classification. The redaction is *structural*, so
 nothing above that level is read at any point and it cannot be defeated by
 a name in a rationale field. Release is a separate action, through the
 egress gate, and is recorded either way.
@@ -453,7 +453,7 @@ flowchart TB
 The shape that matters: **machines only ever reach the proposal queue.**
 There is no arrow from an extractor to the graph. An analyst's decision is
 the only thing that promotes a suggestion into the model, and that
-decision writes an assertion carrying the machine's rationale — so the
+decision writes an assertion carrying the machine's rationale, so the
 graph never forgets a machine suggested it.
 
 ### The access gate
@@ -476,7 +476,7 @@ flowchart LR
 ```
 
 Two details carry the weight. **An element is protected by both its own
-labels and its case's** — a RED node can live in an AMBER case, so the
+labels and its case's**, a RED node can live in an AMBER case, so the
 effective label is the stricter classification and the union of the
 compartments. And **authorisation is decided before existence is
 revealed**: a caller with no relationship to a case gets the same 404 a
@@ -500,7 +500,7 @@ erDiagram
 `IDENTITY` (a persona you observed) and `PERSON` (a human you assessed)
 are different node types joined by a reversible `ATTRIBUTED_TO` edge
 carrying a confidence. There is no `real_name` column on `IDENTITY` and
-there never will be — that is invariant 2, and a trigger rejects a
+there never will be. That is invariant 2, and a trigger rejects a
 cross-layer `SAME_AS`.
 
 ---
@@ -515,10 +515,10 @@ test named after it.
 | 1 | **Nothing is a fact.** Every attribute and edge traces to a graded assertion | deferred constraint triggers on `node` and `edge` |
 | 2 | **A handle is not a person.** `IDENTITY` ≠ `PERSON`, joined reversibly | trigger rejecting cross-layer `SAME_AS` |
 | 3 | **Machines propose, analysts dispose** | no code path from extractor to graph |
-| 4 | **Inferred edges stay distinct** — dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
+| 4 | **Inferred edges stay distinct**, dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
 | 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion`; a retraction is a one-time stamp on the row, never a rewrite |
 | 6 | **The audit log is append-only** | row *and* statement triggers; `TRUNCATE` refused |
-| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process — there is no separate collector — so this bounds the shape of the code, not the blast radius of a compromised host |
+| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process (there is no separate collector) so this bounds the shape of the code, not the blast radius of a compromised host |
 | 8 | **TLP gates egress** | one `can_egress`, called by all four outbound paths |
 | 9 | **Durable identifiers, not displayed ones** | per-type normalisers; `durable_selector_type` |
 | 10 | **Samples never render, never execute** | separate origin, encryption at rest, `is_hostile_markup` |
@@ -535,11 +535,11 @@ test named after it.
 |---|---|---|
 | **System of record** | Postgres 16 + pgvector | The graph, the assertion ledger and the audit log live in **one transactional store**, so an inference and its justification commit or fail together. A separate graph database makes that a distributed-transaction problem, which is how provenance gets lost. |
 | **API** | Python 3.12+ / FastAPI | Async, typed, OpenAPI for free. |
-| **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** — pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain** — Louvain can produce internally disconnected communities. |
+| **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** (pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain**) Louvain can produce internally disconnected communities. |
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Migrations** | Alembic | 61 revisions (Alembic head 0061), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
-| **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction** — no dual write, no lost event. |
+| **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
 
@@ -551,8 +551,8 @@ the sociogram and a web worker runs the ForceAtlas2 layout; the sketch's
 A deliberate trade. The console is served same-origin by the API, so there
 is no CORS surface; there is no `unsafe-inline`, so a stored XSS has no
 scripting context; and the whole UI is auditable by reading it. For a tool
-that renders attacker-authored strings — forum handles, filenames, email
-display names — that mattered more than developer ergonomics. Every value
+that renders attacker-authored strings (forum handles, filenames, email
+display names) that mattered more than developer ergonomics. Every value
 reaching the DOM goes through `textContent`, never markup, and a test
 enforces it.
 
@@ -598,7 +598,7 @@ noctornal/
 | Read | For |
 |---|---|
 | **[`release/INSTALL.md`](release/INSTALL.md)** | installing, in detail, with troubleshooting |
-| **[`release/MANUAL.md`](release/MANUAL.md)** | operating it — every pane, every refusal, and what it means |
+| **[`release/MANUAL.md`](release/MANUAL.md)** | operating it, every pane, every refusal, and what it means |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
 | [`docs/00-decisions.md`](docs/00-decisions.md) | why the architecture is the way it is |
 | [`docs/01-domain-model.md`](docs/01-domain-model.md) | nodes, edges, selectors, assertions |
@@ -606,7 +606,6 @@ noctornal/
 | [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model |
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
-| [`TestFlight.md`](TestFlight.md) | **the install, actually performed** — every command, the output, and the three defects it found |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
 
@@ -636,7 +635,7 @@ fully green 953-test suite. They are fixed, and each leaves a rule:
 - **A forged verdict, from a parser trusting a stream it did not control.**
   A crafted OpenPGP user ID smuggled a fake `VALIDSIG` line into gpg's
   status output through characters `str.splitlines()` treats as line breaks
-  and gpg does not escape — minting a CONFIRMED identity binding for a key
+  and gpg does not escape, minting a CONFIRMED identity binding for a key
   the attacker never held. **The `CHECK` constraints could not catch it**,
   because both compared values came from the same lied-to parse. A
   constraint defends against the application *forgetting* to check, never
@@ -654,7 +653,7 @@ fully green 953-test suite. They are fixed, and each leaves a rule:
   wrong, not approximate.*
 
 **Determination D8 is now CLOSED.** A Telegram channel id and an unrelated
-user id could normalise to the same durable value — a strong selector, so
+user id could normalise to the same durable value, a strong selector, so
 it fed the merge lead an analyst is asked to confirm. The Bot-API encoding is arithmetic
 (`chat_id = -(10¹² + id)`), not a text prefix, and the old code stripped
 the characters `100`, which inverts it only for a ten-digit channel id.
@@ -663,7 +662,7 @@ migration `0051` re-keys stored selectors. It cannot undo a merge already
 made, and says so.
 
 **The software has been adversarially reviewed eight times. Every pass
-found a real defect — four times a critical one — each time under a fully
+found a real defect (four times a critical one) each time under a fully
 passing test suite. Three of those were green tests asserting the bug.
 Assume the ninth pass would find something too.**
 
@@ -682,5 +681,5 @@ Full reasoning, what it means for internal use, and the third-party
 position: **[`NOTICE.md`](NOTICE.md)**.
 
 Running it inside your own organisation imposes no publication duty. Your
-case data is yours — the licence covers the software and reaches nothing
+case data is yours. The licence covers the software and reaches nothing
 you put in it.
