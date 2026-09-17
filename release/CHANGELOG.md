@@ -2,6 +2,83 @@
 
 ## Unreleased
 
+### A destroyed data key is not an unopenable one
+
+Rejecting a sample destroys its data key along with the bytes it opened,
+deliberately, so that nothing can decrypt the object if it survives a
+bucket-lifecycle race. `lab.sample.data_key_ciphertext` is NOT NULL, so
+"the key is gone" is recorded as zero bytes.
+
+The key-ring inventory counted those rows as sealed material and handed
+them to AES-GCM, which rejected the empty nonce with a `ValueError` that
+was not in `envelope.UNOPENABLE`. It escaped every caller that had asked
+only whether a blob opened. One rejected sample was enough to take the
+whole `kek_ring_opens_stored_secrets` readiness check out, so the register
+reported an exception where it should have reported on the key ring, and
+said nothing about the ring at all.
+
+`rewrap_secrets.py --apply` hit the same rows in its `--legacy-key-file`
+mode, which visits every row rather than only those under a retired id,
+and aborted mid-pass. That is the recovery tool, run under pressure after
+restoring a key.
+
+Fixed at the root: `MalformedBlob` names the third way a stored secret
+fails to open and joins `UNOPENABLE`, so a short blob is reported rather
+than raised, and an empty ciphertext is excluded from the inventory and
+the rewrap because it is the absence of a sealed row, not a broken one.
+A login against a malformed secret now answers 503 naming the readiness
+check, as it already did for a missing or wrong key.
+
+### The installer had never been run on a clean machine, and did not work
+
+`release/INSTALL.md` promises the installer "checks what it needs and
+tells you exactly what to do if one is missing, rather than failing
+halfway". That had never been tested anywhere except a development box.
+Run on a VM built for it, Ubuntu 24.04 from the official cloud image with
+nothing added, it failed halfway three times. `release/CLEAN-VM-INSTALL.md`
+records the run.
+
+**It could not build a virtual environment on any stock Debian or Ubuntu.**
+A guard for this existed and asked the wrong question: `import venv`
+succeeds there, because `venv/` ships in `python3-minimal` while
+`python3.12-venv` carries the `ensurepip` that actually creates the
+environment. The guard passed, said nothing, and the install died two
+steps later inside `python -m venv`, in Python's voice rather than its
+own. It now asks for `ensurepip` and names the versioned package, derived
+from the interpreter it selected.
+
+**The failed environment was then mistaken for a good one.** A failed
+`venv` links `bin/python` before it dies, and the "already built" test was
+`-x "$VENV_PY"` alone. So the second run reported `.venv already exists`
+and died with `No module named pip`, a message further from the cause than
+the first run's, which never again mentioned the real fix. Installing the
+package the first run named did not help; only `rm -rf .venv` did, and
+nothing said so. The test now requires `bin/pip`, a half-built environment
+is named and rebuilt, and a failed `venv` removes its own wreckage.
+
+**Every non-interactive install died silently at the account prompt.**
+`docker compose exec` forwards the parent's stdin to the container even
+with `-T`, which disables the TTY and not the attach, so sixty iterations
+of the Postgres readiness loop drained whatever the installer was given.
+`read` then hit EOF and returned non-zero, and under `set -e` the script
+ended there, before the branch written to handle empty answers. The user
+saw the output stop mid-sentence at `Email: `, with exit 1 and no message.
+Anyone at a keyboard was fine, because a pty does not reach EOF, which is
+why it stood. Fixed by redirecting the probe's stdin and guarding both
+reads, which is also what makes that fallback branch reachable at all.
+
+Two smaller ones: the generated `.env.local` omitted the upload caps, so a
+new install carried a readiness warning and could not be promoted to a
+production deployment without meeting a boot refusal; and the shell scripts
+shipped `100644`, so `./release/install.sh` answered "Permission denied".
+
+All five are fixed and re-verified on the same VM. A single run with a file
+on stdin and no terminal now installs and serves: migrations to `0061`, an
+account with password and TOTP, `/ui/` answering 200. Five static checks in
+`test_script_invariants.py` hold them, in the same style as that file's
+existing installer tests, because nothing here is reachable by running the
+suite.
+
 ### MinIO's open source is archived, and CI found out first
 
 CI went red on a commit that changed documentation and nothing else. The

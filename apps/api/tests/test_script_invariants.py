@@ -202,3 +202,118 @@ def test_a_set_but_empty_variable_is_not_treated_as_unset(path: Path):
     # Whichever it is, the empty case has to SAY something -- silently
     # honouring it is how nobody noticed the old behaviour either.
     assert "EMPTY" in src
+
+
+# ---------------------------------------------------------------------------
+# The clean-VM install run, 2026-09-17 (release/CLEAN-VM-INSTALL.md)
+# ---------------------------------------------------------------------------
+#
+# Three defects stopped a new user on stock Ubuntu 24.04. None of them was
+# reachable from this suite before, and none is reachable now by running
+# anything: these are the static checks that would have fired.
+
+SH_INSTALLER = REPO / "release" / "install.sh"
+
+
+def test_the_venv_guard_asks_for_ensurepip_not_just_venv():
+    """R25. `import venv` succeeds on a machine that cannot build one.
+
+    `venv/` ships in python3-minimal; python3.12-venv carries `ensurepip`
+    and the pip wheel it installs. So the guard, which asked only for
+    `venv`, passed on a stock Ubuntu 24.04 and the install died two steps
+    later inside `python -m venv`, printing Python's message about
+    `apt install python3.12-venv` rather than one of this script's own
+    "Cannot continue / What to do" blocks. Measured on a clean VM:
+    `import venv` exit 0, `import ensurepip` exit 1.
+    """
+    src = SH_INSTALLER.read_text(encoding="utf-8")
+    assert "import ensurepip" in src, (
+        "install.sh checks `import venv`, which is true on every Debian "
+        "and Ubuntu box whether or not a venv can actually be built. "
+        "ensurepip is the one that decides")
+    # And it must name the VERSIONED package: `apt install python3-venv`
+    # on a host whose default python3 is not the interpreter the script
+    # found installs the wrong one and changes nothing.
+    assert "-venv" in src and "basename" in src, (
+        "the message should name python3.12-venv, derived from the "
+        "interpreter actually selected, not a bare python3-venv")
+
+
+def test_a_half_built_venv_is_not_mistaken_for_a_good_one():
+    """R26. A failed `venv` leaves bin/python and no pip.
+
+    The "already built" test was `-x "$VENV_PY"` alone, which that
+    wreckage satisfies. So the second run reported '.venv already exists',
+    went on to install dependencies, and died with 'No module named pip':
+    a message FURTHER from the cause than the first run's, and one that
+    never mentioned the real fix again however many times it was re-run.
+    Installing the package the first run named did not help. Only
+    `rm -rf .venv` did, and nothing said so.
+    """
+    src = SH_INSTALLER.read_text(encoding="utf-8")
+    assert '-x "$VENV/bin/pip"' in src, (
+        "install.sh decides the environment is already built without "
+        "checking for pip, so it cannot tell a working venv from the "
+        "remains of a failed one")
+    # A failure must not leave the wreckage behind for the next run.
+    assert src.count('rm -rf "$VENV"') >= 2, (
+        "a failed `python -m venv` must remove its partial directory, or "
+        "the next run takes the already-exists path over it")
+
+
+def test_the_readiness_probe_does_not_eat_the_installers_stdin():
+    """R27. `docker compose exec` forwards stdin even with -T.
+
+    -T disables the TTY, not the attach. Sixty iterations of the Postgres
+    readiness loop therefore drained whatever the installer was given, and
+    the account prompt below read EOF. Every non-interactive install hit
+    it: piped input, cron, CI, cloud-init, Ansible, ssh without a TTY. A
+    person at a keyboard never did, because a pty does not reach EOF,
+    which is why it stood.
+    """
+    src = SH_INSTALLER.read_text(encoding="utf-8")
+    probe = [ln for ln in src.splitlines() if "pg_isready" in ln]
+    assert probe, "the Postgres readiness probe moved; this test is blind"
+    assert any("/dev/null" in ln for ln in probe), (
+        "`docker compose exec -T postgres pg_isready` runs without "
+        "redirecting stdin, so it eats the answers meant for the account "
+        "prompt and the install ends mid-sentence with no message")
+
+
+def test_the_account_prompt_survives_end_of_input():
+    """R27, second half. `read` returns non-zero at EOF and `set -e` acts
+    on it BEFORE the emptiness test, so the branch written to handle "they
+    gave nothing" was unreachable. The script just stopped, having printed
+    `Email: ` and nothing after it, with exit 1 and no error.
+    """
+    src = SH_INSTALLER.read_text(encoding="utf-8")
+    assert "set -e" in src, "if this is no longer set -e, re-read this test"
+    reads = [ln for ln in src.splitlines() if ln.strip().startswith("read -r ADMIN")]
+    assert len(reads) == 2, f"expected two prompts, found {len(reads)}"
+    for line in reads:
+        assert "|| true" in line, (
+            f"unguarded `read` under set -e: {line.strip()!r}. At EOF this "
+            f"ends the script instead of reaching the 'Skipped: both an "
+            f"email and a display name are needed' branch below it")
+
+
+@pytest.mark.parametrize("path", INSTALLERS, ids=lambda p: p.name)
+def test_the_generated_env_declares_the_upload_caps(path: Path):
+    """R28. Production refuses to boot without an evidence cap.
+
+    `config.verify_environment` stops a production boot while
+    NOCTORNAL_MAX_EVIDENCE_BYTES is unset, on purpose: a cap nobody chose
+    is a cap nobody can be held to. The installers wrote every other
+    setting and not that one, so the obvious act of promoting the
+    generated `.env.local` to a real deployment met a boot refusal with no
+    hint the line had ever been available. On the dev stack it showed up
+    as `evidence_size_cap_declared` warning on a brand-new install.
+    """
+    src = path.read_text(encoding="utf-8")
+    for key in ("NOCTORNAL_MAX_EVIDENCE_BYTES",
+                "NOCTORNAL_MAX_SAMPLE_BYTES",
+                "INGEST_BUCKET"):
+        assert key in src, (
+            f"{path.name} generates .env.local without {key}, so a fresh "
+            f"install is born with a readiness warning it could have "
+            f"avoided, and the file cannot be promoted as written")
