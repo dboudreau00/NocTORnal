@@ -407,6 +407,36 @@ def test_rejection_destroys_the_data_key_too(conn, svc):
     assert bytes(row[0]) == b""
 
 
+def test_a_destroyed_data_key_is_not_read_as_a_sealed_row(conn, svc):
+    """The key ring must not mistake a purge for a broken key.
+
+    `data_key_ciphertext` is NOT NULL, so "the key is gone" is recorded
+    as zero bytes. Until 2026-09-16 `sealed.inventory` counted those rows
+    and handed them to the envelope, which answered `ValueError: Nonce
+    must be between 8 and 128 bytes` -- outside `UNOPENABLE`, so it
+    escaped and took the whole `kek_ring_opens_stored_secrets` check with
+    it. One rejected sample was enough, and the register then said
+    nothing about the key ring at all. `rewrap_secrets.py --apply` hit
+    the same rows in its `--legacy-key-file` mode and aborted mid-pass.
+    """
+    from noctornal_api import readiness
+    from noctornal_api.security.sealed import inventory
+
+    alice = _user(conn)
+    s = svc.submit(_unique("inventory"), submitted_by=alice)
+    assert any(g.table == "lab.sample" for g in inventory(conn))
+    before = {(g.table, g.key_id): g.rows for g in inventory(conn)}
+
+    svc.reject(s.id, actor_id=alice, reason="prohibited")
+
+    after = {(g.table, g.key_id): g.rows for g in inventory(conn)}
+    assert all(g.problem is None for g in inventory(conn))
+    assert sum(after.values()) == sum(before.values()) - 1
+    check = next(c for c in readiness.report(conn)["checks"]
+                 if c["check"] == "kek_ring_opens_stored_secrets")
+    assert check["ok"], check["evidence"]
+
+
 def test_a_rejection_has_to_say_why(conn, svc):
     from noctornal_api.samples import SampleError
     alice = _user(conn)

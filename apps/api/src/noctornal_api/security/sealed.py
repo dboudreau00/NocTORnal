@@ -75,17 +75,28 @@ def inventory(conn: psycopg.Connection, *,
               sample: int = SAMPLE_ROWS) -> list[SealedGroup]:
     """Every (table, key id) pair holding sealed rows, with how many of
     its first `sample` rows the ring opens. A NULL key id is read as
-    `envelope.DEFAULT_KEY_ID`, which is what `decrypt` does with it."""
+    `envelope.DEFAULT_KEY_ID`, which is what `decrypt` does with it.
+
+    An EMPTY ciphertext is not a sealed row and is excluded. The columns
+    are NOT NULL, so the only way to record "there is no key here" is
+    zero bytes, and `SampleService.reject` writes exactly that when it
+    purges: the data key is destroyed WITH the bytes it opened. Until
+    2026-09-16 those rows were counted and opened like any other, so one
+    rejected sample was enough to take the whole readiness check out with
+    `ValueError: Nonce must be between 8 and 128 bytes` -- a true
+    sentence about the wrong question. A destroyed key is the ABSENCE of
+    a sealed row, not evidence about the ring.
+    """
     out: list[SealedGroup] = []
     for table, cipher, kid in SEALED_COLUMNS:
         groups = conn.execute(
             f"SELECT COALESCE({kid}, %s), count(*) FROM {table} "
-            f"WHERE {cipher} IS NOT NULL GROUP BY 1 ORDER BY 1",
+            f"WHERE octet_length({cipher}) > 0 GROUP BY 1 ORDER BY 1",
             (envelope.DEFAULT_KEY_ID,)).fetchall()
         for key_id, rows in groups:
             blobs = conn.execute(
                 f"SELECT {cipher} FROM {table} "
-                f"WHERE COALESCE({kid}, %s) = %s AND {cipher} IS NOT NULL "
+                f"WHERE COALESCE({kid}, %s) = %s AND octet_length({cipher}) > 0 "
                 f"ORDER BY id LIMIT %s",
                 (envelope.DEFAULT_KEY_ID, key_id, sample)).fetchall()
             unopenable, problem = 0, None
@@ -127,6 +138,14 @@ def rewrap_table(conn: psycopg.Connection, table: str, cipher: str, kid: str,
     The compare-and-set is on the ciphertext, not the key id, because two
     rows under one id are told apart only by their bytes. Keyset-paged on
     `id`, so a row this pass cannot move cannot make it loop.
+
+    Rows with an EMPTY ciphertext are skipped for `inventory`'s reason: a
+    purged sample's data key was destroyed on purpose, and re-sealing
+    zero bytes would manufacture a key for material that no longer
+    exists. Without the filter this aborted mid-pass, but only WITH
+    `legacy` -- the predicate below is what spares those rows otherwise,
+    since they sit under the active id -- so the fault was hidden in
+    exactly the mode the runbook calls for after a key restore.
     """
     active = envelope.active_key_id()
     report = RewrapReport(table)
@@ -134,7 +153,7 @@ def rewrap_table(conn: psycopg.Connection, table: str, cipher: str, kid: str,
     while True:
         rows = conn.execute(
             f"SELECT id, {cipher}, {kid} FROM {table} "
-            f"WHERE {cipher} IS NOT NULL "
+            f"WHERE octet_length({cipher}) > 0 "
             f"AND (%s OR COALESCE({kid}, %s) <> %s) "
             f"AND (%s::uuid IS NULL OR id > %s) ORDER BY id LIMIT %s",
             (legacy is not None, envelope.DEFAULT_KEY_ID, active,
