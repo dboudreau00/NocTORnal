@@ -94,10 +94,33 @@ class KeyUnavailable(LookupError):
             f"an entry in {_RETIRED_ENV}")
 
 
+class MalformedBlob(ValueError):
+    """The bytes are not an envelope at all: too short to hold a nonce.
+
+    The third way a stored secret fails to open, and the one that was
+    missing until 2026-09-16. `decrypt` used to hand a short blob
+    straight to AESGCM, which answered `ValueError: Nonce must be
+    between 8 and 128 bytes` -- outside `UNOPENABLE`, so it escaped every
+    caller that had asked only whether the blob opened. The readiness
+    check died with that sentence instead of naming a table, and
+    `rewrap_secrets.py --apply` aborted mid-pass in the recovery mode
+    that visits every row, which is the one run under pressure after a
+    key restore. Named here so the answer is "this did not open" in the
+    same shape as the other two.
+    """
+
+    def __init__(self, length: int):
+        self.length = length
+        super().__init__(
+            f"not an envelope: {length} byte(s) cannot hold a "
+            f"{_NONCE_BYTES}-byte nonce and a tag")
+
+
 #: What a caller catches when a stored secret cannot be opened, whichever
-#: of the two reasons applies. `AuthService.authenticate` turns it into a
-#: refusal a client can act on rather than a 500.
-UNOPENABLE: tuple[type[Exception], ...] = (KeyUnavailable, InvalidTag)
+#: of the three reasons applies. `AuthService.authenticate` turns it into
+#: a refusal a client can act on rather than a 500.
+UNOPENABLE: tuple[type[Exception], ...] = (
+    KeyUnavailable, InvalidTag, MalformedBlob)
 
 
 def _decode_key(raw: str, *, name: str) -> bytes:
@@ -203,17 +226,20 @@ def encrypt(plaintext: str) -> tuple[bytes, str]:
 def decrypt(blob: bytes, *, key_id: str | None = None) -> str:
     """Open `blob` with the key its recorded id names.
 
-    Raises `KeyUnavailable` when the ring holds no key of that id, and
+    Raises `KeyUnavailable` when the ring holds no key of that id,
     `cryptography.exceptions.InvalidTag` when it holds one that does not
     open the blob -- a tampered blob, or a key that changed under an id
-    that did not, which is the failure this module exists to name.
-    `UNOPENABLE` is the pair, for a caller that only needs to know the
-    blob did not open.
+    that did not, which is the failure this module exists to name -- and
+    `MalformedBlob` when the bytes are too short to be an envelope.
+    `UNOPENABLE` is the three of them, for a caller that only needs to
+    know the blob did not open.
     """
     wanted = key_id or DEFAULT_KEY_ID
     key = ring().get(wanted)
     if key is None:
         raise KeyUnavailable(wanted)
+    if len(blob) <= _NONCE_BYTES:
+        raise MalformedBlob(len(blob))
     nonce, ct = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
     return AESGCM(key).decrypt(nonce, ct, None).decode("utf-8")
 
@@ -227,6 +253,8 @@ def can_open(blob: bytes, *, key_id: str | None) -> str | None:
     try:
         decrypt(blob, key_id=key_id)
     except KeyUnavailable as exc:
+        return str(exc)
+    except MalformedBlob as exc:
         return str(exc)
     except InvalidTag:
         return (f"the key with id {(key_id or DEFAULT_KEY_ID)!r} does not open "
@@ -253,5 +281,7 @@ def open_with(blob: bytes, key: bytes) -> str:
     """
     if len(key) != 32:
         raise ValueError("a key is exactly 32 bytes")
+    if len(blob) <= _NONCE_BYTES:
+        raise MalformedBlob(len(blob))
     nonce, ct = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
     return AESGCM(key).decrypt(nonce, ct, None).decode("utf-8")

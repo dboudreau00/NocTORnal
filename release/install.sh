@@ -148,11 +148,34 @@ Then run this script again."
 # `venv` is a separate package on Debian-family systems and its absence
 # only shows up at the create step, with a message that does not name the
 # package. Check it here instead.
-if ! "$PYTHON" -c 'import venv' >/dev/null 2>&1; then
-  stop_with "Python is installed but the venv module is missing." \
-    "Debian/Ubuntu:  sudo apt install python3-venv
+#
+# ASK FOR ensurepip, NOT venv. `import venv` succeeds on a stock Ubuntu
+# 24.04 that cannot build an environment at all, because `venv/` ships in
+# python3-minimal while python3.12-venv carries `ensurepip` and the pip
+# wheel it installs. So this guard passed, said nothing, and the install
+# died two steps later inside `python -m venv` with a message in Python's
+# voice rather than this script's. Measured on a clean VM, 2026-09-17:
+# `import venv` exit 0, `import ensurepip` exit 1, `python3.12 -m venv`
+# non-zero. `venv` is still checked, because a stripped build could lack
+# either.
+missing_venv=""
+"$PYTHON" -c 'import venv'      >/dev/null 2>&1 || missing_venv="venv"
+"$PYTHON" -c 'import ensurepip' >/dev/null 2>&1 || missing_venv="${missing_venv:+$missing_venv and }ensurepip"
+if [[ -n "$missing_venv" ]]; then
+  # python3.12 -> python3.12-venv. Naming the versioned package matters:
+  # `apt install python3-venv` on a host whose default python3 is not the
+  # interpreter found above installs the wrong one and changes nothing.
+  py_pkg="$(basename "$PYTHON")-venv"
+  stop_with "Python is installed but cannot build a virtual environment ($missing_venv missing)." \
+    "Debian/Ubuntu:  sudo apt install $py_pkg
+                (or: sudo apt install python3-venv)
+Fedora:         sudo dnf install python3-devel
 
-This is a separate package on Debian-family systems."
+This is a separate package on Debian-family systems: the interpreter is
+present and importing 'venv' succeeds, but 'ensurepip' is what actually
+creates the environment, and it ships separately.
+
+Then run this script again."
 fi
 
 # ---------------------------------------------------------------------------
@@ -188,8 +211,28 @@ VENV="$REPO_ROOT/.venv"
 VENV_PY="$VENV/bin/python"
 
 step 'Building the Python environment'
-if [[ -x "$VENV_PY" ]]; then
+if [[ -x "$VENV_PY" && -x "$VENV/bin/pip" ]]; then
   good '.venv already exists'
+elif [[ -x "$VENV_PY" ]]; then
+  # An interpreter but no pip: `python -m venv` got far enough to link the
+  # binaries and then failed at ensurepip. This is not someone's
+  # environment, it is the wreckage of an interrupted run of THIS script,
+  # and it is safe to remove.
+  #
+  # It used to be indistinguishable from a good one, because the test
+  # above was `-x "$VENV_PY"` alone and a half-built venv has bin/python.
+  # The second run therefore reported '.venv already exists', went on to
+  # install dependencies, and died with 'No module named pip' -- a message
+  # FURTHER from the cause than the first run's, and one that never
+  # mentioned the real fix again however many times it was re-run.
+  note 'a previous run left a half-built .venv (no pip); rebuilding it'
+  rm -rf "$VENV"
+  detail 'creating .venv (this takes a moment)'
+  "$PYTHON" -m venv "$VENV" || { rm -rf "$VENV"; stop_with \
+    "the virtual environment could not be created." \
+    "The output above says why. Nothing was left behind, so fixing the
+cause and running this again is all that is needed."; }
+  good 'created'
 elif [[ -e "$VENV" ]]; then
   # Something is there and it is not a Unix venv. Refuse rather than
   # write over it: `python -m venv` on an existing directory MERGES, so a
@@ -204,7 +247,13 @@ Delete it and run this again:
     rm -rf '$VENV'"
 else
   detail 'creating .venv (this takes a moment)'
-  "$PYTHON" -m venv "$VENV"
+  # Remove the partial directory on failure. Leaving it is what turned a
+  # clear "install python3.12-venv" into a permanent "No module named
+  # pip" on every later run.
+  "$PYTHON" -m venv "$VENV" || { rm -rf "$VENV"; stop_with \
+    "the virtual environment could not be created." \
+    "The output above says why. Nothing was left behind, so fixing the
+cause and running this again is all that is needed."; }
   good 'created'
 fi
 
@@ -291,6 +340,21 @@ MINIO_ACCESS_KEY=noctornal
 MINIO_SECRET_KEY=dev_only_change_me
 EVIDENCE_BUCKET=noctornal-evidence
 SAMPLE_BUCKET=noctornal-samples
+# Raw partner submissions, deliberately in a bucket WITHOUT object lock:
+# an exhibit is locked so not even root can delete it before its deadline,
+# and a partner's raw submission has to stay deletable to answer a
+# deletion order.
+INGEST_BUCKET=noctornal-raw
+
+# The largest exhibit and the largest sample this deployment accepts,
+# declared rather than defaulted. Production REFUSES TO BOOT while
+# NOCTORNAL_MAX_EVIDENCE_BYTES is unset, because a cap nobody chose is a
+# cap nobody can be held to; the development stack only warns. These are
+# written here so that promoting this file to a real deployment, which is
+# the obvious thing to do with it, does not meet a boot refusal with no
+# hint that the line was ever available. Accepts 256MB, 1G, or bytes.
+NOCTORNAL_MAX_EVIDENCE_BYTES=256MB
+NOCTORNAL_MAX_SAMPLE_BYTES=64MB
 
 # Mailpit, on the dev stack only. SMTP_ALLOW_PLAINTEXT is required
 # explicitly: sending case material over an unencrypted connection is a
@@ -336,10 +400,21 @@ detail 'waiting for Postgres to report healthy'
 # block on the postgres healthcheck via openfga-migrate's service_healthy
 # condition, which MASKED this — and R13 removes OpenFGA, so the branch has
 # to go in with that change rather than after it.
+# `< /dev/null` IS LOAD-BEARING. `docker compose exec` forwards the
+# parent's stdin to the container even with -T, which disables the TTY and
+# not the attach, so sixty iterations of this loop drained whatever the
+# installer was given. The account prompt below then read EOF, and under
+# `set -e` the script ended there: no account, no API, exit 1, and the
+# last thing printed was "Email: " with nothing after it. Every
+# non-interactive install hit it (piped input, cron, CI, cloud-init,
+# Ansible, ssh without a TTY); nobody typing at a terminal ever did,
+# because a pty does not reach EOF, which is why this stood for so long.
+# Measured on a clean VM, 2026-09-17: one `exec -T` left `read` with
+# nothing, while `compose up -d` left it intact.
 PG_READY=0
 for _ in $(seq 1 60); do
   if docker compose -f "$REPO_ROOT/infra/docker-compose.yml" \
-       exec -T postgres pg_isready -U noctornal >/dev/null 2>&1; then
+       exec -T postgres pg_isready -U noctornal >/dev/null 2>&1 </dev/null; then
     good 'Postgres is ready'
     PG_READY=1
     break
@@ -394,17 +469,23 @@ if [[ "$USERS" == "0" ]]; then
   detail 'Enter an email and a display name. A strong password is generated'
   detail 'and printed ONCE, with a QR code to scan into an authenticator.'
   printf '\n'
+  # `|| true` is not decoration either. `read` returns non-zero at EOF,
+  # and `set -e` acts on that BEFORE the emptiness test below, so the
+  # branch written to handle "they gave nothing" was unreachable: the
+  # script simply stopped, mid-sentence, with no message at all. Anything
+  # that is not a terminal reaches EOF here.
+  ADMIN_EMAIL=""; ADMIN_NAME=""
   printf '    Email: '
-  read -r ADMIN_EMAIL
+  read -r ADMIN_EMAIL || true
   printf '    Display name: '
-  read -r ADMIN_NAME
+  read -r ADMIN_NAME || true
+  printf '\n'
   if [[ -z "$ADMIN_EMAIL" || -z "$ADMIN_NAME" ]]; then
     note 'Skipped: both an email and a display name are needed.'
     detail 'Create one later with:'
     detail "  .venv/bin/python scripts/bootstrap.py create-user \\"
     detail "      --email you@example.org --name 'Your Name'"
   else
-    printf '\n'
     ( cd "$REPO_ROOT" && "$VENV_PY" scripts/bootstrap.py create-user \
         --email "$ADMIN_EMAIL" --name "$ADMIN_NAME" )
   fi

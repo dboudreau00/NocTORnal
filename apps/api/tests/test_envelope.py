@@ -128,3 +128,43 @@ def test_rewrap_moves_a_blob_to_the_active_key(monkeypatch):
     _ring(monkeypatch, active=_B, active_id="env:v2")   # A dropped
     assert envelope.decrypt(new_blob, key_id=new_id) == "move me"
     assert envelope.can_open(blob, key_id=key_id)         # the old blob is gone for good
+
+
+@pytest.mark.parametrize("blob", [b"", b"short", b"eleven byte"])
+def test_a_blob_too_short_to_be_an_envelope_reports_rather_than_raises(
+        monkeypatch, blob):
+    """The third way a stored secret fails to open.
+
+    `data_key_ciphertext` is NOT NULL, so `SampleService.reject` records
+    a destroyed key as zero bytes. Those bytes used to reach AESGCM,
+    which answered `ValueError: Nonce must be between 8 and 128 bytes` --
+    true, and about the wrong question. Outside `UNOPENABLE`, it escaped
+    every caller that had asked only whether the blob opened: the
+    readiness check died on it and the rewrap tool aborted mid-pass.
+    """
+    _ring(monkeypatch, active=_A)
+    with pytest.raises(envelope.MalformedBlob):
+        envelope.decrypt(blob, key_id="env:v1")
+    assert isinstance(envelope.MalformedBlob(0), ValueError)
+    assert envelope.MalformedBlob in envelope.UNOPENABLE
+    problem = envelope.can_open(blob, key_id="env:v1")
+    assert problem and "not an envelope" in problem
+    assert str(len(blob)) in problem
+
+
+def test_a_missing_key_is_named_before_the_blob_is_measured(monkeypatch):
+    """Order matters: a short blob under an id the ring does not hold is
+    an operator's key problem, not a corrupt row, and saying "not an
+    envelope" would send them to the wrong runbook."""
+    _ring(monkeypatch, active=_A)
+    with pytest.raises(envelope.KeyUnavailable):
+        envelope.decrypt(b"", key_id="env:nope")
+
+
+def test_open_with_measures_the_blob_too(monkeypatch):
+    """The legacy recovery path takes the same rows, so it needs the
+    same answer: `rewrap_secrets.py --legacy-key-file` falls through to
+    `open_with` for every row the ring cannot open."""
+    _ring(monkeypatch, active=_A)
+    with pytest.raises(envelope.MalformedBlob):
+        envelope.open_with(b"", base64.b64decode(_A))

@@ -215,12 +215,27 @@ $Venv       = Join-Path $RepoRoot '.venv'
 $VenvPython = Join-Path $Venv 'Scripts\python.exe'
 
 Write-Step 'Building the Python environment'
-if (Test-Path $VenvPython) {
+$VenvPip = Join-Path $Venv 'Scripts\pip.exe'
+if ((Test-Path $VenvPython) -and (Test-Path $VenvPip)) {
     Write-Good '.venv already exists'
 } else {
+    # An interpreter and no pip is the wreckage of an interrupted run, not
+    # an environment. Testing only for python.exe meant the next run said
+    # '.venv already exists' and then died with 'No module named pip',
+    # which names neither the cause nor the fix, on every attempt after.
+    # Found on Linux (release finding R26); the same shape is here.
+    if (Test-Path $VenvPython) {
+        Write-Note 'a previous run left a half-built .venv (no pip); rebuilding it'
+        Remove-Item -Recurse -Force $Venv
+    }
     Write-Detail 'creating .venv (this takes a moment)'
     & $python -m venv $Venv
-    if ($LASTEXITCODE -ne 0) { Stop-With 'could not create the virtual environment.' 'Check that the venv module is available: python -m venv --help' }
+    if ($LASTEXITCODE -ne 0) {
+        # Leave nothing behind, so the next run starts clean instead of
+        # taking the "already exists" path over a broken directory.
+        if (Test-Path $Venv) { Remove-Item -Recurse -Force $Venv }
+        Stop-With 'could not create the virtual environment.' 'Check that the venv module is available: python -m venv --help'
+    }
     Write-Good 'created'
 }
 
@@ -321,6 +336,21 @@ if (Test-Path $EnvLocal) {
         'MINIO_SECRET_KEY=dev_only_change_me',
         'EVIDENCE_BUCKET=noctornal-evidence',
         'SAMPLE_BUCKET=noctornal-samples',
+        '# Raw partner submissions, deliberately in a bucket WITHOUT object',
+        '# lock: an exhibit is locked so not even root can delete it before',
+        '# its deadline, and a partner submission has to stay deletable to',
+        '# answer a deletion order.',
+        'INGEST_BUCKET=noctornal-raw',
+        '',
+        '# The largest exhibit and the largest sample this deployment',
+        '# accepts, declared rather than defaulted. Production REFUSES TO',
+        '# BOOT while NOCTORNAL_MAX_EVIDENCE_BYTES is unset, because a cap',
+        '# nobody chose is a cap nobody can be held to; the development',
+        '# stack only warns. Written here so that promoting this file to a',
+        '# real deployment does not meet a boot refusal with no hint that',
+        '# the line was available. Accepts 256MB, 1G, or bytes.',
+        'NOCTORNAL_MAX_EVIDENCE_BYTES=256MB',
+        'NOCTORNAL_MAX_SAMPLE_BYTES=64MB',
         '',
         '# Mailpit, on the dev stack only. SMTP_ALLOW_PLAINTEXT is required',
         '# explicitly: sending case material over an unencrypted connection',
