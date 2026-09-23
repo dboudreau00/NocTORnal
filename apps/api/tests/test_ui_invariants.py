@@ -735,7 +735,7 @@ def test_an_unrenderable_value_is_not_drawn_as_a_position():
     assert "pen = false" in body, (
         "an unrenderable value would be drawn at some position anyway")
     html = _html()
-    start = html.index("Trend &mdash; one actor across past runs")
+    start = html.index("Trend: one actor across past runs")
     # Whitespace-normalised: the source wraps prose at 72 columns, so any
     # phrase long enough to be worth asserting on is split by a newline and
     # an indent. A test that cannot survive re-wrapping is a test that gets

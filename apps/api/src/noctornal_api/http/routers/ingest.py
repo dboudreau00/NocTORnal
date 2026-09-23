@@ -530,7 +530,7 @@ def parse_batch(
         "dead_letters": result.dead, "duplicates": result.duplicates,
         "warnings": result.warnings,
         "notice": ("Fragments that failed to parse are in the dead-letter "
-                   "queue, structurally redacted — keys, types and lengths, "
+                   "queue, structurally redacted: keys, types and lengths, "
                    "never values. The verbatim bytes stay in the batch's raw "
                    "object under its own retention. Silent drops are how you "
                    "find out six months later that a feed has been "
@@ -714,7 +714,7 @@ def dead_letters(
                    "2026-07-25 are withheld until the repair script runs. "
                    "Listed: dead letters of feeds into cases you are "
                    "assigned to, plus unattached ones if you hold "
-                   "ingest.manage -- `scope` says which applied.")}
+                   "ingest.manage (`scope` says which applied).")}
     if api_key_id is not None:
         out["dead_letter_rate_24h"] = IngestService(conn).dead_letter_rate(
             api_key_id)
@@ -848,7 +848,7 @@ def records(
          clearance.name, list(compartments), limit)).fetchall()
     return {"records": [_queue_row(r) for r in rows], "count": len(rows),
             "notice": (
-                "Near-duplicates are folded, not dropped — duplicate_count "
+                "Near-duplicates are folded, not dropped, and duplicate_count "
                 "says how many. Payloads are not returned here: a record can "
                 "hold a whole stealer log, and this is a queue.")}
 

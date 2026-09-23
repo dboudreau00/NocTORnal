@@ -226,8 +226,8 @@ def cap_problem(name: str) -> str | None:
     try:
         value = parse_size(raw)
     except ValueError:
-        return (f"{name} is not a size (bytes, or a whole number with K, M or "
-                f"G -- binary -- such as 512MiB)")
+        return (f"{name} is not a size (bytes, or a whole number with a "
+                f"binary K, M or G, such as 512MiB)")
     if not CAP_FLOOR <= value <= CAP_CEILING:
         return f"{name} must be between 1 MiB and 64 GiB"
     return None
@@ -330,8 +330,8 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
             except (RuntimeError, ValueError) as exc:
                 problems.append(
                     f"the key ring is not usable ({exc}), so every blob sealed "
-                    f"under a retired key -- every TOTP secret, persona credential "
-                    f"and sample data key from before a rotation -- opens for "
+                    f"under a retired key (every TOTP secret, persona credential "
+                    f"and sample data key from before a rotation) opens for "
                     f"nobody, and the process would otherwise start and find that "
                     f"out at the first login.")
 
@@ -346,7 +346,7 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     if not env.get("REDIS_URL", "").strip():
         problems.append(
             "REDIS_URL is not set, so rate limiting is per process and N uvicorn "
-            "workers between them admit N times the configured rate -- the login "
+            "workers between them admit N times the configured rate: the login "
             "limit an attacker actually meets is the one this deployment thinks "
             "it set, multiplied by its own worker count.")
 
@@ -425,7 +425,7 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
                 "lifted from a log, a proxy or a workstation is accepted from "
                 "any address and any client: 0058 records where each session "
                 "was minted, and with the control off nothing ever compares a "
-                "presentation against it -- not even to audit the difference.")
+                "presentation against it, not even to audit the difference.")
 
     if _truthy(env.get("NOCTORNAL_ENABLE_DOCS", "")):
         problems.append(
@@ -453,8 +453,8 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
             problems.append(
                 f"{name} is not set, so SampleStorage silently falls back to "
                 f"{evidence_twin} and the malware bucket is opened with the "
-                f"evidence bucket's credentials -- docs/11 requires the sample "
-                f"bucket to have its own, and nothing at runtime reports the "
+                f"evidence bucket's credentials (docs/11 requires the sample "
+                f"bucket to have its own), and nothing at runtime reports the "
                 f"fallback.")
 
     # docs/08, "Exhibit size policy". Every accepted evidence byte is
@@ -474,8 +474,8 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     if not env.get(EVIDENCE_CAP_ENV, "").strip():
         problems.append(
             f"{EVIDENCE_CAP_ENV} is not set, so the largest exhibit this "
-            f"deployment accepts -- and locks under COMPLIANCE for the whole "
-            f"retention period, which no credential can shorten -- is a "
+            f"deployment accepts (and locks under COMPLIANCE for the whole "
+            f"retention period, which no credential can shorten) is a "
             f"default nobody here decided; declare it (docs/08, exhibit size "
             f"policy).")
 
@@ -504,7 +504,13 @@ def enforce_environment(env: Mapping[str, str] | None = None) -> None:
     raise RuntimeError(
         f"{ENV_VAR}={PRODUCTION}, and this environment is not one this build "
         f"will start on:\n{listed}\n"
-        f"All {len(problems)} problem(s) found are listed above -- there is no "
-        f"second one waiting behind the first. Unset {ENV_VAR} to run as "
+        # Agreed with the count rather than a bracketed plural (README
+        # screenshot set review, 2026-09-23). One problem is still said to
+        # be the only one, which is the point of listing them all.
+        + ("The one problem found is listed above. There is no second one "
+           "waiting behind it. " if len(problems) == 1 else
+           f"All {len(problems)} problems found are listed above. There is "
+           f"no further one waiting behind them. ")
+        + f"Unset {ENV_VAR} to run as "
         f"development, which is what a laptop and CI do."
     )

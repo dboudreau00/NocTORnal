@@ -221,14 +221,14 @@ def _warn_if_evicting(backend, url: str) -> None:
         log.info(
             "rate-limit Redis at %s: maxmemory-policy is unknown (CONFIG GET was "
             "refused, which managed Redis usually does). Confirm out of band that "
-            "it runs with maxmemory-policy=noeviction -- docs/16 C8.",
+            "it runs with maxmemory-policy=noeviction (docs/16 C8).",
             redacted_url(url),
         )
     elif is_evicting_policy(policy):
         log.warning(
             "%s (maxmemory-policy=%s at %s). Under memory pressure Redis will "
             "delete live rate-limit meters, and a deleted meter admits the "
-            "subject it was refusing with a full burst -- the limiter stops "
+            "subject it was refusing with a full burst: the limiter stops "
             "limiting whoever the cache evicts, silently. Run the limiter's "
             "Redis with maxmemory-policy=noeviction, or give it its own "
             "instance (docs/16 C8; infra/docker-compose.yml sets allkeys-lru).",

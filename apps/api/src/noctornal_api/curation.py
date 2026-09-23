@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import functools
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from uuid import UUID
 
 import psycopg
@@ -479,6 +479,13 @@ class SearchHit:
     #: searching that name answered "No entities match", which reads as
     #: "not in this case".
     merged_name: str | None = None
+    #: The key of the attribute that matched, when the entity's own name
+    #: did not and neither a selector nor a merged record explains the hit
+    #: (README screenshot review, 2026-09-23). The search vector is name
+    #: plus attributes, so "meridian" found mer_ash, mer_kite and
+    #: mer_ledger through crew=meridian, and with nothing under them the
+    #: hits read as a match on the "mer" prefix of their names.
+    attribute: str | None = None
 
 
 @dataclass(frozen=True)
@@ -776,7 +783,57 @@ SELECT id, label, rank, selector_type, raw_value, exact, more, merged_from,
         hits = [SearchHit(r[0], r[1], float(r[2]), _via(r[3], r[4], r[5], r[6], r[7]),
                           merged_name=r[8])
                 for r in rows]
-        return SearchPage(hits, int(rows[0][9]) if rows else 0)
+        return SearchPage(self._with_attribute_reasons(case_id, p, hits),
+                          int(rows[0][9]) if rows else 0)
+
+    def _with_attribute_reasons(self, case_id: UUID, p: dict,
+                                hits: list[SearchHit]) -> list[SearchHit]:
+        """Name the attribute behind each hit that nothing else explains
+        (README screenshot review, 2026-09-23).
+
+        A second, separate query over the page's own hits (at most `limit`
+        rows the caller may already see), rather than another column in
+        the ranked query above: the reason is needed only for what is
+        shown, and the ranked query's gates are reviewed as they stand.
+        An attribute is the node's own data at the node's own labels, so
+        its key tells the caller nothing the entity does not.
+
+        A hit gets one only when its name does not match by itself and it
+        carries no selector `via` and no `merged_name`, which is exactly
+        the hit the pane had nothing to say about. The attribute must
+        match the whole query on its own (key and value together, as the
+        search vector tokenises them), and the first such key is named. A
+        query split between the name and an attribute names none, since no
+        one attribute is the reason."""
+        if not p["tsq"]:
+            return hits
+        unexplained = [h.id for h in hits
+                       if h.via is None and h.merged_name is None]
+        if not unexplained:
+            return hits
+        rows = self._c.execute(
+            """SELECT n.id,
+                      (SELECT a.key
+                         FROM jsonb_each_text(
+                                CASE WHEN jsonb_typeof(n.attrs) = 'object'
+                                     THEN n.attrs ELSE '{}'::jsonb END)
+                                AS a(key, value)
+                        WHERE to_tsvector('simple',
+                                          a.key || ' ' || coalesce(a.value, ''))
+                              @@ to_tsquery('simple', %(tsq)s)
+                        ORDER BY a.key
+                        LIMIT 1)
+                 FROM core.node n
+                WHERE n.case_id = %(case_id)s AND n.id = ANY(%(ids)s)
+                  AND NOT to_tsvector('simple', coalesce(n.label, ''))
+                          @@ to_tsquery('simple', %(tsq)s)
+                  AND NOT coalesce(n.label ILIKE %(pattern)s, false)""",
+            {"tsq": p["tsq"], "pattern": p["pattern"], "case_id": case_id,
+             "ids": unexplained},
+        ).fetchall()
+        keys = {r[0]: r[1] for r in rows if r[1] is not None}
+        return [replace(h, attribute=keys[h.id]) if h.id in keys else h
+                for h in hits]
 
     def search_nodes(
         self, *, case_id: UUID, query: str, limit: int = 50,
@@ -898,7 +955,7 @@ SELECT n.id, n.label,
                 "excerpt": r[2], "source_name": r[3],
                 "posted_at": r[4].isoformat() if r[4] else None,
                 "external_url": r[5], "rank": float(r[6]), "via": None,
-                "merged_name": None}
+                "merged_name": None, "attribute": None}
                for r in rows]
         return out, (int(rows[0][7]) if rows else 0)
 
@@ -966,7 +1023,7 @@ SELECT n.id, n.label,
              "excerpt": None, "source_name": None, "posted_at": None,
              "external_url": None, "rank": h.rank,
              "via": h.via.as_dict() if h.via else None,
-             "merged_name": h.merged_name}
+             "merged_name": h.merged_name, "attribute": h.attribute}
             for h in nodes.hits]
         totals = {"node": nodes.total, "evidence": 0, "document": 0}
         if include_evidence:
@@ -976,7 +1033,7 @@ SELECT n.id, n.label,
             rows += [{"kind": "evidence", "id": str(h.id), "label": h.label or "",
                       "excerpt": None, "source_name": None, "posted_at": None,
                       "external_url": None, "rank": h.rank, "via": None,
-                      "merged_name": None}
+                      "merged_name": None, "attribute": None}
                      for h in ev.hits]
             totals["evidence"] = ev.total
         if include_documents:

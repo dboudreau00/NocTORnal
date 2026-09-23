@@ -546,7 +546,7 @@ def test_retiring_a_node_retires_its_incident_edges_and_says_how_many(
     assert r.status_code == 200, r.text
     assert r.json()["edges_retired"] == 2, (
         "both directions count: incidence is not the same as being the source")
-    assert "2 incident edge(s)" in r.json()["note"]
+    assert "2 incident edges." in r.json()["note"]
 
     assert _edge_row(conn, out)[4] is not None
     assert _edge_row(conn, inc)[4] is not None

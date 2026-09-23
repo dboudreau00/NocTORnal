@@ -48,6 +48,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.wording import count_of
 
 router = APIRouter(prefix="/cases/{case_id}", tags=["graph"])
 
@@ -760,10 +761,14 @@ def soft_delete_node(
         "destroyed": False,
         "deleted_at": at.isoformat(),
         "edges_retired": edges_retired,
+        # The incident edges were counted with a bracketed plural and
+        # printed verbatim; the count is known (README screenshot set
+        # review, 2026-09-23).
         "note": (f"Soft delete: deleted_at was set on this node and on "
-                 f"{edges_retired} incident edge(s). Nothing was destroyed — "
-                 f"the rows and their assertions remain and the act is "
-                 f"attributed — but the node and those ties are now out of "
+                 f"{count_of(edges_retired, 'incident edge', 'incident edges')}"
+                 f". Nothing was destroyed "
+                 f"(the rows and their assertions remain and the act is "
+                 f"attributed), but the node and those ties are now out of "
                  f"the live graph, and out of as-of views of the past too."),
     }
 
@@ -810,7 +815,7 @@ def soft_delete_edge(
         "destroyed": False,
         "deleted_at": at.isoformat(),
         "note": ("Soft delete: deleted_at was set on this edge. Nothing was "
-                 "destroyed — the row and its assertions remain and the act "
-                 "is attributed — but the tie is now out of the live graph, "
+                 "destroyed (the row and its assertions remain and the act "
+                 "is attributed), but the tie is now out of the live graph, "
                  "and out of as-of views of the past too."),
     }

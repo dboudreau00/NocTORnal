@@ -267,8 +267,8 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
             400, "Invalid request",
             f"refusing to shorten retention from {current.retention_until} "
             f"to {body.retention_until}. Evidence is selected for "
-            f"destruction by this date, and destruction is dual-controlled "
-            f"— moving the date earlier under `case.update` would let one "
+            f"destruction by this date, and destruction is dual-controlled: "
+            f"moving the date earlier under `case.update` would let one "
             f"person schedule what two are required to authorise. "
             f"Extending it is allowed.")
 
@@ -278,8 +278,8 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
             # column: an unknown label would surface as a psycopg
             # InvalidTextRepresentation and come back as a 500.
             raise Problem(400, "Invalid request",
-                          f"unknown classification {classification!r} — one of "
-                          f"{', '.join(Tlp.__members__)}")
+                          f"unknown classification {classification!r}: it "
+                          f"must be one of {', '.join(Tlp.__members__)}")
         now_tlp = tlp_from_name(current.classification)
         new_tlp = Tlp[classification]
         if new_tlp < now_tlp:
@@ -306,7 +306,7 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
         # nothing changed, so this would otherwise 200 having done nothing
         # and left no trace that it was attempted (invariant 12).
         raise Problem(400, "Invalid request",
-                      "nothing to change — supply a non-null title, summary, "
+                      "nothing to change: supply a non-null title, summary, "
                       "authority_ref, review_due, retention_until, or a "
                       "classification different from the current one")
 

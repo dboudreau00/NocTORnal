@@ -229,7 +229,7 @@ def test_refusals_are_logged_sampled_not_per_connection(monkeypatch, caplog):
                 assert len(lines) == 1, (
                     f"{len(lines)} warning lines for 20 refusals; one address "
                     f"chose the log volume")
-                assert "1 refusal(s) since the last line" in lines[0]
+                assert "(1 refusal since the last line" in lines[0], lines[0]
                 # Once the window has passed, the next refusal writes a
                 # line that stands for everything the window swallowed.
                 monkeypatch.setattr(live, "_REFUSAL_LOG_SECONDS", 0.0)
@@ -237,7 +237,7 @@ def test_refusals_are_logged_sampled_not_per_connection(monkeypatch, caplog):
                 lines = [r.getMessage() for r in caplog.records
                          if r.name == LOGGER and "refused" in r.getMessage()]
                 assert len(lines) == 2
-                assert "20 refusal(s) since the last line" in lines[1], lines[1]
+                assert "(20 refusals since the last line" in lines[1], lines[1]
 
 
 # --- the hostile run: the server's own connection set ---------------------

@@ -106,6 +106,21 @@ class ReportError(Exception):
     pass
 
 
+#: What a header field says when the case header is above the document's
+#: ceiling. `build` writes it into the text fields; the dates stay None in
+#: the report itself (they are dates or nothing), and `render_markdown`
+#: prints this for them, so no withheld field reads as a bare "None".
+WITHHELD_MARK = "[withheld: above this document's ceiling]"
+
+
+def _count(n: int, one: str, many: str) -> str:
+    """A count and its noun in agreement. The statement is printed at the
+    top of every disclosure, and "0 entit(y/ies), 0 relationship(s) and 1
+    exhibit(s)" is the first line a reader meets (README screenshot
+    review, 2026-09-23)."""
+    return f"{n} {one if n == 1 else many}"
+
+
 @dataclass(frozen=True)
 class Redaction:
     """What the document does not contain.
@@ -164,41 +179,52 @@ class Redaction:
                     f"prepared to include material up to TLP:{self.ceiling_tlp}. "
                     f"Nothing in the case file was above that ceiling, so "
                     f"nothing has been withheld from it.")
+        # Every count below agrees with its noun, and the header's aside is
+        # a sentence of its own rather than a " -- " clause: the statement
+        # is the first thing a disclosure says (README screenshot review,
+        # 2026-09-23).
         header = ""
         if self.header_withheld:
             header = (
                 " **The case's own identifying detail is above that ceiling "
                 "and has been withheld**, so this document does not name the "
                 "operation, its subject or the authority it was collected "
-                "under -- which means it is not a disclosure document as it "
+                "under. It is therefore not a disclosure document as it "
                 "stands.")
-            if self.assumptions_withheld:
+            n = self.assumptions_withheld
+            if n:
                 header += (
-                    f" The {self.assumptions_withheld} recorded assumption(s) "
-                    f"the case rests on are withheld with it, because they "
-                    f"are written about the case at the case's own level; "
-                    f"the findings below therefore rest on premises this "
-                    f"document cannot state.")
-            if self.hypotheses_withheld:
+                    f" The {_count(n, 'recorded assumption', 'recorded assumptions')} "
+                    f"the case rests on {'is' if n == 1 else 'are'} withheld "
+                    f"with it, because {'it is' if n == 1 else 'they are'} "
+                    f"written about the case at the case's own level; the "
+                    f"findings below therefore rest on "
+                    f"{'a premise' if n == 1 else 'premises'} this document "
+                    f"cannot state.")
+            n = self.hypotheses_withheld
+            if n:
                 header += (
-                    f" The {self.hypotheses_withheld} competing "
-                    f"hypothes(is/es) recorded against the case are withheld "
-                    f"for the same reason.")
+                    f" The {_count(n, 'competing hypothesis', 'competing hypotheses')} "
+                    f"recorded against the case {'is' if n == 1 else 'are'} "
+                    f"withheld for the same reason.")
         matrix = ""
-        if self.hypothesis_evidence_withheld:
+        n = self.hypothesis_evidence_withheld
+        if n:
             matrix = (
-                f" {self.hypothesis_evidence_withheld} item(s) of evidence in "
-                f"the hypothesis matrix rest on that material, so the "
-                f"hypothesis scores below leave them out.")
+                f" {_count(n, 'item', 'items')} of evidence in the hypothesis "
+                f"matrix {'rests' if n == 1 else 'rest'} on that material, so "
+                f"the hypothesis scores below leave "
+                f"{'it' if n == 1 else 'them'} out.")
+        withheld = (f"{_count(self.nodes_withheld, 'entity', 'entities')}, "
+                    f"{_count(self.edges_withheld, 'relationship', 'relationships')} "
+                    f"and {_count(self.evidence_withheld, 'exhibit', 'exhibits')}")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
             f"classified TLP:{self.case_tlp}.{header} "
-            f"{self.nodes_withheld} entit(y/ies), {self.edges_withheld} "
-            f"relationship(s) and {self.evidence_withheld} exhibit(s) are "
-            f"above that level and have been withheld.{matrix} **Every "
-            f"figure below is computed over the redacted graph** and is "
-            f"therefore a lower bound, not a measurement of the case.")
+            f"{withheld} are above that level and have been withheld.{matrix} "
+            f"**Every figure below is computed over the redacted graph** and "
+            f"is therefore a lower bound, not a measurement of the case.")
 
 
 @dataclass
@@ -433,7 +459,7 @@ class ReportBuilder:
                            r["type"], r["src"], r["dst"], r["sign"],
                            r["confidence"], r["inferred"], r["has_evidence"]))
 
-        withheld_mark = "[withheld: above this document's ceiling]"
+        withheld_mark = WITHHELD_MARK
         report = Report(
             case={
                 # The id is not withheld: it identifies nothing to a reader
@@ -758,18 +784,30 @@ def render_markdown(report: Report) -> str:
         d["hypotheses"] = {**d["hypotheses"], "hypotheses": [
             _cells(h) for h in d["hypotheses"]["hypotheses"]]}
     tlp = d["classification"]
+    # A missing value is said in words, as the console says it, and the
+    # mark is set off from the case by the separator the console's case
+    # header uses. No dash: an em or en dash in shipped copy is refused
+    # (test_server_copy_no_dashes.py).
+    #
+    # The three dates are NOT NULL on the case, so one is None only when the
+    # header is withheld; it then says so in the words the legal basis and
+    # authority beside it use, never "None".
+    withheld_header = d["redaction"]["header_withheld"]
+    dates = {key: d["case"][key]
+             or (WITHHELD_MARK if withheld_header else "not recorded")
+             for key in ("opened", "retention_until", "review_due")}
     lines = [
-        f"# TLP:{tlp} — {d['case']['code']}: {d['case']['title']}",
+        f"# TLP:{tlp} · {d['case']['code']}: {d['case']['title']}",
         "",
         f"> **TLP:{tlp}.** {d['redaction']['statement']}",
         "",
         "## Authority and retention",
         "",
         f"- **Legal basis:** {d['case']['legal_basis']}",
-        f"- **Authority reference:** {d['case']['authority_ref'] or '—'}",
-        f"- **Opened:** {d['case']['opened']}",
-        f"- **Retention until:** {d['case']['retention_until']}",
-        f"- **Next review:** {d['case']['review_due']}",
+        f"- **Authority reference:** {d['case']['authority_ref'] or 'not recorded'}",
+        f"- **Opened:** {dates['opened']}",
+        f"- **Retention until:** {dates['retention_until']}",
+        f"- **Next review:** {dates['review_due']}",
         "",
         "## Summary",
         "",
@@ -796,16 +834,20 @@ def render_markdown(report: Report) -> str:
         ]
         for a in d["assumptions"]:
             if a["reviewed_at"]:
+                # The note in brackets after the time, as "Made by" gives
+                # its time in brackets after the name.
                 reviewed = a["reviewed_at"] + (
-                    f" — {a['review_note']}" if a["review_note"] else "")
+                    f" ({a['review_note']})" if a["review_note"] else "")
             else:
                 reviewed = "not yet"
-            lines.append(f"| {a['statement']} | {a['basis'] or '—'} | {a['status']} | "
+            basis = a["basis"] or "not recorded"
+            lines.append(f"| {a['statement']} | {basis} | {a['status']} | "
                          f"{a['made_by_name']} ({a['made_at']}) | {reviewed} |")
     elif d["redaction"]["assumptions_withheld"]:
-        lines.append(f"_{d['redaction']['assumptions_withheld']} recorded "
-                     f"assumption(s) withheld with the case header; see the "
-                     f"marking statement above._")
+        held = d["redaction"]["assumptions_withheld"]
+        lines.append(f"_{_count(held, 'recorded assumption', 'recorded assumptions')} "
+                     f"withheld with the case header; see the marking "
+                     f"statement above._")
     else:
         lines.append("_No assumptions have been recorded against this case. That "
                      "is a statement about the register, not that there are none: "
@@ -878,23 +920,31 @@ def render_markdown(report: Report) -> str:
         lines.append("| _none at this classification_ | | | |")
 
     if d["hypotheses"]:
+        # With its status (README screenshot review, 2026-09-23). The
+        # section exists to carry the alternatives that were ruled out
+        # beside the one that was not, and without this column a REJECTED
+        # hypothesis read exactly like an open one.
+        statuses = d["hypotheses"].get("statuses") or {}
         lines += ["", "## Competing hypotheses", "",
                   d["hypotheses"].get("method", ""), "",
-                  "| Hypothesis | Inconsistency | Support | Assessed |",
-                  "|---|---|---|---|"]
+                  "| Hypothesis | Status | Inconsistency | Support | Assessed |",
+                  "|---|---|---|---|---|"]
         for h in d["hypotheses"]["hypotheses"]:
-            lines.append(f"| {h['statement']} | {h['inconsistency']} | "
-                         f"{h['support']} | {h['assessed']} |")
+            status = _cell(statuses.get(str(h.get("id")), "not recorded"))
+            lines.append(f"| {h['statement']} | {status} | "
+                         f"{h['inconsistency']} | {h['support']} | "
+                         f"{h['assessed']} |")
         for warning in d["hypotheses"].get("warnings", []):
             lines.append(f"\n> ⚠ {warning}")
     elif d["redaction"].get("hypotheses_withheld"):
         # Said where the section would be, as for assumptions: a heading
         # that silently disappears reads as "no alternatives were
         # considered", which is the one thing ACH exists to rule out (C2).
+        withheld = d["redaction"]["hypotheses_withheld"]
         lines += ["", "## Competing hypotheses", "",
-                  f"_{d['redaction']['hypotheses_withheld']} competing "
-                  f"hypothes(is/es) withheld with the case header; see the "
-                  f"marking statement above._"]
+                  f"_{_count(withheld, 'competing hypothesis', 'competing hypotheses')} "
+                  f"withheld with the case header; see the marking statement "
+                  f"above._"]
 
     lines += [
         "",

@@ -1164,3 +1164,69 @@ def test_a_merged_name_ranks_and_is_named_only_when_it_says_more(conn, world):
     merge(loser, survivor)
     hit = only(f"{t3}q")
     assert hit.id == survivor and hit.merged_name == alias_label, hit
+
+
+# --- an attribute hit says which attribute (README screenshot review) ----
+
+def test_a_hit_found_only_by_an_attribute_names_the_attribute(conn, client, world):
+    """"meridian" found mer_ash, mer_kite and mer_ledger through
+    crew=meridian, and nothing under them said so, so the README's Search
+    shot read as a match on the "mer" of their names (README screenshot
+    review, 2026-09-23). The hit whose name does not match now carries the
+    key of the attribute that did; a hit its own name, a selector or a
+    merged record already explains carries none, because the pane shows
+    one reason and those say more."""
+    owner, email, case_id = world
+    tok = _tok()
+    by_attr = _node(conn, case_id, owner, "mer_kite",
+                    attrs={"crew": f"{tok}ian", "role": "broker"})
+    by_name = _node(conn, case_id, owner, f"{tok}ian desk",
+                    attrs={"crew": f"{tok}ian"})
+    by_selector = _node(conn, case_id, owner, "quiet persona",
+                        attrs={"crew": f"{tok}ian"})
+    _selector(conn, case_id, by_selector, "JABBER", f"ledger@{tok}ian.example")
+    two_keys = _node(conn, case_id, owner, "mer_florin",
+                     attrs={"zeta": f"{tok}ian", "alpha": {"note": f"{tok}ian"}})
+    bystander = _node(conn, case_id, owner, "mer_ash", attrs={"crew": "harbour"})
+
+    page = _nodes(conn, case_id, tok)
+    got = {h.id: h for h in page.hits}
+    assert set(got) == {by_attr, by_name, by_selector, two_keys}
+    assert bystander not in got
+    assert got[by_attr].attribute == "crew"
+    assert got[by_name].attribute is None, "its own name already says why"
+    assert got[by_selector].via is not None
+    assert got[by_selector].attribute is None, "the selector is the reason shown"
+    # A nested value is matched with its key, and the first key is named.
+    assert got[two_keys].attribute == "alpha"
+
+    # A key matches as well as a value does: the vector holds both.
+    assert {h.id: h.attribute for h in _nodes(conn, case_id, "broker").hits
+            }.get(by_attr) == "role"
+
+    # Through both routes the console and a client read.
+    h = _auth(_session(conn, email))
+    base = f"/api/v1/cases/{case_id}"
+    nodes = client.get(f"{base}/search/nodes", headers=h,
+                       params={"q": tok, "with_total": "true"})
+    assert nodes.status_code == 200, nodes.text
+    by_id = {row["id"]: row for row in nodes.json()["hits"]}
+    assert by_id[str(by_attr)]["attribute"] == "crew"
+    assert by_id[str(by_name)]["attribute"] is None
+    combined = client.get(f"{base}/search", headers=h, params={"q": tok})
+    assert combined.status_code == 200, combined.text
+    rows = {row["id"]: row for row in combined.json()["hits"]}
+    assert rows[str(by_attr)]["attribute"] == "crew"
+    assert all("attribute" in row for row in combined.json()["hits"])
+
+
+def test_a_query_split_between_name_and_attributes_names_no_attribute(conn, world):
+    """One term in the name and one in an attribute: the entity is found
+    (the vector is name plus attributes), but no single attribute is the
+    reason, so none is named rather than one that explains half of it."""
+    owner, _, case_id = world
+    tok, other = _tok(), _tok()
+    split = _node(conn, case_id, owner, f"split {tok}", attrs={"note": other})
+    hits = _nodes(conn, case_id, f"{tok} {other}").hits
+    assert [h.id for h in hits] == [split]
+    assert hits[0].attribute is None

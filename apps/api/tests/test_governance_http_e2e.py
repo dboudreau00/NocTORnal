@@ -172,7 +172,14 @@ def test_placeholder_retention_rules_are_surfaced_not_hidden(conn, client):
     # Every rule reports whether anybody has confirmed it.
     assert all("is_placeholder" in rule for rule in body["rules"])
     if body["unconfirmed"]:
-        assert "docs/16 D3" in body["notice"]
+        # Why, in the analyst's words rather than a design-document
+        # citation, and with the count's own noun (README screenshot
+        # review, 2026-09-23).
+        n = len(body["unconfirmed"])
+        assert body["notice"].startswith(
+            f"{n} rule still holds" if n == 1 else f"{n} rules still hold")
+        assert "jurisdictional" in body["notice"]
+        assert "docs/" not in body["notice"] and "(s)" not in body["notice"]
 
 
 def test_a_purge_does_not_destroy_by_default(conn, client):

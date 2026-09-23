@@ -21,6 +21,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.security.access import Tlp
+from noctornal_api.wording import agree
 
 # Valid case_status transitions. PURGED is terminal (the actual data purge
 # is Phase 6; this only marks intent). closed_at is stamped on -> CLOSED.
@@ -172,9 +173,11 @@ class CaseService:
             raise CaseError(f"case {case_id} not found")
         allowed = _TRANSITIONS.get(current.status, set())
         if new_status not in allowed:
+            allowed_text = (sorted(allowed) if allowed else
+                            f"none, because {current.status} is terminal")
             raise CaseError(
                 f"illegal status transition {current.status} -> {new_status} "
-                f"(allowed: {sorted(allowed) or 'none — terminal'})"
+                f"(allowed: {allowed_text})"
             )
         closed_clause = ", closed_at = now()" if new_status == "CLOSED" else ""
         with self._c.transaction():
@@ -299,7 +302,7 @@ class CaseService:
         if Tlp[row[0]] < Tlp[classification]:
             raise CaseError(
                 f"{who} clearance {row[0]} is below the case classification "
-                f"{classification} — they could not see the case"
+                f"{classification}, so they could not see the case"
             )
 
     def _require_registered(self, compartments: list[str]) -> None:
@@ -321,8 +324,14 @@ class CaseService:
             (list(compartments),)).fetchall()}
         unknown = sorted(set(compartments) - known)
         if unknown:
+            # Agreed with the keys it names rather than hedged with a
+            # bracketed plural, which the console printed verbatim (README
+            # screenshot set review, 2026-09-23).
+            n = len(unknown)
             raise CaseError(
-                f"compartment(s) {unknown} are not registered. A compartment "
+                f"{agree(n, 'compartment', 'compartments')} "
+                f"{', '.join(unknown)} {agree(n, 'is', 'are')} not "
+                f"registered. A compartment "
                 # The route is spelled with its mount prefix because the
                 # operator pastes it. Until 2026-09-09 this said
                 # `POST /compartments`, a path the router (mounted under
@@ -347,8 +356,9 @@ class CaseService:
         missing = set(compartments) - set(row[0] or [])
         if missing:
             raise CaseError(
-                f"{who} is not read into compartment(s) {sorted(missing)} — "
-                "they could not see the case"
+                f"{who} is not read into "
+                f"{agree(len(missing), 'compartment', 'compartments')} "
+                f"{', '.join(sorted(missing))}, so they could not see the case"
             )
 
     def assign_user_checked(

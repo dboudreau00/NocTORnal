@@ -63,7 +63,7 @@ class SelectorOwnerConflict(SelectorError):
         self.existing_owner = existing_owner
         super().__init__(
             f"selector {selector_id} is already attributed to node "
-            f"{existing_owner} (strong selector — possible merge)"
+            f"{existing_owner} (strong selector: possible merge)"
         )
 
 

@@ -118,13 +118,14 @@ const CONFIDENCE = ['LOW', 'MODERATE', 'HIGH'];
 const CONF_RANK = { LOW: 0, MODERATE: 1, HIGH: 2 };
 
 /* The four metrics /graph/metrics actually returns. Nothing else is offered:
-   betweenness, Burt's constraint and key-player fragmentation are Phase 3 and
-   inventing a control for them would be inventing the number. */
+   betweenness, Burt's constraint and key-player fragmentation are global,
+   computed by the Analysis pane's run and not by this endpoint, and a size
+   control for them here would be inventing the number. */
 const SIZE_METRICS = [
-  ['degree', 'Degree — activity, visibility'],
-  ['weighted_degree', 'Weighted degree — total tie strength'],
-  ['k_core', 'k-core — depth in the durable core'],
-  ['clustering', 'Clustering — how closed the neighbourhood is'],
+  ['degree', 'Degree (activity, visibility)'],
+  ['weighted_degree', 'Weighted degree (total tie strength)'],
+  ['k_core', 'k-core (depth in the durable core)'],
+  ['clustering', 'Clustering (how closed the neighbourhood is)'],
 ];
 const METRIC_LABEL = new Map(SIZE_METRICS);
 
@@ -494,6 +495,12 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
  *  column reads as a rendering fault as often as it reads as "none". */
 const NO_TIME = 'not recorded';
 
+/** What any other missing value in a fact or a cell reads as, for the
+ *  same reason. The console printed a lone dash for these, and the
+ *  owner's copy rule allows no dashes in anything a reader sees (README
+ *  screenshot review, 2026-09-23). */
+const NO_VALUE = 'not recorded';
+
 function pad2(n) { return String(n).padStart(2, '0'); }
 
 /** An instant, in UTC, labelled: "2026-09-17 15:18 UTC". */
@@ -565,18 +572,22 @@ function fmtInterval(from, to) {
 /** The density timeline's axis labels. Kept as a name because the graph
  *  region calls it; it is now the same UTC day as everything else. */
 function fmtDay(ms) { return fmtDate(ms); }
+/* The placeholders below say what is missing rather than printing a
+   dash: a size or a hash the record does not carry, an account or an
+   element with no id, a number that did not arrive as one (README
+   screenshot review, 2026-09-23). */
 function fmtBytes(n) {
-  if (!Number.isFinite(n)) return '—';
+  if (!Number.isFinite(n)) return 'size ' + NO_VALUE;
   const u = ['B', 'KiB', 'MiB', 'GiB'];
   let i = 0, v = n;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
   return (i === 0 ? v : v.toFixed(1)) + ' ' + u[i];
 }
-function shortHash(h) { return h ? h.slice(0, 16) + '…' : '—'; }
-function shortId(id) { return id ? id.slice(0, 8) : '—'; }
+function shortHash(h) { return h ? h.slice(0, 16) + '…' : NO_VALUE; }
+function shortId(id) { return id ? id.slice(0, 8) : 'unknown'; }
 function num(v, dp) {
   const n = Number(v);
-  if (!Number.isFinite(n)) return '—';
+  if (!Number.isFinite(n)) return 'not computed';
   return dp === undefined ? String(n) : n.toFixed(dp);
 }
 function ordinal(n) {
@@ -992,7 +1003,7 @@ async function doLogin(event) {
         + 'sign-in no longer returns a token to fall back on, so this tab '
         + 'holds no credential and nothing was opened. Serve the console '
         + 'over HTTPS, reach it at localhost, or use a '
-        + 'scripts/bootstrap.py session link -- whose token this tab does '
+        + 'scripts/bootstrap.py session link, whose token this tab does '
         + 'keep, for its own life.', 'warn');
       return;
     }
@@ -1617,7 +1628,7 @@ async function loadPresets() {
        is filtering, so fall back to the one preset whose meaning is not in
        doubt and say so. */
     state.presets = [{ key: 'all', label: 'All ties',
-                       description: 'Preset list unavailable — this is the ' +
+                       description: 'Preset list unavailable. This is the ' +
                                     'server default.', edge_types: null }];
     fail(err);
   }
@@ -1631,7 +1642,7 @@ function buildProjectionControls() {
   opts($('sel-preset'), state.presets.map((p) => [p.key, p.label]),
        state.proj.preset);
   opts($('sel-minconf'), [
-    ['LOW', 'LOW — everything'],
+    ['LOW', 'LOW and above'],
     ['MODERATE', 'MODERATE and above'],
     ['HIGH', 'HIGH only'],
   ], state.proj.min_confidence);
@@ -1723,7 +1734,7 @@ async function refreshMetrics(seq, q) {
     const why = err instanceof ApiError && err.status === 403
       ? 'the analytics.run scope is not on your token'
       : (err instanceof ApiError ? err.title : 'the request failed');
-    state.metricsNote = 'metrics unavailable (' + why + ') — nodes are sized by ' +
+    state.metricsNote = 'metrics unavailable (' + why + '), so nodes are sized by ' +
       'the degree counted from the edges on screen, which is not the same ' +
       'number as the projection metric';
     /* Surfaced once. A scrubber drag fires this on every step and a wall of
@@ -1845,7 +1856,7 @@ function renderProjectionBar() {
   const preset = state.presetMap.get(state.proj.preset);
   const desc = $('preset-desc');
   desc.textContent = preset
-    ? preset.label + ' — ' + preset.description
+    ? preset.label + ': ' + preset.description
     : 'No projection description available.';
   $('sel-preset').title = preset ? preset.description : '';
 
@@ -1879,21 +1890,22 @@ function renderReadout() {
   box.appendChild(head);
 
   const drawn = state.graph
-    ? state.graph.nodes.length + ' nodes, ' + state.graph.links.length + ' edges'
+    ? countOf(state.graph.nodes.length, 'node', 'nodes') + ', '
+      + countOf(state.graph.links.length, 'edge', 'edges')
     : '0 nodes';
   box.appendChild(el('span', null, '  │  drawn: ' + drawn));
 
   if (state.metrics) {
     box.appendChild(el('span', null,
-      '  │  metrics over ' + state.metrics.node_count + ' nodes, ' +
-      state.metrics.edge_count + ' edges · density ' +
+      '  │  metrics over ' + countOf(state.metrics.node_count, 'node', 'nodes')
+      + ', ' + countOf(state.metrics.edge_count, 'edge', 'edges') + ' · density ' +
       num(state.metrics.density, 4)));
   } else {
     box.appendChild(el('span', 'rd-warn', '  │  metrics unavailable'));
   }
   if (state.projTruncated) {
     box.appendChild(el('span', 'rd-warn',
-      '  │  TRUNCATED at ' + state.nodeLimit + ' nodes — narrow the projection ' +
+      '  │  TRUNCATED at ' + state.nodeLimit + ' nodes. Narrow the projection ' +
       'before reading anything off this picture'));
     /* The way OUT of the truncation, offered where the truncation is
        reported. Until 2026-07-26 this notice was a dead end: the console
@@ -1932,7 +1944,7 @@ function renderReadout() {
         w.edges + ' tie' + (w.edges === 1 ? '' : 's') + ' are above your ' +
         'clearance';
     box.appendChild(el('span', 'rd-warn',
-      '  │  INCOMPLETE — ' + detail + ' and are not on this canvas. ' +
+      '  │  INCOMPLETE: ' + detail + ' and are not on this canvas. ' +
       'Structural readings from it are lower bounds.'));
   }
   if (state.proj.include_inferred) {
@@ -1983,7 +1995,7 @@ function renderFocusFlag() {
        knows" — distinct from `false`, which is a real finding about the
        graph. Collapsing them is how a failure becomes an assertion. */
     const verdict = state.focus.connected === null
-      ? ' · CONNECTIVITY UNKNOWN — the recompute failed'
+      ? ' · CONNECTIVITY UNKNOWN: the recompute failed'
       : state.focus.connected
         ? ' · ' + state.focus.hops + ' hops'
         : ' · NOT CONNECTED in this projection';
@@ -1991,7 +2003,7 @@ function renderFocusFlag() {
       labelOf(state.focus.dst) + verdict;
     flag.title = state.focus.connected === null
       ? 'The path could not be recomputed for this projection. Whether '
-        + 'these two are connected is UNKNOWN — this is NOT a finding that '
+        + 'these two are connected is UNKNOWN. This is NOT a finding that '
         + 'they are unconnected. Change the projection, or press Escape and '
         + 'shift-click them again.'
       : 'Shortest path, treated as undirected. The path endpoint does '
@@ -2046,7 +2058,7 @@ async function enterPath(srcId, dstId) {
       banner('No path in this projection',
         labelOf(srcId) + ' and ' + labelOf(dstId) + ' are not connected under ' +
         'the current projection. A different preset, or including inferred ' +
-        'edges, may connect them — and whether it does is itself a finding.',
+        'edges, may connect them, and whether it does is itself a finding.',
         'warn');
     }
   } catch (err) {
@@ -2208,14 +2220,17 @@ function renderScrubber(syncValue) {
   range.disabled = !usable;
 
   if (!usable) {
-    $('tl-min').textContent = '—';
-    $('tl-max').textContent = '—';
+    /* Blank, as they are before a case opens, rather than a dash at each
+       end: the note between them says there is no axis to label (README
+       screenshot review, 2026-09-23). */
+    $('tl-min').textContent = '';
+    $('tl-max').textContent = '';
     $('tl-current').textContent = 'as-of: now';
-    $('tl-note').textContent = 'No temporal data in this case yet — nothing ' +
+    $('tl-note').textContent = 'No temporal data in this case yet: nothing ' +
       'carries a valid-from, first-seen or last-seen time, so there is no ' +
       'history to play through. The strip switches on as soon as one element ' +
       'does.';
-    range.setAttribute('aria-valuetext', 'unavailable — no temporal data');
+    range.setAttribute('aria-valuetext', 'unavailable: no temporal data');
     if (syncValue !== false) range.value = '1000';
     drawDensity();
     return;
@@ -2387,7 +2402,7 @@ function paintIsComplete() {
   }
   if (missing.length) {
     console.error('theme tokens did not resolve: ' + missing.join(', ') +
-                  ' -- the canvas will paint with the browser default, '
+                  '. The canvas will paint with the browser default, '
                   + 'which is the intended loud failure.');
   }
   return missing.length === 0;
@@ -4240,7 +4255,8 @@ async function saveLayout() {
     await api(cpath('/graph/layout'), { method: 'PUT',
                                         json: { positions: positions } });
     const pinned = positions.filter((p) => p.is_pinned).length;
-    banner('Layout saved', positions.length + ' positions stored, ' + pinned +
+    banner('Layout saved', countOf(positions.length, 'position', 'positions')
+      + ' stored, ' + pinned +
       ' pinned. This is what the canvas will look like on your next visit.',
       'warn');
   } catch (err) {
@@ -4306,7 +4322,12 @@ function renderEntities() {
     const tdClass = el('td');
     tdClass.appendChild(tlpChip(n.classification));
     tr.appendChild(tdClass);
-    tr.appendChild(el('td', 'num', fmtWhen(n.first_seen)));
+    /* An absent date reads as absent: the words stay, in the quiet style
+       every other missing value takes. At full strength "not recorded" was
+       the brightest text in the table (README screenshot review,
+       2026-09-23). */
+    tr.appendChild(el('td', n.first_seen ? 'num' : 'num absent',
+      fmtWhen(n.first_seen)));
     tr.addEventListener('click', () => selectNode(n.id));
     tr.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectNode(n.id); }
@@ -4316,8 +4337,10 @@ function renderEntities() {
   show($('ent-empty'), rows.length === 0);
   /* Case totals, not projection totals: this list is the case file, and the
      projection's own counts live next to the canvas where they belong. */
-  $('ent-count').textContent = rows.length + ' of ' + state.nodes.length +
-    ' entities · ' + state.edges.length + ' relationships in the case';
+  $('ent-count').textContent = rows.length + ' of '
+    + countOf(state.nodes.length, 'entity', 'entities') + ' · '
+    + countOf(state.edges.length, 'relationship', 'relationships')
+    + ' in the case';
 }
 
 /* ── evidence ─────────────────────────────────────────────────────────── */
@@ -4490,7 +4513,14 @@ function renderCustodyRow(c) {
   const row = el('div', 'custody-row' + (c.hash_verified === false ? ' bad' : ''));
   row.appendChild(el('span', null, c.action));
   row.appendChild(el('span', 'when', fmtTime(c.occurred_at)));
-  row.appendChild(el('span', 'mono small', 'actor ' + shortId(c.actor_id)));
+  /* A person, not an eight-hex id: the log answers "who touched this
+     exhibit" (README screenshot review, 2026-09-23). The id stays in the
+     title, and is the text only when the account no longer resolves. */
+  const who = c.actor_name
+    ? el('span', 'small', 'by ' + visibleText(c.actor_name))
+    : el('span', 'mono small', 'actor ' + shortId(c.actor_id));
+  who.title = 'Account ' + c.actor_id;
+  row.appendChild(who);
   const chip = custodyHashChip(c.action, c.hash_verified);
   if (chip) {
     const flag = el('span', chip[0], chip[1]);
@@ -4538,7 +4568,7 @@ async function uploadEvidence(event) {
       return;
     }
     setMsg(okBox, 'Lodged. sha256 ' + out.sha256 +
-      (out.deduplicated ? ' — identical bytes were already held; the existing exhibit was reused.' : ''));
+      (out.deduplicated ? '. Identical bytes were already held, so the existing exhibit was reused.' : ''));
     $('ev-file').value = '';
     $('ev-title').value = '';
     await loadEvidence();
@@ -4722,6 +4752,15 @@ function viaLine(hit, q) {
      An exact selector still says more, so it wins. */
   if (hit.merged_name && !(v && v.exact)) {
     return 'via the name of merged record ' + visibleText(hit.merged_name);
+  }
+  /* Names and attributes share one search vector, so "meridian" found
+     mer_ash, mer_kite and mer_ledger through crew=meridian and the hits
+     read as a match on the "mer" of their names. The server names the
+     attribute only when nothing else explains the hit (README screenshot
+     review, 2026-09-23). An attribute key is data like a label, so it is
+     de-fanged the same way. */
+  if (!v && hit.attribute) {
+    return 'via attribute ' + visibleText(hit.attribute);
   }
   if (!v) return '';
   const inName = String(hit.label || '').toLowerCase()
@@ -5330,7 +5369,7 @@ function renderTags(box, list, sel) {
     const at = raw.indexOf(':');
     if (at < 1 || at === raw.length - 1) {
       banner('Tag not created',
-             'Use namespace:name — both halves are required, because the ' +
+             'Use namespace:name. Both halves are required, because the ' +
              'same name means different things in different namespaces.');
       return;
     }
@@ -5433,7 +5472,7 @@ function wireCaseActions() {
     if (!rec || !state.caseId) return;
     const next = window.prompt(
       'Current status: ' + rec.status + '\n\n' +
-      'New status — DRAFT, ACTIVE, DORMANT, CLOSED, ARCHIVED or PURGED.\n' +
+      'New status: DRAFT, ACTIVE, DORMANT, CLOSED, ARCHIVED or PURGED.\n' +
       'The transition table decides what is legal from here.',
       rec.status === 'ACTIVE' ? 'CLOSED' : 'ACTIVE');
     if (next === null || !next.trim()) return;
@@ -5483,7 +5522,7 @@ function wireAuditVerify() {
          because WHY the verb is scarce is worth saying. */
       if (err instanceof ApiError && err.status === 403) {
         box.appendChild(el('p', 'help warn', refusalText(err,
-          'audit.read is granted to SECURITY_OFFICER alone — the ' +
+          'audit.read is granted to SECURITY_OFFICER alone: the ' +
           'administrator configures, the officer audits, and neither ' +
           'reads case content by default.')));
       } else { fail(err); }
@@ -5497,9 +5536,14 @@ function wireAuditVerify() {
     const head = el('div', 'card');
     head.appendChild(el('span', 'chip ' + (ok ? 'good' : 'bad'),
       r.checked === 0 ? 'NOTHING TO CHECK' : (r.intact ? 'INTACT' : 'BROKEN')));
+    /* Counts agree with their nouns and verbs: a bracketed plural
+       hedged a number the line already knew (README screenshot set
+       review, 2026-09-23). The noun is chosen from the number, not from
+       the grouped text, which a locale can print as "1.000". */
     head.appendChild(el('p', 'help',
-      r.checked.toLocaleString() + ' event(s) checked' +
-      (r.first_seq ? ' · seq ' + r.first_seq + '–' + r.last_seq : '')));
+      r.checked.toLocaleString() + ' ' + agree(r.checked, 'event', 'events')
+      + ' checked' +
+      (r.first_seq ? ' · seq ' + r.first_seq + ' to ' + r.last_seq : '')));
     if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
     /* Forks are shown as a SEPARATE, quieter line and never as a break.
        They come from concurrent writers, not from editing, and a real
@@ -5508,7 +5552,8 @@ function wireAuditVerify() {
        evidence tool cannot afford to get wrong twice. */
     if (r.forks) {
       head.appendChild(el('p', 'help',
-        r.forks + ' row(s) share a predecessor. ' + (r.fork_note || '')));
+        countOf(r.forks, 'row shares', 'rows share') + ' a predecessor. '
+        + (r.fork_note || '')));
     }
     box.appendChild(head);
 
@@ -5671,8 +5716,10 @@ function wireElementActions() {
          it, and the analyst who clicked once should not have to count the
          difference on the canvas to find that out (invariant 12). */
       if (out && out.edges_retired) {
-        banner('Retired', 'That entity carried ' + out.edges_retired +
-               ' tie(s); they were retired with it. Nothing was destroyed.');
+        banner('Retired', 'That entity carried '
+               + countOf(out.edges_retired, 'tie', 'ties') + ', which '
+               + agree(out.edges_retired, 'was', 'were')
+               + ' retired with it. Nothing was destroyed.');
       }
       state.selection = null;
       await loadCaseGraph();
@@ -5770,7 +5817,7 @@ function renderNodeMetrics(nodeId) {
         r ? ordinal(r) + ' of ' + state.rankTotal : 'unranked'));
     } else if (key === 'positive_degree') {
       const t = el('div', 'metric-rank', 'vouches');
-      t.title = 'docs/03: received vouches are accumulated reputation; given ' +
+      t.title = 'Received vouches are accumulated reputation; given ' +
         'vouches are reputation staked. They mean opposite things, and this ' +
         'count is undirected, so it is the sum of both.';
       box.appendChild(t);
@@ -5822,8 +5869,9 @@ function projectionSentence() {
   ];
   let line = 'computed over projection ' + bits.join(' · ');
   if (state.metrics) {
-    line += ' · ' + state.metrics.node_count + ' nodes, ' +
-      state.metrics.edge_count + ' edges, density ' + num(state.metrics.density, 4);
+    line += ' · ' + countOf(state.metrics.node_count, 'node', 'nodes') + ', '
+      + countOf(state.metrics.edge_count, 'edge', 'edges') + ', density '
+      + num(state.metrics.density, 4);
   }
   if (state.projTruncated) {
     line += ' · WARNING: the node page was truncated, so these numbers describe ' +
@@ -6522,8 +6570,9 @@ function renderSelectors(box, list) {
         el('div', 'mono small muted', 'normalised ' + visibleText(s.norm_value)),
         s.norm_value, 'normalised value'));
     }
-    item.appendChild(el('div', 'ev-meta',
-      'observed ' + s.observation_cnt + ' time(s)'));
+    item.appendChild(el('div', 'ev-meta', 'observed '
+      + (Number(s.observation_cnt) === 1 ? 'once'
+        : countOf(s.observation_cnt, 'time', 'times'))));
     box.appendChild(item);
   }
 }
@@ -6828,7 +6877,13 @@ function buildEndpointSelect(which, keepId) {
       group.label = typeName(n.node_type) + ' (' + n.node_type + ')';
       select.appendChild(group);
     }
-    const o = el('option', null, n.label + '  [' + n.node_type + ']');
+    /* The type by its display name, as the entity list and the inspector
+       chip name it: "oriel [IDENTITY]" printed the raw code (README
+       screenshot set review, 2026-09-23). The code stays in the group
+       label above, which is what the filter's "a type such as WALLET"
+       refers to. */
+    const o = el('option', null,
+      n.label + ' (' + typeName(n.node_type) + ')');
     o.value = n.id;
     group.appendChild(o);
   }
@@ -6852,7 +6907,8 @@ function buildEndpointSelect(which, keepId) {
     ? total + ' entities, grouped by type. Type above to filter by label or type.'
     : (!matches.length
       ? 'Nothing matches. Filter on part of a label, or on a type such as WALLET.'
-      : matches.length + ' of ' + total + ' match. Enter picks ' +
+      : matches.length + ' of ' + total + ' '
+        + agree(matches.length, 'matches', 'match') + '. Enter picks ' +
         (matches.length === 1 ? 'it.' : 'the first.'));
 }
 
@@ -7335,7 +7391,7 @@ function buildPaletteItems() {
 
   if (!inCase) {
     for (const c of state.cases) {
-      items.push({ kind: 'Case', label: c.code + ' — ' + c.title,
+      items.push({ kind: 'Case', label: c.code + ': ' + c.title,
                    hint: c.status, run: () => openCase(c.id) });
     }
     /* Deployment-wide, so offered with no case open, to the same accounts
@@ -7527,7 +7583,8 @@ function addSelectorMatches(matches, sq) {
   }
   return entry.total > entry.hits.length
     ? entry.hits.length + ' of ' + entry.total + ' entities matched by a '
-      + 'selector are listed. Search shows the rest.'
+      + 'selector ' + agree(entry.hits.length, 'is', 'are')
+      + ' listed. Search shows the rest.'
     : '';
 }
 
@@ -7696,6 +7753,10 @@ function initPalette() {
      label, and assigning textContent to it would delete both. */
   $('palette-key').textContent = mac ? '⌘K' : 'Ctrl K';
   $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
+  /* And the hint strip under the canvas, which said ⌘K on every
+     platform beside a header chip that said Ctrl K (README screenshot set
+     review, 2026-09-23). */
+  $('canvas-keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
 /** Show or hide the keyboard sheet. `on` omitted means toggle. */
@@ -7775,7 +7836,7 @@ function renderInboxBadge() {
   const n = state.inboxUnread || 0;
   badge.textContent = n > 99 ? '99+' : String(n);
   show(badge, n > 0);
-  badge.title = n + ' unread notification(s)';
+  badge.title = countOf(n, 'unread notification', 'unread notifications');
 }
 
 const PRIORITY_LABEL = { 1: 'urgent', 2: 'normal', 3: 'low' };
@@ -7868,12 +7929,17 @@ async function loadInboxPreferences() {
     const priority = el('select');
     opts(priority, [['1', 'urgent only'], ['2', 'normal and up'],
                     ['3', 'everything']], String(p.min_priority));
+    /* A control with no visible label says what it sets to a screen
+       reader; a title is not an accessible name everywhere. */
+    priority.setAttribute('aria-label', p.channel + ': lowest priority to deliver');
+    enabled.setAttribute('aria-label', p.channel + ': deliver on this channel');
     row.appendChild(priority);
 
     const digest = el('input');
     digest.type = 'checkbox';
     digest.checked = p.digest;
     digest.title = 'Roll up to the next hour instead of sending immediately';
+    digest.setAttribute('aria-label', p.channel + ': hourly digest');
     row.appendChild(digest);
     row.appendChild(el('span', 'muted small', 'digest'));
 
@@ -7881,10 +7947,12 @@ async function loadInboxPreferences() {
     from.type = 'time';
     from.value = p.quiet_from || '';
     from.title = 'Quiet hours start (your local time)';
+    from.setAttribute('aria-label', p.channel + ': quiet hours start');
     const to = el('input');
     to.type = 'time';
     to.value = p.quiet_to || '';
     to.title = 'Quiet hours end';
+    to.setAttribute('aria-label', p.channel + ': quiet hours end');
     row.appendChild(el('span', 'muted small', 'quiet'));
     row.appendChild(from);
     row.appendChild(to);
@@ -7964,6 +8032,18 @@ function platformByKey(key) {
   return commsPlatforms.find((p) => p.key === key) || null;
 }
 
+/** A normaliser note as a sentence of its own: capital first letter and a
+ *  closing full stop. The service writes its notes as clauses ("a Telegram
+ *  @username is NOT durable ..."), which read correctly after a colon, and
+ *  this pane puts them after a full stop, so the Correlate answer began a
+ *  sentence in lower case (README screenshot review, 2026-09-23). */
+function asSentence(note) {
+  const text = String(note || '').trim();
+  if (!text) return '';
+  const upper = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(upper) ? upper : upper + '.';
+}
+
 /** What this platform's identifier MEANS, and what sparse data means. */
 function renderPlatformNote() {
   const p = platformByKey($('comms-platform').value);
@@ -7971,7 +8051,7 @@ function renderPlatformNote() {
   const cover = $('comms-platform-coverage');
   if (!p) { show(note, false); show(cover, false); return; }
   note.textContent = p.durable_selector_type
-    ? p.durable_selector_type + ' — ' + p.note
+    ? p.durable_selector_type + ': ' + p.note
     : 'No durable identifier exists. ' + p.note;
   show(note, true);
   /* Surfaced rather than buried: an actor on a platform with no coverage
@@ -7998,7 +8078,7 @@ async function previewNormalise() {
       durable.textContent = 'nothing durable';
       durable.classList.add('bad');
     }
-    $('comms-preview-note').textContent = body.note || '';
+    $('comms-preview-note').textContent = asSentence(body.note);
     show(box, true);
   } catch (_e) {
     /* A preview that cannot reach the API is not worth a banner: the
@@ -8040,7 +8120,8 @@ function initCommsBind() {
       }
       setMsg(msg, body.durable_value
         ? 'Recorded, indexed as ' + body.durable_value
-        : 'Recorded. ' + (body.note || 'No durable value — it will not correlate.'));
+        : 'Recorded. ' + asSentence(body.note
+          || 'No durable value, so it will not correlate.'));
       $('comms-observed').value = '';
       show($('comms-preview'), false);
     } catch (err) {
@@ -8070,10 +8151,14 @@ function initCommsCorrelate() {
       /* "N binding(s) in this case" must be about the case on screen. */
       if (caseChanged(token)) return;
       const head = el('p', 'hint');
+      /* The count's own noun: "0 binding(s)" was in the README capture
+         (README screenshot review, 2026-09-23). */
+      const n = body.matches.length;
       head.textContent = body.durable_value
-        ? 'Correlating on ' + body.durable_value + ' — ' + body.matches.length
-          + ' binding(s) in this case.'
-        : 'No durable value, so nothing can correlate. ' + (body.note || '');
+        ? 'Correlating on ' + body.durable_value + ' finds ' + n
+          + (n === 1 ? ' binding' : ' bindings') + ' in this case.'
+        : ('No durable value, so nothing can correlate. '
+          + asSentence(body.note)).trim();
       out.appendChild(head);
       for (const m of body.matches) {
         const row = el('div', 'hit');
@@ -8103,14 +8188,15 @@ function renderContactBlock(block) {
 
   const card = el('div', 'card stack');
   const h = el('h3', 'h-sm', block.already_parsed
-    ? 'Already parsed — showing the existing reading'
+    ? 'Already parsed: showing the existing reading'
     : 'Parsed');
   card.appendChild(h);
 
   const codecl = (block.co_declaration || []).length;
   card.appendChild(el('p', 'hint',
-    codecl + ' identifier(s) read as the publisher’s own. '
-    + 'That SET is the finding — a vendor running Jabber, Tox and Session '
+    countOf(codecl, 'identifier', 'identifiers')
+    + ' read as the publisher’s own. '
+    + 'That SET is the finding: a vendor running Jabber, Tox and Session '
     + 'with a PGP key operates differently from one running a Telegram bot.'));
 
   for (const e of block.entries) {
@@ -8139,13 +8225,14 @@ function renderContactBlock(block) {
     row.appendChild(el('p', 'hint mono-sm', e.score_reason));
     if (e.stoplisted) {
       row.appendChild(el('p', 'hint warn',
-        'On the service stoplist — this belongs to a known escrow, '
+        'On the service stoplist: this belongs to a known escrow, '
         + 'guarantor or admin, not to the publisher.'));
     }
     if (e.shared_service_publishers) {
       row.appendChild(el('p', 'hint warn',
-        'Advertised by ' + e.shared_service_publishers
-        + ' other publisher(s): a shared SERVICE, not a shared identity.'));
+        'Advertised by ' + countOf(e.shared_service_publishers,
+          'other publisher', 'other publishers')
+        + ': a shared SERVICE, not a shared identity.'));
     }
     if (e.proposal_id) {
       row.appendChild(el('p', 'hint',
@@ -8228,7 +8315,7 @@ function wire() {
   opts($('cap-class'), TLP.map((t) => [t, t]), 'AMBER');
   opts($('sel-metric'), SIZE_METRICS, state.sizeMetric);
   opts($('sel-minconf'), [
-    ['LOW', 'LOW — everything'],
+    ['LOW', 'LOW and above'],
     ['MODERATE', 'MODERATE and above'],
     ['HIGH', 'HIGH only'],
   ], state.proj.min_confidence);
@@ -8481,7 +8568,8 @@ async function loadMergeHistory(nodeId) {
         (isSource ? ' merged INTO ' : ' absorbed ') + labelOf(other)));
       item.appendChild(top);
       item.appendChild(el('div', 'muted small',
-        m.reason + ' \u00b7 ' + m.edges_repointed + ' tie(s) moved \u00b7 ' +
+        m.reason + ' \u00b7 ' + countOf(m.edges_repointed, 'tie', 'ties')
+        + ' moved \u00b7 ' +
         fmtTime(m.merged_at)));
       if (m.reversal_reason) {
         item.appendChild(el('div', 'muted small',
@@ -8520,8 +8608,8 @@ async function runMerge() {
     'permanently.\n\nWhy are these the same entity?');
   if (reason === null) return;
   if (!reason.trim()) {
-    setMsg($('merge-error'), 'A merge must say why: docs/01 calls this the ' +
-           'operation most likely to quietly corrupt a case.');
+    setMsg($('merge-error'), 'A merge must say why: it is the operation ' +
+           'most likely to quietly corrupt a case.');
     return;
   }
   try {
@@ -8621,7 +8709,7 @@ async function loadApprovals() {
     const rows = body.approvals || [];
     renderList('apr-list', 'apr-empty', rows, approvalRow);
     $('apr-counts').textContent = rows.length
-      ? rows.length + ' request(s)' : '';
+      ? countOf(rows.length, 'request', 'requests') : '';
     if (!rows.length) {
       $('apr-empty').textContent = wanted
         ? 'No ' + wanted.toLowerCase() + ' requests in this case.'
@@ -8882,7 +8970,8 @@ function renderTriageBadge() {
   const waiting = (state.triageCounts || {}).PROPOSED || 0;
   badge.textContent = waiting > 99 ? '99+' : String(waiting);
   show(badge, waiting > 0);
-  badge.title = waiting + ' suggestion(s) awaiting review';
+  badge.title = countOf(waiting, 'suggestion', 'suggestions')
+    + ' awaiting review';
 }
 
 function renderTriage() {
@@ -8935,14 +9024,14 @@ function renderTriage() {
         'Create the element, attributed to you, with an AUTOMATED_INFERENCE '
         + 'assertion recording that a machine suggested it.'));
       actions.appendChild(mk('Reject', 'danger', rejectProposal,
-        'Dispose of it. A reason is required -- parser drift is found by '
+        'Dispose of it. A reason is required, because parser drift is found by '
         + 'reading rejections.'));
       actions.appendChild(mk('Defer', '', deferProposal,
         'Park it as unresolved rather than forcing a decision now.'));
       card.appendChild(actions);
     } else {
       const meta = el('p', 'muted small',
-        p.state + (p.review_note ? ' — ' + p.review_note : ''));
+        p.state + (p.review_note ? ': ' + p.review_note : ''));
       card.appendChild(meta);
     }
     card.addEventListener('click', () => { state.triageIndex = i; renderTriage(); });
@@ -9002,6 +9091,11 @@ function onTriageKey(e) {
   const target = e.target;
   // Never steal a key from someone typing into the capture box.
   if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  /* A chord is the browser's or the operating system's, never a verdict:
+     Ctrl+A (select all) accepted the highlighted proposal with no prompt,
+     and Ctrl+R and Ctrl+D opened the reject and defer prompts instead of
+     reloading or bookmarking (README screenshot review, 2026-09-23). */
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   const rows = state.triage || [];
   if (!rows.length) return;
   const key = e.key.toLowerCase();
@@ -9046,7 +9140,8 @@ async function runCapture() {
     });
     if (caseChanged(token)) {
       banner('Captured into ' + code,
-        (out.proposals_created || 0) + ' proposal(s) raised there. You had '
+        countOf(out.proposals_created || 0, 'proposal', 'proposals')
+        + ' raised there. You had '
         + 'moved to another case before the reply arrived, so it is not '
         + 'shown here.', 'warn');
       return;
@@ -9055,9 +9150,9 @@ async function runCapture() {
       .map(([k, v]) => v + ' ' + k).join(', ');
     setMsg(okBox,
       (out.deduplicated ? 'Already captured; ' : '') +
-      out.selectors_found + ' selector(s) found' +
+      countOf(out.selectors_found, 'selector', 'selectors') + ' found' +
       (found ? ' (' + found + ')' : '') + '. ' +
-      out.proposals_created + ' proposal(s) raised' +
+      countOf(out.proposals_created, 'proposal', 'proposals') + ' raised' +
       (out.already_known ? ', ' + out.already_known + ' already known' : '') +
       '. ' + out.note);
     $('cap-text').value = '';
@@ -9093,9 +9188,18 @@ async function runCapture() {
 /** num() coerces null to 0, which for a structural metric is a lie: an
  *  isolate has no effective size, and printing 0.00 ranks it as the worst
  *  broker in the case rather than as undefined. The API returns null for
- *  exactly these cases, so preserve the distinction. */
+ *  exactly these cases, so preserve the distinction, in words: "not
+ *  defined" and not a lone dash (README screenshot review, 2026-09-23). */
 function metricNum(v, dp) {
-  return (v === null || v === undefined) ? '—' : num(v, dp);
+  return (v === null || v === undefined) ? 'not defined' : num(v, dp);
+}
+
+/** The cell class for a value the row does not have. A word standing
+ *  in for a number takes the quiet `td.absent` style the entity table's
+ *  missing dates use, so it does not become the brightest text in a
+ *  column of figures (README screenshot review, 2026-09-23). */
+function absentClass(v) {
+  return v === null || v === undefined || v === '' ? 'absent' : null;
 }
 
 function anQuery() {
@@ -9236,13 +9340,24 @@ function renderAnalytics() {
   if (!a) return;
   show($('an-empty'), false);
   show($('an-results'), true);
+  /* The trend canvas is sized on tab entry, and on entry to a case with no
+     run #an-results is hidden, so `resizeHistory` found a zero-width box and
+     returned. Nothing sized it after Run, and the chart drew into the
+     default 300x150 bitmap stretched to the CSS box: a blurred strip with an
+     oversized label (README screenshot review, 2026-09-23). Sized here,
+     once the box has a width. */
+  resizeHistory();
 
   const p = a.projection || {};
+  /* The as-of instant through fmtTime, as every console time is, and the
+     counts agreed with their nouns ("1 actors" was possible) (README
+     screenshot set review, 2026-09-23). */
   $('an-projection').textContent =
     'Projection: ' + (p.label || p.preset) + ' | confidence >= ' +
     p.min_confidence + ' | inferred ' + (p.include_inferred ? 'in' : 'out') +
-    (p.as_of ? ' | as of ' + p.as_of : '') +
-    ' | ' + a.node_count + ' actors, ' + a.dyad_count + ' dyads' +
+    (p.as_of ? ' | as of ' + fmtTime(p.as_of) : '') +
+    ' | ' + countOf(a.node_count, 'actor', 'actors') + ', '
+    + countOf(a.dyad_count, 'dyad', 'dyads') +
     ' | decay: ' + (a.decay ? a.decay.note : 'off');
 
   renderAnalyticsFlags(a);
@@ -9288,7 +9403,7 @@ function renderAnalyticsLeads(a) {
     const head = el('p', 'an-lead-head');
     head.appendChild(el('strong', null, n.label));
     head.appendChild(document.createTextNode(
-      ' — degree ' + n.degree + ', brokerage ' +
+      ': degree ' + n.degree + ', brokerage ' +
       ordinal(n.betweenness_rank) + ' of ' + a.node_count +
       ', constraint ' + ordinal(n.constraint_rank) + ' lowest'));
     item.appendChild(head);
@@ -9331,10 +9446,11 @@ function renderAnalyticsTable(a) {
                             n.betweenness_percentile, a.node_count));
     tr.appendChild(rankCell(n.constraint, n.constraint_rank,
                             n.constraint_percentile, a.node_count));
-    tr.appendChild(el('td', null, metricNum(n.effective_size, 2)));
-    tr.appendChild(el('td', null,
+    tr.appendChild(el('td', absentClass(n.effective_size),
+      metricNum(n.effective_size, 2)));
+    tr.appendChild(el('td', absentClass(n.community),
       n.community === null || n.community === undefined
-        ? '—' : String(n.community)));
+        ? 'none' : String(n.community)));
     /* Its own control rather than a second meaning for the row click: the
        row already means "show me this actor in the graph", and one gesture
        that does two things is one an analyst learns to distrust. */
@@ -9360,7 +9476,7 @@ function renderAnalyticsTable(a) {
 function rankCell(value, rank, percentile, total) {
   const td = el('td');
   if (value === null || value === undefined) {
-    td.appendChild(el('span', 'muted', '—'));
+    td.appendChild(el('span', 'muted', 'not defined'));
     td.title = 'Undefined for this actor (an isolate has no structural '
              + 'position to measure).';
     return td;
@@ -9470,7 +9586,14 @@ function renderMetricHistory() {
 function histRow(p) {
   const tr = el('tr');
   tr.appendChild(el('td', null, fmtTime(p.at)));
-  const val = el('td', null, metricNum(p.value, 4));
+  /* The world time the run measured. Runs at three as-of dates, taken a
+     minute apart, read as one minute three times, and a rising value looked
+     like noise rather than history (README screenshot set review,
+     2026-09-23). A run with no as_of measured the live graph, so its own
+     start is the world time it describes. */
+  const asOf = (p.params && p.params.as_of) || p.at;
+  tr.appendChild(el('td', absentClass(asOf), fmtTime(asOf)));
+  const val = el('td', absentClass(p.value), metricNum(p.value, 4));
   if (p.is_approximate) {
     const chip = el('span', 'chip small warn', 'approx');
     chip.title = 'Computed with sampling (betweenness pivots), so this '
@@ -9480,17 +9603,17 @@ function histRow(p) {
     val.appendChild(chip);
   }
   tr.appendChild(val);
-  tr.appendChild(el('td', null,
+  tr.appendChild(el('td', absentClass(p.rank),
     p.rank === null || p.rank === undefined
-      ? '—' : ordinal(p.rank) + ' of ' + (p.node_count || '?')));
-  tr.appendChild(el('td', null,
+      ? 'unranked' : ordinal(p.rank) + ' of ' + (p.node_count || '?')));
+  tr.appendChild(el('td', absentClass(p.percentile),
     p.percentile === null || p.percentile === undefined
-      ? '—' : 'p' + num(p.percentile, 0)));
+      ? 'unranked' : 'p' + num(p.percentile, 0)));
   /* The preset is per-point and not per-chart on purpose: weights are not
      comparable across parameters, so two points from different presets are
      two different measurements and the row has to say so. */
   const params = p.params || {};
-  const preset = el('td', null, p.preset || '—');
+  const preset = el('td', absentClass(p.preset), p.preset || NO_VALUE);
   if (params.decay_half_life_months) {
     preset.appendChild(el('span', 'muted small',
       '  decay ' + params.decay_half_life_months + 'mo'));
@@ -9647,10 +9770,16 @@ function renderCohesion(a) {
   clear(box);
   const c = a.cohesion || {};
   const card = el('div', 'card');
+  /* "1 communities", and a bracketed plural for the components, were in
+     the Analysis capture (README screenshot set review, 2026-09-23). Every
+     count here is known, so every noun agrees, "size" with its list too. */
+  const sizes = c.component_sizes || [];
   card.appendChild(el('p', null,
-    c.community_count + ' communities (Leiden, modularity ' +
-    metricNum(c.modularity, 3) + ') across ' + c.components +
-    ' connected component(s) of size ' + (c.component_sizes || []).join(', ') + '.'));
+    countOf(c.community_count, 'community', 'communities')
+    + ' (Leiden, modularity ' + metricNum(c.modularity, 3) + ') across '
+    + countOf(c.components, 'connected component', 'connected components')
+    + ' of ' + agree(sizes.length, 'size', 'sizes') + ' '
+    + sizes.join(', ') + '.'));
   if ((c.cut_vertices || []).length) {
     card.appendChild(el('p', null, 'Cut vertices: ' +
       c.cut_vertices.map((v) => v.label).join(', ')));
@@ -9661,7 +9790,7 @@ function renderCohesion(a) {
   }
   if ((c.bridges || []).length) {
     card.appendChild(el('p', null, 'Bridges: ' + c.bridges.map(
-      (b) => b.source_label + ' — ' + b.target_label).join(', ')));
+      (b) => b.source_label + ' and ' + b.target_label).join('; ')));
   }
   box.appendChild(card);
 }
@@ -9680,8 +9809,8 @@ function renderBalance(a) {
     card.appendChild(el('p', 'muted small',
       'No triad in this projection has a signed tie on all three sides, so '
       + 'there is nothing to balance. ' + (b.skipped_unsigned_triads
-        ? b.skipped_unsigned_triads + ' triad(s) were skipped because at '
-          + 'least one tie carries no valence.'
+        ? countOf(b.skipped_unsigned_triads, 'triad was', 'triads were')
+          + ' skipped because at least one tie carries no valence.'
         : 'That is thin data, not a balanced network.')));
   } else {
     card.appendChild(el('p', null,
@@ -9701,7 +9830,7 @@ function renderBalance(a) {
   }
   if ((b.contested_dyads || []).length) {
     card.appendChild(el('p', null, 'Contested pairs: ' + b.contested_dyads.map(
-      (d) => d.source_label + ' — ' + d.target_label).join(', ')));
+      (d) => d.source_label + ' and ' + d.target_label).join('; ')));
     card.appendChild(el('p', 'muted small',
       'These pairs carry BOTH a positive and a negative tie. That combination '
       + 'is a lead in its own right: a vouch and an accusation between the '
@@ -9774,13 +9903,31 @@ function initSubtabs(paneId, onSelect) {
  *  this caller.
  */
 function refusalText(err, context) {
-  const detail = (err instanceof ApiError && err.detail) ? err.detail : '';
-  if (!detail) return context;
-  if (/re-authentication/i.test(detail)) {
-    return 'Re-authentication required — your step-up has expired. Sign out '
+  const said = (err instanceof ApiError && err.detail) ? err.detail : '';
+  if (!said) return context;
+  if (/re-authentication/i.test(said)) {
+    return 'Re-authentication required: your step-up has expired. Sign out '
       + 'and back in to refresh it. ' + context;
   }
+  /* The server writes most details as clauses ("missing global permission
+     break_glass.review"), and the context after it is a sentence, so the
+     two ran together as one: "... break_glass.review The review belongs
+     to ..." (README screenshot review, 2026-09-23). A detail that is
+     followed by something is closed as a sentence first. */
+  const detail = context ? closeClause(said) : said;
   return detail + (context ? ' ' + context : '');
+}
+
+/** A server clause as the first sentence of a line: a closing full stop,
+ *  and a capital when it opens with an ordinary lower-case word. Unlike
+ *  `asSentence` it leaves a first word that is an identifier alone, so
+ *  "case.read required" is not printed as "Case.read required". */
+function closeClause(text) {
+  const t = String(text || '').trim();
+  if (!t) return '';
+  const stopped = /[.!?:]$/.test(t) ? t : t + '.';
+  return /^[a-z]+(\s|$)/.test(stopped)
+    ? stopped.charAt(0).toUpperCase() + stopped.slice(1) : stopped;
 }
 
 /** Signed days from now. Negative reads as overdue, which is the point. */
@@ -9789,10 +9936,13 @@ function daysFromNow(iso) {
   return Math.round((new Date(iso) - Date.now()) / 86400000);
 }
 
+/** A deadline as days from now. A missing one is a deadline nobody set,
+ *  so it says that rather than printing a dash (README screenshot
+ *  review, 2026-09-23). */
 function whenText(iso) {
-  if (!iso) return '—';
+  if (!iso) return 'not set';
   const d = daysFromNow(iso);
-  if (d === null) return '—';
+  if (d === null) return 'not set';
   if (d < 0) return Math.abs(d) + 'd overdue';
   if (d === 0) return 'today';
   return 'in ' + d + 'd';
@@ -9803,7 +9953,7 @@ function fact(label, value, cls) {
   const wrap = el('span', 'fact' + (cls ? ' ' + cls : ''));
   wrap.appendChild(el('span', 'fact-k', label));
   wrap.appendChild(el('span', 'fact-v', value === null || value === undefined
-    ? '—' : String(value)));
+    ? NO_VALUE : String(value)));
   return wrap;
 }
 
@@ -10030,7 +10180,7 @@ async function loadQuarantine() {
     renderList('ing-quarantine-list', 'ing-quarantine-empty', [], ingestRow);
     $('ing-quarantine-empty').textContent = refusalText(
       err, 'The unattached queue could not be read. It is not known to be '
-      + 'empty — reopen this tab to retry.');
+      + 'empty. Reopen this tab to retry.');
   }
 }
 
@@ -10296,7 +10446,7 @@ async function loadKeys() {
       renderList('key-list', 'key-empty', [], keyRow);
       $('key-empty').textContent = refusalText(
         err,
-        'Key administration needs ingest.manage — which feeds exist and what '
+        'Key administration needs ingest.manage, because which feeds exist and what '
         + 'they are cleared for is operational intelligence about the '
         + 'deployment.');
       return;
@@ -10340,7 +10490,7 @@ function keyRow(k) {
   if (k.revoked_reason) card.appendChild(el('p', 'why', k.revoked_reason));
   else if (stale || k.stale_days > 30) {
     card.appendChild(el('p', 'why',
-      'Unused for over thirty days. docs/12: that is either a dead '
+      'Unused for over thirty days, so it is either a dead '
       + 'integration or somebody else’s.'));
   }
   return card;
@@ -10380,7 +10530,7 @@ function wireCustodyVerify() {
          so an inactive account is not told it lacks a permission it holds. */
       if (err instanceof ApiError && err.status === 403) {
         box.appendChild(el('p', 'help warn', refusalText(err,
-          'audit.read is granted to SECURITY_OFFICER alone — the '
+          'audit.read is granted to SECURITY_OFFICER alone: the '
           + 'administrator configures, the officer audits.')));
       } else if (err instanceof ApiError && err.status === 422) {
         box.appendChild(el('p', 'help warn', refusalText(err,
@@ -10412,14 +10562,15 @@ function custodyVerdict(r) {
   card.appendChild(el('span', 'chip ' + (ok ? 'good' : 'bad'),
     r.checked === 0 ? 'NOTHING TO CHECK' : (r.intact ? 'INTACT' : 'BROKEN')));
   const span = (r.first_id === null || r.first_id === undefined)
-    ? '' : ' · id ' + r.first_id + '–' + r.last_id;
+    ? '' : ' · id ' + r.first_id + ' to ' + r.last_id;
   card.appendChild(el('p', 'help',
-    r.checked.toLocaleString() + ' custody row(s) checked' + span
+    r.checked.toLocaleString() + ' custody '
+    + agree(r.checked, 'row', 'rows') + ' checked' + span
     + (r.scoped ? ' · scoped to one exhibit' : ' · whole ledger')));
   if (r.caveat) card.appendChild(el('p', 'help warn', r.caveat));
   if (r.forks) {
     card.appendChild(el('p', 'help warn',
-      r.forks + ' fork(s). ' + (r.fork_note || '')));
+      countOf(r.forks, 'fork', 'forks') + '. ' + (r.fork_note || '')));
   }
   card.appendChild(el('p', 'help', 'Genesis rows: ' + r.genesis_count
     + (r.genesis_count === 1 ? ' (the chain is anchored).' : '')));
@@ -10463,9 +10614,9 @@ function wireRetentionConfirm() {
     if (current && !current.is_placeholder && !window.confirm(
         'Replace the confirmed period for ' + cat + '?\n\n'
         + (current.confirmed_by_name || 'A colleague') + ' confirmed '
-        + current.retain_days + ' day(s)'
+        + dayCount(current.retain_days)
         + (current.confirmed_at ? ' on ' + fmtTime(current.confirmed_at) : '')
-        + '. Your ' + days + ' day(s) replaces that decision, with your '
+        + '. Your ' + dayCount(days) + ' replaces that decision, with your '
         + 'name on it, for every case in the deployment. Records already on '
         + 'file keep the deadline they were stamped with.')) {
       return;
@@ -10492,6 +10643,28 @@ function wireRetentionConfirm() {
     $('ret-rationale').value = '';
     await loadRetention();
   });
+}
+
+/** "1 day", "730 days": a retention period whose count is known. */
+function dayCount(n) {
+  return countOf(n, 'day', 'days');
+}
+
+/** A count and its noun in agreement: "1 item of evidence", "3 items of
+ *  evidence". The number is known when the line is written, so hedging
+ *  with "item(s)" only makes the reader do the agreement (README
+ *  screenshot review, 2026-09-23). */
+function countOf(n, one, many) {
+  return n + ' ' + (Number(n) === 1 ? one : many);
+}
+
+/** The word alone, chosen by the count as countOf chooses it: for a verb
+ *  ("1 check needs", "3 checks need"), or for a noun whose count is
+ *  printed some other way (grouped by toLocaleString, where "1.000" would
+ *  read as one). countOf keeps its own copy of the rule because tests run
+ *  it standalone (README screenshot set review, 2026-09-23). */
+function agree(n, one, many) {
+  return Number(n) === 1 ? one : many;
 }
 
 /** Rules by category, as last loaded: the form reads the current period
@@ -10527,10 +10700,12 @@ function syncRuleForm(force) {
   const note = $('ret-cat-state');
   if (!r) { note.textContent = ''; return; }
   if (force || !$('ret-days').value) $('ret-days').value = String(r.retain_days);
+  /* "730 day(s)" was on screen in the README capture; the count is known,
+     so the word is chosen (README screenshot review, 2026-09-23). */
   note.textContent = r.is_placeholder
-    ? cat + ' runs on ' + r.retain_days + ' day(s), a placeholder shipped '
+    ? cat + ' runs on ' + dayCount(r.retain_days) + ', a placeholder shipped '
       + 'with the build that nobody has confirmed.'
-    : cat + ' was confirmed at ' + r.retain_days + ' day(s) by '
+    : cat + ' was confirmed at ' + dayCount(r.retain_days) + ' by '
       + (r.confirmed_by_name || 'an account no longer listed')
       + (r.confirmed_at ? ' on ' + fmtTime(r.confirmed_at) : '')
       + '. Confirming again replaces their decision.';
@@ -10599,10 +10774,14 @@ function deliveryRow(d) {
      it is already the server's redacted form where redaction applied. */
   if (d.address) facts.appendChild(el('span', 'mono small', d.address));
   if (d.attempts) {
-    facts.appendChild(el('span', 'muted small', d.attempts + ' attempt(s)'));
+    facts.appendChild(el('span', 'muted small',
+      countOf(d.attempts, 'attempt', 'attempts')));
   }
+  /* Through fmtTime like the console's other times, so it says UTC: the
+     subtab appended the raw ISO string (README screenshot set review,
+     2026-09-23). */
   const when = d.attempted_at || d.raised_at;
-  if (when) facts.appendChild(el('span', 'muted small', when));
+  if (when) facts.appendChild(el('span', 'muted small', fmtTime(when)));
   card.appendChild(facts);
   if (d.reason) card.appendChild(el('p', 'why', d.reason));
   return card;
@@ -10661,7 +10840,8 @@ async function loadReadiness() {
      them, so the phrasing stays narrow on purpose. */
   summary.textContent = body.ready
     ? 'Every code-side check passes.'
-    : failed + ' of ' + body.checks.length + ' check(s) need attention.';
+    : failed + ' of ' + countOf(body.checks.length, 'check', 'checks') + ' '
+      + agree(failed, 'needs', 'need') + ' attention.';
   renderBlockingBanner(body);
   for (const c of body.checks) list.appendChild(readinessRow(c));
 }
@@ -10701,9 +10881,10 @@ function renderBlockingBanner(body) {
   show(box, true);
 
   const head = el('p', 'rdy-blocking-head');
-  head.appendChild(el('strong', null, total + ' BLOCKING check(s) failing'));
+  head.appendChild(el('strong', null,
+    countOf(total, 'BLOCKING check', 'BLOCKING checks') + ' failing'));
   head.appendChild(document.createTextNode(
-    ' — the collection poll route is refused. POST '
+    ': the collection poll route is refused. POST '
     + '/collection/sources/{id}/run answers 409 while any of these is red, '
     + 'because a covert poll against a real target must not run on a '
     + 'deployment where these are unsettled. Named as the ROUTE and not as '
@@ -11020,7 +11201,7 @@ function dueExhibitRow(d) {
   const head = el('div', 'row-head');
   const overdue = daysFromNow(d.deadline);
   const score = el('span', 'score' + (overdue !== null && overdue < 0 ? ' hot' : ''),
-    overdue === null ? '—' : (overdue < 0 ? Math.abs(overdue) + 'd' : overdue + 'd'));
+    overdue === null ? 'not set' : (overdue < 0 ? Math.abs(overdue) + 'd' : overdue + 'd'));
   score.title = overdue !== null && overdue < 0
     ? 'Overdue by this many days.' : 'Days until destruction.';
   head.appendChild(score);
@@ -11256,7 +11437,8 @@ async function doPurge(authority, dry) {
   }
   if (body.storage_locked) {
     out.appendChild(el('p', 'form-error',
-      'Storage REFUSED to delete ' + body.storage_locked + ' object(s). '
+      'Storage REFUSED to delete '
+      + countOf(body.storage_locked, 'object', 'objects') + '. '
       + 'COMPLIANCE-mode object lock can refuse even to satisfy a deletion '
       + 'order (decision 50): the bytes are still there, and a tombstone '
       + 'recording a purge that did not happen is a false record.'));
@@ -11264,10 +11446,12 @@ async function doPurge(authority, dry) {
   for (const w of body.warnings || []) {
     out.appendChild(el('p', 'help warn', w));
   }
-  if ((body.tombstones || []).length) {
+  const written = (body.tombstones || []).length;
+  if (written) {
     out.appendChild(el('p', 'help',
-      (body.tombstones || []).length + ' tombstone(s) written. They are '
-      + 'append-only and outlive what they record.'));
+      countOf(written, 'tombstone', 'tombstones') + ' written. '
+      + agree(written, 'It is append-only and outlives what it records.',
+        'They are append-only and outlive what they record.')));
   }
   if (dry) {
     purgePreview = { caseId, authority, counted, at: new Date(),
@@ -11309,7 +11493,8 @@ async function loadTombstones() {
     clearLoadFailure('tomb-empty');
     $('tomb-empty').textContent = 'Nothing has been destroyed.';
     renderList('tomb-list', 'tomb-empty', body.tombstones || [], tombRow);
-    $('tomb-counts').textContent = (body.tombstones || []).length + ' record(s)';
+    $('tomb-counts').textContent = countOf((body.tombstones || []).length,
+      'record', 'records');
   } catch (err) {
     if (caseChanged(token)) return;
     /* Cleared, then explained. The 403 branch used to return with the
@@ -12146,9 +12331,8 @@ async function loadAch() {
   renderAchRanking(body);
   renderAchMatrix(body);
   $('ach-counts').textContent =
-    body.hypotheses.length + ' hypothes'
-    + (body.hypotheses.length === 1 ? 'is' : 'es') + ' · '
-    + body.evidence.length + ' item(s) of evidence';
+    countOf(body.hypotheses.length, 'hypothesis', 'hypotheses') + ' · '
+    + countOf(body.evidence.length, 'item of evidence', 'items of evidence');
 }
 
 function renderAchWarnings(body) {
@@ -12165,28 +12349,32 @@ function renderAchRanking(body) {
   show($('ach-empty'), body.hypotheses.length === 0);
   if (!body.hypotheses.length) return;
 
-  for (const h of body.hypotheses) {
+  body.hypotheses.forEach((h, i) => {
     const card = el('div', 'card row-card');
     const head = el('div', 'row-head');
     /* Inconsistency first and in the score slot, because that is what the
        list is ordered by. Putting support there would be showing the
-       number the method deliberately does not rank on. */
-    const score = el('span', 'score' + (h.inconsistency === 0 ? '' : ' hot'),
+       number the method deliberately does not rank on.
+       `against`, not the shared `hot`: `hot` is the accent, which drew the
+       losing hypotheses in the colour of the "least inconsistent" chip and
+       the "strongly consistent" cells. Evidence against is the matrix's
+       red (README screenshot review, 2026-09-23). */
+    const score = el('span', 'score' + (h.inconsistency === 0 ? '' : ' against'),
       h.inconsistency.toFixed(1));
-    score.title = 'Inconsistency — evidence AGAINST this hypothesis. '
+    score.title = 'Inconsistency: evidence AGAINST this hypothesis. '
       + 'Lower survives. This is what the ranking uses.';
     head.appendChild(score);
+    /* The matrix heads its columns H1, H2, H3 in this order, and a column
+       header's statement was only in its tooltip, which a printed or
+       captured page never shows (README screenshot review, 2026-09-23). */
+    const key = el('span', 'ach-hkey', 'H' + (i + 1));
+    key.setAttribute('aria-label', 'Column H' + (i + 1) + ' in the matrix');
+    head.appendChild(key);
     head.appendChild(el('span', 'row-title', h.statement));
     if (String(h.id) === body.least_inconsistent) {
       const chip = el('span', 'chip ok', 'least inconsistent');
-      chip.title = 'Survives best. NOT "proven" — ACH eliminates, it does '
+      chip.title = 'Survives best. NOT "proven": ACH eliminates, it does '
         + 'not confirm.';
-      head.appendChild(chip);
-    }
-    if (String(h.id) === body.refute_first) {
-      const chip = el('span', 'chip warn', 'refute this first');
-      chip.title = 'The most efficient next move: the hypothesis whose '
-        + 'refutation would change the picture most.';
       head.appendChild(chip);
     }
     const status = (body.statuses || {})[String(h.id)];
@@ -12206,7 +12394,54 @@ function renderAchRanking(body) {
     }
     card.appendChild(facts);
     box.appendChild(card);
+  });
+
+  /* `refute_first` is an ASSERTION id (ach.py: "the most diagnostic item
+     that some live hypothesis has not yet been scored against"). This pane
+     compared it with each HYPOTHESIS id, so it never matched and the half of
+     the method the header comment gives equal billing never rendered
+     (README screenshot review, 2026-09-23). It is said here, under the
+     ranking it could change, and marked on its row in the matrix. */
+  const next = achNextTest(body);
+  if (next) {
+    const line = el('p', 'help ach-next');
+    line.appendChild(el('span', 'chip warn', 'next test'));
+    /* Read as English for both kinds of row (README screenshot set review,
+       2026-09-23): "against H2, H3" became "H2 and H3", "not a neutral"
+       lacked its noun, and an unfinished row's diagnosticity is unknown,
+       so calling it "the most diagnostic item" claimed what the matrix
+       beside it says nobody knows yet. */
+    const cols = next.missing.length > 1
+      ? next.missing.slice(0, -1).join(', ') + ' and '
+        + next.missing[next.missing.length - 1]
+      : next.missing[0];
+    line.appendChild(document.createTextNode(' Score ' + next.label
+      + ' against ' + cols + '. ' + (next.is_incomplete
+        ? 'Its row is unfinished, so its diagnosticity is unknown rather '
+          + 'than zero, and finishing the row is the cheapest work '
+          + 'available here.'
+        : 'It is the most diagnostic item with a blank cell, and a blank '
+          + 'cell is a gap, not a neutral one.')));
+    box.appendChild(line);
   }
+}
+
+/** The evidence row `refute_first` names, its label made safe, with the
+ *  H numbers it has not been scored against; or null. */
+function achNextTest(body) {
+  if (!body || !body.refute_first) return null;
+  const row = (body.evidence || []).find(
+    (e) => String(e.assertion_id) === String(body.refute_first));
+  if (!row) return null;
+  const scored = new Set((body.cells || [])
+    .filter((c) => String(c.assertion_id) === String(row.assertion_id))
+    .map((c) => String(c.hypothesis_id)));
+  const missing = [];
+  (body.hypotheses || []).forEach((h, i) => {
+    if (!scored.has(String(h.id))) missing.push('H' + (i + 1));
+  });
+  if (!missing.length) return null;
+  return Object.assign({}, withSafeLabel(row), { missing: missing });
 }
 
 /** The grid. Evidence down, hypotheses across.
@@ -12279,7 +12514,7 @@ function renderAchMatrix(body) {
       btn.dataset.hypothesis = String(h.id);
       btn.title = (s === undefined
         ? 'Not assessed. Not the same as neutral.'
-        : (h.statement + ' — ' + text)) + ' Click to score.';
+        : (h.statement + ': ' + text + '.')) + ' Click to score.';
       btn.setAttribute('aria-label',
         e.label + ' against H' + (i + 1) + ': '
         + (s === undefined ? 'not assessed' : text) + '. Change stance.');
@@ -12288,18 +12523,29 @@ function renderAchMatrix(body) {
       td.appendChild(btn);
       tr.appendChild(td);
     });
+    /* A word, not a dash: the warning above counts these rows as
+       "unfinished", and a lone glyph in a numeric column read as "no
+       value" rather than "not finished" (README screenshot review,
+       2026-09-23). */
     const diag = el('td', 'ach-diag',
-      e.is_incomplete ? '—' : e.diagnosticity.toFixed(2));
+      e.is_incomplete ? 'unfinished' : e.diagnosticity.toFixed(2));
     if (e.is_incomplete) {
-      diag.title = 'UNKNOWN, not zero. This item has been scored against '
-        + (e.assessed_against === 1 ? 'only one hypothesis'
-          : 'no hypotheses')
-        + ', so whether it discriminates cannot be said yet. Finishing the '
-        + 'row is the cheapest work available here.';
+      diag.title = achUnknownWhy(e, body.hypotheses.length);
     } else if (!e.is_diagnostic) {
-      diag.title = 'Consistent with every hypothesis, so it discriminates '
-        + 'nothing and is excluded from the ranking. Kept in the record '
-        + 'rather than deleted.';
+      diag.title = 'Says the same thing about every hypothesis, so it '
+        + 'discriminates nothing and is excluded from the ranking. Kept in '
+        + 'the record rather than deleted.';
+    }
+    if (String(e.assertion_id) === String(body.refute_first)) {
+      const chip = el('span', 'chip warn small', 'next test');
+      /* An unfinished row is not "the most diagnostic": its diagnosticity
+         is unknown (README screenshot set review, 2026-09-23). */
+      chip.title = (e.is_incomplete
+        ? 'An unfinished row with a blank cell: '
+        : 'The most diagnostic item with a blank cell: ')
+        + 'scoring it against the rest is the cheapest next test.';
+      diag.appendChild(document.createTextNode(' '));
+      diag.appendChild(chip);
     }
     tr.appendChild(diag);
     tbody.appendChild(tr);
@@ -12315,6 +12561,24 @@ function renderAchMatrix(body) {
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([k, v]) => k + ' = ' + v).join(' · ');
   box.appendChild(key);
+}
+
+/** Why a row's diagnosticity reads "unfinished". Two cases since ach.py stopped
+ *  treating two agreeing cells as a finished row (README screenshot review,
+ *  2026-09-23): too few cells to compare, or agreement so far with a
+ *  hypothesis still blank, which could be the one it separates. */
+function achUnknownWhy(e, live) {
+  const n = e.assessed_against || 0;
+  if (n < 2) {
+    return 'UNKNOWN, not zero. This item has been scored against '
+      + (n === 1 ? 'only one hypothesis' : 'no hypotheses')
+      + ', so whether it discriminates cannot be said yet. Finishing the '
+      + 'row is the cheapest work available here.';
+  }
+  return 'UNKNOWN, not zero. This item has been scored against ' + n
+    + ' of ' + live + ' hypotheses and says the same thing about each so '
+    + 'far. The blank one could be the hypothesis it separates, so it is '
+    + 'not called undiagnostic until the row is finished.';
 }
 
 /** The service's wording for a stance, from the response's `stance_scale`;
@@ -12381,7 +12645,7 @@ function renderStanceBasis(box, assertionId) {
   box.appendChild(el('span', 'assert-basis', basis));
   const grade = el('span', 'grading',
     String(meta.reliability) + String(meta.credibility));
-  grade.title = 'Admiralty grading — ' + gradingText(meta);
+  grade.title = 'Admiralty grading: ' + gradingText(meta);
   box.appendChild(grade);
   box.appendChild(el('span', 'help', 'Admiralty ' + gradingText(meta)));
   if (meta.owner) box.appendChild(el('span', 'help', 'on ' + meta.owner));
@@ -12510,7 +12774,7 @@ function assertionOptionLabel(a) {
 function renderAchHypothesisPicker(body) {
   const hyp = $('ach-evidence-hyp');
   const keep = hyp.value;
-  const pairs = body.hypotheses.map((h, i) => [h.id, 'H' + (i + 1) + ' — '
+  const pairs = body.hypotheses.map((h, i) => [h.id, 'H' + (i + 1) + ': '
     + h.statement]);
   opts(hyp, pairs.length ? pairs : [['', 'Add a hypothesis first']],
        pairs.some((p) => p[0] === keep) ? keep : (pairs.length ? pairs[0][0] : ''));
@@ -12649,7 +12913,7 @@ function pgpOutcome(body) {
   head.appendChild(el('span', 'row-title',
     outcome === PGP_GOOD ? 'Cryptographic evidence of control'
       : (PGP_UNCHECKED.has(outcome)
-        ? 'Nobody checked — this is not a finding about the evidence'
+        ? 'Nobody checked, so this is not a finding about the evidence'
         : 'Checked, and it did not hold')));
   card.appendChild(head);
 
@@ -12757,7 +13021,7 @@ async function loadUnverified() {
         return card;
       });
     $('comms-unverified-count').textContent = claims.length
-      ? claims.length + ' claim(s)' : '';
+      ? countOf(claims.length, 'claim', 'claims') : '';
   } catch (err) {
     if (caseChanged(token)) return;
     if (err instanceof ApiError && err.status === 403) {
@@ -12852,7 +13116,7 @@ async function loadCoParticipation() {
       const w = Number(t.weight || 0);
       head.appendChild(el('span', 'score', w.toFixed(2)));
       head.appendChild(el('span', 'row-title',
-        name(t.src) + ' — ' + name(t.dst)));
+        name(t.src) + ' and ' + name(t.dst)));
       /* Invariant 4: an inferred edge stays visually distinct and never
          silently becomes an asserted one. */
       head.appendChild(el('span', 'chip warn', 'inferred'));
@@ -12869,7 +13133,7 @@ async function loadCoParticipation() {
        says weights are not comparable across parameters — so it is stated
        once for the network rather than repeated on every row. */
     $('comms-copart-count').textContent = ties.length
-      ? ties.length + ' inferred tie(s)'
+      ? countOf(ties.length, 'inferred tie', 'inferred ties')
         + (weighting ? ' · ' + weighting + ' weighting' : '')
       : '';
     renderCoParticipationCoverage(body);
@@ -13093,7 +13357,14 @@ function renderRedaction(prepared) {
   const made = el('div', 'facts');
   made.appendChild(fact('case', prepared.caseCode));
   made.appendChild(fact('prepared', fmtTime(body.generated_at)));
-  made.appendChild(fact('built from', 'the whole case as it stands now'));
+  /* What the builder reads: the case as it stands now (no as-of), its
+     asserted social ties only (preset 'all', include_inferred=False in
+     reports.py). "The whole case" was false beside a relationship count
+     smaller than the case's own: inferred ties and non-social types such
+     as CONTROLS and USED are in the case and never in a report (README
+     screenshot set review, 11-report). */
+  made.appendChild(fact('built from',
+    'the case as it stands now, asserted social ties only'));
   /* Asked for is not the same as in the document: a case whose header is
      above the target keeps its hypotheses with it (final review C2). */
   made.appendChild(fact('hypotheses',
@@ -13127,11 +13398,34 @@ function renderRedaction(prepared) {
 
   const anything = withheld || r.header_withheld || r.assumptions_withheld
     || r.hypotheses_withheld || r.hypothesis_evidence_withheld;
-  card.appendChild(el('p', anything ? 'why' : 'help',
+  /* The statement is the document's own Markdown sentence, which bolds
+     "Every figure below is computed over the redacted graph" with `**`.
+     Printed through textContent, the card showed the asterisks the moment
+     anything was withheld (README screenshot review, 2026-09-23). */
+  card.appendChild(withStrongRuns(el('p', anything ? 'why prose' : 'help'),
     r.statement || (withheld
       ? withheld + ' element(s) were withheld from this document.'
       : 'Nothing was withheld at this classification.')));
   box.appendChild(card);
+}
+
+/** Append `text` to `node`, with each `**run**` as a <strong> and the rest
+ *  as text nodes. Markup is never parsed: the only thing read is the `**`
+ *  pair, so a stray `<` in a statement is shown as a `<`. An unpaired `**`
+ *  is left as written rather than guessed at. */
+function withStrongRuns(node, text) {
+  const parts = String(text || '').split('**');
+  const paired = parts.length % 2 === 1;
+  parts.forEach((part, i) => {
+    if (!paired && i === parts.length - 1 && i % 2 === 1) {
+      node.appendChild(document.createTextNode('**' + part));
+    } else if (i % 2 === 1) {
+      node.appendChild(el('strong', null, part));
+    } else if (part) {
+      node.appendChild(document.createTextNode(part));
+    }
+  });
+  return node;
 }
 
 /** One named list in the preview, capped so a large case stays readable;
@@ -13201,8 +13495,15 @@ function renderReportBody(body) {
   const auth = el('div', 'facts');
   auth.appendChild(fact('legal basis', c.legal_basis));
   auth.appendChild(fact('authority', c.authority_ref || 'not recorded'));
-  auth.appendChild(fact('retention until', fmtDate(c.retention_until)));
-  auth.appendChild(fact('next review', fmtDate(c.review_due)));
+  /* A withheld header sends its dates as null, and "not recorded" would
+     say the case has none. The markdown prints the withheld mark for them
+     (reports.WITHHELD_MARK), and so does this preview: the server already
+     put that mark in legal_basis, so the two cannot drift (README
+     screenshot review, 2026-09-23). */
+  const headerOut = !!(body.redaction && body.redaction.header_withheld);
+  const headerDate = (v) => (headerOut && !v ? c.legal_basis : fmtDate(v));
+  auth.appendChild(fact('retention until', headerDate(c.retention_until)));
+  auth.appendChild(fact('next review', headerDate(c.review_due)));
   box.appendChild(auth);
 
   /* Named lists, so an analyst can see WHAT survived the redaction rather
@@ -13225,8 +13526,9 @@ function renderReportBody(body) {
       + 'challenge.');
   } else {
     box.appendChild(el('h2', 'h-sm', 'Assumptions'));
-    box.appendChild(el('p', 'help warn', assumptionsWithheld
-      + ' recorded assumption(s) withheld with the case header.'));
+    box.appendChild(el('p', 'help warn', countOf(assumptionsWithheld,
+      'recorded assumption', 'recorded assumptions')
+      + ' withheld with the case header.'));
   }
 
   reportList(box, 'Entities', body.actors || [], (a) => reportRow(
@@ -13241,9 +13543,13 @@ function renderReportBody(body) {
     (e.title || e.id) + (e.sha256 ? ' · sha256 ' + String(e.sha256).slice(0, 12) : '')));
   if (body.hypotheses && body.hypotheses.hypotheses) {
     /* The statements, not a count: they often name suspects, and they
-       are in the file. */
+       are in the file. With the status the document now prints, so a
+       ruled-out alternative reads as one (README screenshot review,
+       2026-09-23). */
+    const statuses = body.hypotheses.statuses || {};
     reportList(box, 'Competing hypotheses', hyp, (h) => reportRow(
-      h.statement + ' (inconsistency ' + h.inconsistency + ', support '
+      h.statement + ' (' + (statuses[String(h.id)] || 'status not recorded')
+        + ', inconsistency ' + h.inconsistency + ', support '
         + h.support + ')'));
     for (const w of body.hypotheses.warnings || []) {
       box.appendChild(el('p', 'help warn', w));
@@ -13252,8 +13558,12 @@ function renderReportBody(body) {
     /* Said, as the document says it: a missing section reads as "no
        alternatives were considered" (final review C2). */
     box.appendChild(el('h2', 'h-sm', 'Competing hypotheses'));
-    box.appendChild(el('p', 'help warn', body.redaction.hypotheses_withheld
-      + ' competing hypothesis(es) withheld with the case header.'));
+    /* Agreed as the document's own line agrees ("_1 competing hypothesis
+       withheld with the case header"), not a bracketed plural (README
+       screenshot set review, 2026-09-23). */
+    box.appendChild(el('p', 'help warn',
+      countOf(body.redaction.hypotheses_withheld, 'competing hypothesis',
+        'competing hypotheses') + ' withheld with the case header.'));
   }
 
   if (typeof body.document === 'string') {
@@ -13433,15 +13743,20 @@ async function releaseReport() {
  *    text is shown only as the server's defanged runs (`body_segments`),
  *    never from `body_text`, which keeps the sender's live URLs.
  *  - The Received chain is drawn recipient-first with the trust boundary
- *    marked, and everything above it is greyed and labelled "claimed".
+ *    marked, and every hop below it (further from the recipient) is
+ *    greyed and labelled "claimed".
  *  - A screenshot's <img> src is built from an /api/v1/ path and never
  *    from a value in the response -- enforced by a test, because the UI
  *    invariant suite did not police `.src` until this pane needed one.
  */
 
 function dcpUrl(value) {
+  /* No URL is said in words and offers nothing to copy. It was a dash
+     in the defanged style beside a copy button that copied the dash
+     (README screenshot review, 2026-09-23). */
+  if (!value) return el('span', 'muted', NO_VALUE);
   /* Defanged, monospaced, and deliberately NOT an anchor. */
-  const shown = visibleText(value || '—');
+  const shown = visibleText(value);
   const span = el('span', 'mono defanged', shown);
   span.title = 'Defanged and non-clickable on purpose. Fetching this from '
     + 'an analyst workstation would announce the investigation.';
@@ -13807,13 +14122,13 @@ async function openCapture(id, opener) {
     const tls = el('div', 'card sub-card');
     tls.appendChild(el('h3', 'h-xs', 'TLS certificate'));
     const tf = el('div', 'facts');
-    tf.appendChild(fact('subject', visibleText(c.tls_subject || '—')));
-    tf.appendChild(fact('issuer', visibleText(c.tls_issuer || '—')));
+    tf.appendChild(fact('subject', visibleText(c.tls_subject || NO_VALUE)));
+    tf.appendChild(fact('issuer', visibleText(c.tls_issuer || NO_VALUE)));
     tf.appendChild(fact('not after', fmtDate(c.tls_not_after)));
     tls.appendChild(tf);
     if (c.tls_spki_sha256) {
       const k = el('p', 'mono small', c.tls_spki_sha256);
-      k.title = 'SPKI SHA-256 -- pivot on this, not the domain.';
+      k.title = 'SPKI SHA-256: pivot on this, not the domain.';
       tls.appendChild(copyable(k, c.tls_spki_sha256, 'the TLS key hash'));
     }
     body.appendChild(tls);
@@ -13970,10 +14285,13 @@ function emailProved(m) {
     const where = [origin.host_defanged ? visibleText(origin.host_defanged)
       : null, origin.ip].filter(Boolean).join(' ');
     const host = fact('sending host', where || 'not recorded');
+    /* "Below it, further from the recipient": the chain is drawn hop 0
+       first, and "above" pointed at the organisation's own hops (README
+       screenshot review, 2026-09-23). */
     host.title = 'Received hop ' + origin.seq + ': the host that connected to '
       + visibleText(origin.observed_by_defanged || 'the recipient’s relay')
-      + ', written by that relay. Everything above it in the chain is a '
-      + 'claim; this line is an observation.';
+      + ', written by that relay. Every hop below it in the chain, further '
+      + 'from the recipient, is a claim; this line is an observation.';
     f.appendChild(host);
     if (origin.boundary_confirmed !== true) {
       /* Unknown is said as unknown (invariant 12). At hop 0 the stored
@@ -14094,11 +14412,11 @@ function authChip(name, result) {
   chip.title = result === 'PASS'
     ? name + ' passed.'
     : adverse
-      ? name + ' FAILED — the check ran and the message did not pass.'
+      ? name + ' FAILED: the check ran and the message did not pass.'
       : inconclusive
         ? name + ' could not be completed by the receiving MTA (' + result
           + '). This is not a failure and not a pass: it is unknown.'
-        : name + ' returned ' + result + ' — no policy or no verdict. '
+        : name + ' returned ' + result + ': no policy or no verdict. '
           + 'An absence, not a failure.';
   wrap.appendChild(chip);
   return wrap;
@@ -14137,12 +14455,19 @@ async function openDeceptionEmail(id, opener) {
     const chain = el('div', 'card sub-card');
     chain.appendChild(el('h3', 'h-xs', 'Received chain'));
     const note = el('p', 'help');
+    /* The chain is drawn recipient-first, hop 0 at the top, so the hops
+       written outside the organisation are drawn BELOW the boundary row.
+       This note and the chip's title said "above", which is docs/19's word
+       for a higher `seq` and pointed the wrong way on screen (README
+       screenshot review, 2026-09-23). "Further from the recipient" reads
+       the same in any orientation, so it is said as well. */
     note.textContent = 'Read this from the top. Each MTA prepends its own '
       + 'line, so hop 0 is the receiving organisation’s own server. '
-      + 'Everything above the boundary was written by machines outside '
-      + 'this organisation and can say anything the sender wants.';
+      + 'Every hop below the trust boundary, further from the recipient, '
+      + 'was written by machines outside this organisation and can say '
+      + 'anything the sender wants.';
     chain.appendChild(note);
-    /* Hosts in their defanged forms: above the boundary every word of a
+    /* Hosts in their defanged forms: below the boundary every word of a
        line is the sender's, and a `from` or `by` with a path is a URL
        (final review U17, 2026-09-23). */
     for (const h of hops) {
@@ -14159,7 +14484,8 @@ async function openDeceptionEmail(id, opener) {
         const chip = el('span', 'chip good', 'trust boundary');
         chip.title = 'The last hop written by infrastructure this '
           + 'organisation controls. Its observation of who connected is '
-          + 'evidence; everything above it is a claim.';
+          + 'evidence; every hop below it, further from the recipient, is '
+          + 'a claim.';
         row.appendChild(chip);
       }
       if (h.is_attacker_writable) {
@@ -14228,8 +14554,8 @@ async function openDeceptionEmail(id, opener) {
       if (a.byte_size === null || a.byte_size === undefined) {
         const unknown = el('span', 'chip warn', 'size unknown');
         unknown.title = 'This part could not be decoded, so its size and '
-          + 'hash were never established. It is NOT an empty attachment — '
-          + 'see the parse gaps.';
+          + 'hash were never established. It is NOT an empty attachment. '
+          + 'See the parse gaps.';
         p.appendChild(unknown);
       } else {
         p.appendChild(el('span', 'muted small', humanBytes(a.byte_size)));
@@ -14284,10 +14610,10 @@ function callRow(c) {
   const sf = el('div', 'facts');
   sf.appendChild(fact('number',
     c.presented.number_e164 || c.presented.number));
-  sf.appendChild(fact('name', visibleText(c.presented.name || '—')));
+  sf.appendChild(fact('name', visibleText(c.presented.name || NO_VALUE)));
   const warn = el('span', 'chip bad', 'attacker-chosen');
   warn.title = 'Caller ID and CNAM are set by the calling party. This is '
-    + 'the attack, not a detail -- it never becomes a selector.';
+    + 'the attack, not a detail, and it never becomes a selector.';
   sf.appendChild(warn);
   shown.appendChild(sf);
   card.appendChild(shown);
@@ -14319,7 +14645,7 @@ function callRow(c) {
   if (cands.length) {
     const p = el('p', 'why');
     p.textContent = cands.length + ' selector candidate'
-      + (cands.length === 1 ? '' : 's') + ' -- durable fields only';
+      + (cands.length === 1 ? '' : 's') + ' (durable fields only)';
     p.title = cands.map((x) => x.selector_type + ' ' + x.value
       + ' (' + x.strength + '): ' + x.why).join('\n');
     card.appendChild(p);
@@ -14376,7 +14702,8 @@ async function loadWatchHits() {
     const hits = body.hits || [];
     renderList('col-hits-list', 'col-hits-empty', hits, watchHitRow);
     $('col-hits-counts').textContent = hits.length
-      ? hits.length + ' hit(s), ' + (body.unacknowledged || 0) + ' unread'
+      ? countOf(hits.length, 'hit', 'hits') + ', ' + (body.unacknowledged || 0)
+        + ' unread'
       : '';
     if (!hits.length) {
       $('col-hits-empty').textContent = unack
@@ -14473,7 +14800,7 @@ async function loadCollectedDocuments() {
     const docs = body.documents || [];
     renderList('col-doc-list', 'col-doc-empty', docs, collectedDocRow);
     $('col-doc-counts').textContent = docs.length
-      ? docs.length + ' document(s)' : '';
+      ? countOf(docs.length, 'document', 'documents') : '';
     if (!docs.length) {
       $('col-doc-empty').textContent =
         'Nothing collected yet at your clearance.';
@@ -14607,7 +14934,7 @@ async function loadAdminUsers() {
     state.adminYou = body.you;
     renderList('adm-list', 'adm-empty', body.users || [], adminUserRow);
     $('adm-counts').textContent = body.count
-      ? body.count + ' account(s), '
+      ? countOf(body.count, 'account', 'accounts') + ', '
         + (body.users || []).filter((u) => u.is_active).length + ' active'
       : '';
   } catch (err) {
@@ -14644,7 +14971,7 @@ function adminUserRow(u) {
   const card = el('div', 'card row-card');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title',
-    visibleText(u.display_name) + ' — ' + visibleText(u.email)));
+    visibleText(u.display_name) + ' (' + visibleText(u.email) + ')'));
   head.appendChild(el('span', 'chip tlp-' + u.tlp_clearance, u.tlp_clearance));
   if (!u.is_active) head.appendChild(el('span', 'chip bad', 'DEACTIVATED'));
   if (u.locked_until) {
@@ -14727,7 +15054,7 @@ function adminUserRow(u) {
   const setClr = el('button', 'btn ghost small', 'Set clearance');
   setClr.type = 'button';
   setClr.title = 'Their ceiling everywhere. Lowering below a case they own '
-               + 'is refused — transfer or close those cases first.';
+               + 'is refused. Transfer or close those cases first.';
   setClr.addEventListener('click', () => adminAct(
     '/admin/users/' + u.id + '/clearance',
     { method: 'POST', json: { clearance: clr.value } }, setClr));
@@ -15743,11 +16070,10 @@ function sampleRow(s) {
 
 function humanBytes(n) {
   if (n === null || n === undefined) return 'unknown';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
-  return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+  /* One unit rule across the console: this divided by 1024 and printed KB
+     while the Evidence pane printed KiB for the same arithmetic (README
+     screenshot set review, 2026-09-23). */
+  return fmtBytes(n);
 }
 
 /** Which file, whose, from where, and in what state: the header the
@@ -16061,8 +16387,9 @@ function detonationPanel(s, rows) {
 
   box.appendChild(el('p', 'help warn',
     'Nothing here submits anything anywhere. There is no sandbox '
-    + 'integration in this build: docs/11 says integrate rather than '
-    + 'build, and none has been integrated. What this records is the '
+    + 'integration in this build: the design integrates an existing '
+    + 'sandbox rather than building one, and none has been integrated '
+    + 'yet. What this records is the '
     + 'AUTHORISATION, captured before anything could be sent, so that it '
     + 'exists whether or not an integration ever appears.'));
 

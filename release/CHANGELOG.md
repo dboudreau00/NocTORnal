@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+### New README screenshots, and what taking them found
+
+All 16 screenshots in the README are new, taken from the restyled console
+on the TLP:CLEAR showcase case. Each image was designed against its README
+paragraph, critiqued adversarially, taken with the rest of the set in one
+run, and reviewed again as a set. Several captions changed to say what the
+console actually does.
+
+**The showcase case is TLP:CLEAR now.** The README promised a CLEAR case,
+but its own recipe could only make an AMBER one: `demo-network` hard-coded
+the case's label, and graph writes default to AMBER.
+`bootstrap.py demo-network --classification` sets the label for the case
+and every node and tie in it. The default is still AMBER, and the README
+recipe asks for CLEAR.
+
+**`scripts/seed_readme_showcase.py`** runs after the other seeders and
+gives the case enough to show what the README says. It seeds:
+- exhibits linked to about half the graph, a custody log with a read and
+  a verification, and a legal hold;
+- one inferred tie, and a few non-person entities on structural edges;
+- selectors, and comms bindings with a parsed contact block;
+- triage proposals, one of them disputed;
+- notifications from a second fictional account, and a break-glass grant
+  awaiting review;
+- analytics runs at three as-of dates;
+- one GREEN exhibit, so a CLEAR report withholds something.
+
+Everything is written through the services. A test proves that the social
+projection's metrics for the fifteen identities do not change, because the
+analytics paragraph depends on them.
+
+**Copy.**
+- Every em dash, en dash, spaced double hyphen and "(s)" plural is gone
+  from the console and from server strings a user can see. Tests now
+  refuse all four.
+- Counts agree in number, including in stored notification text.
+- Times are printed the way the console prints them everywhere.
+- The Lab says KiB, as the Evidence pane does.
+
+**Fixes the screenshots exposed.**
+- The Deception help described the Received chain upside down. The README
+  paragraph did too.
+- ACH's rule for an unfinished row contradicted its own warning.
+- The analytics Trend showed when each run started, not the world time it
+  measured. It now has an As of column.
+- The report preview called its scope "the whole case" beside a smaller
+  count. Its redaction statement also broke around its bold run, and it
+  said "not recorded" for dates it had withheld.
+- An exhibit's acquisition time came from the API host's clock, and its
+  custody row's time from the database's. A database clock behind the
+  host showed an exhibit acquired after its own ACQUIRED row. Both now
+  come from the database.
+- The Tox preview wrapped a key over two lines. Notification preference
+  selects stretched across the pane. The canvas hint named the Mac key on
+  every platform.
+- Stale "Phase 3" copy, and copy written for developers, was removed.
+- Search now says when a hit came through an attribute.
+- The custody log names the person, not an id.
+- The CI job installs the `dev` extra, so the QR reference encoder is
+  present and the no-skip gate passes.
+
 ### A second review, of the merged result
 
 The ten groups above were each verified alone. A 32-agent adversarial

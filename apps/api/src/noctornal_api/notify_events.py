@@ -192,7 +192,7 @@ def approval_decided(conn: psycopg.Connection, *, case_id: UUID,
               + ("\n\nThe approval is single use and expires; consume it from "
                  "the operation it was raised for." if approved else
                  "\n\nA declined request cannot be re-decided. If the facts "
-                 "have changed, raise a new one -- the history will show "
+                 "have changed, raise a new one. The history will show "
                  "both, which is the point.")),
         classification=classification, compartments=compartments,
         object_type="approval_request", object_id=request_id, actor_id=actor_id)
@@ -218,13 +218,20 @@ def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
     if count <= 0:
         return False
     code, classification, compartments = _case(conn, case_id)
+    # Agreed in number, because the text is stored and read verbatim: the
+    # inbox printed "3 proposal(s) were raised" (README screenshot set
+    # review, 2026-09-23).
+    one = count == 1
+    noun = "proposal" if one else "proposals"
     raised = NotificationService(conn).notify_case_owner(
         case_id,
         kind="PROPOSAL_QUEUED",
-        subject=f"{code}: {count} proposal(s) waiting in triage",
-        summary=f"{count} new proposal(s) are waiting for review on {code}.",
-        body=(f"{count} new proposal(s) were raised from captured material "
-              f"and are waiting in the triage queue.\n\nNothing has been "
+        subject=f"{code}: {count} {noun} waiting in triage",
+        summary=(f"{count} new {noun} {'is' if one else 'are'} waiting for "
+                 f"review on {code}."),
+        body=(f"{count} new {noun} {'was' if one else 'were'} raised from "
+              f"captured material and {'is' if one else 'are'} waiting in "
+              f"the triage queue.\n\nNothing has been "
               f"written to the graph: extractors propose, analysts dispose "
               f"(invariant 3)."),
         classification=classification, compartments=compartments,
@@ -330,7 +337,7 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
               f"Either the stored object or the recorded hash has changed "
               f"since acquisition. The object store is WORM-locked and the "
               f"hash columns are only ever written at ingest, so neither "
-              f"should be possible -- which is exactly why this is priority "
+              f"should be possible, which is exactly why this is priority "
               f"1. The custody log for the exhibit carries the failed "
               f"HASH_VERIFIED entry and the audit trail carries "
               f"EVIDENCE_INTEGRITY_ALARM."),

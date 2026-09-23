@@ -152,6 +152,18 @@ input:focus, select:focus, textarea:focus { background: var(--wash-2); }
 input.mono, textarea.mono { font-family: var(--mono); }
 textarea { resize: vertical; }
 input[type="file"] { padding: 4px; }
+/* The file picker's own button, themed (README screenshot review,
+   2026-09-23). Left to the browser it rendered as a light-grey OS button,
+   the brightest thing in the top of the Evidence pane. */
+input[type="file"]::file-selector-button {
+  font: inherit; font-size: 12px; color: var(--text-secondary);
+  background: var(--wash-2); border: 1px solid var(--field-edge);
+  border-radius: var(--r-sm); padding: 4px 10px; margin-right: var(--s-3);
+  cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover {
+  color: var(--text-primary); border-color: var(--text-tertiary);
+}
 input[type="checkbox"] { width: auto; accent-color: var(--accent-dim); }
 input[type="range"] {
   background: transparent; border: 0; padding: 0; height: 18px;
@@ -160,6 +172,22 @@ input[type="range"] {
 input[type="range"][disabled] { opacity: 0.4; cursor: default; }
 input::placeholder { color: var(--text-tertiary); }
 select.select { appearance: none; padding-right: 24px; }
+/* The chevron `appearance: none` removed and nothing put back, so a styled
+   select read as a text field: Triage's Classification and Queue in the
+   README capture (README screenshot review, 2026-09-23). Two gradient
+   halves, no image, so the CSP's img-src is not involved. Repeated with
+   :focus because the base `select:focus` rule resets the `background`
+   shorthand, which would take the chevron with it. A listbox (`multiple`,
+   Admin's roles) opens in place and has nothing to drop down. */
+select.select, select.select:focus {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-tertiary) 50%),
+    linear-gradient(135deg, var(--text-tertiary) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select.select[multiple] { background-image: none; padding-right: 10px; }
 /* A required select still on its "Choose ..." option reads as unset, the
    way an input's placeholder does, not as a value somebody picked (ux06
    grading-prefilled-upward, 2026-09-22). Only the closed control greys:
@@ -584,6 +612,8 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 }
 .table tbody tr[tabindex] { cursor: pointer; }
 .table .num { font-family: var(--mono); font-size: 12px; }
+/* A missing value in a column of values, as `.fact.muted` draws one. */
+.table td.absent { color: var(--text-tertiary); font-style: italic; }
 
 /* ── workspace: rail | canvas | inspector (docs/06 layout) ─────────── */
 .workspace {
@@ -1225,6 +1255,11 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .pref-row { align-items: center; flex-wrap: wrap; gap: 8px; }
 .pref-row .label { min-width: 64px; }
 .pref-row input[type="time"] { width: 92px; }
+/* Sized to its options. The base rule gives every select width: 100%,
+   which inside this wrapping row put each channel's priority on a line of
+   its own, about 930px wide, and wrapped every channel onto three
+   (README screenshot review, 2026-09-23). */
+.pref-row select { width: auto; }
 
 /* ── comms (Phase 7) ──────────────────────────────────────────────────
  * The normalise preview is the load-bearing element here, not the form.
@@ -1241,7 +1276,14 @@ button.hdr-user.codes-low::before { background: var(--alert); }
   border-left: 3px solid var(--alert);
   border-radius: var(--r-ctl); padding: 8px 10px;
 }
-.preview-row { display: flex; align-items: baseline; gap: 8px; }
+/* The label sits ABOVE the value, not beside it (README screenshot
+   review, 2026-09-23). Side by side, "Will be indexed as" took about 140px
+   of the 620px card and left a 64-hex Tox key about 420px for its 460, so
+   the key broke as "...1259FD" / "11" and read as two values, and the
+   label broke too. On a line of its own the key fits whole; the wrap
+   below stays for a value longer than the card. */
+.preview-row { display: flex; flex-direction: column; align-items: flex-start;
+               gap: 2px; }
 .preview .label { font-size: 11px; color: var(--text-tertiary);
                   text-transform: uppercase; letter-spacing: .04em; }
 /* Overflow-wrap, because a 64-hex public key is the normal case here and
@@ -1269,6 +1311,19 @@ button.hdr-user.codes-low::before { background: var(--alert); }
    document is long and the redaction statement above it must stay the
    first thing read. */
 .rep-document { margin-top: var(--s-4); }
+/* The prepared report's rhythm (README screenshot review, 2026-09-23).
+   The redaction card had a bottom margin only and sat 9px under the help
+   line, and the section headings in #rep-body had no top margin (h2 is
+   reset to 0), so each crowded the list above it while the gap below
+   "Assumptions (0)" was 36px. */
+#rep-redaction > .row-card { margin-top: var(--s-3); }
+#rep-body > h2.h-sm { margin-top: var(--s-6); margin-bottom: var(--s-1); }
+/* Same reset, same crowding, in Lifecycle's Retention subtab: the confirm
+   form's notes ran straight into "Due for destruction" (README screenshot
+   review, 2026-09-23). */
+#gov-retention > h2.h-sm:not(:first-child) {
+  margin-top: var(--s-6); margin-bottom: var(--s-1);
+}
 .rep-document-text {
   font-family: var(--mono); font-size: 11px; line-height: 1.5;
   white-space: pre-wrap; overflow-wrap: anywhere;
@@ -1457,11 +1512,24 @@ button.hdr-user.codes-low::before { background: var(--alert); }
    Tertiary already reads as "absent"; it does not need the alpha too. */
 .st-none { color: var(--text-tertiary); }
 
-/* Evidence consistent with every hypothesis. Kept in the record and
-   excluded from the ranking — dimmed rather than hidden, because
-   "we looked at this and it told us nothing" is itself a finding. */
+/* Evidence that says the same thing about every hypothesis. Kept in the
+   record and excluded from the ranking. Dimmed rather than hidden,
+   because "we looked at this and it told us nothing" is itself a finding. */
 .not-diagnostic { opacity: 0.5; }
 .not-diagnostic .ach-el { font-style: italic; }
+
+/* The ranking's own scores and keys (README screenshot review,
+   2026-09-23). A non-zero inconsistency is evidence AGAINST, so it takes
+   the matrix's "against" red: the shared `.score.hot` is the accent, which
+   drew the losing hypotheses in the colour of the winning chip. The H key
+   ties a card to its matrix column without the column's tooltip. */
+.score.against { color: var(--danger); }
+.ach-hkey {
+  font-size: 11px; font-weight: 600; color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.ach-next { margin: var(--s-2) 0 var(--s-3); }
+.ach-diag .chip { vertical-align: baseline; }
 
 /* A row that has not been finished. Deliberately NOT dimmed like the one
    above: "settles nothing" and "we have not entered this yet" both render
@@ -2057,9 +2125,10 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 }
 .hop-row:last-child { border-bottom: 0; }
 
-/* Above the trust boundary. Dimmed and struck through the host names,
-   because these hops were written by machines outside this organisation
-   and reading them as observations is the classic BEC attribution error. */
+/* Below the trust boundary on screen (further from the recipient, a
+   higher `seq`). Dimmed and struck through the host names, because these
+   hops were written by machines outside this organisation and reading
+   them as observations is the classic BEC attribution error. */
 .hop-row.claimed { opacity: 0.55; }
 .hop-row.claimed .mono { text-decoration: line-through dotted; }
 
@@ -2111,6 +2180,12 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .card .why {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
 }
+/* ...but a sentence is not a label and a value. The report's redaction
+   statement bolds one run inside its paragraph; flexed, the leading text,
+   the bold run and the rest became three items, so the bold run dropped
+   onto its own line with a gap after it (README screenshot set review,
+   11-report). */
+.card .why.prose { display: block; }
 
 /* --- click-to-copy on identifiers -------------------------------------- */
 

@@ -510,8 +510,8 @@ class NotificationService:
                     "notifications go to your account email, which an "
                     "administrator controls. Redirecting them is refused "
                     "unless an operator has declared which domains may "
-                    "receive case material — set "
-                    "NOCTORNAL_NOTIFY_ADDRESS_DOMAINS. A subject line here "
+                    "receive case material (in "
+                    "NOCTORNAL_NOTIFY_ADDRESS_DOMAINS). A subject line here "
                     "carries the case code, and a case code is "
                     "intelligence.")
             if "@" not in new or new.rsplit("@", 1)[1].lower() not in allowed:

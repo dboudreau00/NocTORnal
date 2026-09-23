@@ -316,3 +316,16 @@ def test_check_egress_signs_in_and_tells_its_refusals_apart():
     f = got["egress"]
     assert "invariant 8" in f["out"] and "audited as loudly" in f["out"]
     assert not f["save"]
+
+
+def test_a_withheld_header_does_not_call_its_dates_unrecorded():
+    """README screenshot review, 2026-09-23. A withheld case header sends
+    its retention and review dates as null, and the preview printed "not
+    recorded" for them, which says the case has none. It shows the same
+    withheld mark the markdown prints, taken from the server's own text."""
+    body = _fn("renderReportBody")
+    assert "body.redaction.header_withheld" in body
+    assert "headerDate(c.retention_until)" in body
+    assert "headerDate(c.review_due)" in body
+    assert "fmtDate(c.retention_until)" not in body.replace(
+        "headerDate(c.retention_until)", "")

@@ -129,6 +129,7 @@ from pathlib import Path
 import psycopg
 
 from noctornal_api.config import EVIDENCE_CAP_ENV
+from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.readiness")
 
@@ -320,7 +321,10 @@ def _security_officer_present(conn: psycopg.Connection) -> Check:
     n = _active_holders(conn, "SECURITY_OFFICER")
     return Check(
         "security_officer_present", n >= 1,
-        f"{n} active SECURITY_OFFICER account(s)",
+        # Agreed, not a bracketed plural: the register prints this as
+        # its evidence (README screenshot set review, 2026-09-23).
+        count_of(n, "active SECURITY_OFFICER account",
+                 "active SECURITY_OFFICER accounts"),
         "" if n >= 1 else
         "grant SECURITY_OFFICER to an active account "
         "(POST /admin/users/{user_id}/roles); break-glass refuses every "
@@ -334,7 +338,7 @@ def _sys_admin_present(conn: psycopg.Connection) -> Check:
     n = _active_holders(conn, "SYS_ADMIN")
     return Check(
         "sys_admin_present", n >= 1,
-        f"{n} active SYS_ADMIN account(s)",
+        count_of(n, "active SYS_ADMIN account", "active SYS_ADMIN accounts"),
         "" if n >= 1 else
         "grant SYS_ADMIN to an active account; user.manage is held by "
         "SYS_ADMIN alone, so with none the only repair path is "
@@ -431,7 +435,7 @@ def _kek_ring_opens_stored_secrets(conn: psycopg.Connection) -> Check:
     held = ", ".join(g.describe() for g in groups)
     evidence = f"ring: {ring}; every checked row opens ({held})"
     if any(g.key_id != active for g in groups):
-        evidence += ("; rows under a retired id remain -- run "
+        evidence += ("; rows under a retired id remain, so run "
                      "scripts/rewrap_secrets.py --apply before dropping it")
     return Check(name, True, evidence)
 
@@ -517,7 +521,7 @@ def _app_db_role_not_owner(conn: psycopg.Connection) -> Check:
         "NOCTORNAL_MIGRATION_DATABASE_URL; infra/production/compose.yml sets "
         "both, and migration 0060 grants the app role the table privileges it "
         "needs without making it an owner, a member of one, or a superuser. "
-        "On a development or CI database this check is expected to fail -- the "
+        "On a development or CI database this check is expected to fail: the "
         "test suites own the tables because they disable the append-only "
         "triggers deliberately")
     row = conn.execute(
@@ -611,9 +615,9 @@ def _sample_origin_configured(conn: psycopg.Connection) -> Check:
 
     split = origin_split()
     action = (
-        "set NOCTORNAL_SAMPLE_ORIGIN to a genuinely separate origin -- its own "
-        "host, cookie scope and CSP, never a path on the app's own host "
-        "(docs/16 C9) -- and, on the process that serves it, set "
+        "set NOCTORNAL_SAMPLE_ORIGIN to a genuinely separate origin (its own "
+        "host, cookie scope and CSP, never a path on the app's own host; "
+        "docs/16 C9) and, on the process that serves it, set "
         "NOCTORNAL_PUBLIC_ORIGIN to the same value; NOCTORNAL_BASE_URL names "
         "the application origin on both. Until the split is usable, "
         "samples.download() refuses every request, so no analyst can "
@@ -715,7 +719,7 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
         return Check(
             "redis_limiter_store", False,
             f"Redis at {where} answers PING; maxmemory-policy={policy}, which "
-            f"deletes live rate-limit meters under memory pressure -- a deleted "
+            f"deletes live rate-limit meters under memory pressure, and a deleted "
             f"meter admits the subject it was refusing with a full burst",
             "run the limiter's Redis with maxmemory-policy=noeviction, or give "
             "it its own instance (docs/16 C8; infra/docker-compose.yml sets "
@@ -1694,8 +1698,8 @@ def _migrations_at_head(conn: psycopg.Connection) -> Check:
             "migrations_at_head", False,
             f"migration scripts not found at {_MIGRATIONS_DIR}; cannot compare",
             "run the API from a checkout that carries db/migrations, or set the "
-            "layout right -- this check locates the scripts relative to the "
-            "package")
+            "layout right (this check locates the scripts relative to the "
+            "package)")
 
     from alembic.config import Config
     from alembic.script import ScriptDirectory

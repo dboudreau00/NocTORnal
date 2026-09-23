@@ -892,8 +892,12 @@ def fetch(url: str, *, etag: str | None = None,
             # hop we are ON, not against the original URL.
             target = urllib.parse.urljoin(current, location)
             if target in seen:
+                # Agreed, not a bracketed plural (README screenshot set
+                # review, 2026-09-23): the count is known when the line is
+                # written.
                 raise CollectionError(
-                    f"redirect loop at {hop + 1} hop(s)") from exc
+                    f"redirect loop at {hop + 1} "
+                    f"{'hop' if hop == 0 else 'hops'}") from exc
             seen.append(target)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise CollectionError(f"unreachable: {redact(str(exc))}") from exc

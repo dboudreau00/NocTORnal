@@ -36,6 +36,12 @@ from _env import load_env_local  # noqa: E402
 
 load_env_local()
 
+#: The Reply-To must sit on a real free-mail domain, because the free-mail
+#: signal reads the product's own list (deception.FREEMAIL_DOMAINS). Its
+#: local part holds an underscore, which Gmail does not allow in an
+#: address, so no real account can be this one: the README screenshots
+#: show it as an attacker's address, and a well-formed one could belong to
+#: somebody (README screenshot set review, 2026-09-23).
 BEC_EML = b"""\
 Received: from mx-edge.latticework-holdings.example (mx-edge.latticework-holdings.example [10.4.0.9]) by mail.latticework-holdings.example with ESMTPS id 7f2a; Fri, 17 Jul 2026 08:14:31 +0000
 Received: from relay.latticework-holdings.example (relay.latticework-holdings.example [10.4.0.3]) by mx-edge.latticework-holdings.example with ESMTP id 7f29; Fri, 17 Jul 2026 08:14:30 +0000
@@ -44,17 +50,17 @@ Received: from mail.microsoft.example ([198.51.100.20]) by vps-4471.hostmarket.e
 Authentication-Results: mail.latticework-holdings.example; spf=fail smtp.mailfrom=vps-4471.hostmarket.example; dkim=fail header.d=latticework-holdings.example; dmarc=fail
 Message-ID: <20260717081400.7f28.kitbuild@vps-4471.hostmarket.example>
 From: "Moira Vance, Group CFO" <m.vance@latticework-holdings.example>
-Reply-To: m.vance.latticework@gmail.com
+Reply-To: m.vance_latticework@gmail.com
 Return-Path: <bounce-7f28@vps-4471.hostmarket.example>
 To: accounts.payable@latticework-holdings.example
 Cc: treasury@latticework-holdings.example
-Subject: Updated remittance details - Sandhurst invoice, please action today
+Subject: Updated remittance details: Sandhurst invoice, please action today
 Date: Fri, 17 Jul 2026 08:14:00 +0000
 Content-Type: text/plain; charset=utf-8
 
 Hi,
 
-The Sandhurst payment due today needs to go to our new account -- the old
+The Sandhurst payment due today needs to go to our new account. The old
 one is frozen pending the audit. Details are on the portal:
 
   https://latticework-portal.secure-billing.example/verify?ref=7f28
@@ -117,7 +123,7 @@ def main() -> int:
         capture_tool="analyst screenshot from the reporting user",
         http_status=200,
         is_live=True,
-        page_title="Latticework Holdings - Supplier Portal Sign-in",
+        page_title="Latticework Holdings: Supplier Portal Sign-in",
         favicon_hash="-1274384433",
         tls={
             "subject": "CN=secure-billing.example",

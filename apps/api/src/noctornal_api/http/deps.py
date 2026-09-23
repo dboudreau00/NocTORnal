@@ -45,6 +45,7 @@ from noctornal_api.security.sessions import (
     strict_binding_enabled,
 )
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
+from noctornal_api.wording import agree
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 SESSION_COOKIE = "__Host-session"
@@ -389,8 +390,12 @@ def check_writable_labels(
                       f"{clearance.name} clearance")
     missing = compartments - held
     if missing:
+        # Agreed with the keys it names, not a bracketed plural (README
+        # screenshot set review, 2026-09-23).
         raise Problem(403, "Forbidden",
-                      f"not read into compartment(s) {sorted(missing)}")
+                      f"not read into "
+                      f"{agree(len(missing), 'compartment', 'compartments')} "
+                      f"{', '.join(sorted(missing))}")
 
 
 def user_ceiling(conn: psycopg.Connection, user_id: UUID,

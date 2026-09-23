@@ -138,10 +138,28 @@ class Diagnosticity:
     #: them told an analyst that ten good items "settle nothing" when they
     #: had simply not been entered against the second hypothesis yet.
     assessed_against: int = 0
+    #: How many live hypotheses the matrix was scored over, so the row can
+    #: tell "agrees everywhere" from "agrees everywhere it has been looked
+    #: at". 0 means unknown, and then only the two-cell floor applies.
+    live_hypotheses: int = 0
 
     @property
     def is_incomplete(self) -> bool:
-        return self.assessed_against < 2
+        """True when the row's diagnosticity is UNKNOWN rather than zero.
+
+        Below two cells nothing can be compared. From two cells up, a row
+        that already separates two hypotheses is diagnostic whatever its
+        blanks turn out to be; a row that agrees with itself so far is
+        unknown until the rest are scored, because the blank one could be
+        the hypothesis it separates. The fixed `< 2` let a row scored
+        against two of three hypotheses, the same way both times, count as
+        "the same thing about every hypothesis", so the pane dimmed it as
+        worthless beside its own blank cell while `refute_first` named it
+        as the next test (README screenshot review, 2026-09-23)."""
+        if self.assessed_against < 2:
+            return True
+        return (not self.is_diagnostic
+                and self.assessed_against < self.live_hypotheses)
 
 
 @dataclass(frozen=True)
@@ -160,6 +178,18 @@ class Matrix:
     warnings: list[str] = field(default_factory=list)
 
 
+def _of_items(k: int, total: int) -> str:
+    """The subject of a warning about k of the matrix's total items, as a
+    reader would say it: "1 of 3 items", "All 3 items", "Both items",
+    "The only item". The verb after it agrees with k, which the caller
+    chooses (README screenshot set review, 2026-09-23)."""
+    if total == 1:
+        return "The only item"
+    if k == total:
+        return "Both items" if total == 2 else f"All {total} items"
+    return f"{k} of {total} items"
+
+
 def score(hypotheses: list[tuple[UUID, str]],
           evidence: list[EvidenceItem]) -> Matrix:
     """Score a matrix. Pure: same inputs, same numbers, no clock, no DB."""
@@ -172,7 +202,7 @@ def score(hypotheses: list[tuple[UUID, str]],
     if len(hypotheses) == 1:
         warnings.append(
             "Only one hypothesis. ACH cannot discriminate between one thing; "
-            "add the alternative you think is wrong -- that is the whole "
+            "add the alternative you think is wrong. That is the whole "
             "method.")
 
     scored: list[HypothesisScore] = []
@@ -245,17 +275,27 @@ def score(hypotheses: list[tuple[UUID, str]],
     undiagnostic = [d for d in diagnosticity
                     if not d.is_incomplete and not d.is_diagnostic]
     incomplete = [d for d in diagnosticity if d.is_incomplete]
+    # Agreed with the count, noun, verb and pronoun: "1 of 3 items are
+    # unfinished" headed the ACH capture (README screenshot set review,
+    # 2026-09-23).
     if undiagnostic:
+        one = len(undiagnostic) == 1
         warnings.append(
-            f"{len(undiagnostic)} of {len(diagnosticity)} items say the same "
-            f"thing about every hypothesis and settle nothing. They are kept "
-            f"in the record and excluded from the ranking.")
+            f"{_of_items(len(undiagnostic), len(diagnosticity))} "
+            f"{'says' if one else 'say'} the same thing about every "
+            f"hypothesis and {'settles' if one else 'settle'} nothing. "
+            f"{'It is' if one else 'They are'} kept in the record and "
+            f"excluded from the ranking.")
     if incomplete:
+        one = len(incomplete) == 1
         warnings.append(
-            f"{len(incomplete)} of {len(diagnosticity)} items have been "
-            f"scored against fewer than two hypotheses, so their "
-            f"diagnosticity is unknown rather than zero. Finishing those "
-            f"rows is the cheapest work available here.")
+            f"{_of_items(len(incomplete), len(diagnosticity))} "
+            f"{'is' if one else 'are'} unfinished: scored against fewer than "
+            f"two hypotheses, or against only some of them and the same way "
+            f"each time so far, so {'its' if one else 'their'} "
+            f"diagnosticity is unknown rather than zero. Finishing "
+            f"{'that row' if one else 'those rows'} is the cheapest work "
+            f"available here.")
 
     thin = [h for h in scored if h.assessed and h.unassessed > h.assessed]
     if thin:
@@ -303,12 +343,13 @@ def _diagnosticity(item: EvidenceItem,
         # `assessed_against` says so rather than letting a caller read the
         # 0.0 as a verdict on the evidence.
         return Diagnosticity(item.assertion_id, item.label, 0.0, False,
-                             assessed_against=len(stances))
+                             assessed_against=len(stances),
+                             live_hypotheses=len(hypotheses))
     spread = max(stances) - min(stances)
     return Diagnosticity(
         assertion_id=item.assertion_id, label=item.label,
         score=round(spread * item.weight, 4), is_diagnostic=spread > 0,
-        assessed_against=len(stances))
+        assessed_against=len(stances), live_hypotheses=len(hypotheses))
 
 
 def as_response(matrix: Matrix) -> dict:
@@ -333,12 +374,16 @@ def as_response(matrix: Matrix) -> dict:
         "refute_first": (str(matrix.refute_first)
                          if matrix.refute_first else None),
         "warnings": matrix.warnings,
+        # Rewritten in the README screenshot review, 2026-09-23: the rule
+        # is "the same stance against every hypothesis", which an item
+        # inconsistent with everything meets as well as one consistent
+        # with everything, and a row with a blank cell does not meet yet.
         "method": (
             "Ranked by INCONSISTENCY, ascending. The hypothesis that survives "
             "is the one with the least evidence against it, not the most "
-            "evidence for it -- counting support ranks whichever theory the "
-            "team has collected for longest (Heuer). Evidence consistent with "
-            "every hypothesis is kept in the record and excluded from the "
-            "ranking, because it discriminates nothing."
+            "evidence for it. Counting support ranks whichever theory the "
+            "team has collected for longest (Heuer). Evidence that says the "
+            "same thing about every hypothesis is kept in the record and "
+            "excluded from the ranking, because it discriminates nothing."
         ),
     }

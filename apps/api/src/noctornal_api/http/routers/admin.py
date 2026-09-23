@@ -77,7 +77,7 @@ def _credentials(c: OneTimeCredentials) -> dict:
         "otpauth_uri": c.otpauth_uri,
         "notice": ("Shown once. Neither the password nor the TOTP secret "
                    "is stored in a recoverable form, and no endpoint "
-                   "returns them again — hand them over now or re-enrol."),
+                   "returns them again. Hand them over now or re-enrol."),
     }
 
 

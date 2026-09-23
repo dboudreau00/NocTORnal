@@ -237,7 +237,7 @@ merge half the internet, so clustering only, never auto-merge).
 | 3, machines propose | The header parser and the capture parser write `proposal` rows. Neither has a code path to `node` or `edge`. |
 | 5, superseded, never overwritten | A re-capture of the same URL is a **new** capture row. Phishing pages change hourly; overwriting destroys the timeline that proves it. |
 | 8. TLP gates egress | BEC bodies are victim PII by construction. Nothing new: `check_egress` already covers exhibits and reports. |
-| 12, nothing silently dropped | An unparseable `.eml` or CDR row goes to `ingest.dead_letter` with the raw fragment. |
+| 12, nothing silently dropped | An unparseable `.eml` is still recorded: its bytes land first as a WORM exhibit, and whatever the parser could not read is stored with the message as a parse gap (`parse_gaps`), so a failed parse reads as "not established", never as a finding. A call record arrives as fields, not bytes, and a malformed one is refused with a 422 naming the field. Neither goes to `ingest.dead_letter`, which serves the feed ingest and keeps a failed fragment redacted (JSON to its structure, anything else to a short head with its values masked) with the digest of what arrived, never the raw fragment; the verbatim bytes stay in the batch's raw object. |
 
 ---
 

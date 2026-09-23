@@ -224,6 +224,9 @@ class CustodyOut(BaseModel):
     #: written; False, they did NOT (a HASH_VERIFIED row recording a
     #: mismatch, the tamper alarm); None, this row attests no check.
     hash_verified: bool | None
+    #: The actor's display name, so the log names a person rather than an
+    #: eight-hex id (README screenshot review, 2026-09-23).
+    actor_name: str | None = None
 
 
 @router.get("/{evidence_id}/custody", response_model=list[CustodyOut])
@@ -236,7 +239,8 @@ def custody(
     _authorize_exhibit(conn, user, case_id, evidence_id, "evidence.read")
     return [
         CustodyOut(action=e.action, actor_id=str(e.actor_id),
-                   occurred_at=e.occurred_at, hash_verified=e.hash_verified)
+                   occurred_at=e.occurred_at, hash_verified=e.hash_verified,
+                   actor_name=e.actor_name)
         for e in _svc(conn).custody_log(evidence_id)
     ]
 

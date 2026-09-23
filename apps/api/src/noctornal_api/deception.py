@@ -641,21 +641,26 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
                 "reason": f"{len(auth_headers)} Authentication-Results "
                           "headers were present; only the first (the "
                           "receiving MTA's) was believed. The others are "
-                          "in auth_results_raw and are attacker-writable — "
-                          "a message carrying a second one is suspicious in "
+                          "in auth_results_raw and are attacker-writable. "
+                          "A message carrying a second one is suspicious in "
                           "itself."})
     elif auth_unreadable is not None:
         out.gaps.append({
             "step": "authentication_results",
-            "reason": "the Authentication-Results header(s) could not be "
-                      f"READ ({auth_unreadable}). Whether this message was "
-                      "authenticated is UNKNOWN — this is a parser failure, "
+            # A bracketed plural hedged a count nobody has: the read
+            # failed, so how many headers there are is unknown, and the
+            # sentence says that in words (README screenshot set review,
+            # 2026-09-23).
+            "reason": "the Authentication-Results headers, however many "
+                      "the message carries, could not be READ "
+                      f"({auth_unreadable}). Whether this message was "
+                      "authenticated is UNKNOWN. This is a parser failure, "
                       "not a finding about the message, and it must not be "
                       "read as one. Re-parse from the stored exhibit."})
     else:
         out.gaps.append({
             "step": "authentication_results",
-            "reason": "no Authentication-Results header — SPF/DKIM/DMARC "
+            "reason": "no Authentication-Results header: SPF/DKIM/DMARC "
                       "were not evaluated by anything that wrote to this "
                       "message, so their absence is not a failure"})
 
@@ -816,7 +821,7 @@ def _walk_parts(msg: EmailMessage, out: ParsedEmail) -> None:
                 payload, decode_failed = None, f"{type(exc).__name__}: {exc}"
             if decode_failed is not None or payload is None:
                 why = decode_failed or (
-                    "get_payload returned None -- a malformed transfer "
+                    "get_payload returned None: a malformed transfer "
                     "encoding, or a nested multipart")
                 out.gaps.append({
                     "step": "attachment_decode",
@@ -912,7 +917,7 @@ def selector_candidates_for_call(call: dict) -> list[dict]:
                     "strength": "weak",
                     "why": "STIR/SHAKEN attestation A, verified: the "
                            "originating carrier vouches the caller may use "
-                           "this number — not that they are its subscriber"})
+                           "this number, not that they are its subscriber"})
     return out
 
 
@@ -927,8 +932,9 @@ def selector_candidates_for_email(parsed: ParsedEmail) -> list[dict]:
     if parsed.dkim_domain and parsed.dkim_result == "PASS":
         out.append({"selector_type": "DOMAIN", "value": parsed.dkim_domain,
                     "strength": "durable",
-                    "why": "DKIM PASSED for this domain — the only "
-                           "cryptographically authenticated field in the mail"})
+                    "why": "DKIM PASSED for this domain, which makes it the "
+                           "only cryptographically authenticated field in the "
+                           "mail"})
     if parsed.header_from:
         out.append({"selector_type": "EMAIL", "value": parsed.header_from,
                     "strength": "weak",
@@ -975,7 +981,7 @@ def selector_candidates_for_email(parsed: ParsedEmail) -> list[dict]:
             out.append({"selector_type": "IPV4" if "." in hop.from_ip else "IPV6",
                         "value": hop.from_ip, "strength": "durable",
                         "why": f"Received hop {hop.seq}, at or inside the "
-                               f"trusted boundary — written by infrastructure "
+                               f"trusted boundary: written by infrastructure "
                                f"the recipient controls, so it is an "
                                f"observation rather than a claim"})
     return out
@@ -1086,8 +1092,8 @@ class DeceptionService:
 
         if submitted_input and not (submission_authority_ref or "").strip():
             raise DeceptionError(
-                "submitting input to a phishing page — including canary "
-                "credentials — may constitute unauthorised access and is "
+                "submitting input to a phishing page, including canary "
+                "credentials, may constitute unauthorised access and is "
                 "legal item L5. Record the written authority reference or "
                 "do not record the submission.")
 

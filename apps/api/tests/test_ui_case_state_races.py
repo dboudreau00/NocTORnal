@@ -450,7 +450,12 @@ function shortId(id) { return String(id).slice(0, 8); }
 
 
 def test_a_write_answered_after_a_switch_is_said_where_it_went_not_drawn_here():
-    script = _writes_harness("runCapture", "uploadEvidence") + r"""
+    # countOf is in the harness because runCapture counts through it
+    # (README screenshot set review, 2026-09-23). Without it the success
+    # banner threw, the catch drew the FAILURE banner, and "OP-A" in its
+    # title passed this test for the wrong reason; the title and detail
+    # are now held exactly.
+    script = _writes_harness("countOf", "runCapture", "uploadEvidence") + r"""
 (async () => {
   $('cap-text').value = 'forum dump'; $('cap-class').value = 'AMBER';
   runCapture(); await tick();
@@ -474,7 +479,8 @@ def test_a_write_answered_after_a_switch_is_said_where_it_went_not_drawn_here():
     got = _run_node(script)
     cap = got["capture"]
     assert cap["ok"] == "" and "triage" not in cap["loaded"], cap
-    assert cap["banner"] and "OP-A" in cap["banner"]["title"], cap
+    assert cap["banner"] and cap["banner"]["title"] == "Captured into OP-A", cap
+    assert cap["banner"]["detail"].startswith("3 proposals raised there."), cap
     ev = got["evidence"]
     assert ev["ok"] == "" and "evidence" not in ev["loaded"], ev
     assert ev["banner"] and "OP-B" in ev["banner"]["title"], ev

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>NocTORnal — analyst console</title>
+<title>NocTORnal analyst console</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="app.css">
@@ -401,7 +401,7 @@
             <input id="case-legal" required aria-describedby="case-legal-help">
             <span id="case-legal-help" class="help">A case cannot exist without a
               lawful basis for processing. Name the authority, statute or
-              instruction that permits this collection — it is recorded on the case
+              instruction that permits this collection. It is recorded on the case
               and shown on every export.</span>
           </div>
           <label class="field">
@@ -522,7 +522,7 @@
         <button id="tab-ach" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-ach" aria-selected="false" tabindex="-1"
                 data-tab="ach"
-                title="ACH — analysis of competing hypotheses">
+                title="Analysis of competing hypotheses (ACH)">
           <span class="rail-glyph" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3.2" y="3.2" width="13.6" height="13.6" rx="1.4"/><path d="M3.2 8.3h13.6M3.2 12.9h13.6M8.3 3.2v13.6M12.9 3.2v13.6"/></svg></span>
           <!-- "ACH" rather than "Hypotheses": the rail is a fixed narrow
                column and the long form overflowed it. The full name is in
@@ -671,7 +671,7 @@
                in coverage is not mistaken for a gap in activity. -->
           <div id="scrubber" class="scrubber">
             <div class="tl-head">
-              <span class="label">Timeline — world time</span>
+              <span class="label">Timeline (world time)</span>
               <span id="tl-current" class="tl-current mono">as-of: now</span>
               <button id="btn-asof-now" type="button" class="btn small">as-of: now</button>
             </div>
@@ -742,7 +742,7 @@
               <span class="kbd">dbl-click</span> ego ·
               <span class="kbd">shift-click</span> path ·
               <span class="kbd">space</span> hide inferred ·
-              <span class="kbd">⌘K</span> palette
+              <span class="kbd" id="canvas-keys-palette">Ctrl K</span> palette
             </p>
           </div>
         </section>
@@ -802,9 +802,14 @@
                 <button id="inbox-read-all" type="button" class="btn ghost">
                   Mark all read</button>
               </div>
+              <!-- Named in full (README screenshot review, 2026-09-23): the
+                   read-time filter, notifications.readable_predicate, checks
+                   clearance, compartments AND a live case assignment, and
+                   this line named clearance alone. -->
               <p class="help">Everything here is filtered by your CURRENT
-                clearance, not the clearance you held when it was written &mdash;
-                so a notification about material you can no longer read
+                clearance, compartments and case assignments, not the ones
+                you held when it was written. A notification about material
+                you can no longer read, or about a case you were taken off,
                 disappears rather than lingering. <strong>Email carries a
                 summary and a link, never the detail below</strong>; anything
                 above TLP:AMBER does not leave the platform at all
@@ -820,7 +825,7 @@
 
             <details class="card">
               <summary>Delivery preferences</summary>
-              <p class="help">Quiet hours defer, they never drop &mdash; a
+              <p class="help">Quiet hours defer, they never drop: a
                 deferred notification is still queued with a due time. Priority&nbsp;1
                 (an evidence integrity alarm, a break-glass) ignores them, which
                 is the only reason silencing a channel overnight is safe.</p>
@@ -833,7 +838,7 @@
             <div class="card">
               <h2 class="pane-title">Delivery ledger</h2>
               <p class="help">Every attempt to send a summary out of the
-                platform, newest first &mdash; kinds, channels, destinations and
+                platform, newest first: kinds, channels, destinations and
                 refusal reasons. <strong>Never subjects or summaries</strong>:
                 the ledger spans every case and every recipient, which is why it
                 needs <code>integration.manage</code> rather than your own
@@ -864,7 +869,7 @@
             <summary>Capture text</summary>
             <p class="help">Paste a thread, a chat export or a listing.
               Selectors are extracted with their offsets and raised as
-              proposals &mdash; <strong>nothing enters the graph here</strong>.
+              proposals: <strong>nothing enters the graph here</strong>.
               The document is stored as the record of what was looked at,
               even if nothing is found.</p>
             <label class="field">
@@ -907,11 +912,15 @@
             <span id="triage-counts" class="muted small"></span>
           </div>
 
+          <!-- Was "docs/09 asks for this to be keyboard driven...": a note
+               to the developer, shown to the analyst (README screenshot
+               review, 2026-09-23). -->
           <p class="help">
             <kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept
             &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer.
-            docs/09 asks for this to be keyboard driven, because triage is an
-            hour of work and a mouse makes it a grim one.
+            The keys work whenever no form field has the focus (a text box
+            or a menu such as Queue), so an hour of triage never needs the
+            mouse.
           </p>
 
           <div id="triage-list"></div>
@@ -923,15 +932,15 @@
                A merge on a dual-control case needs an approval_request_id
                and there was no way to obtain one, so Merge was unreachable
                from the browser whenever the control was switched on. -->
-          <h3 class="h3">Dual control &mdash; approvals</h3>
+          <h3 class="h3">Dual control: approvals</h3>
           <p class="help">
             A second signature on the operations a case has put behind one.
             <strong>You cannot decide your own request</strong>, and an
             approval is spent when it is used: it authorises one execution
             of the exact parameters it was raised over, not the operation
-            in general. Rejected and withdrawn requests stay listed &mdash;
-            a request that vanished would hide the fact that somebody once
-            asked.
+            in general. Rejected and withdrawn requests stay listed,
+            because a request that vanished would hide the fact that
+            somebody once asked.
           </p>
           <div class="pane-head">
             <label class="field inline">
@@ -998,7 +1007,7 @@
             <p class="muted small">
               Rank and percentile sit beside every value: a betweenness of
               0.0341 means nothing on its own, "3rd of 214" does. Constraint
-              is ranked ascending &mdash; rank 1 is the LEAST constrained
+              is ranked ascending: rank 1 is the LEAST constrained
               actor, the one spanning a structural hole.
             </p>
             <div class="scroll-x">
@@ -1020,19 +1029,18 @@
               </table>
             </div>
 
-            <h3 class="h3">Trend &mdash; one actor across past runs</h3>
+            <h3 class="h3">Trend: one actor across past runs</h3>
             <p class="help">
               A rising betweenness is a claim about a PERSON, so it is worth
               being exact about what this shows: every completed run in this
               case that <strong>recorded</strong> the metric, at your
               visibility, oldest on the left. Runs use different parameters,
-              and Newman-style weights are not comparable across them
-              &mdash; the preset is printed against each point for that
-              reason.
+              and Newman-style weights are not comparable across them. The
+              preset is printed against each point for that reason.
               <strong>A run in which this actor had no defined value does
               not appear here at all</strong> (an isolate has no constraint
               to measure), and this endpoint cannot tell that apart from no
-              run having happened &mdash; so the line spans such a period
+              run having happened, so the line spans such a period
               rather than breaking, and a long straight segment is not
               evidence that nothing changed.
             </p>
@@ -1061,10 +1069,12 @@
               <table class="table">
                 <caption class="sr-only">
                   Metric history for the selected actor: every recorded run,
-                  newest first, with its value, rank and parameters.</caption>
+                  newest first, with the world time it measured (as of), its
+                  value, rank and parameters.</caption>
                 <thead>
                   <tr>
                     <th scope="col">Run</th>
+                    <th scope="col">As of</th>
                     <th scope="col">Value</th>
                     <th scope="col">Rank</th>
                     <th scope="col">Percentile</th>
@@ -1075,7 +1085,7 @@
               </table>
             </div>
 
-            <h3 class="h3">Key player &mdash; who holds this network together</h3>
+            <h3 class="h3">Key player: who holds this network together</h3>
             <div id="an-kpp"></div>
 
             <h3 class="h3">Cohesion</h3>
@@ -1165,7 +1175,7 @@
             <h2 class="h-sm">Record a channel</h2>
             <p class="hint">
               An identifier in a signature block is a <strong>claim</strong>.
-              Confirmation needs a signature over the identifier — record it
+              Confirmation needs a signature over the identifier. Record it
               under Verification, not here.
             </p>
             <label class="field">
@@ -1189,8 +1199,8 @@
             <label class="field">
               <span class="label">Verification</span>
               <select id="comms-verification">
-                <option value="CLAIMED">CLAIMED — advertised in a profile or signature</option>
-                <option value="OBSERVED">OBSERVED — seen in actual use</option>
+                <option value="CLAIMED">CLAIMED: advertised in a profile or signature</option>
+                <option value="OBSERVED">OBSERVED: seen in actual use</option>
               </select>
             </label>
             <label class="field">
@@ -1221,8 +1231,8 @@
           <form id="comms-block-form" class="card stack" novalidate>
             <h2 class="h-sm">Parse a contact block</h2>
             <p class="hint">
-              Third-party identifiers — the forum's escrow, a guarantor, a
-              partner shop — are flagged rather than attributed to the
+              Third-party identifiers (the forum's escrow, a guarantor, a
+              partner shop) are flagged rather than attributed to the
               publisher. Lines whose type is ambiguous are kept
               <strong>unresolved with a reason</strong> rather than guessed.
             </p>
@@ -1308,9 +1318,9 @@
           <h2 class="h-sm">Co-participation</h2>
           <p class="help">
             Ties inferred from being in the same room. These are
-            <strong>inferred</strong>, weighted by the room's size — two
+            <strong>inferred</strong>, weighted by the room's size (two
             people in a 500-member channel is not the same evidence as a
-            private exchange — and they are excluded from metrics unless a
+            private exchange), and they are excluded from metrics unless a
             projection opts in.
           </p>
           <div class="pane-head">
@@ -1361,12 +1371,12 @@
                nothing read them, so a watch that fired four hundred times
                showed an analyst the number 400 and nothing to open. -->
           <div id="feeds-collected" class="subpane" hidden>
-            <h3 class="h3">Watch hits &mdash; what fired on this case</h3>
+            <h3 class="h3">Watch hits: what fired on this case</h3>
             <p class="help">
               Unacknowledged first, then by score: a hit nobody has looked
               at outranks a higher-scoring one somebody has already dealt
               with. <strong>Suppressed hits are shown</strong>, with their
-              reason &mdash; a watch drowning in one recurring thread and a
+              reason. A watch drowning in one recurring thread and a
               watch that has gone quiet look identical if you hide them,
               and they need opposite responses.
             </p>
@@ -1387,8 +1397,8 @@
             <p class="help">
               Every source, not just this case: a document hangs off a
               SOURCE and has no case of its own, so the same forum post is
-              material in however many cases cite it. Bodies are excerpted
-              &mdash; a row marked <em>truncated</em> has more behind it.
+              material in however many cases cite it. Bodies are excerpted:
+              a row marked <em>truncated</em> has more behind it.
               Purged documents are absent entirely rather than shown empty.
             </p>
             <div class="pane-head">
@@ -1428,7 +1438,7 @@
               <span id="ing-counts" class="muted small"></span>
             </div>
             <p class="help">
-              Near-duplicates are <strong>folded, not dropped</strong> &mdash;
+              Near-duplicates are <strong>folded, not dropped</strong>:
               the count on a row says how many other feeds sent the same
               thing. Payloads are never listed here: a record can hold a whole
               stealer log, and this is a queue.
@@ -1437,7 +1447,7 @@
             <p id="ing-empty" class="empty">Nothing in the queue for this case.</p>
 
             <details id="ing-quarantine-box" class="card" hidden>
-              <summary>Quarantine &mdash; material attached to no case</summary>
+              <summary>Quarantine: material attached to no case</summary>
               <p class="help">
                 A record with no case cannot be reached by a case
                 assignment, so nobody sees it through the ordinary gate. It
@@ -1454,13 +1464,22 @@
             <p class="help">
               Invariant 12: nothing is silently dropped. A rising rate on one
               key is usually a partner changing their schema without telling
-              you &mdash; and it is invisible unless somebody looks, which is
-              what this is for.
+              you, and it is invisible unless somebody looks. That is what
+              this is for.
             </p>
+            <!-- Said per path (README screenshot review, 2026-09-23). It
+                 read "keys, types and lengths, never values" above rows
+                 that showed a bare [redacted]: a fragment that parses goes
+                 through ingest.redact_structure and keeps each value's type
+                 and length, and one that does not goes through redact_text,
+                 which masks it line by line with no types or lengths. -->
             <p class="help warn">
-              Fragments are <strong>structurally redacted</strong>: keys,
-              types and lengths, never values. Rows recorded before the
-              redactor existed are withheld and marked.
+              Fragments are <strong>structurally redacted</strong>: keys and
+              shape survive, values never do. A fragment that parsed keeps
+              each value's type and length; one that would not parse is
+              masked line by line, keeping what reads as a key or a
+              delimiter and replacing every value, address and token. Rows
+              recorded before the redactor existed are withheld and marked.
             </p>
             <div class="pane-head">
               <button id="dl-refresh" type="button" class="btn">Refresh</button>
@@ -1519,8 +1538,8 @@
           <div id="feeds-keys" class="subpane" hidden>
             <p class="help">
               Keys are <strong>write-only</strong> (invariant 11). A leaked
-              key means junk data in a quarantine bucket, never the case file
-              &mdash; there is a CHECK constraint saying so.
+              key means junk data in a quarantine bucket, never the case file:
+              there is a CHECK constraint saying so.
             </p>
             <div class="pane-head">
               <label class="field inline check">
@@ -1587,9 +1606,14 @@
             <h2 class="h-sm">The matrix</h2>
             <p class="help">
               A cell is how one piece of evidence stands against one
-              hypothesis. Evidence consistent with <em>everything</em> is kept
-              in the record and excluded from the ranking, because it
-              discriminates nothing — that is the row marked not diagnostic.
+              hypothesis. The columns are numbered H1, H2 and so on in the
+              order ranked above. Evidence that says the same thing about
+              <em>every</em> hypothesis is kept in the record and excluded
+              from the ranking, because it discriminates nothing, and its
+              row is dimmed. A row with a blank cell that agrees with itself
+              so far is unfinished, not undiagnostic: its diagnosticity
+              reads <em>unfinished</em> until it is scored against the
+              rest.
             </p>
             <div id="ach-matrix" class="scroll-x"></div>
 
@@ -1661,13 +1685,13 @@
             <div class="card">
               <h2 class="h-sm">What this analysis takes for granted</h2>
               <p class="help">An assumption is a claim the case rests on that
-                nobody has evidenced &mdash; that a handle belongs to one person,
+                nobody has evidenced: that a handle belongs to one person,
                 that a timezone is local, that a leaked database is genuine.
                 Writing it down is what makes it reviewable: an OPEN assumption
                 is a question still owed an answer, and a REFUTED one that nobody
                 revisited is how an analysis quietly becomes wrong.
-                <strong>Open and confirmed assumptions appear in the report</strong>
-                &mdash; withdrawn and refuted ones do not.</p>
+                <strong>Open and confirmed assumptions appear in the report</strong>;
+                withdrawn and refuted ones do not.</p>
               <form id="asm-create" class="row-form" novalidate>
                 <label class="field grow">
                   <span class="label">Assumption</span>
@@ -1852,7 +1876,7 @@
             <p class="help">
               Every audit row hashes its predecessor and all of its own
               payload columns. Re-computing that chain is the only way to
-              tell an intact log from an edited one — until somebody asks,
+              tell an intact log from an edited one. Until somebody asks,
               the two look identical.
             </p>
             <div class="row audit-actions">
@@ -1872,7 +1896,7 @@
             <p class="help">
               The custody ledger is what goes to a court. It is one chain across
               every exhibit, so naming an exhibit narrows what is <em>reported</em>
-              and not what is checked &mdash; leave it blank for the answer to
+              and not what is checked. Leave it blank for the answer to
               &ldquo;is this exhibit&rsquo;s history complete&rdquo;.
             </p>
             <label class="field">
@@ -2158,7 +2182,7 @@
                check with the error as its evidence, never a 500. -->
           <h2 class="h-sm">Readiness</h2>
           <p class="help">What the deployment can prove about itself right now.
-            This is the code-side half only: the legal sign-off items (L1&ndash;L5)
+            This is the code-side half only: the legal sign-off items (L1 to L5)
             are not software and nothing here can close them.</p>
           <div class="row audit-actions">
             <button id="btn-readiness" type="button" class="btn">Check readiness</button>
@@ -2356,7 +2380,7 @@
             </div>
             <p class="help">
               A screenshot on its own proves somebody had a screenshot. The
-              evidence is the whole fetch — requested URL, redirect chain,
+              evidence is the whole fetch: requested URL, redirect chain,
               final URL, TLS certificate, screenshot and DOM, all at one
               timestamp. Every URL below is <strong>defanged and
               non-clickable</strong>: a mis-click would fetch attacker
@@ -2422,7 +2446,7 @@
               Caller ID is the attack, not a detail. What the victim's
               handset displayed is shown separately from what the carrier
               vouched for, and the presented number never becomes a
-              selector — putting it on an actor would attribute the crime
+              selector: putting it on an actor would attribute the crime
               to whoever's number the attacker picked.
             </p>
             <div id="dcp-call-list" class="rows"></div>
@@ -2721,11 +2745,15 @@
             </div>
             <div id="insp-metrics" class="metric-grid"></div>
             <p id="insp-metrics-proj" class="assert-meta"></p>
+            <!-- Was "Brokerage ... is Phase 3 and is not computed here":
+                 a build-plan phase that has shipped, read by an analyst as
+                 "not built" beside a computed key-player card (README
+                 screenshot review, 2026-09-23). -->
             <p class="help">These are <strong>local</strong> measures: each one
               describes the entity's own neighbourhood. Brokerage (betweenness,
-              Burt's constraint, key-player fragmentation) is Phase 3 and is not
-              computed here, so nothing on this panel tells you who bridges two
-              clusters.</p>
+              Burt's constraint, key-player fragmentation) is global and lives
+              in the Analysis pane, so nothing on this panel tells you who
+              bridges two clusters.</p>
           </section>
 
           <!-- Every tie at the selected entity, or, for a selected tie, its
@@ -2856,7 +2884,7 @@
             <p class="help">The entity you are looking at becomes the
               <strong>losing</strong> record: it keeps its history, its ties
               move to the one you choose, and it leaves the live graph. Only
-              entities of the same type are listed &mdash; saying a persona
+              entities of the same type are listed: saying a persona
               IS a person is an attribution, not a merge.</p>
             <button id="merge-run" type="button" class="btn small">Merge</button>
             <p id="merge-error" class="form-error" role="alert" hidden></p>
@@ -2892,10 +2920,10 @@
       <span id="ach-stance-hypothesis"></span>
     </div>
     <fieldset id="ach-stance-options" class="stance-options">
-      <legend class="label">Stance &mdash; how this evidence stands against the hypothesis</legend>
+      <legend class="label">Stance: how this evidence stands against the hypothesis</legend>
     </fieldset>
     <label class="field">
-      <span class="label">Note (optional &mdash; why it stands where it does)</span>
+      <span class="label">Note: why it stands where it does (optional)</span>
       <textarea id="ach-stance-note" rows="2"></textarea>
     </label>
     <p id="ach-stance-msg" class="msg" hidden></p>
@@ -2969,16 +2997,16 @@
       <h3 class="h-xs">Anywhere</h3>
       <dl class="keys">
         <dt><span class="kbd" id="keys-palette">Ctrl K</span></dt>
-        <dd>Command palette — entities, projections, commands</dd>
+        <dd>Command palette: entities, projections, commands</dd>
         <dt><span class="kbd">?</span></dt>
         <dd>This sheet</dd>
         <dt><span class="kbd">Esc</span></dt>
         <dd>Close whatever is open</dd>
-        <dt><span class="kbd">Alt</span> <span class="kbd">1</span>&ndash;<span class="kbd">9</span></dt>
+        <dt><span class="kbd">Alt</span> <span class="kbd">1</span> to <span class="kbd">9</span></dt>
         <dd>Jump to a pane, in rail order</dd>
         <dt><span class="kbd">&#x2398;</span></dt>
-        <dd>Copy an identifier &mdash; the button beside any selector,
-        hash or TLS key. Copies the <em>full</em> value, and for a URL the
+        <dd>Copy an identifier (the button beside any selector,
+        hash or TLS key). Copies the <em>full</em> value, and for a URL the
         <em>defanged</em> one, because that is what belongs in a report</dd>
       </dl>
 
@@ -3022,7 +3050,7 @@
     <p class="help">
       Nothing here writes to the graph without a confirmation step. Accept
       in triage promotes a <em>proposal</em>, which is still an assertion
-      with a source and a grading — machines propose, analysts dispose.
+      with a source and a grading. Machines propose, analysts dispose.
     </p>
     <button id="keys-close" type="button" class="btn">Close</button>
   </div>

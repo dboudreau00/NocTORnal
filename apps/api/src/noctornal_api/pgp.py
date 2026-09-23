@@ -432,8 +432,8 @@ def _payload_contains(payload_text: str, value: str) -> tuple[bool, str]:
         start = hay.find(low, start + 1)
     return False, (
         f"{needle!r} does not appear in the signed text as an identifier. "
-        f"It may occur inside a longer run of characters -- an order "
-        f"number, another account -- which is not the same as the signer "
+        f"It may occur inside a longer run of characters (an order "
+        f"number, another account), which is not the same as the signer "
         f"naming it.")
 
 
@@ -479,9 +479,9 @@ def _read_status(status: bytes, payload: bytes, *, claimed: str,
         return VerificationResult(
             REVOKED_KEY, **common,
             detail="the signature is good but the key is REVOKED. That is a "
-                   "fact for a person to interpret -- a signature from a key "
+                   "fact for a person to interpret (a signature from a key "
                    "revoked before the message was published is not the same "
-                   "as one from a live key -- so it does not confirm a "
+                   "as one from a live key), so it does not confirm a "
                    "binding on its own.")
     if "EXPKEYSIG" in codes:
         return VerificationResult(
@@ -553,8 +553,8 @@ def _read_status(status: bytes, payload: bytes, *, claimed: str,
                     f"below the signature block, and that is what this "
                     f"refuses. The match is deliberately strict, so a "
                     f"genuine signature can land here when the actor "
-                    f"printed the identifier in a different form -- spaced "
-                    f"hex, for instance. Check the signed text before "
+                    f"printed the identifier in a different form (spaced "
+                    f"hex, for instance). Check the signed text before "
                     f"reading this as an attack: a false confirmation is "
                     f"far more expensive than a second look."))
 

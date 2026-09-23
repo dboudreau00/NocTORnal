@@ -112,8 +112,11 @@ class MalformedBlob(ValueError):
     def __init__(self, length: int):
         self.length = length
         super().__init__(
-            f"not an envelope: {length} byte(s) cannot hold a "
-            f"{_NONCE_BYTES}-byte nonce and a tag")
+            # Agreed, not a bracketed plural (README screenshot set
+            # review, 2026-09-23); inline because this module imports
+            # nothing of the application's.
+            f"not an envelope: {length} {'byte' if length == 1 else 'bytes'} "
+            f"cannot hold a {_NONCE_BYTES}-byte nonce and a tag")
 
 
 #: What a caller catches when a stored secret cannot be opened, whichever
@@ -140,8 +143,8 @@ def _load_kek() -> bytes:
     raw = os.environ.get(_KEK_ENV)
     if not raw:
         raise RuntimeError(
-            f"{_KEK_ENV} is not set — refusing to encrypt/decrypt secrets "
-            "with a default key. Provide a base64-encoded 32-byte key "
+            f"{_KEK_ENV} is not set, and secrets are never encrypted or "
+            "decrypted with a default key. Provide a base64-encoded 32-byte key "
             "(dev: `python -c \"import os,base64;"
             "print(base64.b64encode(os.urandom(32)).decode())\"`)."
         )

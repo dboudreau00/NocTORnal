@@ -276,6 +276,30 @@ def test_the_report_states_its_authority_and_retention(conn, builder):
     assert "Retention until" in text
 
 
+def test_a_withheld_header_withholds_its_dates_in_words(conn, builder):
+    """Built below the case's own classification, the header is withheld.
+    `build` leaves the opened, retention and review dates None, and the
+    document printed a bare "None" for each, beneath a legal basis and an
+    authority reference that said they were withheld. All five say it in
+    the same words now, and none of the three dates leaks."""
+    from noctornal_api.reports import WITHHELD_MARK, render_markdown
+    owner = _user(conn)
+    case_id = _case(conn, owner, classification="AMBER")
+    report = builder.build(case_id, target_tlp="GREEN", generated_by=owner)
+    assert report.redaction.header_withheld
+    assert [report.case[k] for k in ("opened", "retention_until",
+                                     "review_due")] == [None, None, None]
+    text = render_markdown(report)
+    lines = text.split("\n")
+    for field in ("Legal basis", "Authority reference", "Opened",
+                  "Retention until", "Next review"):
+        assert f"- **{field}:** {WITHHELD_MARK}" in lines, field
+    assert "None" not in text
+    for leaked in ("production order 2026-0001", "WARRANT-2026-77",
+                   "2028-01-01", "2027-01-01"):
+        assert leaked not in text, leaked
+
+
 # --- markings and egress -----------------------------------------------
 
 def test_the_document_is_tlp_marked_at_both_ends(conn, builder):

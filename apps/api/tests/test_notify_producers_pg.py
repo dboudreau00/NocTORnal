@@ -357,6 +357,25 @@ def test_a_capture_that_queues_proposals_tells_the_owner(conn, client):
     assert queued[0].case_id == UUID(case_id)
 
 
+@pytest.mark.parametrize("count, noun, verb", [(1, "proposal", "is"),
+                                               (3, "proposals", "are")])
+def test_the_queued_notice_agrees_in_number(conn, client, count, noun, verb):
+    """README screenshot set review, 2026-09-23: the text is stored and read
+    verbatim, and the inbox printed "3 proposal(s) were raised"."""
+    from noctornal_api import notify_events
+
+    owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
+    case_id = _create_case(client, _session(conn, email))
+    actor, _, _ = _make_user(conn)
+    assert notify_events.proposals_queued(
+        conn, case_id=UUID(case_id), count=count, actor_id=actor)
+    note = _inbox(conn, owner, "PROPOSAL_QUEUED")[0]
+    text = " ".join((note.subject, note.summary, note.body or ""))
+    assert "(s)" not in text
+    assert f"{count} {noun} waiting in triage" in note.subject
+    assert f"{count} new {noun} {verb} waiting" in note.summary
+
+
 def test_a_capture_notification_failure_is_null_not_false(conn, client, monkeypatch):
     """The document and the proposals committed before the notify write;
     a 500 here would tell the analyst the capture failed, and they would
