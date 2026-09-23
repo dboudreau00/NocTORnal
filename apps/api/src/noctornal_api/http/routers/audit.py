@@ -87,7 +87,7 @@ def verify(
             "Windowed: LINK, FORK and CONTENT are each exact for the rows "
             "reported, because the predecessor lookup covers the whole "
             "table. What a window cannot tell you is whether rows OUTSIDE "
-            "it verify — run without `limit` for that."
+            "it verify. Run without `limit` for that."
         ) if limit is not None else None,
         # Forks are NOT tampering -- see ChainReport.intact. Reported so an
         # officer knows the chain is not linearisable, which weakens the
@@ -95,7 +95,7 @@ def verify(
         "forks": len(report.forks),
         "fork_note": (
             "Rows sharing a predecessor. Still not evidence of editing, and "
-            "still not counted as tampering — but no longer explained away "
+            "still not counted as tampering, but no longer explained away "
             "as normal concurrency. Measured on this code, the chaining "
             "trigger's advisory lock DOES serialise concurrent writers and a "
             "multi-row insert chains correctly, so a fork is not known to be "
@@ -110,7 +110,7 @@ def verify(
         "genesis_note": (
             "More than one row claims to be the first. The chaining trigger "
             "writes a NULL predecessor only into an EMPTY table, under a "
-            "lock, and no application code writes prev_hash at all — so a "
+            "lock, and no application code writes prev_hash at all, so a "
             "second one means the trigger was bypassed. Unlike a fork, this "
             "IS evidence of tampering, and it is the shape a truncation "
             "leaves: delete the first rows, re-anchor the next one, and "
@@ -206,7 +206,7 @@ def verify_custody(
              "for the rows reported, because the predecessor lookup covers "
              "the whole ledger. GENESIS and NO_GENESIS are whole-ledger "
              "findings and are reported here too, so a scoped run can come "
-             "back not-intact naming rows of OTHER exhibits — read "
+             "back not-intact naming rows of OTHER exhibits. Read "
              "`breaks[].evidence_id` before attributing one. An unscoped "
              "run sees more of this exhibit's history, because a row "
              "deleted from it is revealed by whichever row came next in the "
@@ -215,7 +215,7 @@ def verify_custody(
              "Whole ledger, every exhibit. ")
             + "What NO run can tell you is whether rows were removed from "
               "the END. Nothing names the newest row as its predecessor, so "
-              "deleting the last entries — the export, the destruction — "
+              "deleting the last entries (the export, the destruction) "
               "orphans nothing, costs one DELETE and no rehashing, and "
               "leaves `intact` true. The defence is `tail_row_hash`: record "
               "it somewhere this system cannot reach and compare it next "
@@ -228,7 +228,7 @@ def verify_custody(
         "fork_ids": [b.id for b in report.forks],
         "fork_note": (
             "Rows sharing a predecessor. Not counted as tampering, for the "
-            "reasons /audit/verify gives — but on a ledger written by 0024, "
+            "reasons /audit/verify gives. But on a ledger written by 0024, "
             "whose advisory lock serialises writers, a fork is not known to "
             "be reachable by ordinary traffic and is worth investigating. "
             "What it means for certain is that the chain cannot be fully "
@@ -240,7 +240,7 @@ def verify_custody(
         "genesis_note": (
             "More than one row claims to be the first. The chaining trigger "
             "writes a NULL predecessor only into an EMPTY table, under a "
-            "lock, and no application code writes prev_hash at all — so a "
+            "lock, and no application code writes prev_hash at all, so a "
             "second one means the trigger was bypassed. This IS evidence of "
             "tampering, and it is the shape a truncation leaves: delete the "
             "first rows, re-anchor the next one, and every other check still "

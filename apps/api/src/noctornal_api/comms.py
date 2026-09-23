@@ -265,7 +265,7 @@ def _normalise_mxid(value: str) -> Normalised:
         return Normalised(
             None,
             "not an MXID: expected @localpart:server.tld. A bare Matrix "
-            "display name is not durable -- it is changeable per room.")
+            "display name is not durable: it is changeable per room.")
     return Normalised(
         _canonical("MATRIX_MXID", cleaned),
         "the server part is case-folded and the localpart is NOT: MXID "
@@ -301,8 +301,11 @@ def _normalise_tox(value: str) -> Normalised:
 _TYPED_TELEGRAM = re.compile(r"^([ucg]):\s*(\d+)$", re.I)
 _TELEGRAM_SPACE = {"u": "user", "c": "channel", "g": "group"}
 
+#: Written as a sentence, capital first (README screenshot review,
+#: 2026-09-23): the console prints it after "No durable value, so nothing
+#: can correlate.", where the old lower-case clause began a sentence.
 _NOT_DURABLE_TELEGRAM = (
-    "a Telegram @username is NOT durable -- usernames are recycled, and "
+    "A Telegram @username is NOT durable: usernames are recycled, and "
     "matching on one can attribute a new person's traffic to an old "
     "case. Record the numeric user ID to correlate.")
 
@@ -368,14 +371,17 @@ def _normalise_telegram(value: str) -> Normalised:
         # The note is kept but is now informational: a bare positive
         # number remains ambiguous between a user and an MTProto channel,
         # and only the collector knows which. It no longer warns about a
-        # merge that can happen.
+        # merge that can happen. It is shown to the analyst as written, so
+        # it carries no review codes or dates: "(CR3)" and "(2026-09-11)"
+        # were on screen in the Comms pane (README screenshot review,
+        # 2026-09-23).
         return Normalised(
             canonical,
-            "a Bot-API channel id, decoded to its MTProto form and indexed "
-            "in the channel namespace. It can no longer collide with the "
-            "user id of the same number (CR3). A BARE positive number "
-            "observed elsewhere is refused for that reason (2026-09-11); "
-            "record it as u:<id> or c:<id> when the collector knows.")
+            "A Bot-API channel id, decoded to its MTProto form and indexed "
+            "in the channel namespace, so it cannot collide with the user "
+            "id of the same number. A bare positive number is refused for "
+            "that reason: record it as u:<id> or c:<id> when the collector "
+            "knows which it is.")
     if cleaned.startswith("-"):
         return Normalised(
             canonical,
@@ -493,8 +499,8 @@ class CommsService:
             raise CommsError(f"unknown verification {verification!r}")
         if verification == CONFIRMED and not (verification_note or "").strip():
             raise CommsError(
-                "a CONFIRMED binding has to say what confirmed it -- a PGP "
-                "signature over the identifier, an observed login. "
+                "a CONFIRMED binding has to say what confirmed it (a PGP "
+                "signature over the identifier, an observed login). "
                 "'Confirmed' with no method is a claim somebody felt "
                 "strongly about")
         exists = self._c.execute(
@@ -649,7 +655,7 @@ class CommsService:
                  "observed_values": list(r[3]),
                  "lead": "the same physical device published under more than "
                          "one identity. This is a strong LEAD, not an "
-                         "attribution -- record the conclusion as an "
+                         "attribution. Record the conclusion as an "
                          "ATTRIBUTED_TO edge with a confidence."}
                 for r in rows]
 

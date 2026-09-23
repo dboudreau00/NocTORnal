@@ -69,6 +69,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.security import envelope
+from noctornal_api.wording import count_of
 
 KEY_PREFIX = "noct_sk"
 #: The searchable half. docs/12: a fixed prefix means leaked keys are
@@ -842,8 +843,14 @@ class IngestService:
         """Turn raw bytes into records. Every failure is a dead letter.
 
         Invariant 12: nothing is silently dropped. A record that will not
-        parse goes to `ingest.dead_letter` with the raw fragment, the error
-        and the parser version, and a repair-and-replay path exists.
+        parse goes to `ingest.dead_letter` with its fragment redacted (see
+        "Dead-letter redaction" above and `redact_fragment`: JSON keeps its
+        keys, types and lengths and no leaf value; anything else keeps a
+        short head with its values masked), the digest of what arrived,
+        the error and the parser version. The verbatim bytes stay in the
+        batch's raw object, and a repair-and-replay path exists. This said
+        "the raw fragment", which the table has not held since the
+        redaction landed (README screenshot set review, 2026-09-23).
         """
         key = self._c.execute(
             """SELECT k.id, k.declared_category, k.classification_ceiling,
@@ -888,16 +895,20 @@ class IngestService:
                     # what was reached, then stop: the remainder is not
                     # recoverable by this parser, and a repair replays from
                     # the raw object.
+                    # Counts agreed, not a bracketed plural: both lines
+                    # are read by an operator (README screenshot set review,
+                    # 2026-09-23).
+                    reached = count_of(seen, "fragment", "fragments")
                     self._dead_letter(
                         batch_id, key,
-                        f"[container failed after {seen} fragment(s)]",
+                        f"[container failed after {reached}]",
                         type(exc).__name__, str(exc), parser_version)
                     result.dead += 1
                     result.warnings.append(
-                        f"the container stopped being readable after {seen} "
-                        f"fragment(s): {type(exc).__name__}. What follows it "
+                        f"the container stopped being readable after "
+                        f"{reached}: {type(exc).__name__}. What follows it "
                         f"was NOT parsed and is not in the dead-letter queue "
-                        f"record by record — re-parse from the raw object "
+                        f"record by record. Re-parse from the raw object "
                         f"once the cause is fixed.")
                     break
                 seen += 1
@@ -1135,7 +1146,7 @@ class IngestService:
                 "this dead letter predates the redactor and still holds its "
                 "fragment verbatim, so any UPDATE to it violates migration "
                 "0040's check. Run `scripts/redact_dead_letters.py --apply` "
-                "first — replaying without it would create the record and "
+                "first. Replaying without it would create the record and "
                 "then fail to mark this row resolved.")
         key = self._c.execute(
             """SELECT id, declared_category, classification_ceiling,

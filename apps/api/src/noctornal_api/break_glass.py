@@ -229,7 +229,7 @@ class BreakGlassService:
         if not officers:
             raise BreakGlassError(
                 "no active user holds SECURITY_OFFICER, so nobody can review "
-                "this. Unreviewed emergency access is just access -- assign "
+                "this. Unreviewed emergency access is just access, so assign "
                 "the role before relying on break-glass in an incident")
 
         now = datetime.now(timezone.utc)
@@ -327,7 +327,10 @@ class BreakGlassService:
                          f"review."),
                 body=(f"An analyst invoked break-glass access.\n\n"
                       f"Grant: {grant.id}\n"
-                      f"Expires: {grant.expires_at.isoformat()}\n\n"
+                      # The console's own form, not ISO: a reader sees
+                      # this text verbatim (README screenshot set
+                      # review, 2026-09-23).
+                      f"Expires: {ends:%Y-%m-%d %H:%M UTC}\n\n"
                       f"Their justification is held with the grant and is "
                       f"readable with break_glass.review. It is not "
                       f"reproduced here, because it describes the emergency "
@@ -361,7 +364,7 @@ class BreakGlassService:
                     body=(f"An analyst invoked break-glass access on your "
                           f"case.\n\nTheir justification:\n\n"
                           f"    {grant.justification}\n\n"
-                          f"It expires at {grant.expires_at.isoformat()}. A "
+                          f"It expires at {ends:%Y-%m-%d %H:%M UTC}. A "
                           f"security officer has been alerted independently "
                           f"and their review is mandatory; you are told "
                           f"because it is your case, not because anything "

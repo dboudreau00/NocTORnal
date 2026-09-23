@@ -541,7 +541,7 @@ def centrality(m: Materialised, params: AnalyticsParams) -> dict:
             "computed over positive ties only"
             if meaningful else
             "computed over positive ties only, and the positive graph has {} "
-            "separate components -- eigenvector centrality is only comparable "
+            "separate components: eigenvector centrality is only comparable "
             "WITHIN a component, so treat cross-component comparisons as "
             "meaningless".format(len(components))
         )
@@ -913,7 +913,7 @@ def run_suite(sub: Subgraph, p: Projection,
         # through the nodes that were dropped.
         "truncated": sub.truncated,
         "truncation_note": (
-            "the node set was cut off at the projection limit -- global "
+            "the node set was cut off at the projection limit: global "
             "metrics below are computed over a PARTIAL graph and understate "
             "paths through the omitted nodes"
         ) if sub.truncated else None,
@@ -1021,7 +1021,7 @@ def _broker_signature(degree: int, betweenness: float,
     if betweenness <= 0:
         return None
     if degree <= 3 and btw_pct >= 80:
-        return ("Broker signature: few ties but high brokerage -- these may be "
+        return ("Broker signature: few ties but high brokerage. These may be "
                 "the only connections between clusters, which usually matters "
                 "more than the loudest poster.")
     if constraint is not None and constraint < 0.4 and btw_pct >= 70:

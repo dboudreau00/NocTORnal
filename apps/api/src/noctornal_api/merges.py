@@ -295,10 +295,15 @@ class MergeService:
             (merge_id, record.merged_at),
         ).fetchone()
         if blocker is not None:
+            # Agreed with the shared count, not a bracketed plural (README
+            # screenshot set review, 2026-09-23).
+            one = blocker[2] == 1
             raise MergeError(
                 f"a later merge ({blocker[0]}) is still live and moved "
-                f"{blocker[2]} of the same relationship(s). Reversing this "
-                f"one first would write their old endpoints over ties that "
+                f"{'one' if one else blocker[2]} of the same relationships. "
+                f"Reversing this one first would write "
+                f"{'its' if one else 'their'} old endpoints over "
+                f"{'a tie' if one else 'ties'} that "
                 f"merge now owns, and the graph would assert a relationship "
                 f"that never existed. Reverse the later merge first.")
 

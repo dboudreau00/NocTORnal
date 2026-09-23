@@ -33,9 +33,10 @@ import psycopg
 PRESETS: dict[str, dict] = {
     "trust": {
         "label": "Trust",
-        "description": "Vouches, guarantees, escrow, rip reports, disputes — "
-                       "the signed network. Negative ties included, because "
-                       "removing them throws away the most diagnostic signal.",
+        "description": "The signed network of vouches, guarantees, escrow, "
+                       "rip reports and disputes. Negative ties included, "
+                       "because removing them throws away the most "
+                       "diagnostic signal.",
         "edge_types": ["VOUCHED_FOR", "GUARANTOR_FOR", "ESCROW_FOR",
                        "ACCUSED_SCAM", "DISPUTED_WITH", "RIVAL_OF"],
     },
@@ -49,9 +50,9 @@ PRESETS: dict[str, dict] = {
     },
     "financial": {
         "label": "Financial",
-        "description": "Payments, laundering, escrow and wallet control — the "
-                       "money picture, which usually names different leaders "
-                       "than the trust one does.",
+        "description": "The money picture of payments, laundering, escrow "
+                       "and wallet control. It usually names different "
+                       "leaders than the trust network does.",
         "edge_types": ["PAID", "LAUNDERED_FOR", "ESCROW_FOR", "CONTROLS",
                        "TX_INPUT", "TX_OUTPUT"],
     },
@@ -59,8 +60,8 @@ PRESETS: dict[str, dict] = {
         "label": "All ties",
         "description": "Every edge type marked as a social tie in the "
                        "ontology. Identity plumbing (SAME_AS, ALIAS_OF) stays "
-                       "out — it would make whichever persona you researched "
-                       "hardest look the most central.",
+                       "out, because it would make whichever persona you "
+                       "researched hardest look the most central.",
         "edge_types": None,          # resolved to is_social_tie at query time
     },
 }

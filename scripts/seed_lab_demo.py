@@ -48,33 +48,50 @@ def _entropy_bytes(magic: bytes, size: int, alphabet: int) -> bytes:
     return magic + body
 
 
-#: (magic, size, alphabet, filename, note, classification)
+#: (magic, size, alphabet, filename, note, classification, finding)
+#:
+#: `note` is what the submitter said when the sample came in; `finding` is
+#: the analyst's one-line reading after static analysis, recorded as the
+#: analysis narrative. They were one string until the README screenshot
+#: review, 2026-09-23: the Analysis narrative repeated the source note word
+#: for word, so the pane showed a submission note twice and no analysis at
+#: all. Each finding stays inside what the synthetic buffer and the
+#: recorded findings can bear (entropy, readable imports, the file type).
 SPEC = [
     (b"MZ\x90\x00", 24000, 256,
      "svchost_update.exe",
      "Dropped by the loader in the OP-NIGHTJAR capture. Near-maximum "
      "entropy across the whole file: packed or encrypted.",
-     "AMBER"),
+     "AMBER",
+     "Packed: entropy sits near 8 bits end to end, so nothing past the "
+     "loader stub reads statically until it is unpacked."),
     (b"MZ\x90\x00", 18000, 44,
      "collector.exe",
      "Second stage, unpacked. Imports are readable, which is the useful "
      "half of a stage-two.",
-     "AMBER"),
+     "AMBER",
+     "Not packed: the import table reads cleanly, so this stage can be "
+     "worked statically without a sandbox run."),
     (b"\x7fELF", 12000, 40,
      "kdmflush",
      "Pulled from a compromised build host. The Linux half of this "
      "intrusion, which nobody had a lane for.",
-     "AMBER"),
+     "AMBER",
+     "ELF named to pass for a kernel worker thread in a process list; low "
+     "entropy, so it is not packed."),
     (b"PK\x03\x04", 9000, 256,
      "Invoice_2026_Q1.docx",
      "Phishing attachment. OOXML is a ZIP, so it scores like a packer, "
      "which is exactly why entropy never decides anything on its own.",
-     "GREEN"),
+     "GREEN",
+     "High entropy is the ZIP container, not a packer: read the parts "
+     "inside it, not the score."),
     (b"#!/bin/sh\n", 3000, 90,
      "setup.sh",
      "Low entropy, high nuisance. Plain text, and it does the same job as "
      "the binaries above.",
-     "GREEN"),
+     "GREEN",
+     "Plain shell script: it reads as text and needs no unpacking at all."),
     # The filename attack, seeded on purpose so the quarantine treatment in
     # the UI is exercised by something rather than only described.
     #
@@ -93,11 +110,15 @@ SPEC = [
      "Submitted with a U+202E RIGHT-TO-LEFT OVERRIDE in the filename: it "
      "renders as 'harmlessexe.pdf' anywhere the direction is not forced. "
      "The oldest presentation attack there is.",
-     "AMBER"),
+     "AMBER",
+     "A Windows executable under a document's name: the magic says MZ, so "
+     "treat the displayed name as hostile input."),
+    # Rejected on submission, so never analysed: no finding.
     (b"MZ\x90\x00", 5000, 250,
      "keygen.exe",
      "Rejected on submission.",
-     "AMBER"),
+     "AMBER",
+     None),
 ]
 
 
@@ -155,7 +176,7 @@ def main() -> int:
 
     svc = SampleService(conn, _Store())
     made = 0
-    for magic, size, alphabet, filename, note, classification in SPEC:
+    for magic, size, alphabet, filename, note, classification, finding in SPEC:
         data = _entropy_bytes(magic, size, alphabet)
         digest = hashlib.sha256(data).digest()
         if conn.execute("SELECT 1 FROM lab.sample WHERE sha256 = %s",
@@ -182,7 +203,7 @@ def main() -> int:
                 findings={"sections": 5, "imports_readable": alphabet < 100},
                 family_assessment="NIGHTJAR loader" if alphabet > 200 else None,
                 confidence="MODERATE" if alphabet > 200 else None,
-                narrative=note, tool="manual", tool_version="0")
+                narrative=finding, tool="manual", tool_version="0")
     conn.commit()
     print(f"seeded {made} sample(s)"
           + (f" onto {args.case}" if args.case else " unattached"))

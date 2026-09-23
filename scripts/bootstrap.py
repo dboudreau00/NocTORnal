@@ -131,7 +131,7 @@ def _require_kek() -> None:
             f'  PowerShell: $env:{KEK_ENV} = "<the value from that file>"'
         )
     _fail(
-        f"{KEK_ENV} is not set, and there is no default key — a hard-coded one "
+        f"{KEK_ENV} is not set, and there is no default key: a hard-coded one "
         "would make every stored TOTP secret readable by anyone with the "
         "source.\nGenerate 32 random bytes, base64, and keep them somewhere "
         "durable: without this value the enrolled secrets cannot be "
@@ -167,11 +167,15 @@ def _parse_roles(raw: str) -> list[str]:
 def _check_roles_exist(conn: psycopg.Connection, roles: list[str]) -> None:
     known = {r[0] for r in conn.execute("SELECT key FROM iam.role").fetchall()}
     if not known:
-        _fail("iam.role is empty — run `alembic upgrade head` before bootstrapping")
+        _fail("iam.role is empty, so run `alembic upgrade head` before bootstrapping")
     unknown = [r for r in roles if r not in known]
     if unknown:
+        # The operator's first words from the product agree with their
+        # counts, here and below, with no bracketed plurals (README
+        # screenshot set review, 2026-09-23).
         _fail(
-            f"unknown role(s): {', '.join(unknown)}\n"
+            f"unknown {'role' if len(unknown) == 1 else 'roles'}: "
+            f"{', '.join(unknown)}\n"
             f"seeded roles are: {', '.join(sorted(known))}"
         )
 
@@ -197,7 +201,7 @@ def _print_qr(uri: str) -> None:
     except ImportError:
         print("  No QR code: the optional `qrcode` package is not installed.")
         print("  Run  pip install qrcode  for one, or enter the URI or the")
-        print("  base32 secret into your authenticator by hand — either works.")
+        print("  base32 secret into your authenticator by hand. Either works.")
         return
     qr = qrcode.QRCode(border=1)
     qr.add_data(uri)
@@ -212,7 +216,7 @@ def _print_qr(uri: str) -> None:
         print("  PYTHONIOENCODING=utf-8 and re-run, or use the URI above.")
         return
     print("  Drawn for a dark terminal; on a light background it is inverted")
-    print("  and will not scan — use the URI instead.")
+    print("  and will not scan. Use the URI instead.")
 
 
 def _audit_created(
@@ -247,7 +251,7 @@ def cmd_create_user(args: argparse.Namespace) -> None:
         # concurrent bootstrap.
         if _user_id(conn, args.email) is not None:
             _fail(
-                f"a user with email {args.email} already exists — nothing was "
+                f"a user with email {args.email} already exists. Nothing was "
                 "changed.\nRun `list-users` to see it, or choose another address."
             )
         store = PgUserStore(conn)
@@ -270,7 +274,7 @@ def cmd_create_user(args: argparse.Namespace) -> None:
                 store.enroll_totp(user_id, secret)
                 _audit_created(conn, user_id, args.email, roles, args.clearance)
         except psycopg.errors.UniqueViolation:
-            _fail(f"email {args.email} was taken while this ran — nothing was changed")
+            _fail(f"email {args.email} was taken while this ran, so nothing was changed")
 
     now = int(time.time())
     uri = _otpauth_uri(args.email, secret)
@@ -288,7 +292,7 @@ def cmd_create_user(args: argparse.Namespace) -> None:
         print("  Password (generated, shown once, not recoverable):")
         print(f"    {password}")
     else:
-        print("  Password: as supplied on the command line — note that it is")
+        print("  Password: as supplied on the command line. Note that it is")
         print("  now in your shell history.")
     print()
     # The secret is printed as well as encoded: an operator without a camera,
@@ -304,7 +308,7 @@ def cmd_create_user(args: argparse.Namespace) -> None:
     print(f"  Code valid right now: {totp.code_at(secret, now)}"
           f"  (for another {totp.STEP_SECONDS - now % totp.STEP_SECONDS} s)")
     print("  If your authenticator shows something else, the enrolment did not")
-    print("  take — fix it now rather than at the login screen.")
+    print("  take. Fix it now rather than at the login screen.")
     print()
     print(RULE)
     print("Next")
@@ -347,7 +351,7 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                 title="Operation Nightjar",
                 summary=(
                     "Initial-access brokerage feeding a ransomware crew. Demo "
-                    "case written by scripts/bootstrap.py — fictional entities."
+                    "case written by scripts/bootstrap.py (fictional entities)."
                 ),
                 legal_basis=(
                     "Demonstration data. Replace with the real lawful basis "
@@ -540,7 +544,7 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
     print("            nightmarket (FORUM), a BTC wallet, Meridian Logistics")
     print("            Ltd (VICTIM)")
     print("  6 edges:  MEMBER_OF, POSTS_ON, VOUCHED_FOR, ACCUSED_SCAM,")
-    print("            CONTROLS, BROKERED_ACCESS — each with its own assertion")
+    print("            CONTROLS, BROKERED_ACCESS, each with its own assertion")
     print("  3 selectors (raw observation -> normalised match key):")
     for row in recorded:
         print(f"    {row.selector_type:<10} {row.raw_value}")
@@ -581,7 +585,8 @@ def cmd_recovery_codes(args: argparse.Namespace) -> None:
     print(f"Recovery codes for {args.email}")
     print(RULE)
     if had:
-        print(f"  {had} previous code(s) invalidated -- a set is replaced,")
+        print(f"  {had} previous {'code' if had == 1 else 'codes'} "
+              f"invalidated: a set is replaced,")
         print("  never topped up, so nothing older stays valid.")
         print()
     for code in codes:
@@ -623,6 +628,9 @@ _CREWS = {
 }
 _BRIDGES = ["dvina", "kolar", "oriel"]
 
+#: The labels `--classification` accepts, lowest first (core.tlp).
+_TLP_NAMES = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+
 
 def cmd_demo_network(args: argparse.Namespace) -> None:
     _require_database_url()
@@ -658,7 +666,14 @@ def cmd_demo_network(args: argparse.Namespace) -> None:
                     "before any operational use."
                 ),
                 authority_ref="DEMO/2026/0002",
-                classification="AMBER",
+                # AMBER unless asked. The README's screenshots are of a
+                # case published on GitHub, and a public image marked
+                # TLP:AMBER contradicts its own marking, so the recipe
+                # there asks for CLEAR (2026-09-23). Every node and tie
+                # below takes the same label: graph writes default to
+                # AMBER, and a CLEAR case full of AMBER entities would
+                # still be AMBER material on the screen.
+                classification=args.classification,
                 retention_until=today + timedelta(days=730),
                 review_due=today + timedelta(days=180),
                 owner_user_id=owner,
@@ -682,12 +697,14 @@ def cmd_demo_network(args: argparse.Namespace) -> None:
                 ids[handle] = graph.create_node(
                     case_id=case_id, node_type="IDENTITY", label=handle,
                     created_by=owner, attrs={"crew": crew},
+                    classification=args.classification,
                     assertion=assertion(30, "HIGH"),
                 )
         for handle in _BRIDGES:
             ids[handle] = graph.create_node(
                 case_id=case_id, node_type="IDENTITY", label=handle,
                 created_by=owner, attrs={"role": "broker"},
+                classification=args.classification,
                 assertion=assertion(24, "HIGH"),
             )
 
@@ -697,6 +714,7 @@ def cmd_demo_network(args: argparse.Namespace) -> None:
                 case_id=case_id, edge_type=etype,
                 src_node_id=ids[src], dst_node_id=ids[dst],
                 created_by=owner, sign=sign,
+                classification=args.classification,
                 # World time, so the timeline scrubber and trust decay both
                 # have something real to work with.
                 valid_from=ago(months),
@@ -748,7 +766,7 @@ def cmd_demo_network(args: argparse.Namespace) -> None:
     print(RULE)
     print(f"  Case id   {case_id}")
     print(f"  Case code {code}")
-    print("  Status    ACTIVE, classification AMBER")
+    print(f"  Status    ACTIVE, classification {args.classification}")
     print(f"  Owner     {args.owner_email}")
     print()
     print("  15 IDENTITY nodes in three crews, 22 signed ties, every one with")
@@ -806,7 +824,8 @@ def cmd_list_users(args: argparse.Namespace) -> None:
               f"{'yes' if active else 'no':<6}  "
               f"{', '.join(roles) if roles else '(none)'}")
     print()
-    print(f"{len(rows)} user(s). A user with no global role can read only the")
+    print(f"{len(rows)} {'user' if len(rows) == 1 else 'users'}. A user with "
+          f"no global role can read only the")
     print("cases they are assigned to, and can create none.")
 
 
@@ -883,7 +902,7 @@ def cmd_reenrol_totp(args: argparse.Namespace) -> None:
     print(RULE)
     print(f"  Email   {args.email}")
     print()
-    print("  Scan this rather than typing the secret — a single mistyped")
+    print("  Scan this rather than typing the secret: a single mistyped")
     print("  character produces codes that are wrong every single time.")
     print()
     _print_qr(uri)
@@ -895,7 +914,7 @@ def cmd_reenrol_totp(args: argparse.Namespace) -> None:
     print(f"  Code valid right now: {totp.code_at(secret, now)}  "
           f"(for another {30 - now % 30} s)")
     print("  Your authenticator must show exactly this. If it does not, the")
-    print("  entry is wrong — fix it here, not at the login screen.")
+    print("  entry is wrong. Fix it here, not at the login screen.")
     if args.new_secret:
         print()
         print("  The previous secret no longer works. Delete the old entry")
@@ -947,7 +966,7 @@ def cmd_totp_code(args: argparse.Namespace) -> None:
         # Replay protection rejects a counter that has already been accepted.
         print(f"  WARNING: step {counter} has already been used "
               f"(last accepted {last}).")
-        print("  Wait for the next code — a used code is refused even while")
+        print("  Wait for the next code: a used code is refused even while")
         print("  it is still on screen. That is the replay guard working.")
         print()
     print("  If your authenticator shows something different, its entry is")
@@ -1018,7 +1037,7 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
     if nearest is None:
         print(f"  No match anywhere within +/- {searched}.")
         print()
-        print("  The authenticator holds a DIFFERENT SECRET — no clock setting")
+        print("  The authenticator holds a DIFFERENT SECRET. No clock setting")
         print("  explains this. Delete the entry and re-add it by scanning:")
         print(f"    python scripts/bootstrap.py reenrol-totp --email {args.email}")
         print(RULE)
@@ -1026,12 +1045,12 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
 
     drift = nearest * step
     print(f"  MATCH at step offset {nearest:+d} ({drift:+d} s).")
-    print("  The secret is CORRECT — the code was generated for")
+    print("  The secret is CORRECT: the code was generated for")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now + drift))}.")
     print()
     if abs(nearest) <= totp.DRIFT_WINDOWS:
         print("  That is inside the accepted window, so this code should have")
-        print("  worked. If it was refused, the step had already been used —")
+        print("  worked. If it was refused, the step had already been used, so")
         print("  wait for the next code.")
     elif abs(drift) < 600:
         print("  Small drift. Enable automatic time on both devices.")
@@ -1048,7 +1067,7 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
         print("  This is not drift, it is two machines disagreeing about the")
         print("  date. TOTP is a function of absolute Unix time, so no")
         print("  re-enrolment can fix it: whichever clock is wrong must be")
-        print("  corrected. Check this host first —")
+        print("  corrected. Check this host first:")
         print("    w32tm /query /status      (Windows)")
         print("  reports 'not synchronized' when the host has never reached a")
         print("  time server, which is the usual culprit on an offline or")
@@ -1178,7 +1197,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--name", required=True, help="display name")
     create.add_argument(
         "--password",
-        help="omit this — a strong password is generated and printed once "
+        help="omit this: a strong password is generated and printed once "
              "(a password given here lands in your shell history)",
     )
     create.add_argument(
@@ -1203,8 +1222,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     codes = sub.add_parser(
         "recovery-codes",
-        help="issue a fresh set of single-use recovery codes (replaces any "
-             "existing set) -- the way back in when TOTP cannot work",
+        help="issue a fresh set of single-use recovery codes, the way back "
+             "in when TOTP cannot work (replaces any existing set)",
     )
     codes.add_argument("--email", required=True)
     codes.set_defaults(func=cmd_recovery_codes)
@@ -1217,6 +1236,10 @@ def _build_parser() -> argparse.ArgumentParser:
     network.add_argument("--owner-email", required=True,
                          help="an existing user, who becomes CASE_OWNER")
     network.add_argument("--code", help="case code (default OP-LATTICEWORK-26)")
+    network.add_argument(
+        "--classification", default="AMBER", choices=_TLP_NAMES,
+        help="the case's TLP, which every seeded node and tie also takes "
+             "(default AMBER; the README's screenshots use CLEAR)")
     network.set_defaults(func=cmd_demo_network)
 
     listing = sub.add_parser("list-users", help="who exists, and can they log in")

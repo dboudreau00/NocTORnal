@@ -308,9 +308,12 @@ def _refused(reason: str, ip: str | None) -> None:
     operator wants the size of the campaign, not one meter per excuse."""
     n = _refusals.note()
     if n is not None:
-        log.warning("live socket refused before accept: %s (%d refusal(s) "
-                    "since the last line; %d subscribed, %d pending, %d "
-                    "pending from this peer)", reason, n, _hub.count,
+        # The noun agrees with the count an operator reads, rather than
+        # a bracketed plural (README screenshot set review, 2026-09-23).
+        log.warning("live socket refused before accept: %s (%d %s since "
+                    "the last line; %d subscribed, %d pending, %d "
+                    "pending from this peer)", reason, n,
+                    "refusal" if n == 1 else "refusals", _hub.count,
                     _pending.count, _pending.count_for(ip))
 
 

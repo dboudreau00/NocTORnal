@@ -10,7 +10,7 @@ The matrix is built to demonstrate the method rather than to look tidy,
 because a demo where the obvious hypothesis wins teaches the wrong lesson:
 
   * Three hypotheses, one of which is the one an analyst would reach for
-    first — and it is NOT the one that survives, because ACH ranks on
+    first. It is NOT the one that survives, because ACH ranks on
     evidence AGAINST rather than evidence for.
   * One piece of evidence consistent with every hypothesis, so the
     "not diagnostic" row is populated. That row is the point: it is the
@@ -77,10 +77,13 @@ def live_assertions(conn, case_id, want):
               AND a.superseded_at IS NULL
             ORDER BY a.recorded_at LIMIT %s""", (case_id, want)).fetchall()
     if len(rows) < want:
+        # No em dash and no bracketed plural: a reader runs this from
+        # the README (README screenshot set review, 2026-09-23).
         raise SystemExit(
-            f"this case has {len(rows)} live assertion(s) and the demo needs "
-            f"{want}. Add some graph elements first — ACH evidence has to be "
-            f"an assertion, and there is no path that invents one.")
+            f"this case has {len(rows)} live "
+            f"{'assertion' if len(rows) == 1 else 'assertions'} and the demo "
+            f"needs {want}. Add some graph elements first: ACH evidence has "
+            f"to be an assertion, and there is no path that invents one.")
     return rows
 
 
@@ -127,7 +130,7 @@ def main() -> int:
         print(f"  H  {statement[:58]}  ({len(stances)} assessed)")
 
     print("\nOpen the Hypotheses pane. The one an analyst reaches for first "
-          "is NOT the one that survives — that is the method working, not a "
+          "is NOT the one that survives. That is the method working, not a "
           "seeding mistake.")
     return 0
 

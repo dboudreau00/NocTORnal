@@ -213,8 +213,8 @@ def bind(
             "earned by a verified signature over the identifier, not "
             "declared. POST to /pgp/verify with the signed message and the "
             "public key. If the confirmation rests on something other than "
-            "a signature -- an observed login, an admin-confirmed vendor "
-            "list -- record the binding as OBSERVED and state the basis in "
+            "a signature (an observed login, an admin-confirmed vendor "
+            "list), record the binding as OBSERVED and state the basis in "
             "an assertion, which is reviewable in a way a free-text note "
             "is not.")
     compartments = frozenset(body.compartments)

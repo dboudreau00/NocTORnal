@@ -20,8 +20,10 @@ where every line of it traces back to an exhibit.
 ![The sociogram](docs/images/01-graph.png)
 
 <sub>Every screenshot in this README is a live render of the bundled
-<b>TLP:CLEAR synthetic</b> showcase case. Every actor, handle, domain and
-phone number in it is fiction.</sub>
+<b>TLP:CLEAR synthetic</b> showcase case, seeded by the commands under
+First run. Every actor, handle, domain and phone number in it is fiction.
+Items inside it keep their own labels, because a sample or an exhibit can
+sit above its case, which is why a few read GREEN or AMBER.</sub>
 
 </div>
 
@@ -231,8 +233,13 @@ every screenshot below comes from:
 
 ```bash
 .venv/bin/python scripts/bootstrap.py demo-network \
-    --owner-email you@example.org --code OP-SHOWCASE-26
+    --owner-email you@example.org --code OP-SHOWCASE-26 --classification CLEAR
 .venv/bin/python scripts/seed_deception_demo.py --case OP-SHOWCASE-26
+.venv/bin/python scripts/seed_lab_demo.py --case OP-SHOWCASE-26
+.venv/bin/python scripts/seed_feeds_demo.py --case OP-SHOWCASE-26
+.venv/bin/python scripts/seed_ach_demo.py --case OP-SHOWCASE-26
+.venv/bin/python scripts/seed_readme_showcase.py \
+    --case OP-SHOWCASE-26 --owner-email you@example.org
 ```
 
 > **If TOTP rejects every code**, your host clock is out of step.
@@ -250,7 +257,7 @@ DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/n
   .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped**, **2400 tests** (`def test_`
+Expect **every test to pass with 0 skipped**, **2518 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -266,132 +273,183 @@ not a broken install.
 ![Sociogram](docs/images/01-graph.png)
 
 A hand-written 2D `<canvas>` renderer with a ForceAtlas2 layout in a web
-worker; the sketch's `sigma.js` WebGL renderer was replaced before anything
-was built. **Projections decide which edge types
-count as a social tie**, identity plumbing (`SAME_AS`, `ALIAS_OF`) stays
-out, or whichever persona you researched hardest looks the most central.
-Inferred edges render **dashed** and are excluded from metrics unless a
-projection opts in. The bar along the bottom is world time: drag it and
-the graph becomes what was believed on that date.
+worker; the sketch's `sigma.js` WebGL renderer was replaced before
+anything was built. **Projections decide which edge types count as a
+social tie**: identity plumbing (`SAME_AS`, `ALIAS_OF`) stays out, or
+whichever persona you researched hardest looks the most central. Entities
+joined only by structural edges wait on a shelf at the side (five here:
+three crews, a wallet and a domain). Inferred edges render **dashed**,
+like the one beside the selected vouch between bit_forge and bit_lathe,
+and count toward the metrics only when a projection opts in. The console's
+default projection does, and the readout under the legend says so. The bar
+along the bottom is world time: drag it and the graph becomes the network
+as it stood on that date, as the case records it today.
 
 ### Structural analysis
 ![Structural analysis](docs/images/06-analytics.png)
 
-Betweenness, eigenvector, k-core, Burt's constraint and Leiden communities
-via `igraph`'s C core. **Key-player analysis is a set problem, not the
-top-n by centrality**: two brokers who redundantly bridge the same two
-crews are worth less together than either alone, and the panel says so
-rather than ranking them 1 and 2.
+Betweenness, eigenvector and Burt's constraint via `igraph`'s C core,
+Leiden communities via `leidenalg`, and k-core among the inspector's local
+measures. **Key-player analysis is a set problem, not the top-n by
+centrality**: the three actors with the highest betweenness sit on one
+chain between two crews, so removing any one of them already cuts it. The
+panel searches for the removal set that fragments the network most, which
+here keeps only one of the three, and prints the top three by betweenness
+beside it with the fragmentation each reaches, so the difference is on
+screen rather than taken on trust. Above them, one actor's betweenness
+across past runs, each with the date it describes and its preset, because
+a rising betweenness is a claim about a person.
 
 ### Evidence and chain of custody
 ![Evidence](docs/images/03-evidence.png)
 
 SHA-256 and BLAKE3 at ingest; every exhibit written under a per-object
-MinIO **COMPLIANCE** lock, so not even a root credential can alter it
-before retention expires (the compose bucket DEFAULT is `GOVERNANCE 365d`);
-an append-only hash-chained custody ledger that records every touch,
-**including reads**.
+MinIO **COMPLIANCE** lock (the **WORM LOCKED** badge), so not even a root
+credential can alter it before retention expires (the compose bucket
+DEFAULT is `GOVERNANCE 365d`); an append-only hash-chained custody ledger
+that records every touch, **including reads**: the log open here has the
+exhibit's VIEWED row between ACQUIRED and HASH_VERIFIED.
 
 ### Competing hypotheses (ACH)
 ![ACH](docs/images/10-ach.png)
 
-Hypotheses scored against evidence explicitly, and a report carries the
-alternatives that were **ruled out** beside the one that was not. An
-analytic line without its rejected competitors is an assertion, not an
-assessment.
+Hypotheses scored against evidence explicitly and **ranked by the evidence
+against them**, not the evidence for them, so a theory can tie for the
+most support and still come last. A blank cell is a gap, not a neutral: a
+row with one that agrees with itself so far reads *unfinished*, not
+worthless, and the gap most worth filling is named as the next test. A
+report carries the alternatives that were ruled out beside the one that
+was not. An analytic line without its rejected competitors is an
+assertion, not an assessment.
 
 ### Deception: phishing, BEC and vishing
 ![Deception](docs/images/14-deception.png)
 
-Captures where the screenshot, redirect chain and TLS certificate are
-**one indivisible exhibit**. BEC email with the `Received` chain drawn
-recipient-first and its **trust boundary marked**, because everything
-above that hop is attacker-writable. Call records that keep the spoofable
+BEC email with the `Received` chain drawn recipient-first and its **trust
+boundary marked**, because every hop below it, further from the recipient,
+was written outside the recipient's infrastructure and is
+attacker-writable. What the recipient saw is kept apart from what the
+infrastructure proved. Captures bind the screenshot, DOM, HAR, redirect
+chain and TLS certificate into **one record**, so a screenshot cannot be
+re-paired with a different page's DOM. Call records keep the spoofable
 caller ID and the durable carrier attestation in separate, separately
-labelled blocks, collapsing them is how a crime gets attributed to
+labelled blocks. Collapsing them is how a crime gets attributed to
 whoever's number the attacker picked. Every URL defanged and
 non-clickable. See [`docs/19`](docs/19-social-engineering-evidence.md).
 
 ### Malware lab
 ![Lab](docs/images/13-samples.png)
 
-Metadata renders; bytes never do. Samples are encrypted at rest and
-downloadable only from a **separate origin**. Detonation requests that
-would send anything outside the boundary require a named authoriser and a
-written reason, a database `CHECK`, not a code review.
+Metadata renders; bytes never do. Even the attacker's filename is escaped,
+so a right-to-left override shows as the trick it is, and the record says
+plainly which checks never ran. Openings, downloads, assignments and
+detonation requests land in an append-only access ledger. Samples are
+encrypted at rest and downloadable only from a **separate origin**.
+Detonation requests that would send anything outside the boundary require
+a named authoriser and a written reason, a database `CHECK`, not a code
+review.
 
 ### Channels and contact blocks
 ![Comms](docs/images/08-comms.png)
 
 **Durable identifiers, not displayed ones.** Tox indexes the 64-hex public
-key because the nospam rotates at will; Telegram indexes the numeric id,
+key because the nospam rotates at will, so the same key under a different
+nospam still finds its binding; Telegram indexes the numeric id,
 namespaced by id space, because usernames are recycled. A pasted vendor
-contact block is parsed with the escrow's identifier attributed to the
-**escrow**, not to the vendor.
+contact block is parsed with the escrow's identifier flagged as a **third
+party's**, not attributed to the vendor.
 
 ### Lifecycle and governance
 ![Governance](docs/images/12-governance.png)
 
-Retention schedules; legal holds that override every deletion path; purge
-tombstones that outlive what they describe; break-glass access that is
-loud, dual-controlled and time-boxed.
+Retention schedules, each flagged **unconfirmed** until a named person
+confirms its period with a written reason: the placeholder the build
+shipped still runs, but never silently. Legal holds that override every
+deletion path; purge tombstones that outlive what they describe;
+break-glass access that is loud, capped at eight hours, and must be
+reviewed afterwards by a security officer who is not the person who used
+it.
 
 ### Entity list
 ![Entity list](docs/images/02-entities.png)
 
-Every node in the case with its type, labels, selectors and Admiralty
-grading. The type colour is the same one the sociogram uses, so the two
-views read as one thing. Filter by type, by tag, or by whether an element
-still rests on a live assertion.
+Every entity in the case with its type, label and TLP marking, filterable
+by type. The type colour is the same one the sociogram uses, so the two
+views read as one thing. Pick a row and the inspector opens on it: local
+metrics, every tie at the entity with its sign, and each assertion behind
+it with its Admiralty grading; further down come the exhibits linked to it
+and any selectors observed for it.
 
 ### Capture and triage
 ![Capture and triage](docs/images/04-triage.png)
 
 Paste an observation (a forum profile, a vendor advert, a contact block)
-and extraction raises **proposals**. Nothing here writes to the graph.
-Accept, reject or defer; a deferral parks the ambiguous item as DISPUTED
-rather than forcing a yes/no on something that does not deserve one yet.
-`J` and `K` move through the queue.
+and extraction raises **proposals**; extraction itself never writes to the
+graph. Accept, reject or defer; a deferral parks the ambiguous item as
+DISPUTED rather than forcing a yes/no on something that does not deserve
+one yet. `J` and `K` move through the queue.
 
 ### Notifications
 ![Notifications](docs/images/05-inbox.png)
 
-Re-authorised **on every delivery**, not only at subscribe time. A
-long-lived subscription and a case assignment have different lifetimes,
-and a notification centre that checked once was the headline finding of a
-previous review.
+Re-authorised **on every delivery**, not only at subscribe time: the list
+is filtered by the clearance, compartments and case assignment you hold
+now, so a notice about material you can no longer read, or about a case
+you were taken off, disappears rather than lingering. A long-lived
+subscription and a case assignment have different lifetimes, and a
+notification centre that checked once was the headline finding of a
+previous review. Email carries a summary and a link, never the detail.
+Quiet hours defer delivery and never drop it, and an urgent notice, like
+the break-glass alert here, ignores them.
 
 ### Search
 ![Search](docs/images/07-search.png)
 
 Filtered by your own clearance and compartments, so an over-classified
-element is *invisible* rather than discoverable-then-403. The two columns
-load independently: one failing does not blank the other.
+element is *invisible* rather than discoverable-then-403. Names,
+selectors, attributes and exhibit titles all match, and an entity found
+through a selector or an attribute says which one. The two columns load
+independently: one failing does not blank the other.
 
 ### Feeds and ingest
 ![Feeds and ingest](docs/images/09-feeds.png)
 
-Monitored sources, their run history, the persona vault, and the
-**dead-letter table**: anything unparseable is kept with its raw fragment.
-Silent drops are how you find out six months later that a feed has been
-half-failing.
+The **dead-letter table**: anything unparseable is recorded, not dropped,
+and its fragment is redacted before it is stored, so the keys and the
+shape survive and the values do not. A credential dump that failed to
+parse does not become a second copy of the credentials. Silent drops are
+how you find out six months later that a feed has been half-failing.
+Monitored sources, their run history and the persona vault live in the
+same pane.
 
 ### Report
 ![Report](docs/images/11-report.png)
 
 Build at a target classification. The redaction is *structural*, so
 nothing above that level is read at any point and it cannot be defeated by
-a name in a rationale field. Release is a separate action, through the
-egress gate, and is recorded either way.
+a name in a rationale field. The document counts what it withheld, calls
+every figure in it a lower bound, and flags each entity and tie that no
+exhibit in it backs. Release is a separate action, through the egress
+gate, and is recorded either way.
 
 ### Add entity and add relationship
 ![Add entity](docs/images/15-add-node.png)
 
-Neither form will complete without a source, an Admiralty
-reliability/credibility grading and a basis. That is invariant 1 at the
-point of entry: there is no "add it now, justify it later" path.
+Neither form will complete until you grade the claim yourself: a basis, an
+Admiralty reliability and credibility, and an ICD 203 confidence, none of
+them chosen for you. That is invariant 1 at the console's point of entry:
+there is no "add it now, justify it later" path. Beside the form, the
+inspector shows what a recorded claim keeps: its grade, its reference and
+the passage of the exhibit that backs it.
 
 ![Add relationship](docs/images/16-add-edge.png)
+
+A relationship is graded the same way, and an inference must also state
+its reasoning: choose Analyst inference and the rationale is marked
+required, and the form will not record the tie without one. Types are
+offered only where the ontology permits the pair, and none is chosen for
+you. On the right, an inference already on the case shows the reasoning it
+was recorded with, and says plainly that no exhibit backs it.
 
 ---
 
@@ -408,7 +466,7 @@ flowchart TB
     end
 
     X -->|"never writes the graph"| P[("proposal queue")]
-    X -.->|"unparseable"| DL[("dead letter<br/>+ raw fragment")]
+    X -.->|"unparseable"| DL[("dead letter<br/>+ redacted fragment")]
 
     P --> T{"Analyst triage"}
     T -->|reject| P
@@ -503,7 +561,7 @@ test named after it.
 | 9 | **Durable identifiers, not displayed ones** | per-type normalisers; `durable_selector_type` |
 | 10 | **Samples never render, never execute** | separate origin, encryption at rest, `is_hostile_markup` |
 | 11 | **Ingest keys are write-only** | a `CHECK` constraint saying so |
-| 12 | **Nothing is silently dropped** | dead-letter table with the raw fragment |
+| 12 | **Nothing is silently dropped** | dead-letter table, fragments redacted to their structure |
 
 ---
 
@@ -538,7 +596,7 @@ enforces it.
 
 ### Testing
 
-**2400 tests** (`def test_` functions across two pytest roots, maintained by
+**2518 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.

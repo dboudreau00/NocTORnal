@@ -407,6 +407,11 @@ class CustodyEntry:
     actor_id: UUID
     occurred_at: datetime
     hash_verified: bool | None
+    #: Who, as a person: the log answers "who touched this exhibit", and
+    #: an eight-hex id ("actor fcfd6f27") answered it for nobody (README
+    #: screenshot review, 2026-09-23). None only for an account row that
+    #: no longer resolves; the id is still there.
+    actor_name: str | None = None
 
 
 class EvidenceService:
@@ -448,7 +453,16 @@ class EvidenceService:
         digest = _sha256(data)
         blake = _blake3d(data)
         shahex = digest.hex()
-        acquired = acquired_at or self._now()
+        # acquired_at, when the caller gives none, is stamped by the
+        # DATABASE inside the INSERT below: COALESCE(..., now()) in the same
+        # transaction as the ACQUIRED custody row, whose occurred_at the
+        # custody trigger pins to now() (migration 0024). Both are then the
+        # one transaction timestamp. Until 2026-09-23 it was self._now(),
+        # the API host's clock, read before the object store put: a
+        # database clock behind the host showed an exhibit "acquired" a
+        # minute AFTER its own ACQUIRED, VIEWED and HASH_VERIFIED rows
+        # (README screenshot set review, 03-evidence).
+        acquired = acquired_at
         retain = retain_until or (self._now() + DEFAULT_RETENTION)
 
         # Dedup within the case (UNIQUE(case_id, sha256)): identical bytes
@@ -486,7 +500,9 @@ class EvidenceService:
                             acquired_at, acquired_by, acquisition_method, source_url,
                             classification, compartments, retention_until,
                             is_hostile_markup)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,
+                               COALESCE(%s::timestamptz, now()),
+                               %s,%s,%s,%s,%s,%s,%s)
                        RETURNING id""",
                     (case_id, title, description, media_type, len(data), digest, blake,
                      storage_key, self._s.bucket, acquired, acquired_by,
@@ -708,12 +724,14 @@ class EvidenceService:
 
     def custody_log(self, evidence_id: UUID) -> list[CustodyEntry]:
         rows = self._c.execute(
-            """SELECT action, actor_id, occurred_at, hash_verified
-                 FROM core.evidence_custody
-                WHERE evidence_id = %s ORDER BY occurred_at, id""",
+            """SELECT c.action, c.actor_id, c.occurred_at, c.hash_verified,
+                      u.display_name
+                 FROM core.evidence_custody c
+                 LEFT JOIN iam.app_user u ON u.id = c.actor_id
+                WHERE c.evidence_id = %s ORDER BY c.occurred_at, c.id""",
             (evidence_id,),
         ).fetchall()
-        return [CustodyEntry(r[0], r[1], r[2], r[3]) for r in rows]
+        return [CustodyEntry(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     # -- internal --------------------------------------------------------
     def _custody(self, evidence_id, action, actor_id, *, detail=None, hash_verified=None):

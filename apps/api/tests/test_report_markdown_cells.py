@@ -120,7 +120,7 @@ _TABLES = {
     "| From | Relationship | To | Sign | Confidence | Evidenced |": 6,
     "| Title | SHA-256 | Acquired | Method |": 4,
     "| Assumption | Basis | Status | Made by | Reviewed |": 5,
-    "| Hypothesis | Inconsistency | Support | Assessed |": 4,
+    "| Hypothesis | Status | Inconsistency | Support | Assessed |": 5,
 }
 
 
@@ -226,3 +226,78 @@ def test_the_statement_still_never_says_which_classification():
     # The case's own mark is stated, as it always was; nothing names the
     # level of what was withheld.
     assert statement.count("RED") == 1
+
+
+# --- the ruled-out alternatives say they were ruled out ------------------
+
+def test_each_hypothesis_row_carries_its_status():
+    """README screenshot review, 2026-09-23. The section exists to carry
+    the alternatives that were ruled out beside the one that was not, and
+    the table printed statement, inconsistency, support and assessed only,
+    so a REJECTED hypothesis read exactly like an open one."""
+    from noctornal_api.reports import render_markdown
+    report = _report(labels=("same operator", "imitator | RED"))
+    report.hypotheses = {**report.hypotheses,
+                         "statuses": {"h0": "REJECTED", "h1": "PROPOSED"}}
+    rows = _table(render_markdown(report),
+                  "| Hypothesis | Status | Inconsistency | Support | Assessed |")
+    assert [_cells_counting(r)[1].strip() for r in rows] == ["REJECTED", "PROPOSED"]
+    # A status the body does not carry is said, not left blank.
+    report.hypotheses = {k: v for k, v in report.hypotheses.items()
+                         if k != "statuses"}
+    rows = _table(render_markdown(report),
+                  "| Hypothesis | Status | Inconsistency | Support | Assessed |")
+    assert {_cells_counting(r)[1].strip() for r in rows} == {"not recorded"}
+
+
+# --- a count agrees with its noun ------------------------------------------
+
+_HEDGES = ("(s)", "(y/ies)", "(is/es)", " -- ")
+
+
+def test_the_redaction_statement_counts_in_words_that_agree():
+    """README screenshot review, 2026-09-23. The Report shot withheld one
+    exhibit, and the first line of the disclosure read "0 entit(y/ies), 0
+    relationship(s) and 1 exhibit(s)", with a " -- " aside in the header
+    sentence. Every count is known when the line is written."""
+    one = _redaction(nodes_withheld=1, edges_withheld=1, evidence_withheld=1,
+                     header_withheld=True, assumptions_withheld=1,
+                     hypotheses_withheld=1,
+                     hypothesis_evidence_withheld=1).statement()
+    many = _redaction(nodes_withheld=0, edges_withheld=2, evidence_withheld=3,
+                      header_withheld=True, assumptions_withheld=2,
+                      hypotheses_withheld=2,
+                      hypothesis_evidence_withheld=4).statement()
+    for statement in (one, many):
+        for hedge in _HEDGES:
+            assert hedge not in statement, (hedge, statement)
+    assert "1 entity, 1 relationship and 1 exhibit are above that level" in one
+    assert "0 entities, 2 relationships and 3 exhibits are above that level" in many
+    assert "The 1 recorded assumption the case rests on is withheld" in one
+    assert "rest on a premise this document cannot state" in one
+    assert "The 2 recorded assumptions the case rests on are withheld" in many
+    assert "The 1 competing hypothesis recorded against the case is withheld" in one
+    assert "The 2 competing hypotheses recorded against the case are withheld" in many
+    assert "1 item of evidence in the hypothesis matrix rests on" in one
+    assert "leave it out." in one
+    assert "4 items of evidence in the hypothesis matrix rest on" in many
+    assert "It is therefore not a disclosure document as it stands." in one
+
+
+def test_a_withheld_section_counts_in_words_that_agree():
+    """The sections that stand in for withheld ones say how many, the same
+    way."""
+    from noctornal_api.reports import render_markdown
+    report = _report(labels=(), header_withheld=True, assumptions_withheld=1,
+                     hypotheses_withheld=1)
+    report.hypotheses = {}
+    document = render_markdown(report)
+    assert "_1 recorded assumption withheld with the case header" in document
+    assert "_1 competing hypothesis withheld with the case header" in document
+    report = _report(labels=(), header_withheld=True, assumptions_withheld=3,
+                     hypotheses_withheld=2)
+    report.hypotheses = {}
+    document = render_markdown(report)
+    assert "_3 recorded assumptions withheld with the case header" in document
+    assert "_2 competing hypotheses withheld with the case header" in document
+    assert "assumption(s)" not in document and "hypothes(is/es)" not in document

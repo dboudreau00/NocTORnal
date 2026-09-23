@@ -301,7 +301,7 @@ def _looks_third_party(label: str | None, whole_line: str) -> str | None:
         if hit or label.lower().strip() in _THIRD_PARTY_LABEL_WORDS:
             named = sorted(hit) or [label.lower().strip()]
             return (f"the label {label!r} names a third-party role "
-                    f"({', '.join(named)}) -- docs/10: attributing the "
+                    f"({', '.join(named)}). docs/10: attributing the "
                     f"escrow's identifier to the vendor is a serious and "
                     f"easy error")
     low = whole_line.lower()
@@ -364,20 +364,20 @@ def _resolve_by_shape(value: str) -> tuple[str | None, str | None, str]:
                                  "fingerprint is printed")
     # ---- the refusals, each with the collision that causes it ----
     if len(hexish) == 64 and _HEX.match(hexish.replace(" ", "")):
-        return None, None, ("64 hex is AMBIGUOUS -- a Tox public key, a "
+        return None, None, ("64 hex is AMBIGUOUS: a Tox public key, a "
                             "SHA-256 and an OMEMO fingerprint are the same "
                             "shape. Label it to resolve it.")
     if len(hexish) == 40 and _HEX.match(hexish):
-        return None, None, ("40 hex is AMBIGUOUS -- a PGP fingerprint and a "
+        return None, None, ("40 hex is AMBIGUOUS: a PGP fingerprint and a "
                             "SHA-1 are the same shape. Label it, or print "
                             "the fingerprint in its usual spaced groups.")
     if "@" in v and "." in v.split("@")[-1] and not v.startswith("@"):
-        return None, None, ("local@domain is AMBIGUOUS -- a JID and an email "
+        return None, None, ("local@domain is AMBIGUOUS: a JID and an email "
                             "address are the same shape, and calling one the "
                             "other misfiles the strongest selector in the "
                             "block. Label it to resolve it.")
     if v.startswith("@"):
-        return None, None, ("a bare @handle is AMBIGUOUS -- Telegram, "
+        return None, None, ("a bare @handle is AMBIGUOUS: Telegram, "
                             "Discord, a forum handle and an Instagram all "
                             "print this way, and a Telegram @username is "
                             "not durable even when it IS Telegram.")
@@ -523,7 +523,7 @@ def parse(text: str) -> list[ParsedEntry]:
         elif entry.platform_key or entry.selector_type:
             entry.role_reasons.append(
                 "published in the block with no third-party label or "
-                "disclaimer, so read as the publisher's own -- a CLAIM, "
+                "disclaimer, so read as the publisher's own: a CLAIM, "
                 "which docs/10 says is a lead and not evidence")
         else:
             entry.role = ROLE_UNPARSED
@@ -801,8 +801,8 @@ class ContactBlockService:
             (case_id, probe, probe)).fetchone()
         if row:
             return (row[0], row[1], row[2],
-                    "the observed text, case-folded -- this line's TYPE was "
-                    "ambiguous, so there was no canonical form to match on")
+                    "the observed text, case-folded (this line's TYPE was "
+                    "ambiguous, so there was no canonical form to match on)")
         return None
 
     # -- shared services ---------------------------------------------------
@@ -1060,7 +1060,7 @@ class ContactBlockService:
             f"advertised by {publishers} distinct publishers across "
             f"{blocks + 1} blocks. docs/10: a selector appearing in many "
             f"unrelated vendors' blocks is a SHARED SERVICE, not a shared "
-            f"identity -- attributing it to any one of them is the escrow "
+            f"identity. Attributing it to any one of them is the escrow "
             f"error at scale")
         entry.score = min(entry.score, 0.05)
         entry.score_reasons.append(
@@ -1108,7 +1108,7 @@ class ContactBlockService:
                 f"{kind}. Co-declaration: the actor themselves asserted "
                 f"these identifiers belong to one operator, which is "
                 f"stronger than co-occurrence in a thread. This is a "
-                f"CLAIM -- docs/10: only CONFIRMED carries weight in "
+                f"CLAIM. docs/10: only CONFIRMED carries weight in "
                 f"automatic identity resolution, and confirmation needs a "
                 f"signature over the identifier, not a parse of it. "
                 f"Scoring: {entry.score_reason}"),
@@ -1244,7 +1244,7 @@ class ContactBlockService:
              "reading": ("EITHER one operator running both handles, OR one "
                          "impersonating the other. This tool cannot tell "
                          "which, and the difference decides who the victim "
-                         "is -- corroborate with a PGP signature or an "
+                         "is. Corroborate with a PGP signature or an "
                          "observed use before attributing either way.")}
             for r in rows]
 

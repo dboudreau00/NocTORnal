@@ -76,6 +76,7 @@ from noctornal_api.security.access import (
     tlp_from_name,
 )
 from noctornal_api.stores import PgAccessResolver
+from noctornal_api.wording import agree, count_of
 
 router = APIRouter(prefix="/retention", tags=["governance"])
 break_glass_router = APIRouter(prefix="/break-glass", tags=["governance"])
@@ -195,14 +196,20 @@ def rules(
                              if rule.confirmed_at else None),
         })
     unconfirmed = [r["category"] for r in out if r["is_placeholder"]]
+    # The console prints this notice as it stands, so it says "rules" or
+    # "rule" and names no design document: "6 rule(s) ... (docs/16 D3)"
+    # was on screen in the Lifecycle pane (README screenshot review,
+    # 2026-09-23). The decision is still docs/16 D3.
+    n = len(unconfirmed)
     return {
         "rules": out,
         "unconfirmed": unconfirmed,
         "notice": (
-            f"{len(unconfirmed)} rule(s) still hold a placeholder period "
-            f"nobody has confirmed. These are jurisdictional and the build "
-            f"cannot choose them (docs/16 D3)." if unconfirmed else
-            "every rule has been confirmed, with a rationale and a name"),
+            f"{n} {'rule still holds' if n == 1 else 'rules still hold'} a "
+            f"placeholder period nobody has confirmed. Retention periods are "
+            f"jurisdictional, so the build cannot choose them: a named person "
+            f"has to." if unconfirmed else
+            "Every rule has been confirmed, with a rationale and a name."),
     }
 
 
@@ -269,13 +276,18 @@ def confirm_rule(
             "is_placeholder": rule.is_placeholder,
             "previous": previous,
             "existing_records_unchanged": unchanged,
+            # Counts agreed rather than hedged with bracketed plurals,
+            # because the console prints this notice as it stands (README
+            # screenshot set review, 2026-09-23).
             "notice": (
                 f"{rule.category} material ingested from now on is kept for "
-                f"{rule.retain_days} day(s), in every case in the deployment. "
-                f"Nothing already on file is recomputed: {unchanged} ingest "
-                f"record(s) in this category on cases you can see keep the "
-                f"deadline they were stamped with, and so does the same "
-                f"category on every other case.")}
+                f"{count_of(rule.retain_days, 'day', 'days')}, in every case "
+                f"in the deployment. Nothing already on file is recomputed: "
+                f"{count_of(unchanged, 'ingest record', 'ingest records')} in "
+                f"this category on cases you can see "
+                f"{agree(unchanged, 'keeps', 'keep')} the deadline "
+                f"{agree(unchanged, 'it was', 'they were')} stamped with, and "
+                f"so does the same category on every other case.")}
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +548,7 @@ def purge_out_of_schedule(
             400, "Invalid request",
             f"{len(ids) - present} of the {len(ids)} selected exhibits are "
             f"not in this case. An out-of-schedule purge destroys exactly "
-            f"what its approval named, in the case it named -- and the "
+            f"what its approval named, in the case it named. The "
             f"tombstone is written against that case, so a cross-case "
             f"destruction would leave the other case with no record that "
             f"it happened.")
@@ -592,12 +604,12 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
         "notice": (
-            "DRY RUN -- nothing was destroyed. The counts above are what "
+            "DRY RUN: nothing was destroyed. The counts above are what "
             "WOULD be destroyed if this ran for real."
             if dry_run else
             "Destruction is irreversible. `storage_locked` counts EXHIBITS "
-            "the store REFUSED to delete -- exhibits, not object versions, "
-            "so the three storage counters add up to `evidence_purged`: "
+            "the store REFUSED to delete (exhibits, not object versions, "
+            "so the three storage counters add up to `evidence_purged`). "
             "COMPLIANCE-mode object lock can refuse even to satisfy a "
             "deletion order, and a tombstone recording a purge that did "
             "not happen is a false record. An exhibit is counted as "

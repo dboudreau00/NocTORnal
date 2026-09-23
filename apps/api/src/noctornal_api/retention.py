@@ -71,6 +71,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.evidence import is_retention_refusal
+from noctornal_api.wording import agree, count_of
 
 #: A category with no rule falls back to the case's own retention. Never
 #: to "forever" and never to a default period -- an unknown category is a
@@ -430,11 +431,17 @@ class RetentionService:
             "SELECT count(*) FROM collect.document "
             "WHERE purged_at IS NULL AND retain_until IS NULL").fetchone()[0]
         if unclocked:
+            # Counts and pronouns agreed rather than a bracketed plural;
+            # every warning in this module is printed to the operator
+            # verbatim (README screenshot set review, 2026-09-23).
+            one = unclocked == 1
             result.warnings.append(
-                f"{unclocked} collected document(s) have no retention clock "
-                f"set, so they are invisible to this sweep and can never "
-                f"expire. `documents_purged` below counts only documents "
-                f"that HAVE a clock -- it is not evidence that the collect "
+                f"{count_of(unclocked, 'collected document', 'collected documents')} "
+                f"{agree(unclocked, 'has', 'have')} no retention clock set, "
+                f"so {'it is' if one else 'they are'} invisible to this "
+                f"sweep and can never expire. `documents_purged` below "
+                f"counts only documents "
+                f"that HAVE a clock. It is not evidence that the collect "
                 f"layer is clean. Nothing writes `retain_until` today.")
 
         items = self.due(case_id=case_id, as_of=as_of)
@@ -640,7 +647,7 @@ class RetentionService:
             # does not also burn somebody's signature.
             raise RetentionError(
                 f"{held} of the selected exhibits are under legal hold. A "
-                f"hold overrides all deletion, everywhere (docs/08) -- lift "
+                f"hold overrides all deletion, everywhere (docs/08). Lift "
                 f"the hold first, with its own authority.")
 
         payload = {"case_id": str(case_id),
@@ -683,17 +690,23 @@ class RetentionService:
                     # Before the row-marking change it was at least marked;
                     # the change altered what this response means and said
                     # nothing on this path.
+                    kept = storage.locked + storage.failed
+                    one = kept == 1
                     result.warnings.append(
-                        f"{storage.locked + storage.failed} of "
-                        f"{len(evidence_ids)} exhibit(s) still have their "
-                        f"bytes in the object store, so those rows are NOT "
+                        f"{kept} of "
+                        f"{count_of(len(evidence_ids), 'exhibit', 'exhibits')} "
+                        f"still {'has its' if one else 'have their'} "
+                        f"bytes in the object store, so "
+                        f"{'that row is' if one else 'those rows are'} NOT "
                         f"marked purged. Unlike the scheduled sweep, nothing "
-                        f"will retry them: `due()` returns only evidence "
-                        f"whose case retention has expired, and this purge "
-                        f"is out of schedule, so those exhibits are not due "
-                        f"and will not come back due when the lock lifts. "
+                        f"will retry {'it' if one else 'them'}: `due()` "
+                        f"returns only evidence whose case retention has "
+                        f"expired, and this purge is out of schedule, so "
+                        f"{'that exhibit is' if one else 'those exhibits are'} "
+                        f"not due and will not come back due when the lock "
+                        f"lifts. "
                         f"The four-eyes approval has been CONSUMED and "
-                        f"cannot be reused -- a second attempt needs a new "
+                        f"cannot be reused: a second attempt needs a new "
                         f"one. A tombstone recording the refusal was "
                         f"written. Do not report this as a completed "
                         f"destruction.")
@@ -854,8 +867,11 @@ class RetentionService:
                     # count.
                     locked += 1
                     warnings.append(
-                        f"{r.versions_locked} of {r.versions_seen} version(s) "
-                        f"of storage_key {key!r} are under a retention lock "
+                        f"{r.versions_locked} of "
+                        f"{count_of(r.versions_seen, 'version', 'versions')} "
+                        f"of storage_key {key!r} "
+                        f"{agree(r.versions_locked, 'is', 'are')} under a "
+                        f"retention lock "
                         f"({r.versions_removed} removed); the exhibit's bytes "
                         f"remain, so nothing was destroyed for it and the row "
                         f"is not marked purged")
@@ -864,8 +880,11 @@ class RetentionService:
                     failed += 1
                     warnings.append(
                         f"no object found for storage_key {key!r}: the store "
-                        f"holds no bytes under it ({r.versions_seen} "
-                        f"version(s) listed, none of them an object), so "
+                        f"holds no bytes under it "
+                        f"({count_of(r.versions_seen, 'version', 'versions')} "
+                        f"listed, "
+                        f"{agree(r.versions_seen, 'not', 'none of them')} an "
+                        f"object), so "
                         f"nothing was destroyed and the row is not marked "
                         f"purged. The database says an exhibit was written; "
                         f"the object store has nothing.")

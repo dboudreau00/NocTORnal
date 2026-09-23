@@ -499,6 +499,12 @@ def test_break_glass_alerts_the_security_officer_at_priority_one(conn):
     inbox = NotificationService(conn).inbox(officer)
     assert [n.kind for n in inbox] == ["BREAK_GLASS_INVOKED"]
     assert inbox[0].priority == URGENT
+    # Read verbatim, so it carries the console's time form, not ISO
+    # (README screenshot set review, 2026-09-23).
+    import re
+    assert re.search(r"Expires: \d{4}-\d\d-\d\d \d\d:\d\d UTC\n", inbox[0].body)
+    assert "+00:00" not in inbox[0].body
+    assert not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", inbox[0].body)
 
 
 def test_a_thin_justification_is_refused(conn):

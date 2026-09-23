@@ -2,7 +2,7 @@
 
 **State (2026-09-23):** branch `main` (the working branch; byte-identical to
 `deception-and-release-hardening` except `README.md`), Alembic head `0065`,
-2400 tests counted as `def test_` functions across the two pytest roots,
+2518 tests counted as `def test_` functions across the two pytest roots,
 version 0.5.2 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
@@ -140,6 +140,17 @@ Found during the pass and not yet fixed:
 - A stale sign-in on any other step-up route still reads "missing
   permission" rather than asking to re-authenticate; the report release
   is the one route taught the difference.
+- The HTTP API still grades a claim for the caller when the body leaves
+  it out (`AssertionBody` defaults to DIRECT_OBSERVATION, F6, LOW). The
+  console forms no longer pre-grade anything, but invariant 1 at the API
+  wants the grading to be required.
+- Nothing writes `core.node.first_seen`, so the entity list's First seen
+  column can never fill through the product. Either give entity creation
+  a first seen or derive it from the earliest observation.
+- The seeded retention rules' rationales cite design documents on screen
+  (migration 0032 data); a data migration would reword them.
+- `nightmarket.im`, a real country-code domain, appears in the other demo
+  seeders and in tests. The README estate uses `.example` hosts throughout.
 
 ---
 

@@ -329,7 +329,7 @@ def test_a_locked_answer_is_recorded_as_locked_and_the_exhibit_stays(conn):
         "the exhibit was marked purged while every version of its object "
         "is still in the store")
     assert any("object store disagrees" in w for w in result.warnings)
-    assert any("2 of 2 version(s)" in w and key in w
+    assert any("2 of 2 versions" in w and key in w
                for w in result.warnings), (
         "the version detail was dropped when the counters went back to "
         "rows; it belongs in the warning that names the key")
@@ -394,7 +394,7 @@ def test_a_partial_refusal_marks_nothing_purged(conn):
 
     assert (result.storage_deleted, result.storage_locked) == (0, 1)
     _assert_counters_account_for_the_batch(result)
-    assert any("1 of 2 version(s)" in w and key in w and "1 removed" in w
+    assert any("1 of 2 versions" in w and key in w and "1 removed" in w
                for w in result.warnings), result.warnings
     assert _tombstone_outcome(conn, case_id) == STORAGE_LOCKED
     assert _purged_at(conn, ev) is None

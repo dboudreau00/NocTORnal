@@ -9,6 +9,7 @@ Pure: no database, no clock. The HTTP leg is in `test_ach_pg.py`.
 """
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from noctornal_api.ach import (
@@ -26,6 +27,12 @@ H1, H2, H3 = uuid4(), uuid4(), uuid4()
 HYPOTHESES = [(H1, "The broker is the developer"),
               (H2, "The broker is a reseller"),
               (H3, "The broker is a law-enforcement persona")]
+
+
+#: The "settles nothing" warning in either number. The warning agrees with
+#: its count now (README screenshot set review, 2026-09-23), so a check
+#: that it is absent must look for both forms or pass on a singular.
+_SETTLES_NOTHING = re.compile(r"\bsettles? nothing\b")
 
 
 def _item(label, stances, reliability="A", credibility="1"):
@@ -98,7 +105,10 @@ def test_evidence_consistent_with_everything_is_not_diagnostic():
     m = score(HYPOTHESES, evidence)
     assert m.evidence[0].is_diagnostic is False
     assert m.evidence[0].score == 0.0
-    assert any("settle nothing" in w for w in m.warnings)
+    # One item, so the warning says it in the singular throughout.
+    assert any(w.startswith("The only item says the same thing about every "
+                            "hypothesis and settles nothing. It is kept")
+               for w in m.warnings), m.warnings
 
 
 def test_evidence_that_separates_hypotheses_scores_highest():
@@ -259,7 +269,7 @@ def test_an_unfinished_row_is_unknown_not_undiagnostic():
     assert item.assessed_against == 1
     joined = " ".join(m.warnings)
     assert "unknown rather than zero" in joined
-    assert "settle nothing" not in joined
+    assert not _SETTLES_NOTHING.search(joined), joined
 
 
 def test_a_genuinely_undiagnostic_row_still_says_so():
@@ -270,7 +280,7 @@ def test_a_genuinely_undiagnostic_row_still_says_so():
                                   H3: CONSISTENT})])
     assert not m.evidence[0].is_incomplete
     assert not m.evidence[0].is_diagnostic
-    assert "settle nothing" in " ".join(m.warnings)
+    assert _SETTLES_NOTHING.search(" ".join(m.warnings)), m.warnings
 
 
 def test_a_stance_against_a_superseded_hypothesis_does_not_fill_a_gap():
@@ -284,6 +294,71 @@ def test_a_stance_against_a_superseded_hypothesis_does_not_fill_a_gap():
                  {H1: STRONGLY_CONSISTENT, superseded: INCONSISTENT})
     m = score([(H1, "live"), (H2, "live too")], [item])
     assert m.refute_first == item.assertion_id
+
+
+def test_a_row_scored_against_only_some_hypotheses_is_unknown_not_undiagnostic():
+    """README screenshot review, 2026-09-23. The demo matrix scored one
+    item against two of its three hypotheses, the same way both times, and
+    left the third blank. `is_incomplete` was a fixed `assessed_against < 2`,
+    so with two cells filled the row counted as finished: the pane dimmed it
+    as "not diagnostic" and the warning above it said the item says "the
+    same thing about every hypothesis and settle[s] nothing", while the
+    unassessed cell sat in the same row and `refute_first` named that very
+    item as the cheapest next test. The pane contradicted itself.
+
+    Agreement across the hypotheses it HAS been scored against says nothing
+    about the one it has not: scored against H3 it could separate H3 from
+    the other two. Until then its diagnosticity is unknown, not zero."""
+    evidence = [
+        _item("same builder", {H1: STRONGLY_CONSISTENT, H2: CONSISTENT,
+                               H3: INCONSISTENT}),
+        _item("different C2 panels", {H1: STRONGLY_INCONSISTENT,
+                                      H2: CONSISTENT, H3: STRONGLY_CONSISTENT}),
+        _item("hal_quarry", {H1: CONSISTENT, H2: CONSISTENT}),
+    ]
+    m = score(HYPOTHESES, evidence)
+    quarry = next(d for d in m.evidence if d.label == "hal_quarry")
+    assert quarry.assessed_against == 2
+    assert quarry.is_incomplete, (
+        "two agreeing cells and a blank third is an unfinished row")
+    joined = " ".join(m.warnings)
+    assert not _SETTLES_NOTHING.search(joined), (
+        "the warning claimed an item said the same thing about EVERY "
+        "hypothesis while one of them had never been scored")
+    assert "unknown rather than zero" in joined
+    assert m.refute_first == quarry.assertion_id, (
+        "the cheapest next test is the row the warning now calls unfinished")
+
+
+def test_a_partial_row_that_already_separates_two_hypotheses_is_diagnostic():
+    """The other side of the same rule. A row that already puts two
+    hypotheses apart DOES discriminate, whatever the blank cell turns out
+    to be; calling it unknown would hide a result. Its gap is still the
+    next test."""
+    gap = _item("half judged, and sharp", {H1: STRONGLY_CONSISTENT,
+                                           H2: STRONGLY_INCONSISTENT})
+    m = score(HYPOTHESES, [gap])
+    row = m.evidence[0]
+    assert row.is_diagnostic and not row.is_incomplete
+    assert m.refute_first == gap.assertion_id
+
+
+def test_every_warning_about_a_row_is_true_of_the_rows_it_counts():
+    """Held as a property over every shape a three-hypothesis row can take
+    with stances drawn from {none, -1, +1}: an item counted as "says the
+    same thing about every hypothesis" has a stance against every live
+    hypothesis, and they are all the same."""
+    from itertools import product
+    choices = (None, INCONSISTENT, CONSISTENT)
+    for combo in product(choices, repeat=3):
+        stances = {h: s for h, s in zip((H1, H2, H3), combo, strict=True)
+                   if s is not None}
+        row = score(HYPOTHESES, [_item("x", stances)]).evidence[0]
+        undiagnostic = not row.is_incomplete and not row.is_diagnostic
+        if undiagnostic:
+            assert len(stances) == 3 and len(set(stances.values())) == 1, combo
+        if len(set(stances.values())) > 1:
+            assert row.is_diagnostic and not row.is_incomplete, combo
 
 
 # --- the response ------------------------------------------------------
@@ -303,3 +378,55 @@ def test_the_response_round_trips_ids_as_strings():
         _item("a", {H1: CONSISTENT, H2: INCONSISTENT, H3: NEUTRAL})]))
     assert body["least_inconsistent"] == str(H1)
     assert all(isinstance(h["id"], str) for h in body["hypotheses"])
+
+
+def test_a_warning_agrees_with_the_count_it_states():
+    """README screenshot set review, 2026-09-23: the ACH capture was headed
+    "1 of 3 items are unfinished". Every count the warnings state takes
+    its noun, verb and pronoun from the number, and a count that is the
+    whole matrix is said as such."""
+    def warning(m, word):
+        found = [w for w in m.warnings if word in w]
+        assert len(found) == 1, m.warnings
+        return found[0]
+
+    sharp = _item("sharp", {H1: STRONGLY_CONSISTENT, H2: STRONGLY_INCONSISTENT,
+                            H3: CONSISTENT})
+    half = _item("half", {H1: CONSISTENT})
+    flat = _item("flat", {H1: CONSISTENT, H2: CONSISTENT, H3: CONSISTENT})
+
+    one = score(HYPOTHESES, [sharp, half, _item("sharp too", {
+        H1: INCONSISTENT, H2: CONSISTENT, H3: CONSISTENT})])
+    assert warning(one, "unfinished").startswith(
+        "1 of 3 items is unfinished: "), one.warnings
+    assert "so its diagnosticity is unknown" in warning(one, "unfinished")
+    assert "Finishing that row is" in warning(one, "unfinished")
+
+    two = score(HYPOTHESES, [sharp, half, _item("half too", {H2: CONSISTENT})])
+    assert warning(two, "unfinished").startswith(
+        "2 of 3 items are unfinished: "), two.warnings
+    assert "so their diagnosticity is unknown" in warning(two, "unfinished")
+    assert "Finishing those rows is" in warning(two, "unfinished")
+
+    both = score(HYPOTHESES, [half, _item("half too", {H2: CONSISTENT})])
+    assert warning(both, "unfinished").startswith(
+        "Both items are unfinished: "), both.warnings
+    every = score(HYPOTHESES, [half, _item("half too", {H2: CONSISTENT}),
+                               _item("half three", {H3: CONSISTENT})])
+    assert warning(every, "unfinished").startswith(
+        "All 3 items are unfinished: "), every.warnings
+
+    flat_one = score(HYPOTHESES, [sharp, flat])
+    assert warning(flat_one, "nothing").startswith(
+        "1 of 2 items says the same thing about every hypothesis and "
+        "settles nothing. It is kept"), flat_one.warnings
+
+    flat_two = score(HYPOTHESES, [sharp, flat, _item("flat too", {
+        H1: INCONSISTENT, H2: INCONSISTENT, H3: INCONSISTENT})])
+    assert warning(flat_two, "nothing").startswith(
+        "2 of 3 items say the same thing about every hypothesis and "
+        "settle nothing. They are kept"), flat_two.warnings
+
+    for m in (one, two, both, every, flat_one, flat_two):
+        assert not any(re.search(r"\w\((?:s|es)\)", w) for w in m.warnings), (
+            m.warnings)

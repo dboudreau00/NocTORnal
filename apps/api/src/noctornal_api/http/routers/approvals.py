@@ -106,12 +106,12 @@ def _request_reach(r: ApprovalRequest) -> dict:
     if r.approvers_notified is None:
         warnings.append(
             "the request is recorded but the notification failed; no "
-            "approver has been told -- ask one directly")
+            "approver has been told, so ask one directly")
     elif r.approvers_notified == 0:
         warnings.append(
             "the request is recorded but no approver was notified: nobody "
             "else on this case both holds the operation's permission and is "
-            "cleared to read the request -- assign one, or ask directly")
+            "cleared to read the request, so assign one or ask directly")
     return {"approvers_notified": r.approvers_notified, "warnings": warnings}
 
 

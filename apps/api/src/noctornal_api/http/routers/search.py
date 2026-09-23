@@ -59,12 +59,18 @@ class HitOut(BaseModel):
     """`merged_name` is the label of a record merged into this entity
     whose name matched when the entity's own did not, or matched less well
     (final review U10, 2026-09-23), so the pane can say why a name it does
-    not show is here. Null otherwise."""
+    not show is here. Null otherwise.
+
+    `attribute` is the key of the entity's own attribute that matched,
+    when its name did not and neither `via` nor `merged_name` is set
+    (README screenshot review, 2026-09-23): "broker" found three entities
+    through role=broker, and nothing on screen said so. Null otherwise."""
     id: str
     label: str
     rank: float
     via: SelectorViaOut | None = None
     merged_name: str | None = None
+    attribute: str | None = None
 
 
 class HitPage(BaseModel):
@@ -82,7 +88,7 @@ def _hit_out(h) -> HitOut:
     if h.via is not None:
         via = SelectorViaOut(**h.via.as_dict())
     return HitOut(id=str(h.id), label=h.label, rank=h.rank, via=via,
-                  merged_name=h.merged_name)
+                  merged_name=h.merged_name, attribute=h.attribute)
 
 
 def _page_out(page, limit: int, with_total: bool) -> list[HitOut] | HitPage:

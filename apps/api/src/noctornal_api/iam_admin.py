@@ -59,6 +59,7 @@ from psycopg.types.json import Json
 from noctornal_api.security import totp
 from noctornal_api.security.envelope import _load_kek
 from noctornal_api.stores import PgSessionStore, PgUserStore
+from noctornal_api.wording import agree
 
 
 class AdminError(Exception):
@@ -203,8 +204,8 @@ class IamAdminService:
                     "tlp_clearance": clearance})
         except psycopg.errors.UniqueViolation as exc:
             raise AdminError(
-                f"a user with email {email} already exists — nothing was "
-                f"changed") from exc
+                f"a user with email {email} already exists. Nothing was "
+                f"changed.") from exc
         return OneTimeCredentials(
             user_id=user_id, email=email, password=password,
             totp_secret=secret, otpauth_uri=_otpauth_uri(email, secret))
@@ -506,15 +507,21 @@ class IamAdminService:
             return current
         unknown = self._unknown_compartments(keys)
         if unknown:
+            # This refusal, the strand refusal below and `_check_roles`
+            # agree with the keys they name, rather than hedging with a
+            # bracketed plural (README screenshot set review, 2026-09-23).
+            n = len(unknown)
             raise AdminError(
-                f"compartment(s) not registered: {', '.join(unknown)}. Register "
+                f"{agree(n, 'compartment', 'compartments')} not registered: "
+                f"{', '.join(unknown)}. Register "
                 # Spelled with the mount prefix, for the reason cases.py
                 # gives at its twin refusal: until 2026-09-09 this said
                 # `POST /compartments`, which the router does not serve,
                 # and disagreed with the 0059 trigger's wording of the
                 # same rule. `test_compartment_binding_pg.py` pins all
                 # three to the migration constant and the route table.
-                f"the key first (POST /api/v1/compartments); an unregistered "
+                f"{agree(n, 'the key', 'the keys')} first "
+                f"(POST /api/v1/compartments); an unregistered "
                 f"key is a "
                 f"typo, and a typo in a read-in is a case the user cannot see")
         removed = sorted(set(current) - set(keys))
@@ -535,7 +542,9 @@ class IamAdminService:
                 names = ", ".join(
                     f"{r[0]} ({r[1]}: needs {', '.join(r[2])})" for r in stranded)
                 raise AdminError(
-                    f"removing compartment(s) {', '.join(removed)} would strand "
+                    f"removing "
+                    f"{agree(len(removed), 'compartment', 'compartments')} "
+                    f"{', '.join(removed)} would strand "
                     f"this user outside cases they hold ({names}). Transfer, "
                     f"reassign or close those cases first.")
         detail = {"email": row[1], "from": current, "to": keys}
@@ -630,14 +639,16 @@ class IamAdminService:
         bad = [r for r in roles if r not in GRANTABLE_ROLES]
         if bad:
             raise AdminError(
-                f"role(s) not grantable from this surface: {', '.join(bad)}")
+                f"{agree(len(bad), 'role', 'roles')} not grantable from this "
+                f"surface: {', '.join(bad)}")
         known = {r[0] for r in self._c.execute(
             "SELECT key FROM iam.role WHERE key = ANY(%s)",
             (roles,)).fetchall()}
         missing = [r for r in roles if r not in known]
         if missing:
             raise AdminError(
-                f"role(s) not present in this deployment's seed: "
+                f"{agree(len(missing), 'role', 'roles')} not present in this "
+                f"deployment's seed: "
                 f"{', '.join(missing)}")
 
     def _lock_role_census(self) -> None:

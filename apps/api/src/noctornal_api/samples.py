@@ -347,7 +347,7 @@ _TICKET_REFUSED = (
     "this download ticket is not valid: it has been used, it has expired, "
     "it was not issued for this sample, or the account it was issued to "
     "may no longer download samples. Tickets are good for one download "
-    f"within {DOWNLOAD_TICKET_TTL_SECONDS} seconds -- ask the console for "
+    f"within {DOWNLOAD_TICKET_TTL_SECONDS} seconds. Ask the console for "
     "another."
 )
 
@@ -652,7 +652,7 @@ def origin_split(*, this: str | None = None) -> OriginSplit:
             "invalid", None, app, this_origin,
             f"sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN="
             f"{raw_sample!r} is not an origin. It must be scheme://host[:port] "
-            f"with no path, query or credentials -- a path is a location on "
+            f"with no path, query or credentials. A path is a location on "
             f"an origin, not an origin, and docs/11 is explicit that "
             f"app.internal/samples is not separate from app.internal.")
     if app is not None and sample == app:
@@ -1437,7 +1437,7 @@ class SampleService:
                     f"than storing it twice")
             raise SampleError(
                 "this submission was not accepted. If you believe it is new, "
-                "raise it with the lab — a duplicate of something you may "
+                "raise it with the lab. A duplicate of something you may "
                 "not see is refused without saying so, because the refusal "
                 "would otherwise answer a question the access gate does not.")
 
@@ -2226,7 +2226,7 @@ class SampleService:
             raise SampleError(
                 "sample integrity check failed: stored bytes do not match the "
                 "recorded sha256. This is a tamper alarm, not a transient "
-                "error — it has been written to the custody ledger and the "
+                "error. It has been written to the custody ledger and the "
                 "audit log, and the bytes have NOT been served.")
 
         # `via` is derived rather than passed: a ticket id present means
@@ -3138,7 +3138,7 @@ class SampleService:
             raise SampleError(
                 "queue() needs the caller's clearance. It used to default to "
                 "RED, so a caller that forgot became maximally privileged in "
-                "silence — which is exactly how download() came to have no "
+                "silence, which is exactly how download() came to have no "
                 "label check at all.")
         rows = self._c.execute(
             f"""SELECT {_SELECT} FROM lab.sample s
