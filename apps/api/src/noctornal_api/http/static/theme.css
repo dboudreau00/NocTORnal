@@ -1,8 +1,8 @@
-/* NocTORnal theme — "Mulberry Nocturne", second cut.
+/* NocTORnal theme: "Mulberry Nocturne", second cut.
    The console's entire visual identity, in one file. app.css holds
    structure and behaviour; nothing in it may name a colour that is not a
    token defined here. Swap this file and the console reskins without a
-   single structural edit — that is the contract, and
+   single structural edit. That is the contract, and
    test_theme_contract.py now actually enforces it. (The previous version
    of this comment claimed test_ui_invariants held app.css to the rule. It
    did not. Nine raw rgba() literals had accumulated in app.css and twelve
@@ -13,7 +13,7 @@
 
    Every dark console looks the same because every dark console is
    BLUE-shifted: GitHub's #0D1117, Discord's slate, VS Code's neutral
-   graphite — cold grounds with a blue or purple accent. This one is
+   graphite: cold grounds with a blue or purple accent. This one is
    WINE-shifted: black-plum surfaces a few degrees into red, porcelain
    text warmed to match, an oxidised-verdigris accent. Nocturnal, not
    "dark mode".
@@ -33,17 +33,19 @@
 
    Colour carries MEANING in this console (docs/06), and the meaning
    layer is not a theme:
-   - sign-positive / sign-negative / sign-neutral — a vouch is green and
+   - sign-positive / sign-negative / sign-neutral: a vouch is green and
      an accusation is red in every theme, forever.
    - --alert vs --accent must stay far apart in hue: the metric-history
      chart draws its line in accent and marks APPROXIMATE runs in alert,
      and a theme that lets them converge erases a data distinction.
      Measured gap: 137 degrees.
    - The seven node-type hues must stay mutually distinct AND distinct
-     from the sign colours on the canvas. Measured with CIEDE2000 against
+     from the positive and negative sign colours on the canvas (not from
+     --sign-neutral: `context` sits near it by design, see below, and a
+     disc does not read as a line). Measured with CIEDE2000 against
      --void, the closest pair is 15.8 (was 12.0). Note this was NOT free:
-     the reference palette this cut is based on scored 10.5 — worse than
-     what it replaced — because it pushed `context` toward a saturated
+     the reference palette this cut is based on scored 10.5, worse than
+     what it replaced, because it pushed `context` toward a saturated
      blue. `context` is deliberately near-neutral so that it reads as
      "not an actor" rather than as a dim actor.
    - Confidence is opacity, never hue.
@@ -59,11 +61,73 @@
      content passes underneath (sticky table headers). A translucent value
      here would let rows ghost through a header. Everything else in the
      app should reach for a --wash-* instead. */
-  --void: #140C13;        /* the canvas: darkest thing in the app */
+  --void: #140C13;        /* the canvas ground: darkest surface in the app */
   --surface-0: #1A1017;   /* app ground */
   --surface-1: #21151F;   /* rail, app bar, inspector ground */
   --surface-2: #2D2030;   /* raised: inputs, buttons, sticky headers */
   --surface-3: #3A2A3C;   /* hover / selected row */
+
+  /* ── the canvas ground ─────────────────────────────────────────────
+     The sociogram was the one surface that opted OUT of the elevation
+     system below. It painted a flat --void and nothing else, so the
+     thing an analyst looks at longest read as a black rectangle cut
+     into a lit room, while every panel around it was glass over plum.
+
+     These two put it back in the family: the same key-light gesture
+     `body` uses, plus a graph-paper grid that gives pan and zoom
+     something to move against.
+
+     TWO CEILINGS, both measured and both held by test_theme_contract
+     (test_the_canvas_ground_keeps_every_mark_above_its_floor):
+
+     1. The key light alone stays at or below --surface-0, so the canvas
+        is still the darkest surface in the app (docs/06) at its
+        brightest point, not only on average. At 0.025 the top of the
+        canvas was brighter than the app ground; 0.02 is the largest
+        two-place value under it.
+
+     2. The binding MARK is --sign-neutral, the colour of every neutral
+        tie: at 4.92:1 on bare --void it has the least headroom of
+        anything drawn here. (This comment used to name `context`, and
+        quoted --sign-neutral's figures for it. `context` is 6.17:1 on
+        --void and was never the limit, so tuning it would have moved
+        nothing: cr02 ceiling-comment-wrong-token, 2026-09-22.) The
+        worst case is a tie crossing a grid line under the brightest
+        part of the light, where both alphas composite once. At these
+        values that ground is about rgb(28,20,27) and --sign-neutral
+        holds 4.6:1.
+
+     "Composite once" is a property of the painter, not of the tokens.
+     Stroked as 1px lines, Chromium composited every grid crossing twice
+     at DPR 1 and --sign-neutral fell to 4.48:1 there. paintGrid fills one
+     path of rectangles, which covers the union once.
+
+     Canvas TEXT is not measured against this ground at all. Every label
+     is drawn on a --void plate, so its floor is taken against --void:
+     --text-tertiary (edge types, the shelf caption) is 4.68:1 there, and
+     it may not be dimmed further. It used to be drawn at 0.85 alpha
+     straight onto the ground, which put it at 3.5:1.
+
+     The -out token exists for the reason the --*-wash ones do. A canvas
+     gradient needs both stops as colours and the painter may not invent
+     the second one, so the theme supplies it. */
+  --canvas-grid: rgba(241, 233, 234, 0.016);
+  --canvas-keylight: rgba(241, 233, 234, 0.02);
+  --canvas-keylight-out: rgba(241, 233, 234, 0);
+
+  /* The node BODY's alpha per confidence step. Ring and core take the
+     --conf-* steps themselves; the body is the largest area of a node, so
+     it is where confidence is read, and these keep HIGH against LOW at
+     2:1 or better for every node hue on --void (the old opaque disc was
+     2.19:1; the restyle's 0.40 multiplier had cut it to 1.39:1). They are
+     steps, not a multiplier: app.js may not scale a --conf-* value by a
+     literal (test_theme_contract). */
+  --canvas-node-body-high: 0.66;
+  --canvas-node-body-moderate: 0.44;
+  --canvas-node-body-low: 0.3;
+  /* Node labels, --text-secondary at this alpha on their --void plate:
+     5.8:1. Quieter than the node, never below 4.5:1. */
+  --canvas-label-alpha: 0.8;
 
   /* ── glass ─────────────────────────────────────────────────────────
      The elevation system. A card is a wash over whatever it sits on plus
@@ -89,14 +153,17 @@
      been used (best case 3.16 on the ground, 2.26 on --surface-3). A tier
      that cannot carry text is not a text tier.
      Ratios on --surface-0: 15.56 / 8.21 / 4.52. Tertiary clears AA body
-     text for the first time — it was 3.79 and used for real labels. */
+     text for the first time (it was 3.79 and used for real labels). */
   --text-primary: #F1E9EA;
   --text-secondary: #B9A8AE;
   --text-tertiary: #8A7885;
 
   /* ── accent ────────────────────────────────────────────────────────
-     Verdigris: oxidised copper against dark wine. Used sparingly — focus,
-     selection, the active rail tab, the trend line, the playhead.
+     Verdigris: oxidised copper against dark wine. Used sparingly: focus,
+     selection, the active rail tab, the trend line, the playhead, and
+     identity, which is the TOR in the NocTORnal wordmark and nothing
+     else (the one use that is not a state; cr02
+     brand-split-and-accent-in-chrome, 2026-09-22).
      --accent-soft is the text colour to use ON an accent wash; --accent
      itself on a 12% accent fill is too low-contrast to read. */
   --accent: #4FC1AF;
@@ -168,7 +235,7 @@
   --conf-moderate: 0.74;
   --conf-low: 0.58;
 
-  /* Overlay scrim — warmed to match the ground; a blue scrim over plum
+  /* Overlay scrim, warmed to match the ground; a blue scrim over plum
      reads as a rendering bug. */
   --scrim: rgba(12, 6, 11, 0.72);
 
@@ -219,8 +286,8 @@
   --motion-fast: 120ms;
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
 
-  /* docs/06 names Söhne / Inter / JetBrains Mono. Nothing is fetched — a
-     webfont would breach the CSP and leak a request — so these are system
+  /* docs/06 names Söhne / Inter / JetBrains Mono. Nothing is fetched (a
+     webfont would breach the CSP and leak a request), so these are system
      stacks that degrade to the closest local grotesk and the local mono. */
   --ui: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
         "Helvetica Neue", Arial, "Noto Sans", sans-serif;
@@ -235,7 +302,7 @@
    These live here rather than app.css because they are LOOK, not
    structure: a different theme would make different choices. */
 
-/* Text selection stays in the accent family — the one chrome colour —
+/* Text selection stays in the accent family (the one chrome colour),
    never in amber, which would make every selection look like a warning. */
 ::selection { background: rgba(79, 193, 175, 0.28); color: var(--text-primary); }
 

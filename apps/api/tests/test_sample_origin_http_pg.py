@@ -453,9 +453,13 @@ def test_the_lab_pane_downloads_from_the_policys_sample_origin():
         "the cross-origin download carries no bearer since Wave 2")
 
     # The mint is a POST on the ordinary path, which is what brings the
-    # CSRF double-submit with it. A GET would not.
+    # CSRF double-submit with it. A GET would not. Since 2026-09-22 (F2)
+    # the mint PATH is a parameter defaulting to the download's, because
+    # the retrieval of a preserved sample rides the same two legs with
+    # its own mint; the POST through api() is what is held.
+    assert "async function downloadSample(s, msg, mint = '/download-ticket')" in body
     assert re.search(r"api\('/samples/' \+ encodeURIComponent\([^)]*\)\s*\n?"
-                     r"\s*\+ '/download-ticket', \{ method: 'POST' \}\)", body), (
+                     r"\s*\+ mint, \{ method: 'POST' \}\)", body), (
         "the ticket must be minted through api() with POST, so the "
         "double-submit applies")
     assert "fetch(API + '/samples/'" not in body, (

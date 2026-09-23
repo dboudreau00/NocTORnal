@@ -53,7 +53,7 @@ SPEC = [
     (b"MZ\x90\x00", 24000, 256,
      "svchost_update.exe",
      "Dropped by the loader in the OP-NIGHTJAR capture. Near-maximum "
-     "entropy across the whole file — packed or encrypted.",
+     "entropy across the whole file: packed or encrypted.",
      "AMBER"),
     (b"MZ\x90\x00", 18000, 44,
      "collector.exe",
@@ -67,7 +67,7 @@ SPEC = [
      "AMBER"),
     (b"PK\x03\x04", 9000, 256,
      "Invoice_2026_Q1.docx",
-     "Phishing attachment. OOXML is a ZIP, so it scores like a packer — "
+     "Phishing attachment. OOXML is a ZIP, so it scores like a packer, "
      "which is exactly why entropy never decides anything on its own.",
      "GREEN"),
     (b"#!/bin/sh\n", 3000, 90,
@@ -167,10 +167,15 @@ def main() -> int:
             classification=classification)
         made += 1
         if filename == "keygen.exe":
+            # purge_bytes=False: recorded, nothing disposed of. This store
+            # writes nothing, so there are no bytes to preserve, and since
+            # F2 (2026-09-22) a rejection that disposes of bytes preserves
+            # them by default and refuses when there is nothing to move.
             svc.reject(sample.id, actor_id=who,
                        reason="Out of scope: a licence bypass, not the "
                               "intrusion. Recorded so the decision is "
-                              "visible rather than a gap in the queue.")
+                              "visible rather than a gap in the queue.",
+                       purge_bytes=False)
         else:
             svc.record_analysis(
                 sample.id, analyst_id=who, kind="STATIC",

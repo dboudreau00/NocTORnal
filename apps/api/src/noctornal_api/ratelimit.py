@@ -453,6 +453,28 @@ LIMITS: dict[str, Limit] = {
         "auth.recovery_codes", quota=5, per_seconds=3600, scope=Scope.USER,
         burst=3, on_backend_failure=OnBackendFailure.DENY,
     ),
+    # An administrator minting somebody ELSE's credentials: provisioning an
+    # account, or re-enrolling a colleague's authenticator. Both answer
+    # with a one-time password or secret, so a loop is still worth
+    # braking, and both are step-up gated behind `user.manage` already.
+    #
+    # Its own meter, not `auth.recovery_codes`, which both routes shared
+    # until 2026-09-23 (final review U18). That bucket is sized for one
+    # person reissuing their OWN codes, three at once, and the console now
+    # spends one of the three issuing the first administrator's codes at
+    # their first sign-in. The operator of a fresh install could then add
+    # two colleagues before a 429, and one more every twelve minutes, on
+    # the very step first run sends them to next. A refused request still
+    # spends from a meter (the limit runs before the gate's step-up check,
+    # on purpose, see http/limits.py), so every stale-session click also
+    # took away a chance to reissue their own codes. The numbers are set
+    # for standing up a unit in one sitting: twenty at once, then one a
+    # minute.
+    "admin.credentials": Limit(
+        "admin.credentials", quota=60, per_seconds=3600, scope=Scope.USER,
+        burst=20, on_backend_failure=OnBackendFailure.DENY,
+        audit_every_seconds=60,
+    ),
     # decision 30 names this as the DoS surface: a CPU-bound igraph run
     # behind a non-step-up permission. 2k nodes is ~1.15s of one core.
     "analytics.suite": Limit(

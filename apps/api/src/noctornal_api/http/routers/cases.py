@@ -21,6 +21,11 @@ interesting part of this file:
 3. **`ARCHIVED -> PURGED` is re-gated onto `case.delete`** (`transition`),
    because marking a case for destruction is not a "close".
 
+`revoke_case_user` joined them on 2026-09-22: `revoke_user` had no route
+either, so a case shared from the console could not be unshared from it.
+It refuses to remove the owner, for the same reason the grant route
+refuses to regrade them.
+
 ## Where the audit rows come from
 
 Every mutation here is audited *inside* `CaseService`, in the same
@@ -38,9 +43,10 @@ import psycopg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from noctornal_api.cases import CaseService
+from noctornal_api.cases import CaseError, CaseService
 from noctornal_api.http.deps import (
     CurrentUser,
+    audit_auth_event,
     authorize_object,
     check_writable_labels,
     current_user,
@@ -78,6 +84,11 @@ class CaseOut(BaseModel):
     retention_until: date
     review_due: date
     created_at: datetime
+    # When the case was last closed. The workspace header states the case's
+    # lifecycle state and, for a closed case, since when: material added
+    # after this instant postdates the close, which matters for disclosure
+    # (ux02-cases:case-status-invisible-in-workspace, 2026-09-22).
+    closed_at: datetime | None = None
 
 
 def _out(c) -> CaseOut:
@@ -86,6 +97,7 @@ def _out(c) -> CaseOut:
         classification=c.classification, owner_user_id=str(c.owner_user_id),
         legal_basis=c.legal_basis, retention_until=c.retention_until,
         review_due=c.review_due, created_at=c.created_at,
+        closed_at=c.closed_at,
     )
 
 
@@ -340,15 +352,46 @@ def _assignees_below(conn: psycopg.Connection, case_id: UUID,
 # ---------------------------------------------------------------------
 
 class AssignUserBody(BaseModel):
-    #: The durable identifier, never the email (invariant 9): `app_user.email`
-    #: is citext-unique but a person's address changes and can be reassigned
+    #: The durable identifier (invariant 9): `app_user.email` is
+    #: citext-unique but a person's address changes and can be reassigned
     #: within an organisation. A grant must not follow the mailbox.
-    user_id: UUID
+    user_id: UUID | None = None
+    #: OR the colleague's work address, resolved to their id HERE, once, at
+    #: the moment of granting. The assignment row still stores `user_id`,
+    #: so the grant binds to the person and not the mailbox, and invariant
+    #: 9 holds. Added 2026-09-22 (ux16 no-user-id-for-share, ux02
+    #: share-needs-raw-uuid): the only way to share a case was to type an
+    #: `iam.app_user.id` that no screen available to a case owner ever
+    #: showed, and the directory that does show ids needs `user.manage`.
+    #: Exactly one address is resolved per request, so this answers "is
+    #: this person on the system" for one address a caller already knows
+    #: and never lists anybody.
+    email: str | None = Field(default=None, min_length=3, max_length=320)
     role_key: str
     #: docs/05 wants case access time-boxed by default. Not forced here —
     #: a case owner with an expiring grant is its own failure mode — but
     #: validated so a grant cannot be born already dead.
     expires_at: datetime | None = None
+
+
+def _audit_share_refused(conn: psycopg.Connection, user: CurrentUser,
+                         case_id: UUID, email: str, reason: str) -> None:
+    """Record a grant by address that was refused, with the address.
+
+    Sharing by address answers, for one address at a time, whether an
+    active account uses it: an unknown address is a 404, a known one that
+    cannot open the case a 400. That cannot be hidden without making the
+    Share dialog useless to the owner who mistypes an address, and a grant
+    that succeeds says as much anyway. What CAN be ensured is that asking
+    leaves a trace: a successful grant is audited by the service, and until
+    2026-09-23 a refused one wrote nothing, so a `case.grant` holder could
+    walk a list of addresses unseen (verifier follow-up to ux02
+    share-needs-raw-uuid). Grants by id are not recorded here: an id is
+    not guessable, and the service's own refusal already covers them.
+    """
+    audit_auth_event(conn, "CASE_SHARE_REFUSED", user.user_id, case_id,
+                     {"by": "email", "email": email.strip().lower(),
+                      "reason": reason})
 
 
 @router.post("/cases/{case_id}/users", response_model=dict,
@@ -392,6 +435,11 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     if case is None:
         raise Problem(404, "Not found", "case does not exist")
 
+    if (body.user_id is None) == (body.email is None):
+        raise Problem(400, "Invalid request",
+                      "name the colleague by user_id or by email, and by "
+                      "exactly one of them")
+
     if body.expires_at is not None:
         # An offset is REQUIRED, and the absence of one is a 400 rather
         # than an assumption.
@@ -416,13 +464,14 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
                 "2027-03-14T17:00:00Z or 2027-03-14T17:00:00+01:00.")
         if body.expires_at <= _now():
             raise Problem(400, "Invalid request",
-                          "expires_at is in the past — that grant would be "
+                          "expires_at is in the past: that grant would be "
                           "expired before it was written")
 
     role = conn.execute(
         """SELECT r.key,
                   ARRAY(SELECT rp.permission_key FROM iam.role_permission rp
-                         WHERE rp.role_key = r.key ORDER BY rp.permission_key)
+                         WHERE rp.role_key = r.key ORDER BY rp.permission_key),
+                  r.display_name
              FROM iam.role r WHERE r.key = %s""",
         (body.role_key,),
     ).fetchone()
@@ -430,41 +479,84 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         raise Problem(400, "Invalid request", f"unknown role {body.role_key!r}")
     if not role[1]:
         raise Problem(400, "Invalid request",
-                      f"role {body.role_key!r} grants no permissions — that "
+                      f"role {body.role_key!r} grants no permissions, so that "
                       "assignment would confer nothing")
+
+    # The address is resolved only AFTER everything about the request
+    # itself has been validated. Resolved first, a request with a bad
+    # role_key answered 404 for an unknown address and 400 for a known one,
+    # writing nothing and auditing nothing: a free account-existence probe
+    # for any case.grant holder (2026-09-23). From here on, a known address
+    # either becomes a grant, which is audited, or is refused for a reason
+    # about that grant.
+    target = body.user_id
+    if target is None:
+        # One refusal for "no account" and "deactivated account" alike: the
+        # address is guessable where a UUID is not, so the two answers must
+        # not differ. An inactive account could not use the grant anyway.
+        row = conn.execute(
+            "SELECT id FROM iam.app_user WHERE email = %s AND is_active",
+            (body.email.strip(),)).fetchone()
+        if row is None:
+            _audit_share_refused(conn, user, case_id, body.email,
+                                 "no_active_account")
+            raise Problem(404, "Not found",
+                          "no active account uses that address. Check the "
+                          "spelling, or ask an administrator whether the "
+                          "account exists and is active.")
+        target = row[0]
 
     assignee = conn.execute(
         "SELECT display_name, is_active FROM iam.app_user WHERE id = %s",
-        (body.user_id,),
+        (target,),
     ).fetchone()
     if assignee is None:
         raise Problem(404, "Not found", "no such user")
     if not assignee[1]:
         raise Problem(400, "Invalid request",
-                      "that account is deactivated — the assignment would "
+                      "that account is deactivated, so the assignment would "
                       "be ignored by every access check")
 
     # The owner-demotion guard. Mirrors revoke_user's refusal to strip the
     # owner: the two are the same act by different routes.
-    if body.user_id == case.owner_user_id and body.role_key != "CASE_OWNER":
+    if target == case.owner_user_id and body.role_key != "CASE_OWNER":
+        if body.email is not None:
+            _audit_share_refused(conn, user, case_id, body.email, "owner")
         raise Problem(400, "Invalid request",
                       "that user owns this case; regrading them would lock "
                       "the owner out of their own case. Transfer ownership "
                       "first.")
 
     existing = conn.execute(
-        "SELECT role_key FROM iam.case_assignment "
-        "WHERE case_id = %s AND user_id = %s",
-        (case_id, body.user_id),
+        "SELECT a.role_key, r.display_name FROM iam.case_assignment a "
+        "LEFT JOIN iam.role r ON r.key = a.role_key "
+        "WHERE a.case_id = %s AND a.user_id = %s",
+        (case_id, target),
     ).fetchone()
 
-    CaseService(conn).assign_user_checked(
-        case_id, body.user_id, body.role_key,
-        granted_by=user.user_id, expires_at=body.expires_at,
-    )
+    try:
+        CaseService(conn).assign_user_checked(
+            case_id, target, body.role_key,
+            granted_by=user.user_id, expires_at=body.expires_at,
+        )
+    except CaseError as exc:
+        if body.email is None:
+            raise
+        _audit_share_refused(conn, user, case_id, body.email, "labels")
+        # The service's refusal names the assignee's clearance ("assignee
+        # clearance GREEN is below ..."). Reached by UUID that told a case
+        # owner about somebody whose id they already held; reached by a
+        # guessable address it would tell them any colleague's clearance.
+        # Said the way the roster says it, without the level (2026-09-23).
+        raise Problem(
+            400, "Invalid request",
+            "that colleague could not open this case: their clearance is "
+            "below its classification, or they are not read into one of its "
+            "compartments. An administrator can check their account.",
+        ) from exc
     return {
         "case_id": str(case_id),
-        "user_id": str(body.user_id),
+        "user_id": str(target),
         "display_name": assignee[0],
         "role_key": body.role_key,
         "expires_at": body.expires_at.isoformat() if body.expires_at else None,
@@ -472,6 +564,14 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         # demoting a colleague looks identical to adding a new one
         # (invariant 12).
         "replaced_role": existing[0] if existing else None,
+        # The names a person reads, beside the keys. The owner decided
+        # CASE_OWNER is shown as Lead investigator (migration 0062), and
+        # the Share panel printed the key because nothing it could read
+        # carried the name: `/admin/roles` needs user.manage (final review
+        # U21, 2026-09-23).
+        "role_name": role[2] or body.role_key,
+        "replaced_role_name": ((existing[1] or existing[0])
+                               if existing else None),
         # What this grade actually confers on this case, so "I gave them
         # access and they still cannot upload" is answerable at the moment
         # of granting rather than by reading the seed.
@@ -482,7 +582,7 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
 @router.get("/cases/{case_id}/users", response_model=dict,
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_case_users(case_id: UUID,
-                    _: CurrentUser = Depends(require("case.read")),
+                    user: CurrentUser = Depends(require("case.read")),
                     conn: psycopg.Connection = Depends(get_conn)) -> dict:
     """Who is assigned to this case, and whether the assignment works.
 
@@ -497,6 +597,19 @@ def list_case_users(case_id: UUID,
     Recomputed here from the same predicates `CaseService.list_for_user`
     uses, so the two cannot drift into disagreeing about who can read.
 
+    That includes break-glass. `list_for_user` and the gate count a live
+    grant, on this case or global, at its level; this compared
+    `u.tlp_clearance` alone, so an analyst working in the case under an
+    emergency grant was shown to its owner as "cannot open the case",
+    "clearance below the case's classification" (final review U22,
+    2026-09-23). Such a colleague is now `effective`, and a caller who can
+    manage the roster (`you_can_grant`) is also told when that access
+    lapses, in `emergency_access_until`, because on that instant they
+    drop back to "cannot open" and a clearance change, not a re-share, is
+    what fixes it. Anyone else reading the roster, LIAISON included, gets
+    null there: whether a colleague can open the case answers their
+    question, and who is on emergency access is not a partner's business.
+
     Email is deliberately not returned. LIAISON holds `case.read`, so this
     endpoint is reachable by an external partner, and the roster of a case
     does not need to hand out the staff directory to answer "who is on it".
@@ -509,46 +622,152 @@ def list_case_users(case_id: UUID,
         raise Problem(404, "Not found", "case does not exist")
     case_tlp, case_comp = tlp_from_name(labels[0]), set(labels[1] or [])
 
+    # The last column: when this colleague's live break-glass cover for the
+    # case ends, counting only grants (global, or on this case) at or
+    # above the case's classification, i.e. the ones that open it. NULL
+    # when no such grant is live. Same grant predicate as list_for_user.
     rows = conn.execute(
         """SELECT a.user_id, u.display_name, a.role_key, a.granted_by,
                   a.granted_at, a.expires_at, u.is_active,
                   u.tlp_clearance, u.compartments,
                   EXISTS (SELECT 1 FROM iam.role_permission rp
                            WHERE rp.role_key = a.role_key
-                             AND rp.permission_key = 'case.read')
+                             AND rp.permission_key = 'case.read'),
+                  (SELECT max(bg.expires_at) FROM iam.break_glass bg
+                    WHERE bg.user_id = a.user_id AND bg.revoked_at IS NULL
+                      AND bg.expires_at > now()
+                      AND bg.granted_classification >= %s::core.tlp
+                      AND (bg.case_id IS NULL OR bg.case_id = a.case_id))
              FROM iam.case_assignment a
              JOIN iam.app_user u ON u.id = a.user_id
             WHERE a.case_id = %s
             ORDER BY a.granted_at""",
-        (case_id,),
+        (labels[0], case_id),
     ).fetchall()
 
+    # Whether the CALLER's own case role carries `case.grant`, so the Share
+    # panel offers Add and Remove only to somebody who could use them. It
+    # showed both to every roster reader, LIAISON and READ_ONLY included,
+    # and each click ended in a 403 (2026-09-23). A hint for the console,
+    # never a gate: the grant and revoke routes still decide, step-up
+    # included. Read before the roster is built because it also decides
+    # who is told when a colleague's emergency access ends (U22).
+    can_grant = bool(conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM iam.case_assignment a
+                 JOIN iam.role_permission rp ON rp.role_key = a.role_key
+                WHERE a.case_id = %s AND a.user_id = %s
+                  AND (a.expires_at IS NULL OR a.expires_at > now())
+                  AND rp.permission_key = 'case.grant')""",
+        (case_id, user.user_id)).fetchone()[0])
+
+    owner = CaseService(conn).get(case_id).owner_user_id
+    granters = {r[3] for r in rows if r[3]}
+    names = {g[0]: g[1] for g in conn.execute(
+        "SELECT id, display_name FROM iam.app_user WHERE id = ANY(%s)",
+        (list(granters),)).fetchall()} if granters else {}
+    # The name a person reads for each grade on the roster, looked up like
+    # the granters' names: the owner decided CASE_OWNER is shown as Lead
+    # investigator (0062), every case worker opens this roster, and none
+    # of them can read `/admin/roles` (final review U21, 2026-09-23).
+    role_names = {g[0]: g[1] for g in conn.execute(
+        "SELECT key, display_name FROM iam.role WHERE key = ANY(%s)",
+        (list({r[2] for r in rows}),)).fetchall()} if rows else {}
     now = _now()
     users = []
     for r in rows:
         expired = r[5] is not None and r[5] <= now
-        effective = (
-            bool(r[9])                       # role grants case.read
-            and not expired                  # assignment still live
-            and bool(r[6])                   # account active
-            and tlp_from_name(r[7]) >= case_tlp   # clearance dominates
-            and case_comp <= set(r[8] or []) # read into every compartment
-        )
+        # Each failing check, in words, so the Share panel can say WHY a
+        # colleague on the roster cannot open the case rather than only
+        # that they cannot (ux02 share-needs-raw-uuid, 2026-09-22). The
+        # clearance line does not name the colleague's level: LIAISON can
+        # read this roster, and "below the case" answers the question
+        # without handing a partner the staff's clearances.
+        reasons = []
+        role_name = role_names.get(r[2]) or r[2]
+        if not r[9]:
+            reasons.append(f"the {role_name} role does not include reading "
+                           f"the case")
+        if expired:
+            reasons.append("the assignment has expired")
+        if not r[6]:
+            reasons.append("the account is deactivated")
+        # Below the case on their own clearance, but a live grant covers
+        # it: the gate opens the case, so this is not a reason (U22).
+        below = tlp_from_name(r[7]) < case_tlp
+        under_grant = below and r[10] is not None
+        if below and not under_grant:
+            reasons.append("their clearance is below the case's classification")
+        if not case_comp <= set(r[8] or []):
+            reasons.append("they are not read into every compartment on this case")
         users.append({
             "user_id": str(r[0]),
             "display_name": r[1],
             "role_key": r[2],
+            # The key stays for code and for a tooltip (U21, above).
+            "role_name": role_name,
+            "is_owner": r[0] == owner,
             "granted_by": str(r[3]) if r[3] else None,
+            "granted_by_name": names.get(r[3]) if r[3] else None,
             "granted_at": r[4].isoformat(),
             "expires_at": r[5].isoformat() if r[5] else None,
             "expired": expired,
             "is_active": bool(r[6]),
             # Named "effective" rather than "can_read" because it answers
-            # the whole gate, not one check.
-            "effective": effective,
+            # the whole gate, not one check. Derived from `reasons` so the
+            # flag and the explanation cannot disagree.
+            "effective": not reasons,
+            "reasons": reasons,
+            # UTC, ISO 8601. Only while `effective` rests on the grant, and
+            # only for a caller who can manage the roster (see docstring).
+            "emergency_access_until": (
+                r[10].astimezone(timezone.utc).isoformat()
+                if under_grant and not reasons and can_grant else None),
         })
     return {"case_id": str(case_id), "classification": labels[0],
-            "users": users}
+            "users": users, "you_can_grant": can_grant}
+
+
+@router.delete("/cases/{case_id}/users/{user_id}", response_model=dict,
+               dependencies=[Depends(rate_limit("request"))])
+def revoke_case_user(case_id: UUID, user_id: UUID,
+                     user: CurrentUser = Depends(require("case.grant")),
+                     conn: psycopg.Connection = Depends(get_conn)) -> dict:
+    """Take a colleague off this case.
+
+    `CaseService.revoke_user` has existed since Phase 1 with no route, so a
+    case could be shared from the console and never unshared: the only
+    remedy for a grant made to the wrong person was SQL (ux02
+    share-needs-raw-uuid, 2026-09-22). Same verb as granting, `case.grant`,
+    with the step-up that permission row carries. The service audits
+    `CASE_ACCESS_REVOKED` in the same transaction.
+
+    The owner cannot be removed, for the reason `assign_case_user` refuses
+    to regrade them: it would lock the case's owner out of their own case.
+    """
+    case = CaseService(conn).get(case_id)
+    if case is None:
+        raise Problem(404, "Not found", "case does not exist")
+    if user_id == case.owner_user_id:
+        raise Problem(400, "Invalid request",
+                      "that user owns this case, and removing them would lock "
+                      "the owner out of their own case. Transfer ownership "
+                      "first.")
+    row = conn.execute(
+        """SELECT a.role_key, u.display_name, r.display_name
+             FROM iam.case_assignment a
+             JOIN iam.app_user u ON u.id = a.user_id
+             LEFT JOIN iam.role r ON r.key = a.role_key
+            WHERE a.case_id = %s AND a.user_id = %s""",
+        (case_id, user_id)).fetchone()
+    if row is None:
+        raise Problem(404, "Not found", "that person is not on this case")
+    CaseService(conn).revoke_user(case_id, user_id, revoked_by=user.user_id)
+    # `revoked_role_name` for the same reason as the roster's `role_name`
+    # (final review U21, 2026-09-23).
+    return {"case_id": str(case_id), "user_id": str(user_id),
+            "display_name": row[1], "revoked_role": row[0],
+            "revoked_role_name": row[2] or row[0]}
 
 
 # ---------------------------------------------------------------------

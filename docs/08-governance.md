@@ -44,7 +44,19 @@ date should be visibly flagged in the case list, not silently rolling on.
 - `legal_hold` overrides all deletion, everywhere
 - Purge is a scheduled job requiring dual control to run outside schedule
 - Purge writes a tombstone to the audit log: what was destroyed, under what
-  authority, by whom. The record of destruction survives the data.
+  authority, by whom. The record of destruction survives the data. The
+  console's Destroyed list shows each batch's count, actor, rule and
+  storage outcome, and a batch whose bytes the object store refused is
+  never shown as destroyed.
+- A per-category retention rule is stamped onto each record when it is
+  ingested. Confirming or changing a rule therefore applies to material
+  ingested afterwards and recomputes no deadline already on file; the
+  console and the API both say so, and name whose confirmation a change
+  replaces.
+- A real purge from the console takes two deliberate steps: a dry run of
+  the same case under the same written authority, then a confirmation
+  that repeats the dry run's counts and asks for the case code to be
+  typed. The dry run is the default every time the pane opens.
 - Documents supporting an accepted assertion are pinned past source
   retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome

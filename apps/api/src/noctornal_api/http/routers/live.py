@@ -928,7 +928,7 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
 
 
 def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
-              mfa_at) -> bool:
+              mfa_at, *, count_use: bool = True) -> bool:
     """The five-part gate, through the one `evaluate()` every other path
     uses. `case.read` is the right permission: this stream tells a caller
     only that the case changed, which is exactly what reading it would.
@@ -954,15 +954,21 @@ def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
         user_id=user_id, case_id=case_id, permission_key="case.read",
         object_classification=row[0],
         object_compartments=frozenset(row[1] or []),
-        mfa_satisfied_at=mfa_at)
+        mfa_satisfied_at=mfa_at, count_use=count_use)
     return evaluate(ctx).allowed
 
 
 def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
-    """Borrow a connection, re-run the gate, give it back."""
+    """Borrow a connection, re-run the gate, give it back.
+
+    Asked without counting a break-glass use. The socket's opening was the
+    request and counted once at its gate; this re-asks the same question
+    before each delivery so a revoked assignment stops the stream, and on
+    a case above the caller's clearance it counted every event on a busy
+    case as another use (final review U19 fix round, 2026-09-23, g02)."""
     conn = connect()
     try:
-        return _may_read(conn, user_id, case_id, mfa_at)
+        return _may_read(conn, user_id, case_id, mfa_at, count_use=False)
     finally:
         conn.close()
 

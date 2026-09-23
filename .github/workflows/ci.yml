@@ -291,6 +291,11 @@ jobs:
           # NOT --with-lock: docs/11's rejection path must be able to
           # destroy sample bytes, which an object lock would prevent.
           mc mb --ignore-existing local/noctornal-samples
+          # F2 (2026-09-22): rejected samples are PRESERVED here by default,
+          # under a per-object legal hold, so this one IS --with-lock and has
+          # no default retention. test_sample_preservation_pg.py writes held
+          # objects to it and needs the lock to be real, not assumed.
+          mc mb --ignore-existing --with-lock local/noctornal-preserved
 
       - name: Migrate to head
         run: alembic upgrade head

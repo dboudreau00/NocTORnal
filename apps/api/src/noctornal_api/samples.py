@@ -95,6 +95,17 @@ Three more rules the code holds:
 - **Quarantine is the landing state.** Nothing reaches the RE queue
   before triage has run.
 
+## A rejected sample is preserved, not destroyed (F2, 2026-09-22)
+
+The owner's decision after the review of that day. `reject()` moves the
+ciphertext into a separate object-locked store under a legal hold and
+keeps the data key, unless `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` says
+`destroy`. Getting a preserved sample back out takes two people: a
+Security Officer's time-boxed authorisation naming one case owner, and
+that case owner, through the same encrypted archive and the same sample
+origin a download uses. `PreservationStorage` has no method that deletes
+or lifts a hold. See `reject` and `retrieve_preserved`, and docs/11.
+
 ## What the archive password does and does not do
 
 The convention is a ZIP with the password `infected`. It DOES prevent
@@ -134,6 +145,7 @@ import time
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import NamedTuple
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -161,6 +173,116 @@ ASSIGNED = "ASSIGNED"
 IN_ANALYSIS = "IN_ANALYSIS"
 REPORTED = "REPORTED"
 REJECTED = "REJECTED"
+
+#: What the queue can be filtered by, in queue order. SUBMITTED is in the
+#: enum and never landed in (a submission lands in QUARANTINED), so it is
+#: not offered. Until 2026-09-22 the route took no state at all and the
+#: console filtered the working set client-side, so choosing Rejected, In
+#: analysis or Reported always showed "Nothing in the queue."
+#: (ux13-lab:rejected-filter-always-empty).
+QUEUE_STATES = (QUARANTINED, TRIAGED, ASSIGNED, IN_ANALYSIS, REPORTED,
+                REJECTED)
+
+#: What the queue shows when no state is asked for: work still waiting.
+WORKING_SET = (QUARANTINED, TRIAGED, ASSIGNED)
+
+#: F2, decided by the owner on 2026-09-22: what `reject()` does with the
+#: bytes. `preserve` (the default) moves the ciphertext into the
+#: preservation store under a legal hold and keeps the data key; `destroy`
+#: is the behaviour this module had until that day. Anything else refuses,
+#: naming this variable, because a typo that silently picked either one
+#: would be a disposition nobody chose.
+DISPOSITION_ENV = "NOCTORNAL_REJECTED_SAMPLE_DISPOSITION"
+PRESERVE = "preserve"
+DESTROY = "destroy"
+DISPOSITIONS = (PRESERVE, DESTROY)
+
+#: The two verbs around a preserved sample (migration 0063). The
+#: authoriser and the retriever hold different roles on purpose, and the
+#: table refuses an authorisation whose two people are one person.
+AUTHORISE_PERMISSION = "sample.preserved.authorise"
+RETRIEVE_PERMISSION = "sample.preserved.retrieve"
+
+#: What a download ticket may be spent on (0063). The redemption re-reads
+#: the permission that belongs to the purpose, and the route reads the
+#: store that belongs to it, so one purpose can never be spent as the
+#: other.
+TICKET_DOWNLOAD = "download"
+TICKET_RETRIEVAL = "preserved_retrieval"
+
+#: How long an authorisation to retrieve a preserved sample may last. The
+#: table's CHECK holds the same bound, so the number here is the
+#: friendlier refusal and not the control.
+MAX_AUTHORISATION_DAYS = 30
+
+#: How long a preserving rejection waits for the sample's row lock before
+#: giving up. The lock is taken BEFORE anything is copied, so a second
+#: rejection of the same sample waits for the first and then sees
+#: REJECTED, instead of copying too and leaving a held version behind that
+#: no row names and this product can never delete (verifier on F2,
+#: 2026-09-22). A module constant so a test can shorten it.
+REJECT_LOCK_TIMEOUT = "5s"
+
+
+def _row_busy() -> SampleError:
+    """The refusal when a rejection could not get the sample's row lock
+    within `REJECT_LOCK_TIMEOUT`. Read at call time, so a test that
+    shortens the timeout sees its own value named.
+
+    Raise it `from None`, never from the LockNotAvailable: the router's
+    `safe_detail` replaces the whole message of an error chained to a
+    psycopg one, so the analyst was shown "the request could not be
+    completed" instead of this (final review verifier on U5, 2026-09-23).
+    The lock timeout's own text adds nothing this does not say."""
+    return SampleError(
+        f"another change to this sample is still in progress (most likely "
+        f"somebody else rejecting it), and this rejection stopped after "
+        f"waiting {REJECT_LOCK_TIMEOUT} for it. Nothing has changed and "
+        f"nothing was copied. Reopen the sample and try again.")
+
+
+def _db_error_in(exc: BaseException) -> psycopg.Error | None:
+    """The psycopg error anywhere in `exc`'s chain, as cause or context.
+
+    For a refusal whose authored text has to reach the analyst.
+    `http.errors.safe_detail` throws away the WHOLE message of an error
+    whose cause chain holds a psycopg error, which is right, since a
+    psycopg error's text is raw PQ output. So such a refusal is raised
+    `from None`, names the database error by its class only, and logs it
+    against a ref the message carries (final review verifier on U4,
+    2026-09-23). Bounded and cycle-guarded, like `safe_detail`'s walk.
+    """
+    seen: set[int] = set()
+    todo: list[BaseException | None] = [exc]
+    while todo and len(seen) < 16:
+        cur = todo.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        if isinstance(cur, psycopg.Error):
+            return cur
+        seen.add(id(cur))
+        todo.extend((cur.__cause__, cur.__context__))
+    return None
+
+
+#: Why a `destroy` rejection of a held sample is refused. Said twice, once
+#: before any lock and once under it (a hold placed in between counts).
+_HOLD_REFUSES_DESTROY = (
+    "this sample is under a legal hold, and docs/08 is "
+    "unqualified: a hold overrides all deletion, everywhere. "
+    "This deployment destroys rejected samples "
+    f"({DISPOSITION_ENV}=destroy), so rejecting it would destroy "
+    "material somebody has been ordered to preserve. If a "
+    "prohibited-content policy also requires destruction, that "
+    "conflict is a decision for counsel and the designated "
+    "person, not for this endpoint. Lift the hold deliberately, "
+    "or record the rejection without disposing of the bytes "
+    "(purge_bytes=False).")
+
+#: One VIEWED_META row per person per sample within this window. The
+#: console reopens a sample after every action it takes, and a ledger
+#: with a "viewed" row between every real event is one nobody reads.
+VIEW_DEDUPE_SECONDS = 300
 
 #: The industry convention (MalwareBazaar, VirusShare, malware-traffic).
 #: It is a safety interlock, not a secret.
@@ -197,6 +319,15 @@ DOWNLOAD_TICKET_TTL_SECONDS = 60
 #: would mean a permission renamed in the seed silently ungating one door
 #: while the other kept refusing.
 DOWNLOAD_PERMISSION = "sample.download"
+
+#: Which permission a ticket's redemption re-reads, by the ticket's
+#: purpose (0063). Keyed on the column's CHECK vocabulary, so a purpose
+#: this build does not know raises a KeyError rather than falling back to
+#: either permission.
+_PURPOSE_PERMISSION = {
+    TICKET_DOWNLOAD: DOWNLOAD_PERMISSION,
+    TICKET_RETRIEVAL: RETRIEVE_PERMISSION,
+}
 
 #: The refusal reason, from `_ticket_refusal`, that names nobody: a
 #: presented string that matched no row at all. It is the one refusal an
@@ -271,6 +402,72 @@ class SampleError(Exception):
 class PolicyNotDeclared(SampleError):
     """Raised when nothing has been ingested because nobody has said the
     prohibited-content policy exists."""
+
+
+class AuthorisationRequired(SampleError):
+    """A preserved sample was asked for by somebody with no live
+    authorisation for it. The router answers 451, as victim PII does: the
+    refusal is the two-person control working, not a fault."""
+
+
+class PreservationUnverified(SampleError):
+    """The held PUT returned, so a held version EXISTS, and then the store
+    could not be made to confirm what it holds (the read-back failed, or
+    disagreed). Carries `copy`, the version the PUT reported, so the
+    rejection can name it.
+
+    Final review C8, 2026-09-23: only a size or hold MISMATCH was a
+    SampleError, and it was reported as "Nothing has changed"; an S3 or
+    transport error from the read-back was not a SampleError at all, reached
+    the router raw, and answered 500. Either way the held version was named
+    nowhere, and each retry wrote another one."""
+
+    def __init__(self, message: str, copy: PreservedObject) -> None:
+        super().__init__(message)
+        self.copy = copy
+
+
+class PreservationUnconfirmed(SampleError):
+    """The held PUT was sent and no answer came back (a timeout, a dropped
+    connection), so a held version may or may not exist at `bucket`/`key`,
+    and if it does, its version id is not known here. Distinct from a
+    refusal, where the store answered and nothing was written (C8)."""
+
+    def __init__(self, message: str, bucket: str, key: str) -> None:
+        super().__init__(message)
+        self.bucket = bucket
+        self.key = key
+
+
+def disposition_setting() -> tuple[str | None, str | None]:
+    """`(disposition, problem)` for `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`.
+
+    Unset or blank means `preserve`, the owner's default and the direction
+    that loses nothing. A value that is neither `preserve` nor `destroy`
+    comes back as a problem naming the variable, never as a guess: a typo
+    that silently became either one would be a disposition nobody chose,
+    and one of the two cannot be undone.
+    """
+    raw = os.environ.get(DISPOSITION_ENV, "").strip().lower()
+    if not raw:
+        return PRESERVE, None
+    if raw in DISPOSITIONS:
+        return raw, None
+    return None, (
+        f"{DISPOSITION_ENV}={raw!r} is not a disposition this build knows. "
+        f"Set it to 'preserve' (the default: a rejected sample's ciphertext "
+        f"moves into the preservation store under a legal hold and its "
+        f"data key is kept) or 'destroy' (the bytes and the data key are "
+        f"deleted). Rejections that dispose of the bytes are refused until "
+        f"it is one of the two.")
+
+
+def rejected_sample_disposition() -> str:
+    """The configured disposition, or a refusal naming the variable."""
+    value, problem = disposition_setting()
+    if value is None:
+        raise SampleError(problem)
+    return value
 
 
 def policy_declared() -> tuple[bool, str]:
@@ -751,6 +948,64 @@ def archive(data: bytes, sha256_hex: str,
 # Records
 # ---------------------------------------------------------------------------
 
+#: Seconds to wait for a TCP connection to the sample or preservation store.
+STORE_CONNECT_TIMEOUT_S = 10.0
+#: Seconds to wait on any one read from the socket. Per read, not per
+#: transfer: a 256 MiB sample streams in many reads, each well inside this.
+STORE_READ_TIMEOUT_S = 60.0
+
+
+def _bounded_http(*, resend_writes: bool = True):
+    """The HTTP pool both sample stores use, which gives up in seconds.
+
+    minio-py's own pool waits five minutes on a connect or a read and
+    retries five times, so one stalled call could hold a request for about
+    half an hour. The preserving rejection makes calls to these stores
+    inside a transaction that holds the sample's row lock, and until final
+    review C7 (2026-09-23) the working-copy delete ran while the audit
+    chain's advisory lock was held too, which stalled every audited write
+    in the deployment behind one hung DELETE. The same bound as
+    `readiness._object_store_client`, loosened for real transfers.
+
+    Retries: a connection that never opened is retried (nothing was sent).
+    A READ that timed out is NOT: the request went out, and retrying a held
+    PUT whose answer was lost writes a second held version that nothing
+    can delete. A 5xx answer is retried only where a resend is harmless.
+    For the samples store it is (a resent PUT overwrites the same
+    unversioned object, a resent DELETE deletes nothing twice). For the
+    preservation store (`resend_writes=False`) only reads are resent: a 502
+    or 504 can come from a proxy after the store took the held PUT, so a 5xx
+    does not prove nothing was written, and `preserve()` reports the
+    refusal instead (final review verifier on C7, 2026-09-23, which found
+    this docstring claiming it did). Certificate handling is minio-py's
+    own default, restated because passing a pool replaces it.
+    """
+    import certifi
+    import urllib3
+
+    retry = {"total": 2, "connect": 2, "read": 0, "status": 2,
+             "backoff_factor": 0.2, "status_forcelist": [500, 502, 503, 504]}
+    if not resend_writes:
+        retry["allowed_methods"] = frozenset({"GET", "HEAD"})
+    return urllib3.PoolManager(
+        timeout=urllib3.Timeout(connect=STORE_CONNECT_TIMEOUT_S,
+                                read=STORE_READ_TIMEOUT_S),
+        maxsize=10,
+        cert_reqs="CERT_REQUIRED",
+        ca_certs=os.environ.get("SSL_CERT_FILE") or certifi.where(),
+        retries=urllib3.Retry(**retry),
+    )
+
+
+def _missing(exc: BaseException) -> bool:
+    """Whether a failed working-store read means the object is not there,
+    as opposed to the store not answering. KeyError is the test doubles'
+    spelling of NoSuchKey."""
+    if isinstance(exc, KeyError):
+        return True
+    return getattr(exc, "code", None) in ("NoSuchKey", "NoSuchObject")
+
+
 class SampleStorage:
     """The sample bucket. docs/11: "Bucket separate from evidence, WORM, no
     public access, no CDN, own credentials."
@@ -780,7 +1035,7 @@ class SampleStorage:
         secure = os.environ.get("SAMPLE_SECURE", "false").lower() == "true"
         self._bucket = os.environ.get("SAMPLE_BUCKET", "noctornal-samples")
         self._client = Minio(endpoint, access_key=access, secret_key=secret,
-                             secure=secure)
+                             secure=secure, http_client=_bounded_http())
 
     def put(self, key: str, data: bytes) -> None:
         self._client.put_object(
@@ -799,6 +1054,182 @@ class SampleStorage:
 
     def delete(self, key: str) -> None:
         self._client.remove_object(self._bucket, key)
+
+
+@dataclass(frozen=True)
+class PreservedObject:
+    """Where a rejected sample's ciphertext now lives, as the store
+    reported it after the write, not as it was asked for."""
+
+    bucket: str
+    key: str
+    version_id: str | None
+    size: int
+
+
+class PreservationStorage:
+    """The preservation bucket (F2, 2026-09-22): where a rejected sample's
+    ciphertext goes instead of being destroyed.
+
+    Modelled on `SampleStorage`, and separate from it for the same reason
+    that store is separate from evidence: its own bucket
+    (`PRESERVE_BUCKET`, default `noctornal-preserved`) and its own
+    credentials (`PRESERVE_ENDPOINT` / `PRESERVE_ACCESS_KEY` /
+    `PRESERVE_SECRET_KEY`). Those fall back to the `SAMPLE_*` variables and
+    then to `MINIO_*` ONLY so a single-node development stack works with
+    nothing added; a deployment gives this bucket its own account, and
+    infra/production/compose.yml mints one when the variables are set.
+
+    The bucket is created WITH object lock and no default retention. The
+    protection is a per-object LEGAL HOLD, placed on the one version this
+    process wrote, which holds until somebody deliberately lifts it and has
+    no expiry for a clock to run out.
+
+    Two things are deliberately absent. There is no `delete`, and no method
+    that lifts a hold: retrieval reads a held object and leaves the hold
+    exactly where it was, and nothing in this codebase may release one.
+    Lifting a hold is an operator's act under counsel's instruction,
+    outside the product, and it should be.
+    """
+
+    def __init__(self) -> None:
+        from minio import Minio
+
+        def pick(*names: str) -> str | None:
+            for name in names:
+                value = os.environ.get(name)
+                if value:
+                    return value
+            return None
+
+        endpoint = pick("PRESERVE_ENDPOINT", "SAMPLE_ENDPOINT", "MINIO_ENDPOINT")
+        access = pick("PRESERVE_ACCESS_KEY", "SAMPLE_ACCESS_KEY",
+                      "MINIO_ACCESS_KEY")
+        secret = pick("PRESERVE_SECRET_KEY", "SAMPLE_SECRET_KEY",
+                      "MINIO_SECRET_KEY")
+        if not (endpoint and access and secret):
+            raise SampleError(
+                "the preservation store is not configured: set "
+                "PRESERVE_ENDPOINT / PRESERVE_ACCESS_KEY / PRESERVE_SECRET_KEY "
+                "(a deployment should give the preservation bucket its own "
+                "credentials), or set NOCTORNAL_REJECTED_SAMPLE_DISPOSITION "
+                "deliberately")
+        secure = (pick("PRESERVE_SECURE", "SAMPLE_SECURE") or "false"
+                  ).lower() == "true"
+        self.bucket = os.environ.get("PRESERVE_BUCKET") or "noctornal-preserved"
+        self._client = Minio(endpoint, access_key=access, secret_key=secret,
+                             secure=secure,
+                             http_client=_bounded_http(resend_writes=False))
+
+    def preserve(self, key: str, data: bytes) -> PreservedObject:
+        """Write, hold, and prove both, or raise saying what now exists.
+
+        The hold is set IN the write (`legal_hold=True` on the PUT), so no
+        window exists in which the object is in the bucket unheld. Then the
+        store is asked, about the exact version it returned, what it now
+        holds: the size must be the size written and the hold must read
+        back as ON. A bucket created without object lock refuses the held
+        PUT outright, and that refusal is translated into a sentence that
+        says which bucket and what to do, rather than an S3 error code.
+
+        Three ways to fail, and the caller must be able to tell them apart
+        (final review C8, 2026-09-23): the store REFUSED the PUT, so nothing
+        was written (`SampleError`); the PUT got no answer, so a held
+        version may exist (`PreservationUnconfirmed`); or the PUT returned
+        and the read-back failed or disagreed, so a held version DOES exist
+        (`PreservationUnverified`, naming it). The read-back messages say
+        "hold", never the two words the console reads as "record the
+        rejection only", because once a held copy exists that is the one
+        way out that strands it.
+        """
+        from minio.error import S3Error
+
+        try:
+            written = self._client.put_object(
+                self.bucket, key, io.BytesIO(data), length=len(data),
+                content_type="application/octet-stream", legal_hold=True)
+        except S3Error as exc:
+            if "lock" in (exc.message or "").lower() or exc.code in (
+                    "InvalidRequest", "ObjectLockConfigurationNotFoundError"):
+                raise SampleError(
+                    f"the preservation bucket {self.bucket!r} would not take a "
+                    f"legal hold ({exc.code}: {exc.message}). It must be "
+                    f"created with object lock (mc mb --with-lock); object "
+                    f"lock cannot be switched on afterwards, so an unlocked "
+                    f"bucket has to be replaced.") from exc
+            raise SampleError(
+                f"the preservation store refused the copy ({exc.code}: "
+                f"{exc.message})") from exc
+        except Exception as exc:
+            raise PreservationUnconfirmed(
+                f"the preservation store did not answer the held copy "
+                f"({type(exc).__name__}: {exc}), so a held version may or "
+                f"may not now exist at {self.bucket}/{key}",
+                self.bucket, key) from exc
+        version = written.version_id
+        made = PreservedObject(self.bucket, key, version, len(data))
+        try:
+            stat = self._client.stat_object(self.bucket, key,
+                                            version_id=version)
+            if stat.size != len(data):
+                raise SampleError(
+                    f"the preservation store reports {stat.size} bytes at "
+                    f"{self.bucket}/{key} after {len(data)} were written")
+            if not self._client.is_object_legal_hold_enabled(
+                    self.bucket, key, version_id=version):
+                raise SampleError(
+                    f"the preservation store accepted {self.bucket}/{key} but "
+                    f"does not report the hold as on")
+        except SampleError as exc:
+            raise PreservationUnverified(str(exc), made) from exc
+        except Exception as exc:
+            raise PreservationUnverified(
+                f"the held copy was written to {self.bucket}/{key} but could "
+                f"not be read back ({type(exc).__name__}: {exc})",
+                made) from exc
+        return PreservedObject(self.bucket, key, version, stat.size)
+
+    def latest_held(self, key: str) -> PreservedObject | None:
+        """The newest version at `key`, if the store holds one under a hold.
+
+        For a rejection whose working copy is already gone because an
+        earlier attempt deleted it and then failed to record (final review
+        U4, 2026-09-23): the retry adopts the held copy instead of steering
+        the analyst to a record-only rejection that would leave it named by
+        no row. A plain HEAD and a hold read, which the preservation
+        account's policy already allows; listing versions it may not do.
+        The caller still proves the bytes are this sample's before
+        recording anything."""
+        from minio.error import S3Error
+
+        try:
+            stat = self._client.stat_object(self.bucket, key)
+        except S3Error as exc:
+            if exc.code in ("NoSuchKey", "NoSuchVersion", "NoSuchObject"):
+                return None
+            raise
+        if not self._client.is_object_legal_hold_enabled(
+                self.bucket, key, version_id=stat.version_id):
+            return None
+        return PreservedObject(self.bucket, key, stat.version_id, stat.size)
+
+    def get(self, key: str, *, version_id: str | None = None,
+            bucket: str | None = None) -> bytes:
+        """The held ciphertext, read in place. `bucket` is the one the
+        sample's row names, which outlives a later change of
+        `PRESERVE_BUCKET`."""
+        response = self._client.get_object(bucket or self.bucket, key,
+                                           version_id=version_id)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
+    def is_held(self, key: str, *, version_id: str | None = None,
+                bucket: str | None = None) -> bool:
+        return self._client.is_object_legal_hold_enabled(
+            bucket or self.bucket, key, version_id=version_id)
 
 
 @dataclass(frozen=True)
@@ -821,6 +1252,39 @@ class Sample:
     assigned_to: UUID | None
     classification: str
     compartments: frozenset[str]
+    #: F2 (0063): where a rejected sample's ciphertext went, if it was
+    #: preserved rather than destroyed or left in place.
+    preserved_bucket: str | None = None
+    preserved_key: str | None = None
+    preserved_at: datetime | None = None
+    #: The sample's OWN hold. The case's is composed in where a decision
+    #: turns on it (`reject`), not carried here.
+    legal_hold: bool = False
+    #: True once the data key has been zeroed (a destroy). Read as a
+    #: boolean in SQL so the sealed key itself never enters this object.
+    key_destroyed: bool = False
+
+    @property
+    def bytes_disposition(self) -> str:
+        """Where the bytes are, in one word the console can show.
+
+        `in_sample_store` for a live sample; for a rejected one,
+        `preserved`, `destroyed`, or `kept` (the rejection was recorded
+        without disposing of anything, which is what a hold or a missing
+        object leaves)."""
+        if self.preserved_key:
+            return "preserved"
+        if self.state != REJECTED:
+            return "in_sample_store"
+        return "destroyed" if self.key_destroyed else "kept"
+
+
+class Redemption(NamedTuple):
+    """What a spent ticket proves: who, which ticket, and for what."""
+
+    user_id: UUID
+    ticket_id: UUID
+    purpose: str
 
 
 @dataclass(frozen=True)
@@ -856,9 +1320,14 @@ class SampleService:
     encryption and the custody ledger without MinIO -- and so the
     quarantine path is provable without a bucket full of live malware."""
 
-    def __init__(self, conn: psycopg.Connection, storage=None):
+    def __init__(self, conn: psycopg.Connection, storage=None,
+                 preservation=None):
         self._c = conn
         self._storage = storage
+        #: The preservation store (F2). Injected like `storage`, and None
+        #: unless the caller is about to preserve or retrieve: building
+        #: one needs credentials that a queue read has no use for.
+        self._preservation = preservation
 
     # -- ingest ------------------------------------------------------------
 
@@ -1010,7 +1479,7 @@ class SampleService:
                         classification, compartments)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            'QUARANTINED', %s, %s, %s, %s, %s, %s, %s)
-                   RETURNING """ + _COLUMNS,
+                   RETURNING """ + _RETURNING,
                 (case_id, result.sha256, result.sha1, result.md5,
                  original_filename, result.byte_size, storage_key, bucket,
                  key_blob, key_id, result.file_type, result.entropy,
@@ -1027,34 +1496,88 @@ class SampleService:
     def reject(self, sample_id: UUID, *, actor_id: UUID, reason: str,
                purge_bytes: bool = True) -> Sample:
         """The REJECTED path docs/11 requires: record THAT something was
-        rejected and why, **without retaining the content**.
+        rejected and why, and take the material out of the working store.
 
-        The bytes go; the row stays. That asymmetry is the point -- an
-        auditor asking "did anything prohibited ever come through here"
-        needs an answer, and the answer cannot be the material itself.
+        ## What happens to the bytes (F2, owner decision, 2026-09-22)
 
-        ## Legal hold beats this, and the collision is not ours to resolve
+        `purge_bytes=True` means "dispose of the bytes the way this
+        deployment has decided", read from
+        `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`:
 
-        docs/08 states it without qualification: **"legal_hold overrides all
-        deletion, everywhere."** `lab.sample.legal_hold` has existed since
-        migration 0031 and, until F19 (2026-07-26), was read by nothing --
-        so one non-step-up call irreversibly destroyed material under a
-        court hold, and did it through the code path most likely to be
-        reached in a hurry.
+        - `preserve`, the default. The CIPHERTEXT is copied into the
+          preservation store at `preserved/<sha256[:2]>/<sha256>`, under a
+          legal hold set in the same PUT, and the store is asked what it
+          now holds (size, and that the hold reads back ON) before
+          anything else moves. Only then is the row marked REJECTED with
+          where the copy went, then the working copy is deleted from the
+          samples bucket, and the audit row is appended LAST (C7, below).
+          The data key is KEPT: ciphertext with no key is a file nobody
+          can ever read, which would satisfy a preservation order in form
+          and defeat it in substance (0063 makes that a CHECK). What moves
+          is exactly what was stored; the only decryption on this path is
+          the in-memory proof a retry makes before adopting a held copy
+          (U4, below), the same check a retrieval makes.
+        - `destroy`, the behaviour until that day: the object is deleted
+          and the data key zeroed.
 
-        What makes this worse than an ordinary missing check is that the two
-        rules genuinely conflict. A prohibited-content policy may require
-        destruction; a preservation order requires retention; and in some
-        jurisdictions doing either is an offence against the other. Software
-        cannot pick. So the destruction is REFUSED and the conflict is put
-        in front of a person, with `purge_bytes=False` available to record
-        the rejection and the reason while the bytes stay put. That is
-        docs/18 L1's open question arriving as a runtime refusal rather than
-        as a silent irreversible act.
+        `purge_bytes=False` keeps its old meaning: record the rejection and
+        the reason, dispose of nothing, leave the bytes where they are.
 
-        The case's hold counts too. docs/08 puts `legal_hold` on the case
-        precisely so a hold can be applied to everything in it at once
-        without enumerating the contents.
+        Until 2026-09-22 a rejection DESTROYED by default, on the first
+        click, from a card that did not name the sample
+        (ux13-lab:reject-one-click-destroy). The console now asks for a
+        confirmation that names the sample and states which of these will
+        happen, and the default no longer loses anything.
+
+        ## Failure leaves nothing half done
+
+        If the copy fails, nothing changes: the sample is still where it
+        was, in the state it was in, and the refusal says why. Once a held
+        copy exists (the held PUT returned, or was sent and never answered)
+        nothing in this product can delete it, so every failure from then
+        on names it, says truthfully whether the working copy was already
+        deleted, and is written to the audit log in its own statement
+        (`SAMPLE_PRESERVATION_INCOMPLETE`) so the record does not live only
+        in one analyst's error box (final review C8, 2026-09-23).
+
+        A retry whose working copy is gone does not steer to a record-only
+        rejection: if the preservation store holds a held copy at this
+        sample's key and the kept data key opens it to this sample's
+        SHA-256, the retry records THAT copy (final review U4, 2026-09-23).
+        Until then a failure between the working-copy delete and COMMIT
+        told the analyst the working copy was still in place, the retry
+        answered "nothing to preserve", and the record-only rejection it
+        suggested left the held copy linked to no row, for good.
+
+        The audit append takes the chain's global advisory lock and holds
+        it to COMMIT, so nothing slow may run after it: the working-copy
+        delete, a network call, used to (final review C7, 2026-09-23), and
+        a stalled object store then stalled every audited write in the
+        deployment, logins included.
+
+        The sample's row is locked before anything is copied, so two
+        rejections of one sample cannot both copy: the second waits for
+        the first (up to `REJECT_LOCK_TIMEOUT`), reads REJECTED and
+        refuses having copied nothing. The record-only and destroy paths
+        take the same lock (final review U5, 2026-09-23): without it a
+        record-only rejection that started during a preserving one waited
+        on the row, then overwrote its reason and appended a second,
+        contradictory REJECTED custody row.
+
+        ## Legal hold still beats DESTROY, and does not block PRESERVE
+
+        docs/08 states it without qualification: **"legal_hold overrides
+        all deletion, everywhere."** A prohibited-content policy may
+        require destruction and a preservation order requires retention,
+        and in some jurisdictions each is an offence against the other.
+        Software cannot pick, so destruction under a hold (the sample's or
+        its case's) is REFUSED and the conflict goes to a person.
+
+        Preservation is not a deletion of the material. It moves the same
+        ciphertext, key intact, into a store where it sits under a legal
+        hold of its own; a sample under a hold is, if anything, better
+        preserved afterwards. So it proceeds, and the custody row records
+        that a hold was in force when it did.
         """
         if not reason or not reason.strip():
             raise SampleError("a rejection has to say why; that record is the "
@@ -1065,61 +1588,477 @@ class SampleService:
         if current.state == REJECTED:
             raise SampleError("already rejected")
 
-        held = self._c.execute(
-            """SELECT s.legal_hold, coalesce(c.legal_hold, false)
+        held, storage_key = self._hold_and_key(sample_id)
+
+        if not purge_bytes:
+            return self._reject_keeping(sample_id, actor_id=actor_id,
+                                        reason=reason.strip())
+
+        disposition = rejected_sample_disposition()
+        if disposition == PRESERVE:
+            return self._reject_preserving(
+                current, actor_id=actor_id, reason=reason.strip(),
+                storage_key=storage_key, held=held)
+
+        if held:
+            raise SampleError(_HOLD_REFUSES_DESTROY)
+
+        # Refusing rather than proceeding, for the same reason
+        # `retention._purge_evidence` and `ingest._with_raw` do: the
+        # row about to be written says `bytes_purged: true` in an
+        # APPEND-ONLY ledger. Writing that without a store is not a
+        # missing side effect, it is a false record of a destruction
+        # -- and the one an auditor asking "was this destroyed" will
+        # be shown. The state machine is still testable with a fake;
+        # what is refused is claiming a destruction with nothing at
+        # all behind it.
+        if self._storage is None:
+            raise SampleError(
+                "the sample store is not configured, so the bytes "
+                "cannot be destroyed and recording this rejection "
+                "would claim a destruction that did not happen. Fix "
+                "the store, or call this with purge_bytes=False to "
+                "record the rejection while the material stays put.")
+        return self._reject_destroying(sample_id, actor_id=actor_id,
+                                       reason=reason.strip())
+
+    def _hold_and_key(self, sample_id: UUID) -> tuple[bool, str]:
+        """Whether a legal hold covers the sample (its own or its case's),
+        and its working-store key."""
+        row = self._c.execute(
+            """SELECT s.legal_hold, coalesce(c.legal_hold, false), s.storage_key
                  FROM lab.sample s
                  LEFT JOIN core."case" c ON c.id = s.case_id
                 WHERE s.id = %s""", (sample_id,)).fetchone()
-        if purge_bytes and held and (held[0] or held[1]):
+        if row is None:
+            raise SampleError("no such sample")
+        return bool(row[0] or row[1]), row[2]
+
+    def _lock_unrejected(self, sample_id: UUID, *, nothing: str) -> None:
+        """Inside the caller's transaction: lock the sample's row, and
+        refuse if it is already REJECTED.
+
+        Every rejection path takes this lock before it changes anything
+        (final review U5, 2026-09-23). The preserving path took it alone,
+        so a record-only rejection that started while a preserving one was
+        copying passed the unlocked pre-check in `reject`, waited on its
+        UPDATE, and then, READ COMMITTED re-reading a row that still
+        matched `WHERE id = %s`, overwrote the reason and appended a second
+        REJECTED custody row saying the bytes were kept where they had in
+        fact been moved. Now the second rejection waits here, reads
+        REJECTED, and changes nothing.
+
+        NO KEY UPDATE rather than UPDATE so that inserts elsewhere that only
+        reference this row (a custody row written by somebody opening it,
+        whose foreign key takes KEY SHARE) are not held up. The short wait
+        is for THIS lock only; the audit append a caller may make later
+        waits on the chain's advisory lock at the default timeout.
+        """
+        self._c.execute("SELECT set_config('lock_timeout', %s, true)",
+                        (REJECT_LOCK_TIMEOUT,))
+        locked = self._c.execute(
+            """SELECT state FROM lab.sample WHERE id = %s
+               FOR NO KEY UPDATE""", (sample_id,)).fetchone()
+        self._c.execute("SET LOCAL lock_timeout TO DEFAULT")
+        if locked is None:
+            raise SampleError("no such sample")
+        if locked[0] == REJECTED:
             raise SampleError(
-                "this sample is under a legal hold, and docs/08 is "
-                "unqualified: a hold overrides all deletion, everywhere. "
-                "Rejecting it would destroy material somebody has been "
-                "ordered to preserve. If a prohibited-content policy also "
-                "requires destruction, that conflict is a decision for "
-                "counsel and the designated person, not for this endpoint "
-                "-- lift the hold deliberately, or call this with "
-                "purge_bytes=False to record the rejection and keep the "
-                "bytes.")
+                "already rejected (somebody else finished rejecting it while "
+                f"this rejection was waiting). {nothing}")
 
-        if purge_bytes:
-            # Refusing rather than proceeding, for the same reason
-            # `retention._purge_evidence` and `ingest._with_raw` do: the
-            # row about to be written says `bytes_purged: true` in an
-            # APPEND-ONLY ledger. Writing that without a store is not a
-            # missing side effect, it is a false record of a destruction
-            # -- and the one an auditor asking "was this destroyed" will
-            # be shown. The state machine is still testable with a fake;
-            # what is refused is claiming a destruction with nothing at
-            # all behind it.
-            if self._storage is None:
-                raise SampleError(
-                    "the sample store is not configured, so the bytes "
-                    "cannot be destroyed and recording this rejection "
-                    "would claim a destruction that did not happen. Fix "
-                    "the store, or call this with purge_bytes=False to "
-                    "record the rejection while the material stays put.")
-            self._storage.delete(
-                self._c.execute(
-                    "SELECT storage_key FROM lab.sample WHERE id = %s",
-                    (sample_id,)).fetchone()[0])
+    def _reject_destroying(self, sample_id: UUID, *, actor_id: UUID,
+                           reason: str) -> Sample:
+        """The `destroy` disposition: the object deleted, the key zeroed.
 
-        row = self._c.execute(
-            """UPDATE lab.sample
-                  SET state = 'REJECTED', reject_reason = %s,
-                      data_key_ciphertext = CASE WHEN %s THEN %s
-                                                 ELSE data_key_ciphertext END
-                WHERE id = %s RETURNING """ + _COLUMNS,
-            # The data key is destroyed WITH the bytes, so that even if the
-            # object survives a bucket-lifecycle race nothing can decrypt
-            # it. Only with them, though: destroying the key while keeping
-            # the ciphertext preserves a file nobody can ever read, which
-            # satisfies a preservation order in form and defeats it in
-            # substance.
-            (reason.strip(), purge_bytes, b"", sample_id)).fetchone()
-        self._access(sample_id, actor_id, "REJECTED",
-                     {"reason": reason.strip(), "bytes_purged": purge_bytes})
+        Under the row lock, with the hold read again under it, so neither a
+        concurrent rejection nor a hold placed since `reject` looked can be
+        destroyed through (U5). There is no audit append here, so the
+        delete holding the row lock holds up only this sample."""
+        try:
+            with self._c.transaction():
+                self._lock_unrejected(sample_id, nothing="Nothing was "
+                                      "destroyed.")
+                held, storage_key = self._hold_and_key(sample_id)
+                if held:
+                    raise SampleError(_HOLD_REFUSES_DESTROY)
+                self._storage.delete(storage_key)
+                row = self._c.execute(
+                    """UPDATE lab.sample
+                          SET state = 'REJECTED', reject_reason = %s,
+                              data_key_ciphertext = %s
+                        WHERE id = %s AND state <> 'REJECTED'
+                    RETURNING """ + _RETURNING,
+                    # The data key is destroyed WITH the bytes, so that even
+                    # if the object survives a bucket-lifecycle race nothing
+                    # can decrypt it. Only with them, though: destroying the
+                    # key while keeping the ciphertext preserves a file
+                    # nobody can ever read, which satisfies a preservation
+                    # order in form and defeats it in substance.
+                    (reason, b"", sample_id)).fetchone()
+                if row is None:
+                    raise SampleError("already rejected")
+                self._access(sample_id, actor_id, "REJECTED",
+                             {"reason": reason, "bytes_purged": True,
+                              "disposition": "destroyed"})
+        except psycopg.errors.LockNotAvailable:
+            raise _row_busy() from None
         return _record(row)
+
+    def _reject_keeping(self, sample_id: UUID, *, actor_id: UUID,
+                        reason: str) -> Sample:
+        """`purge_bytes=False`: the rejection and its reason, recorded, and
+        nothing disposed of. The bytes and the key stay where they were.
+        Under the row lock, like every rejection (U5)."""
+        try:
+            with self._c.transaction():
+                self._lock_unrejected(sample_id, nothing="Nothing was "
+                                      "recorded.")
+                held, _key = self._hold_and_key(sample_id)
+                # `state <> 'REJECTED'` cannot fail under the lock; it is
+                # the belt, as on the other two paths.
+                row = self._c.execute(
+                    """UPDATE lab.sample SET state = 'REJECTED',
+                              reject_reason = %s
+                        WHERE id = %s AND state <> 'REJECTED'
+                    RETURNING """ + _RETURNING,
+                    (reason, sample_id)).fetchone()
+                if row is None:
+                    raise SampleError("already rejected")
+                detail = {"reason": reason, "bytes_purged": False,
+                          "disposition": "kept"}
+                if held:
+                    detail["legal_hold"] = True
+                self._access(sample_id, actor_id, "REJECTED", detail)
+        except psycopg.errors.LockNotAvailable:
+            raise _row_busy() from None
+        return _record(row)
+
+    def _reject_preserving(self, current: Sample, *, actor_id: UUID,
+                           reason: str, storage_key: str,
+                           held: bool) -> Sample:
+        """The `preserve` disposition. See `reject` for the order and why."""
+        if self._storage is None:
+            raise SampleError(
+                "the sample store is not configured, so there is nothing to "
+                "copy into the preservation store and the rejection is "
+                "refused rather than recorded as a preservation that did not "
+                "happen. Fix the store, or record the rejection without "
+                "disposing of the bytes (purge_bytes=False).")
+        if self._preservation is None:
+            raise SampleError(
+                "the preservation store is not configured, so this rejection "
+                "cannot preserve the sample and is refused rather than "
+                "destroying it by default. Configure PRESERVE_BUCKET and its "
+                f"credentials, set {DISPOSITION_ENV}=destroy deliberately, or "
+                "record the rejection without disposing of the bytes "
+                "(purge_bytes=False).")
+
+        preserved_key = f"preserved/{current.sha256[:2]}/{current.sha256}"
+        # Set once a held copy exists (the held PUT returned). From that
+        # moment any failure must NAME the copy, because nothing in this
+        # product can delete it.
+        copy: PreservedObject | None = None
+        # Set when the held PUT was sent and never answered: a held copy
+        # may exist and its version is not known (C8).
+        unconfirmed: PreservationUnconfirmed | None = None
+        # Whether the working copy is gone: deleted by this attempt, or
+        # already missing when a retry adopted the held copy (U4).
+        working_gone = False
+        # Set as the delete is sent: a delete that raised may still have
+        # removed the object, and the refusal must not say otherwise.
+        deleting = False
+        adopted = False
+        try:
+            with self._c.transaction():
+                # The row is locked BEFORE anything is copied (verifier on
+                # F2, 2026-09-22). Two rejections of one sample used to
+                # both copy into the preservation bucket; the loser's
+                # guarded UPDATE then matched nothing and it raised a bare
+                # "already rejected", leaving a held version that no row
+                # named. Now the second waits here, reads REJECTED and
+                # copies nothing.
+                self._lock_unrejected(current.id, nothing="Nothing was "
+                                      "copied.")
+                try:
+                    ciphertext = self._storage.get(storage_key)
+                except Exception as exc:
+                    copy = self._adopt_held_copy(current, preserved_key,
+                                                 storage_key, exc)
+                    adopted = working_gone = True
+                if not adopted:
+                    try:
+                        copy = self._preservation.preserve(preserved_key,
+                                                           ciphertext)
+                    except PreservationUnverified as exc:
+                        copy = exc.copy
+                        raise
+                    except PreservationUnconfirmed as exc:
+                        unconfirmed = exc
+                        raise
+                    except SampleError as exc:
+                        raise SampleError(
+                            f"{exc} Nothing has changed: the sample is still "
+                            f"in the working store and is not rejected."
+                        ) from exc
+
+                detail = {"reason": reason, "bytes_purged": False,
+                          "disposition": "preserved",
+                          "preserved_bucket": copy.bucket,
+                          "preserved_key": copy.key,
+                          "preserved_version_id": copy.version_id,
+                          "preserved_bytes": copy.size}
+                if adopted:
+                    # Said in the ledger, because this rejection did not
+                    # itself move the bytes: an earlier attempt did, and
+                    # failed before it could record the move.
+                    detail["adopted_held_copy"] = True
+                if held:
+                    detail["legal_hold"] = True
+                # `state <> 'REJECTED'` cannot fail under the lock above; it
+                # stays as the belt, and if it ever does fail the handler
+                # below names the copy rather than losing it.
+                row = self._c.execute(
+                    """UPDATE lab.sample
+                          SET state = 'REJECTED', reject_reason = %s,
+                              preserved_bucket = %s, preserved_key = %s,
+                              preserved_version_id = %s, preserved_at = now()
+                        WHERE id = %s AND state <> 'REJECTED'
+                    RETURNING """ + _RETURNING,
+                    (reason, copy.bucket, copy.key, copy.version_id,
+                     current.id)).fetchone()
+                if row is None:
+                    raise SampleError("the sample was rejected by somebody "
+                                      "else while it was being copied")
+                # The custody ledger takes no chain lock, so it goes before
+                # the delete with the row it describes.
+                self._access(current.id, actor_id, "REJECTED", detail)
+                # Inside the transaction, so a working copy that will not
+                # delete leaves the row unclaimed. BEFORE the audit append,
+                # never after it (final review C7, 2026-09-23): the append
+                # takes the audit chain's global advisory lock and holds it
+                # to COMMIT, and this is a network call. Behind it, a
+                # stalled store stalled every audited write in the
+                # deployment, logins included, for as long as minio-py
+                # kept retrying.
+                if not adopted:
+                    deleting = True
+                    self._storage.delete(storage_key)
+                    working_gone = True
+                # LAST: nothing slow may run between this and COMMIT.
+                self._audit("SAMPLE_REJECTED_PRESERVED", actor_id=actor_id,
+                            sample_id=current.id,
+                            detail={k: v for k, v in detail.items()
+                                    if k != "reason"})
+        except Exception as exc:
+            if copy is None and unconfirmed is None:
+                if isinstance(exc, psycopg.errors.LockNotAvailable):
+                    # The row lock above timed out: before any copy.
+                    raise _row_busy() from None
+                raise
+            refusal = self._preservation_incomplete(
+                current.id, actor_id=actor_id, copy=copy,
+                unconfirmed=unconfirmed, working_gone=working_gone,
+                delete_unconfirmed=deleting and not working_gone,
+                cause=exc)
+            # Unchained when the cause is a database error, which after the
+            # delete it most likely is: the audit append and COMMIT are all
+            # that follow it. Chained, `safe_detail` threw the whole message
+            # away and the analyst read "the request could not be completed
+            # (ref ...)" instead of where the only copy of the sample now is
+            # (final review verifier on U4, 2026-09-23). The database error
+            # is logged against the ref the message carries.
+            raise refusal from (None if _db_error_in(exc) else exc)
+        return _record(row)
+
+    def _adopt_held_copy(self, current: Sample, preserved_key: str,
+                         storage_key: str, exc: BaseException
+                         ) -> PreservedObject:
+        """A retry whose working copy is gone: the held copy an earlier
+        attempt left, proven to be this sample's, or a refusal that says
+        which of four things is true.
+
+        Final review U4, 2026-09-23. An attempt that deleted the working
+        copy and then failed before COMMIT used to leave the next attempt
+        here with nothing to read, answering "nothing to preserve" and
+        pointing at a record-only rejection, which recorded the sample as
+        kept in place, named no held copy, and could never be undone (a
+        second rejection is refused, and retrieval needs `preserved_key`).
+
+        Adopted only when the working store says the object is ABSENT (a
+        store that did not answer proves nothing), when the newest version
+        at the content-addressed key is under a hold, and when the kept data
+        key opens it to this sample's SHA-256: the same proof a retrieval
+        makes before it serves a byte, so a stray or foreign object at the
+        key is never recorded as this sample. The plaintext exists only in
+        this process's memory, for the length of the hash.
+        """
+        kind = type(exc).__name__
+        if not _missing(exc):
+            raise SampleError(
+                f"the sample store could not be read at {storage_key} "
+                f"({kind}), so nothing was copied. Nothing has changed. Try "
+                f"again when the sample store answers.") from exc
+        try:
+            found = self._preservation.latest_held(preserved_key)
+        except Exception as lookup:
+            raise SampleError(
+                f"the sample store has no object at {storage_key}, and the "
+                f"preservation store could not be asked whether an earlier "
+                f"attempt left a held copy of it at {preserved_key} "
+                f"({type(lookup).__name__}). Nothing has changed. Try again "
+                f"when the preservation store answers: recording the "
+                f"rejection without the bytes now could leave such a copy "
+                f"named by no row.") from lookup
+        if found is None:
+            # KeyError from a test double, S3Error NoSuchKey from MinIO,
+            # and no held copy either: a row whose object is not in the
+            # store (the demo seed writes none) has nothing to preserve,
+            # and saying "preserved" for it would be the false record
+            # `destroy` refuses to write too.
+            raise SampleError(
+                f"the sample store has no readable object at {storage_key} "
+                f"({kind}) and the preservation store holds no copy of it, "
+                f"so there is nothing to preserve. Nothing has changed. "
+                f"Record the rejection without disposing of the bytes "
+                f"(purge_bytes=False) if the object is known to be "
+                f"gone.") from exc
+        why = None
+        if found.size != current.byte_size:
+            why = (f"it is {found.size} bytes and this sample is "
+                   f"{current.byte_size}")
+        else:
+            held_at = (f"the held copy at {found.bucket}/{found.key} (version "
+                       f"{found.version_id})")
+            key_row = self._c.execute(
+                "SELECT data_key_ciphertext, data_key_id FROM lab.sample "
+                "WHERE id = %s", (current.id,)).fetchone()
+            # Both refused as a SampleError naming what was found, so a key
+            # ring or a store that fails here answers the router's 409 and
+            # not a bare 500 (final review verifier on U4, 2026-09-23: a
+            # missing working object had always been a 409 before adoption
+            # added these two calls).
+            try:
+                data_key = bytes.fromhex(envelope.decrypt(
+                    bytes(key_row[0]), key_id=key_row[1]))
+            except Exception as err:
+                raise SampleError(
+                    f"the sample store has no object at {storage_key}, and "
+                    f"{held_at} could not be checked against this sample "
+                    f"because its data key could not be opened "
+                    f"({type(err).__name__}). It was not recorded as this "
+                    f"sample's copy and nothing has changed. Raise it with "
+                    f"whoever administers the key ring before rejecting "
+                    f"this sample.") from err
+            try:
+                held_bytes = self._preservation.get(
+                    found.key, version_id=found.version_id,
+                    bucket=found.bucket)
+            except Exception as err:
+                raise SampleError(
+                    f"the sample store has no object at {storage_key}, and "
+                    f"{held_at} could not be read to check that it is this "
+                    f"sample ({type(err).__name__}). It was not recorded as "
+                    f"this sample's copy and nothing has changed. Try again "
+                    f"when the preservation store answers.") from err
+            digest = hashlib.sha256(_xor_stream(held_bytes, data_key))
+            if digest.hexdigest() != current.sha256:
+                why = "this sample's data key does not open it to its SHA-256"
+        if why is not None:
+            raise SampleError(
+                f"the sample store has no object at {storage_key}, and the "
+                f"held copy at {found.bucket}/{found.key} (version "
+                f"{found.version_id}) is not this sample: {why}. It was not "
+                f"recorded as this sample's copy and nothing has changed. "
+                f"Raise it with whoever administers the preservation "
+                f"store before rejecting this sample.") from exc
+        return found
+
+    def _preservation_incomplete(self, sample_id: UUID, *, actor_id: UUID,
+                                 copy: PreservedObject | None,
+                                 unconfirmed: PreservationUnconfirmed | None,
+                                 working_gone: bool,
+                                 delete_unconfirmed: bool,
+                                 cause: BaseException) -> SampleError:
+        """The refusal for a preserving rejection that failed once a held
+        copy existed (or may have), and a record of it that outlives the
+        rolled-back transaction.
+
+        Final review C8 and U4, 2026-09-23. The message names the copy,
+        says truthfully whether the working copy is gone, and says what a
+        retry will do. It never says "legal hold" or `purge_bytes`: the
+        console reads either as "offer the record-only rejection", which
+        is the one way out that strands a held copy. The audit row is its
+        own statement on the autocommit connection, after the rollback;
+        when the connection itself is what failed, the message says the
+        row could not be written rather than implying it was.
+
+        A database error is named by its class only, never its text (raw PQ
+        output, which the HTTP layer must not return), and logged in full
+        against a ref the message and the audit row both carry. The caller
+        raises the result unchained in that case, so the message survives
+        `safe_detail` (final review verifier on U4, 2026-09-23).
+        """
+        db = _db_error_in(cause)
+        ref = None
+        if db is None:
+            failure = f"{type(cause).__name__}: {cause}"
+        else:
+            ref = secrets.token_hex(6)
+            failure = (f"{type(db).__name__}, a database error; the server "
+                       f"log has it under ref {ref}")
+        if copy is not None:
+            where = (f"{copy.bucket}/{copy.key}, version {copy.version_id}")
+            said = f"A held copy of this sample exists at {where}."
+        else:
+            where = f"{unconfirmed.bucket}/{unconfirmed.key}"
+            said = (f"A held copy of this sample may exist at {where}; the "
+                    f"store did not say, and its version is not known here.")
+        if working_gone:
+            state = ("The working copy is no longer in the samples store, so "
+                     "the held copy is now the only copy of this sample. "
+                     "Reopen the sample: if it is not shown as rejected, "
+                     "reject it again, and the retry records the held copy "
+                     "rather than copying again.")
+        elif delete_unconfirmed:
+            state = ("Nothing was recorded, and the samples store did not "
+                     "confirm deleting the working copy, so it may or may "
+                     "not still be there. Rejecting it again copies it "
+                     "again (a new held version) if it is, and records the "
+                     "held copy if it is not.")
+        else:
+            state = ("Nothing was recorded and the working copy was not "
+                     "deleted. Rejecting it again copies it again (a new "
+                     "held version), or, if the working copy turns out to "
+                     "be gone, records the held copy.")
+        detail = {"preserved_bucket": copy.bucket if copy else
+                  unconfirmed.bucket,
+                  "preserved_key": copy.key if copy else unconfirmed.key,
+                  "preserved_version_id": copy.version_id if copy else None,
+                  "copy_confirmed": copy is not None,
+                  "working_copy_gone": working_gone,
+                  "working_delete_unconfirmed": delete_unconfirmed,
+                  "failure": type(cause).__name__}
+        if ref is not None:
+            detail["log_ref"] = ref
+            log.warning(
+                "a preserving rejection of sample %s failed on a database "
+                "error after the held copy (%s), ref %s", sample_id, where,
+                ref, exc_info=cause)
+        try:
+            self._audit("SAMPLE_PRESERVATION_INCOMPLETE", actor_id=actor_id,
+                        sample_id=sample_id, outcome="FAILED", detail=detail)
+            logged = "This has been written to the audit log."
+        except Exception:
+            log.warning(
+                "a preserving rejection of sample %s failed after the held "
+                "copy (%s) and the audit row recording that failed too",
+                sample_id, where, exc_info=True)
+            logged = ("It could not be written to the audit log either, so "
+                      "keep this message.")
+        return SampleError(
+            f"the rejection could not be completed ({failure}). {said} "
+            f"{state} {logged}")
 
     # -- queue -------------------------------------------------------------
 
@@ -1129,7 +2068,7 @@ class SampleService:
             """UPDATE lab.sample
                   SET assigned_to = %s, assigned_at = now(), state = 'ASSIGNED'
                 WHERE id = %s AND state IN ('QUARANTINED','TRIAGED')
-            RETURNING """ + _COLUMNS,
+            RETURNING """ + _RETURNING,
             (analyst_id, sample_id)).fetchone()
         if row is None:
             raise SampleError(
@@ -1333,7 +2272,7 @@ class SampleService:
         _require_clearance(clearance)
         row = self._c.execute(
             """SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
-                      s.sha256, s.state
+                      s.sha256, s.state, s.preserved_key
                  FROM lab.sample s
                  LEFT JOIN core."case" c ON c.id = s.case_id
                 WHERE s.id = %s
@@ -1346,7 +2285,23 @@ class SampleService:
         if row is None:
             raise SampleError("no such sample")
         if row[4] == REJECTED:
-            raise SampleError("this sample was rejected and its bytes destroyed")
+            # Three different answers since 0063, because "its bytes
+            # destroyed" was the only sentence this had and it became false
+            # for two of the three dispositions.
+            if row[5]:
+                raise SampleError(
+                    "this sample was rejected and preserved: its bytes are in "
+                    "the preservation store under a legal hold, and they are "
+                    "released only as a preserved-sample retrieval, which "
+                    "needs a live authorisation from a Security Officer "
+                    "naming you.")
+            if not row[1]:
+                raise SampleError(
+                    "this sample was rejected and its bytes destroyed")
+            raise SampleError(
+                "this sample was rejected. Its bytes were left where they "
+                "were when the rejection was recorded, and a rejected sample "
+                "is not released through the download.")
         if not row[1]:
             raise SampleError("this sample has no data key; it cannot be read")
         return row
@@ -1390,18 +2345,24 @@ class SampleService:
         `_downloadable`, so the mint cannot authorise what the download
         would refuse.
         """
-        split = origin_split(this=request_origin)
-        if split.split_problem is not None:
-            raise SampleError(split.split_problem)
-        if split.serves_here:
-            raise SampleError(
-                "download tickets are minted on the application origin and "
-                "redeemed here. This process is configured as the sample "
-                f"origin ({split.sample}), which serves sample bytes and "
-                f"nothing else; ask {split.app} for a ticket.")
+        split = _mint_split(request_origin)
         self._downloadable(sample_id, clearance=clearance,
                            compartments=compartments)
+        return self._mint_ticket(sample_id, actor_id=actor_id,
+                                 session_id=session_id, ip_hash=ip_hash,
+                                 purpose=TICKET_DOWNLOAD,
+                                 audit_action="SAMPLE_DOWNLOAD_TICKET_ISSUED",
+                                 sample_origin=split.sample)
 
+    def _mint_ticket(self, sample_id: UUID, *, actor_id: UUID,
+                     session_id: UUID | None, ip_hash: bytes | None,
+                     purpose: str, audit_action: str,
+                     sample_origin: str | None,
+                     extra: dict | None = None) -> DownloadTicket:
+        """The one INSERT both mints share (0063 split it out of
+        `issue_download_ticket` when the retrieval ticket arrived), so the
+        hash, the database-clock expiry and the issue audit cannot drift
+        between a download and a retrieval."""
         raw = new_download_ticket()
         # The expiry is set BY THE DATABASE and compared against the
         # database clock at redemption. Computing it here would put a
@@ -1416,31 +2377,37 @@ class SampleService:
         row = self._c.execute(
             """INSERT INTO lab.download_ticket
                    (token_hash, sample_id, user_id, session_id, expires_at,
-                    ip_hash)
-               VALUES (%s, %s, %s, %s, now() + %s, %s)
+                    ip_hash, purpose)
+               VALUES (%s, %s, %s, %s, now() + %s, %s, %s)
                RETURNING id, expires_at""",
             (hash_token(raw), sample_id, actor_id, session_id,
              timedelta(seconds=DOWNLOAD_TICKET_TTL_SECONDS),
-             ip_hash)).fetchone()
+             ip_hash, purpose)).fetchone()
         # Audited as an ISSUE, not as custody. `lab.sample_access` is the
         # record of who took a copy, its action set is closed, and a
         # ticket is not a copy -- the custody row is written when the
         # bytes are actually served, and it names this ticket.
-        self._audit("SAMPLE_DOWNLOAD_TICKET_ISSUED", actor_id=actor_id,
+        detail = {"ticket_id": str(row[0]),
+                  "expires_at": row[1].isoformat(),
+                  "ttl_seconds": DOWNLOAD_TICKET_TTL_SECONDS,
+                  "sample_origin": sample_origin}
+        if purpose != TICKET_DOWNLOAD:
+            detail["purpose"] = purpose
+        detail.update(extra or {})
+        self._audit(audit_action, actor_id=actor_id,
                     sample_id=sample_id, session_id=session_id,
-                    ip_hash=ip_hash,
-                    detail={"ticket_id": str(row[0]),
-                            "expires_at": row[1].isoformat(),
-                            "ttl_seconds": DOWNLOAD_TICKET_TTL_SECONDS,
-                            "sample_origin": split.sample})
+                    ip_hash=ip_hash, detail=detail)
         return DownloadTicket(id=row[0], raw=raw, sample_id=sample_id,
                               user_id=actor_id, expires_at=row[1])
 
     def redeem_download_ticket(self, presented: str, *, sample_id: UUID,
                                ip_hash: bytes | None = None
-                               ) -> tuple[UUID, UUID]:
-        """Spend a ticket. Returns `(user_id, ticket_id)`; raises on
-        anything else.
+                               ) -> Redemption:
+        """Spend a ticket. Returns `(user_id, ticket_id, purpose)`; raises
+        on anything else. The purpose (0063) says whether the bytes come
+        from the working store or, for a preserved sample, the
+        preservation store; it is read from the row, never from the
+        request.
 
         ONE statement decides it. The predicate and the write are the same
         `UPDATE ... RETURNING`, so two simultaneous presentations of the
@@ -1491,7 +2458,7 @@ class SampleService:
                   AND sample_id = %s
                   AND redeemed_at IS NULL
                   AND expires_at > now()
-            RETURNING id, user_id, session_id, token_hash""",
+            RETURNING id, user_id, session_id, token_hash, purpose""",
             (digest, sample_id)).fetchone()
         if row is None:
             # WHY it failed goes in the audit and never in the answer. The
@@ -1557,23 +2524,32 @@ class SampleService:
         # guess, this presentation could only be made by somebody actually
         # holding the string.
         holder = row[1]
-        if not self._still_authorised(holder):
+        # The permission re-read belongs to the ticket's PURPOSE (0063): a
+        # retrieval ticket was minted under `sample.preserved.retrieve`,
+        # which the retriever's role holds and `sample.download` is not.
+        permission = _PURPOSE_PERMISSION[row[4]]
+        if not self._still_authorised(holder, permission):
             self._audit("SAMPLE_DOWNLOAD_TICKET_REFUSED", actor_id=holder,
                         sample_id=sample_id, session_id=row[2],
                         outcome="DENIED", ip_hash=ip_hash,
-                        detail={"reason": self._authority_refusal(holder),
+                        detail={"reason": self._authority_refusal(
+                                    holder, permission),
                                 # The row was spent by the UPDATE above, so
                                 # the ledger and the audit agree about a
                                 # ticket that reads as redeemed and served
                                 # nothing.
                                 "ticket_id": str(row[0]), "spent": True})
             raise SampleError(_TICKET_REFUSED)
+        redeemed = {"ticket_id": str(row[0])}
+        if row[4] != TICKET_DOWNLOAD:
+            redeemed["purpose"] = row[4]
         self._audit("SAMPLE_DOWNLOAD_TICKET_REDEEMED", actor_id=holder,
                     sample_id=sample_id, session_id=row[2], ip_hash=ip_hash,
-                    detail={"ticket_id": str(row[0])})
-        return holder, row[0]
+                    detail=redeemed)
+        return Redemption(holder, row[0], row[4])
 
-    def _still_authorised(self, user_id: UUID) -> bool:
+    def _still_authorised(self, user_id: UUID,
+                          permission: str = DOWNLOAD_PERMISSION) -> bool:
         """Is the ticket's holder still an ACTIVE account holding
         `sample.download` through a global role?
 
@@ -1595,9 +2571,10 @@ class SampleService:
         account -- is the residual 0061 states.
         """
         return IamAdminService(self._c).holds_global_permission(
-            user_id, DOWNLOAD_PERMISSION)
+            user_id, permission)
 
-    def _authority_refusal(self, user_id: UUID) -> str:
+    def _authority_refusal(self, user_id: UUID,
+                           permission: str = DOWNLOAD_PERMISSION) -> str:
         """Which half of `_still_authorised` said no, for the audit only.
 
         A second read on the refusal path alone, for `_ticket_refusal`'s
@@ -1612,6 +2589,8 @@ class SampleService:
             (user_id,)).fetchone()
         if row is None or not row[0]:
             return "account_deactivated"
+        if permission == RETRIEVE_PERMISSION:
+            return "retrieve_permission_revoked"
         return "download_permission_revoked"
 
     def _ticket_refusal(self, digest: bytes,
@@ -1643,6 +2622,440 @@ class SampleService:
         # Live, unspent, for this sample, and the UPDATE still matched
         # nothing: another request redeemed it between the two statements.
         return "redeemed_concurrently", row[0]
+
+    # -- preserved samples: two people to get one back out (F2, 0063) -----
+
+    def resolve_account(self, value: str) -> UUID:
+        """An account named by id or by email, for the authorisation form.
+
+        The Security Officer granting a retrieval knows the person, not
+        their uuid, and the detonation form's "user id of the person"
+        field is the example of what that costs. Active accounts only: an
+        authorisation for a disabled account authorises nobody and would
+        read, later, as though it had."""
+        text = (value or "").strip()
+        if not text:
+            raise SampleError("name the person being authorised")
+        try:
+            row = self._c.execute(
+                "SELECT id FROM iam.app_user WHERE id = %s AND is_active",
+                (UUID(text),)).fetchone()
+        except ValueError:
+            row = self._c.execute(
+                "SELECT id FROM iam.app_user "
+                "WHERE lower(email) = lower(%s) AND is_active",
+                (text,)).fetchone()
+        if row is None:
+            raise SampleError(f"no active account is {text!r}")
+        return row[0]
+
+    def grant_preservation_authorisation(
+            self, sample_id: UUID, *, granted_to: UUID, granted_by: UUID,
+            scope_note: str, legal_basis: str,
+            duration: timedelta = timedelta(days=7)) -> UUID:
+        """Authorise ONE named person to retrieve ONE preserved sample.
+
+        Modelled on `IngestService.grant_pii_authorisation`: time-boxed,
+        justified, two humans. The person granting and the person granted
+        cannot be one person (a CHECK in 0063 as well as this refusal),
+        the scope has a length floor because a blanket authorisation is
+        not one, the legal basis is mandatory, and the window is capped at
+        thirty days.
+
+        The grantee must hold `sample.preserved.retrieve` now. An
+        authorisation for somebody whose role cannot use it authorises
+        nothing, and a Security Officer told so at the time can pick the
+        right person instead of finding out from a refusal later.
+        """
+        if granted_to == granted_by:
+            raise SampleError(
+                "a retrieval authorisation needs two people: authorising "
+                "yourself is not an authorisation, it is the control removed")
+        if len((scope_note or "").strip()) <= 20:
+            raise SampleError(
+                "say what may be retrieved and why. A blanket authorisation "
+                "is not one, and this is the text somebody defends later.")
+        if not (legal_basis or "").strip():
+            raise SampleError("a legal basis is mandatory")
+        if duration <= timedelta(0) or duration > timedelta(
+                days=MAX_AUTHORISATION_DAYS):
+            raise SampleError(
+                f"an authorisation lasts between a moment and "
+                f"{MAX_AUTHORISATION_DAYS} days")
+        sample = self.get(sample_id)
+        if sample is None:
+            raise SampleError("no such sample")
+        if not sample.preserved_key:
+            raise SampleError(
+                "only a preserved sample can be authorised for retrieval; "
+                "this one is not in the preservation store")
+        if not IamAdminService(self._c).holds_global_permission(
+                granted_to, RETRIEVE_PERMISSION):
+            raise SampleError(
+                f"that account does not hold {RETRIEVE_PERMISSION} (the case "
+                f"owner role carries it), so an authorisation would authorise "
+                f"nothing")
+        row = self._c.execute(
+            """INSERT INTO lab.preservation_authorisation
+                   (sample_id, granted_to, granted_by, scope_note, legal_basis,
+                    expires_at)
+               VALUES (%s, %s, %s, %s, %s, now() + %s)
+               RETURNING id, expires_at""",
+            (sample_id, granted_to, granted_by, scope_note.strip(),
+             legal_basis.strip(), duration)).fetchone()
+        self._audit("SAMPLE_PRESERVED_AUTHORISATION_GRANTED",
+                    actor_id=granted_by, sample_id=sample_id,
+                    detail={"authorisation_id": str(row[0]),
+                            "granted_to": str(granted_to),
+                            "scope": scope_note.strip(),
+                            "legal_basis": legal_basis.strip(),
+                            "expires_at": row[1].isoformat()})
+        return row[0]
+
+    def revoke_preservation_authorisation(self, authorisation_id: UUID, *,
+                                          sample_id: UUID,
+                                          actor_id: UUID) -> None:
+        """End an authorisation early. A column, never a DELETE: 0063's
+        trigger refuses both a delete and an un-revoke."""
+        row = self._c.execute(
+            """UPDATE lab.preservation_authorisation
+                  SET revoked_at = now(), revoked_by = %s
+                WHERE id = %s AND sample_id = %s AND revoked_at IS NULL
+            RETURNING id""", (actor_id, authorisation_id, sample_id)).fetchone()
+        if row is None:
+            raise SampleError(
+                "no unrevoked authorisation with that id on this sample")
+        self._audit("SAMPLE_PRESERVED_AUTHORISATION_REVOKED",
+                    actor_id=actor_id, sample_id=sample_id,
+                    detail={"authorisation_id": str(authorisation_id)})
+
+    def preservation_authorisations(self, sample_id: UUID) -> list[dict]:
+        """Every authorisation ever granted on this sample, newest first,
+        with names rather than uuids: the point of the record is that a
+        NAMED person allowed a NAMED person, and a reviewer who has to look
+        the ids up separately will not."""
+        rows = self._c.execute(
+            """SELECT a.id, a.granted_to, gt.display_name, gt.email,
+                      gb.display_name, gb.email, a.scope_note, a.legal_basis,
+                      a.created_at, a.expires_at, a.revoked_at, rb.email,
+                      a.retrieval_count,
+                      a.revoked_at IS NULL AND a.expires_at > now()
+                 FROM lab.preservation_authorisation a
+                 JOIN iam.app_user gt ON gt.id = a.granted_to
+                 JOIN iam.app_user gb ON gb.id = a.granted_by
+                 LEFT JOIN iam.app_user rb ON rb.id = a.revoked_by
+                WHERE a.sample_id = %s
+                ORDER BY a.created_at DESC""", (sample_id,)).fetchall()
+        return [{"id": str(r[0]), "granted_to": str(r[1]),
+                 "granted_to_name": r[2], "granted_to_email": r[3],
+                 "granted_by_name": r[4], "granted_by_email": r[5],
+                 "scope_note": r[6], "legal_basis": r[7],
+                 "created_at": r[8].isoformat(),
+                 "expires_at": r[9].isoformat(),
+                 "revoked_at": r[10].isoformat() if r[10] else None,
+                 "revoked_by_email": r[11], "retrieval_count": r[12],
+                 "live": bool(r[13])} for r in rows]
+
+    def preserved_for_authorisation(self, *, clearance: str | None,
+                                    compartments: frozenset[str] = frozenset(),
+                                    limit: int = 100) -> list[dict]:
+        """The Security Officer's list: every preserved sample the officer's
+        labels reach, with its authorisations, and NOTHING of its content.
+
+        Final review U3, 2026-09-23. The officer's half of the two-person
+        retrieval lived only in the Lab's sample card, which needs
+        `sample.read`, and SECURITY_OFFICER holds no `sample.read` (nor may
+        it: Security Officers read no case content). So the one role that
+        may authorise a retrieval could not reach the form, and the case
+        owner was told to ask for something nobody could give.
+
+        What is returned is what an authorisation is ABOUT and nothing
+        more: which sample (hash, size, labels), where it is held and since
+        when, whether a legal hold covers it, the case's code (the label
+        the break-glass review queue already shows the same officer), and
+        who has been authorised. No filename, source note, rejection
+        reason, analysis or custody: those are the case's content, and the
+        officer decides on the request and its legal basis, not on the
+        material. The label composition is `queue()`'s, and it is the same
+        gate the authorise route applies, so a sample listed here is one
+        the officer can act on.
+        """
+        if clearance is None:
+            raise SampleError(
+                "the preserved-sample list needs the caller's clearance; a "
+                "default would list every compartment to whoever forgot it")
+        rows = self._c.execute(
+            """SELECT s.id, s.sha256, s.byte_size, s.preserved_bucket,
+                      s.preserved_key, s.preserved_at,
+                      s.legal_hold OR coalesce(c.legal_hold, false), c.code,
+                      greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                 FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.preserved_key IS NOT NULL
+                  AND greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                      <= %s::core.tlp
+                  AND (s.compartments
+                       || coalesce(c.compartments, '{}')) <@ %s
+                ORDER BY s.preserved_at DESC LIMIT %s""",
+            (clearance, list(compartments), limit)).fetchall()
+        return [{"id": str(r[0]), "sha256": bytes(r[1]).hex(),
+                 "byte_size": r[2], "preserved_bucket": r[3],
+                 "preserved_key": r[4], "preserved_at": r[5].isoformat(),
+                 "legal_hold": bool(r[6]), "case_code": r[7],
+                 "classification": r[8],
+                 "authorisations": self.preservation_authorisations(r[0])}
+                for r in rows]
+
+    def live_preservation_authorisation(self, user_id: UUID,
+                                        sample_id: UUID) -> UUID | None:
+        row = self._c.execute(
+            """SELECT id FROM lab.preservation_authorisation
+                WHERE granted_to = %s AND sample_id = %s
+                  AND revoked_at IS NULL AND expires_at > now()
+                ORDER BY expires_at DESC LIMIT 1""",
+            (user_id, sample_id)).fetchone()
+        return row[0] if row else None
+
+    def _refuse_retrieval(self, sample_id: UUID, actor_id: UUID, reason: str,
+                          message: str, *, stage: str,
+                          error: type[SampleError] = SampleError,
+                          session_id: UUID | None = None,
+                          ip_hash: bytes | None = None) -> None:
+        """Audit a refused retrieval, then raise.
+
+        Every refusal is written, not only the missing authorisation: a
+        preserved sample is material somebody decided to hold under a
+        legal hold, and "who tried to get it out, and why were they
+        stopped" is a question a Security Officer must be able to answer
+        years later. The caller here is always an authenticated account,
+        so unlike an unknown download ticket this cannot be used to append
+        to the audit chain anonymously. Autocommit, so the row survives
+        the raise.
+        """
+        self._audit("SAMPLE_PRESERVED_RETRIEVAL_REFUSED", actor_id=actor_id,
+                    sample_id=sample_id, outcome="DENIED",
+                    session_id=session_id, ip_hash=ip_hash,
+                    detail={"reason": reason, "stage": stage})
+        raise error(message)
+
+    def _retrievable(self, sample_id: UUID, *, actor_id: UUID,
+                     clearance: str | None, compartments: frozenset[str],
+                     stage: str, session_id: UUID | None = None,
+                     ip_hash: bytes | None = None) -> tuple:
+        """The label and state half of a retrieval: the same composition
+        `_downloadable` makes, then "is it preserved". Returns
+        `(sha256, data_key_ciphertext, data_key_id, preserved_bucket,
+        preserved_key, preserved_version_id)`."""
+        _require_clearance(clearance)
+        row = self._c.execute(
+            """SELECT s.sha256, s.data_key_ciphertext, s.data_key_id,
+                      s.preserved_bucket, s.preserved_key,
+                      s.preserved_version_id
+                 FROM lab.sample s
+                 LEFT JOIN core."case" c ON c.id = s.case_id
+                WHERE s.id = %s
+                  AND greatest(s.classification,
+                               coalesce(c.classification, s.classification))
+                      <= %s::core.tlp
+                  AND (s.compartments
+                       || coalesce(c.compartments, '{}')) <@ %s""",
+            (sample_id, clearance, list(compartments))).fetchone()
+        if row is None:
+            self._refuse_retrieval(sample_id, actor_id, "not_visible",
+                                   "no such sample", stage=stage,
+                                   session_id=session_id, ip_hash=ip_hash)
+        if not row[4]:
+            self._refuse_retrieval(
+                sample_id, actor_id, "not_preserved",
+                "this sample is not in the preservation store, so there is "
+                "nothing to retrieve. Only a sample rejected under the "
+                "'preserve' disposition is held there.", stage=stage,
+                session_id=session_id, ip_hash=ip_hash)
+        return row
+
+    def _require_live_authorisation(self, sample_id: UUID, actor_id: UUID, *,
+                                    stage: str, session_id: UUID | None = None,
+                                    ip_hash: bytes | None = None) -> UUID:
+        authorisation = self.live_preservation_authorisation(actor_id,
+                                                             sample_id)
+        if authorisation is None:
+            self._refuse_retrieval(
+                sample_id, actor_id, "no_live_authorisation",
+                "retrieving a preserved sample needs a live authorisation "
+                "naming you, granted by a Security Officer, and you hold none "
+                "for this sample. Ask one to authorise you: nobody may grant "
+                "that to themselves, which is the point of it.",
+                stage=stage, error=AuthorisationRequired,
+                session_id=session_id, ip_hash=ip_hash)
+        return authorisation
+
+    def issue_retrieval_ticket(self, sample_id: UUID, *, actor_id: UUID,
+                               clearance: str | None = None,
+                               compartments: frozenset[str] = frozenset(),
+                               session_id: UUID | None = None,
+                               ip_hash: bytes | None = None,
+                               request_origin: str | None = None
+                               ) -> DownloadTicket:
+        """The retrieval's half of the 0061 hand-off: a one-shot,
+        sixty-second ticket, minted on the APPLICATION origin, spent at
+        the sample origin's download path.
+
+        A retrieval is sample bytes, so invariant 10 applies to it exactly
+        as to a download: they come from the separate origin or not at
+        all, and the sample process serves the download path and nothing
+        else. Reusing that path, and the ticket that crosses to it, is what
+        keeps a second door from being opened on the one process the split
+        exists to keep narrow. The ticket carries `purpose =
+        'preserved_retrieval'`, so it cannot be spent as a download.
+
+        Refuses (and audits the refusal) unless the caller holds a LIVE
+        authorisation for this sample. The redemption checks it again,
+        because an authorisation revoked inside the sixty seconds must
+        bite before a byte moves.
+        """
+        split = _mint_split(request_origin)
+        self._retrievable(sample_id, actor_id=actor_id, clearance=clearance,
+                          compartments=compartments, stage="mint",
+                          session_id=session_id, ip_hash=ip_hash)
+        authorisation = self._require_live_authorisation(
+            sample_id, actor_id, stage="mint", session_id=session_id,
+            ip_hash=ip_hash)
+        return self._mint_ticket(
+            sample_id, actor_id=actor_id, session_id=session_id,
+            ip_hash=ip_hash, purpose=TICKET_RETRIEVAL,
+            audit_action="SAMPLE_RETRIEVAL_TICKET_ISSUED",
+            sample_origin=split.sample,
+            extra={"authorisation_id": str(authorisation)})
+
+    def retrieve_preserved(self, sample_id: UUID, *, actor_id: UUID,
+                           request_origin: str | None = None,
+                           clearance: str | None = None,
+                           compartments: frozenset[str] = frozenset(),
+                           ticket_id: UUID | None = None
+                           ) -> tuple[bytes, str]:
+        """A preserved sample, in the SAME encrypted archive a download
+        produces, under a live authorisation somebody else granted.
+
+        Never plaintext: the held ciphertext is opened with the kept data
+        key, re-verified against the recorded SHA-256 (a mismatch is the
+        same recorded tamper alarm a download raises), and wrapped by
+        `archive()`, whose password is an interlock and not
+        confidentiality. The legal hold is not touched: nothing in
+        `PreservationStorage` can lift one, and this reads the held
+        version in place.
+
+        Written down on both outcomes. Every refusal is an audit row
+        (`SAMPLE_PRESERVED_RETRIEVAL_REFUSED`, with the reason); a success
+        is a custody row naming the authorisation and the store, an audit
+        row, and one more on the authorisation's retrieval count.
+        """
+        _require_clearance(clearance)
+        split = origin_split(this=request_origin)
+        if not split.serves_here:
+            self._refuse_retrieval(sample_id, actor_id, "origin_split",
+                                   split.refusal, stage="retrieve")
+        row = self._retrievable(sample_id, actor_id=actor_id,
+                                clearance=clearance,
+                                compartments=compartments, stage="retrieve")
+        authorisation = self._require_live_authorisation(
+            sample_id, actor_id, stage="retrieve")
+        if self._preservation is None:
+            raise SampleError("the preservation store is not configured")
+        if not row[1]:
+            raise SampleError("this sample has no data key; it cannot be read")
+
+        sha256, key_blob, key_id, bucket, key, version = row
+        data_key = bytes.fromhex(envelope.decrypt(key_blob, key_id=key_id))
+        ciphertext = self._preservation.get(key, version_id=version,
+                                            bucket=bucket)
+        data = _xor_stream(ciphertext, data_key)
+        digest = hashlib.sha256(data).digest()
+        if digest != bytes(sha256):
+            # The download's tamper discipline, word for word: recorded in
+            # its own transaction so the alarm survives the raise.
+            with self._c.transaction():
+                self._access(
+                    sample_id, actor_id, "VIEWED_META",
+                    {"event": "integrity_check_failed",
+                     "recorded_sha256": bytes(sha256).hex(),
+                     "computed_sha256": digest.hex(),
+                     "store": "preservation", "preserved_key": key})
+                self._c.execute(
+                    """INSERT INTO audit.event
+                           (actor_id, actor_kind, action, object_type,
+                            object_id, outcome, detail)
+                       VALUES (%s, 'USER', 'SAMPLE_INTEGRITY_ALARM', 'sample',
+                               %s, 'DENIED', %s)""",
+                    (actor_id, sample_id,
+                     Json({"recorded_sha256": bytes(sha256).hex(),
+                           "computed_sha256": digest.hex(),
+                           "store": "preservation"})))
+            raise SampleError(
+                "preserved sample integrity check failed: the held bytes do "
+                "not match the recorded sha256. This is a tamper alarm, not "
+                "a transient error. It has been written to the custody "
+                "ledger and the audit log, and nothing has been served.")
+
+        custody = {"source": "preservation_store", "origin": split.sample,
+                   "preserved_bucket": bucket, "preserved_key": key,
+                   "preserved_version_id": version,
+                   "authorisation_id": str(authorisation)}
+        if ticket_id is not None:
+            custody["via"] = "ticket"
+            custody["ticket_id"] = str(ticket_id)
+        with self._c.transaction():
+            self._c.execute(
+                "UPDATE lab.preservation_authorisation "
+                "SET retrieval_count = retrieval_count + 1 WHERE id = %s",
+                (authorisation,))
+            self._access(sample_id, actor_id, "DOWNLOADED", custody,
+                         archive_format="ZIP_INFECTED")
+            self._audit("SAMPLE_PRESERVED_RETRIEVED", actor_id=actor_id,
+                        sample_id=sample_id,
+                        detail={k: v for k, v in custody.items()
+                                if k != "origin"})
+        return archive(data, digest.hex()), digest.hex()
+
+    # -- the ledger and the names in it ------------------------------------
+
+    def record_view(self, sample_id: UUID, *, actor_id: UUID) -> bool:
+        """Write that somebody opened this sample's record.
+
+        The console's ledger promised "every look is a row" and opening a
+        sample wrote nothing, so an analyst relying on it to show who had
+        seen a sample was misled (ux13-lab:custody-ledger-hides-who-and-
+        what, 2026-09-22). Once per person per `VIEW_DEDUPE_SECONDS`: the
+        console reopens the record after each action it takes, and those
+        reopenings are not separate looks. Returns whether a row was
+        written."""
+        recent = self._c.execute(
+            """SELECT 1 FROM lab.sample_access
+                WHERE sample_id = %s AND actor_id = %s
+                  AND action = 'VIEWED_META' AND detail->>'event' = 'viewed'
+                  AND occurred_at > now() - %s
+                LIMIT 1""",
+            (sample_id, actor_id,
+             timedelta(seconds=VIEW_DEDUPE_SECONDS))).fetchone()
+        if recent:
+            return False
+        self._access(sample_id, actor_id, "VIEWED_META", {"event": "viewed"})
+        return True
+
+    def people(self, ids) -> dict[str, dict]:
+        """`{uuid: {"name", "email"}}` for the accounts a record names.
+
+        Submitter and assignee were returned as bare uuids and the console
+        read neither (ux13-lab:provenance-never-shown). Names, because
+        provenance nobody can read is not provenance."""
+        wanted = sorted({str(i) for i in ids if i})
+        if not wanted:
+            return {}
+        rows = self._c.execute(
+            "SELECT id, display_name, email FROM iam.app_user "
+            "WHERE id = ANY(%s::uuid[])", (wanted,)).fetchall()
+        return {str(r[0]): {"name": r[1], "email": r[2]} for r in rows}
 
     def request_detonation(self, sample_id: UUID, *, requested_by: UUID,
                            target: str, exposure_level: str,
@@ -1680,13 +3093,14 @@ class SampleService:
 
     def get(self, sample_id: UUID) -> Sample | None:
         row = self._c.execute(
-            f"SELECT {_COLUMNS} FROM lab.sample WHERE id = %s",
+            f"SELECT {_RETURNING} FROM lab.sample WHERE id = %s",
             (sample_id,)).fetchone()
         return _record(row) if row else None
 
-    def queue(self, *, states: tuple[str, ...] = (QUARANTINED, TRIAGED, ASSIGNED),
+    def queue(self, *, states: tuple[str, ...] = WORKING_SET,
               clearance: str | None = None,
               compartments: frozenset[str] = frozenset(),
+              case_id: UUID | None = None,
               limit: int = 100) -> list[Sample]:
         """The RE queue, filtered by the caller's own labels COMPOSED with
         each sample's case.
@@ -1705,7 +3119,21 @@ class SampleService:
         a caller who forgot the argument was silently handed everything —
         the same fail-open shape that left `download()` with no gate at all,
         sitting in the same file.
+
+        `states` is honoured, and `case_id` narrows to one case (2026-09-22).
+        The route used to take neither, so the console filtered the working
+        set client-side: Rejected, In analysis and Reported were always
+        empty, and a Lab opened inside one case listed every case's
+        samples (ux13-lab:rejected-filter-always-empty,
+        ux13-lab:lab-not-case-scoped). Narrowing by case discloses nothing
+        the unfiltered queue does not: the label predicate below is the
+        gate either way.
         """
+        unknown = [s for s in states if s not in QUEUE_STATES + (SUBMITTED,)]
+        if unknown:
+            raise SampleError(
+                f"unknown sample state {unknown[0]!r}: the states are "
+                f"{', '.join(QUEUE_STATES)}")
         if clearance is None:
             raise SampleError(
                 "queue() needs the caller's clearance. It used to default to "
@@ -1713,16 +3141,18 @@ class SampleService:
                 "silence — which is exactly how download() came to have no "
                 "label check at all.")
         rows = self._c.execute(
-            f"""SELECT {_SAMPLE_COLUMNS} FROM lab.sample s
+            f"""SELECT {_SELECT} FROM lab.sample s
                  LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.state = ANY(%s)
+                WHERE s.state = ANY(%s::lab.sample_state[])
+                  AND (%s::uuid IS NULL OR s.case_id = %s::uuid)
                   AND greatest(s.classification,
                                coalesce(c.classification, s.classification))
                       <= %s::core.tlp
                   AND (s.compartments
                        || coalesce(c.compartments, '{{}}')) <@ %s
                 ORDER BY s.submitted_at DESC LIMIT %s""",
-            (list(states), clearance, list(compartments), limit)).fetchall()
+            (list(states), case_id, case_id, clearance, list(compartments),
+             limit)).fetchall()
         return [_record(r) for r in rows]
 
     def visible(self, sample_id: UUID, *, clearance: str,
@@ -1737,7 +3167,7 @@ class SampleService:
         case.
         """
         row = self._c.execute(
-            f"""SELECT {_SAMPLE_COLUMNS} FROM lab.sample s
+            f"""SELECT {_SELECT} FROM lab.sample s
                  LEFT JOIN core."case" c ON c.id = s.case_id
                 WHERE s.id = %s
                   AND greatest(s.classification,
@@ -1798,13 +3228,35 @@ class SampleService:
                  "submitted": False} for r in rows]
 
     def custody(self, sample_id: UUID) -> list[dict]:
+        """The ledger, with WHO in it.
+
+        `actor_id`, `archive_format` and `detail` were always returned and
+        the console dropped all three, so the chain of custody for
+        attacker-supplied binaries named nobody, and a submission and a
+        failed integrity check both read "VIEWED_META"
+        (ux13-lab:custody-ledger-hides-who-and-what, 2026-09-22). The
+        actor's name and email come back now, and for an assignment the
+        assignee's too; `detail.event` is what tells the console which
+        VIEWED_META row it is looking at.
+        """
         rows = self._c.execute(
-            """SELECT actor_id, action, occurred_at, archive_format, detail
-                 FROM lab.sample_access WHERE sample_id = %s
-                ORDER BY occurred_at DESC""", (sample_id,)).fetchall()
+            """SELECT a.actor_id, a.action, a.occurred_at, a.archive_format,
+                      a.detail, u.display_name, u.email,
+                      an.display_name, an.email
+                 FROM lab.sample_access a
+                 LEFT JOIN iam.app_user u ON u.id = a.actor_id
+                 LEFT JOIN iam.app_user an
+                        ON a.action = 'ASSIGNED'
+                       AND an.id::text = a.detail->>'analyst_id'
+                WHERE a.sample_id = %s
+                ORDER BY a.occurred_at DESC, a.id DESC""",
+            (sample_id,)).fetchall()
         return [{"actor_id": str(r[0]), "action": r[1],
                  "occurred_at": r[2].isoformat(), "archive_format": r[3],
-                 "detail": r[4]} for r in rows]
+                 "detail": r[4], "actor_name": r[5], "actor_email": r[6],
+                 "event": (r[4] or {}).get("event"),
+                 "analyst_name": r[7], "analyst_email": r[8]}
+                for r in rows]
 
     # -- internals ---------------------------------------------------------
 
@@ -1870,12 +3322,19 @@ def _xor_stream(data: bytes, key: bytes) -> bytes:
 _COLUMNS = ("id, case_id, sha256, sha1, md5, original_filename, byte_size, "
             "state, reject_reason, file_type, entropy, triage_gaps, "
             "submitted_by, submitted_at, source_note, assigned_to, "
-            "classification, compartments")
+            "classification, compartments, preserved_bucket, preserved_key, "
+            "preserved_at, legal_hold")
 #: The same list, table-qualified, for the reads that JOIN `core."case"` to
 #: compose its labels. Derived from the one string rather than restated, so
 #: the two cannot fall out of step and unpack into the wrong fields — the
 #: same discipline `notifications._N_COLUMNS` uses for the same reason.
 _SAMPLE_COLUMNS = ", ".join("s." + c.strip() for c in _COLUMNS.split(","))
+#: Whether the data key has been destroyed, read as a BOOLEAN (0063). The
+#: console needs to say "destroyed" or "kept" for a rejected sample, and
+#: selecting the sealed key itself to decide that would carry key material
+#: through every queue read for the sake of one word.
+_RETURNING = _COLUMNS + ", octet_length(data_key_ciphertext) = 0"
+_SELECT = _SAMPLE_COLUMNS + ", octet_length(s.data_key_ciphertext) = 0"
 
 
 def _require_clearance(clearance: str | None) -> None:
@@ -1892,6 +3351,30 @@ def _require_clearance(clearance: str | None) -> None:
             "clearance. Defaulting would make every caller that forgets "
             "silently maximally privileged, which is how this path came "
             "to have no label check at all.")
+
+
+def _mint_split(request_origin: str | None) -> OriginSplit:
+    """The two configuration refusals every ticket mint makes before it
+    looks at anything, hoisted out of `issue_download_ticket` (0063) so the
+    retrieval mint states the same ones rather than a copy of them.
+
+    - `split_problem`: the control is off, the value is not an origin, or
+      it is a second name for the application's. A ticket whose
+      `download_url` points at an origin that refuses every download is a
+      worse answer than a refusal here;
+    - this process IS the sample origin, which serves sample bytes and
+      nothing else, and on which no analyst session may run.
+    """
+    split = origin_split(this=request_origin)
+    if split.split_problem is not None:
+        raise SampleError(split.split_problem)
+    if split.serves_here:
+        raise SampleError(
+            "download tickets are minted on the application origin and "
+            "redeemed here. This process is configured as the sample "
+            f"origin ({split.sample}), which serves sample bytes and "
+            f"nothing else; ask {split.app} for a ticket.")
+    return split
 
 
 def _may_see(classification: str, compartments, clearance: str | None,
@@ -1922,12 +3405,19 @@ def _record(r) -> Sample:
         triage_gaps=r[11] or [], submitted_by=r[12], submitted_at=r[13],
         source_note=r[14], assigned_to=r[15], classification=r[16],
         compartments=frozenset(r[17] or []),
+        preserved_bucket=r[18], preserved_key=r[19], preserved_at=r[20],
+        legal_hold=bool(r[21]), key_destroyed=bool(r[22]),
     )
 
 
 __all__ = [
-    "ARCHIVE_PASSWORD", "ASSIGNED", "DOWNLOAD_PERMISSION",
-    "DOWNLOAD_TICKET_TTL_SECONDS",
+    "ARCHIVE_PASSWORD", "ASSIGNED", "AUTHORISE_PERMISSION",
+    "AuthorisationRequired", "DESTROY", "DISPOSITION_ENV", "DISPOSITIONS",
+    "DOWNLOAD_PERMISSION", "DOWNLOAD_TICKET_TTL_SECONDS",
+    "PRESERVE", "PreservationStorage", "PreservedObject", "QUEUE_STATES",
+    "RETRIEVE_PERMISSION", "Redemption", "TICKET_DOWNLOAD",
+    "TICKET_RETRIEVAL", "WORKING_SET", "disposition_setting",
+    "rejected_sample_disposition",
     "IN_ANALYSIS", "MAX_SAMPLE_BYTES",
     "QUARANTINED", "REJECTED", "REPORTED", "SUBMITTED", "TRIAGED",
     "DownloadTicket", "OriginSplit", "PolicyNotDeclared", "Sample",

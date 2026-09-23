@@ -102,6 +102,19 @@ Analytic confidence (ICD 203: low/moderate/high) is a **third, separate**
 field. Corroborating C3 sources can support high confidence; a single A1
 source on a novel claim usually should not.
 
+A **tie's** confidence is not a fourth field. It is the highest confidence
+among the tie's live claims about the tie itself, and the database derives
+it (`core.tie_confidence`, migration 0064), so the value the canvas draws,
+the confidence filter applies and the metrics count is always a grade
+some analyst gave a claim. The claims that count are the founding and
+corroborating assertions, and a correction that re-grades the tie (it
+counts at the value it states). A correction to the tie's weight or
+attributes grades that value, not the tie, and does not move it.
+Recording a weaker second source never lowers a tie; retracting the claim
+that graded it high does. Until 2026-09-22 the edge carried its own
+confidence, written once at creation from a default of LOW, and a tie
+graded HIGH was drawn and filtered as LOW.
+
 ## Temporal model
 
 Two clocks, everywhere:

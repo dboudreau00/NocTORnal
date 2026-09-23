@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import psycopg
@@ -34,7 +34,11 @@ from noctornal_api.http.limits import (
     rate_limit_peek,
 )
 from noctornal_api.security.auth import AuthOutcome, AuthService
-from noctornal_api.security.sessions import STEP_UP_FRESHNESS, SessionService
+from noctornal_api.security.sessions import (
+    IDLE_TIMEOUT,
+    STEP_UP_FRESHNESS,
+    SessionService,
+)
 from noctornal_api.stores import PgSessionStore, PgUserStore
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -294,6 +298,20 @@ class Me(BaseModel):
     display_name: str
     email: str
     recovery_codes_remaining: int
+    # The session's two limits, so the console can warn before either
+    # instead of discovering them on a Save (expiry-drops-context,
+    # 2026-09-22). The idle window has just been slid by this very request,
+    # so it is the full timeout; the absolute limit is a distance rather
+    # than a timestamp because the browser's clock need not agree with
+    # this one.
+    idle_timeout_seconds: int
+    session_expires_in_seconds: int
+    # How much longer this session satisfies the step-up gate (a second
+    # factor within STEP_UP_FRESHNESS), 0 when it no longer does. The
+    # console asks for a fresh sign-in BEFORE a gated request instead of
+    # after its 403, because each refused POST /auth/recovery-codes still
+    # spends a token of that route's rate limit (2026-09-22 fix round).
+    step_up_fresh_seconds: int
 
 
 @router.get("/me", response_model=Me)
@@ -312,6 +330,15 @@ def me(user: CurrentUser = Depends(current_user),
         # not as a 500 the client would retry.
         raise Problem(401, "Unauthenticated", "session refers to no account")
     display_name, email = row
+    expires = conn.execute(
+        "SELECT expires_at FROM iam.session WHERE id = %s", (user.session_id,),
+    ).fetchone()
+    left = (expires[0] - datetime.now(timezone.utc)).total_seconds() if expires else 0
+    fresh_left = 0.0
+    if user.session_mfa_at is not None:
+        fresh_left = (STEP_UP_FRESHNESS
+                      - (datetime.now(user.session_mfa_at.tzinfo) - user.session_mfa_at)
+                      ).total_seconds()
     return Me(
         user_id=str(user.user_id),
         display_name=display_name,
@@ -320,6 +347,9 @@ def me(user: CurrentUser = Depends(current_user),
         # actionable; the codes themselves exist in plaintext exactly once,
         # at the moment they are issued.
         recovery_codes_remaining=PgUserStore(conn).count_recovery_codes(user.user_id),
+        idle_timeout_seconds=int(IDLE_TIMEOUT.total_seconds()),
+        session_expires_in_seconds=max(0, int(left)),
+        step_up_fresh_seconds=max(0, int(fresh_left)),
     )
 
 

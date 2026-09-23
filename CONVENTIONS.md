@@ -110,8 +110,8 @@ firehose into a half-built model produces a landfill.
 
 `ARCHITECTURE.md` holds the reasoning. What is in the tree:
 
-- Postgres 16 + pgvector as the system of record; 61 Alembic revisions
-  (`0001`-`0061`), `db/schema.sql` regenerated from them
+- Postgres 16 + pgvector as the system of record; 65 Alembic revisions
+  (`0001`-`0065`), `db/schema.sql` regenerated from them
 - Python 3.12+ / FastAPI, **one process**, serving the REST API under
   `/api/v1`, the analyst console under `/ui`, the `/api/v1/live`
   WebSocket, and running the collectors, the analytics and the

@@ -214,7 +214,16 @@ class CaseService:
         denies. All four applicable checks are in the SQL: the verb (via the
         assignment's role), the unexpired assignment, clearance dominance,
         and compartment subset. (Step-up does not apply: case.read is not a
-        step-up permission.)"""
+        step-up permission.)
+
+        Clearance dominance counts a live break-glass grant, as the gate
+        does (`PgAccessResolver.resolve`): one on this case or a global one,
+        at its level. Until 2026-09-23 this read `u.tlp_clearance` alone, so
+        an analyst assigned to a case above their own clearance could have
+        the gate opened by a grant and still not find the case to open: the
+        list, which is the console's only way in, said no while the gate
+        said yes (verifier follow-up to ux15 breakglass-grant-raises-nothing).
+        Compartments are not widened, by a grant or here."""
         rows = self._c.execute(
             """SELECT c.id, c.code, c.title, c.summary, c.status, c.classification,
                       c.compartments, c.owner_user_id, c.deputy_user_id, c.legal_basis,
@@ -226,7 +235,13 @@ class CaseService:
                 WHERE a.user_id = %s
                   AND (a.expires_at IS NULL OR a.expires_at > now())
                   AND u.is_active
-                  AND c.classification <= u.tlp_clearance
+                  AND c.classification <= GREATEST(u.tlp_clearance, COALESCE(
+                        (SELECT max(bg.granted_classification)
+                           FROM iam.break_glass bg
+                          WHERE bg.user_id = u.id AND bg.revoked_at IS NULL
+                            AND bg.expires_at > now()
+                            AND (bg.case_id IS NULL OR bg.case_id = c.id)),
+                        u.tlp_clearance))
                   AND c.compartments <@ u.compartments
                   AND EXISTS (SELECT 1 FROM iam.role_permission rp
                                WHERE rp.role_key = a.role_key

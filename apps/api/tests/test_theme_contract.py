@@ -375,3 +375,213 @@ def test_the_canvas_reads_confidence_alpha_from_the_theme_and_docs_06_agrees():
         in_docs = float(re.search(rf"^{token}\s+([0-9.]+)", docs, re.M).group(1))
         assert in_theme == in_docs, (
             f"{token}: theme.css says {in_theme}, docs/06 says {in_docs}")
+
+
+# ---------------------------------------------------------------------------
+# The sociogram's ground and marks (2026-09-22 review, cr01 / cr02)
+# ---------------------------------------------------------------------------
+
+def _alpha_tokens() -> dict[str, float]:
+    """Plain numeric tokens (the --conf-* steps, the node body steps, the
+    label alpha)."""
+    body = _strip_comments(_theme_css())
+    return {m.group(1): float(m.group(2))
+            for m in re.finditer(r"(--[a-zA-Z0-9-]+)\s*:\s*([0-9]*\.?[0-9]+)\s*;",
+                                 body)}
+
+
+def _rgba_token(name: str) -> tuple[tuple[int, int, int], float]:
+    """`--x: rgba(r, g, b, a);`, which `_tokens()` cannot see: it matches
+    #RRGGBB only, and that is how the canvas ground tokens went unmeasured
+    by every test in this file (cr02 no-test-pins-ground-ceiling)."""
+    body = _strip_comments(_theme_css())
+    m = re.search(re.escape(name) + r"\s*:\s*rgba\(\s*(\d+)\s*,\s*(\d+)\s*,"
+                  r"\s*(\d+)\s*,\s*([0-9.]+)\s*\)", body)
+    assert m, f"{name} is not an rgba() token any more; update this test"
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))), float(m.group(4))
+
+
+def _over(fg: tuple[float, ...], alpha: float,
+          bg: tuple[float, ...]) -> tuple[float, float, float]:
+    return tuple(alpha * fg[i] + (1 - alpha) * bg[i] for i in range(3))
+
+
+def _lum_rgb(c: tuple[float, ...]) -> float:
+    r, g, b = (_lin(v) for v in c)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _ratio_rgb(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    la, lb = _lum_rgb(a), _lum_rgb(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def _worst_ground() -> tuple[float, float, float]:
+    """The brightest point a mark can sit on: the key light at its full
+    alpha, then ONE grid layer. One, because paintGrid fills a single path
+    of rectangles, which composites the union once
+    (test_sociogram_canvas holds the painter to that). Stroked hairlines
+    composited every crossing twice at DPR 1."""
+    t = _tokens()
+    void = _rgb(t["--void"])
+    key_rgb, key_a = _rgba_token("--canvas-keylight")
+    grid_rgb, grid_a = _rgba_token("--canvas-grid")
+    return _over(grid_rgb, grid_a, _over(key_rgb, key_a, void))
+
+
+def test_the_canvas_is_still_the_darkest_surface_under_its_key_light():
+    """docs/06: "The canvas is the darkest surface". The restyle's key
+    light lifted the top of the canvas above --surface-0, so the claim
+    held only on average. The grid is a mark, not a surface, and is held
+    by the next test instead."""
+    t = _tokens()
+    key_rgb, key_a = _rgba_token("--canvas-keylight")
+    lit = _over(key_rgb, key_a, _rgb(t["--void"]))
+    assert _lum_rgb(lit) <= _lum_rgb(_rgb(t["--surface-0"])), (
+        f"--canvas-keylight lifts the canvas to {tuple(round(v) for v in lit)}, "
+        "brighter than --surface-0: the canvas is no longer the darkest surface")
+    _, out_a = _rgba_token("--canvas-keylight-out")
+    assert out_a == 0, "the key light must fall off to nothing"
+
+
+@pytest.mark.parametrize("token,floor", [
+    # The binding mark: every neutral tie, and the dimmest thing drawn.
+    ("--sign-neutral", 4.5),
+    ("--sign-positive", 4.5),
+    ("--sign-negative", 4.5),
+    *[(t, 4.5) for t in NODE_TOKENS],
+    # State rings are UI marks, not text: WCAG 1.4.11 asks 3:1.
+    ("--accent", 3.0),        # selected, path anchor
+    ("--alert", 3.0),         # unreviewed proposal
+    ("--accent-dim", 3.0),    # ego centre
+    ("--text-secondary", 3.0),  # pinned
+])
+def test_the_canvas_ground_keeps_every_mark_above_its_floor(token, floor):
+    """The ceiling theme.css claims for the ground, measured instead of
+    asserted. Setting the ground tokens back to the first cut's 0.055 and
+    0.035, which that comment itself says measured 4.07:1, used to pass
+    the whole suite (cr02 no-test-pins-ground-ceiling, 2026-09-22)."""
+    t = _tokens()
+    r = _ratio_rgb(_rgb(t[token]), _worst_ground())
+    assert r >= floor, (
+        f"{token} is {r:.2f}:1 where a grid line crosses the key light; "
+        f"needs {floor}:1. Lower --canvas-grid or --canvas-keylight.")
+
+
+def test_canvas_text_clears_4_5_on_its_plate():
+    """Every canvas label sits on a --void plate (placeText), so its
+    contrast is taken against --void. Edge types used to be --text-tertiary
+    at 0.85 alpha straight on the ground: 3.5:1."""
+    t = _tokens()
+    a = _alpha_tokens()
+    void = _rgb(t["--void"])
+    label = _over(_rgb(t["--text-secondary"]), a["--canvas-label-alpha"], void)
+    assert _ratio_rgb(label, void) >= 4.5, "node labels fall under 4.5:1"
+    assert _ratio(t["--text-tertiary"], t["--void"]) >= 4.5, (
+        "edge types and the shelf caption are --text-tertiary at full "
+        "strength on --void, and that no longer clears 4.5:1")
+    js = APP_JS.read_text(encoding="utf-8")
+    start = js.index("function placeText(")
+    body = js[start:js.index("\n}\n", start)]
+    assert "PAINT.void" in body and body.index("fillRect") < body.index("fillText"), (
+        "placeText no longer lays a --void plate under the text, so the "
+        "4.5:1 above is measured against the wrong background")
+    assert "cssVar('--canvas-label-alpha')" in js
+
+
+def test_the_node_body_carries_confidence_by_theme_steps():
+    """The body is the largest area of a node, so it is where confidence is
+    read. The restyle drew it at confAlpha * 0.40 above 5px and solid below,
+    which put a HIGH hub's body under a LOW leaf's (cr02
+    node-opacity-follows-size-not-confidence, 2026-09-22). The steps are
+    theme tokens now, ordered, each no stronger than its --conf-* step,
+    and HIGH against LOW holds 2:1 on --void for every node hue (the old
+    opaque disc gave 2.19:1; the 0.40 body gave 1.39:1)."""
+    a = _alpha_tokens()
+    t = _tokens()
+    void = _rgb(t["--void"])
+    steps = [a["--canvas-node-body-high"], a["--canvas-node-body-moderate"],
+             a["--canvas-node-body-low"]]
+    confs = [a["--conf-high"], a["--conf-moderate"], a["--conf-low"]]
+    assert steps[0] > steps[1] > steps[2] > 0, "body steps must stay ordered"
+    for body, conf in zip(steps, confs, strict=True):
+        assert body <= conf, "a body is never stronger than its ring"
+    for hue in NODE_TOKENS:
+        c = _rgb(t[hue])
+        r = _ratio_rgb(_over(c, steps[0], void), _over(c, steps[2], void))
+        assert r >= 2.0, f"{hue}: a HIGH body is only {r:.2f}:1 against a LOW one"
+    js = APP_JS.read_text(encoding="utf-8")
+    for token in ("--canvas-node-body-high", "--canvas-node-body-moderate",
+                  "--canvas-node-body-low"):
+        assert f"cssVar('{token}')" in js, f"the canvas never reads {token}"
+
+
+def test_no_literal_scales_confidence_on_the_canvas():
+    """Opacity is confidence and nothing else. Two literals multiplied it
+    in draw(): 0.40 on the node body and 0.45 on an unevidenced tie, the
+    second of which drew an unevidenced HIGH tie fainter than an evidenced
+    LOW one (ux07 unevidenced-fade-hijacks-confidence-opacity). No alpha
+    in the sociogram painter may be a product: a step is a token, and a
+    token is not scaled."""
+    js = APP_JS.read_text(encoding="utf-8")
+    start = js.index("function draw() {")
+    painter = js[start:js.index("/* ── hit testing", start)]
+    products = [line.strip() for line in painter.splitlines()
+                if "globalAlpha" in line and "=" in line and "*" in line]
+    assert not products, "an alpha in the painter is scaled: " + "; ".join(products)
+    assert not re.search(r"confAlpha\([^)]*\)\s*\*|\*\s*confAlpha\(", js), (
+        "confAlpha is multiplied somewhere in app.js")
+    assert not re.search(r"\bbase\s*\*", painter), "the node's step is scaled"
+
+
+def test_docs_06_quotes_the_canvas_tokens_the_theme_defines():
+    """docs/06 is the contract the canvas is reviewed against, and its token
+    table had drifted a whole palette away from theme.css. The canvas
+    tokens at least are held to it, the way the confidence steps are."""
+    docs = (Path(__file__).resolve().parents[3]
+            / "docs" / "06-interface.md").read_text(encoding="utf-8")
+    a = _alpha_tokens()
+    for token in ("--canvas-node-body-high", "--canvas-node-body-moderate",
+                  "--canvas-node-body-low", "--canvas-label-alpha"):
+        m = re.search(rf"^{token}\s+([0-9.]+)", docs, re.M)
+        assert m, f"docs/06 does not list {token}"
+        assert float(m.group(1)) == a[token], (
+            f"{token}: theme.css says {a[token]}, docs/06 says {m.group(1)}")
+    for token in ("--canvas-grid", "--canvas-keylight"):
+        _, alpha = _rgba_token(token)
+        m = re.search(rf"^{token}\s+rgba\([^)]*?,\s*([0-9.]+)\)", docs, re.M)
+        assert m, f"docs/06 does not list {token}"
+        assert float(m.group(1)) == alpha, (
+            f"{token}: theme.css alpha {alpha}, docs/06 {m.group(1)}")
+
+
+def test_docs_06_claims_only_the_hue_distances_this_file_measures():
+    """docs/06 said the node hues sat 20 or more from "the sign colours",
+    and test_no_node_hue_can_be_mistaken_for_an_edge_sign measures only
+    positive and negative: --context is about dE 9 from --sign-neutral,
+    near-neutral by design (fix round of the 2026-09-22 review). The
+    sentence names the two it measures, and the exception is real."""
+    docs = (Path(__file__).resolve().parents[3]
+            / "docs" / "06-interface.md").read_text(encoding="utf-8")
+    start = docs.index("/* Node type hues")
+    claim = docs[start:docs.index("*/", start)]
+    assert "--sign-positive and --sign-negative" in claim, (
+        "docs/06 no longer says which sign colours the hues are held apart from")
+    assert "from the sign colours by" not in claim, "the blanket claim is back"
+    t = _tokens()
+    assert _delta_e(t["--context"], t["--sign-neutral"]) < 20.0, (
+        "--context is now far from --sign-neutral; docs/06 can drop the exception")
+
+
+def test_identity_is_a_documented_use_of_the_accent():
+    """The TOR in the wordmark is drawn in --accent, and the theme listed
+    the accent's uses without it while docs/06 kept chrome neutral (cr02
+    brand-split-and-accent-in-chrome, 2026-09-22). The use stays; it is
+    written down in both places now."""
+    theme = _theme_css()
+    block = theme[theme.index("── accent"):theme.index("--accent:")]
+    assert "wordmark" in block, "theme.css's accent uses omit the wordmark"
+    docs = (Path(__file__).resolve().parents[3]
+            / "docs" / "06-interface.md").read_text(encoding="utf-8")
+    assert "wordmark" in docs, "docs/06 does not document the accent's identity use"
+    assert ".brand-tor { color: var(--accent); }" in _app_css()

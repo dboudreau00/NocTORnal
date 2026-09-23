@@ -28,6 +28,7 @@ from psycopg.types.json import Json
 from noctornal_api import notify_events
 from noctornal_api.http.deps import (
     CurrentUser,
+    authorize_object,
     check_writable_labels,
     get_conn,
     require,
@@ -35,11 +36,15 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.proposals import (
+    KIND_ATTRIBUTE,
+    KIND_EDGE,
+    KIND_NODE,
     STATE_PROPOSED,
     ProposalError,
     ProposalReview,
     ProposalRow,
     ProposalStore,
+    accepted_classification,
 )
 
 log = logging.getLogger(__name__)
@@ -92,6 +97,59 @@ def _owned(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> Propos
     if row is None or row.case_id != case_id:
         raise Problem(404, "Not found", "no such proposal in this case")
     return row
+
+
+def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
+                         case_id: UUID, row: ProposalRow,
+                         requested: str | None) -> None:
+    """Hold an accept to the rule every other write route holds: what an
+    analyst writes stays within what they can read back.
+
+    Final review C12 (2026-09-23). This route ran `proposal.review` and
+    nothing else, then passed the caller's `classification` straight to
+    the graph writer. An AMBER reviewer could accept at RED and author an
+    element that at once vanished from their own graph, search and lists,
+    and that they could neither correct nor retire, which is exactly what
+    `check_writable_labels` exists to prevent on graph.py, capture, comms,
+    deception, evidence and samples. The database enforces only the case
+    FLOOR, so nothing below this caught it.
+
+    NODE and EDGE are checked at the label that will actually be written
+    (`accepted_classification`, the same expression the service uses),
+    against the case-less ceiling, as every other creation route does: a
+    case-scoped break-glass grant does not raise what may be authored.
+
+    ATTRIBUTE writes an assertion onto an existing entity rather than a
+    new element, so it is gated the way `graph.py` gates asserting about
+    an entity (CR7): against that entity's own labels. Its target must
+    also be in this case. Nothing in the database ties an assertion's
+    entity to the assertion's case, and the graph route refuses a
+    foreign one; this path did not look.
+    """
+    if row.kind in (KIND_NODE, KIND_EDGE):
+        check_writable_labels(
+            conn, user,
+            classification=accepted_classification(row.payload, requested))
+        return
+    if row.kind != KIND_ATTRIBUTE:
+        return  # the service refuses an unknown kind, writing nothing
+    try:
+        target = UUID(str((row.payload or {})["node_id"]))
+    except (KeyError, ValueError) as exc:
+        raise Problem(409, "Conflict",
+                      "this proposal does not name a valid entity to attach "
+                      "its claim to; nothing was written") from exc
+    labels = conn.execute(
+        "SELECT case_id, classification, compartments FROM core.node "
+        "WHERE id = %s", (target,)).fetchone()
+    if labels is None or labels[0] != case_id:
+        raise Problem(409, "Conflict",
+                      "the entity this proposal makes a claim about is not in "
+                      "this case; nothing was written")
+    authorize_object(conn, user, case_id=case_id,
+                     permission_key="proposal.review",
+                     classification=labels[1],
+                     compartments=frozenset(labels[2] or []))
 
 
 class CaptureBody(BaseModel):
@@ -213,8 +271,11 @@ def accept(
     written in the same transaction and attributed to the reviewer — an
     accepted proposal is a person making a claim on a machine's suggestion,
     not a privileged path around the assertion model.
+
+    Nor a path around the label ceiling: see `_check_accept_labels`.
     """
-    _owned(conn, case_id, proposal_id)
+    row = _owned(conn, case_id, proposal_id)
+    _check_accept_labels(conn, user, case_id, row, body.classification)
     try:
         return _out(ProposalReview(conn).accept(
             proposal_id, reviewed_by=user.user_id, note=body.note,

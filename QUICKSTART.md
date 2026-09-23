@@ -35,9 +35,14 @@ ports on a workstation; it was also OpenFGA's published port until that service 
 **The easy way:** open <http://127.0.0.1:8000/ui/>. While no account
 exists, the sign-in screen offers **First-run setup** instead, enter an
 email and a display name, and it creates the administrator (SYS_ADMIN +
-SECURITY_OFFICER + CASE_OWNER + ANALYST, clearance RED) and shows the
-password and TOTP secret **once**. Put the secret in any authenticator app
-(Aegis, 1Password, Google Authenticator), then sign in below it. That door
+SECURITY_OFFICER + CASE_OWNER + ANALYST, clearance RED) and shows a
+generated password and a TOTP secret **once**, with a QR code for the
+secret. Scan it into any authenticator app (Aegis, 1Password, Google
+Authenticator), keep the password somewhere safe, then sign in with both
+on the same card: the card checks the code against the secret before it
+sends anything, and keeps the password and secret on screen until that
+sign-in works. It then shows ten single-use recovery codes, once; a new set
+can be issued later from **Account** (your name, top right). That door
 closes permanently the moment the first account exists; every later
 account is created from **Admin** in the rail, or with `bootstrap.py`.
 

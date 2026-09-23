@@ -404,6 +404,34 @@ services:
   # impossible for the whole period. Evidence is locked because an exhibit
   # must survive; a sample is not, because some samples must not.
   #
+  # ## the preservation bucket IS locked, and gets NO default either
+  #
+  # F2, decided by the owner on 2026-09-22: a rejected sample is PRESERVED
+  # by default, not destroyed. `reject()` copies its ciphertext into
+  # PRESERVE_BUCKET (default noctornal-preserved) under a per-object LEGAL
+  # HOLD and keeps the data key, and a retrieval needs a Security Officer's
+  # authorisation (docs/11). So this bucket is --with-lock, created here
+  # because object lock cannot be switched on afterwards, and it carries
+  # no default retention: the hold is per object and has no expiry, and a
+  # COMPLIANCE default would make a held sample undeletable even after
+  # counsel lifted the hold. A deployment that sets
+  # NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy still gets the bucket;
+  # an empty locked bucket costs nothing and switching back needs it.
+  #
+  # When PRESERVE_ACCESS_KEY / PRESERVE_SECRET_KEY are set, the account
+  # below is minted with a policy that reaches this bucket alone: write,
+  # read, read a hold, and SET a hold, with nothing that deletes. Setting
+  # a hold is s3:PutObjectLegalHold, which would also let the account LIFT
+  # one, so it is granted only under the condition
+  # s3:object-lock-legal-hold = ON. Measured against this MinIO release on
+  # 2026-09-22 with a throwaway account: a held PUT succeeds, and deleting
+  # the version, lifting the hold and listing the samples bucket are all
+  # AccessDenied. Unconditioned, the lift succeeded. When they
+  # are not set, `PreservationStorage` falls back to the SAMPLE_* account,
+  # whose policy does not reach this bucket, so a rejection is REFUSED with
+  # the store's AccessDenied rather than destroying anything. That is the
+  # safe failure, and the fix is to set the two variables.
+  #
   # ## the sample service account
   #
   # `mc admin user svcacct add` can do this in one shot, so it does: a
@@ -506,6 +534,17 @@ services:
                --secret-key "$$SAMPLE_SECRET_KEY" \
                --policy /tmp/sample-policy.json \
                local "$$MINIO_ROOT_USER"
+        PRESERVE="$${PRESERVE_BUCKET:-noctornal-preserved}"
+        mc mb --ignore-existing --with-lock "local/$$PRESERVE"
+        if [ -n "$${PRESERVE_ACCESS_KEY:-}" ]; then
+          printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:GetObjectVersion","s3:GetObjectLegalHold"],"Resource":["arn:aws:s3:::%s/*"]},{"Effect":"Allow","Action":["s3:PutObjectLegalHold"],"Resource":["arn:aws:s3:::%s/*"],"Condition":{"StringEquals":{"s3:object-lock-legal-hold":["ON"]}}},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation","s3:GetBucketObjectLockConfiguration"],"Resource":["arn:aws:s3:::%s"]}]}' "$$PRESERVE" "$$PRESERVE" "$$PRESERVE" > /tmp/preserve-policy.json
+          mc admin user svcacct info local "$$PRESERVE_ACCESS_KEY" >/dev/null 2>&1 \
+            || mc admin user svcacct add \
+                 --access-key "$$PRESERVE_ACCESS_KEY" \
+                 --secret-key "$$PRESERVE_SECRET_KEY" \
+                 --policy /tmp/preserve-policy.json \
+                 local "$$MINIO_ROOT_USER"
+        fi
         echo 'buckets ready'
 
   # ------------------------------------------------------------------------

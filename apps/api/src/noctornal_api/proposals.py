@@ -70,6 +70,26 @@ class ProposalError(Exception):
     pass
 
 
+#: What an accepted NODE or EDGE is labelled when neither the reviewer nor
+#: the proposal names a classification.
+DEFAULT_CLASSIFICATION = "AMBER"
+
+
+def accepted_classification(payload: dict | None, requested: str | None) -> str:
+    """The label an accepted NODE or EDGE proposal is written at.
+
+    One expression, used by `ProposalReview.accept` to write the element
+    AND by the accept route to check it against the reviewer's clearance
+    first. They were two copies of nothing: the route checked no label at
+    all, so a reviewer could accept at a classification above their own
+    and author an element they could then neither see nor correct (final
+    review C12, 2026-09-23). Keeping the rule here means the label that is
+    checked is the label that is written.
+    """
+    return requested or (payload or {}).get("classification",
+                                            DEFAULT_CLASSIFICATION)
+
+
 @dataclass(frozen=True)
 class ProposalRow:
     id: UUID
@@ -256,8 +276,8 @@ class ProposalReview:
                         created_by=reviewed_by,
                         assertion=assertion,
                         attrs=payload.get("attrs") or {},
-                        classification=classification or payload.get(
-                            "classification", "AMBER"),
+                        classification=accepted_classification(
+                            payload, classification),
                     )
                 elif row.kind == KIND_EDGE:
                     edge_id = self._graph.create_edge(
@@ -267,8 +287,8 @@ class ProposalReview:
                         dst_node_id=UUID(str(payload["dst_node_id"])),
                         created_by=reviewed_by,
                         assertion=assertion,
-                        classification=classification or payload.get(
-                            "classification", "AMBER"),
+                        classification=accepted_classification(
+                            payload, classification),
                         # Invariant 4: an edge born from a machine's
                         # suggestion is INFERRED, renders dashed and stays
                         # out of metrics unless a projection opts in. It

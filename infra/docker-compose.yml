@@ -97,6 +97,15 @@ services:
   # Evidence is locked because an exhibit must survive; a sample is not,
   # because some samples must not.
   #
+  # `noctornal-preserved` (F2, 2026-09-22) IS --with-lock, with NO default
+  # retention. A rejected sample is preserved there by default rather than
+  # destroyed: `reject()` copies its ciphertext in under a per-object LEGAL
+  # HOLD and keeps the data key, and getting it back out needs a Security
+  # Officer's authorisation (docs/11). The hold is per object and has no
+  # expiry, so a bucket default would add nothing but a clock. Object lock
+  # cannot be switched on after creation, which is why the bucket is made
+  # here on first run rather than by the first rejection.
+  #
   # EVERY comment about this command lives OUT HERE. `entrypoint: >` is a
   # YAML *folded* scalar: it joins its lines with spaces into one string,
   # so a `#` inside it comments out the rest of the entire shell command.
@@ -113,6 +122,7 @@ services:
       mc mb --ignore-existing --with-lock local/noctornal-evidence;
       mc mb --ignore-existing local/noctornal-raw;
       mc mb --ignore-existing local/noctornal-samples;
+      mc mb --ignore-existing --with-lock local/noctornal-preserved;
       mc retention set --default GOVERNANCE 365d local/noctornal-evidence;
       echo 'buckets ready';
       "

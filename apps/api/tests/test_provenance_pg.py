@@ -259,8 +259,11 @@ def test_retracting_an_already_retracted_assertion_is_refused(conn, world):
 
 
 def test_history_survives_retraction_for_temporal_replay(conn, world):
-    """`as_of` before the retraction must still show the element: the row
-    and its history persist, only the LIVE graph loses it."""
+    """The ROW and its history persist, stamped with who and why. The VIEW
+    does not: the projection's live-provenance leg has no as-of term, so a
+    retracted element is gone at every as-of position. (Until 2026-09-22
+    this docstring said an earlier `as_of` still showed it, the promise the
+    console's Retract prompt also made; ux05 retract-confirmation-wrong.)"""
     from datetime import datetime, timezone
     from noctornal_api.graph import GraphWriteService
     case_id, uid, _n1, _n2, edge = world
@@ -274,6 +277,25 @@ def test_history_survives_retraction_for_temporal_replay(conn, world):
         """SELECT retracted_at, retracted_by, retraction_reason
              FROM core.assertion WHERE id = %s""", (aid,)).fetchone()
     assert row[0] is not None and row[1] == uid and row[2] == "burned"
+
+
+def test_a_retracted_element_is_gone_at_earlier_as_of_positions_too(conn, world):
+    """Pins what the console's Retract prompt now SAYS (`retractionWords`
+    in app.js, 2026-09-22): the element stays out at every as-of position,
+    earlier ones included. If the projection ever learns to replay a
+    retraction against as_of, this test fails, and that prompt has to change
+    in the same commit, or it goes back to describing the wrong product."""
+    from datetime import datetime, timezone
+    from noctornal_api.graph import GraphWriteService
+    case_id, uid, _n1, _n2, edge = world
+    aid = conn.execute(
+        "SELECT id FROM core.assertion WHERE edge_id = %s", (edge,)
+    ).fetchone()[0]
+    before = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert len(_svc(conn).project(_proj(case_id, as_of=before)).edges) == 1
+    GraphWriteService(conn).retract_assertion(
+        aid, retracted_by=uid, reason="burned", at=datetime.now(timezone.utc))
+    assert _svc(conn).project(_proj(case_id, as_of=before)).edges == []
 
 
 # --- U3: temporal intervals ---------------------------------------------

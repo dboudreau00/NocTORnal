@@ -541,3 +541,171 @@ def test_a_call_cannot_end_before_it_starts(conn):
                         record_source, recorded_by)
                    VALUES (%s, 'INBOUND_TO_VICTIM', %s, %s, 'CARRIER_CDR', %s)""",
                 (case_id, NOW, NOW - timedelta(minutes=5), owner))
+
+
+# --- what the console reads (ux14-deception, 2026-09-22) -----------------
+
+def _bec(conn, owner, case_id, *, trusted=("corp.example",), body=b"Body.\r\n",
+         subject=b"Remittance update", display=b"Jane, CFO"):
+    from noctornal_api.deception import parse_eml
+    from noctornal_api.evidence import EvidenceService, EvidenceStorage
+
+    raw = (
+        b"Received: from mx.corp.example ([10.0.0.5]) by mail.corp.example"
+        b" with ESMTPS; Mon, 20 Jul 2026 09:00:02 +0000\r\n"
+        b"Received: from vps-9.hostmarket.example ([203.0.113.7]) by"
+        b" mx.corp.example with ESMTP; Mon, 20 Jul 2026 09:00:01 +0000\r\n"
+        b"Received: from mail.microsoft.example ([198.51.100.20]) by"
+        b" vps-9.hostmarket.example; Mon, 20 Jul 2026 08:59:00 +0000\r\n"
+        b"Return-Path: <bounce@vps-9.hostmarket.example>\r\n"
+        b"Message-ID: <" + uuid4().hex.encode() + b"@vps-9.hostmarket.example>\r\n"
+        b"From: \"" + display + b"\" <jane@acme.example>\r\n"
+        b"Reply-To: jane.acme@gmail.com\r\n"
+        b"Subject: " + subject + b"\r\n\r\n" + body)
+    exhibit = EvidenceService(conn, EvidenceStorage()).ingest(
+        case_id=case_id, title="bec.eml", media_type="message/rfc822",
+        data=raw, acquired_by=owner, acquisition_method="MANUAL_UPLOAD")
+    return _svc(conn).record_email(
+        case_id=case_id, evidence_id=exhibit.evidence_id,
+        parsed=parse_eml(raw, trusted=trusted), recorded_by=owner)
+
+
+def test_the_email_row_carries_the_host_the_recipients_relay_observed(conn):
+    """ux14-deception:email-durable-origin-missing. The row showed only
+    headers the sender typed; the first trusted Received hop (docs/19's
+    durable email origin) lived in a detail card. The LIST row now names
+    the host, and the detail agrees with it."""
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    message_id = _bec(conn, owner, case_id)
+
+    [row] = _svc(conn).emails(case_id, clearance="RED")
+    origin = row["sending_host"]
+    assert origin["host"] == "vps-9.hostmarket.example"
+    assert origin["ip"] == "203.0.113.7"
+    assert origin["observed_by"] == "mx.corp.example"
+    assert origin["seq"] == 1
+    # Above hop 0, so the parser recognised the recipient's own MTA.
+    assert origin["boundary_confirmed"] is True
+    # Never the forged hop above the boundary.
+    assert origin["ip"] != "198.51.100.20"
+    assert row["message_id_domain"] == "vps-9.hostmarket.example"
+    assert row["from_returnpath_divergent"] is True
+
+    detail = _svc(conn).email(message_id, clearance="RED")
+    assert detail["sending_host"] == origin
+
+
+def test_an_assumed_boundary_is_not_presented_as_a_confirmed_origin(conn):
+    """With no trusted MTA configured the boundary falls back to hop 0,
+    whose `from` is the recipient's OWN relay here (10.0.0.5). The stored
+    chain cannot tell that apart from a configured single-MX estate, so the
+    origin is reported unconfirmed rather than as the sender."""
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    _bec(conn, owner, case_id, trusted=())
+    [row] = _svc(conn).emails(case_id, clearance="RED")
+    assert row["sending_host"]["seq"] == 0
+    assert row["sending_host"]["ip"] == "10.0.0.5"
+    assert row["sending_host"]["boundary_confirmed"] is None
+
+
+def test_the_email_detail_returns_its_body_defanged(conn):
+    """ux14-deception:body-url-not-defanged. The console renders only the
+    runs; the fanged `body_text` stays for a consumer that needs the bytes,
+    the same pairing as `extracted_urls` and `extracted_urls_defanged`."""
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    message_id = _bec(conn, owner, case_id, body=(
+        b"Pay via https://portal.evil.example/verify?ref=1 today.\r\n"))
+    got = _svc(conn).email(message_id, clearance="RED")
+    assert "https://portal.evil.example" in got["body_text"]
+    assert "evil.example" not in got["body_text_defanged"]
+    assert [s["text"] for s in got["body_segments"] if s["defanged"]] == [
+        "hxxps://portal[.]evil[.]example/verify?ref=1"]
+    # The sentence's full stop stays outside the URL, as the extractor has it.
+    assert got["body_segments"][-1]["text"].startswith(" today.")
+    assert got["body_segments"][-1]["defanged"] is False
+
+
+def test_capture_and_call_notes_come_back_attributed(conn):
+    """ux14-deception:notes-never-rendered. The note is where the demo
+    records that the victim had already entered credentials; it is only
+    worth showing with who wrote it, and a UUID is not a name."""
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    note = "The victim had already entered credentials."
+    _svc(conn).record_capture(
+        case_id=case_id, requested_url="https://evil.example/login",
+        capture_method="VICTIM_SUPPLIED", captured_by=owner, note=note)
+    [listed] = _svc(conn).captures(case_id, clearance="RED")
+    assert listed["note"] == note
+    assert listed["captured_by_name"] == "Dcp"
+    one = _svc(conn).capture(listed["id"], clearance="RED")
+    assert one["note"] == note and one["captured_by_name"] == "Dcp"
+
+    _svc(conn).record_call(
+        case_id=case_id, started_at=NOW, direction="INBOUND_TO_VICTIM",
+        record_source="CARRIER_CDR", recorded_by=owner,
+        note="Attestation C: the carrier vouches for nothing.")
+    [call] = _svc(conn).calls(case_id, clearance="RED")
+    assert call["note"].startswith("Attestation C")
+    assert call["recorded_by_name"] == "Dcp"
+
+
+def _marked(runs):
+    return [s["text"] for s in runs if s["defanged"]]
+
+
+def test_a_url_in_a_note_title_or_subject_comes_back_defanged(conn):
+    """Once notes were rendered, a note recording the link the victim
+    clicked put it on screen live, under help text promising that every URL
+    in the pane is defanged (the verifier of the 2026-09-22 notes fix). The
+    note, and the other free text the sender or the kit wrote (a page title,
+    a subject line, a display name), come back in a defanged form beside
+    the raw one, and the console reads only that form."""
+    owner = _user(conn)
+    case_id = _case(conn, owner)
+    _svc(conn).record_capture(
+        case_id=case_id, requested_url="https://evil.example/login",
+        capture_method="VICTIM_SUPPLIED", captured_by=owner,
+        page_title="Sign in at https://login.evil.example/o365",
+        note="Victim clicked https://lattice-invoice.example/r/7f28 and "
+             "entered credentials.")
+    [cap] = _svc(conn).captures(case_id, clearance="RED")
+    assert "https://lattice-invoice.example" in cap["note"]
+    assert _marked(cap["note_segments"]) == [
+        "hxxps://lattice-invoice[.]example/r/7f28"]
+    assert cap["note_segments"][-1] == {
+        "text": " and entered credentials.", "defanged": False}
+    assert cap["page_title_defanged"] == (
+        "Sign in at hxxps://login[.]evil[.]example/o365")
+    one = _svc(conn).capture(cap["id"], clearance="RED")
+    assert one["note_segments"] == cap["note_segments"]
+
+    _svc(conn).record_call(
+        case_id=case_id, started_at=NOW, direction="INBOUND_TO_VICTIM",
+        record_source="CARRIER_CDR", recorded_by=owner,
+        note="Caller read out secure-billing.example/verify twice.")
+    [call] = _svc(conn).calls(case_id, clearance="RED")
+    assert _marked(call["note_segments"]) == [
+        "secure-billing[.]example/verify"]
+
+    message_id = _bec(conn, owner, case_id,
+                      subject=b"Action needed: https://pay.evil.example/x",
+                      display=b"IT desk www.evil.example/help")
+    [row] = _svc(conn).emails(case_id, clearance="RED")
+    assert row["subject_defanged"] == (
+        "Action needed: hxxps://pay[.]evil[.]example/x")
+    assert row["header_from_display_defanged"] == (
+        "IT desk www[.]evil[.]example/help")
+    detail = _svc(conn).email(message_id, clearance="RED")
+    assert detail["subject_defanged"] == row["subject_defanged"]
+
+    # No note is no runs, so the console draws no note block at all.
+    _svc(conn).record_capture(
+        case_id=case_id, requested_url="https://quiet.example/",
+        capture_method="VICTIM_SUPPLIED", captured_by=owner)
+    quiet = [c for c in _svc(conn).captures(case_id, clearance="RED")
+             if c["requested_url"] == "https://quiet.example/"]
+    assert quiet[0]["note_segments"] == []

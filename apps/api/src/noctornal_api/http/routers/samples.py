@@ -71,10 +71,20 @@ access at all.
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import (
@@ -100,11 +110,21 @@ from noctornal_api.http.limits import (
 from noctornal_api.config import SAMPLE_CAP_ENV, cap_is_declared
 from noctornal_api.ratelimit import ip_subject
 from noctornal_api.samples import (
+    AUTHORISE_PERMISSION,
+    MAX_AUTHORISATION_DAYS,
     MAX_SAMPLE_BYTES,
+    PRESERVE,
+    QUEUE_STATES,
+    RETRIEVE_PERMISSION,
+    TICKET_DOWNLOAD,
+    TICKET_RETRIEVAL,
+    WORKING_SET,
+    AuthorisationRequired,
     PolicyNotDeclared,
     Sample,
     SampleError,
     SampleService,
+    disposition_setting,
     origin_split,
     policy_declared,
 )
@@ -121,9 +141,17 @@ router = APIRouter(prefix="/samples", tags=["samples"],
                    route_class=BodyCappedRoute)
 
 
-def _svc(conn: psycopg.Connection) -> SampleService:
-    from noctornal_api.samples import SampleStorage
-    return SampleService(conn, SampleStorage())
+def _svc(conn: psycopg.Connection, *, preserving: bool = False
+         ) -> SampleService:
+    """The service with the sample store, and the preservation store when
+    the caller is about to preserve or retrieve (F2, 2026-09-22).
+
+    `preserving` rather than always building both: `PreservationStorage()`
+    raises when its credentials are missing, and a queue read must not fail
+    on the absence of a store it will never touch."""
+    from noctornal_api.samples import PreservationStorage, SampleStorage
+    return SampleService(conn, SampleStorage(),
+                         PreservationStorage() if preserving else None)
 
 
 def _ticket_svc(conn: psycopg.Connection) -> SampleService:
@@ -209,9 +237,28 @@ class SampleOut(BaseModel):
     source_note: str | None
     assigned_to: str | None
     classification: str
+    #: Names for the two uuids above (2026-09-22). The console read
+    #: neither uuid, so who submitted a sample and who holds it were never
+    #: shown anywhere (ux13-lab:provenance-never-shown).
+    submitted_by_name: str | None = None
+    submitted_by_email: str | None = None
+    assigned_to_name: str | None = None
+    assigned_to_email: str | None = None
+    compartments: list[str] = []
+    #: F2 (0063). `bytes_disposition` is one of `in_sample_store`,
+    #: `preserved`, `destroyed` or `kept`; the `preserved_*` fields say
+    #: where a preserved sample went. `legal_hold` is the sample's own.
+    bytes_disposition: str = "in_sample_store"
+    preserved_bucket: str | None = None
+    preserved_key: str | None = None
+    preserved_at: str | None = None
+    legal_hold: bool = False
 
 
-def _out(s: Sample) -> SampleOut:
+def _out(s: Sample, names: dict | None = None) -> SampleOut:
+    names = names or {}
+    sub = names.get(str(s.submitted_by), {})
+    held = names.get(str(s.assigned_to), {}) if s.assigned_to else {}
     return SampleOut(
         id=str(s.id), case_id=str(s.case_id) if s.case_id else None,
         sha256=s.sha256, sha1=s.sha1, md5=s.md5,
@@ -222,7 +269,22 @@ def _out(s: Sample) -> SampleOut:
         submitted_at=s.submitted_at.isoformat(), source_note=s.source_note,
         assigned_to=str(s.assigned_to) if s.assigned_to else None,
         classification=s.classification,
+        submitted_by_name=sub.get("name"), submitted_by_email=sub.get("email"),
+        assigned_to_name=held.get("name"), assigned_to_email=held.get("email"),
+        compartments=sorted(s.compartments),
+        bytes_disposition=s.bytes_disposition,
+        preserved_bucket=s.preserved_bucket, preserved_key=s.preserved_key,
+        preserved_at=s.preserved_at.isoformat() if s.preserved_at else None,
+        legal_hold=s.legal_hold,
     )
+
+
+def _named(svc: SampleService, samples: list[Sample]) -> list[dict]:
+    """`_out` for a list, with every submitter and assignee resolved in
+    one query rather than one per row."""
+    names = svc.people([s.submitted_by for s in samples]
+                       + [s.assigned_to for s in samples])
+    return [_out(s, names).model_dump(mode="json") for s in samples]
 
 
 @router.get("/policy", response_model=dict)
@@ -246,6 +308,7 @@ def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
     declared, detail = policy_declared()
     split = origin_split()
     usable = split.split_problem is None
+    disposition, disposition_problem = disposition_setting()
     return {
         "policy_declared": declared,
         "policy_reference": detail if declared else None,
@@ -255,6 +318,11 @@ def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
         "sample_origin_problem": split.split_problem,
         # The cap `submit` enforces on THIS process, for the picker.
         "max_sample_bytes": MAX_SAMPLE_BYTES,
+        # What a rejection does with the bytes (F2), so the console's
+        # confirmation can say which will happen before it happens, and
+        # the reason when the setting is one this build refuses.
+        "rejected_sample_disposition": disposition,
+        "rejected_sample_disposition_problem": disposition_problem,
         "max_sample_bytes_declared": cap_is_declared(SAMPLE_CAP_ENV),
         "counsel_review_required": True,
         "notice": (
@@ -351,6 +419,8 @@ async def submit(
 
 @router.get("", response_model=dict)
 def queue(
+    state: str | None = Query(default=None),
+    case_id: UUID | None = Query(default=None),
     user: CurrentUser = Depends(require_global("sample.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -362,10 +432,66 @@ def queue(
     existence; and it can sit below its case, because `lab.sample` has no
     classification floor trigger, so the sample's own labels alone would
     leak the case's.
+
+    `state` picks one of the six queue states, and none means the working
+    set (quarantined, triaged, assigned). `case_id` narrows to one case.
+    Neither existed until 2026-09-22: the console filtered the working set
+    client-side, so three of its six filters could never show a row, and a
+    rejected sample and its reason became unreachable the moment it was
+    rejected (ux13-lab:rejected-filter-always-empty). A state outside the
+    six is a 400 naming them, never an empty list that reads as "none".
+    """
+    if state is not None and state.strip():
+        wanted = state.strip().upper()
+        if wanted not in QUEUE_STATES:
+            raise Problem(
+                400, "Invalid request",
+                f"unknown sample state {state!r}: filter by one of "
+                f"{', '.join(QUEUE_STATES)}, or leave it empty for the "
+                f"working set")
+        states: tuple[str, ...] = (wanted,)
+    else:
+        wanted = None
+        states = WORKING_SET
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    svc = _svc(conn)
+    rows = svc.queue(states=states, case_id=case_id,
+                     clearance=clearance.name, compartments=compartments)
+    return {"samples": _named(svc, rows), "state": wanted,
+            "states": list(states),
+            "case_id": str(case_id) if case_id else None}
+
+
+@router.get("/preserved", response_model=dict)
+def preserved_for_authorisation(
+    user: CurrentUser = Depends(require_global("sample.preserved.authorise")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The Security Officer's way in to the preserved samples (final review
+    U3, 2026-09-23).
+
+    Authorising and revoking a retrieval were offered only inside the Lab's
+    sample card, which is `GET /samples/{id}` under `sample.read`, and
+    SECURITY_OFFICER holds no `sample.read` (Security Officers read no case
+    content), and no case either. So the one role allowed to authorise got
+    403 on the Lab queue and on the card, and the two-person retrieval the
+    owner decided on could not be completed from the console.
+
+    Gated on the officer's own verb instead, step-up included, like the
+    break-glass review queue beside which the console shows it. It returns
+    each preserved sample's identity, where it is held, and its
+    authorisations, and none of its content (`preserved_for_authorisation`
+    says what is left out and why). Declared ahead of `/{sample_id}`, which
+    would otherwise take "preserved" for an id.
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
-    rows = _svc(conn).queue(clearance=clearance.name, compartments=compartments)
-    return {"samples": [_out(s).model_dump(mode="json") for s in rows]}
+    # No storage: this reads rows, and a list about who may have bytes must
+    # not fail over credentials for a store it never touches.
+    samples = SampleService(conn).preserved_for_authorisation(
+        clearance=clearance.name, compartments=compartments)
+    return {"samples": samples, "count": len(samples),
+            "authorise_permission": AUTHORISE_PERMISSION,
+            "retrieve_permission": RETRIEVE_PERMISSION}
 
 
 @router.get("/{sample_id}", response_model=dict)
@@ -395,10 +521,25 @@ def detail(
                          compartments=compartments)
     if sample is None:
         raise Problem(404, "Not found", "no such sample")
-    return {"sample": _out(sample).model_dump(mode="json"),
-            "analyses": svc.analyses(sample_id),
-            "detonations": svc.detonations(sample_id),
-            "custody": svc.custody(sample_id)}
+    # Recorded AFTER the label check, so a refused read writes nothing,
+    # and before the ledger is read, so the reader sees their own look.
+    # The console said "every look is a row" and no look ever was
+    # (ux13-lab:custody-ledger-hides-who-and-what, 2026-09-22).
+    svc.record_view(sample_id, actor_id=user.user_id)
+    out = {"sample": _named(svc, [sample])[0],
+           "analyses": svc.analyses(sample_id),
+           "detonations": svc.detonations(sample_id),
+           "custody": svc.custody(sample_id)}
+    if sample.preserved_key:
+        out["preservation"] = {
+            "authorisations": svc.preservation_authorisations(sample_id),
+            "you_hold_a_live_authorisation":
+                svc.live_preservation_authorisation(user.user_id, sample_id)
+                is not None,
+            "authorise_permission": AUTHORISE_PERMISSION,
+            "retrieve_permission": RETRIEVE_PERMISSION,
+        }
+    return out
 
 
 class DownloadTicketOut(BaseModel):
@@ -547,8 +688,12 @@ def _credential_presented(request: Request) -> None:
 
 
 def _download_actor(request: Request, conn: psycopg.Connection,
-                    sample_id: UUID, ticket: str | None) -> tuple[UUID, UUID | None]:
-    """Who is downloading, and the ticket that proved it if one did.
+                    sample_id: UUID, ticket: str | None
+                    ) -> tuple[UUID, UUID | None, str]:
+    """Who is downloading, the ticket that proved it if one did, and what
+    that ticket was minted FOR (0063): a download, or the retrieval of a
+    preserved sample. A session is always a download; a retrieval crosses
+    on a ticket or not at all.
 
     The two authentications cannot both be `Depends`: FastAPI resolves
     every dependency a route declares, so `Depends(_REQUIRE_DOWNLOAD)`
@@ -591,7 +736,7 @@ def _download_actor(request: Request, conn: psycopg.Connection,
     user = current_user(request, raw, conn)
     _REQUIRE_DOWNLOAD(user, conn)
     require_step_up(user, conn)
-    return user.user_id, None
+    return user.user_id, None, TICKET_DOWNLOAD
 
 
 @router.post("/{sample_id}/download",
@@ -643,7 +788,8 @@ def download(
     user: the ticket's holder is the actor the labels are checked against,
     the audit names, and the custody row records.
     """
-    actor_id, ticket_id = _download_actor(request, conn, sample_id, ticket)
+    actor_id, ticket_id, purpose = _download_actor(request, conn, sample_id,
+                                                   ticket)
     # The caller's ceiling, exactly as `detail()` twenty lines above already
     # does. Its absence here was the worst defect found in this codebase:
     # `detail()` 404'd an over-classified sample and this endpoint handed
@@ -654,10 +800,24 @@ def download(
     # withdrawn in between must bite before the bytes move.
     clearance, compartments = user_ceiling(conn, actor_id)
     try:
-        blob, digest = _svc(conn).download(
-            sample_id, actor_id=actor_id,
-            clearance=clearance.name, compartments=compartments,
-            ticket_id=ticket_id)
+        if purpose == TICKET_RETRIEVAL:
+            # A preserved sample (0063): the same archive, read from the
+            # preservation store under a live authorisation that
+            # `retrieve_preserved` checks again here, on the sample
+            # origin, because one revoked inside the ticket's minute must
+            # bite before a byte moves.
+            blob, digest = _svc(conn, preserving=True).retrieve_preserved(
+                sample_id, actor_id=actor_id,
+                clearance=clearance.name, compartments=compartments,
+                ticket_id=ticket_id)
+        else:
+            blob, digest = _svc(conn).download(
+                sample_id, actor_id=actor_id,
+                clearance=clearance.name, compartments=compartments,
+                ticket_id=ticket_id)
+    except AuthorisationRequired as exc:
+        raise Problem(451, "Unavailable for legal reasons",
+                      safe_detail(exc)) from exc
     except SampleError as exc:
         if "no such sample" in str(exc):
             # 404, not 409: "this sample exists but is not yours" is itself
@@ -679,12 +839,13 @@ def download(
 
 class RejectBody(BaseModel):
     reason: str = Field(min_length=1)
-    #: Defaults to destroying, because that is what a rejection means. The
-    #: opt-out exists for the one case the service refuses outright: a
-    #: sample under a legal hold, where preservation and destruction are
-    #: both legal obligations and the caller has to say which one they are
-    #: acting under. Making it a parameter rather than an override keeps
-    #: the choice in the request body, where the audit row records it.
+    #: True means "dispose of the bytes the way this deployment decided"
+    #: (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`): PRESERVED under a legal
+    #: hold by default since 2026-09-22 (F2), destroyed only where an
+    #: operator chose `destroy`. False records the rejection and disposes
+    #: of nothing. Until that date True meant destroy, on the first click
+    #: (ux13-lab:reject-one-click-destroy). Kept in the request body, where
+    #: the custody row records it.
     purge_bytes: bool = True
 
 
@@ -722,12 +883,22 @@ def reject(
     if _svc(conn).visible(sample_id, clearance=clearance.name,
                           compartments=comps) is None:
         raise Problem(404, "Not found", "no such sample")
+    disposition, _problem = disposition_setting()
     try:
-        return _out(_svc(conn).reject(sample_id, actor_id=user.user_id,
-                                      reason=body.reason,
-                                      purge_bytes=body.purge_bytes))
+        # The preservation store is built only when this rejection will
+        # use it, so a deployment that destroys, or a rejection that
+        # disposes of nothing, is not refused over credentials it never
+        # needed. A disposition this build does not know is refused by the
+        # service, naming the variable.
+        svc = _svc(conn, preserving=body.purge_bytes
+                   and disposition == PRESERVE)
+        rejected = svc.reject(sample_id, actor_id=user.user_id,
+                              reason=body.reason,
+                              purge_bytes=body.purge_bytes)
     except SampleError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(rejected, svc.people([rejected.submitted_by,
+                                      rejected.assigned_to]))
 
 
 class AssignBody(BaseModel):
@@ -815,3 +986,122 @@ def request_detonation(
             "submitted": False,
             "notice": "Recorded only. No sandbox integration exists; nothing "
                       "has been sent anywhere."}
+
+
+# ---------------------------------------------------------------------------
+# Preserved samples: two people to get one back out (F2, 0063, 2026-09-22)
+# ---------------------------------------------------------------------------
+
+class PreservationAuthoriseBody(BaseModel):
+    #: The person being authorised, by account id or email. The Security
+    #: Officer knows the person, not their uuid.
+    granted_to: str = Field(min_length=1)
+    #: What may be retrieved and why. Not decoration: an authorisation
+    #: whose scope nobody wrote down is one nobody can say was exceeded.
+    scope_note: str = Field(min_length=21)
+    legal_basis: str = Field(min_length=1)
+    duration_days: int = Field(default=7, ge=1, le=MAX_AUTHORISATION_DAYS)
+
+
+def _visible_or_404(conn: psycopg.Connection, user: CurrentUser,
+                    sample_id: UUID) -> Sample:
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    sample = _svc(conn).visible(sample_id, clearance=clearance.name,
+                                compartments=compartments)
+    if sample is None:
+        raise Problem(404, "Not found", "no such sample")
+    return sample
+
+
+@router.post("/{sample_id}/preserved/authorisations", response_model=dict,
+             status_code=201)
+def authorise_preserved_retrieval(
+    sample_id: UUID, body: PreservationAuthoriseBody,
+    user: CurrentUser = Depends(require_global("sample.preserved.authorise")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Authorise somebody ELSE to retrieve one preserved sample.
+
+    `sample.preserved.authorise` is held by SECURITY_OFFICER alone and
+    `sample.preserved.retrieve` by CASE_OWNER alone, so the person who
+    wants the material and the person who permits it are structurally
+    different people. Self-authorisation is refused here, in the service,
+    and by a CHECK in 0063. Step-up, because the permission requires it.
+    """
+    _visible_or_404(conn, user, sample_id)
+    svc = _svc(conn)
+    try:
+        granted_to = svc.resolve_account(body.granted_to)
+        if granted_to == user.user_id:
+            raise SampleError(
+                "you cannot authorise your own retrieval: the authorisation "
+                "is the control, and authorising yourself removes it")
+        auth_id = svc.grant_preservation_authorisation(
+            sample_id, granted_to=granted_to, granted_by=user.user_id,
+            scope_note=body.scope_note, legal_basis=body.legal_basis,
+            duration=timedelta(days=body.duration_days))
+    except SampleError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return {"id": str(auth_id), "granted_to": str(granted_to),
+            "expires_in_days": body.duration_days}
+
+
+@router.post("/{sample_id}/preserved/authorisations/{authorisation_id}/revoke",
+             response_model=dict)
+def revoke_preserved_retrieval(
+    sample_id: UUID, authorisation_id: UUID,
+    user: CurrentUser = Depends(require_global("sample.preserved.authorise")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """End an authorisation early. It stays on the record as revoked."""
+    _visible_or_404(conn, user, sample_id)
+    try:
+        _svc(conn).revoke_preservation_authorisation(
+            authorisation_id, sample_id=sample_id, actor_id=user.user_id)
+    except SampleError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return {"id": str(authorisation_id), "revoked": True}
+
+
+@router.post("/{sample_id}/preserved/retrieval-ticket",
+             response_model=DownloadTicketOut, status_code=201)
+def mint_retrieval_ticket(
+    sample_id: UUID,
+    request: Request,
+    user: CurrentUser = Depends(require_global("sample.preserved.retrieve")),
+    _fresh: None = Depends(require_step_up),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> DownloadTicketOut:
+    """A one-shot ticket to retrieve ONE preserved sample, spent at the
+    sample origin's download path exactly as a download ticket is.
+
+    Why a ticket and not a route of its own: a preserved sample's bytes are
+    sample bytes, invariant 10 puts them on the separate origin, and the
+    process there serves the download path and nothing else
+    (`app._allowed_on_sample_origin`). A second byte-serving route would be
+    a second door on the one process the split keeps narrow. The ticket
+    carries its purpose, so the redemption re-reads
+    `sample.preserved.retrieve` rather than `sample.download`, reads the
+    preservation store, and checks the live authorisation again.
+
+    451 when the caller holds no live authorisation for this sample: the
+    two-person control working, audited as a refusal.
+    """
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    try:
+        ticket = _ticket_svc(conn).issue_retrieval_ticket(
+            sample_id, actor_id=user.user_id, clearance=clearance.name,
+            compartments=compartments, session_id=user.session_id,
+            ip_hash=_ip_hash(request))
+    except AuthorisationRequired as exc:
+        raise Problem(451, "Unavailable for legal reasons",
+                      safe_detail(exc)) from exc
+    except SampleError as exc:
+        if "no such sample" in str(exc):
+            raise Problem(404, "Not found", "no such sample") from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    sample_origin = origin_split().sample or ""
+    return DownloadTicketOut(
+        ticket=ticket.raw,
+        expires_at=ticket.expires_at.isoformat(),
+        download_url=_download_url(sample_origin, sample_id))

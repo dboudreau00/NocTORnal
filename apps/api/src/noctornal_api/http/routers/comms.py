@@ -109,7 +109,21 @@ def _visible_cases(conn: psycopg.Connection, user: CurrentUser,
               -- because of it. Without these two lines the impersonation
               -- query returned publisher handles and source URLs out of a
               -- case the caller cannot open.
-              AND c.classification <= u.tlp_clearance
+              --
+              -- Clearance counts a live break-glass grant, global or on
+              -- that case, at its level: the gate does, and so does
+              -- CaseService.list_for_user, which this mirrors. Comparing
+              -- u.tlp_clearance alone left out a case a GLOBAL grant opened,
+              -- while the case-less block ceiling applied below was raised
+              -- by that same grant (final review U7, 2026-09-23).
+              -- Compartments are never widened by a grant.
+              AND c.classification <= GREATEST(u.tlp_clearance, COALESCE(
+                    (SELECT max(bg.granted_classification)
+                       FROM iam.break_glass bg
+                      WHERE bg.user_id = u.id AND bg.revoked_at IS NULL
+                        AND bg.expires_at > now()
+                        AND (bg.case_id IS NULL OR bg.case_id = c.id)),
+                    u.tlp_clearance))
               AND c.compartments <@ u.compartments""",
         (user.user_id, exclude)).fetchall()
     return tuple(r[0] for r in rows)
@@ -234,7 +248,7 @@ def correlate(
     disclosure policy (open question 5), and this endpoint is not the
     place to decide it.
     """
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
         hits = CommsService(conn, clearance=clearance.name,
                             compartments=compartments).correlate(
@@ -260,7 +274,7 @@ def co_declared(
     running Jabber + Tox + Session with a PGP key operates differently
     from one running a Telegram bot and nothing else.
     """
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"reference": reference,
             "identifiers": CommsService(
                 conn, clearance=clearance.name, compartments=compartments
@@ -279,7 +293,7 @@ def shared_devices(
     and a device, and concluding the identities are one person is an
     attribution that belongs in an ATTRIBUTED_TO edge with a confidence.
     """
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"leads": CommsService(
         conn, clearance=clearance.name, compartments=compartments
     ).shared_devices(case_id)}
@@ -339,7 +353,7 @@ def contact_block(
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     # The BLOCK's own labels, not just its case's: a contact block can be
     # classified above its case, and this returns raw_text -- the whole
     # forum post. Answered as 404 either way, because a status code must
@@ -366,6 +380,9 @@ def impersonation(
     """
     # CR5: the caller's own ceiling, threaded in. This used to filter on
     # case_id alone, and a block may be classified above its case.
+    # Deliberately WITHOUT `case_id=` (2026-09-23): the candidates come
+    # from every case the caller can see, so a break-glass grant on this
+    # one must not raise what they read of the others.
     ceiling, comps = user_ceiling(conn, user.user_id)
     return {"candidates": ContactBlockService(conn).impersonation_candidates(
         case_id, visible_case_ids=_visible_cases(conn, user, case_id),
@@ -507,7 +524,7 @@ def verifications(
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"verifications": PgpService(conn).verifications(
                 case_id, clearance=clearance.name, compartments=compartments),
             # Cached per process. This called gpg --version on EVERY
@@ -534,7 +551,7 @@ def unverified(
     Without the split, "not confirmed" and "not checked" look identical,
     and an analyst reads an unchecked claim as a checked-and-failed one.
     """
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"claims": PgpService(conn).unverified_claims(
         case_id, clearance=clearance.name, compartments=compartments)}
 
@@ -603,7 +620,7 @@ def contact_graph(
 ) -> dict:
     """Who talks to whom, from metadata alone -- which is what survives
     minimisation."""
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"conversations": CommsService(
         conn, clearance=clearance.name, compartments=compartments
     ).contact_graph(case_id)}
@@ -707,7 +724,7 @@ def co_participation(
     not been observed talking to each other, and invariant 4 exists
     because that distinction has to survive.
     """
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
         return CoParticipationService(
             conn, clearance=clearance.name, compartments=compartments

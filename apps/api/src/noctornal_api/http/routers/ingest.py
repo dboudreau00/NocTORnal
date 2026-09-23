@@ -259,7 +259,11 @@ def _case_allows(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
         ctx = PgAccessResolver(conn).resolve(
             user_id=user.user_id, case_id=case_id, permission_key=permission_key,
             object_classification=eff_cls, object_compartments=eff_comp,
-            mfa_satisfied_at=user.session_mfa_at)
+            mfa_satisfied_at=user.session_mfa_at,
+            # A question, so no audit row of any kind: one queue load asked
+            # it per case and per label set, and each answer counted as a
+            # break-glass use (final review U19 fix round, 2026-09-23, g02).
+            count_use=False)
     except (AccessResolutionError, Problem):
         return False
     return evaluate(ctx).allowed

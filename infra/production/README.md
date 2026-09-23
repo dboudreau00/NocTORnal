@@ -242,7 +242,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Fifteen checks, each with the evidence behind it and, when it fails, the
+Sixteen checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -266,7 +266,7 @@ working.
 
 ### What stays red, and what a red check refuses
 
-Four of the fifteen are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the sixteen are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -304,8 +304,12 @@ until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
 not a control: a false one produces a working system and an unlawful
 deployment. Counsel has to write the policy first, and it has to settle who
 is notified when screening trips, what the `REJECTED` path does with the
-bytes (this build **destroys** them, which is the wrong answer in a
-jurisdiction that requires preservation), the reporting obligations in both
+bytes (this build **preserves** them by default: moved into the
+object-locked `PRESERVE_BUCKET` under a legal hold, still encrypted, and
+retrievable only by a lead investigator a Security Officer has authorised.
+Set `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy` only where the policy
+requires destruction, and destruction is still refused under a legal
+hold), the reporting obligations in both
 operating jurisdictions, and whether you are authorised to hold known-
 material hash sets at all. Then point the variable at something an auditor
 can follow and restart the API.

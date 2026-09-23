@@ -446,7 +446,7 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                 ("MEMBER_OF", lynx, halcyon, dict(
                     attrs={"role": "access broker"},
                     valid_from=datetime(2026, 1, 15, tzinfo=timezone.utc),
-                    weight=1.0, confidence="MODERATE",
+                    weight=1.0,
                     assertion=AssertionInput(
                         basis="DIRECT_OBSERVATION", created_by=owner,
                         reliability="B", credibility="2", confidence="MODERATE",
@@ -454,7 +454,7 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                         external_ref="nightmarket/thread/8841/post/1",
                     ))),
                 ("POSTS_ON", lynx, forum, dict(
-                    attrs={"post_count": 34}, weight=34.0, confidence="HIGH",
+                    attrs={"post_count": 34}, weight=34.0,
                     assertion=AssertionInput(
                         basis="DIRECT_OBSERVATION", created_by=owner,
                         reliability="A", credibility="1", confidence="HIGH",
@@ -462,7 +462,6 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                     ))),
                 ("VOUCHED_FOR", monsoon, lynx, dict(
                     attrs={"context": "completed escrow deal"},
-                    confidence="MODERATE",
                     assertion=AssertionInput(
                         basis="DIRECT_OBSERVATION", created_by=owner,
                         reliability="C", credibility="3", confidence="MODERATE",
@@ -474,14 +473,12 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                 ("ACCUSED_SCAM", lynx, monsoon, dict(
                     attrs={"claimed_loss_btc": "0.4"},
                     valid_from=datetime(2026, 5, 2, tzinfo=timezone.utc),
-                    confidence="LOW",
                     assertion=AssertionInput(
                         basis="THIRD_PARTY_REPORT", created_by=owner,
                         reliability="D", credibility="4", confidence="LOW",
                         external_ref="partner report NM-2026-0431",
                     ))),
                 ("CONTROLS", lynx, wallet, dict(
-                    confidence="MODERATE",
                     assertion=AssertionInput(
                         basis="ANALYST_INFERENCE", created_by=owner,
                         reliability="C", credibility="3", confidence="MODERATE",
@@ -494,7 +491,6 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                 # Not in the requested five, but it is what the VICTIM node is
                 # for — an unconnected victim tells the analyst nothing.
                 ("BROKERED_ACCESS", lynx, victim, dict(
-                    confidence="LOW",
                     assertion=AssertionInput(
                         basis="ANALYST_INFERENCE", created_by=owner,
                         reliability="D", credibility="4", confidence="LOW",
@@ -700,7 +696,7 @@ def cmd_demo_network(args: argparse.Namespace) -> None:
             graph.create_edge(
                 case_id=case_id, edge_type=etype,
                 src_node_id=ids[src], dst_node_id=ids[dst],
-                created_by=owner, sign=sign, confidence="MODERATE",
+                created_by=owner, sign=sign,
                 # World time, so the timeline scrubber and trust decay both
                 # have something real to work with.
                 valid_from=ago(months),

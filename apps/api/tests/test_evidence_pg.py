@@ -109,6 +109,24 @@ def test_ingest_hashes_and_stores_and_records_custody(conn, case, svc):
     assert [e.action for e in log] == ["ACQUIRED"]
 
 
+def test_a_fresh_acquisition_records_its_read_back_as_a_verified_hash(conn, case, svc):
+    """ux07 custody-failed-hash-shown-as-not-checked (2026-09-22). Ingest
+    reads the stored object back and compares digests BEFORE it writes the
+    ACQUIRED row, and then wrote that row with hash_verified NULL, which
+    the custody view showed as "hash not checked" on every clean exhibit.
+    A re-acquisition of bytes already held stores nothing and reads
+    nothing back, so it rightly attests nothing."""
+    case_id, uid = case
+    data = b"read-back-" + uuid4().hex.encode()
+    res = _ingest(svc, case_id, uid, data)
+    [acquired] = svc.custody_log(res.evidence_id)
+    assert acquired.action == "ACQUIRED" and acquired.hash_verified is True
+    _ingest(svc, case_id, uid, data)
+    again = [e.hash_verified for e in svc.custody_log(res.evidence_id)
+             if e.action == "ACQUIRED"]
+    assert again == [True, None]
+
+
 def test_view_returns_original_bytes_and_logs_access(conn, case, svc):
     case_id, uid = case
     data = b"view-me-" + uuid4().hex.encode()

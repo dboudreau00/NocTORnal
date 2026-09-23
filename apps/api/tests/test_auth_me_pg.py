@@ -140,3 +140,64 @@ def test_me_reflects_a_renamed_account(conn, client):
                  (uid,))
     body = client.get("/api/v1/auth/me", headers=_auth(token)).json()
     assert body["display_name"] == "Mia Corrected"
+
+
+def test_me_states_the_two_limits_the_session_runs_under(conn, client):
+    """expiry-drops-context (2026-09-22): the console warns five minutes
+    before either limit, so it has to know them. The idle timeout is the
+    server's own constant, and the absolute limit is a DISTANCE the
+    browser can count down without trusting its clock to agree with this
+    one. A session minted a moment ago has close to its full 12 hours."""
+    from noctornal_api.security.sessions import ABSOLUTE_LIFETIME, IDLE_TIMEOUT
+    _, email, _secret = _make_user(conn)
+    body = client.get("/api/v1/auth/me",
+                      headers=_auth(_session(conn, email))).json()
+    assert body["idle_timeout_seconds"] == int(IDLE_TIMEOUT.total_seconds())
+    full = int(ABSOLUTE_LIFETIME.total_seconds())
+    assert full - 120 <= body["session_expires_in_seconds"] <= full
+
+
+def test_me_counts_down_the_session_it_was_asked_on(conn, client):
+    """The distance belongs to the presenting session, not to the account's
+    newest one: two sessions minted hours apart report different limits."""
+    _, email, _secret = _make_user(conn)
+    old = _session(conn, email)
+    conn.execute(
+        "UPDATE iam.session SET expires_at = now() + interval '1 hour' "
+        "WHERE user_id = (SELECT id FROM iam.app_user WHERE email = %s)",
+        (email,))
+    fresh = _session(conn, email)
+    near = client.get("/api/v1/auth/me", headers=_auth(old)).json()
+    far = client.get("/api/v1/auth/me", headers=_auth(fresh)).json()
+    assert 3400 <= near["session_expires_in_seconds"] <= 3600
+    assert far["session_expires_in_seconds"] > 11 * 3600
+
+
+def test_me_says_how_long_the_step_up_gate_stays_open(conn, client):
+    """Fix round, 2026-09-22: the console asks for a fresh sign-in BEFORE a
+    step-up gated request once this reaches zero, because every refused
+    POST /auth/recovery-codes spends a token of its rate limit. The gate
+    it describes is the route's own: open (and issuing) while this is
+    above zero, shut (403) once it is zero."""
+    from noctornal_api.security.sessions import STEP_UP_FRESHNESS
+    _, email, _secret = _make_user(conn)
+    token = _session(conn, email)
+    full = int(STEP_UP_FRESHNESS.total_seconds())
+    body = client.get("/api/v1/auth/me", headers=_auth(token)).json()
+    assert full - 120 <= body["step_up_fresh_seconds"] <= full
+    ok = client.post("/api/v1/auth/recovery-codes", headers=_auth(token))
+    assert ok.status_code == 200, ok.text
+
+    conn.execute(
+        "UPDATE iam.session SET mfa_satisfied_at = now() - interval '20 minutes' "
+        "WHERE user_id = (SELECT id FROM iam.app_user WHERE email = %s)", (email,))
+    stale = client.get("/api/v1/auth/me", headers=_auth(token)).json()
+    assert stale["step_up_fresh_seconds"] == 0
+    refused = client.post("/api/v1/auth/recovery-codes", headers=_auth(token))
+    assert refused.status_code == 403, refused.text
+
+    conn.execute(
+        "UPDATE iam.session SET mfa_satisfied_at = NULL "
+        "WHERE user_id = (SELECT id FROM iam.app_user WHERE email = %s)", (email,))
+    never = client.get("/api/v1/auth/me", headers=_auth(token)).json()
+    assert never["step_up_fresh_seconds"] == 0

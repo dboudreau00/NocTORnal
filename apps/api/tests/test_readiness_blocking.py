@@ -118,7 +118,14 @@ def test_the_register_names_are_unique_and_in_register_order():
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    assert len(readiness.CHECK_NAMES) == 15, readiness.CHECK_NAMES
+    assert len(readiness.CHECK_NAMES) == 16, readiness.CHECK_NAMES
+    # 2026-09-22 (docs/17 F2, F24): the preservation bucket, proven
+    # write-once the same way as the evidence bucket, and NOT blocking.
+    # Adding a blocker is a decision about what the product refuses to do,
+    # and a store that cannot hold a rejected sample is a finding for the
+    # operator, not a reason to stop a collection poll.
+    assert "preservation_bucket_object_lock" in readiness.CHECK_NAMES
+    assert "preservation_bucket_object_lock" not in readiness.BLOCKING_CHECKS
     # 2026-09-11: `kek_ring_opens_stored_secrets` (the ring opens what is
     # stored, counted) and `evidence_size_cap_declared` (the cap is a
     # declaration, and the enforced value is the environment's).
@@ -167,8 +174,9 @@ def test_the_report_lists_the_blocking_failures_it_derived():
 
 
 def test_blocking_failures_runs_only_the_blocking_probes():
-    """The reason the helper exists. The other nine checks include a
-    Redis PING, a MinIO round trip and an Alembic script scan, and this
+    """The reason the helper exists. The other checks include a Redis
+    PING, two object-store probes that each attempt a delete (the WORM
+    proofs, 2026-09-22) and an Alembic script scan, and this
     runs on the collection route's request path: a poll that waits on the
     object store to find out whether it may proceed has turned a
     readiness refusal into a latency bug.

@@ -22,6 +22,7 @@ from noctornal_api.security import envelope, passwords
 from noctornal_api.security.access import (
     AccessContext,
     AccessResolutionError,
+    evaluate,
     tlp_from_name,
 )
 from noctornal_api.security.auth import AuthUser, UserStore
@@ -207,7 +208,20 @@ class PgAccessResolver:
         object_classification: str,
         object_compartments: frozenset[str],
         mfa_satisfied_at: datetime | None,
+        count_use: bool = True,
     ) -> AccessContext:
+        """`count_use=False` is for a gate asked as a QUESTION rather than
+        a request being let through: `search._allowed_on_case` (what a
+        response may name, for a request whose own gate has already run),
+        `ingest._case_allows` (which rows a queue listing may show) and
+        `live._recheck` (whether to keep streaming to a socket whose
+        opening was already counted). Counting them told the reviewing
+        officer each inspector open was two uses of the grant, and each
+        queue load or live event one more (final review U19 and its fix
+        round, 2026-09-23). The default stays True
+        on purpose: a new caller that forgets the flag over-counts, which
+        an officer can see through, rather than under-counts, which they
+        cannot."""
         # Every lookup fails CLOSED: an unknown permission/user or an
         # out-of-range TLP value raises AccessResolutionError (→ 403), never
         # a 500 that could mask a bad caller.
@@ -257,12 +271,22 @@ class PgAccessResolver:
         # possible (base < object <= granted). An analyst reading a CLEAR
         # node under an AMBER grant has not USED the grant, and counting it
         # would tell the reviewing officer the emergency was busier than it
-        # was. The connection is autocommit, so the count survives whatever
-        # the request does next.
+        # was. And only once the gate has ALLOWED the request: see the end
+        # of this method. The connection is autocommit, so the count
+        # survives whatever the request does next.
         #
         # A grant whose classification does not parse is ignored, not
         # fatal: failing closed here means "no raise", not "every request
         # from this user 403s until an officer revokes the row".
+        #
+        # The HIGHEST live level decides, not the grant that ends last.
+        # Ordered by expiry alone, an analyst holding an 8-hour AMBER grant
+        # who invoked RED for one hour was told "raised to RED" while this
+        # kept reading the AMBER row, because it ends later (ux15
+        # breakglass-grant-raises-nothing follow-up, 2026-09-23). Each live
+        # grant was justified and is reviewed on its own, so the one that
+        # raises most is the one in force, and its use is what is counted.
+        # `core.tlp` is an enum declared CLEAR..RED, so DESC is highest.
         grant = self._c.execute(
             """SELECT id, granted_classification
                  FROM iam.break_glass
@@ -271,10 +295,11 @@ class PgAccessResolver:
                   AND expires_at > now()
                   AND granted_classification IS NOT NULL
                   AND (case_id IS NULL OR case_id = %s)
-                ORDER BY expires_at DESC
+                ORDER BY granted_classification DESC, expires_at DESC
                 LIMIT 1""",
             (user_id, case_id),
         ).fetchone()
+        use_of = None
         if grant is not None:
             try:
                 granted = tlp_from_name(grant[1])
@@ -283,9 +308,7 @@ class PgAccessResolver:
                 granted = None
             if granted is not None and granted > user_clearance:
                 if user_clearance < needed <= granted:
-                    from noctornal_api.break_glass import BreakGlassService
-                    BreakGlassService(self._c).record_use(
-                        grant[0], action=permission_key, case_id=case_id)
+                    use_of = grant[0]
                 user_clearance = granted
 
         assignment = self._c.execute(
@@ -304,7 +327,7 @@ class PgAccessResolver:
             ).fetchall()
             role_permissions = frozenset(p[0] for p in perms)
 
-        return AccessContext(
+        ctx = AccessContext(
             permission_key=permission_key,
             permission_requires_step_up=requires_step_up,
             role_permissions=role_permissions,
@@ -315,6 +338,19 @@ class PgAccessResolver:
             object_compartments=object_compartments,
             mfa_satisfied_at=mfa_satisfied_at,
         )
+        # Counted AFTER the decision, and only when it allows. The use used
+        # to be recorded above, while the context was still being built, so
+        # a request the gate then refused (no such permission on the case
+        # role, a compartment the caller is not read into, no assignment at
+        # all under a global grant) still added to `action_count` and wrote
+        # a BREAK_GLASS_ACTION row for access that never happened (final
+        # review U19, 2026-09-23). `evaluate()` is pure, so asking it here
+        # is the same decision every caller then makes.
+        if use_of is not None and count_use and evaluate(ctx).allowed:
+            from noctornal_api.break_glass import BreakGlassService
+            BreakGlassService(self._c).record_use(
+                use_of, action=permission_key, case_id=case_id)
+        return ctx
 
     def resolve_global(
         self,

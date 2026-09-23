@@ -14,10 +14,13 @@ Per `CONVENTIONS.md`, every invariant has a test named after it.
 """
 from __future__ import annotations
 
+import time
+
 from noctornal_api.deception import (
     HOSTILE_MEDIA_TYPES,
     ParsedEmail,
     defang,
+    defang_text,
     is_hostile_media_type,
     parse_eml,
     parse_received_chain,
@@ -543,3 +546,230 @@ def test_defang_breaks_a_host_that_carries_no_scheme():
     # The scheme-carrying forms still behave.
     assert defang("https://evil.example/x") == "hxxps://evil[.]example/x"
     assert defang("http://a.b.example") == "hxxp://a[.]b[.]example"
+
+
+def test_defang_breaks_a_bare_host_whose_path_has_a_doubled_slash():
+    """The authority branch took index 2 whenever index 1 was empty, which
+    a doubled slash in a scheme-less PATH also produces: the host stayed
+    live and a path segment got the brackets. `defang_text` hands this
+    function bare `www.` hosts, so the gap became reachable on 2026-09-22."""
+    assert defang("www.evil.example//login") == "www[.]evil[.]example//login"
+    assert defang("evil.example//a/b") == "evil[.]example//a/b"
+    # A protocol-relative URL still has its authority at index 2.
+    assert defang("//cdn.evil.example/x") == "//cdn[.]evil[.]example/x"
+
+
+# --- the body as the console shows it (ux14-deception, 2026-09-22) --------
+
+_BEC_BODY = (
+    "Hi,\n\nDetails are on the portal:\n\n"
+    "  https://latticework-portal.secure-billing.example/verify?ref=7f28\n\n"
+    "or www.lattice-invoice.example/r/7f28. Thanks.\n")
+
+
+def test_the_body_text_is_defanged_wherever_it_names_a_url():
+    """ux14-deception:body-url-not-defanged. The detail card showed the
+    attacker's working URL in the one block an analyst copies from, right
+    above a list that showed it defanged. Every URL in the runs is the
+    defanger's output, and nothing live survives anywhere in the text."""
+    runs = defang_text(_BEC_BODY)
+    joined = "".join(r["text"] for r in runs)
+    assert "https://" not in joined and "http://" not in joined
+    assert "secure-billing.example" not in joined
+    assert "www.lattice-invoice.example" not in joined
+    urls = [r["text"] for r in runs if r["defanged"]]
+    assert urls == [
+        "hxxps://latticework-portal[.]secure-billing[.]example/verify?ref=7f28",
+        "www[.]lattice-invoice[.]example/r/7f28",
+    ]
+
+
+def test_the_body_runs_keep_every_character_the_sender_wrote():
+    """Defanging changes the URLs and nothing else: the prose between them
+    and the sentence's own full stop survive, so the runs are the message
+    with its links broken, not a paraphrase of it."""
+    runs = defang_text(_BEC_BODY)
+    plain = [r["text"] for r in runs if not r["defanged"]]
+    assert plain[0] == "Hi,\n\nDetails are on the portal:\n\n  "
+    assert plain[-1] == ". Thanks.\n"
+    # Refanging the marked runs gives the original body back exactly.
+    refanged = "".join(
+        r["text"].replace("hxxp", "http").replace("[.]", ".") for r in runs)
+    assert refanged == _BEC_BODY
+
+
+def test_the_body_defanger_cuts_an_http_url_where_the_extractor_does():
+    """The URL list and the body must agree about where a URL ends, or the
+    two views of one message would disagree about what was sent."""
+    parsed = parse_eml(
+        b"From: a@corp.example\r\nSubject: x\r\n\r\n"
+        + _BEC_BODY.replace("\n", "\r\n").encode())
+    marked = [r["text"] for r in defang_text(parsed.body_text) if r["defanged"]]
+    assert [defang(u) for u in parsed.extracted_urls] == [
+        u for u in marked if u.startswith("hxxp")]
+
+
+def test_an_empty_body_has_no_runs():
+    assert defang_text(None) == []
+    assert defang_text("") == []
+    assert defang_text("no links here.") == [
+        {"text": "no links here.", "defanged": False}]
+
+
+def _live(text: str) -> str:
+    """The text a reader would see: every run joined."""
+    return "".join(r["text"] for r in defang_text(text))
+
+
+def test_a_scheme_glued_to_a_word_still_gets_defanged():
+    """The body pattern began with the extractor's `\\b`, and there is no
+    word boundary between `_` or a digit and the `h` of `https`, so these
+    came back untouched. A linkifier finds the `https://` inside them
+    regardless (the verifier of the 2026-09-22 body fix)."""
+    assert _live("click_https://evil.example/x") == (
+        "click_hxxps://evil[.]example/x")
+    assert _live("1https://evil.example/x") == "1hxxps://evil[.]example/x"
+    assert _live("see:https://evil.example/x.") == (
+        "see:hxxps://evil[.]example/x.")
+    assert _live("go_www.evil.example now") == "go_www[.]evil[.]example now"
+
+
+def test_a_bare_host_with_a_path_is_a_url_and_gets_defanged():
+    """No scheme and no `www.`: `secure-billing.example/verify` is still a
+    URL, and every chat client links it (the same verifier)."""
+    assert _live("visit secure-billing.example/verify today") == (
+        "visit secure-billing[.]example/verify today")
+    assert _live("at evil.example:8443/login.") == (
+        "at evil[.]example:8443/login.")
+    assert _live("(lattice-invoice.example/r/7f28)") == (
+        "(lattice-invoice[.]example/r/7f28)")
+    assert _live("pay.evil.example?ref=1") == "pay[.]evil[.]example?ref=1"
+    runs = defang_text("visit secure-billing.example/verify today")
+    assert [r["text"] for r in runs if r["defanged"]] == [
+        "secure-billing[.]example/verify"]
+
+
+def test_prose_with_dots_in_it_is_left_as_the_writer_wrote_it():
+    """The line the bare-host rule stops at. A hostname with nothing after
+    it is a hostname, which this pane shows as written everywhere else
+    (the sending host, the Received chain); matching every dotted word
+    would bracket file names and product names in the sender's prose. An
+    address is not a URL either."""
+    for prose in ("Attached is invoice.pdf, see Node.js docs.",
+                  "Section 3.2, e.g. the v1.2/v1.3 notes, and/or U.S./EU.",
+                  "Write to cfo@corp.example today.",
+                  "The host was vps-4471.hostmarket.example at the time."):
+        assert defang_text(prose) == [{"text": prose, "defanged": False}]
+
+
+def test_a_url_inside_a_url_is_defanged_too():
+    """An open redirect carries the real destination in its query, and a
+    linkifier finds the inner `https://` on its own, so defanging only the
+    outer URL handed back a working link to the actor."""
+    assert defang("https://www.google.example/url?q=https://evil.example/x") == (
+        "hxxps://www[.]google[.]example/url?q=hxxps://evil[.]example/x")
+    assert defang("https://t.example/r/http://evil.example/x&y=1") == (
+        "hxxps://t[.]example/r/hxxp://evil[.]example/x&y=1")
+    assert defang("https://t.example/r?u=www.evil.example/x") == (
+        "hxxps://t[.]example/r?u=www[.]evil[.]example/x")
+    assert defang("t.example/r?u=https://evil.example") == (
+        "t[.]example/r?u=hxxps://evil[.]example")
+    # And through the body defanger, which hands defang whole URLs.
+    assert "https://" not in _live(
+        "Open https://safe.example/go?to=https://evil.example/pay now")
+
+
+def test_a_bare_host_whose_query_carries_a_url_is_bracketed_itself():
+    """Final review C5, 2026-09-23. `parts[0].endswith(":")` was taken to
+    mean "parts[0] is a scheme", and `host?next=https:` ends with a colon
+    too, so only the EMBEDDED host was bracketed. The actor's own host
+    stayed live in a run the pane marks as defanged, and the capture row's
+    copy button copied it that way."""
+    assert defang("evil.example?next=https://google.com") == (
+        "evil[.]example?next=hxxps://google[.]com")
+    assert defang("evil.example#https://x.y") == "evil[.]example#hxxps://x[.]y"
+    assert defang("evil.example:8080?x=http://a.b") == (
+        "evil[.]example:8080?x=hxxp://a[.]b")
+    # The embedded ftp host was bracketed only by accident of the bug; it
+    # stays bracketed on purpose now, and a leading one is unchanged.
+    assert defang("evil.example?u=ftp://a.b") == "evil[.]example?u=ftp://a[.]b"
+    assert defang("ftp://a.b/c") == "ftp://a[.]b/c"
+    # So is an embedded host under any other scheme, which the first cut
+    # of this fix left live (its verifier, 2026-09-23), in a bare host's
+    # query and in a scheme-led URL's alike.
+    assert defang("evil.example?next=ftps://g.c") == (
+        "evil[.]example?next=ftps://g[.]c")
+    assert defang("https://a.b/?n=sftp://c.d&x=1") == (
+        "hxxps://a[.]b/?n=sftp://c[.]d&x=1")
+    # Idempotent: a value defanged already comes back as it went in.
+    once = defang("evil.example?next=https://google.com&u=ftps://g.c")
+    assert defang(once) == once
+    # A dotted "scheme" is a host until proven otherwise.
+    assert defang("evil.example://x") == "evil[.]example://x"
+    # Through the body defanger, which reaches bodies, notes, subjects and
+    # display names: the whole run is the defanger's and nothing is live.
+    runs = defang_text("Please verify at secure-billing.example?ref="
+                       "https://www.bank.com today.")
+    assert [r["text"] for r in runs if r["defanged"]] == [
+        "secure-billing[.]example?ref=hxxps://www[.]bank[.]com"]
+    for shape in ("evil.example?next=https://google.com",
+                  "evil.example#https://x.y",
+                  "evil.example:8080?x=http://a.b"):
+        live = _live("see " + shape + " now")
+        assert "evil.example" not in live and "://" not in live.replace(
+            "hxxp://", "").replace("hxxps://", ""), live
+
+
+def test_a_helo_name_or_message_id_with_a_path_is_served_defanged():
+    """Final review U17, 2026-09-23. `_RECEIVED_FROM` and `_domain_of` keep
+    `/`, `?` and `#`, so EHLO `pay.evil.example/verify` and Message-ID
+    `<a@pay.evil.example/verify>` gave a "host" that is a URL, and the
+    email row drew both live. The service now serves a defanged form of
+    each beside the raw one, and a plain hostname passes through as
+    written, as this pane shows hostnames everywhere else."""
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from noctornal_api.deception import _email_row, _sending_host
+
+    [hop] = parse_received_chain(
+        ["from pay.evil.example/verify (unknown [203.0.113.9]) by"
+         " mx.victim.example with ESMTP; Mon, 20 Jul 2026 09:00:00 +0000"],
+        trusted=())
+    # Reachable: the parser keeps the path, so the fix belongs downstream.
+    assert hop.from_host == "pay.evil.example/verify"
+    origin = _sending_host(
+        (hop.seq, hop.from_host, hop.from_ip, hop.by_host, None, True))
+    assert origin["host_defanged"] == "pay[.]evil[.]example/verify"
+    assert origin["observed_by_defanged"] == "mx.victim.example"
+    assert origin["host"] == "pay.evil.example/verify"     # raw kept beside
+    plain = _sending_host((1, "vps-9.hostmarket.example", "203.0.113.7",
+                           "mx.corp.example", None, True))
+    assert plain["host_defanged"] == "vps-9.hostmarket.example"
+
+    row: list = [None] * 34
+    row[0], row[1], row[2], row[28] = uuid4(), uuid4(), uuid4(), uuid4()
+    row[3] = "<a1b2@pay.evil.example/verify>"
+    row[29] = datetime(2026, 7, 20, 9, tzinfo=timezone.utc)
+    out = _email_row(row)
+    assert out["message_id_domain"] == "pay.evil.example/verify"
+    assert out["message_id_domain_defanged"] == "pay[.]evil[.]example/verify"
+    row[3] = "<a1b2@vps-9.hostmarket.example>"
+    assert _email_row(row)["message_id_domain_defanged"] == (
+        "vps-9.hostmarket.example")
+
+
+def test_a_host_already_defanged_by_hand_is_not_bracketed_twice():
+    assert defang("https://evil[.]example/x") == "hxxps://evil[.]example/x"
+    assert defang("evil[.]example") == "evil[.]example"
+
+
+def test_the_body_defanger_stays_linear_on_hostile_input():
+    """The sender controls the body, and the bare-host pattern nests a
+    quantifier. A long dotted run must not backtrack its way to a hung
+    request."""
+    start = time.perf_counter()
+    for hostile in ("a." * 50_000, "a-" * 50_000 + ".x", "ab." * 30_000 + "c",
+                    ("x" * 60 + ".") * 5_000):
+        defang_text(hostile)
+    assert time.perf_counter() - start < 5.0

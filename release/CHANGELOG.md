@@ -2,11 +2,184 @@
 
 ## Unreleased
 
+### A second review, of the merged result
+
+The ten groups above were each verified alone. A 32-agent adversarial
+review of the merged tree then found 43 problems; the 20 most severe went
+to a verifier each, and all 20 held. Every one of the 43 is fixed, the 23
+unverified ones after being shown real first.
+
+**Security.**
+- A report's competing hypotheses went out whatever the target level, and
+  their cells read nodes and assertions above it. A RED case prepared at
+  GREEN produced a TLP:CLEAR file naming the operation's suspect. The
+  hypotheses now go only where the case header does (otherwise they are
+  counted as withheld). Their cells are read at the reader's level, in the
+  report and in `GET /ach`, and feed the document's mark.
+- The one-time credentials card in Administration (password, TOTP secret,
+  QR) survived sign-out and was shown to the next person to use the tab.
+  It is cleared whenever a session ends or another account signs in.
+- `defang()` left a bare host live when its query held `x://`.
+- A case-scoped break-glass grant showed RED collected-document titles and
+  source names in the inspector. Documents are every source's, so they
+  keep the analyst's own ceiling.
+- Accepting a proposal wrote elements at any classification the reviewer
+  named. It is now held to their ceiling, like every other write.
+- Report tables escaped nothing: a `|` in a handle moved the TLP column,
+  and a line break in a label could add a `**TLP:CLEAR**` line.
+
+**Break-glass.**
+- A sole Security Officer could invoke a grant nobody else could review.
+  It is refused, and the officers alerted exclude the invoker.
+- A live grant can no longer be reviewed. The review judges everything
+  done under it, and a verdict used to take it off the only list that
+  could end it.
+- The count, the invoke pane and both cards now say the same thing about
+  what is counted.
+
+**Preservation and readiness.**
+- A rejection no longer holds the audit-chain lock across an S3 DELETE.
+- A held copy written but not read back is reported as a copy that
+  exists.
+- A later record-only rejection cannot overwrite a preserving one.
+- The preservation check now proves the LEGAL HOLD the samples rely on,
+  not only COMPLIANCE retention.
+- The probe fails when the store records GOVERNANCE for a COMPLIANCE
+  request, instead of calling it proven.
+
+**Console.**
+- The Analysis pane, sociogram replies, saved layouts and typed entry
+  forms no longer carry one case into the next.
+- The break-glass chip notices a grant ending.
+- Idle expiry is no longer postponed forever by live-channel refetches.
+- The first-run sign-in leaves the sign-in form usable after sign-out.
+- The edge inspector can add a claim, so a tie's confidence can be
+  lowered without retracting the claim that carries its exhibit.
+- Egress checks ask for a fresh sign-in, rather than calling an expired
+  one a refusal.
+- A real purge is bound to the dry run it confirms.
+- Share shows role names and when a colleague's emergency access ends.
+- An officer-only account's view is called Oversight.
+
+**Search.**
+- A pasted Gmail `+tag`, googlemail or IDNA address finds its selector.
+- The trigram index 0065 added is now used.
+- A merged record's name finds its survivor.
+
+### The 2026-09-22 usability and code review, and the owner's decisions
+
+A 42-agent review of the console and the code behind it produced 229
+verified findings (12 critical, 78 high, 105 medium, 34 low). This pass
+fixes 75 of them: all twelve criticals, 53 highs and the ten medium and low
+findings that share their code. The other 154 stay on the review's list.
+Alembic head moves from 0061 to **0065**.
+
+**Owner decisions, recorded in docs/00 (61 to 64) and docs/17.**
+- A rejected malware sample is preserved by default, not destroyed. Its
+  encrypted bytes move, with the data key kept, into an object-locked
+  store (`PRESERVE_BUCKET`, default `noctornal-preserved`) under a legal
+  hold. Getting them back takes two people: the Security Officer
+  authorises and the Lead investigator retrieves.
+  `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy` opts back into
+  destruction, which a legal hold still refuses (0063).
+- The Lead investigator reveals victim PII and the Security Officer alone
+  authorises it. Break-glass is invoked by the Lead investigator or the
+  administrator and reviewed by the Security Officer alone. Both pairs are
+  separated duties, so no role can hold both halves. The upgrade revokes,
+  with an audit event each, any authorisation a Lead investigator granted
+  a co-lead (0062).
+- `CASE_OWNER` displays as **Lead investigator**. The key is unchanged, so
+  no permission check moved.
+- The archived MinIO build stays pinned, with the risk accepted in writing.
+  The readiness register no longer reads the bucket's lock configuration;
+  it proves write-once. It writes a canary under a one-day COMPLIANCE
+  retention and passes only when a delete that names that version is
+  refused, on both the evidence and the preservation buckets.
+- The placeholder retention periods are a deployment setting, which the
+  register already blocks on. They are no longer listed as a defect.
+
+**The sociogram.**
+- The hollow "unevidenced" mark had never drawn. It now uses area and is
+  never a fade, because opacity is reserved for confidence.
+- A tie's confidence comes from one place: its strongest live assertion.
+  Migration 0064 backfills the ties whose stored value disagreed. The
+  confidence picked on Add relationship now reaches the tie; before, every
+  new link was stored as LOW.
+- Parallel ties bow apart, and `[` and `]` step through them.
+- Fit frames the whole case.
+- Labels thin out by priority instead of vanishing below 0.7x.
+- Add relationship no longer pre-selects an accusation or pre-grades a
+  claim, and the endpoints can be searched.
+- A selected entity offers Link from and Link to.
+
+**Evidence.**
+- "Evidenced" has one definition. The canvas, the coverage figure, the
+  report column and the inspector all use it.
+- A failed hash check shows as a red HASH MISMATCH, no longer as a grey
+  "not checked".
+
+**Search.**
+- Entities are found by the selectors attributed to them (wallet, Jabber,
+  Tox, email, handle), exactly or in part, with the matching selector
+  named (0065).
+- Fragments of handles, domains and file names match.
+- A capped list says how many matched (`with_total`).
+
+**Lab.**
+- The state filters work.
+- Reject names the sample and says what will happen to its bytes.
+- Inside a case, the queue is that case's samples.
+- The custody ledger says who did what.
+
+**Deception.**
+- The capture and email detail cards were never visible. They are now.
+- URLs in an email body are defanged.
+- Analyst notes render.
+
+**Governance.**
+- A break-glass grant from the console raises what it names, on the open
+  case. A header chip stays up while any grant is live. Starting or ending
+  a grant reloads the open case.
+- Review cards name the people involved. A verdict is confirmed before it
+  is recorded, because the server will not revisit it.
+- Purge is a dry run by default. A real purge confirms by case code and
+  names what the dry run counted.
+- Sharing names people rather than ids.
+- Administration is reachable without opening a case.
+
+**Reports.**
+- A report file now comes only out of the egress release, so it has been
+  judged at the gate.
+- The console will not save a cleared document whose `content_digest`
+  differs from the one previewed.
+- `POST /report` refuses `fmt=markdown` and points to the release.
+
+**Case switching.**
+- Search, Report, Feeds, Triage, Comms, the Lab and Deception drop
+  the previous case's results.
+- A reply that lands after a switch is discarded.
+- A load that fails says so and offers Retry, instead of reading as empty.
+- The header shows the case's state.
+
+**Dates.**
+- Every time on screen is UTC and says so.
+- A date-only value is a calendar day and no longer shifts a day west of
+  UTC.
+
+**First run and session.**
+- The one-time credential card keeps the password and authenticator
+  secret until they have been used, or until the operator confirms losing
+  them. It shows a QR code.
+- Recovery codes can be obtained from the account panel.
+- Idle expiry warns five minutes ahead. Signing in again carries on in
+  the same case, pane and form, and says whether the last action saved.
+
 ### A destroyed data key is not an unopenable one
 
-Rejecting a sample destroys its data key along with the bytes it opened,
-deliberately, so that nothing can decrypt the object if it survives a
-bucket-lifecycle race. `lab.sample.data_key_ciphertext` is NOT NULL, so
+Destroying a rejected sample (the only disposition until the review pass
+above, and now one a deployment must declare) destroys its data key along
+with the bytes it opened, deliberately, so that nothing can decrypt the
+object if it survives a bucket-lifecycle race. `lab.sample.data_key_ciphertext` is NOT NULL, so
 "the key is gone" is recorded as zero bytes.
 
 The key-ring inventory counted those rows as sealed material and handed

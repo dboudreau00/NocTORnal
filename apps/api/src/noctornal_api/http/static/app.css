@@ -160,6 +160,15 @@ input[type="range"] {
 input[type="range"][disabled] { opacity: 0.4; cursor: default; }
 input::placeholder { color: var(--text-tertiary); }
 select.select { appearance: none; padding-right: 24px; }
+/* A required select still on its "Choose ..." option reads as unset, the
+   way an input's placeholder does, not as a value somebody picked (ux06
+   grading-prefilled-upward, 2026-09-22). Only the closed control greys:
+   the options in its list keep the normal text colour. */
+select.select:invalid { color: var(--text-tertiary); }
+select.select:invalid option:not(:disabled) { color: var(--text-primary); }
+/* A disabled select is barred from validation, so :invalid never matches
+   it; the relationship type waiting on its endpoints greys this way. */
+select.select:disabled { color: var(--text-tertiary); cursor: default; }
 
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field.inline { flex-direction: row; align-items: center; gap: 8px; }
@@ -199,6 +208,20 @@ select.select { appearance: none; padding-right: 24px; }
 .row > .field { flex: 1; }
 .row-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
 .empty { color: var(--text-tertiary); font-size: 12px; padding: 10px 2px; }
+/* A read that failed, said in the pane (ux17-failure, 2026-09-22). Styled
+   as a problem, not as an empty state, because it is not one: the grey
+   of `.empty` is exactly the colour that let "Nothing awaiting review."
+   pass for an answer. */
+.load-failed {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2);
+  margin: var(--s-2) 0; padding: var(--s-2) var(--s-3);
+  border-left: 2px solid var(--danger); background: var(--danger-soft);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.load-failed-text {
+  font-size: 12px; color: var(--danger); margin: 0; flex: 1 1 240px;
+  overflow-wrap: anywhere;
+}
 
 /* ── chips ─────────────────────────────────────────────────────────── */
 .chip {
@@ -220,6 +243,18 @@ select.select { appearance: none; padding-right: 24px; }
              background: var(--accent-wash); }
 .chip.stale { color: var(--text-tertiary); }
 .chip.bad { color: var(--danger); border-color: var(--danger); }
+/* The case's lifecycle state in the header. ACTIVE is quiet because it
+   is the expected state; anything else is bright and bold so it cannot be
+   read past (ux02-cases, 2026-09-22). It borrows NONE of the TLP colours:
+   it sits right beside the handling marking, and in the alert amber it
+   read as a second TLP:AMBER chip, "CLOSED" beside "TLP:RED" included
+   (verifier, fix round). The strip under the bar carries the warning;
+   the chip only names the state. */
+.chip.case-state { color: var(--text-tertiary); }
+.chip.case-state-off {
+  color: var(--text-primary); border-color: var(--hairline-strong);
+  background: var(--wash-3); font-weight: 600;
+}
 
 /* Node-type hue carriers. One class per hue; JS picks the class so no
    inline style is ever needed (the CSP forbids them). */
@@ -250,11 +285,113 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .login-mark { align-self: center; }
 
+/* First run and the one-time credential card (2026-09-22). The card is
+   also Admin's, for a new analyst and a re-enrolled authenticator. */
+.setup-warn {
+  display: flex; flex-direction: column; gap: var(--s-1);
+  border-left: 2px solid var(--alert); background: var(--alert-wash);
+  padding: var(--s-2) var(--s-3); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.setup-card { width: min(460px, 100%); }
+.setup-tools, .setup-actions {
+  display: flex; flex-wrap: wrap; gap: var(--s-2); justify-content: flex-end;
+}
+.setup-verify { border-top: 1px solid var(--hairline); padding-top: var(--s-4); }
+.setup-verify input[readonly], .reauth-sheet input[readonly] {
+  color: var(--text-secondary);
+}
+.setup-skip { display: flex; flex-direction: column; gap: var(--s-2);
+              align-items: flex-start; }
+.setup-skip-confirm {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  border-left: 2px solid var(--danger); background: var(--danger-soft);
+  padding: var(--s-2) var(--s-3); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  overflow-wrap: anywhere;
+}
+.setup-skip-confirm[hidden] { display: none; }
+/* totp-enrolment-typein: the copy control is the point of this card, so
+   it is always visible here (it only appears on hover elsewhere), and the
+   long values wrap inside the card instead of running out of it. */
+.creds .copyable { display: flex; align-items: flex-start; max-width: 100%; }
+.creds .copy-btn {
+  opacity: 1; font-size: 11px; padding: 3px 8px;
+  border: 1px solid var(--hairline-strong); color: var(--text-secondary);
+}
+.creds-value {
+  flex: 1; min-width: 0; overflow-wrap: anywhere; word-break: break-all;
+  user-select: all;
+}
+/* The grouped secret breaks between its groups, never inside one. */
+.creds-value.creds-secret { font-size: 13px; letter-spacing: 0.02em; word-break: normal; }
+.creds-qr { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; }
+.creds-qr .help { flex: 1 1 120px; }
+/* The QR is drawn dark on light whatever the theme: several authenticator
+   scanners do not read an inverted code. Its own size where it fits, so
+   each module stays a whole number of pixels. */
+.creds-qr canvas {
+  flex: none; max-width: 100%; height: auto; image-rendering: pixelated;
+  border-radius: var(--r-sm); background: var(--text-primary);
+}
+.creds-uri summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.creds-uri[open] summary { margin-bottom: var(--s-2); }
+.creds-check { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.creds-check input { width: 9ch; }
+.codes-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-1) var(--s-3); margin: 0; padding: var(--s-3);
+  list-style: none; background: var(--wash-1); border-radius: var(--r-ctl);
+  font-family: var(--mono); font-size: 13px; user-select: all;
+}
+
+/* Session (expiry-drops-context, 2026-09-22): a warning before the idle
+   limit, and a sign-in that sits OVER the app rather than replacing it. */
+.session-warn {
+  position: fixed; top: calc(var(--appbar-h) + var(--s-2)); left: 50%;
+  transform: translateX(-50%); z-index: 85; width: min(520px, calc(100% - 32px));
+  display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-3);
+  align-items: center; justify-content: space-between;
+  padding: var(--s-2) var(--s-3); background: var(--surface-2);
+  border: 1px solid var(--alert-edge); border-left: 3px solid var(--alert);
+  border-radius: var(--r-ctl); box-shadow: var(--shadow-pop);
+}
+.session-warn[hidden] { display: none; }
+.session-warn-text { flex: 1 1 260px; }
+.session-warn-actions { display: flex; gap: var(--s-2); }
+.reauth-scrim { z-index: 86; }
+/* Two classes, so the width beats `.palette`'s, which comes later. */
+.palette.reauth-sheet, .palette.account-sheet {
+  width: min(460px, 100%); max-height: 88vh; overflow: auto; gap: var(--s-3);
+}
+.reauth-reason { color: var(--text-secondary); }
+.account-facts {
+  display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3);
+  margin: 0; font-size: 12px;
+}
+.account-facts dt { color: var(--text-tertiary); }
+.account-facts dd { margin: 0; overflow-wrap: anywhere; }
+
 /* ── app shell ─────────────────────────────────────────────────────── */
 .app {
   height: 100vh; height: 100dvh;
-  display: grid; grid-template-rows: var(--appbar-h) 1fr;
+  display: grid; grid-template-rows: var(--appbar-h) auto 1fr;
 }
+/* Rows placed explicitly: the case-state strip between them is `hidden`
+   most of the time, and a hidden grid child takes no track, which would
+   otherwise hand the workspace the strip's auto row. */
+.app > .appbar { grid-row: 1; }
+.app > .case-state-strip { grid-row: 2; }
+.app > .main { grid-row: 3; }
+/* Every pane sits under this, so a non-ACTIVE case says so wherever the
+   analyst is, the Add entity form included. */
+.case-state-strip {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  font-size: 12px; color: var(--alert);
+  background: var(--alert-wash); border-bottom: 1px solid var(--alert-edge);
+}
+.case-state-strip.shut { background: var(--alert-soft); font-weight: 600; }
+.case-state-strip > span { flex: 1 1 auto; overflow-wrap: anywhere; }
+.case-state-strip > .btn { flex: none; }
 
 /* Translucent rather than opaque, with a blur: the app bar is the one
    piece of chrome that content scrolls under, and a frosted bar reads as
@@ -271,6 +408,13 @@ select.select { appearance: none; padding-right: 24px; }
   .appbar { background: var(--appbar-bg); backdrop-filter: blur(18px); }
 }
 .brand { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+/* The TOR in NocTORnal, in the accent, on purpose. Identity is one of the
+   accent's documented uses (theme.css's accent block and docs/06); it is
+   the only one that is not a state, which is why it is confined to these
+   three letters (cr02 brand-split-and-accent-in-chrome, 2026-09-22). A
+   span rather than a second font, so the text of the bar is still the
+   single word "NocTORnal". */
+.brand-tor { color: var(--accent); }
 .appbar-sep { width: 1px; height: 16px; background: var(--hairline); }
 /* `min-width: 0` is what actually lets this ellipsise: a grid/flex item
    defaults to min-content width, so without it the case id refused to
@@ -295,6 +439,36 @@ select.select { appearance: none; padding-right: 24px; }
 .appbar > * { flex: none; }
 .appbar .btn, .appbar .chip, .hdr-user, .hdr-asof { white-space: nowrap; }
 .hdr-case { flex: 0 1 auto; }
+/* Live break-glass. Danger, per docs/06, and on every screen: the only
+   sign of a live grant used to sit on one Lifecycle subtab (ux15,
+   2026-09-22). The full sentence is in its title. */
+.hdr-glass { font-weight: 600; letter-spacing: 0.02em; cursor: help; }
+/* A grant live on another case, not this one. Still shown, because the
+   analyst is still under break-glass, but not in the danger red: nothing
+   it raises is in force on the screen in front of them (2026-09-23). */
+.hdr-glass.elsewhere { color: var(--text-secondary); border-color: var(--hairline);
+                       font-weight: 500; }
+/* The end time is half of what the chip is for, so on a laptop it is the
+   palette's "Search" label that gives way while a grant is live, not the
+   time. Hiding the time at 1500px and below left "BREAK-GLASS RED" with no
+   end on every common laptop (verifier follow-up to ux15, 2026-09-23).
+   Measured then: with the label gone the time and the whole of
+   "OP-NIGHTJAR-26" both fit at 1366px and up. At 1280px they do not, and
+   there the time (or "not this case") gives way, only while a case is
+   open, because the open case's code is the one thing in the bar that
+   must stay legible. Both stay in the chip's title. */
+@media (max-width: 1500px) {
+  .appbar:has(#hdr-glass:not([hidden])) .appbar-search-label { display: none; }
+}
+@media (max-width: 1320px) {
+  .appbar:has(#btn-case-share:not([hidden])) .hdr-glass-until { display: none; }
+  .appbar:has(#btn-case-share:not([hidden])) .hdr-glass-where { display: none; }
+}
+/* A floor on that shrink. With the lifecycle chip beside the TLP chip
+   (ux02-cases, 2026-09-22) a 700px bar squeezed the case identifier to a
+   single character, and which case this is matters more than the bar not
+   scrolling: past this width the bar scrolls, as it already may. */
+.hdr-case { min-width: 18ch; }
 
 /* The palette affordance. Bordered rather than ghost: it is the primary
    way to navigate this console and it competes for attention with nothing
@@ -352,6 +526,22 @@ select.select { appearance: none; padding-right: 24px; }
 .hdr-user { display: flex; align-items: center; gap: 6px;
             color: var(--text-tertiary); }
 .hdr-user code { color: var(--text-secondary); }
+/* The pill became the Account button on 2026-09-22: a button's own font
+   and cursor, the pill's look otherwise. */
+button.hdr-user { font: inherit; cursor: pointer; }
+button.hdr-user:hover { background: var(--wash-3); border-color: var(--field-edge); }
+/* No recovery codes: the pill's dot turns to the alert colour at every
+   width, and the words show beside it where the bar has room. Below that
+   they stay in the accessible name and the title, so the case title is
+   not squeezed out at laptop widths to make room for them. */
+button.hdr-user.codes-low::before { background: var(--alert); }
+.hdr-user .chip { font-size: 10px; }
+@media (max-width: 1500px) {
+  .hdr-user .chip {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+}
 
 .main { min-height: 0; overflow: hidden; }
 
@@ -362,6 +552,17 @@ select.select { appearance: none; padding-right: 24px; }
   align-content: start;
 }
 .cases-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* Administration opened from the case list (ux16, 2026-09-22). The same
+   #pane-admin the workspace tab shows, moved in here: it drops the
+   workspace grid's full-height scroll box and centres at a reading width. */
+.admin-view { height: 100%; overflow: auto; }
+.admin-view > .pane {
+  height: auto; overflow: visible; max-width: 1180px; margin: 0 auto;
+  padding: 24px;
+}
+.admin-view > .glass-review { max-width: 1180px; margin: 0 auto;
+                              padding: 24px; }
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th {
@@ -491,6 +692,15 @@ select.select { appearance: none; padding-right: 24px; }
   color: var(--text-tertiary); font-size: 13px; pointer-events: none;
   padding: 24px; text-align: center;
 }
+/* What the canvas is not showing (entities outside the view, names held
+   back). Opaque so it reads over the graph, and out of the pointer's way. */
+.canvas-note {
+  position: absolute; left: var(--s-2); bottom: var(--s-2);
+  max-width: calc(100% - var(--s-4)); pointer-events: none;
+  font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
+  background: var(--surface-1); border: 1px solid var(--hairline);
+  border-radius: var(--r-sm); padding: 2px var(--s-2);
+}
 
 .graph-bar {
   display: flex; flex-direction: column; gap: var(--s-1);
@@ -512,6 +722,22 @@ select.select { appearance: none; padding-right: 24px; }
 .ring.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
 .ring.pin { border-style: dotted; border-color: var(--text-secondary); }
 .ring.prop { border-style: dashed; border-color: var(--alert); }
+/* The node as the canvas draws it, in a neutral: ring, body and core for
+   an evidenced entity, the ring alone round --void for a hollow one. */
+.glyph-node {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  margin-right: 5px; border: 1.5px solid var(--text-secondary);
+  background: radial-gradient(circle, var(--text-secondary) 0 30%,
+                              var(--text-tertiary) 34%);
+}
+.glyph-node.hollow { background: var(--void); }
+/* A tie with a hollow bead at its midpoint. */
+.line.bead { position: relative; }
+.line.bead::after {
+  content: ""; position: absolute; left: 4px; top: -5px;
+  width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box;
+  border: 1px solid var(--sign-neutral); background: var(--void);
+}
 
 /* docs/03: show the projection parameters next to the results, always. */
 .proj-readout { font-size: 11px; color: var(--text-secondary);
@@ -563,6 +789,10 @@ select.select { appearance: none; padding-right: 24px; }
 .custody-row { display: flex; gap: 10px; font-size: 12px; flex-wrap: wrap; }
 .custody-row .when { color: var(--text-tertiary); font-family: var(--mono);
                      font-size: 11px; }
+/* A row recording a failed hash check. The red chip says what; the rule
+   down the edge makes the row findable in a long log at a glance
+   (ux07 custody-failed-hash-shown-as-not-checked, 2026-09-22). */
+.custody-row.bad { border-left: 2px solid var(--danger); padding-left: 6px; }
 
 /* ── search ────────────────────────────────────────────────────────── */
 .search-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
@@ -579,6 +809,18 @@ select.select { appearance: none; padding-right: 24px; }
 .hit:hover { background: var(--wash-3); border-color: var(--hairline-strong); }
 .hit .rank { color: var(--text-tertiary); font-family: var(--mono);
              font-size: 11px; }
+/* The entity's name, and under it the selector that matched when the name
+   does not show why the entity is here (ux09-search, 2026-09-22). A wallet
+   is 42 characters without a break, so it wraps anywhere. */
+.hit-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hit-label { overflow-wrap: anywhere; }
+.hit-via { font-family: var(--mono); font-size: 11px;
+           color: var(--text-secondary); overflow-wrap: anywhere; }
+.hit-count { font-size: 11px; color: var(--text-secondary); margin: 0 0 2px; }
+.hit-more { align-self: flex-start; margin-top: 4px; }
+.search-help { margin-top: 8px; max-width: 72ch; }
+.search-scope { margin-top: 12px; font-size: 12px; color: var(--text-secondary);
+                overflow-wrap: anywhere; }
 
 /* ── assertion fieldset ────────────────────────────────────────────── */
 .assertion {
@@ -592,6 +834,9 @@ select.select { appearance: none; padding-right: 24px; }
                     padding: 0 6px; }
 .assertion-note { border-left: 2px solid var(--accent-dim); padding-left: 8px;
                   color: var(--text-secondary); }
+/* The explicit "same grading as the last entry" offer: sized to its text,
+   not stretched across the fieldset like a field. */
+.assertion .same-grading { align-self: flex-start; }
 
 /* ── inspector ─────────────────────────────────────────────────────── */
 .inspector {
@@ -650,9 +895,63 @@ select.select { appearance: none; padding-right: 24px; }
 .assert-rationale.none { color: var(--text-tertiary); font-style: italic; }
 .assert-meta { margin-top: 6px; font-size: 11px; color: var(--text-tertiary);
                font-family: var(--mono); overflow-wrap: anywhere; }
+/* What the assertion claims and where it came from (ux05
+   assertion-drops-claim-and-source, 2026-09-22). The claim line reads as
+   primary text: it is the answer to "what is being asserted". */
+.assert-claim { margin-top: 6px; font-size: 12px; color: var(--text-primary);
+                overflow-wrap: anywhere; }
+.assert-source { display: flex; flex-wrap: wrap; align-items: center;
+                 gap: 4px 10px; margin-top: 6px; }
+.assert-source .btn { overflow-wrap: anywhere; text-align: left; }
+/* A correction is an edit note, not a sighting: a rule down its edge in
+   the accent tone keeps it apart from claims about the world. */
+.assert.correction { border-left: 2px solid var(--accent-dim); }
+.assert:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .sel-item { background: var(--wash-2); border: 1px solid var(--hairline);
             border-radius: var(--r-ctl); padding: var(--s-2) var(--s-3); }
 .sel-val { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+/* A purged exhibit still listed, flagged, and dashed like a dead
+   assertion: it no longer counts as evidence. */
+.sel-item.purged { border-style: dashed; }
+/* How an exhibit is attached: carried by an assertion, or linked. */
+.ev-backing { display: flex; flex-wrap: wrap; align-items: center;
+              gap: 4px 8px; margin-top: 6px; font-size: 12px;
+              color: var(--text-secondary); overflow-wrap: anywhere; }
+
+/* Relationships (ux05 parallel-ties-unreachable, ux18 edges-mouse-only,
+   2026-09-22): every tie at the selected entity, or every other tie
+   between a tie's two ends, each a button into the tie inspector. */
+/* One line per tie where it fits (name left, facts right), wrapping only
+   when the name is long: a hub's list must not push Assertions off the
+   rail. */
+.tie-list { gap: var(--s-1); }
+.tie-item {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  justify-content: space-between; gap: 2px var(--s-2);
+  width: 100%; text-align: left; font: inherit; cursor: pointer;
+  color: var(--text-primary); background: var(--wash-2);
+  border: 1px solid var(--hairline); border-radius: var(--r-ctl);
+  padding: var(--s-1) var(--s-3);
+  transition: background-color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out);
+}
+.tie-item:hover { background: var(--wash-3); border-color: var(--hairline-strong); }
+/* Not drawn in this projection: dashed, like an inferred edge is drawn,
+   and never dimmed, because the row still has to be read. */
+.tie-item.undrawn { border-style: dashed; }
+.tie-who { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.tie-facts { display: flex; flex-wrap: wrap; align-items: baseline;
+             gap: 2px 8px; font-size: 11px; }
+.tie-type { font-family: var(--mono); color: var(--text-secondary); }
+.tie-sign { font-family: var(--mono); font-weight: 700; }
+.tie-sign.positive { color: var(--sign-positive); }
+.tie-sign.negative { color: var(--sign-negative); }
+.tie-sign.neutral { color: var(--sign-neutral); }
+.tie-flag { font-family: var(--mono); color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.04em; }
+.tie-ends { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.tie-ends .tie-end { overflow-wrap: anywhere; text-align: left; }
+.tie-arrow { color: var(--text-tertiary); }
 
 /* ── command palette ───────────────────────────────────────────────── */
 .palette-scrim {
@@ -692,6 +991,8 @@ select.select { appearance: none; padding-right: 24px; }
             flex: none; max-width: 45%; overflow-wrap: anywhere; }
 .pal-foot { display: flex; gap: 5px; align-items: center; flex-wrap: wrap;
             font-size: 10px; color: var(--text-tertiary); }
+/* The selector lookup's state: searching, failed, or capped. */
+.pal-remote { font-size: 11px; color: var(--text-secondary); margin: 0; }
 
 /* ── responsive / zoom tolerance ───────────────────────────────────── */
 /* Dense information design still has to be operable at 200% zoom: the
@@ -823,6 +1124,17 @@ select.select { appearance: none; padding-right: 24px; }
 @media (max-height: 820px) {
   .rail-cap { display: none; }
   .rail-btn { min-height: 42px; gap: 0; }
+  /* The sociogram's own chrome gives way too. On a 1366x768 laptop the
+     legend wrapped to two rows and the key hints took a third, and the
+     canvas was left 269px tall (ux18 laptop-canvas-fit, 2026-09-22). The
+     key hints go: they are all in the ? sheet and in the canvas's
+     accessible name. The legend STAYS whole, packed tighter. A first cut
+     made it one row that scrolled sideways, which put "dashed = inferred",
+     opacity and both E2 marks off the edge at 1366, and a legend nobody
+     can see teaches nothing. */
+  .legend { gap: 1px 10px; }
+  .legend-sep { height: 11px; }
+  .canvas-keys { display: none; }
 }
 
 /* Deep zoom (200%) and short split-screens. Everything that was allowed
@@ -952,6 +1264,17 @@ select.select { appearance: none; padding-right: 24px; }
 .entry-row > .grow { flex: 1 1 200px; overflow-wrap: anywhere; }
 .entry-row > p { flex-basis: 100%; margin: 2px 0 0; }
 .entry-sub { flex-basis: 100%; display: flex; gap: 6px; align-items: baseline; }
+/* The report preview's exact text: what Save writes, byte for byte
+   (ux15-report, 2026-09-22). Capped and scrolled, because a large case's
+   document is long and the redaction statement above it must stay the
+   first thing read. */
+.rep-document { margin-top: var(--s-4); }
+.rep-document-text {
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 420px; overflow: auto; margin: var(--s-2) 0 0;
+  color: var(--text-secondary);
+}
 
 /* ── Feeds and Lifecycle (Phases 9, 4, 6) ───────────────────────────────
  *
@@ -1011,6 +1334,14 @@ select.select { appearance: none; padding-right: 24px; }
 .fact.bad .fact-v { color: var(--danger); }
 .fact.warn .fact-v { color: var(--alert); }
 .fact.muted .fact-v { color: var(--text-tertiary); font-style: italic; }
+/* A reference line under a row: a label and a copyable id, quieter than
+   the facts because it is for pasting, not reading. */
+.adm-id, .tomb-ref { display: flex; align-items: center; gap: 6px;
+                     margin: 6px 0 0; }
+.adm-id code, .tomb-ref code { font-size: 11px; color: var(--text-secondary);
+                               overflow-wrap: anywhere; }
+.adm-assign { margin-top: 8px; font-size: 12px; }
+.adm-assign > summary { cursor: pointer; color: var(--text-secondary); }
 
 /* The reason a row looks the way it does. A score with no reason is a
    number an analyst learns to ignore. */
@@ -1092,6 +1423,13 @@ select.select { appearance: none; padding-right: 24px; }
 /* The stance chooser. Reuses the palette sheet so it sits where the
    command palette and the keyboard sheet already sit. */
 .stance-sheet { width: min(560px, 100%); }
+.share-sheet { width: min(720px, 100%); max-height: 84vh; overflow: auto; }
+.share-roster { display: flex; flex-direction: column; }
+.share-row .row-actions { margin-top: 4px; }
+.share-form { display: flex; flex-direction: column; gap: 8px;
+              border-top: 1px solid var(--hairline); padding-top: 10px; }
+.share-fields { flex-wrap: wrap; align-items: flex-end; }
+.share-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .stance-evidence { color: var(--text-primary); }
 .stance-basis { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .stance-options {
@@ -1199,6 +1537,20 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .filename-quarantine bdi { unicode-bidi: isolate; color: var(--text-secondary); }
 
+/* Where a sample came from, as the submitter wrote it (2026-09-22,
+   ux13-lab:provenance-never-shown). Quoted and set apart, because it is
+   somebody else's text and sometimes the attacker's. */
+.source-note { margin-top: 8px; }
+.source-quote {
+  margin: 4px 0 0; padding: var(--s-1) var(--s-2);
+  border-left: 2px solid var(--artefact-malware); background: var(--wash-1);
+  font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.source-note-line q { color: var(--text-secondary); overflow-wrap: anywhere; }
+.source-note-line .fact-k { margin-right: 6px; }
+.person { color: var(--text-primary); }
+
 /* Entropy as a bar. The number alone means nothing to anybody who does not
    do this daily; the bar puts ~7.9 (packed) and ~4 (text) in immediate
    relation to each other. */
@@ -1279,6 +1631,20 @@ select.select { appearance: none; padding-right: 24px; }
 }
 .insp-linker select { flex: 1; min-width: 0; }
 .insp-linker { flex-wrap: wrap; }
+/* The "what in it supports this" field takes its own line under the
+   picker: the rail is too narrow for three controls abreast. */
+.insp-linker input { flex: 1 1 100%; min-width: 0; }
+/* The tie inspector's Add a claim form (final review C14, 2026-09-23),
+   under the assertion cards it adds to and set off from them the way the
+   exhibit linker is. Its paired fields wrap in the 360px rail rather than
+   squeezing two long Admiralty labels abreast. */
+.insp-claim {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--surface-3);
+}
+.insp-claim form { margin-top: 8px; }
+.insp-claim .row { flex-wrap: wrap; }
+.insp-claim .row > .field { flex: 1 1 140px; }
+.claim-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* Tag chips. Neutral by design — a tag is an analyst's overlay, not a
    finding, and colouring it like a TLP marking or a confidence would lend
@@ -1400,6 +1766,34 @@ select.select { appearance: none; padding-right: 24px; }
 .card.sub.danger { border-color: var(--sign-negative); }
 .card.sub.danger > summary { color: var(--danger); cursor: pointer;
                              font-weight: 600; font-size: 12px; }
+/* The rejection's confirmation: names the sample and the disposition
+   before anything is sent (ux13-lab:reject-one-click-destroy). */
+.confirm-box {
+  margin-top: 10px; padding: var(--s-3); border-radius: var(--r-ctl);
+  border: 1px solid var(--danger-edge); background: var(--danger-soft);
+}
+.confirm-q { margin: 0 0 6px; font-weight: 600; color: var(--text-primary); }
+.confirm-q:focus-visible { outline-offset: 3px; }
+/* A preserved sample is held, not gone: the panel reads as a record, and
+   the authorisation form stays folded until somebody opens it. */
+.card.sub.preserved-panel { border-color: var(--sign-positive); }
+.authorise-form { margin-top: 10px; }
+.authorise-form > summary { cursor: pointer; font-size: 12px;
+                            color: var(--text-secondary); }
+/* The destruction confirmation (ux15/ux17, 2026-09-22). A danger card
+   inside the purge disclosure, so the step that destroys never looks like
+   the step that previews. */
+.purge-confirm { display: flex; flex-direction: column; gap: 8px; }
+.purge-confirm[hidden] { display: none; }
+.purge-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+#ret-purge { margin-top: 8px; }
+/* Break-glass: what the grant will do, stated before it is invoked. */
+.glass-choices { flex-wrap: wrap; margin: 8px 0; }
+.glass-effect { color: var(--text-secondary); border-left: 2px solid var(--danger-edge);
+                padding-left: 8px; margin: 8px 0; }
+.glass-granted { font-weight: 600; margin: 8px 0 4px; }
+.glass-live { border-color: var(--danger-edge); background: var(--danger-soft); }
+.glass-note { width: 100%; margin-top: 8px; font-size: 12px; }
 .h-xs { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
         color: var(--text-tertiary); margin: 0 0 6px; }
 .row-card.inner { background: var(--surface-1); margin-top: 8px; }
@@ -1409,6 +1803,11 @@ select.select { appearance: none; padding-right: 24px; }
 .rules li { margin-bottom: 6px; }
 .rules strong { color: var(--text-primary); }
 .why.gaps { border-left-color: var(--alert); color: var(--alert); }
+/* Not screened for prohibited content: the gap with legal consequences,
+   named and pinned first (ux13-lab:triage-gap-names-dropped). */
+.why.gaps.unscreened { border-left-color: var(--danger); color: var(--danger); }
+.gap-list .gap-unscreened,
+.gap-list .gap-unscreened strong { color: var(--danger); }
 .selectable { user-select: all; }
 .is-highlighted {
   outline: 1px solid var(--alert); outline-offset: 3px; border-radius: var(--r-sm);
@@ -1427,7 +1826,17 @@ select.select { appearance: none; padding-right: 24px; }
   width: 5px; height: 5px; border-radius: 50%; background: var(--accent-dim);
   margin-left: -13px; flex: 0 0 auto; align-self: center;
 }
-.timeline-body { font-size: 12px; }
+.timeline-body {
+  font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 8px;
+  align-items: baseline;
+}
+.custody-when { font-variant-numeric: tabular-nums; }
+.custody-what { color: var(--text-secondary); overflow-wrap: anywhere; }
+.timeline-item.is-notable .timeline-dot { background: var(--alert); }
+/* A failed integrity check used to read as another "VIEWED_META"
+   (ux13-lab:custody-ledger-hides-who-and-what). It is a tamper alarm. */
+.timeline-item.is-alarm .timeline-dot { background: var(--danger); }
+.timeline-item.is-alarm .custody-what { color: var(--danger); font-weight: 600; }
 
 .detail-card { margin-top: 14px; }
 
@@ -1475,13 +1884,23 @@ select.select { appearance: none; padding-right: 24px; }
   to   { opacity: 1; transform: none; }
 }
 
-/* The detail card. Opened from a row, so it comes UP from the list. */
-.detail-card {
-  opacity: 0; transform: translateY(6px);
-  transition: opacity 200ms ease,
-              transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+/* The detail card. Opened from a row, so it comes UP from the list.
+ *
+ * Its RESTING state is visible, and the motion is an entrance keyframe on
+ * showing, the same shape as `.pane` above. It used to rest at opacity 0
+ * and wait for an `is-in` class that only the Lab's openSample ever added,
+ * so both Deception cards were invisible from the day they shipped: Open
+ * did nothing on screen while the card's buttons still took keyboard
+ * focus (ux14-deception:detail-cards-invisible, 2026-09-22). Motion that
+ * needs a class to END invisible is the row-stagger lesson again, so no
+ * class is needed at all now; openSample's `is-in` toggle is harmless. */
+.detail-card:not([hidden]) {
+  animation: detail-in 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-.detail-card.is-in { opacity: 1; transform: none; }
+@keyframes detail-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
 
 /* Hover feedback on the border rather than the fill: a background change
    at this row density makes the whole list twitch as the pointer crosses
@@ -1648,6 +2067,29 @@ select.select { appearance: none; padding-right: 24px; }
    two blocks cannot be skim-read as one list of "caller" fields. */
 .presented-block { border-left: 3px solid var(--danger); }
 .durable-block { border-left: 3px solid var(--sign-positive); }
+
+/* An analyst's note on a capture or a call (ux14-deception:
+   notes-never-rendered, 2026-09-22). A person's statement, so it is framed
+   apart from the `.why` lines, which are the system explaining itself, and
+   set at reading size: in the demo it is where "the victim had already
+   entered credentials" lives. Amber rule, neither the red of the
+   attacker's side nor the green of the proven side. */
+.analyst-note {
+  margin-top: 10px; padding: 8px 12px; background: var(--surface-2);
+  border-left: 3px solid var(--alert); border-radius: var(--r-sm);
+}
+.analyst-note-head {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  margin: 0 0 4px;
+}
+.analyst-note-text {
+  margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-primary);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* A URL in a note is drawn from the server's defanged runs, and set in the
+   monospace every other defanged URL on the pane uses, so `hxxps` and
+   `[.]` read as the defanger's marks inside the analyst's prose. */
+.analyst-note-text .defanged { font-family: var(--mono); }
 
 /* The one inline exhibit in the platform. Boxed and clearly framed so it
    reads as a specimen rather than as part of the console's own chrome. */

@@ -591,6 +591,9 @@ def test_a_review_cannot_be_revisited(conn):
     svc = BreakGlassService(conn)
     grant = svc.invoke(user_id=analyst, case_id=None,
                        justification="live incident, owner unreachable now")
+    # Ended first: a live grant cannot be reviewed at all (final review
+    # U2, 2026-09-23; test_breakglass_final_review_pg.py).
+    svc.revoke(grant.id, actor_id=officer)
     svc.review(grant.id, reviewer_id=officer, outcome="UNJUSTIFIED")
     with pytest.raises(BreakGlassError, match="already been reviewed"):
         svc.review(grant.id, reviewer_id=other, outcome="JUSTIFIED")
