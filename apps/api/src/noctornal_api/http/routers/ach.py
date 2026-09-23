@@ -27,9 +27,10 @@ from pydantic import BaseModel, Field
 from psycopg.types.json import Json
 
 from noctornal_api.ach import EvidenceItem, STANCE_LABEL, as_response, score
-from noctornal_api.http.deps import CurrentUser, get_conn, require
+from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.reports import ach_cells
 
 router = APIRouter(prefix="/cases/{case_id}/ach", tags=["ach"])
 
@@ -77,30 +78,27 @@ def matrix(
         (case_id, states)).fetchall()
     hypotheses = [(r[0], r[1]) for r in rows]
 
-    # Only LIVE assertions. A retracted source must not leave its
-    # conclusion standing (decision 24, applied here).
-    cells = conn.execute(
-        """SELECT he.assertion_id, he.hypothesis_id, he.stance,
-                  a.reliability, a.credibility,
-                  coalesce(n.label, et.display_name, a.claim_path,
-                           a.rationale, 'assertion') AS label
-             FROM core.hypothesis_evidence he
-             JOIN core.hypothesis h ON h.id = he.hypothesis_id
-             JOIN core.assertion a ON a.id = he.assertion_id
-             LEFT JOIN core.node n ON n.id = a.node_id
-             LEFT JOIN core.edge e ON e.id = a.edge_id
-             LEFT JOIN core.edge_type et ON et.key = e.edge_type
-            WHERE h.case_id = %s AND a.retracted_at IS NULL""",
-        (case_id,)).fetchall()
+    # Only LIVE assertions (a retracted source must not leave its
+    # conclusion standing, decision 24), and only about what THIS caller may
+    # see. The query had no label filter, so an AMBER analyst on an AMBER
+    # case read a RED node's label here as `evidence[].label` while the
+    # graph hid it, and above-ceiling stances moved the scores (final
+    # review C2, 2026-09-23). `ach_cells` is the one filter the report
+    # reads the matrix through as well. The case is passed so a break-glass
+    # grant on this case raises the ceiling here as it does on the graph.
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    cells = ach_cells(conn, case_id, clearance=clearance.name,
+                      compartments=compartments)
 
     by_assertion: dict[UUID, EvidenceItem] = {}
-    for assertion_id, hypothesis_id, stance, reliability, credibility, label in cells:
-        item = by_assertion.get(assertion_id)
+    for cell in cells:
+        item = by_assertion.get(cell.assertion_id)
         if item is None:
-            item = EvidenceItem(assertion_id=assertion_id, label=label,
-                                reliability=reliability, credibility=credibility)
-            by_assertion[assertion_id] = item
-        item.stances[hypothesis_id] = stance
+            item = EvidenceItem(assertion_id=cell.assertion_id, label=cell.label,
+                                reliability=cell.reliability,
+                                credibility=cell.credibility)
+            by_assertion[cell.assertion_id] = item
+        item.stances[cell.hypothesis_id] = cell.stance
 
     body = as_response(score(hypotheses, list(by_assertion.values())))
     body["stance_scale"] = {str(k): v for k, v in STANCE_LABEL.items()}

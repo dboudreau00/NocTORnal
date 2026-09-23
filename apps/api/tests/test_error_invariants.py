@@ -233,6 +233,13 @@ def test_break_glass_does_not_promise_an_elevation_it_does_not_perform():
         assert "does NOT currently raise your clearance" not in router, (
             "the access path reads the break-glass grant, but the invoke "
             "response still tells the analyst the elevation did not apply")
-        assert "raised to that level" in router, (
+        # Since 2026-09-22 the notice is computed per grant (ux15
+        # breakglass-grant-raises-nothing): it names the level raised FROM
+        # and TO when the grant raises, and says "raises nothing" when it
+        # does not, rather than one sentence conditional on the reader.
+        assert "Your clearance is raised from" in router, (
             "the invoke response must say the clearance is raised, and to "
             "what, now that it is")
+        assert "raises nothing" in router, (
+            "a grant that names no level, or one the caller already holds, "
+            "must be told so rather than described as access")

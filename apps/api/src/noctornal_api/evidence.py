@@ -493,8 +493,17 @@ class EvidenceService:
                      acquisition_method, source_url, classification,
                      compartments or [], retain.date(), is_hostile_markup),
                 ).fetchone()[0]
+                # hash_verified=True because the read-back above has just
+                # confirmed the STORED object hashes to the digest recorded
+                # here. Until 2026-09-22 this row said NULL, which the
+                # custody view rendered as "hash not checked" on every clean
+                # acquisition: a lapse in custody that never happened, on
+                # the record that goes to court (ux07 custody-failed-hash-
+                # shown-as-not-checked). The deduplicated branch above stays
+                # NULL: it stored nothing and read nothing back.
                 self._custody(evidence_id, "ACQUIRED", acquired_by,
-                              detail={"sha256": shahex, "bytes": len(data)})
+                              detail={"sha256": shahex, "bytes": len(data)},
+                              hash_verified=True)
                 self._audit("EVIDENCE_ACQUIRED", acquired_by, evidence_id, case_id,
                             {"sha256": shahex})
             return IngestResult(evidence_id, shahex, deduplicated=False)

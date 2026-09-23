@@ -219,6 +219,10 @@ class CustodyOut(BaseModel):
     action: str
     actor_id: str
     occurred_at: datetime
+    #: THREE states, and a reader must keep them apart (2026-09-22): True,
+    #: the stored bytes matched the recorded digest when this row was
+    #: written; False, they did NOT (a HASH_VERIFIED row recording a
+    #: mismatch, the tamper alarm); None, this row attests no check.
     hash_verified: bool | None
 
 

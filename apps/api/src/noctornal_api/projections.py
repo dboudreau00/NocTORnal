@@ -68,6 +68,82 @@ PRESETS: dict[str, dict] = {
 _CONFIDENCE_ORDER = {"LOW": 0, "MODERATE": 1, "HIGH": 2}
 
 
+# --- what "evidenced" means, in ONE place -------------------------------
+#
+# ux07 two-evidence-paths-disagree and ux05 linked-evidence-vs-evidenced
+# (2026-09-22). An exhibit reaches an element by two routes: a live
+# assertion that carries it (`assertion.evidence_id`, the E1 add-form path)
+# and a direct attachment (`core.evidence_link`, the inspector's linker).
+# Until this date the canvas mark, the coverage figure and the report's
+# "Evidenced" column counted only the first, while the inspector listed
+# only the second. So an analyst who linked an exhibit saw the element stay
+# hollow and the report say "NO", and an element evidenced at creation said
+# "No exhibits linked." in its own inspector. Both readings were wrong.
+#
+# The rule now, used by the projection (`has_evidence`, and through it the
+# coverage figure and the report) and by the inspector's evidence list
+# (`routers/read.py`), which both build on `evidence_backing_sql`:
+#
+#   an element is EVIDENCED when an exhibit is attached to it by a live
+#   (unretracted) assertion OR by an evidence_link row, and that exhibit is
+#   in the element's case, not purged, and visible at the reader's
+#   clearance and compartments.
+#
+# The visibility leg is deliberate. `withheld()` below explains why a mark
+# that localises withheld material is the disclosure that matters, and a
+# "yes" resting on an exhibit the reader cannot see would be exactly that.
+# It is also what keeps the report honest: the report projects at the
+# TARGET's clearance and its exhibit register filters the same way, so
+# "Evidenced: yes" means an exhibit in that document's own register backs it.
+# A purged exhibit is shown by the inspector (flagged) but backs nothing,
+# because an element cannot rest on bytes the record says are gone.
+
+_ELEMENT_COLUMNS = ("node_id", "edge_id")
+
+
+def evidence_backing_sql(column: str, element: str) -> str:
+    """Every live attachment of an exhibit to one element, as a SELECT.
+
+    Columns: evidence_id, kind ('LINK' | 'ASSERTION'), assertion_id,
+    basis, at, by_user, relevance, page_ref. `column` is 'node_id' or
+    'edge_id'; `element` is a SQL expression for the element's id (an
+    outer alias such as ``n.id``, or ``%s`` when the caller binds it, in
+    which case it is bound TWICE, once per branch). Both are literals from
+    this codebase and never client input.
+    """
+    assert column in _ELEMENT_COLUMNS
+    return f"""SELECT bl.evidence_id, 'LINK'::text AS kind,
+                      NULL::uuid AS assertion_id, NULL::text AS basis,
+                      bl.created_at AS at, bl.created_by AS by_user,
+                      bl.relevance, bl.page_ref
+                 FROM core.evidence_link bl
+                WHERE bl.{column} = {element}
+               UNION ALL
+               SELECT ba.evidence_id, 'ASSERTION'::text, ba.id,
+                      ba.basis::text, ba.recorded_at, ba.created_by,
+                      NULL::text, NULL::text
+                 FROM core.assertion ba
+                WHERE ba.{column} = {element}
+                  AND ba.retracted_at IS NULL
+                  AND ba.evidence_id IS NOT NULL"""
+
+
+def evidenced_sql(column: str, alias: str) -> str:
+    """The boolean `has_evidence` for the row aliased `alias` ('n' or 'e').
+
+    Takes TWO bind parameters, in order: the reader's clearance and the
+    reader's compartments. See the block comment above for the rule.
+    """
+    assert alias in ("n", "e")
+    return f"""EXISTS (SELECT 1
+                         FROM ({evidence_backing_sql(column, alias + '.id')}) bk
+                         JOIN core.evidence bx ON bx.id = bk.evidence_id
+                        WHERE bx.case_id = {alias}.case_id
+                          AND bx.purged_at IS NULL
+                          AND bx.classification <= %s::core.tlp
+                          AND bx.compartments <@ %s)"""
+
+
 class ProjectionError(Exception):
     pass
 
@@ -171,15 +247,12 @@ class GraphService:
         nodes = self._c.execute(
             """SELECT id, node_type, label, classification, attrs,
                       valid_from, valid_to, first_seen, last_seen,
-                      -- E2: is any LIVE assertion behind this element backed
-                      -- by an exhibit? A case is defensible in proportion to
-                      -- how much of it is evidenced, and that should be
-                      -- visible on the canvas rather than only in the
-                      -- inspector one element at a time.
-                      EXISTS (SELECT 1 FROM core.assertion ev
-                               WHERE ev.node_id = n.id
-                                 AND ev.retracted_at IS NULL
-                                 AND ev.evidence_id IS NOT NULL) AS has_evidence
+                      -- E2: does an exhibit back this element? A case is
+                      -- defensible in proportion to how much of it is
+                      -- evidenced, and that should be visible on the canvas
+                      -- rather than only in the inspector one element at a
+                      -- time. The rule is `evidenced_sql`'s (2026-09-22).
+                      """ + evidenced_sql("node_id", "n") + """ AS has_evidence
                  FROM core.node n
                 WHERE case_id = %s AND deleted_at IS NULL AND merged_into_id IS NULL
                   AND classification <= %s::core.tlp AND compartments <@ %s
@@ -191,14 +264,21 @@ class GraphService:
                   -- replay. Without this leg retraction is cosmetic -- the
                   -- assertion shows RETRACTED while the node keeps its full
                   -- degree, and every metric counts withdrawn evidence.
+                  -- Live is not retracted AND not superseded, as it is for
+                  -- core.tie_confidence and the assertion list (final review
+                  -- U11, 2026-09-23): a superseded claim has been replaced,
+                  -- and it must not hold an element up once its replacement
+                  -- is withdrawn, since no card offers to retract it.
                   AND EXISTS (SELECT 1 FROM core.assertion a
-                               WHERE a.node_id = n.id AND a.retracted_at IS NULL)
+                               WHERE a.node_id = n.id AND a.retracted_at IS NULL
+                                 AND a.superseded_at IS NULL)
                   -- as-of is WORLD time: the thing existed then.
                   AND (%s::timestamptz IS NULL
                        OR (valid_from IS NULL OR valid_from <= %s)
                        AND (valid_to IS NULL OR valid_to >= %s))
                 ORDER BY created_at LIMIT %s""",
-            (p.case_id, self._clearance, self._comp,
+            (self._clearance, self._comp,
+             p.case_id, self._clearance, self._comp,
              p.as_of, p.as_of, p.as_of, limit + 1),
         ).fetchall()
         truncated = len(nodes) > limit
@@ -219,10 +299,7 @@ class GraphService:
                           e.weight, e.confidence, e.is_inferred, e.review,
                           e.classification, e.valid_from, e.valid_to,
                           et.is_social_tie,
-                          EXISTS (SELECT 1 FROM core.assertion ev
-                                   WHERE ev.edge_id = e.id
-                                     AND ev.retracted_at IS NULL
-                                     AND ev.evidence_id IS NOT NULL) AS has_evidence
+                          """ + evidenced_sql("edge_id", "e") + """ AS has_evidence
                      FROM core.edge e
                      JOIN core.edge_type et ON et.key = e.edge_type
                     WHERE e.case_id = %s AND e.deleted_at IS NULL
@@ -231,17 +308,20 @@ class GraphService:
                       AND (%s OR NOT e.is_inferred)
                       -- LIVE provenance, as for nodes above (decision 24).
                       -- Retracting the only assertion behind a tie must
-                      -- dissolve the tie from the live graph.
+                      -- dissolve the tie from the live graph, superseded
+                      -- rows included (final review U11, 2026-09-23).
                       AND EXISTS (SELECT 1 FROM core.assertion a
                                    WHERE a.edge_id = e.id
-                                     AND a.retracted_at IS NULL)
+                                     AND a.retracted_at IS NULL
+                                     AND a.superseded_at IS NULL)
                       -- NULL types means "the preset is everything social".
                       AND (%s::text[] IS NULL AND et.is_social_tie
                            OR e.edge_type = ANY(%s))
                       AND (%s::timestamptz IS NULL
                            OR (e.valid_from IS NULL OR e.valid_from <= %s)
                            AND (e.valid_to IS NULL OR e.valid_to >= %s))""",
-                (p.case_id, ids, ids, self._clearance, self._comp,
+                (self._clearance, self._comp,
+                 p.case_id, ids, ids, self._clearance, self._comp,
                  p.include_inferred, types, types, p.as_of, p.as_of, p.as_of),
             ).fetchall()
             keep = {"LOW", "MODERATE", "HIGH"}
@@ -281,7 +361,8 @@ class GraphService:
                   AND merged_into_id IS NULL
                   AND NOT (classification <= %s::core.tlp AND compartments <@ %s)
                   AND EXISTS (SELECT 1 FROM core.assertion a
-                               WHERE a.node_id = n.id AND a.retracted_at IS NULL)
+                               WHERE a.node_id = n.id AND a.retracted_at IS NULL
+                                 AND a.superseded_at IS NULL)
                   AND (%s::timestamptz IS NULL
                        OR (valid_from IS NULL OR valid_from <= %s)
                        AND (valid_to IS NULL OR valid_to >= %s))""",
@@ -305,7 +386,8 @@ class GraphService:
                        OR e.edge_type = ANY(%s))
                   AND e.confidence::text = ANY(%s)
                   AND EXISTS (SELECT 1 FROM core.assertion a
-                               WHERE a.edge_id = e.id AND a.retracted_at IS NULL)
+                               WHERE a.edge_id = e.id AND a.retracted_at IS NULL
+                                 AND a.superseded_at IS NULL)
                   AND (%s::timestamptz IS NULL
                        OR (e.valid_from IS NULL OR e.valid_from <= %s)
                        AND (e.valid_to IS NULL OR e.valid_to >= %s))
@@ -475,8 +557,11 @@ class GraphService:
                 "elements": total_elements,
                 "ratio": round((evidenced_nodes + evidenced_edges) / total_elements, 4)
                 if total_elements else None,
-                "note": "share of visible elements with at least one live "
-                        "assertion carrying an exhibit",
+                # Worded from `evidenced_sql`, the one definition the
+                # canvas, the inspector and the report share (2026-09-22).
+                "note": "share of visible elements backed by an exhibit you "
+                        "can see, either carried by a live assertion or "
+                        "linked to the element directly",
             },
             "dyad_note": "metrics treat the graph as simple: parallel edges "
                          "between the same pair count once",

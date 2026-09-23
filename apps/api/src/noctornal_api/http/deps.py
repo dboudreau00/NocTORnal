@@ -393,10 +393,15 @@ def check_writable_labels(
                       f"not read into compartment(s) {sorted(missing)}")
 
 
-def user_ceiling(conn: psycopg.Connection, user_id: UUID) -> tuple[Tlp, frozenset[str]]:
+def user_ceiling(conn: psycopg.Connection, user_id: UUID,
+                 case_id: UUID | None = None) -> tuple[Tlp, frozenset[str]]:
     """The caller's own clearance and compartments — used to filter search
     results so an over-classified element is invisible rather than
-    discoverable-then-403."""
+    discoverable-then-403.
+
+    `case_id` is for a READ whose rows all belong to that one case, and
+    only such a read may pass it: a live break-glass grant scoped to that
+    case then raises the ceiling too. Leave it out everywhere else."""
     row = conn.execute(
         "SELECT tlp_clearance, compartments FROM iam.app_user WHERE id = %s",
         (user_id,),
@@ -405,26 +410,33 @@ def user_ceiling(conn: psycopg.Connection, user_id: UUID) -> tuple[Tlp, frozense
         raise Problem(401, "Unauthenticated", "unknown user")
     clearance, held = tlp_from_name(row[0]), frozenset(row[1] or [])
 
-    # This ceiling has no case in hand -- it is what search, comms, samples
-    # and some forty other sites use to decide what NOT to show. A
-    # case-scoped break-glass grant therefore cannot apply here: raising it
-    # would widen the caller's view of every OTHER case for the life of the
-    # grant. Only a global grant (case_id NULL) raises this ceiling. The
-    # case-scoped raise lives in PgAccessResolver.resolve(), which is the
-    # gate every case-scoped read and write passes through.
+    # Without `case_id` this ceiling has no case in hand: it is what the
+    # Lab, collection, ingest, reports and label checks on writes use, and
+    # a case-scoped grant must not apply there, because raising it would
+    # widen the caller's view of every OTHER case for the life of the
+    # grant. Only a global grant (case_id NULL) raises it then.
     #
-    # Honest consequence: an analyst under a case-scoped AMBER grant can
-    # OPEN an AMBER exhibit on that case, but a case-wide search filtered
-    # by this ceiling will not LIST it. Stated here rather than papered
-    # over; the fix is a case_id parameter on this function and forty call
-    # sites, which is a change to make on purpose.
+    # With `case_id`, a grant scoped to THAT case raises it as well. Until
+    # 2026-09-23 no caller could say which case it was reading, so a
+    # case-scoped grant opened an exhibit by id and nothing else: the
+    # graph, the entity and exhibit lists and case search still hid
+    # everything above the analyst's own clearance, while the console,
+    # whose default scope is the open case, announced emergency access as
+    # live (ux15 breakglass-grant-raises-nothing, verifier follow-up). The
+    # case-scoped reads now pass their case; this is the change the
+    # comment here used to say should be made on purpose.
+    #
+    # Highest live level first, as in PgAccessResolver.resolve(): ordered by
+    # expiry alone, a later-ending lower grant hid a higher one (2026-09-23).
+    # `case_id = NULL` is never true, so with no case only a global grant
+    # matches, exactly as before.
     g = conn.execute(
         """SELECT granted_classification FROM iam.break_glass
-            WHERE user_id = %s AND case_id IS NULL
+            WHERE user_id = %s AND (case_id IS NULL OR case_id = %s)
               AND revoked_at IS NULL AND expires_at > now()
               AND granted_classification IS NOT NULL
-            ORDER BY expires_at DESC LIMIT 1""",
-        (user_id,),
+            ORDER BY granted_classification DESC, expires_at DESC LIMIT 1""",
+        (user_id, case_id),
     ).fetchone()
     if g is not None:
         from noctornal_api.security.access import AccessResolutionError

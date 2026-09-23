@@ -64,6 +64,14 @@ A case code IS intelligence. `transports.py` reasons the same way about
 putting one in an email subject line: "OP-KESTREL" tells a reader that an
 operation by that name exists and that this person works on it.
 
+The same holds for everything written ABOUT the case rather than about one
+element: the assumptions (0056) and, since final review C2 (2026-09-23),
+the competing hypotheses. A hypothesis statement has no label of its own,
+so it went into every document the console prepared, including a RED
+case's TLP:CLEAR one. Both now travel with the header and are counted when
+it is withheld, and the matrix's evidence is read at the target like
+everything else.
+
 ## Egress
 
 `can_egress()` decides whether the finished document may leave, and it is
@@ -79,6 +87,9 @@ never fire for a report.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
@@ -87,7 +98,7 @@ import psycopg
 
 from noctornal_api.assumptions import AssumptionService
 from noctornal_api.egress import Destination, can_egress
-from noctornal_api.projections import GraphService, Projection
+from noctornal_api.projections import DISCLOSURE_NONE, GraphService, Projection
 from noctornal_api.security.access import Tlp, tlp_from_name
 
 
@@ -124,12 +135,28 @@ class Redaction:
     #: content at the case's own level, exactly like the title, and it is
     #: withheld on the same condition. Counted so the statement can say so.
     assumptions_withheld: int = 0
+    #: How many live competing hypotheses went with the header. A
+    #: hypothesis statement ("OP-KESTREL is run by Ivan Petrov") is free
+    #: text about the case with no label of its own, exactly like an
+    #: assumption, and until final review C2 (2026-09-23) it went in
+    #: whether or not the header did: a RED case prepared at GREEN with the
+    #: console's defaults saved a TLP:CLEAR file naming the operation and
+    #: its suspect.
+    hypotheses_withheld: int = 0
+    #: How many items of evidence in the hypothesis matrix rest on material
+    #: above the ceiling and were left out of its scores (C2). Counted
+    #: apart from the entities because an element the projection does not
+    #: count (a deleted node, an inferred tie) can still carry a stance.
+    #: Like those counts it follows the case's withheld-disclosure setting,
+    #: and is 0 under NONE.
+    hypothesis_evidence_withheld: int = 0
 
     @property
     def anything_withheld(self) -> bool:
         return bool(self.nodes_withheld or self.edges_withheld
                     or self.evidence_withheld or self.header_withheld
-                    or self.assumptions_withheld)
+                    or self.assumptions_withheld or self.hypotheses_withheld
+                    or self.hypothesis_evidence_withheld)
 
     def statement(self) -> str:
         if not self.anything_withheld:
@@ -152,15 +179,26 @@ class Redaction:
                     f"are written about the case at the case's own level; "
                     f"the findings below therefore rest on premises this "
                     f"document cannot state.")
+            if self.hypotheses_withheld:
+                header += (
+                    f" The {self.hypotheses_withheld} competing "
+                    f"hypothes(is/es) recorded against the case are withheld "
+                    f"for the same reason.")
+        matrix = ""
+        if self.hypothesis_evidence_withheld:
+            matrix = (
+                f" {self.hypothesis_evidence_withheld} item(s) of evidence in "
+                f"the hypothesis matrix rest on that material, so the "
+                f"hypothesis scores below leave them out.")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
             f"classified TLP:{self.case_tlp}.{header} "
             f"{self.nodes_withheld} entit(y/ies), {self.edges_withheld} "
             f"relationship(s) and {self.evidence_withheld} exhibit(s) are "
-            f"above that level and have been withheld. **Every figure below "
-            f"is computed over the redacted graph** and is therefore a lower "
-            f"bound, not a measurement of the case.")
+            f"above that level and have been withheld.{matrix} **Every "
+            f"figure below is computed over the redacted graph** and is "
+            f"therefore a lower bound, not a measurement of the case.")
 
 
 @dataclass
@@ -200,6 +238,9 @@ class Report:
                 "statement": self.redaction.statement(),
                 "header_withheld": self.redaction.header_withheld,
                 "assumptions_withheld": self.redaction.assumptions_withheld,
+                "hypotheses_withheld": self.redaction.hypotheses_withheld,
+                "hypothesis_evidence_withheld":
+                    self.redaction.hypothesis_evidence_withheld,
             },
             "summary": self.summary,
             "assumptions": self.assumptions,
@@ -285,28 +326,61 @@ class ReportBuilder:
         # the requester's read-in. Without it the exhibit register was the
         # one place compartmented material entered a report: the graph
         # filtered it and the evidence query did not.
+        # `purged_at` travels with each row so the register can say which
+        # exhibits are destroyed. A purged exhibit stays IN the register
+        # (the record of it is meant to outlive the bytes, and dropping it
+        # would miscount it as withheld above the ceiling), but it no
+        # longer makes anything "Evidenced", and until 2026-09-22 the
+        # register did not say so: an entity attached only to a purged
+        # exhibit printed NO beside an exhibit list that still showed it.
         evidence_rows = self._c.execute(
             """SELECT id, title, sha256, blake3, media_type, byte_size,
                       acquired_at, acquisition_method, classification,
-                      compartments
+                      compartments, purged_at
                  FROM core.evidence
                 WHERE case_id = %s AND classification <= %s::core.tlp
                   AND compartments <@ %s
-                ORDER BY acquired_at""",
+                ORDER BY acquired_at, id""",
             (case_id, target.name, sorted(compartments))).fetchall()
         evidence_total = self._c.execute(
             "SELECT count(*) FROM core.evidence WHERE case_id = %s",
             (case_id,)).fetchone()[0]
 
+        # The competing hypotheses (final review C2, 2026-09-23). A
+        # statement is free text about the case with no label of its own,
+        # so it is case content at the case's level and goes in on the
+        # header's condition, exactly like an assumption; when the header
+        # is withheld the builder only COUNTS them. The matrix's evidence is
+        # read at the TARGET through `ach_cells`, the same filter the live
+        # ACH read uses, so a label above the ceiling is never read and an
+        # above-ceiling stance does not move a printed score.
+        hypotheses: dict = {}
+        hypotheses_withheld = 0
+        matrix = _Matrix()
+        if include_hypotheses:
+            if header_ok:
+                matrix = self._hypotheses(
+                    case_id, target, compartments,
+                    count_withheld=withheld.mode != DISCLOSURE_NONE)
+                hypotheses = matrix.body
+            else:
+                hypotheses_withheld = self._c.execute(
+                    """SELECT count(*) FROM core.hypothesis
+                        WHERE case_id = %s AND status::text <> 'SUPERSEDED'""",
+                    (case_id,)).fetchone()[0]
+
         # The document's own mark: the highest classification of anything
         # actually in it, never the ceiling that was asked for. The case
         # header counts as "in it" -- deriving the mark from the graph body
         # alone is what let a RED case emit a TLP:CLEAR document carrying
-        # its own codename and summary.
+        # its own codename and summary. So does every element whose label
+        # the hypothesis matrix carries: a stance can rest on an element
+        # the projection does not return (a deleted node, an inferred tie).
         included = ([n["classification"] for n in sub.nodes]
                     + [e["classification"] for e in sub.edges]
                     + [r[8] for r in evidence_rows]
-                    + ([case_tlp] if header_ok else []))
+                    + ([case_tlp] if header_ok else [])
+                    + matrix.classifications)
         marking = (max((tlp_from_name(c) for c in included), default=Tlp.CLEAR)
                    if included else Tlp.CLEAR)
 
@@ -327,6 +401,8 @@ class ReportBuilder:
             evidence_withheld=evidence_total - len(evidence_rows),
             header_withheld=not header_ok,
             assumptions_withheld=assumptions_withheld,
+            hypotheses_withheld=hypotheses_withheld,
+            hypothesis_evidence_withheld=matrix.withheld,
         )
 
         metrics = redacted.metrics(projection) if hasattr(
@@ -337,13 +413,25 @@ class ReportBuilder:
               "classification": n["classification"],
               "has_evidence": n.get("has_evidence", False)}
              for n in sub.nodes),
-            key=lambda a: a["label"].lower())
-        relationships = [
-            {"type": e["edge_type"], "src": str(e["src_node_id"]),
-             "dst": str(e["dst_node_id"]), "sign": e["sign"],
-             "confidence": e["confidence"], "inferred": e["is_inferred"],
-             "has_evidence": e.get("has_evidence", False)}
-            for e in sub.edges]
+            key=lambda a: (a["label"].lower(), a["id"]))
+        # Ordered by the labels a reader sees, then by id. The projection's
+        # edge query has no ORDER BY, so without this two builds of the same
+        # case could list the same ties in different orders, and the
+        # document an analyst previewed would not be byte-for-byte the one
+        # the egress check cleared (ux15-report, 2026-09-22).
+        label_of = {a["id"]: a["label"] for a in actors}
+        relationships = sorted(
+            ({"type": e["edge_type"], "src": str(e["src_node_id"]),
+              "dst": str(e["dst_node_id"]), "sign": e["sign"],
+              "confidence": e["confidence"], "inferred": e["is_inferred"],
+              "has_evidence": e.get("has_evidence", False)}
+             for e in sub.edges),
+            # Every field is in the key, so two ties that still tie on it
+            # render as identical rows and their order cannot show.
+            key=lambda r: (label_of.get(r["src"], "").lower(),
+                           label_of.get(r["dst"], "").lower(),
+                           r["type"], r["src"], r["dst"], r["sign"],
+                           r["confidence"], r["inferred"], r["has_evidence"]))
 
         withheld_mark = "[withheld: above this document's ceiling]"
         report = Report(
@@ -381,7 +469,8 @@ class ReportBuilder:
             # `compartments` and is the honest subset of it, not the whole.
             compartments=frozenset(
                 (case_compartments if header_ok else frozenset())
-                | {c for r in evidence_rows for c in (r[9] or [])}),
+                | {c for r in evidence_rows for c in (r[9] or [])}
+                | matrix.compartments),
             redaction=redaction,
             summary={
                 "entities": len(sub.nodes),
@@ -404,20 +493,25 @@ class ReportBuilder:
                 "media_type": r[4], "byte_size": r[5],
                 "acquired_at": r[6].isoformat() if r[6] else None,
                 "acquisition_method": r[7], "classification": r[8],
+                "purged_at": r[10].isoformat() if r[10] else None,
             } for r in evidence_rows],
+            hypotheses=hypotheses,
             generated_by=generated_by,
         )
-
-        if include_hypotheses:
-            report.hypotheses = self._hypotheses(case_id)
         return report
 
-    def _hypotheses(self, case_id: UUID) -> dict:
-        """The ACH matrix, if the case has one.
+    def _hypotheses(self, case_id: UUID, target: Tlp,
+                    compartments: frozenset[str], *,
+                    count_withheld: bool) -> _Matrix:
+        """The ACH matrix, if the case has one, over what `target` may see.
 
         Included because a report that states a conclusion without the
         alternatives that were considered and ruled out is the confirmation
         bias ACH exists to correct, delivered on letterhead.
+
+        `count_withheld` is the case's withheld-disclosure setting (0030):
+        under NONE the element counts are never computed, so this one is
+        not either, and the report says no more than the graph does.
         """
         from noctornal_api.ach import EvidenceItem, as_response, score
 
@@ -426,26 +520,124 @@ class ReportBuilder:
                 WHERE case_id = %s AND status::text <> 'SUPERSEDED'
                 ORDER BY created_at""", (case_id,)).fetchall()
         if not rows:
-            return {}
-        cells = self._c.execute(
-            """SELECT he.assertion_id, he.hypothesis_id, he.stance,
-                      a.reliability, a.credibility,
-                      coalesce(n.label, a.claim_path, a.rationale, 'assertion')
-                 FROM core.hypothesis_evidence he
-                 JOIN core.hypothesis h ON h.id = he.hypothesis_id
-                 JOIN core.assertion a ON a.id = he.assertion_id
-                 LEFT JOIN core.node n ON n.id = a.node_id
-                WHERE h.case_id = %s AND a.retracted_at IS NULL""",
-            (case_id,)).fetchall()
+            return _Matrix()
+        cells = ach_cells(self._c, case_id, clearance=target.name,
+                          compartments=compartments)
         items: dict[UUID, EvidenceItem] = {}
-        for assertion_id, hypothesis_id, stance, rel, cred, label in cells:
-            item = items.setdefault(assertion_id, EvidenceItem(
-                assertion_id=assertion_id, label=label, reliability=rel,
-                credibility=cred))
-            item.stances[hypothesis_id] = stance
+        for cell in cells:
+            item = items.setdefault(cell.assertion_id, EvidenceItem(
+                assertion_id=cell.assertion_id, label=cell.label,
+                reliability=cell.reliability, credibility=cell.credibility))
+            item.stances[cell.hypothesis_id] = cell.stance
         body = as_response(score([(r[0], r[1]) for r in rows], list(items.values())))
         body["statuses"] = {str(r[0]): r[2] for r in rows}
-        return body
+        return _Matrix(
+            body=body,
+            classifications=[c.classification for c in cells],
+            compartments=frozenset(x for c in cells for x in c.compartments),
+            withheld=ach_cells_withheld(self._c, case_id, clearance=target.name,
+                                        compartments=compartments)
+            if count_withheld else 0)
+
+
+@dataclass
+class _Matrix:
+    """The hypothesis section as the builder needs it: the scored body, and
+    the labels of every element it drew on so the mark and the compartments
+    account for them."""
+
+    body: dict = field(default_factory=dict)
+    classifications: list[str] = field(default_factory=list)
+    compartments: frozenset[str] = field(default_factory=frozenset)
+    withheld: int = 0
+
+
+@dataclass(frozen=True)
+class AchCell:
+    """One live stance, with the labels of the element its assertion is
+    about."""
+
+    assertion_id: UUID
+    hypothesis_id: UUID
+    stance: int
+    reliability: str
+    credibility: str
+    label: str
+    classification: str
+    compartments: tuple[str, ...]
+
+
+#: Whether a matrix cell's assertion is about something a reader at
+#: %(clearance)s, read into %(compartments)s, may see: the projection's own
+#: rule (`GraphService.project`), so the matrix and the graph agree. A tie
+#: is visible only when both its ends are, because a rationale written
+#: about a tie can name either end.
+#:
+#: Final review C2 (2026-09-23). Both reads of the matrix, the report's and
+#: GET /ach, used to label a cell `coalesce(n.label, ...)` with no filter at
+#: all, so an AMBER analyst on an AMBER case received a RED node's label as
+#: `evidence[].label` while every graph, list and search view hid it, and
+#: above-ceiling stances moved the scores a released document printed.
+_ACH_CELL_VISIBLE = """
+    (   (a.node_id IS NOT NULL
+         AND n.classification <= %(clearance)s::core.tlp
+         AND n.compartments <@ %(compartments)s)
+     OR (a.edge_id IS NOT NULL
+         AND e.classification <= %(clearance)s::core.tlp
+         AND e.compartments <@ %(compartments)s
+         AND EXISTS (SELECT 1 FROM core.node sn
+                      WHERE sn.id = e.src_node_id
+                        AND sn.classification <= %(clearance)s::core.tlp
+                        AND sn.compartments <@ %(compartments)s)
+         AND EXISTS (SELECT 1 FROM core.node dn
+                      WHERE dn.id = e.dst_node_id
+                        AND dn.classification <= %(clearance)s::core.tlp
+                        AND dn.compartments <@ %(compartments)s)))"""
+
+_ACH_CELL_FROM = """
+      FROM core.hypothesis_evidence he
+      JOIN core.hypothesis h ON h.id = he.hypothesis_id
+      JOIN core.assertion a ON a.id = he.assertion_id
+      LEFT JOIN core.node n ON n.id = a.node_id
+      LEFT JOIN core.edge e ON e.id = a.edge_id
+      LEFT JOIN core.edge_type et ON et.key = e.edge_type
+     WHERE h.case_id = %(case_id)s
+       -- Only LIVE assertions: a retracted source must not leave its
+       -- conclusion standing (decision 24, applied to the matrix).
+       AND a.retracted_at IS NULL"""
+
+
+def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
+              compartments: frozenset[str]) -> list[AchCell]:
+    """The matrix cells a reader at `clearance`, read into `compartments`,
+    may see. The ONE query both the report and GET /ach read the matrix
+    through, so the two cannot disagree about what a stance may reveal."""
+    rows = conn.execute(
+        """SELECT he.assertion_id, he.hypothesis_id, he.stance,
+                  a.reliability, a.credibility,
+                  coalesce(n.label, et.display_name, a.claim_path,
+                           a.rationale, 'assertion'),
+                  coalesce(n.classification, e.classification),
+                  coalesce(n.compartments, e.compartments)"""
+        + _ACH_CELL_FROM + " AND " + _ACH_CELL_VISIBLE
+        + " ORDER BY he.assertion_id, he.hypothesis_id",
+        {"case_id": case_id, "clearance": clearance,
+         "compartments": sorted(compartments)}).fetchall()
+    return [AchCell(assertion_id=r[0], hypothesis_id=r[1], stance=r[2],
+                    reliability=r[3], credibility=r[4], label=r[5],
+                    classification=r[6], compartments=tuple(r[7] or ()))
+            for r in rows]
+
+
+def ach_cells_withheld(conn: psycopg.Connection, case_id: UUID, *,
+                       clearance: str, compartments: frozenset[str]) -> int:
+    """How many live pieces of matrix evidence `ach_cells` leaves out for
+    this reader. A count only: never which, never where."""
+    return conn.execute(
+        "SELECT count(DISTINCT he.assertion_id)" + _ACH_CELL_FROM
+        + " AND NOT " + _ACH_CELL_VISIBLE,
+        {"case_id": case_id, "clearance": clearance,
+         "compartments": sorted(compartments)}).fetchone()[0]
 
 
 def check_egress(report: Report, destination: Destination | str,
@@ -470,6 +662,79 @@ def check_egress(report: Report, destination: Destination | str,
                       destination_ceiling=destination_ceiling)
 
 
+def content_digest(report: Report) -> str:
+    """A fingerprint of what the document SAYS, so two builds can be shown
+    to be the same document.
+
+    ux15-report:report-download-bypasses-egress (2026-09-22): the console's
+    preview came from one build, the egress verdict from a second, and the
+    downloaded file from a third, and nothing tied them together. "Cleared"
+    and "downloaded" could name two different documents: the release built
+    with hypotheses on whatever the preview had said, and a write between
+    Prepare and Check egress changed the file without changing the screen.
+    Build and release both return this; the console offers the file only
+    when the release's digest matches the preview's.
+
+    The generation time and author are left out (they differ on every
+    build and say nothing about the content), and every list is put in a
+    canonical order first, so a query that returns the same rows in a
+    different order is not reported as a different document.
+    """
+    body = report.as_dict()
+    body.pop("generated_at", None)
+    body.pop("generated_by", None)
+
+    def canon(value):
+        if isinstance(value, dict):
+            return {k: canon(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            items = [canon(v) for v in value]
+            return sorted(items, key=lambda v: json.dumps(
+                v, sort_keys=True, default=str))
+        # Summed weights depend on the order the edges arrived in, down to
+        # the last bit; that is not a different document.
+        if isinstance(value, float):
+            return round(value, 9)
+        return value
+
+    blob = json.dumps(canon(body), sort_keys=True, default=str,
+                      separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _line(value) -> str:
+    """`value` as ONE line: every character an editor or a renderer may
+    end a line on becomes a space.
+
+    Final review U13 (2026-09-23). Labels, exhibit titles, assumptions and
+    hypothesis statements went into the document verbatim, and a label is
+    only checked for being blank. A collected handle holding a newline
+    ended its table row and put text of the forum's choosing on a line of
+    its own in the file the egress gate cleared: "\\n\\n**TLP:CLEAR**" is a
+    false handling mark partway through an AMBER document. `str()` first so
+    a missing value still prints as it always did."""
+    return " ".join(str(value).splitlines())
+
+
+def _cell(value) -> str:
+    """`value` as the text of one markdown table cell (U13).
+
+    One line (`_line`), and every "|" escaped, because a "|" in a handle
+    moved each later cell one column right: "x | RED" made that entity's
+    TLP column read RED. A backslash is doubled only where it stands
+    before a "|", so a renderer that counts backslashes and one that looks
+    only at the character before the pipe both keep it in the cell, and a
+    label without a pipe in it stays byte for byte greppable."""
+    return re.sub(r"(\\*)\|", lambda m: m.group(1) * 2 + "\\|", _line(value))
+
+
+def _cells(row: dict) -> dict:
+    """A copy of `row` with every text value made safe for a table cell.
+    Numbers, flags and missing values pass through, so a cell prints
+    exactly what it printed before whenever there was nothing to escape."""
+    return {k: _cell(v) if isinstance(v, str) else v for k, v in row.items()}
+
+
 def render_markdown(report: Report) -> str:
     """A plain-text rendering, TLP-marked top and bottom.
 
@@ -480,6 +745,18 @@ def render_markdown(report: Report) -> str:
     must still carry its handling caveat.
     """
     d = report.as_dict()
+    # U13: every value is made safe for where it lands ONCE, here, and on
+    # copies. `as_dict` hands back the report's own lists, which
+    # `content_digest` is computed over, so they are rebound, never edited.
+    # The heading and the authority lines are not tables, so a case field
+    # only has to stay on its line; every table row is built from `_cells`.
+    d["case"] = {k: _line(v) if isinstance(v, str) else v
+                 for k, v in d["case"].items()}
+    for key in ("assumptions", "actors", "relationships", "evidence"):
+        d[key] = [_cells(row) for row in d[key]]
+    if d["hypotheses"]:
+        d["hypotheses"] = {**d["hypotheses"], "hypotheses": [
+            _cells(h) for h in d["hypotheses"]["hypotheses"]]}
     tlp = d["classification"]
     lines = [
         f"# TLP:{tlp} — {d['case']['code']}: {d['case']['title']}",
@@ -539,6 +816,19 @@ def render_markdown(report: Report) -> str:
         "",
         "## Entities",
         "",
+        # Says what the column means because until 2026-09-22 it meant less
+        # than the console implied: it counted exhibits carried by a claim
+        # and ignored exhibits linked to the entity, so an entity the
+        # analyst had linked an exhibit to printed "NO" (ux07
+        # two-evidence-paths-disagree). The rule is projections.evidenced_sql,
+        # which also ignores a purged exhibit, so the sentence says that too
+        # and the register below marks each purged row (2026-09-22 verifier).
+        "Evidenced means at least one exhibit in the register below, not "
+        "marked purged, is attached to the entity, either by a live claim "
+        "that cites it or by a direct link. A purged exhibit stays in the "
+        "register because the record of it outlives the bytes, and it does "
+        "not count.",
+        "",
         "| Type | Label | TLP | Evidenced |",
         "|---|---|---|---|",
     ]
@@ -546,13 +836,43 @@ def render_markdown(report: Report) -> str:
         lines.append(f"| {a['type']} | {a['label']} | {a['classification']} | "
                      f"{'yes' if a['has_evidence'] else 'NO'} |")
 
+    # The ties themselves, by name. Until 2026-09-22 the document carried
+    # only a COUNT of relationships while the console's preview listed them
+    # (as "undefined -> undefined", ux15-report), so the one thing a
+    # network report is about was neither readable on screen nor present
+    # in the file. Every tie here joins two entities listed above: the
+    # projection admits an edge only when both endpoints are visible.
+    label_of = {a["id"]: a["label"] for a in d["actors"]}
+    sign_word = {1: "positive", -1: "negative", 0: "neutral"}
+    lines += [
+        "",
+        "## Relationships",
+        "",
+        "Asserted ties only: inferred ties are not in a report.",
+        "",
+        "| From | Relationship | To | Sign | Confidence | Evidenced |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in d["relationships"]:
+        lines.append(
+            f"| {label_of.get(r['src'], r['src'])} | {r['type']} | "
+            f"{label_of.get(r['dst'], r['dst'])} | "
+            f"{sign_word.get(r['sign'], r['sign'])} | {r['confidence']} | "
+            f"{'yes' if r['has_evidence'] else 'NO'} |")
+    if not d["relationships"]:
+        lines.append("| _none at this classification_ | | | | | |")
+
     lines += ["", "## Exhibits", "",
               "Hashes are given so the record can be identified evidentially "
               "rather than described (decision 13: US FRE 902(13)-(14), Canada "
               "Evidence Act ss. 31.1-31.8).", "",
               "| Title | SHA-256 | Acquired | Method |", "|---|---|---|---|"]
     for e in d["evidence"]:
-        lines.append(f"| {e['title']} | `{(e['sha256'] or '')[:32]}…` | "
+        # .get: a report serialised before purged_at was added has no key.
+        purged = e.get("purged_at")
+        title = (f"{e['title']} **(PURGED {purged}: does not count as "
+                 f"evidence)**" if purged else e["title"])
+        lines.append(f"| {title} | `{(e['sha256'] or '')[:32]}…` | "
                      f"{e['acquired_at']} | {e['acquisition_method']} |")
     if not d["evidence"]:
         lines.append("| _none at this classification_ | | | |")
@@ -567,6 +887,14 @@ def render_markdown(report: Report) -> str:
                          f"{h['support']} | {h['assessed']} |")
         for warning in d["hypotheses"].get("warnings", []):
             lines.append(f"\n> ⚠ {warning}")
+    elif d["redaction"].get("hypotheses_withheld"):
+        # Said where the section would be, as for assumptions: a heading
+        # that silently disappears reads as "no alternatives were
+        # considered", which is the one thing ACH exists to rule out (C2).
+        lines += ["", "## Competing hypotheses", "",
+                  f"_{d['redaction']['hypotheses_withheld']} competing "
+                  f"hypothes(is/es) withheld with the case header; see the "
+                  f"marking statement above._"]
 
     lines += [
         "",

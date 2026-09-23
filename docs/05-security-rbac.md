@@ -92,11 +92,76 @@ which is how the shipped gate treats them too (legs 3 and 4 above).
 
 ## Roles
 
-Seeded in Alembic revision `0021_role_permissions.py`. The two worth calling out:
+Seeded in Alembic revisions `0017` (the roles) and `0021` (the matrix), and
+extended by later revisions as each surface got a permission. The console
+shows each role by its name; permission checks, the API and these documents
+use the key, and a rename moves only the name (migration 0062 renamed
+`CASE_OWNER` to Lead investigator on 2026-09-22 and moved no check).
+
+| Key | Shown as | Holds, among others | Deliberately does not hold |
+|---|---|---|---|
+| `CASE_OWNER` | **Lead investigator** | Full control of their cases: `case.grant`, `case.close`, `case.delete`, `evidence.export`, `evidence.purge`, `retention.manage`, `proposal.review`, `break_glass.invoke`, `victim_pii.reveal`, `sample.preserved.retrieve` | `victim_pii.authorise`, `sample.preserved.authorise`, `break_glass.review`: the other half of every two-person control below |
+| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise` | **Any case content**, and every permission it authorises or reviews |
+| `SYS_ADMIN` | System administrator | `user.manage`, `role.manage`, `integration.manage`, `ingest.manage`, `retention.manage`, `retention.purge`, `break_glass.invoke` | Case content by default |
+| `ANALYST` | Analyst | Graph, assertion and evidence work on assigned cases, `analytics.run`, `report.generate`, `sample.read`, `sample.submit` | Grants, export, purge, break-glass, any reveal |
+| `REVIEWER` | Reviewer | `proposal.review`, `graph.merge`, `graph.unmerge`, `case.read` | Originating graph content |
+| `CONTRIBUTOR` | Contributor | `evidence.upload`, `case.read` | Accepting a proposal |
+| `COLLECTOR` | Collection manager | `collection.run`, `source.manage`, `watch.manage`, `collection_account.manage` | `case.read` |
+| `MALWARE_ANALYST` | Malware analyst | `sample.read`, `sample.analyse`, `sample.download` | Any case access (docs/11) |
+| `READ_ONLY` | Read only | `case.read`, `evidence.read`, `comms.read` | Any write |
+| `LIAISON` | External liaison | Read of one case, time-boxed and TLP-capped | Export |
+| `SERVICE` | Service account | `evidence.upload` | Anything a person does; not grantable from the admin pane |
+
+The two worth calling out:
 
 **SECURITY_OFFICER** reads the audit trail and reviews break-glass events
 but has **no case content access**. Separation of duties: the person
 watching the watchers must not be an analyst, or the oversight is theatre.
+The owner confirmed the split on 2026-09-22 ("keep the split"): the Lead
+investigator controls their case, and the Security Officer stays the
+independent overseer.
+
+### Two-person controls, and the guard that keeps them two
+
+Three acts need two different people, and in each the halves sit in
+different roles:
+
+| Act | One person | The other | Decided |
+|---|---|---|---|
+| Reveal a masked victim credential | `victim_pii.authorise` (Security officer) | `victim_pii.reveal` (Lead investigator) | docs/17 F16 |
+| Emergency access | `break_glass.invoke` (Lead investigator, System administrator) | `break_glass.review` (Security officer) | docs/17 F14 |
+| Retrieve a preserved rejected sample | `sample.preserved.authorise` (Security officer) | `sample.preserved.retrieve` (Lead investigator) | docs/17 F2 |
+
+The case gate reads the permission off the caller's ONE role on the case,
+so even a person who holds both roles globally (the first-run operator
+does) cannot perform both halves on one case: on their own case they are
+the Lead investigator, and to authorise they would have to be assigned to it
+as `SECURITY_OFFICER` instead, which confers no case content. The services
+refuse `granted_to = granted_by` as well, and `ingest.pii_authorisation`
+carries that as a CHECK. Authorisations a Lead investigator granted while
+`CASE_OWNER` still held `victim_pii.authorise` were revoked by migration
+0062 itself, each with a `PII_AUTHORISATION_REVOKED` audit event, because
+the reveal lookup matches an authorisation on its grantee and never on who
+granted it (docs/17 F16).
+
+Emergency access is the exception to "one role per case": both
+`break_glass.invoke` and `break_glass.review` are GLOBAL verbs, so the
+first-run operator, who holds SYS_ADMIN, SECURITY_OFFICER and CASE_OWNER,
+holds both halves at once. What keeps it two people is the service, in two
+places. `review()` refuses the invoker's own grant, and `invoke()` refuses
+unless an active SECURITY_OFFICER OTHER THAN THE INVOKER exists. Until the
+final review (C6, 2026-09-23) the second check counted the invoker too, so
+a sole officer could create a grant nobody could ever review, and its alert
+reached nobody, because a notification never tells someone what they just
+did. The 409 now says "the only active SECURITY_OFFICER is you". Readiness
+still asks only for one active officer, which is true for everybody but
+that officer: they need a second one before they can invoke.
+
+What no request-time check can see is a ROLE DEFINITION that holds both
+halves, which would make every holder of it both people. `iam.separated_duty`
+(migration 0062) lists the pairs above, and a trigger on
+`iam.role_permission` refuses the grant that would bring a pair together in
+one role, naming the role and the pair.
 
 **LIAISON** is for external sharing. Time-boxed by default (`expires_at`
 required), capped at a TLP level, export disabled, single case. Most
@@ -133,6 +198,40 @@ bypassed entirely. Make it available, loud and short: mandatory
 justification, hard expiry, immediate alert to the security officer, and
 mandatory post-hoc review. The access is granted; the visibility is what
 makes it safe.
+
+How that is held in `break_glass.py` and `stores.py` (final review,
+2026-09-23):
+
+- **Post-hoc means after.** A grant that is still live cannot be reviewed
+  (409: end it now, or wait for it to expire). The officer's queue lists
+  unreviewed grants only and End it now sits on those cards, so a verdict
+  on a live grant hid it from every officer while the analyst kept the
+  raised clearance, and every later access was counted against a grant
+  nobody would open again (U2).
+- **A use is a request the grant let through.** `PgAccessResolver.resolve`
+  counts one when the gate ALLOWS the request and the object's label sits
+  above the invoker's own clearance and within the grant's. Refused
+  requests are not counted, and neither is the gate asked as a question:
+  `search._allowed_on_case` (what a response may name),
+  `ingest._case_allows` (which rows a queue listing shows) and
+  `live._recheck` (whether an open socket may keep streaming) (U19).
+- **What that counts.** On a case within the invoker's clearance, the
+  graph, the inspector, lists and search are widened without being
+  counted, because each is gated at the case's labels. What counts is a
+  gate that sees an item's OWN labels above that clearance: any exhibit
+  route, a deception capture, screenshot or message opened (U23), and a
+  change to a node or edge. Reading an entity is not counted, and the
+  invoke notice says exactly this. On a case classified above the
+  invoker's clearance every request on it passes the case's gate only
+  through the grant, so every request counts. The capture and message
+  reads count once there; the exhibit routes, the capture screenshot and
+  the entity writes pass a second gate at the item's labels and count
+  twice. Ending that double count needs a `count_use` passthrough on
+  `deps.authorize_object`.
+- **A case grant raises that case's content, not the deployment's.**
+  Collected documents and sources belong to no case, so the names an
+  assertion carries for them are filtered at the invoker's case-less
+  ceiling, as every collection view filters them (C11).
 
 ## Sessions
 

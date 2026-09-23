@@ -1,8 +1,8 @@
 # What is left
 
-**State (2026-09-15):** branch `main` (the working branch; byte-identical to
-`deception-and-release-hardening` except `README.md`), Alembic head `0061`,
-1818 tests counted as `def test_` functions across the two pytest roots,
+**State (2026-09-23):** branch `main` (the working branch; byte-identical to
+`deception-and-release-hardening` except `README.md`), Alembic head `0065`,
+2400 tests counted as `def test_` functions across the two pytest roots,
 version 0.5.2 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
@@ -73,7 +73,7 @@ order. The five blockers, compressed:
 
 | | What | Why it blocks |
 |---|---|---|
-| **L1** | Prohibited-content policy for samples | The build refuses ingest until a policy reference and a designated person are declared, but that is a declaration it records, not one it can verify. `REJECTED` currently destroys the bytes, which is wrong in a jurisdiction requiring preservation. |
+| **L1** | Prohibited-content policy for samples | The build refuses ingest until a policy reference and a designated person are declared, but that is a declaration it records, not one it can verify. `REJECTED` now preserves the bytes under a legal hold by default (owner decision, 2026-09-22; docs/17 F2), and destroys them only where the deployment declares it. Whether this jurisdiction wants preservation, and for whom, is still counsel's. |
 | **L2** | Stealer-log lawful basis, victim notification, real retention | Holding data about thousands of uninvolved people. 90 days is a placeholder somebody typed. |
 | **L3** | Persona operation authority | The software will drive an account into a forum. Whether you may is not a software question. |
 | **L4** | Interception law and consent | Message capture. `provenance_class` records which kind it was; the authority is external. |
@@ -97,6 +97,49 @@ attribution.
 | A collector process | The persona vault runs inside the API process, so invariant 7 is a property of the code's shape rather than of a network boundary. Splitting it out is behind L3 and a queue nothing has needed. |
 | Compartment retirement | Every compartment column is bound to `iam.compartment` (0059), and no route deletes or renames a registered key while a row carries it. |
 | Redis isolation | The limiter's meters need an instance running `noeviction`. The production compose sets it and the readiness register reports the policy, but whether the limiter has that instance to itself is a deployment fact the runtime cannot see. |
+
+---
+
+## Left from the 2026-09-22 review
+
+The 42-agent usability and code review found 229 verified problems. The fix
+pass that followed closed 75, every critical among them (release/CHANGELOG.md).
+**154 remain: 25 high, 102 medium, 27 low.** The highs, by area:
+
+| Area | What is still wrong |
+|---|---|
+| Triage (6) | Single-key and Ctrl shortcuts accept a proposal with no confirmation; the graph's "unreviewed proposals" count and the Triage queue disagree and nothing reviews the graph's; a notification's "Open approvals" opens the current case; a merge approval shows two UUIDs and no requester; contact-block proposals name no identifier; triage cards carry no TLP and Accept files selectors as AMBER whatever the capture was |
+| ACH (5) | An unscored row reads as "settles nothing"; stance notes are never shown and are wiped on save; "refute this first" never appears; a hypothesis cannot be accepted, rejected, edited or removed; Cancel on withdrawing an assumption still withdraws it |
+| Analytics (4) | The navigation budget runs out and disables Node size; results stay on screen after the graph or as-of time changes; "brokers" mislabels median-constraint actors; the trend plots run time, not as-of time |
+| Feeds (3) | Dead letters hide the feed and have no replay; a watched-selector hit names no selector and scores every case's watches; queue and quarantine records cannot be acted on |
+| Elsewhere (7) | Every tie reads "review PROPOSED"; the upload form cannot record when, where or under what authority an exhibit was obtained; a malware analyst cannot assign a sample or record findings from the console; compartment read-ins cannot be seen or set in Admin; at 200% zoom most projection controls are out of reach; single-letter triage keys fire from anywhere on the pane |
+
+Found during the pass and not yet fixed:
+
+- A `CLOSED` or `ARCHIVED` case still accepts writes on the server. The
+  console now says what state a case is in, but the API does not refuse.
+- There is no password reset, in the console, the API or
+  `scripts/bootstrap.py`. An administrator can re-enrol an authenticator
+  or clear a lockout; a forgotten password has no way back.
+- Rejecting a sample asks for no step-up, although it moves evidence into
+  a store it cannot leave without two people.
+- Console strings in `app.js` and `index.html` still carry dashes that the
+  documents no longer do.
+- On a case classified above the invoker's clearance, an exhibit, capture
+  screenshot or entity write under break-glass is counted twice: once by
+  the case gate and once by the item's own. Stopping it needs a
+  `count_use` passthrough on `deps.authorize_object`.
+- A capture's classification is not copied into the proposals it yields,
+  so they accept at AMBER whatever the capture was (the Triage row above,
+  confirmed again by the second review).
+- `GET /ach` now leaves out cells above the reader, but the ACH pane does
+  not say that anything was left out.
+- `url_norm` drops a URL's fragment, so fragment-keyed links (`mega.nz/#!`)
+  collapse into one selector. That is an ontology identity rule, not a
+  search defect.
+- A stale sign-in on any other step-up route still reads "missing
+  permission" rather than asking to re-authenticate; the report release
+  is the one route taught the difference.
 
 ---
 

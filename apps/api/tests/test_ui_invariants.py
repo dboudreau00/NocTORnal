@@ -444,14 +444,21 @@ def test_a_rejection_does_not_claim_a_destruction_it_did_not_perform():
     row does not display whether the object survived.
     """
     js = _js()
-    start = js.index("/* --- reject */")
-    body = js[start:start + 3000]
-    assert "purge_bytes" in body
-    # The message has to depend on what was actually sent.
-    assert re.search(r"setMsg\(msg,\s*purged\s*\?", body), (
-        "the rejection message is unconditional -- it reports the same "
-        "outcome whether or not the bytes were destroyed")
-    assert "were KEPT" in body, "the preserve case must say so in words"
+    body = _js_function("sampleActions")
+    assert "purge_bytes: purged" in body
+    # UPDATED 2026-09-22 (F2): the outcome is reported from the SERVER's
+    # answer, `bytes_disposition`, which is stricter than the old check
+    # that the message depended on what was sent. Since rejection became
+    # preserve-by-default there are three outcomes, and only the server
+    # knows which one it applied.
+    assert "DISPOSITION_TEXT[out.bytes_disposition]" in body, (
+        "the rejection message does not come from what the server did")
+    words = js[js.index("const DISPOSITION_TEXT"):]
+    words = words[:words.index("};")]
+    for disposition in ("preserved:", "destroyed:", "kept:"):
+        assert disposition in words, disposition
+    assert "left where they were" in words, (
+        "the record-only case must say in words that nothing was disposed of")
 
 
 def test_an_inconclusive_auth_result_is_not_painted_as_a_failure():

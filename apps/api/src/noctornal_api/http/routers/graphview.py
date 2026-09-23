@@ -28,8 +28,12 @@ from noctornal_api.http.limits import rate_limit
 router = APIRouter(prefix="/cases/{case_id}/graph", tags=["graph-view"])
 
 
-def _svc(conn: psycopg.Connection, user: CurrentUser) -> GraphService:
-    clearance, compartments = user_ceiling(conn, user.user_id)
+def _svc(conn: psycopg.Connection, user: CurrentUser, case_id: UUID) -> GraphService:
+    # The projection is of ONE case, so a break-glass grant scoped to it
+    # raises what is drawn. Without the case, the default "this case"
+    # grant opened an exhibit by id and left the graph as it was (ux15
+    # breakglass-grant-raises-nothing, 2026-09-23).
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return GraphService(conn, clearance=clearance.name, compartments=compartments)
 
 
@@ -74,7 +78,7 @@ def projected_graph(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
-    svc = _svc(conn, user)
+    svc = _svc(conn, user, case_id)
     try:
         sub = svc.project(p, limit=limit)
         # docs/14 U2. Computed here and not inside project(), because ego,
@@ -110,7 +114,7 @@ def ego(
 ) -> dict:
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     try:
-        sub = _svc(conn, user).ego(p, node_id, depth)
+        sub = _svc(conn, user, case_id).ego(p, node_id, depth)
     except ProjectionError as exc:
         # A centre the caller cannot see must not be distinguishable from one
         # that does not exist.
@@ -141,7 +145,7 @@ def path(
     way an edge points."""
     p = _projection(case_id, preset, include_inferred, min_confidence, None)
     try:
-        found = _svc(conn, user).shortest_path(p, src, dst)
+        found = _svc(conn, user, case_id).shortest_path(p, src, dst)
     except ProjectionError as exc:
         raise Problem(404, "Not found", "both endpoints must be visible") from exc
     return {"projection": p.describe(),
@@ -170,7 +174,7 @@ def metrics(
     with the answer."""
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     try:
-        return _svc(conn, user).metrics(p)
+        return _svc(conn, user, case_id).metrics(p)
     except ProjectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 

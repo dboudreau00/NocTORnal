@@ -30,7 +30,14 @@ where legal advice is required.
 
 **Built:** Phase 8 (`samples.py`, Alembic 0031). Ingest is refused until
 `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and `NOCTORNAL_DESIGNATED_PERSON` are
-set. `REJECTED` destroys the bytes and the data key and keeps the row.
+set. Since 2026-09-22 (docs/17 F2, decided by the owner) `REJECTED`
+**preserves** by default: the encrypted bytes move into their own
+object-locked store (`PRESERVE_BUCKET`) under a legal hold, the data key is
+kept, and retrieving them takes two people (the Security Officer authorises,
+the Lead investigator retrieves). It destroys the bytes and the data key only
+where `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy` is declared, and never
+under a legal hold. The readiness check `prohibited_content_policy` states
+which of the two this deployment does.
 
 **Assumes:** that somebody has written the policy the environment variable
 references. **The software records a declaration; it cannot verify one.** A
@@ -41,9 +48,11 @@ false declaration produces a working system and an unlawful deployment.
 1. Who is notified, how fast, through what channel, when screening trips.
 2. What the `REJECTED` path does with the bytes, quarantine, secure
    destruction, or **preservation under legal instruction**. These
-   conflict. The build currently destroys, which is the wrong answer in a
-   jurisdiction that requires preservation. `reject(purge_bytes=False)`
-   exists for that case and nothing selects it automatically.
+   conflict. The build now preserves unless told to destroy, which is the
+   safer error (preserved material can still be destroyed later; destroyed
+   material cannot be preserved), but it is not a legal answer: counsel
+   decides which this jurisdiction requires, who the preserved material is
+   held for, and for how long.
 3. Reporting obligations in **both** operating jurisdictions (decision 13:
    US and Canada). They differ.
 4. Who may see a quarantined item and under what authority.
@@ -76,7 +85,11 @@ the subjects of the investigation.
    replaced.
 4. Whether **session tokens and live credentials** may be held at all, as
    opposed to their metadata. The build can store either; it masks by
-   default and the reveal is step-up audited.
+   default and the reveal is step-up audited. Who reveals was decided by
+   the owner on 2026-09-22 (docs/17 F16, migration 0062): the Lead
+   investigator (`CASE_OWNER`), under an authorisation only the Security
+   Officer grants, so a reveal is always two different people. That settles
+   who presses the button, not whether the value may be held.
 5. Cross-border transfer, if any partner or analyst is in a third country.
 6. What "minimisation review at closure" must actually produce.
 
@@ -130,7 +143,7 @@ per docs/19.
 docs/19 §6, README, SECURITY.md and ARCHITECTURE.md when the deception
 work landed, and enforced in the schema the same day (but it was never
 added *here*, and so it was also missing from the counsel pack in
-docs/18, which carried A1)A4 only. Every user-facing document said five
+docs/18, which carried A1 to A4 only). Every user-facing document said five
 blocking items while the two documents a lawyer actually reads said four.
 The drift ran in the dangerous direction: the review pack under-reported.
 Recorded plainly because a register that quietly omits an item is worse
@@ -221,7 +234,9 @@ process is needed that the software does not provide.
 invocation. **Who that is** is an operator determination, and the build
 will refuse to grant break-glass if no user holds
 `SECURITY_OFFICER`, deliberately, because unreviewed emergency access is
-just access.
+just access. Which ROLES invoke and review was decided by the owner on
+2026-09-22 (docs/17 F14): invoke with `CASE_OWNER` and `SYS_ADMIN`, review
+with `SECURITY_OFFICER` only, and no role may hold both (migration 0062).
 
 ### D8: Telegram channel and user ids can share one durable value
 
@@ -320,6 +335,36 @@ be deleted before its retention expires *even to satisfy a deletion order*.
 > vulnerability" is a disclosure answer nobody wants to give. It is not
 > urgent in the sense of breaking anything today, and it does not become
 > less true by waiting. See docs/17.
+
+> **2026-09-22: decided by the owner (docs/17 F24).** Stay on the pinned
+> community build, with the risk accepted in writing; the store is an
+> internal, non-internet-facing service in the production compose, which
+> bounds the exposure. And stop taking the store's word for it: the
+> readiness register now **proves** write-once instead of reading the lock
+> configuration. It keeps one canary object per bucket under a one-day
+> COMPLIANCE retention and, on every probe, tries to DELETE that exact
+> version id, passing only when the store refuses and the version survives
+> (`evidence_bucket_object_lock`, and `preservation_bucket_object_lock` for
+> the rejected-sample store). A refusal counts only from credentials that
+> were allowed to delete: the preservation account is minted unable to, so
+> that bucket is proven with the `MINIO_*` credentials on the same store,
+> and the evidence says which credential made the proof.
+>
+> Why a configuration read was not evidence: SeaweedFS accepts a COMPLIANCE
+> retention and has let the delete succeed anyway (seaweedfs issues 8350
+> and 11333, the second deleting the locked version by its id), and Garage
+> implements no object lock at all. Ceph RGW is maintained and implements
+> S3 Object Lock in both modes, and is the self-hosted option if the pinned
+> build has to be left. A vendor-operated S3 moves the evidence onto
+> somebody else's infrastructure, which is a custody question for this
+> register (who can reach the bytes, in which jurisdiction, under whose
+> legal process) before it is a technical one.
+>
+> **Still to confirm externally,** whichever store is used: that a
+> COMPLIANCE lock on it is the property your courts need, and that the
+> probe passing on it is evidence enough of that for your disclosure
+> regime. The probe shows the store refused one delete; it does not show
+> that nothing else can remove an object, and whoever holds the volume can.
 
 ### C3: Prohibited-content hash sets
 

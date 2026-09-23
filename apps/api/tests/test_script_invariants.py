@@ -317,3 +317,24 @@ def test_the_generated_env_declares_the_upload_caps(path: Path):
             f"{path.name} generates .env.local without {key}, so a fresh "
             f"install is born with a readiness warning it could have "
             f"avoided, and the file cannot be promoted as written")
+
+
+@pytest.mark.parametrize("path", INSTALLERS, ids=lambda p: p.name)
+def test_the_generated_env_declares_where_rejected_samples_go(path: Path):
+    """F2, 2026-09-22. A rejected sample is preserved in its own
+    object-locked bucket by default, and `NOCTORNAL_REJECTED_SAMPLE_
+    DISPOSITION` decides whether that happens at all. Both installers write
+    the two lines with the owner's default, so a fresh install says in its
+    own configuration what a rejection does, and a readiness check that
+    reads them (docs/11) is not answered by a default nobody wrote down.
+
+    The values are pinned, not only the names: an installer that wrote
+    `destroy` would quietly reverse the owner's decision on every new
+    machine.
+    """
+    from noctornal_api.samples import DISPOSITION_ENV, PRESERVE
+    src = path.read_text(encoding="utf-8")
+    for line in ("PRESERVE_BUCKET=noctornal-preserved",
+                 f"{DISPOSITION_ENV}={PRESERVE}"):
+        assert line in src, (
+            f"{path.name} generates .env.local without {line!r}")

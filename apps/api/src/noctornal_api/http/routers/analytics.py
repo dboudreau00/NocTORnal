@@ -35,8 +35,13 @@ _HISTORY_METRICS = frozenset({
 })
 
 
-def _svc(conn: psycopg.Connection, user: CurrentUser) -> AnalyticsRunService:
-    clearance, compartments = user_ceiling(conn, user.user_id)
+def _svc(conn: psycopg.Connection, user: CurrentUser,
+         case_id: UUID) -> AnalyticsRunService:
+    # One case's projection, so a break-glass grant scoped to it counts, as
+    # it does for the graph it is computed from (ux15, 2026-09-23). A run
+    # computed at the raised level is stored under that level's
+    # `visibility_clearance` and served to nobody below it.
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return AnalyticsRunService(conn, clearance=clearance.name,
                                compartments=compartments,
                                actor_id=user.user_id)
@@ -88,7 +93,7 @@ def suite(
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, leiden_resolution)
     try:
-        return _svc(conn, user).suite(p, params, force=force).as_response()
+        return _svc(conn, user, case_id).suite(p, params, force=force).as_response()
     except ProjectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     except AnalyticsError as exc:
@@ -132,7 +137,7 @@ def latest(
     """
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, leiden_resolution)
-    found = _svc(conn, user).latest(p, params)
+    found = _svc(conn, user, case_id).latest(p, params)
     if found is None:
         raise Problem(404, "Not found",
                       "no completed analytics run for this projection at your "
@@ -167,7 +172,7 @@ def key_player(
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, 1.0)
     try:
-        return _svc(conn, user).key_player(
+        return _svc(conn, user, case_id).key_player(
             p, params, n_remove=n, force=force).as_response()
     except ProjectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
@@ -190,5 +195,5 @@ def history(
         raise Problem(400, "Invalid request",
                       f"unknown metric {metric!r}; one of "
                       f"{', '.join(sorted(_HISTORY_METRICS))}")
-    series = _svc(conn, user).history(case_id, node_id, metric, limit)
+    series = _svc(conn, user, case_id).history(case_id, node_id, metric, limit)
     return {"node_id": str(node_id), "metric": metric, "series": series}

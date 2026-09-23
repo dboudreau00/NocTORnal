@@ -114,6 +114,28 @@ def _migration():
     return module
 
 
+def _guarded_after_0060() -> dict[str, tuple[str, ...]]:
+    """Tables a LATER migration guarded against deletion without making
+    them ledgers, each with the privileges the runtime role keeps on it.
+
+    A migration declares these as a module constant `GUARDED_TABLES`,
+    beside the REVOKE it runs, rather than in a list here, so the claim
+    and the statement that makes it true live in one file. The first was
+    0063's `lab.preservation_authorisation` (revocation is an UPDATE, so
+    it keeps UPDATE and loses DELETE); until the verifier's pass of
+    2026-09-22 it was on no list, and the accounting test below failed in
+    CI on it."""
+    guarded: dict[str, tuple[str, ...]] = {}
+    for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if path.name <= MIGRATION.name:
+            continue
+        spec = importlib.util.spec_from_file_location(f"m{path.stem[:4]}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        guarded.update(getattr(module, "GUARDED_TABLES", {}))
+    return guarded
+
+
 def _scalar(conn, sql, params=None):
     # `None` rather than `()`: psycopg only runs its client-side binder when
     # params is not None, and the binder treats `%` as a placeholder marker.
@@ -230,8 +252,13 @@ def test_the_catalog_and_the_migration_agree_on_which_tables_are_ledgers(conn):
     inherited UPDATE and DELETE from 0060's default privileges the moment it
     was created -- silently, because that is what a default privilege does --
     and its own migration must revoke them.
+
+    A later table that is guarded but not append-only (it keeps UPDATE)
+    is accounted for by its own migration's `GUARDED_TABLES`, and checked
+    by `test_the_guarded_records_keep_exactly_what_their_migration_declares`.
     """
     m = _migration()
+    accounted = set(m.LEDGERS) | set(_guarded_after_0060())
     found = {r[0] for r in conn.execute(
         """SELECT n.nspname || '.' || c.relname
              FROM pg_trigger t
@@ -239,12 +266,28 @@ def test_the_catalog_and_the_migration_agree_on_which_tables_are_ledgers(conn):
              JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE NOT t.tgisinternal
               AND pg_get_triggerdef(t.oid) LIKE '%BEFORE TRUNCATE%'""")}
-    assert found == set(m.LEDGERS), {
-        "append-only in the database but not revoked by 0060":
-            sorted(found - set(m.LEDGERS)),
-        "revoked by 0060 but no longer append-only":
-            sorted(set(m.LEDGERS) - found)}
+    assert found == accounted, {
+        "append-only in the database but not revoked by 0060 or declared "
+        "by a later migration's GUARDED_TABLES": sorted(found - accounted),
+        "revoked by 0060 or declared guarded but no longer truncate-proof":
+            sorted(accounted - found)}
     assert set(LEDGER_SEQUENCE_COLUMN) == set(m.LEDGERS)
+
+
+def test_the_guarded_records_keep_exactly_what_their_migration_declares(conn):
+    """The later, non-ledger half of the accounting above. Each table a
+    migration declares in `GUARDED_TABLES` keeps exactly the privileges it
+    names and nothing else: in particular not the DELETE that 0060's
+    default privileges handed it on creation, which only that migration's
+    own REVOKE takes back."""
+    guarded = _guarded_after_0060()
+    assert "lab.preservation_authorisation" in guarded, (
+        "0063 declares the preservation authorisations; the loader is not "
+        "reading the migrations after 0060")
+    for table, keeps in guarded.items():
+        got = _table_privileges(conn, table)
+        held = {p for p, on in got.items() if on}
+        assert held == set(keeps), (table, got)
 
 
 def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
@@ -338,11 +381,12 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
         f"only {len(tables)} tables found; the scan is not seeing the schema")
 
     ledgers = set(m.LEDGERS)
+    guarded = _guarded_after_0060()
     unreachable = {}
     for table in tables:
         got = _table_privileges(conn, table)
-        wanted = ("SELECT", "INSERT") if table in ledgers else (
-            "SELECT", "INSERT", "UPDATE", "DELETE")
+        wanted = ("SELECT", "INSERT") if table in ledgers else guarded.get(
+            table, ("SELECT", "INSERT", "UPDATE", "DELETE"))
         missing = [p for p in wanted if not got[p]]
         if missing:
             unreachable[table] = missing

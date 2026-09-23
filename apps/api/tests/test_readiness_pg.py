@@ -56,6 +56,8 @@ EXPECTED_CHECKS = (
     "rate_limiting_enabled",
     "redis_limiter_store",
     "evidence_bucket_object_lock",
+    # 2026-09-22, docs/17 F2: the store rejected samples are preserved in.
+    "preservation_bucket_object_lock",
     "evidence_size_cap_declared",
     "migrations_at_head",
     "app_db_role_not_owner",
@@ -307,18 +309,39 @@ def test_a_down_redis_and_minio_are_failed_checks_not_a_500(conn, client, monkey
     assert minio_check["ok"] is False
     assert minio_check["evidence"].strip()
     assert minio_check["action"].strip()
+    # The preservation store falls back to MINIO_* on a development stack,
+    # so the same dead endpoint is a failed check there too, not a 500.
+    # Cleared first so a workstation that sets PRESERVE_* or SAMPLE_*
+    # still probes the port that refuses.
+    for var in ("PRESERVE_ENDPOINT", "SAMPLE_ENDPOINT",
+                "NOCTORNAL_REJECTED_SAMPLE_DISPOSITION"):
+        monkeypatch.delenv(var, raising=False)
+    kept = _by_name(client.get("/api/v1/admin/readiness",
+                               headers=_auth(token)).json())
+    preserve_check = kept["preservation_bucket_object_lock"]
+    assert preserve_check["ok"] is False, preserve_check
+    assert preserve_check["evidence"].strip()
+    assert preserve_check["action"].strip()
 
 
 def test_unset_redis_and_minio_are_failed_checks_with_the_variable_named(
         conn, client, monkeypatch):
     token = _admin_token(conn)
     monkeypatch.delenv("REDIS_URL", raising=False)
-    monkeypatch.delenv("MINIO_ENDPOINT", raising=False)
+    for var in ("MINIO_ENDPOINT", "SAMPLE_ENDPOINT", "PRESERVE_ENDPOINT",
+                "NOCTORNAL_REJECTED_SAMPLE_DISPOSITION"):
+        monkeypatch.delenv(var, raising=False)
     checks = _by_name(client.get("/api/v1/admin/readiness", headers=_auth(token)).json())
     assert checks["redis_limiter_store"]["ok"] is False
     assert "REDIS_URL" in checks["redis_limiter_store"]["evidence"]
     assert checks["evidence_bucket_object_lock"]["ok"] is False
     assert "MINIO_ENDPOINT" in checks["evidence_bucket_object_lock"]["evidence"]
+    # The preservation check names its own variable AND the fallbacks it
+    # tried, so the operator is not sent to set one that was never read.
+    preserve = checks["preservation_bucket_object_lock"]
+    assert preserve["ok"] is False
+    for var in ("PRESERVE_ENDPOINT", "SAMPLE_ENDPOINT", "MINIO_ENDPOINT"):
+        assert var in preserve["evidence"], preserve
 
 
 def test_the_rate_limit_check_reads_the_same_off_switch_as_the_limiter(

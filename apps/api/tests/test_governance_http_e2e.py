@@ -411,11 +411,24 @@ def test_a_bad_ingest_key_is_one_message_for_every_failure(conn, client):
 
 def test_you_cannot_authorise_your_own_pii_reveal(conn, client):
     """The authorisation IS the control, and authorising yourself removes
-    it."""
+    it.
+
+    Rearranged 2026-09-22 for migration 0062, which revoked
+    `victim_pii.authorise` from CASE_OWNER (docs/17 F16). The officer used
+    to create the case and authorise on it as its owner; a case owner can
+    no longer authorise at all, so that request now stops at the case gate
+    (403, asserted in test_roles_and_pii_pg) before this self-check. The
+    self-check is still reachable the way it matters: an officer assigned
+    to the case as SECURITY_OFFICER, naming themselves.
+    """
+    from noctornal_api.cases import CaseService
+    owner, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
     uid, email, secret = _make_user(
         conn, global_roles=("SECURITY_OFFICER", "CASE_OWNER"))
     token = _session(conn, email)
-    case_id = _create_case(client, token)
+    case_id = _create_case(client, _session(conn, owner_email))
+    CaseService(conn).assign_user_checked(case_id, uid, "SECURITY_OFFICER",
+                                          granted_by=owner)
     r = client.post("/api/v1/ingest/pii-authorisations", headers=_auth(token),
                     json={"case_id": case_id, "granted_to": str(uid),
                           "scope_note": "reveal credentials for the victims "

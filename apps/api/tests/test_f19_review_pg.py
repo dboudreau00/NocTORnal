@@ -697,13 +697,17 @@ def _cleanup_samples(conn, *sample_ids):
 
 
 @pg
-def test_a_legal_hold_stops_reject_destroying_the_bytes(conn, policy):
+def test_a_legal_hold_stops_reject_destroying_the_bytes(conn, policy,
+                                                         monkeypatch):
     """docs/08, unqualified: "legal_hold overrides all deletion,
     everywhere." `lab.sample.legal_hold` has existed since migration 0031
     and was read by nothing, so one non-step-up call irreversibly destroyed
     material under a court hold."""
     from noctornal_api.samples import SampleError, SampleService
 
+    # Destruction is the `destroy` disposition since F2 (2026-09-22);
+    # the default preserves, which a hold does not block.
+    monkeypatch.setenv("NOCTORNAL_REJECTED_SAMPLE_DISPOSITION", "destroy")
     who = _user(conn)
     store = _MemStore()
     sample = _submit(conn, store, who)
@@ -717,11 +721,13 @@ def test_a_legal_hold_stops_reject_destroying_the_bytes(conn, policy):
 
 
 @pg
-def test_a_case_wide_hold_protects_the_samples_in_it(conn, policy):
+def test_a_case_wide_hold_protects_the_samples_in_it(conn, policy,
+                                                     monkeypatch):
     """docs/08 puts `legal_hold` on the case precisely so a hold covers
     everything in it without enumerating the contents."""
     from noctornal_api.samples import SampleError, SampleService
 
+    monkeypatch.setenv("NOCTORNAL_REJECTED_SAMPLE_DISPOSITION", "destroy")
     owner = _user(conn)
     case_id = _case(conn, owner)
     conn.execute('UPDATE core."case" SET legal_hold = true, '

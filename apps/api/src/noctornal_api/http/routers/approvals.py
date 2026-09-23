@@ -142,7 +142,20 @@ def list_approvals(
         raise Problem(400, "Invalid request",
                       f"unknown state {state!r}; one of {', '.join(sorted(_STATES))}")
     rows = ApprovalService(conn).list_for_case(case_id, state=state, limit=limit)
-    return {"approvals": [_out(r).model_dump(mode="json") for r in rows],
+    out = [_out(r).model_dump(mode="json") for r in rows]
+    # Who asked and who decided, by NAME. The card printed the payload's
+    # UUIDs and nothing about either person, so dual control was a blind
+    # click (ux19 raw-ids-instead-of-names, 2026-09-22). The ids stay: they
+    # are the durable record, the names are for the person deciding.
+    ids = {r.requested_by for r in rows} | {r.decided_by for r in rows
+                                            if r.decided_by}
+    names = {row[0]: row[1] for row in conn.execute(
+        "SELECT id, display_name FROM iam.app_user WHERE id = ANY(%s)",
+        (list(ids),)).fetchall()} if ids else {}
+    for item, r in zip(out, rows, strict=True):
+        item["requested_by_name"] = names.get(r.requested_by)
+        item["decided_by_name"] = names.get(r.decided_by) if r.decided_by else None
+    return {"approvals": out,
             "operations": {k: {"permission": v.permission,
                                "description": v.description,
                                "ttl_seconds": int(v.ttl.total_seconds())}

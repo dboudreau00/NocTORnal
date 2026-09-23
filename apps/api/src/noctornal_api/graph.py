@@ -14,7 +14,7 @@ trigger validates at that commit.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import UUID
 
@@ -25,6 +25,14 @@ from psycopg.types.json import Json
 class GraphWriteError(Exception):
     """A graph write violated the model (bad basis, missing rationale,
     ontology/endpoint rejection, or the invariant-1 trigger)."""
+
+
+class TieConfidenceConflict(GraphWriteError):
+    """A correction tried to lower a tie beneath a claim that is still live.
+
+    Its own class so the router can answer 409 rather than the 400 every
+    other GraphWriteError gets: the request is well formed, it conflicts
+    with the state of the assertions. See `update_edge`."""
 
 
 def _write_error(exc: psycopg.Error) -> GraphWriteError:
@@ -58,6 +66,46 @@ def _write_error(exc: psycopg.Error) -> GraphWriteError:
 #: a readable error instead of a psycopg InvalidTextRepresentation; the DB
 #: enum remains the source of truth and rejects anything else regardless.
 _CONFIDENCE = frozenset({"LOW", "MODERATE", "HIGH"})
+
+
+def _outvoted(now: str, wanted: str, higher: list[tuple]) -> str:
+    """The 409 text for a correction the rule would ignore, naming the
+    claims that stop it so the analyst knows which card to retract.
+
+    `higher` is (is the caller's own, recorded_at, is a confidence
+    correction) per live claim that grades the tie above `wanted`, newest
+    first. Added in the fix round of 2026-09-23: the re-verifier found the
+    old text said only "a live assertion", so an analyst whose own earlier
+    correction was in the way was not told it was theirs.
+    """
+    def one(mine: bool, at: datetime, is_correction: bool) -> str:
+        kind = "correction" if is_correction else "claim"
+        return f"{'your own' if mine else 'a'} {kind} of {at:%Y-%m-%d}"
+
+    named = [one(*row) for row in higher[:3]]
+    if len(higher) > 3:
+        named.append(f"{len(higher) - 3} more")
+    n = len(higher)
+    claims = "1 live claim grades" if n == 1 else f"{n} live claims grade"
+    those = "that claim" if n <= 1 else "those claims"
+    # No named claim only if the rule and this query disagree, which the
+    # shared tie_grade should make impossible; say what is known anyway.
+    why = (f"{claims} it above {wanted} ({', '.join(named)})" if n
+           else f"a live claim grades it above {wanted}")
+    # The last sentence names the console's control since the final review
+    # (C14, 2026-09-23): it used to prescribe an assertion the console had
+    # no way to add, so the only route an analyst could follow was retract
+    # then correct, which left the tie resting on an ungraded correction.
+    return (
+        f"This tie stays {now}: {why}. A tie's confidence is the highest grade "
+        f"among the live claims about it, so a correction cannot lower it "
+        f"past a claim that still stands, and nothing was recorded. Retract "
+        f"{those} first, giving the reason, and the tie drops to the highest "
+        f"grade that remains; then correct it again if it still needs it. To "
+        f"keep the tie's grading and exhibit, add a {wanted} claim before "
+        f"retracting (in the console, Add a claim under the tie's "
+        f"assertions); if nothing else supports the tie, retracting without "
+        f"one takes it out of the live graph.")
 
 
 # Admiralty + ICD-203 grading and basis, mirroring core enums. Kept as
@@ -131,10 +179,22 @@ class GraphWriteService:
         compartments: list[str] | None = None,
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
-        confidence: str = "LOW",
         is_inferred: bool = False,
         inference_method: str | None = None,
     ) -> UUID:
+        """Create an edge and its founding assertion, atomically.
+
+        THERE IS NO `confidence` PARAMETER, and that is the fix for ux05
+        two-disagreeing-confidences and ux06 edge-confidence-not-stored
+        (2026-09-22). There used to be one, defaulting to LOW, and
+        `POST /edges` never passed it: every tie an analyst graded HIGH was
+        stored, drawn and filtered as LOW while its assertion said HIGH.
+        Two parameters for one fact disagree, so there is now one. A tie's
+        confidence is its assertions' (`core.tie_confidence`, migration
+        0064), the row is born with the founding assertion's grade, and
+        the 0064 triggers keep it there as assertions are added and
+        retracted.
+        """
         try:
             with self._c.transaction():
                 if sign is None:
@@ -155,7 +215,7 @@ class GraphWriteService:
                        RETURNING id""",
                     (case_id, edge_type, src_node_id, dst_node_id, sign, weight,
                      Json(attrs or {}), classification, compartments or [],
-                     valid_from, valid_to, confidence, is_inferred,
+                     valid_from, valid_to, assertion.confidence, is_inferred,
                      inference_method, created_by),
                 ).fetchone()[0]
                 self._insert_assertion(case_id, assertion, edge_id=edge_id)
@@ -255,6 +315,44 @@ class GraphWriteService:
         mechanical one: the type drives ontology validation and
         `is_social_tie`, so changing it in place would bypass the 0016
         trigger that checks endpoint types against the ontology.
+
+        **`confidence` is not written to the edge row**, since migration
+        0064 (ux05 two-disagreeing-confidences, 2026-09-22). A tie's
+        confidence is the highest among its live claims about the tie, so
+        a re-grade IS an assertion: the correction is recorded graded at
+        the value it states, and the 0064 trigger derives the tie from it.
+        The old path wrote the column and attached an assertion graded LOW,
+        which started a new disagreement with every correction. A
+        correction to `weight` or `attrs` alone is a claim about that
+        field, and its grade does not move the tie (`core.tie_confidence`).
+
+        Raising a tie therefore always works. LOWERING one beneath a claim
+        that is still live cannot, because that claim still grades it, and
+        a correction the rule would ignore is refused rather than recorded
+        and quietly outvoted (`TieConfidenceConflict`, whose text names the
+        claims in the way). The remedy is retraction: withdraw the claim
+        that grades the tie higher, with the reason, and the tie drops.
+        To keep the tie graded and evidenced at the lower grade, add that
+        claim first (`add_assertion`, the console's Add a claim; final
+        review C14, 2026-09-23), since a correction made after the
+        retraction carries only the ungraded defaults and no exhibit.
+        That holds for the analyst's own earlier correction too. It is not
+        superseded automatically, because invariant 5 as decided on
+        2026-09-09 makes a correction "a retraction plus a new assertion",
+        and a retraction carries a reason that a silent supersession would
+        not.
+
+        **The refusal is decided by the rule, after the write, inside the
+        transaction** (fix round, 2026-09-23). The correction is recorded,
+        the 0064 trigger derives the tie, and if the tie is not at the
+        value the correction states, the transaction is rolled back and
+        nothing survives. So the check cannot disagree with the rule, and
+        there is no second copy of the enum's order in Python. The edge is
+        locked first, in a statement of its own, for the reason
+        `core.sync_tie_confidence` gives: the old single statement,
+        `SELECT tie_confidence(...) ... FOR UPDATE`, waited behind a
+        concurrent retraction and then answered from the snapshot it had
+        started with, refusing a correction the committed state allowed.
         """
         if weight is None and confidence is None and attrs is None:
             raise GraphWriteError(
@@ -262,29 +360,70 @@ class GraphWriteService:
         if confidence is not None and confidence not in _CONFIDENCE:
             raise GraphWriteError(
                 f"confidence must be one of {sorted(_CONFIDENCE)}")
+        if confidence is not None:
+            assertion = replace(assertion, confidence=confidence)
         try:
             with self._c.transaction():
-                cur = self._c.execute(
-                    """UPDATE core.edge
-                          SET weight = COALESCE(%s, weight),
-                              confidence = COALESCE(
-                                  %s::core.analytic_confidence, confidence),
-                              attrs = COALESCE(%s::jsonb, attrs),
-                              updated_at = now()
-                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
-                    (weight, confidence,
-                     Json(attrs) if attrs is not None else None,
-                     edge_id, case_id),
-                )
-                if cur.rowcount == 0:
+                # FOR NO KEY UPDATE, the lock the trigger takes, and not FOR
+                # UPDATE: see the 0064 docstring ("Concurrency") for why a
+                # key-share lock from an assertion's foreign key must not be
+                # waited on here.
+                found = self._c.execute(
+                    """SELECT 1 FROM core.edge
+                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL
+                          FOR NO KEY UPDATE""",
+                    (edge_id, case_id),
+                ).fetchone()
+                if found is None:
                     raise GraphWriteError(
                         f"edge {edge_id} not found in this case, or already "
                         f"deleted")
+                self._c.execute(
+                    """UPDATE core.edge
+                          SET weight = COALESCE(%s, weight),
+                              attrs = COALESCE(%s::jsonb, attrs),
+                              updated_at = now()
+                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
+                    (weight, Json(attrs) if attrs is not None else None,
+                     edge_id, case_id),
+                )
                 self._insert_assertion(case_id, assertion, edge_id=edge_id)
+                if confidence is not None:
+                    self._refuse_if_outvoted(edge_id, confidence,
+                                             assertion.created_by)
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
             raise _write_error(exc) from exc
+
+    def _refuse_if_outvoted(self, edge_id: UUID, confidence: str,
+                            by: UUID | None) -> None:
+        """Raise `TieConfidenceConflict` if the correction just written did
+        not move the tie to the value it states. Called inside
+        `update_edge`'s transaction, after the write, with the edge locked,
+        so raising rolls the correction back.
+
+        The tie's value is the column the 0064 trigger has just derived;
+        the claims named in the refusal are chosen by `core.tie_grade`, the
+        same function the rule is built from, so the text cannot count a
+        claim the rule ignores (a weight fix, say) or miss one it counts.
+        """
+        now = self._c.execute(
+            "SELECT confidence::text FROM core.edge WHERE id = %s", (edge_id,)
+        ).fetchone()[0]
+        if now == confidence:
+            return
+        higher = self._c.execute(
+            """SELECT a.created_by IS NOT DISTINCT FROM %s, a.recorded_at,
+                      a.claim_value ->> 'confidence' IS NOT NULL
+                 FROM core.assertion a
+                WHERE a.edge_id = %s
+                  AND a.retracted_at IS NULL AND a.superseded_at IS NULL
+                  AND core.tie_grade(a) > %s::core.analytic_confidence
+                ORDER BY a.recorded_at DESC""",
+            (by, edge_id, confidence),
+        ).fetchall()
+        raise TieConfidenceConflict(_outvoted(now, confidence, higher))
 
     def soft_delete_node(
         self,

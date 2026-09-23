@@ -11,6 +11,14 @@ refuses would be two halves wrong together. A kind the caller may not see
 is named in `omitted` rather than silently absent: an empty result that
 means "nothing collected" and one that means "you cannot see collected
 things" need opposite responses.
+
+Since 2026-09-22 (ux09-search) every search here matches word starts,
+fragments of names and file names, and the selectors attributed to an
+entity, which come back as the hit's `via`; `/search/selectors` is the
+selector-only form the command palette uses. The kind routes take
+`with_total=true` for `{hits, total, limit}`, so a capped list can say
+how many matched, and the combined `/search` always reports `total` and
+per-kind `totals`. How a query matches, and why, is in `curation.py`.
 """
 from __future__ import annotations
 
@@ -36,10 +44,64 @@ from noctornal_api.stores import PgAccessResolver
 router = APIRouter(prefix="/cases/{case_id}", tags=["search"])
 
 
+class SelectorViaOut(BaseModel):
+    """Which selector put an entity in the results (selectors-unsearchable,
+    2026-09-22). `value` is the selector as observed; `merged_from` names
+    the merged record that holds it when that is not the entity itself."""
+    selector_type: str
+    value: str
+    exact: bool
+    more: int
+    merged_from: str | None = None
+
+
 class HitOut(BaseModel):
+    """`merged_name` is the label of a record merged into this entity
+    whose name matched when the entity's own did not, or matched less well
+    (final review U10, 2026-09-23), so the pane can say why a name it does
+    not show is here. Null otherwise."""
     id: str
     label: str
     rank: float
+    via: SelectorViaOut | None = None
+    merged_name: str | None = None
+
+
+class HitPage(BaseModel):
+    """`with_total=true`: the capped hits AND how many matched, so a caller
+    can say "showing 50 of 73" (silent-truncation-50, 2026-09-22). `total`
+    counts only rows the caller may see. The bare list stays the default
+    because it is the documented shape every existing client reads."""
+    hits: list[HitOut]
+    total: int
+    limit: int
+
+
+def _hit_out(h) -> HitOut:
+    via = None
+    if h.via is not None:
+        via = SelectorViaOut(**h.via.as_dict())
+    return HitOut(id=str(h.id), label=h.label, rank=h.rank, via=via,
+                  merged_name=h.merged_name)
+
+
+def _page_out(page, limit: int, with_total: bool) -> list[HitOut] | HitPage:
+    hits = [_hit_out(h) for h in page.hits]
+    if with_total:
+        return HitPage(hits=hits, total=page.total, limit=limit)
+    return hits
+
+
+#: Longer than any selector an analyst pastes (an SSH public key is under
+#: 800 characters). Fragment matching since 2026-09-22 costs about one
+#: trigram lookup for every character of the query, so an unbounded query
+#: is an unbounded index scan, 120 times a minute under the `search` meter.
+MAX_QUERY = 1024
+
+
+_WITH_TOTAL = Query(
+    False, description="Wrap the hits as {hits, total, limit} so a capped "
+    "list can say how many matched in all.")
 
 
 def _allowed_on_case(conn, user: CurrentUser, case_id: UUID,
@@ -58,7 +120,10 @@ def _allowed_on_case(conn, user: CurrentUser, case_id: UUID,
             user_id=user.user_id, case_id=case_id,
             permission_key=permission_key,
             object_classification=eff_cls, object_compartments=eff_comp,
-            mfa_satisfied_at=user.session_mfa_at)
+            mfa_satisfied_at=user.session_mfa_at,
+            # A question, not an access: the request it serves was counted
+            # at its own gate (final review U19, 2026-09-23, g02).
+            count_use=False)
     except AccessResolutionError:
         return False
     return evaluate(ctx).allowed
@@ -86,7 +151,7 @@ def _holds_global(conn, user: CurrentUser, permission_key: str) -> bool:
             dependencies=[Depends(rate_limit("search"))])
 def search_all(
     case_id: UUID,
-    q: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY),
     limit: int = Query(50, ge=1, le=200),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -101,6 +166,10 @@ def search_all(
     `omitted.documents` says so. Evidence likewise needs `evidence.read`
     on the case. Nodes need `case.read`, which is the gate above.
     """
+    # The one search here that does NOT pass `case_id=` (2026-09-23): its
+    # documents are every source's, not this case's, so a break-glass grant
+    # on this case must not raise them. The per-kind routes below, which
+    # the console uses, read only this case and do.
     clearance, compartments = user_ceiling(conn, user.user_id)
     omitted: dict[str, str] = {}
     with_evidence = _allowed_on_case(conn, user, case_id, "evidence.read")
@@ -109,53 +178,94 @@ def search_all(
     with_documents = _holds_global(conn, user, "collection.read")
     if not with_documents:
         omitted["documents"] = "missing global collection.read"
-    hits = SearchService(conn).search(
+    found = SearchService(conn).search_all(
         case_id=case_id, query=q, limit=limit,
         clearance=clearance.name, compartments=compartments,
         include_evidence=with_evidence, include_documents=with_documents)
-    return {"hits": hits, "count": len(hits), "omitted": omitted,
+    hits, totals = found["hits"], found["totals"]
+    return {"hits": hits, "count": len(hits),
+            "total": sum(totals.values()), "totals": totals,
+            "omitted": omitted,
             "note": ("Documents are every source's, not this case's: a "
                      "collected post hangs off a source and is material in "
                      "however many cases cite it. A kind listed in "
                      "`omitted` was not searched, which is not the same as "
-                     "having no matches.")}
+                     "having no matches. `count` is how many hits are "
+                     "listed; `total` is how many matched, so a `count` "
+                     "below `total` means the list was capped at `limit`.")}
 
 
 # docs/05: "hard limits on export and search". Search is the shape a
 # bulk-read of a case file takes, so the limit is about what leaves as much
 # as about what the server spends.
-@router.get("/search/nodes", response_model=list[HitOut],
+@router.get("/search/nodes", response_model=list[HitOut] | HitPage,
             dependencies=[Depends(rate_limit("search"))])
 def search_nodes(
     case_id: UUID,
-    q: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY),
     limit: int = Query(50, ge=1, le=200),
+    with_total: bool = _WITH_TOTAL,
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
-) -> list[HitOut]:
-    clearance, compartments = user_ceiling(conn, user.user_id)
-    hits = SearchService(conn).search_nodes(
+) -> list[HitOut] | HitPage:
+    """Entities by word start over name and attributes, by any fragment of
+    the name, or by a selector attributed to them (reported as `via`).
+    Filtered by the caller's own clearance and compartments; a selector is
+    matched only through a node the caller may see."""
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    page = SearchService(conn).node_page(
         case_id=case_id, query=q, limit=limit,
         clearance=clearance.name, compartments=compartments,
     )
-    return [HitOut(id=str(h.id), label=h.label, rank=h.rank) for h in hits]
+    return _page_out(page, limit, with_total)
 
 
-@router.get("/search/evidence", response_model=list[HitOut],
+@router.get("/search/selectors", response_model=list[HitOut] | HitPage,
+            dependencies=[Depends(rate_limit("search"))])
+def search_selectors(
+    case_id: UUID,
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY),
+    limit: int = Query(50, ge=1, le=200),
+    with_total: bool = _WITH_TOTAL,
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> list[HitOut] | HitPage:
+    """Only the entities a selector matched, each with its `via`: the
+    command palette's lookup, which matches names in memory and cannot see
+    the selector table. Same gate as `/search/nodes`."""
+    # Case-scoped like `/search/nodes`, so a break-glass grant on this case
+    # raises both or neither. Written by the search group and the
+    # break-glass group in parallel on 2026-09-23; the merge found this route
+    # still reading the caller's ceiling alone, so under a grant the palette
+    # missed an entity the Search pane found. It reads only this case's
+    # rows (selector_page takes case_id), unlike the combined `/search`
+    # above, whose documents belong to every source.
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    page = SearchService(conn).selector_page(
+        case_id=case_id, query=q, limit=limit,
+        clearance=clearance.name, compartments=compartments,
+    )
+    return _page_out(page, limit, with_total)
+
+
+@router.get("/search/evidence", response_model=list[HitOut] | HitPage,
             dependencies=[Depends(rate_limit("search"))])
 def search_evidence(
     case_id: UUID,
-    q: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY),
     limit: int = Query(50, ge=1, le=200),
+    with_total: bool = _WITH_TOTAL,
     user: CurrentUser = Depends(require("evidence.read")),
     conn: psycopg.Connection = Depends(get_conn),
-) -> list[HitOut]:
-    clearance, compartments = user_ceiling(conn, user.user_id)
-    hits = SearchService(conn).search_evidence(
+) -> list[HitOut] | HitPage:
+    """Exhibits by word start over title, description and extracted text,
+    or by any fragment of the title."""
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    page = SearchService(conn).evidence_page(
         case_id=case_id, query=q, limit=limit,
         clearance=clearance.name, compartments=compartments,
     )
-    return [HitOut(id=str(h.id), label=h.label, rank=h.rank) for h in hits]
+    return _page_out(page, limit, with_total)
 
 
 class SelectorOut(BaseModel):
@@ -193,7 +303,7 @@ def find_selector(
     if row is None:
         return None
     if row.node_id is not None:
-        clearance, compartments = user_ceiling(conn, user.user_id)
+        clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
         visible = conn.execute(
             """SELECT 1 FROM core.node
                 WHERE id = %s AND classification <= %s::core.tlp

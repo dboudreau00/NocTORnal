@@ -16,9 +16,15 @@ obtaining it is easy, and everything else about it is loud.
 ## Five properties, each doing real work
 
 **1. It cannot be granted if nobody can review it.** The service refuses
-unless some active user holds `SECURITY_OFFICER`. Unreviewed emergency
-access is just access, and a control whose oversight is nominal is worse
-than none because it produces a record that looks like governance.
+unless some active user OTHER THAN THE INVOKER holds `SECURITY_OFFICER`.
+Unreviewed emergency access is just access, and a control whose oversight
+is nominal is worse than none because it produces a record that looks like
+governance. The invoker never counted as a reviewer (`review()` refuses
+them), but until final review C6 (2026-09-23) they counted here, so the
+sole officer, who on a fresh install is also the operator holding
+`break_glass.invoke` through SYS_ADMIN and CASE_OWNER, could create a grant
+nobody could ever review, and whose alert went nowhere because nobody is
+told what they just did.
 
 **2. It is short by constraint, not by convention.** Migration 0032 caps it
 at eight hours in a CHECK. A break-glass that can be granted for a week is
@@ -43,11 +49,44 @@ usually means the analyst found another way, and the emergency was not one.
 > that cannot be anything else answers "was this used?" in the wrong
 > direction. They are published again now, together, as that note said
 > they should be.
+>
+> **What one use is, since final review U19 (2026-09-23).** One request
+> the grant let through: the gate ALLOWED it, and the object's label sat
+> above the invoker's own clearance and within the grant's. A request the
+> gate then refused (a missing permission, a compartment, no assignment)
+> used to be counted, because the count was taken while the context was
+> being built, before `evaluate()` ran. A gate asked as a QUESTION is
+> not counted either: `search._allowed_on_case` (what a response may
+> name), `ingest._case_allows` (which rows a queue listing shows) and
+> `live._recheck` (whether a socket already opened may keep streaming).
+>
+> **Where that leaves the count.** On a case at or below the invoker's
+> clearance every request is gated at the case's labels, which the grant
+> is not needed for, so the graph, the inspector, lists and search are
+> widened without being counted. What counts there is a gate that sees an
+> item's OWN labels above that clearance: any exhibit route
+> (`evidence._authorize_exhibit`), a deception capture, screenshot or
+> message opened, and a change to a node or edge (the graph writes and
+> curation). An entity READ is not among them: the node and edge reads
+> gate at the case's labels, and the fix round of 2026-09-23 corrected an
+> invoke notice that said otherwise. On a case classified above the
+> invoker's clearance every request on it passes the case's gate only
+> through the grant, so every request counts. The deception capture and
+> message reads then skip their second gate, so they count once; the
+> exhibit routes, the screenshot and the entity writes still pass a second
+> gate at the item's labels and count twice. Stopping that needs a
+> `count_use` passthrough on `deps.authorize_object`.
 
 **5. Review is mandatory and its absence is visible.** `unreviewed()` is
 the queue. An expired grant with no review is an open item forever; it does
 not age out, because ageing out is how a review requirement becomes a
-formality.
+formality. The review is POST-HOC: a grant that is still live cannot be
+reviewed (final review U2, 2026-09-23). The queue lists only unreviewed
+grants and the console's End it now sits on those cards, so a verdict on a
+live grant took it out of every list while the analyst kept the raised
+clearance for the rest of its hours, and every access after it was counted
+against a grant nobody would look at again. End it, or let it expire, then
+judge the whole of it.
 
 ## What break-glass does NOT do here
 
@@ -72,12 +111,19 @@ purpose.
 > an emergency control is the more urgent half. It is implemented now.
 >
 > **Scope of the raise, stated exactly.** It applies at the gate every
-> case-scoped read and write passes through. It does NOT apply to
-> `deps.user_ceiling()`, the case-agnostic ceiling behind search and some
-> forty list endpoints, except for a GLOBAL grant -- a grant scoped to one
-> case must not widen the caller's view of every other case. So under a
-> case-scoped grant an analyst can open an exhibit a search will not list.
-> That is stated in `user_ceiling()` too, rather than hidden.
+> case-scoped read and write passes through, and, since 2026-09-23, to
+> `deps.user_ceiling(..., case_id=)` wherever a read of ONE case passes
+> that case: the graph, the entity and exhibit lists and the inspector,
+> case search, comms, analytics, tags and sets, deception captures and
+> watch hits. Until then a case-scoped grant opened an exhibit by id and
+> every list still hid it, while the console announced emergency access
+> as live (ux15 breakglass-grant-raises-nothing, verifier follow-up).
+>
+> What a case-scoped grant still does NOT raise: `user_ceiling()` without
+> a case, which is what the label checks on writes and the report
+> builder use, so the analyst still creates material and builds reports
+> at their own clearance; and anything on another case. A GLOBAL grant
+> raises both, as it always has. The invoke notice says which applies.
 >
 > `granted_permissions` is stored and still NOT consulted: this module has
 > always said break-glass "does not grant a permission the user could not
@@ -149,9 +195,9 @@ class BreakGlassService:
                duration: timedelta = DEFAULT_DURATION) -> Grant:
         """Grant emergency access. Easy to obtain, loud in every other way.
 
-        Refuses if nobody holds `SECURITY_OFFICER`, because the review is
-        the control and a grant nobody will review is just access with a
-        better story.
+        Refuses if nobody but the invoker holds `SECURITY_OFFICER`, because
+        the review is the control and a grant nobody will review is just
+        access with a better story.
         """
         justification = (justification or "").strip()
         if len(justification) < MIN_JUSTIFICATION:
@@ -165,7 +211,21 @@ class BreakGlassService:
                 f"break-glass is capped at {MAX_DURATION}: anything longer is "
                 f"a role, and roles are granted differently")
 
-        officers = self._security_officers()
+        # The invoker is not a reviewer: `review()` refuses their own grant.
+        # Counted here, the sole officer could invoke, and the grant then
+        # sat in a queue nobody could clear, while `_alert` paged only them
+        # and notifications drop what you did yourself, so nobody was told
+        # either (final review C6, 2026-09-23). The alert goes to the same
+        # filtered list.
+        everyone = self._security_officers()
+        officers = [o for o in everyone if o != user_id]
+        if not officers and everyone:
+            raise BreakGlassError(
+                "the only active SECURITY_OFFICER is you, so nobody can "
+                "review this: reviewing your own emergency is not a review. "
+                "Unreviewed emergency access is just access, so give "
+                "SECURITY_OFFICER to somebody else before relying on "
+                "break-glass in an incident")
         if not officers:
             raise BreakGlassError(
                 "no active user holds SECURITY_OFFICER, so nobody can review "
@@ -173,6 +233,16 @@ class BreakGlassService:
                 "the role before relying on break-glass in an incident")
 
         now = datetime.now(timezone.utc)
+        # The invoker's own clearance at this moment, recorded with the
+        # grant. The review card said "raised to RED" for any grant naming
+        # RED, including one invoked by somebody who already held RED and
+        # so raised nothing; the grant row has no column for the level it
+        # started from, and today's clearance is not the one it was judged
+        # against (ux15 glass-review-queue-uninformative follow-up,
+        # 2026-09-23).
+        base = self._c.execute(
+            "SELECT tlp_clearance FROM iam.app_user WHERE id = %s",
+            (user_id,)).fetchone()
         row = self._c.execute(
             """INSERT INTO iam.break_glass
                    (user_id, case_id, justification, started_at, expires_at,
@@ -188,6 +258,7 @@ class BreakGlassService:
             "expires_at": grant.expires_at.isoformat(),
             "classification": classification,
             "permissions": permissions or [],
+            "base_clearance": base[0] if base else None,
         })
         # N1 (2026-09-02). The grant row is committed (autocommit) and, since
         # 2026-09-01, RAISES the caller's effective clearance. Letting a
@@ -238,6 +309,11 @@ class BreakGlassService:
         from noctornal_api.notifications import URGENT, NotificationService
 
         svc = NotificationService(self._c)
+        # Converted, not assumed. RETURNING hands back the timestamptz in the
+        # SESSION's zone and no connection pins it, so formatting the raw
+        # value printed local hours labelled UTC on any Postgres initialised
+        # with a local timezone (2026-09-23).
+        ends = grant.expires_at.astimezone(timezone.utc)
         for officer in officers:
             svc.notify(
                 # No `case_id`: this notification is ABOUT a grant, not
@@ -247,13 +323,13 @@ class BreakGlassService:
                 kind="BREAK_GLASS_INVOKED", priority=URGENT,
                 subject="Emergency access was used",
                 summary=(f"Break-glass access was invoked and expires at "
-                         f"{grant.expires_at:%H:%M UTC}. It needs your "
+                         f"{ends:%H:%M UTC}. It needs your "
                          f"review."),
                 body=(f"An analyst invoked break-glass access.\n\n"
                       f"Grant: {grant.id}\n"
                       f"Expires: {grant.expires_at.isoformat()}\n\n"
                       f"Their justification is held with the grant and is "
-                      f"readable with break_glass.review — it is not "
+                      f"readable with break_glass.review. It is not "
                       f"reproduced here, because it describes the emergency "
                       f"and therefore the case.\n\n"
                       f"Every action taken under this grant is counted and "
@@ -280,7 +356,7 @@ class BreakGlassService:
                     kind="BREAK_GLASS_INVOKED", priority=URGENT,
                     subject=f"{row[0]}: emergency access was used",
                     summary=(f"Break-glass access was invoked on {row[0]}. It "
-                             f"expires at {grant.expires_at:%H:%M UTC}. A "
+                             f"expires at {ends:%H:%M UTC}. A "
                              f"security officer has been alerted."),
                     body=(f"An analyst invoked break-glass access on your "
                           f"case.\n\nTheir justification:\n\n"
@@ -298,15 +374,37 @@ class BreakGlassService:
     # -- using it ----------------------------------------------------------
 
     def live_grant(self, user_id: UUID, case_id: UUID | None = None) -> Grant | None:
-        """The grant that would apply right now, if any."""
+        """The grant that would apply right now, if any: the highest live
+        level first, as `PgAccessResolver.resolve()` reads them."""
         row = self._c.execute(
             f"""SELECT {_COLUMNS} FROM iam.break_glass
                  WHERE user_id = %s AND revoked_at IS NULL
                    AND expires_at > now()
                    AND (case_id IS NULL OR case_id = %s)
-                 ORDER BY expires_at DESC LIMIT 1""",
+                 ORDER BY granted_classification DESC NULLS LAST,
+                          expires_at DESC LIMIT 1""",
             (user_id, case_id)).fetchone()
         return _record(row) if row else None
+
+    def live_grants(self, user_id: UUID) -> list[Grant]:
+        """Every grant this user is operating under right now, on any case.
+
+        `live_grant` answers "does a grant apply to THIS case", which is the
+        wrong question for the console's header chip: an analyst under a
+        grant scoped to case A who has switched to case B is still under
+        break-glass, and the chip that says so must not go dark because
+        the open case changed (ux15 breakglass-grant-raises-nothing,
+        2026-09-22). Highest level first, so the first row is the one the
+        access gate would use wherever it applies.
+        """
+        rows = self._c.execute(
+            f"""SELECT {_COLUMNS} FROM iam.break_glass
+                 WHERE user_id = %s AND revoked_at IS NULL
+                   AND expires_at > now()
+                 ORDER BY granted_classification DESC NULLS LAST,
+                          expires_at DESC""",
+            (user_id,)).fetchall()
+        return [_record(r) for r in rows]
 
     def record_use(self, grant_id: UUID, *, action: str,
                    case_id: UUID | None = None) -> None:
@@ -364,6 +462,11 @@ class BreakGlassService:
         The reviewer may not be the person who invoked it. That is the same
         two-distinct-humans principle as four-eyes approval, and for the
         same reason: reviewing your own emergency is not a review.
+
+        Nor may the grant still be live. See property 5 in the module
+        docstring: a verdict on a live grant removed it from the only list
+        and the only revoke control while the raise went on (final review
+        U2, 2026-09-23).
         """
         if outcome not in {"JUSTIFIED", "UNJUSTIFIED", "INCONCLUSIVE"}:
             raise BreakGlassError(
@@ -379,14 +482,23 @@ class BreakGlassService:
             raise BreakGlassError(
                 "you cannot review your own break-glass: reviewing your own "
                 "emergency is not a review")
+        if current.is_live():
+            raise BreakGlassError(_STILL_LIVE)
 
+        # Ended is decided by the database's clock, not this process's, so
+        # an app server running ahead cannot review a grant a few seconds
+        # before it has actually stopped raising anything.
         row = self._c.execute(
             """UPDATE iam.break_glass
                   SET reviewed_by = %s, reviewed_at = now(), review_outcome = %s
                 WHERE id = %s AND reviewed_at IS NULL
+                  AND (revoked_at IS NOT NULL OR expires_at <= now())
             RETURNING """ + _COLUMNS,
             (reviewer_id, outcome, grant_id)).fetchone()
         if row is None:
+            latest = self.get(grant_id)
+            if latest is not None and latest.reviewed_at is None:
+                raise BreakGlassError(_STILL_LIVE)
             raise BreakGlassError("this grant was reviewed by someone else first")
         grant = _record(row)
         self._audit(grant.case_id, reviewer_id, "BREAK_GLASS_REVIEWED",
@@ -420,6 +532,13 @@ class BreakGlassService:
                     case_id, detail)
                VALUES (%s, 'USER', %s, 'break_glass', %s, %s, %s)""",
             (actor_id, action, grant_id, case_id, Json(detail)))
+
+
+#: The refusal for a verdict on a live grant (final review U2, 2026-09-23).
+_STILL_LIVE = (
+    "this grant is still live, so it cannot be reviewed yet: end it now, or "
+    "wait for it to expire, then review it. A review judges everything done "
+    "under the grant, and while it is live that is still growing")
 
 
 _COLUMNS = ("id, user_id, case_id, justification, started_at, expires_at, "

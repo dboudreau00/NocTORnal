@@ -77,15 +77,20 @@ router = APIRouter(prefix="/cases/{case_id}/curation", tags=["curation"])
 
 # --- helpers ------------------------------------------------------------
 
-def _ceiling(conn: psycopg.Connection, user: CurrentUser) -> tuple[str, list[str]]:
+def _ceiling(conn: psycopg.Connection, user: CurrentUser,
+             case_id: UUID) -> tuple[str, list[str]]:
     """The caller's own clearance and compartments, in the shapes SQL wants.
 
     An element may be classified ABOVE its case (the TLP floor trigger only
     forbids going below), so passing the case gate is not permission to see
     every node in the case. Read paths here filter on the CALLER's ceiling
     for the same reason `SearchService` does.
+
+    Every read here is of ONE case's nodes, so a break-glass grant scoped
+    to that case raises the ceiling too, as it does on the graph those
+    nodes are drawn on (ux15 breakglass-grant-raises-nothing, 2026-09-23).
     """
-    clearance, compartments = user_ceiling(conn, user.user_id)
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return clearance.name, list(compartments)
 
 
@@ -332,7 +337,7 @@ def list_tags(
     volume oracle; without the label predicates, the count would reveal how
     many RED nodes an AMBER analyst is not allowed to see.
     """
-    clearance, compartments = _ceiling(conn, user)
+    clearance, compartments = _ceiling(conn, user, case_id)
     rows = conn.execute(
         """SELECT t.id, t.case_id, t.namespace, t.name, t.colour, t.description,
                   t.parent_id, t.external_id,
@@ -466,7 +471,7 @@ def tags_on_node(
     is whether the caller may see the NODE. If not: 404, same answer a
     nonexistent node gives.
     """
-    clearance, compartments = _ceiling(conn, user)
+    clearance, compartments = _ceiling(conn, user, case_id)
     if not _visible_node(conn, case_id, node_id, clearance, compartments):
         raise Problem(404, "Not found", "no such node in this case")
     rows = conn.execute(
@@ -540,7 +545,7 @@ def list_sets(
     own ceiling — a set may hold nodes above their clearance, and a raw
     count would disclose how many.
     """
-    clearance, compartments = _ceiling(conn, user)
+    clearance, compartments = _ceiling(conn, user, case_id)
     rows = conn.execute(
         """SELECT s.id, s.name, s.purpose, s.is_pinned, s.created_by, s.created_at,
                   count(m.node_id) AS visible_member_count
@@ -678,7 +683,7 @@ def list_members(
     that distinction is itself the disclosure.
     """
     _own_set(conn, case_id, set_id)
-    clearance, compartments = _ceiling(conn, user)
+    clearance, compartments = _ceiling(conn, user, case_id)
     rows = conn.execute(
         """SELECT n.id, n.label, n.node_type, n.classification, m.note
              FROM core.node_set_member m

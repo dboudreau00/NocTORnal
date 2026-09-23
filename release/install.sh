@@ -346,6 +346,14 @@ SAMPLE_BUCKET=noctornal-samples
 # deletion order.
 INGEST_BUCKET=noctornal-raw
 
+# Rejected malware samples are PRESERVED, not destroyed (docs/11): their
+# encrypted bytes move into this object-locked bucket under a legal hold,
+# and a retrieval needs a Security Officer's authorisation. Set the
+# disposition to destroy only if counsel has decided rejected samples must
+# not be kept; any other value refuses rejections until it is corrected.
+PRESERVE_BUCKET=noctornal-preserved
+NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=preserve
+
 # The largest exhibit and the largest sample this deployment accepts,
 # declared rather than defaulted. Production REFUSES TO BOOT while
 # NOCTORNAL_MAX_EVIDENCE_BYTES is unset, because a cap nobody chose is a

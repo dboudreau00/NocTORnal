@@ -32,7 +32,12 @@ from fastapi import APIRouter, Depends
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
-from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
+from noctornal_api.graph import (
+    AssertionInput,
+    GraphWriteError,
+    GraphWriteService,
+    TieConfidenceConflict,
+)
 from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
@@ -75,6 +80,14 @@ class CreateNodeBody(BaseModel):
 
 
 class CreateEdgeBody(BaseModel):
+    """A new tie and the assertion it rests on.
+
+    The tie's confidence is `assertion.confidence` and nothing else
+    (migration 0064). `confidence` is declared at the top level only so a
+    client that sends it there is TOLD, instead of having it dropped the
+    way pydantic drops an unknown field: that silent drop is exactly how a
+    HIGH tie became LOW before 2026-09-22 (ux06 edge-confidence-not-stored).
+    """
     edge_type: str
     src_node_id: UUID
     dst_node_id: UUID
@@ -82,6 +95,7 @@ class CreateEdgeBody(BaseModel):
     assertion: AssertionBody = AssertionBody()
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    confidence: str | None = None
 
 
 class AddAssertionBody(AssertionBody):
@@ -160,6 +174,13 @@ def create_node(case_id: UUID, body: CreateNodeBody,
 def create_edge(case_id: UUID, body: CreateEdgeBody,
                 user: CurrentUser = Depends(require("graph.edge.create")),
                 conn: psycopg.Connection = Depends(get_conn)) -> IdOut:
+    if body.confidence is not None:
+        # A malformed body, so refused before anything is read from the
+        # database, and naming the field to use instead. See CreateEdgeBody.
+        raise Problem(400, "Invalid request",
+                      "a tie's confidence is the grade of the assertion it "
+                      "rests on: send it as assertion.confidence, not as a "
+                      "top-level confidence")
     check_writable_labels(conn, user, classification=body.classification)
     _check_evidence(conn, case_id, body.assertion.evidence_id)
     _interval_sane(body.valid_from, body.valid_to)
@@ -269,8 +290,13 @@ def retract_assertion(
     the projection, taking its degree, its centrality and its edges with
     it. Withdraw a source and the part of the network that rested on it
     dissolves — which is the whole point of grounding a graph in evidence.
-    History survives, so an `as_of` earlier than the retraction still shows
-    the element as it stood.
+    The ROW survives, stamped, with its reason. The VIEW does not: the
+    projection's live-provenance leg is `retracted_at IS NULL AND
+    superseded_at IS NULL` with no as-of term, so the element is gone at
+    every as-of position, including ones before the retraction. (Corrected
+    2026-09-22, ux05 retract-confirmation-wrong: this said an earlier
+    `as_of` still showed it, and the console's confirmation repeated the
+    promise. The superseded half is the final review's U11, 2026-09-23.)
     """
     from fastapi import Response
     row = conn.execute(
@@ -580,14 +606,33 @@ def update_edge(
 
     **An assertion is required**, for the same reason as `update_node`.
 
-    `confidence` is the cached render value on the edge; the assertion's
-    own `confidence` grades the claim being made now. They are different
-    fields and the body carries both.
+    `confidence` re-grades the tie, and since migration 0064 a tie's
+    confidence is the highest among its live claims about the tie, so the
+    re-grade is carried BY the correction's assertion: it is recorded
+    graded at the value it states. A correction to `weight` or `attrs`
+    alone grades that field, not the tie, and leaves the tie's confidence
+    where it was. Until 2026-09-22 this docstring called the two
+    "different fields", the column was overwritten, the assertion kept its
+    default LOW, and every correction opened a new disagreement between
+    the tie and its claims (ux05 two-disagreeing-confidences). Sending
+    both `confidence` and a different `assertion.confidence` is therefore
+    refused as contradictory rather than one being silently preferred.
+
+    Lowering a tie beneath a claim that is still live is a 409: see
+    `GraphWriteService.update_edge` for why, and for the remedy the
+    response names.
 
     Not editable here: `sign` and `edge_type` (a different claim, not a
-    correction — record it as its own edge), classification and
+    correction; record it as its own edge), classification and
     compartments. See `GraphWriteService.update_edge`.
     """
+    if (body.confidence is not None
+            and "confidence" in body.assertion.model_fields_set
+            and body.assertion.confidence != body.confidence):
+        raise Problem(400, "Invalid request",
+                      "confidence and assertion.confidence disagree. A tie's "
+                      "confidence is its assertions' grade, so a re-grade is "
+                      "the correction's own grade: send one value")
     old_weight, old_confidence, old_attrs = _gate_for_change(
         conn, user, case_id=case_id, table="edge", element_id=edge_id,
         permission_key="graph.edge.update")
@@ -609,19 +654,32 @@ def update_edge(
                 "attrs": old_attrs}
     previous = {key: previous[key] for key in changed}
 
-    with conn.transaction():
-        GraphWriteService(conn).update_edge(
-            edge_id, case_id=case_id,
-            assertion=_assertion(body.assertion, user.user_id,
-                                 claim_path=_claim_path(changed),
-                                 claim_value=changed or None),
-            weight=body.weight, confidence=body.confidence, attrs=body.attrs,
-        )
-        _audit_change(conn, user, case_id, action="EDGE_UPDATED",
-                      object_type="edge", object_id=edge_id,
-                      detail={"fields": sorted(changed), "previous": previous})
+    try:
+        with conn.transaction():
+            GraphWriteService(conn).update_edge(
+                edge_id, case_id=case_id,
+                assertion=_assertion(body.assertion, user.user_id,
+                                     claim_path=_claim_path(changed),
+                                     claim_value=changed or None),
+                weight=body.weight, confidence=body.confidence, attrs=body.attrs,
+            )
+            _audit_change(conn, user, case_id, action="EDGE_UPDATED",
+                          object_type="edge", object_id=edge_id,
+                          detail={"fields": sorted(changed), "previous": previous})
+    except TieConfidenceConflict as exc:
+        # Authored text naming the claims in the way and the remedy. The
+        # service raised it inside the transaction above, which rolled the
+        # correction back, and the audit row below it was never reached.
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
-    return {"edge_id": str(edge_id), "updated": sorted(changed)}
+    # The tie's confidence AFTER the write, as the rule derived it, so a
+    # client never has to assume its re-grade (or a weight fix) left the
+    # tie where it expected.
+    now_confidence = conn.execute(
+        "SELECT confidence::text FROM core.edge WHERE id = %s", (edge_id,)
+    ).fetchone()[0]
+    return {"edge_id": str(edge_id), "updated": sorted(changed),
+            "confidence": now_confidence}
 
 
 @router.delete("/graph/nodes/{node_id}", response_model=dict,

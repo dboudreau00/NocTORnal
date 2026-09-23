@@ -2,7 +2,9 @@
 
 Every route here is gated on `user.manage`, which the seed grants to
 SYS_ADMIN alone and marks step-up — `require_global` enforces both, so a
-stale session cannot mint accounts.
+stale session cannot mint accounts. The one exception is `GET /access`,
+which reads nothing but which of two verbs the CALLER holds, so the
+console knows whether to offer the way in (2026-09-22).
 
 Credentials appear ONCE, in the response that generated them, and no
 route returns an existing secret. The response says so, because an
@@ -17,7 +19,12 @@ import psycopg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from noctornal_api.http.deps import CurrentUser, get_conn, require_global
+from noctornal_api.http.deps import (
+    CurrentUser,
+    current_user,
+    get_conn,
+    require_global,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api import readiness as readiness_register
@@ -74,6 +81,41 @@ def _credentials(c: OneTimeCredentials) -> dict:
     }
 
 
+@router.get("/access", response_model=dict)
+def access(
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Whether the caller may open Administration at all.
+
+    ux16 admin-unreachable-without-a-case (2026-09-22): the accounts panel
+    and the readiness register were a tab inside a case, so an account
+    holding SYS_ADMIN alone (0021 gives it user.manage and no case.read,
+    by design) signed in to an empty case list with no way in. The console
+    now offers Administration from the case list, and asks here whether to.
+
+    Any signed-in caller may ask, and the answer is about the caller only:
+    whether one of THEIR global roles carries `user.manage`, and whether
+    one carries `break_glass.review`. The second is here for the same
+    reason as the first: SECURITY_OFFICER is assigned to no case by
+    design, and the break-glass review queue was reachable only through a
+    case's Lifecycle pane. It is not a gate: every route below, and the
+    queue itself, still runs `require_global`, including its step-up
+    check, which is why the freshness is not answered here: an
+    administrator whose re-challenge has lapsed should still see the way
+    in, and be told on arrival why the list refuses them.
+    """
+    held = {r[0] for r in conn.execute(
+        """SELECT DISTINCT rp.permission_key FROM iam.user_role ur
+             JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.user_id = %s AND u.is_active
+              AND rp.permission_key IN ('user.manage', 'break_glass.review')""",
+        (user.user_id,)).fetchall()}
+    return {"user_manage": "user.manage" in held,
+            "break_glass_review": "break_glass.review" in held}
+
+
 @router.get("/users", response_model=dict)
 def list_users(
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -86,8 +128,11 @@ def list_users(
             "you": str(user.user_id)}
 
 
+# Its own meter, `admin.credentials`, not the recovery-code one: sharing
+# that bucket let a fresh install's operator add two colleagues before a
+# 429 (final review U18, 2026-09-23; see the catalogue in ratelimit.py).
 @router.post("/users", response_model=dict, status_code=201,
-             dependencies=[Depends(rate_limit("auth.recovery_codes"))])
+             dependencies=[Depends(rate_limit("admin.credentials"))])
 def create_user(
     body: CreateBody,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -175,10 +220,11 @@ def revoke_role(
     return {"user_id": str(user_id), "revoked": role.upper()}
 
 
-# Same meter as recovery codes: both mint a credential in a loop
-# an impatient operator will happily click.
+# Same meter as provisioning: both mint a credential in a loop an
+# impatient operator will happily click. Not the recovery-code meter,
+# which is the administrator's own and too small to share (U18).
 @router.post("/users/{user_id}/totp", response_model=dict,
-             dependencies=[Depends(rate_limit("auth.recovery_codes"))])
+             dependencies=[Depends(rate_limit("admin.credentials"))])
 def reenrol_totp(
     user_id: UUID,
     user: CurrentUser = Depends(require_global("user.manage")),
@@ -237,3 +283,28 @@ def readiness(
     as evidence and this endpoint still answers 200.
     """
     return readiness_register.report(conn)
+
+
+@router.get("/roles", response_model=dict)
+def roles(
+    user: CurrentUser = Depends(require_global("user.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Every role's key and the name a person reads, from `iam.role`.
+
+    Added 2026-09-22 with migration 0062, which renamed CASE_OWNER's
+    display name to "Lead investigator" and kept the key. The admin pane
+    had only ever shown keys, so the rename would have reached nobody; it
+    reads the names here rather than keeping a copy, because a label table
+    in the console is the second copy of a rule that goes stale (the role
+    picker once offered six roles while the server granted ten).
+    `grantable` is `iam_admin.GRANTABLE_ROLES`, the server's own allowlist.
+    """
+    from noctornal_api.iam_admin import GRANTABLE_ROLES
+
+    rows = conn.execute(
+        "SELECT key, display_name, description FROM iam.role ORDER BY key"
+    ).fetchall()
+    return {"roles": [{"key": k, "display_name": n, "description": d or "",
+                       "grantable": k in GRANTABLE_ROLES}
+                      for k, n, d in rows]}

@@ -115,6 +115,19 @@ def svc(conn, store):
     return SampleService(conn, store)
 
 
+@pytest.fixture
+def destroying(monkeypatch):
+    """The `destroy` disposition, stated by the tests that are about it.
+
+    Since F2 (2026-09-22) a rejection PRESERVES by default. The tests in
+    this file that assert destruction were written when destruction was
+    the only disposition, and they still describe what `destroy` does, so
+    they ask for it rather than rely on a default that changed.
+    test_sample_preservation_pg.py covers the default."""
+    from noctornal_api.samples import DESTROY, DISPOSITION_ENV
+    monkeypatch.setenv(DISPOSITION_ENV, DESTROY)
+
+
 def _unique(seed: str) -> bytes:
     return FAKE_PE + seed.encode()
 
@@ -366,7 +379,8 @@ def test_a_tampered_sample_is_never_served(conn, svc, store, monkeypatch):
 # --- the REJECTED path --------------------------------------------------
 
 def test_rejection_keeps_the_record_and_destroys_the_content(conn, svc, store,
-                                                             monkeypatch):
+                                                             monkeypatch,
+                                                             destroying):
     """docs/11 requires a REJECTED path that records THAT something was
     rejected and why, without retaining the content. The asymmetry is the
     point: an auditor asking "did anything prohibited come through here"
@@ -384,7 +398,8 @@ def test_rejection_keeps_the_record_and_destroys_the_content(conn, svc, store,
     assert not store.objects, "the bytes must not survive"
 
 
-def test_a_rejected_sample_can_never_be_downloaded(conn, svc, monkeypatch):
+def test_a_rejected_sample_can_never_be_downloaded(conn, svc, monkeypatch,
+                                                   destroying):
     from noctornal_api.samples import SampleError
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://samples.example")
     alice = _user(conn)
@@ -395,7 +410,7 @@ def test_a_rejected_sample_can_never_be_downloaded(conn, svc, monkeypatch):
                      request_origin="https://samples.example", **CLEARED)
 
 
-def test_rejection_destroys_the_data_key_too(conn, svc):
+def test_rejection_destroys_the_data_key_too(conn, svc, destroying):
     """Even if the object survives a bucket-lifecycle race, nothing can
     decrypt it."""
     alice = _user(conn)
@@ -407,7 +422,8 @@ def test_rejection_destroys_the_data_key_too(conn, svc):
     assert bytes(row[0]) == b""
 
 
-def test_a_destroyed_data_key_is_not_read_as_a_sealed_row(conn, svc):
+def test_a_destroyed_data_key_is_not_read_as_a_sealed_row(conn, svc,
+                                                          destroying):
     """The key ring must not mistake a purge for a broken key.
 
     `data_key_ciphertext` is NOT NULL, so "the key is gone" is recorded
@@ -446,7 +462,7 @@ def test_a_rejection_has_to_say_why(conn, svc):
 
 
 def test_a_rejection_with_no_store_refuses_rather_than_claiming_destruction(
-        conn, store):
+        conn, store, destroying):
     """`bytes_purged: true` with nothing behind it is a FALSE record.
 
     Found 2026-08-07, and it is the third instance of one shape: a

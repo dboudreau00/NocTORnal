@@ -123,6 +123,31 @@ def raster_type_of(data: bytes) -> str | None:
 # ---------------------------------------------------------------------------
 
 _SCHEME_RE = re.compile(r"^(h)(ttps?)(://)", re.I)
+#: A dot not already inside `[.]`, so a value an analyst defanged by hand
+#: is not bracketed twice into `[[.]]`.
+_BARE_DOT = re.compile(r"(?<!\[)\.(?!\])")
+#: A second URL INSIDE the first: an open redirect's `?u=https://...`, a
+#: tracker's `/r/https://...`. The authority stops at the first `/ ? # &`.
+_EMBEDDED_SCHEME = re.compile(r"(h)tt(ps?://)([^/?#\s&]*)", re.I)
+#: An embedded URL under any other scheme (`ftp://`, `ftps://`, `sftp://`)
+#: gets its host bracketed like a leading one does: those schemes have no
+#: `hxx` form, and a linkifier that knows the scheme links the host. An
+#: embedded `ftp://` host was only ever bracketed by accident of the
+#: `parts[0]` bug below, and the fix for that bug briefly left `ftps://`
+#: live in a bare host's query (final review C5, 2026-09-23). The
+#: lookbehind starts a scheme only where a run of scheme characters starts,
+#: so a long run with no `://` in it is scanned once, not once per letter.
+#: Re-bracketing an `hxxps://` host already done above is a no-op.
+_EMBEDDED_OTHER = re.compile(
+    r"(?<![A-Za-z0-9+.\-])([A-Za-z][A-Za-z0-9+.\-]*://)([^/?#\s&]*)")
+_EMBEDDED_WWW = re.compile(r"(?<![\w.\-\[])(www\.[^/?#\s&]*)", re.I)
+#: What `parts[0]` must be for `parts[2]` to be an authority: a URL scheme
+#: and its colon, RFC 3986 section 3.1, and nothing else.
+_URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def _bracket(host: str) -> str:
+    return _BARE_DOT.sub("[.]", host)
 
 
 def defang(value: str) -> str:
@@ -157,16 +182,129 @@ def defang(value: str) -> str:
     # That form is not exotic: `requested_url` and `final_url` are free
     # text and a victim report routinely omits the scheme, and
     # `GET /deception/defang` is documented as safe for a report.
+    #
+    # `parts[0]` must also be a scheme (or empty, for `//host/x`). A bare
+    # host with a doubled slash in its path, `www.evil.example//login`,
+    # otherwise put a PATH segment at index 2 and left the host live. The
+    # body defanger (`defang_text`) feeds this scheme-less `www.` hosts, so
+    # the gap stopped being theoretical on 2026-09-22.
+    #
+    # "A scheme" means the WHOLE of `parts[0]` is one. The test was
+    # `parts[0].endswith(":")`, which a bare host with a URL in its query
+    # also passes: `evil.example?next=https://google.com` splits with
+    # `parts[0] = "evil.example?next=https:"`, so only the embedded host
+    # was bracketed and the leading one, the actor's, stayed live under a
+    # run marked defanged (final review C5, 2026-09-23). Anything that is
+    # not a scheme now takes the branch below, which brackets the whole
+    # head up to the first `/`, query and fragment included.
+    #
+    # `parts[0]` is bracketed as well even when it is a scheme: a real one
+    # has no dots, so that is a no-op, and a dotted "scheme" such as
+    # `evil.example://x` is more likely a host than an exotic protocol.
     parts = out.split("/", 3)
-    if len(parts) >= 3 and parts[1] == "" and parts[2]:
-        parts[2] = parts[2].replace(".", "[.]")
+    if (len(parts) >= 3 and parts[1] == "" and parts[2]
+            and (parts[0] == "" or _URL_SCHEME.fullmatch(parts[0]))):
+        parts[0] = _bracket(parts[0])
+        parts[2] = _bracket(parts[2])
         out = "/".join(parts)
     else:
         # No authority to isolate — bracket the first segment, which is
         # where a bare host lives, and leave any path alone.
         head, sep, tail = out.partition("/")
-        out = head.replace(".", "[.]") + sep + tail
+        out = _bracket(head) + sep + tail
+    # A URL carried inside this one is a URL too. An open redirect puts the
+    # real destination in the query, `hxxps://www[.]google[.]com/url?q=`
+    # `https://evil.example/x`, and a linkifier finds the inner `https://`
+    # on its own: a paste of the "defanged" form into a ticket was still a
+    # working link to the actor. The leading scheme is already `hxx`, so
+    # these patterns only ever meet the embedded ones. Found while fixing
+    # ux14-deception:body-url-not-defanged (2026-09-22), because the body
+    # defanger hands this function whole redirect URLs.
+    out = _EMBEDDED_SCHEME.sub(
+        lambda m: m.group(1) + "xx" + m.group(2) + _bracket(m.group(3)), out)
+    out = _EMBEDDED_OTHER.sub(lambda m: m.group(1) + _bracket(m.group(2)), out)
+    return _EMBEDDED_WWW.sub(lambda m: _bracket(m.group(1)), out)
+
+
+#: What the BODY defanger looks for. Wider than `_URL_RE`, which decides
+#: what is EXTRACTED as a URL: display has to catch everything a mail client
+#: or a chat window auto-links when an analyst pastes the text into a
+#: ticket. The character class is `_URL_RE`'s, so an http(s) URL is cut at
+#: exactly the place the extracted list cut it and the two views never
+#: disagree about where a URL ends.
+#:
+#: Three shapes, each a URL by any reading:
+#:   * a scheme, WITHOUT `_URL_RE`'s leading `\b`: `click_https://...` and
+#:     `1https://...` have no word boundary before the `h`, so they stayed
+#:     live, and a linkifier finds the `https://` inside them regardless;
+#:   * a `www.` host, for the same reason unanchored;
+#:   * a bare host followed by a path, port, query or fragment,
+#:     `secure-billing.example/verify`, which carries no scheme and no
+#:     `www.` and which every chat client links.
+#: Both scheme-less gaps were found by the verifier of the 2026-09-22 fix.
+#: A bare hostname with nothing after it is deliberately NOT matched: it is
+#: a hostname and not a URL, and this pane shows hostnames as written (the
+#: sending host, the Received chain, the Message-ID host), while matching
+#: every dotted word would bracket `invoice.pdf` and `Node.js` in the
+#: sender's prose.
+_BODY_URL_RE = re.compile(
+    r"(?:https?|ftp)://[^\s<>\"'\)\]]{3,2048}"
+    r"|www\.[^\s<>\"'\)\]]{3,2048}"
+    r"|(?<![A-Za-z0-9@.\-])"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}"
+    r"(?::[0-9]{1,5})?[/?#][^\s<>\"'\)\]]{0,2048}",
+    re.I)
+
+
+def defang_text(text: str | None) -> list[dict]:
+    """Message text as runs, with every URL in it defanged.
+
+    `[{"text": "Details are on the portal: ", "defanged": False},
+      {"text": "hxxps://portal[.]evil[.]example/verify", "defanged": True},
+      ...]`
+
+    ux14-deception:body-url-not-defanged (2026-09-22). The detail card put
+    `body_text` in a <pre> verbatim, so the one block an analyst is most
+    likely to select and paste into a report held the attacker's working
+    URL, directly above a list that showed the same URL defanged. docs/19
+    §5 says the UI shows extracted plain text WITH URLS DEFANGED.
+
+    Runs rather than one string because the UI marks each substituted span
+    the way it marks the URL list, so a reader can see which characters
+    are the defanger's and which are the sender's. Joining the `text` of
+    every run gives the defanged body for any consumer that wants a string.
+    Trailing sentence punctuation is left outside the URL, as the
+    extractor does.
+
+    Not only for bodies. Analyst notes on captures and calls go through it
+    too (`note_segments`): once the notes were rendered, a note recording
+    the link the victim clicked put that link on screen live, under help
+    text promising every URL in the pane is defanged.
+    """
+    if not text:
+        return []
+    out: list[dict] = []
+    pos = 0
+    for match in _BODY_URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;:!?")
+        start = match.start()
+        if start > pos:
+            out.append({"text": text[pos:start], "defanged": False})
+        out.append({"text": defang(url), "defanged": True})
+        pos = start + len(url)
+    if pos < len(text):
+        out.append({"text": text[pos:], "defanged": False})
     return out
+
+
+def _defanged_str(text: str | None) -> str | None:
+    """`defang_text` joined back into one string, for a short free-text
+    field the console shows as a line (a subject, a page title, a display
+    name) rather than as marked runs. Attacker-written, so it can hold a
+    URL as easily as a body can."""
+    if not text:
+        return text
+    return "".join(s["text"] for s in defang_text(text))
 
 
 # ---------------------------------------------------------------------------
@@ -1006,8 +1144,9 @@ class DeceptionService:
                  compartments: frozenset[str] = frozenset(),
                  limit: int = 100) -> list[dict]:
         rows = self._c.execute(
-            f"""SELECT {_CAPTURE_Q} FROM deception.capture x
+            f"""SELECT {_CAPTURE_Q}, u.display_name FROM deception.capture x
                   LEFT JOIN core."case" c ON c.id = x.case_id
+                  LEFT JOIN iam.app_user u ON u.id = x.captured_by
                  WHERE x.case_id = %s AND {_labels_clause()}
                  ORDER BY x.captured_at DESC LIMIT %s""",
             (case_id, clearance, list(compartments), limit)).fetchall()
@@ -1022,8 +1161,9 @@ class DeceptionService:
         for a compartmented case (rule (b) of the access gate).
         """
         row = self._c.execute(
-            f"""SELECT {_CAPTURE_Q} FROM deception.capture x
+            f"""SELECT {_CAPTURE_Q}, u.display_name FROM deception.capture x
                   LEFT JOIN core."case" c ON c.id = x.case_id
+                  LEFT JOIN iam.app_user u ON u.id = x.captured_by
                  WHERE x.id = %s AND {_labels_clause()}""",
             (capture_id, clearance, list(compartments))).fetchone()
         if row is None:
@@ -1127,7 +1267,30 @@ class DeceptionService:
                  ORDER BY x.recorded_at DESC LIMIT %s""",
             (case_id, clearance, list(compartments), divergent_only,
              limit)).fetchall()
-        return [_email_row(r) for r in rows]
+        # The sending host rides on the LIST row, not only on the detail.
+        # ux14-deception:email-durable-origin-missing (2026-09-22): the row
+        # showed From, display name and Reply-To, every one of them typed
+        # by the sender, and the one observation the recipient's own relay
+        # made about who connected lived only in the detail card. One query
+        # for the page, not one per row; the partial unique index on the
+        # boundary makes it an index read.
+        hops = {}
+        if rows:
+            hops = {h[0]: h[1:] for h in self._c.execute(
+                """SELECT DISTINCT ON (message_id)
+                          message_id, seq, from_host, from_ip, by_host,
+                          received_at, is_trusted_boundary
+                     FROM deception.email_hop
+                    WHERE message_id = ANY(%s)
+                      AND (is_trusted_boundary OR seq = 0)
+                    ORDER BY message_id, is_trusted_boundary DESC, seq""",
+                ([r[0] for r in rows],)).fetchall()}
+        out = []
+        for r in rows:
+            row = _email_row(r)
+            row["sending_host"] = _sending_host(hops.get(r[0]))
+            out.append(row)
+        return out
 
     def email(self, message_id: UUID, *, clearance: str,
               compartments: frozenset[str] = frozenset()) -> dict | None:
@@ -1153,6 +1316,17 @@ class DeceptionService:
         # extractor.
         boundary = next((h[0] for h in hop_rows if h[7]), 0)
         out["trusted_boundary_seq"] = boundary
+        at_boundary = next((h for h in hop_rows if h[0] == boundary), None)
+        out["sending_host"] = _sending_host(
+            (at_boundary[0], at_boundary[1], at_boundary[2], at_boundary[3],
+             at_boundary[6], at_boundary[7]) if at_boundary else None)
+        # The body as the UI may show it. `body_text` stays in the payload,
+        # fanged, beside `extracted_urls`, for a consumer that needs the
+        # exact bytes; the console renders only these runs (a static test
+        # holds it to that). ux14-deception:body-url-not-defanged.
+        out["body_segments"] = defang_text(out["body_text"])
+        out["body_text_defanged"] = (
+            "".join(s["text"] for s in out["body_segments"]) or None)
         out["hops"] = [
             {"seq": h[0], "from_host": h[1],
              "from_ip": str(h[2]) if h[2] else None, "by_host": h[3],
@@ -1161,7 +1335,14 @@ class DeceptionService:
              "is_trusted_boundary": h[7], "raw": h[8],
              # Stated per-row so the UI does not have to re-derive the
              # rule, and cannot re-derive it wrongly.
-             "is_attacker_writable": h[0] > boundary}
+             "is_attacker_writable": h[0] > boundary,
+             # The forms the console draws. `from` is whatever the sender
+             # said in HELO, and every line above the boundary is the
+             # sender's outright, so either can be `pay.evil.example/verify`
+             # (final review U17, 2026-09-23). A plain hostname comes back
+             # unchanged; only a URL-shaped one is defanged.
+             "from_host_defanged": _defanged_str(h[1]),
+             "by_host_defanged": _defanged_str(h[3])}
             for h in hop_rows]
         out["attachments"] = [
             {"filename": a[0], "media_type": a[1], "byte_size": a[2],
@@ -1240,8 +1421,9 @@ class DeceptionService:
               compartments: frozenset[str] = frozenset(),
               limit: int = 100) -> list[dict]:
         rows = self._c.execute(
-            f"""SELECT {_CALL_Q} FROM deception.call_record x
+            f"""SELECT {_CALL_Q}, u.display_name FROM deception.call_record x
                   LEFT JOIN core."case" c ON c.id = x.case_id
+                  LEFT JOIN iam.app_user u ON u.id = x.recorded_by
                  WHERE x.case_id = %s AND {_labels_clause()}
                  ORDER BY x.started_at DESC LIMIT %s""",
             (case_id, clearance, list(compartments), limit)).fetchall()
@@ -1291,7 +1473,10 @@ def _capture_row(r) -> dict:
         "capture_tool": r[8],
         "egress_profile_id": str(r[9]) if r[9] else None,
         "user_agent": r[10], "viewport": r[11], "http_status": r[12],
-        "is_live": r[13], "page_title": r[14], "favicon_hash": r[15],
+        "is_live": r[13], "page_title": r[14],
+        # The kit wrote the title; the console shows only this form.
+        "page_title_defanged": _defanged_str(r[14]),
+        "favicon_hash": r[15],
         "screenshot_evidence_id": str(r[16]) if r[16] else None,
         "dom_evidence_id": str(r[17]) if r[17] else None,
         "har_evidence_id": str(r[18]) if r[18] else None,
@@ -1301,8 +1486,55 @@ def _capture_row(r) -> dict:
         "tls_spki_sha256": bytes(r[23]).hex() if r[23] else None,
         "submitted_input": r[24], "submission_authority_ref": r[25],
         "captured_by": str(r[26]), "note": r[27],
+        # The note as the console draws it. An analyst recording what the
+        # victim clicked pastes the link, and `note` keeps it working; the
+        # same pairing as `body_text` and `body_segments`.
+        "note_segments": defang_text(r[27]),
         "classification": r[28], "compartments": sorted(r[29] or []),
         "legal_hold": r[30],
+        # Who wrote the note, by name. ux14-deception:notes-never-rendered
+        # (2026-09-22): a note is only worth showing attributed, and a UUID
+        # is not an attribution a reader can act on.
+        "captured_by_name": r[31] if len(r) > 31 else None,
+    }
+
+
+def _sending_host(hop) -> dict | None:
+    """The host that connected to the recipient's last trusted relay.
+
+    `hop` is `(seq, from_host, from_ip, by_host, received_at,
+    is_trusted_boundary)` for the boundary hop, or None when the message
+    has no Received chain. This is docs/19's "first trusted Received hop":
+    the one line of the chain written by a machine the recipient controls
+    about who connected to it, so the only origin claim in a message the
+    sender did not write.
+
+    `boundary_confirmed` is three-valued on purpose (invariant 12). True
+    when the boundary sits above hop 0, which the parser only ever does
+    after recognising hop 0's `by` host as the recipient's
+    (`parse_received_chain`). None when it sits AT hop 0, because the
+    stored chain cannot say whether an operator named that MTA or the
+    parser fell back to its default with nothing configured. In the second
+    case hop 0's `from` can be the recipient's own internal relay, which is
+    the inversion `selector_candidates_for_email` refuses to propose. The
+    UI says "not confirmed" rather than guessing either way.
+    """
+    if hop is None:
+        return None
+    seq, host, ip, by_host, received_at, marked = hop
+    return {
+        "seq": seq, "host": host, "ip": str(ip) if ip else None,
+        "observed_by": by_host,
+        # What the console shows, on the list row and the detail alike.
+        # The host is the HELO name the sender chose, recorded faithfully
+        # by the relay, and `_RECEIVED_FROM` keeps a `/` in it: EHLO
+        # `pay.evil.example/verify` was drawn live under "What the
+        # infrastructure proved" (final review U17, 2026-09-23).
+        "host_defanged": _defanged_str(host),
+        "observed_by_defanged": _defanged_str(by_host),
+        "received_at": received_at.isoformat() if received_at else None,
+        "boundary_marked": bool(marked),
+        "boundary_confirmed": True if (marked and seq > 0) else None,
     }
 
 
@@ -1310,10 +1542,24 @@ def _email_row(r) -> dict:
     return {
         "id": str(r[0]), "case_id": str(r[1]), "evidence_id": str(r[2]),
         "message_id": r[3], "message_id_norm": r[4],
+        # The kit's fingerprint, surfaced on the row: in the demo BEC the
+        # Message-ID, the Return-Path and the first trusted hop all name the
+        # same VPS, and a reader had to open three things to see that.
+        # Attacker-generated like every header, so it is a pivot and never
+        # an identity (`selector_candidates_for_email` offers it weak).
+        "message_id_domain": _domain_of(r[3]),
+        # `_domain_of` keeps everything after the last `@`, so the kit's
+        # `<a@pay.evil.example/verify>` gives a URL, not a domain (final
+        # review U17, 2026-09-23). The console shows this form only.
+        "message_id_domain_defanged": _defanged_str(_domain_of(r[3])),
         "header_from": r[5], "header_from_display": r[6],
+        # The display name and subject are the sender's prose, and a lure
+        # puts a link in either as readily as in the body. The console
+        # shows these forms and never the raw two.
+        "header_from_display_defanged": _defanged_str(r[6]),
         "header_reply_to": r[7], "header_return_path": r[8],
         "envelope_from": r[9], "header_to": r[10] or [], "header_cc": r[11] or [],
-        "subject": r[12],
+        "subject": r[12], "subject_defanged": _defanged_str(r[12]),
         "date_header": r[13].isoformat() if r[13] else None,
         "spf_result": r[14], "spf_domain": r[15],
         "dkim_result": r[16], "dkim_domain": r[17],
@@ -1350,16 +1596,21 @@ def _call_row(r) -> dict:
         "evidence_id": str(r[21]) if r[21] else None,
         "recording_evidence_id": str(r[22]) if r[22] else None,
         "recording_lawful_basis": r[23], "note": r[24],
+        # See `_capture_row`: the note as the console draws it.
+        "note_segments": defang_text(r[24]),
         "recorded_by": str(r[25]), "recorded_at": r[26].isoformat(),
         "classification": r[27], "compartments": sorted(r[28] or []),
         "legal_hold": r[29],
+        # See `captured_by_name`: the note's author, by name.
+        "recorded_by_name": r[30] if len(r) > 30 else None,
     }
 
 
 __all__ = [
     "FREEMAIL_DOMAINS", "HOSTILE_MEDIA_TYPES", "MAX_EML_BYTES",
     "DeceptionError", "DeceptionService", "Hop", "ParsedEmail",
-    "defang", "is_hostile_media_type", "parse_eml", "parse_received_chain",
+    "defang", "defang_text", "is_hostile_media_type", "parse_eml",
+    "parse_received_chain",
     "raster_type_of", "selector_candidates_for_call",
     "selector_candidates_for_email", "trusted_mta_suffixes",
 ]

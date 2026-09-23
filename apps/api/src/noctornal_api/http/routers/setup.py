@@ -67,7 +67,11 @@ def first_admin(
         "password": creds.password,
         "totp_secret": creds.totp_secret,
         "otpauth_uri": creds.otpauth_uri,
+        # "then sign in below" was true of a sign-in form this card hid
+        # until its button was pressed (firstrun-oneclick-wipe,
+        # 2026-09-22). The console now signs in on the card itself.
         "notice": ("Shown once and not recoverable. Put the secret in your "
-                   "authenticator before leaving this page, then sign in "
-                   "below."),
+                   "authenticator and keep the password safe, then sign in "
+                   "with both on this page. They stay here until that "
+                   "works."),
     }

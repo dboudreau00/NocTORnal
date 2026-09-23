@@ -87,9 +87,49 @@ def _svc(conn: psycopg.Connection) -> DeceptionService:
     return DeceptionService(conn)
 
 
-def _ceiling(conn: psycopg.Connection, user: CurrentUser):
-    tlp, comps = user_ceiling(conn, user.user_id)
+def _ceiling(conn: psycopg.Connection, user: CurrentUser, case_id: UUID):
+    # Captures, emails and calls all belong to the case in the path, so a
+    # break-glass grant scoped to it counts here as it does on the graph
+    # (ux15 breakglass-grant-raises-nothing, 2026-09-23).
+    tlp, comps = user_ceiling(conn, user.user_id, case_id=case_id)
     return tlp.name, comps
+
+
+def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
+                   case_id: UUID, row: dict) -> None:
+    """The gate again, against ONE capture's or message's own labels.
+
+    The route's first gate runs at the CASE's labels, before anything is
+    fetched, so that existence is never revealed to the unassigned. The
+    row is then fetched under `_ceiling`, which a break-glass grant on
+    this case raises, and served. A RED message in an AMBER case, opened
+    by an AMBER analyst under a RED grant, reached them body and all
+    without ever passing the gate at RED, and the gate is where a grant's
+    use is counted. So it went uncounted, while the officer's card said
+    items opened one by one are (final review U23, 2026-09-23). Asked
+    after the fetch, which already applied the same ceiling, this refuses
+    nothing new; it is the use being recorded, as the screenshot route
+    and the exhibit routes already record it. Lists stay uncounted, as
+    everywhere.
+
+    Not asked at all on a case classified above the caller's own
+    clearance. There the route's first gate was passable only through the
+    grant, so it has already counted this request, and asking again
+    counted one open as two: the inflation U19 removed from the inspector,
+    brought back here by the first U23 fix (fix-round verifier,
+    2026-09-23). Skipping it is safe for the reason above: it refuses
+    nothing the fetch did not."""
+    above = conn.execute(
+        'SELECT c.classification > u.tlp_clearance '
+        '  FROM core."case" c, iam.app_user u '
+        ' WHERE c.id = %s AND u.id = %s',
+        (case_id, user.user_id)).fetchone()
+    if above is not None and above[0]:
+        return
+    authorize_object(conn, user, case_id=case_id,
+                     permission_key="evidence.read",
+                     classification=row["classification"],
+                     compartments=frozenset(row.get("compartments") or []))
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +296,7 @@ def list_captures(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
-    clearance, comps = _ceiling(conn, user)
+    clearance, comps = _ceiling(conn, user, case_id)
     return {"captures": _svc(conn).captures(
         case_id, clearance=clearance, compartments=comps, limit=min(limit, 500))}
 
@@ -268,13 +308,14 @@ def get_capture(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
-    clearance, comps = _ceiling(conn, user)
+    clearance, comps = _ceiling(conn, user, case_id)
     capture = _svc(conn).capture(capture_id, clearance=clearance, compartments=comps)
     if capture is None or capture["case_id"] != str(case_id):
         # Identical answer for "does not exist", "belongs to another case"
         # and "you may not see it" — a status code must not be an
         # existence oracle for a compartmented case.
         raise Problem(404, "Not found", "no such capture")
+    _gate_the_item(conn, user, case_id, capture)
     return capture
 
 
@@ -289,7 +330,7 @@ def capture_screenshot(
     from noctornal_api.evidence import EvidenceService, EvidenceStorage, IntegrityError
 
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
-    clearance, comps = _ceiling(conn, user)
+    clearance, comps = _ceiling(conn, user, case_id)
     capture = _svc(conn).capture(capture_id, clearance=clearance, compartments=comps)
     if capture is None or capture["case_id"] != str(case_id):
         raise Problem(404, "Not found", "no such capture")
@@ -442,7 +483,7 @@ def list_emails(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
-    clearance, comps = _ceiling(conn, user)
+    clearance, comps = _ceiling(conn, user, case_id)
     return {"emails": _svc(conn).emails(
         case_id, clearance=clearance, compartments=comps,
         divergent_only=divergent_only, limit=min(limit, 500))}
@@ -455,10 +496,11 @@ def get_email(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
-    clearance, comps = _ceiling(conn, user)
+    clearance, comps = _ceiling(conn, user, case_id)
     message = _svc(conn).email(message_id, clearance=clearance, compartments=comps)
     if message is None or message["case_id"] != str(case_id):
         raise Problem(404, "Not found", "no such message")
+    _gate_the_item(conn, user, case_id, message)
     return message
 
 
@@ -551,7 +593,7 @@ def list_calls(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
-    clearance, comps = _ceiling(conn, user)
+    clearance, comps = _ceiling(conn, user, case_id)
     calls = _svc(conn).calls(case_id, clearance=clearance,
                              compartments=comps, limit=min(limit, 500))
     for call in calls:

@@ -139,6 +139,40 @@ receiving MTA *decided*: `spf_result`, `dkim_result`, `dkim_domain`,
 `from_replyto_divergent` is stored, not computed on read, because it is
 the finding and a report must be able to cite it.
 
+Three read-side fields come with every message, the list row included,
+because the list row is what an analyst triages from:
+
+- `sending_host`: the first trusted `Received` hop of §2 (host, IP, the
+  relay that observed it and when). `boundary_confirmed` is `true` only
+  when the boundary sits above hop 0, which the parser reaches only by
+  recognising hop 0 as the recipient's own MTA. At hop 0 it is `null`:
+  the stored chain cannot tell a configured single-MX estate from the
+  unconfigured default, and in the default case that host can be the
+  recipient's own relay. The console says "boundary not confirmed" rather
+  than guess.
+- `message_id_domain`: the kit's fingerprint, a pivot and never an
+  identity.
+- `body_segments` (detail only): the body as runs, with every URL
+  defanged by the same `defang()` as the URL list. The console renders
+  these and never `body_text` (§5).
+- `subject_defanged` and `header_from_display_defanged`: the sender's
+  prose, which can carry a link as readily as the body can. The console
+  shows these and never the raw two.
+
+Captures and calls carry `note_segments` beside `note` (the analyst's
+note as runs, defanged the same way), and a capture carries
+`page_title_defanged` beside `page_title`. The raw field stays in each
+case for a consumer that needs the exact text.
+
+What `defang_text` treats as a URL, and so breaks: anything with an
+`http`, `https` or `ftp` scheme (even glued to a preceding word, as in
+`click_https://...`), a `www.` host, and a bare host followed by a path,
+port, query or fragment (`secure-billing.example/verify`). A URL carried
+inside another, such as an open redirect's `?q=https://...`, is broken
+too. A bare hostname with nothing after it is left as written, as the
+pane shows every other hostname, so `invoice.pdf` in a sentence stays
+`invoice.pdf`.
+
 Attachments carry an optional `sample_id`, a BEC attachment is malware
 and belongs in `lab.sample`, under the policy gate that already exists. It
 does not get a second, weaker home here.

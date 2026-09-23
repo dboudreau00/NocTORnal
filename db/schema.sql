@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0061.
+-- GENERATED MIRROR of the schema at Alembic revision 0065.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0061
+-- Alembic revision: 0065
 -- =====================================================================
 
 --
@@ -412,6 +412,32 @@ CREATE FUNCTION core.announce_change() RETURNS trigger
         END $$;
 
 --
+-- Name: assertion_derives_tie_confidence(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_derives_tie_confidence() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'core', 'public'
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.edge_id IS NOT NULL THEN
+      PERFORM core.sync_tie_confidence(NEW.edge_id);
+    END IF;
+    RETURN NULL;
+  END IF;
+  IF OLD.edge_id IS NOT NULL THEN
+    PERFORM core.sync_tie_confidence(OLD.edge_id);
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.edge_id IS NOT NULL AND NEW.edge_id IS DISTINCT FROM OLD.edge_id THEN
+      PERFORM core.sync_tie_confidence(NEW.edge_id);
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+--
 -- Name: assertion_protects_element(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -485,6 +511,26 @@ BEGIN
       coalesce(NEW.hash_verified::text,'-')
     ), 'UTF8'),
     'sha256');
+  RETURN NEW;
+END $$;
+
+--
+-- Name: edge_confidence_is_derived(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.edge_confidence_is_derived() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'core', 'public'
+    AS $$
+DECLARE
+  derived core.analytic_confidence := core.tie_confidence(NEW.id);
+BEGIN
+  IF NEW.confidence IS DISTINCT FROM derived THEN
+    RAISE EXCEPTION
+      'edge %: confidence is derived from its live assertions (%), not written directly. Record or retract an assertion instead.',
+      NEW.id, derived
+      USING ERRCODE = 'check_violation';
+  END IF;
   RETURN NEW;
 END $$;
 
@@ -595,6 +641,109 @@ BEGIN
   END IF;
   RETURN NULL;
 END $$;
+
+--
+-- Name: sync_tie_confidence(uuid); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.sync_tie_confidence(p_edge uuid) RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO 'core', 'public'
+    AS $$
+DECLARE
+  derived core.analytic_confidence;
+BEGIN
+  -- 1. Lock the edge. Waits here for any other writer still deriving
+  --    this tie, until it commits.
+  PERFORM 1 FROM core.edge WHERE id = p_edge FOR NO KEY UPDATE;
+  -- 2. Derive, in a statement that starts after the lock is held, so its
+  --    snapshot includes whatever that writer committed.
+  SELECT core.tie_confidence(p_edge) INTO derived;
+  -- 3. Write only a change, so an unchanged tie is not rewritten. Never
+  --    skipped for want of a grade: the rule answers LOW for a tie no live
+  --    claim grades, where it used to answer NULL and leave a withdrawn
+  --    claim's grade standing (final review U11, 2026-09-23).
+  UPDATE core.edge
+     SET confidence = derived
+   WHERE id = p_edge
+     AND confidence IS DISTINCT FROM derived;
+END $$;
+
+--
+-- Name: tie_confidence(uuid); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.tie_confidence(p_edge uuid) RETURNS core.analytic_confidence
+    LANGUAGE sql STABLE
+    SET search_path TO 'core', 'public'
+    AS $$
+  SELECT coalesce(max(core.tie_grade(a)), 'LOW')
+    FROM core.assertion a
+   WHERE a.edge_id = p_edge
+     AND a.retracted_at IS NULL
+     AND a.superseded_at IS NULL
+$$;
+
+--
+-- Name: FUNCTION tie_confidence(p_edge uuid); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.tie_confidence(p_edge uuid) IS 'A tie''s confidence: the highest core.tie_grade among its live assertions (not retracted, not superseded), and LOW, the ungraded value, when no live assertion is a claim about the tie. Never NULL. Migration 0064.';
+
+--
+-- Name: assertion; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.assertion (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid NOT NULL,
+    node_id uuid,
+    edge_id uuid,
+    claim_path text,
+    claim_value jsonb,
+    basis core.assertion_basis NOT NULL,
+    reliability core.source_reliability DEFAULT 'F'::core.source_reliability NOT NULL,
+    credibility core.info_credibility DEFAULT '6'::core.info_credibility NOT NULL,
+    confidence core.analytic_confidence DEFAULT 'LOW'::core.analytic_confidence NOT NULL,
+    source_id uuid,
+    document_id uuid,
+    evidence_id uuid,
+    external_ref text,
+    rationale text,
+    observed_at timestamp with time zone,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    superseded_at timestamp with time zone,
+    superseded_by uuid,
+    retracted_at timestamp with time zone,
+    retracted_by uuid,
+    retraction_reason text,
+    created_by uuid NOT NULL,
+    CONSTRAINT assertion_inference_needs_rationale CHECK (((basis <> ALL (ARRAY['ANALYST_INFERENCE'::core.assertion_basis, 'AUTOMATED_INFERENCE'::core.assertion_basis])) OR (rationale IS NOT NULL))),
+    CONSTRAINT assertion_one_subject CHECK ((num_nonnulls(node_id, edge_id) = 1))
+);
+
+--
+-- Name: tie_grade(core.assertion); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.tie_grade(a core.assertion) RETURNS core.analytic_confidence
+    LANGUAGE sql STABLE
+    SET search_path TO 'core', 'public'
+    AS $$
+  SELECT CASE
+           WHEN a.claim_value ->> 'confidence' IN ('LOW', 'MODERATE', 'HIGH')
+           THEN (a.claim_value ->> 'confidence')::core.analytic_confidence
+           WHEN a.claim_path IS NULL
+                AND coalesce(jsonb_typeof(a.claim_value), 'null') = 'null'
+           THEN a.confidence
+         END
+$$;
+
+--
+-- Name: FUNCTION tie_grade(a core.assertion); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.tie_grade(a core.assertion) IS 'What one assertion says about its tie''s confidence: its own grade for a claim about the tie itself (no claim_path and no claim_value), the value a correction states in claim_value.confidence, and NULL for a correction to another field (weight, attrs), which does not grade the tie. Liveness is core.tie_confidence''s business, not this function''s. Migration 0064.';
 
 --
 -- Name: validate_edge_endpoints(); Type: FUNCTION; Schema: core; Owner: -
@@ -746,6 +895,53 @@ END
 $$;
 
 --
+-- Name: refuse_separated_duty_grant(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.refuse_separated_duty_grant() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  other text;
+  was_role text;
+  was_permission text;
+BEGIN
+  -- On an UPDATE the row being replaced is still visible to the lookup
+  -- below, and it is not a grant the role keeps. Without this, moving
+  -- CASE_OWNER's reveal row to authorise in place was refused: the lookup
+  -- found the very reveal row being replaced and counted it as the other
+  -- half (verifier, 2026-09-22). ROW(...) IS DISTINCT FROM a pair of NULLs
+  -- is true, so an INSERT, where these stay NULL, excludes nothing.
+  IF TG_OP = 'UPDATE' THEN
+    was_role := OLD.role_key;
+    was_permission := OLD.permission_key;
+  END IF;
+  SELECT CASE WHEN s.permission_a = NEW.permission_key
+              THEN s.permission_b ELSE s.permission_a END
+    INTO other
+    FROM iam.separated_duty s
+    JOIN iam.role_permission rp
+      ON rp.role_key = NEW.role_key
+     AND rp.permission_key = CASE WHEN s.permission_a = NEW.permission_key
+                                  THEN s.permission_b ELSE s.permission_a END
+   WHERE NEW.permission_key IN (s.permission_a, s.permission_b)
+     AND (rp.role_key, rp.permission_key)
+         IS DISTINCT FROM (was_role, was_permission)
+   LIMIT 1;
+  IF other IS NOT NULL THEN
+    -- One line, no DETAIL, for the reason 0059 gives: safe_detail forwards
+    -- only the first line of a P0001.
+    RAISE EXCEPTION USING MESSAGE =
+      'role ' || NEW.role_key || ' already holds ' || other
+      || ', and ' || NEW.permission_key || ' is the other half of the same'
+      || ' two-person control (iam.separated_duty): one role holding both'
+      || ' makes every holder of it both people';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
 -- Name: refuse_unregistered_compartment(); Type: FUNCTION; Schema: iam; Owner: -
 --
 
@@ -781,6 +977,46 @@ END
 $_$;
 
 --
+-- Name: refuse_violated_separation(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.refuse_violated_separation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  holder text;
+BEGIN
+  SELECT a.role_key INTO holder
+    FROM iam.role_permission a
+    JOIN iam.role_permission b ON b.role_key = a.role_key
+   WHERE a.permission_key = NEW.permission_a
+     AND b.permission_key = NEW.permission_b
+   LIMIT 1;
+  IF holder IS NOT NULL THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'role ' || holder || ' already holds both ' || NEW.permission_a
+      || ' and ' || NEW.permission_b || ': revoke one of them before'
+      || ' declaring the pair separated';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: separated_duty_violations(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.separated_duty_violations() RETURNS TABLE(role_key text, permission_a text, permission_b text)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT a.role_key, s.permission_a, s.permission_b
+    FROM iam.separated_duty s
+    JOIN iam.role_permission a ON a.permission_key = s.permission_a
+    JOIN iam.role_permission b ON b.permission_key = s.permission_b
+                              AND b.role_key = a.role_key
+$$;
+
+--
 -- Name: unregistered_compartments(text[]); Type: FUNCTION; Schema: iam; Owner: -
 --
 
@@ -802,6 +1038,37 @@ CREATE FUNCTION lab.block_access_mutation() RETURNS trigger
     AS $$
 BEGIN
   RAISE EXCEPTION 'lab.sample_access is append-only (docs/11 custody)';
+END $$;
+
+--
+-- Name: guard_preservation_authorisation(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_preservation_authorisation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'lab.preservation_authorisation is never deleted: it is the record of who allowed a held sample out (revoke it instead)';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.sample_id IS DISTINCT FROM OLD.sample_id
+     OR NEW.granted_to IS DISTINCT FROM OLD.granted_to
+     OR NEW.granted_by IS DISTINCT FROM OLD.granted_by
+     OR NEW.scope_note IS DISTINCT FROM OLD.scope_note
+     OR NEW.legal_basis IS DISTINCT FROM OLD.legal_basis
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR NEW.expires_at IS DISTINCT FROM OLD.expires_at THEN
+    RAISE EXCEPTION 'a preservation authorisation cannot be rewritten; revoke it and grant another';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
+                                     OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by) THEN
+    RAISE EXCEPTION 'a revoked preservation authorisation stays revoked';
+  END IF;
+  IF NEW.retrieval_count < OLD.retrieval_count THEN
+    RAISE EXCEPTION 'the retrieval count on a preservation authorisation only rises';
+  END IF;
+  RETURN NEW;
 END $$;
 
 --
@@ -1421,38 +1688,6 @@ CREATE TABLE core.approval_request (
     CONSTRAINT approval_state_known CHECK ((state = ANY (ARRAY['PENDING'::text, 'APPROVED'::text, 'REJECTED'::text, 'WITHDRAWN'::text, 'CONSUMED'::text]))),
     CONSTRAINT approval_state_matches_decision CHECK (((state = ANY (ARRAY['APPROVED'::text, 'REJECTED'::text, 'CONSUMED'::text])) = (decided_by IS NOT NULL))),
     CONSTRAINT approval_two_distinct_humans CHECK (((decided_by IS NULL) OR (decided_by <> requested_by)))
-);
-
---
--- Name: assertion; Type: TABLE; Schema: core; Owner: -
---
-
-CREATE TABLE core.assertion (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    case_id uuid NOT NULL,
-    node_id uuid,
-    edge_id uuid,
-    claim_path text,
-    claim_value jsonb,
-    basis core.assertion_basis NOT NULL,
-    reliability core.source_reliability DEFAULT 'F'::core.source_reliability NOT NULL,
-    credibility core.info_credibility DEFAULT '6'::core.info_credibility NOT NULL,
-    confidence core.analytic_confidence DEFAULT 'LOW'::core.analytic_confidence NOT NULL,
-    source_id uuid,
-    document_id uuid,
-    evidence_id uuid,
-    external_ref text,
-    rationale text,
-    observed_at timestamp with time zone,
-    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
-    superseded_at timestamp with time zone,
-    superseded_by uuid,
-    retracted_at timestamp with time zone,
-    retracted_by uuid,
-    retraction_reason text,
-    created_by uuid NOT NULL,
-    CONSTRAINT assertion_inference_needs_rationale CHECK (((basis <> ALL (ARRAY['ANALYST_INFERENCE'::core.assertion_basis, 'AUTOMATED_INFERENCE'::core.assertion_basis])) OR (rationale IS NOT NULL))),
-    CONSTRAINT assertion_one_subject CHECK ((num_nonnulls(node_id, edge_id) = 1))
 );
 
 --
@@ -2216,6 +2451,24 @@ CREATE TABLE iam.role_permission (
 );
 
 --
+-- Name: separated_duty; Type: TABLE; Schema: iam; Owner: -
+--
+
+CREATE TABLE iam.separated_duty (
+    permission_a text NOT NULL,
+    permission_b text NOT NULL,
+    why text NOT NULL,
+    CONSTRAINT separated_duty_says_why CHECK ((length(btrim(why)) > 0)),
+    CONSTRAINT separated_duty_two_permissions CHECK ((permission_a <> permission_b))
+);
+
+--
+-- Name: TABLE separated_duty; Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON TABLE iam.separated_duty IS 'Pairs of permissions no single role may hold together: the two halves of a two-person control. Enforced on iam.role_permission by trigger role_permission_separated_duty (migration 0062).';
+
+--
 -- Name: session; Type: TABLE; Schema: iam; Owner: -
 --
 
@@ -2491,7 +2744,9 @@ CREATE TABLE lab.download_ticket (
     expires_at timestamp with time zone NOT NULL,
     redeemed_at timestamp with time zone,
     ip_hash bytea,
-    CONSTRAINT download_ticket_expiry_after_issue CHECK ((expires_at > issued_at))
+    purpose text DEFAULT 'download'::text NOT NULL,
+    CONSTRAINT download_ticket_expiry_after_issue CHECK ((expires_at > issued_at)),
+    CONSTRAINT download_ticket_purpose_known CHECK ((purpose = ANY (ARRAY['download'::text, 'preserved_retrieval'::text])))
 );
 
 --
@@ -2499,6 +2754,35 @@ CREATE TABLE lab.download_ticket (
 --
 
 COMMENT ON TABLE lab.download_ticket IS 'One-shot, sixty-second authority to download ONE sample from the sample origin, minted on the application origin under a cookie session. Exhausted state, not a ledger: lab.sample_access is the custody record and audit.event carries the issue and the redemption.';
+
+--
+-- Name: preservation_authorisation; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.preservation_authorisation (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sample_id uuid NOT NULL,
+    granted_to uuid NOT NULL,
+    granted_by uuid NOT NULL,
+    scope_note text NOT NULL,
+    legal_basis text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    revoked_by uuid,
+    retrieval_count integer DEFAULT 0 NOT NULL,
+    CONSTRAINT preservation_authorisation_count_non_negative CHECK ((retrieval_count >= 0)),
+    CONSTRAINT preservation_authorisation_is_time_boxed CHECK (((expires_at > created_at) AND (expires_at <= (created_at + '30 days'::interval)))),
+    CONSTRAINT preservation_authorisation_justified CHECK (((length(btrim(scope_note)) > 20) AND (length(btrim(legal_basis)) > 0))),
+    CONSTRAINT preservation_authorisation_revocation_complete CHECK (((revoked_at IS NULL) = (revoked_by IS NULL))),
+    CONSTRAINT preservation_authorisation_two_people CHECK ((granted_to <> granted_by))
+);
+
+--
+-- Name: TABLE preservation_authorisation; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON TABLE lab.preservation_authorisation IS 'One named person may retrieve one preserved (rejected) sample, in its encrypted archive, until expires_at. Granted by somebody else. Never deleted and never rewritten: revocation is a column.';
 
 --
 -- Name: sample; Type: TABLE; Schema: lab; Owner: -
@@ -2534,7 +2818,14 @@ CREATE TABLE lab.sample (
     classification core.tlp DEFAULT 'AMBER'::core.tlp NOT NULL,
     compartments text[] DEFAULT '{}'::text[] NOT NULL,
     legal_hold boolean DEFAULT false NOT NULL,
+    preserved_bucket text,
+    preserved_key text,
+    preserved_version_id text,
+    preserved_at timestamp with time zone,
     CONSTRAINT sample_assignment_complete CHECK (((assigned_to IS NULL) = (assigned_at IS NULL))),
+    CONSTRAINT sample_preservation_complete CHECK ((((preserved_key IS NULL) = (preserved_bucket IS NULL)) AND ((preserved_key IS NULL) = (preserved_at IS NULL)) AND ((preserved_key IS NOT NULL) OR (preserved_version_id IS NULL)))),
+    CONSTRAINT sample_preserved_keeps_its_key CHECK (((preserved_key IS NULL) OR (octet_length(data_key_ciphertext) > 0))),
+    CONSTRAINT sample_preserved_only_when_rejected CHECK (((preserved_key IS NULL) OR (state = 'REJECTED'::lab.sample_state))),
     CONSTRAINT sample_rejection_has_reason CHECK (((state = 'REJECTED'::lab.sample_state) = (reject_reason IS NOT NULL)))
 );
 
@@ -3216,6 +3507,13 @@ ALTER TABLE ONLY iam.role
     ADD CONSTRAINT role_pkey PRIMARY KEY (key);
 
 --
+-- Name: separated_duty separated_duty_pkey; Type: CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.separated_duty
+    ADD CONSTRAINT separated_duty_pkey PRIMARY KEY (permission_a, permission_b);
+
+--
 -- Name: session session_pkey; Type: CONSTRAINT; Schema: iam; Owner: -
 --
 
@@ -3333,6 +3631,13 @@ ALTER TABLE ONLY lab.download_ticket
 
 ALTER TABLE ONLY lab.download_ticket
     ADD CONSTRAINT download_ticket_token_hash_key UNIQUE (token_hash);
+
+--
+-- Name: preservation_authorisation preservation_authorisation_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.preservation_authorisation
+    ADD CONSTRAINT preservation_authorisation_pkey PRIMARY KEY (id);
 
 --
 -- Name: sample_access sample_access_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
@@ -3799,6 +4104,12 @@ CREATE INDEX evidence_search_tsv_idx ON core.evidence USING gin (search_tsv);
 CREATE INDEX evidence_sha256_idx ON core.evidence USING btree (sha256);
 
 --
+-- Name: evidence_title_trgm_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX evidence_title_trgm_idx ON core.evidence USING gin (title public.gin_trgm_ops);
+
+--
 -- Name: node_attrs_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -3875,6 +4186,12 @@ CREATE INDEX selector_node_id_idx ON core.selector USING btree (node_id);
 --
 
 CREATE INDEX selector_norm_value_idx ON core.selector USING gin (norm_value public.gin_trgm_ops);
+
+--
+-- Name: selector_raw_value_trgm_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX selector_raw_value_trgm_idx ON core.selector USING gin (raw_value public.gin_trgm_ops);
 
 --
 -- Name: selector_selector_type_norm_value_idx; Type: INDEX; Schema: core; Owner: -
@@ -4225,6 +4542,18 @@ CREATE INDEX download_ticket_live_idx ON lab.download_ticket USING btree (expire
 CREATE INDEX download_ticket_sample_idx ON lab.download_ticket USING btree (sample_id, issued_at DESC);
 
 --
+-- Name: preservation_authorisation_live_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX preservation_authorisation_live_idx ON lab.preservation_authorisation USING btree (granted_to, sample_id, expires_at) WHERE (revoked_at IS NULL);
+
+--
+-- Name: preservation_authorisation_sample_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX preservation_authorisation_sample_idx ON lab.preservation_authorisation USING btree (sample_id, created_at DESC);
+
+--
 -- Name: sample_access_actor_idx; Type: INDEX; Schema: lab; Owner: -
 --
 
@@ -4369,6 +4698,12 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 CREATE TRIGGER pgp_verification_confirms_its_binding BEFORE INSERT OR UPDATE ON comms.pgp_verification FOR EACH ROW EXECUTE FUNCTION comms.pgp_verification_confirms_its_binding();
 
 --
+-- Name: assertion assertion_derives_tie_confidence; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_derives_tie_confidence AFTER INSERT OR DELETE OR UPDATE OF edge_id, confidence, claim_path, claim_value, retracted_at, superseded_at ON core.assertion FOR EACH ROW EXECUTE FUNCTION core.assertion_derives_tie_confidence();
+
+--
 -- Name: assertion assertion_protects_element; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -4421,6 +4756,12 @@ CREATE TRIGGER edge_announce_ins AFTER INSERT ON core.edge REFERENCING NEW TABLE
 --
 
 CREATE TRIGGER edge_announce_upd AFTER UPDATE ON core.edge REFERENCING NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('edge');
+
+--
+-- Name: edge edge_confidence_is_derived; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER edge_confidence_is_derived BEFORE UPDATE OF confidence ON core.edge FOR EACH ROW EXECUTE FUNCTION core.edge_confidence_is_derived();
 
 --
 -- Name: edge edge_requires_assertion; Type: TRIGGER; Schema: core; Owner: -
@@ -4561,6 +4902,18 @@ CREATE TRIGGER compartment_in_use BEFORE DELETE OR UPDATE OF key ON iam.compartm
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON iam.app_user FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
+-- Name: role_permission role_permission_separated_duty; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER role_permission_separated_duty BEFORE INSERT OR UPDATE ON iam.role_permission FOR EACH ROW EXECUTE FUNCTION iam.refuse_separated_duty_grant();
+
+--
+-- Name: separated_duty separated_duty_not_already_violated; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER separated_duty_not_already_violated BEFORE INSERT OR UPDATE ON iam.separated_duty FOR EACH ROW EXECUTE FUNCTION iam.refuse_violated_separation();
+
+--
 -- Name: api_key compartments_registered; Type: TRIGGER; Schema: ingest; Owner: -
 --
 
@@ -4583,6 +4936,18 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 --
 
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON lab.sample FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: preservation_authorisation preservation_authorisation_guarded; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER preservation_authorisation_guarded BEFORE DELETE OR UPDATE ON lab.preservation_authorisation FOR EACH ROW EXECUTE FUNCTION lab.guard_preservation_authorisation();
+
+--
+-- Name: preservation_authorisation preservation_authorisation_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER preservation_authorisation_no_truncate BEFORE TRUNCATE ON lab.preservation_authorisation FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_preservation_authorisation();
 
 --
 -- Name: sample_access sample_access_append_only; Type: TRIGGER; Schema: lab; Owner: -
@@ -5873,6 +6238,34 @@ ALTER TABLE ONLY lab.download_ticket
 
 ALTER TABLE ONLY lab.download_ticket
     ADD CONSTRAINT download_ticket_user_id_fkey FOREIGN KEY (user_id) REFERENCES iam.app_user(id);
+
+--
+-- Name: preservation_authorisation preservation_authorisation_granted_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.preservation_authorisation
+    ADD CONSTRAINT preservation_authorisation_granted_by_fkey FOREIGN KEY (granted_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: preservation_authorisation preservation_authorisation_granted_to_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.preservation_authorisation
+    ADD CONSTRAINT preservation_authorisation_granted_to_fkey FOREIGN KEY (granted_to) REFERENCES iam.app_user(id);
+
+--
+-- Name: preservation_authorisation preservation_authorisation_revoked_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.preservation_authorisation
+    ADD CONSTRAINT preservation_authorisation_revoked_by_fkey FOREIGN KEY (revoked_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: preservation_authorisation preservation_authorisation_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.preservation_authorisation
+    ADD CONSTRAINT preservation_authorisation_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
 
 --
 -- Name: sample_access sample_access_actor_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
