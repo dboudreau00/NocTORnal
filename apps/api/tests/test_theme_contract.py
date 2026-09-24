@@ -263,6 +263,84 @@ def test_the_node_hues_stay_mutually_distinguishable():
         "canvas; they are two different entity types.")
 
 
+#: Machado, Oliveira and Fernandes (2009), severity 1.0, applied to linear
+#: RGB: the simulation the 2026-09-23 review measured with.
+_CVD = {
+    "deuteranopia": ((0.367322, 0.860646, -0.227968),
+                     (0.280085, 0.672501, 0.047413),
+                     (-0.011820, 0.042940, 0.968881)),
+    "protanopia": ((0.152286, 1.052583, -0.204868),
+                   (0.114503, 0.786281, 0.099216),
+                   (-0.003882, -0.048116, 1.051998)),
+}
+#: CIE76 under simulation below which two type hues are taken to have
+#: collapsed. The review's collapses were 7.9 and 5.0.
+CVD_FLOOR = 10.0
+
+
+def _lab_linear(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
+    r, g, b = rgb
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 216 / 24389 else (841 / 108) * t + 4 / 29
+
+    fx, fy, fz = f(x / 0.95047), f(y / 1.0), f(z / 1.08883)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def _delta_e_cvd(a: str, b: str, kind: str) -> float:
+    m = _CVD[kind]
+
+    def sim(h: str) -> tuple[float, float, float]:
+        r, g, bl = (_lin(v) for v in _rgb(h))
+        return tuple(min(1.0, max(0.0, row[0] * r + row[1] * g + row[2] * bl))
+                     for row in m)
+
+    la, lb = _lab_linear(sim(a)), _lab_linear(sim(b))
+    return math.dist(la, lb)
+
+
+def _hue_shapes() -> dict[str, str]:
+    """The outline the canvas gives each type hue (SHAPE_BY_HUE in app.js;
+    'disc' for the rest)."""
+    js = APP_JS.read_text(encoding="utf-8")
+    m = re.search(r"const SHAPE_BY_HUE = \{([^}]*)\};", js)
+    assert m, "SHAPE_BY_HUE is gone from app.js; update this test with it"
+    table = dict(re.findall(r"'?([\w-]+)'?:\s*'(\w+)'", m.group(1)))
+    return {t: table.get(t.lstrip("-"), "disc") for t in NODE_TOKENS}
+
+
+def test_node_types_survive_the_common_colour_vision_deficiencies():
+    """ux04 persona-person-hue-cvd (2026-09-23). docs/06 promised the type
+    hues were distinguishable "under the common colour-vision
+    deficiencies", and nothing measured it: under deuteranopia the Persona
+    blue and the Assessed person purple were 7.9 apart and Malware and
+    Context 5.0, while hue was the only channel for type. Every pair is
+    now held apart by hue under both simulations, or by the outline the
+    canvas draws."""
+    t = _tokens()
+    shapes = _hue_shapes()
+    collapsed = []
+    for a, b in itertools.combinations(NODE_TOKENS, 2):
+        for kind in _CVD:
+            d = _delta_e_cvd(t[a], t[b], kind)
+            if d < CVD_FLOOR and shapes[a] == shapes[b]:
+                collapsed.append(f"{a} vs {b} under {kind}: dE {d:.1f}, both {shapes[a]}")
+    assert not collapsed, "type hues collapse with nothing else to tell them apart: " \
+        + "; ".join(collapsed)
+    # The pair the attribution claim rests on, by hue alone as well as by
+    # the second ring the canvas draws for a person.
+    for kind in _CVD:
+        d = _delta_e_cvd(t["--actor-persona"], t["--actor-person"], kind)
+        assert d >= 15.0, f"Persona and Assessed person are only {d:.1f} apart under {kind}"
+    js = APP_JS.read_text(encoding="utf-8")
+    assert re.search(r"const SHAPE_BY_TYPE = \{[^}]*PERSON: 'double'", js), (
+        "an assessed person no longer carries its second ring")
+
+
 def test_no_node_hue_can_be_mistaken_for_an_edge_sign():
     """Node fill and edge colour share the canvas. A node type that reads
     as "vouch green" or "accusation red" is worse than an ugly one.

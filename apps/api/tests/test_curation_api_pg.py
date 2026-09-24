@@ -208,7 +208,9 @@ def _node(client, token, case_id, label, *, classification="AMBER") -> str:
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
                     json={"node_type": "IDENTITY", "label": label,
                           "classification": classification,
-                          "assertion": {"basis": "DIRECT_OBSERVATION"}})
+                          "assertion": {"basis": "DIRECT_OBSERVATION",
+                                        "reliability": "F", "credibility": "6",
+                                        "confidence": "LOW"}})
     assert r.status_code == 201, r.text
     return r.json()["id"]
 

@@ -39,6 +39,17 @@ the registry and the two things gated on it ship as one surface; the
 refusal mapping mirrors admin's (`409` for a rule, `404` for a user that
 is not there) and is deliberately the same shape, so a client that knows
 one knows both.
+
+## Rename and retire (sec-compartment-retirement, 2026-09-23)
+
+`POST /compartments/{key}/rename` and `POST /compartments/{key}/retire`
+are the product route for what 0059 made a manual per-column operation
+(`compartment_lifecycle.py` explains both). They are `user.manage` like
+every other registry write, and step-up is asked for explicitly as well
+as through the permission's seed flag, because a rename rewrites the lock
+on every row filed under a key: the seed flag is data, and this route
+must not stop asking if it changes. Metered with the merge limit, because
+each one locks every compartmented table while it runs.
 """
 from __future__ import annotations
 
@@ -48,7 +59,19 @@ import psycopg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from noctornal_api.http.deps import CurrentUser, current_user, get_conn, require_global
+from noctornal_api.compartment_lifecycle import (
+    CompartmentBusy,
+    CompartmentError,
+    CompartmentLifecycle,
+    NoSuchCompartment,
+)
+from noctornal_api.http.deps import (
+    CurrentUser,
+    current_user,
+    get_conn,
+    require_global,
+    require_step_up,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.iam_admin import AdminError, IamAdminService
@@ -137,3 +160,58 @@ def set_user_compartments(
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "compartments": held}
+
+
+class RenameBody(BaseModel):
+    new_key: str
+    #: Optional: the label is kept unless a new one is given.
+    label: str | None = None
+
+
+def _lifecycle_refusal(exc: CompartmentError) -> Problem:
+    """404 for a key that is not registered, 409 for a rule (in use, onto
+    a registered key, busy). The busy refusal carries Retry-After, because
+    it is the one that asking again later will fix."""
+    detail = safe_detail(exc)
+    if isinstance(exc, NoSuchCompartment):
+        return Problem(404, "Not found", detail)
+    if isinstance(exc, CompartmentBusy):
+        return Problem(409, "Busy", detail, headers={"Retry-After": "30"})
+    return Problem(409, "Conflict", detail)
+
+
+@router.post("/{key}/rename", response_model=dict,
+             dependencies=[Depends(rate_limit("merge"))])
+def rename_compartment(
+    key: str, body: RenameBody,
+    user: CurrentUser = Depends(require_global("user.manage")),
+    _fresh: None = Depends(require_step_up),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Rename a registered key everywhere it is used, in one transaction.
+    Who holds it and what it locks do not change; see
+    `compartment_lifecycle.py`."""
+    try:
+        return CompartmentLifecycle(conn).rename(
+            key, body.new_key, label=body.label, actor_id=user.user_id)
+    except CompartmentError as exc:
+        raise _lifecycle_refusal(exc) from exc
+
+
+@router.post("/{key}/retire", response_model=dict,
+             dependencies=[Depends(rate_limit("merge"))])
+def retire_compartment(
+    key: str,
+    user: CurrentUser = Depends(require_global("user.manage")),
+    _fresh: None = Depends(require_step_up),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Drop a registered key nothing carries. A key still carried is
+    refused, and the refusal counts every kind of row that carries it and
+    names only the accounts, cases and ingest keys the caller can already
+    see: `user.manage` is not a case role, and a case code is not told to
+    somebody who cannot open the case (`compartment_lifecycle.py`)."""
+    try:
+        return CompartmentLifecycle(conn).retire(key, actor_id=user.user_id)
+    except CompartmentError as exc:
+        raise _lifecycle_refusal(exc) from exc

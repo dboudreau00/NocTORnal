@@ -35,7 +35,7 @@ sit above its case, which is why a few read GREEN or AMBER.</sub>
 
 | | What is built | What is assumed, and is not true until somebody makes it true |
 |---|---|---|
-| **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, written with counsel, covering preservation-vs-destruction. Given enough attacker-chosen files, one will eventually contain material whose *possession alone* is an offence. That is the normal failure mode of the problem domain, not a hypothetical. `REJECTED` currently **destroys the bytes**, which is the wrong answer where preservation is required; `reject(purge_bytes=False)` exists and nothing selects it automatically. |
+| **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, written with counsel, covering preservation-vs-destruction. Given enough attacker-chosen files, one will eventually contain material whose *possession alone* is an offence. That is the normal failure mode of the problem domain, not a hypothetical. A `REJECTED` sample is **preserved by default**: its encrypted bytes move into the object-locked `noctornal-preserved` bucket under a legal hold, its data key is kept, and getting it back out takes two people, a Security Officer who authorises one named Lead investigator for that one sample, and that investigator. Destroying rejected samples instead is an opt-in the deployment declares (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy`), and a legal hold still refuses it. Which of the two a deployment must do is for counsel. |
 | **L2** | Stealer-log ingest holding data on thousands of uninvolved people | That a lawful basis exists, that victim-notification duties are understood, and that the retention period is real. **90 days is a placeholder somebody typed.** |
 | **L3** | A persona vault that will drive a covert account into a forum | That operating that persona is authorised in each jurisdiction. Accessing a system with credentials registered under a false identity engages computer-misuse law in several jurisdictions regardless of intent. |
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
@@ -194,42 +194,55 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 65 Alembic migrations (Alembic head 0065)
-7. offers to create your first account, printing the password **once** with a QR code to scan
-8. starts the API and opens the console
+6. applies all 68 Alembic migrations (Alembic head 0068)
+7. offers to create your first account, printing the password **once** with a QR code to scan (on Windows it prints the `create-user` command to run instead)
+8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
 
 Detail and troubleshooting: **[`release/INSTALL.md`](release/INSTALL.md)**.
 
 ### Prerequisites
 
+Measured on a clean Ubuntu 24.04 machine with 8 GB of RAM. The installer
+checks Python and Docker; it does not check memory or disk.
+
 | | Minimum | Notes |
 |---|---|---|
-| **Python** | 3.12 | 3.13 is what it is developed and tested on daily |
-| **Docker Desktop** | with Compose v2 | runs Postgres, Redis, MinIO, Mailpit |
-| **RAM** | 8 GB | ~3 GB for the four containers |
-| **Disk** | 5 GB | images, database, object store |
-| **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for |
-| **GnuPG** | optional | only for verifying PGP signatures on contact blocks |
+| **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
+| **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
+| **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
+| **Disk** | 2 GB free | 1.4 GB was added by the install and the showcase seed: 1.1 GB of images, a 189 MB `.venv`, and the data. Installing Docker Engine on a bare Ubuntu took about 0.75 GB before that. |
+| **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
+| **GnuPG** | optional | Only for verifying PGP signatures on contact blocks. |
 
-**Ports:** 5432, 6379, 9000, 9001, 1025, 8025, 8000. A collision on any
-fails the Compose start; 5432 is the usual offender if you already run
-Postgres locally. Nothing needs internet access after install, except the
-optional YARA rule fetch.
+**Ports:** 5432, 6379, 9000, 9001, 1025, 8025 for the four containers, all
+published on 127.0.0.1 only, and 8000 for the API. A collision on any of
+the first six fails the Compose start; 5432 is the usual offender if you
+already run Postgres locally. On 8000 the installer stops before starting
+the API and says so. Nothing needs internet access after install, except
+the optional YARA rule fetch.
 
 ---
 
 ## First run
 
-The installer leaves you at a sign-in page with the account it created.
+The installer ends with the API running and the console URL printed.
+Open <http://127.0.0.1:8000/ui/> and sign in with the account it created.
+The commands below run from the repository root in a second terminal,
+which needs no exports: `bootstrap.py` reads `.env.local`. On Windows the
+interpreter is `.venv\Scripts\python`.
+
+**Only if you have no account yet**, because you skipped the installer's
+account prompt or installed on Windows, where the installer prints this
+command rather than running it:
 
 ```bash
-# A second terminal needs no exports: bootstrap.py reads .env.local.
 .venv/bin/python scripts/bootstrap.py create-user \
     --email you@example.org --name "Your Name"
 ```
 
-On Windows that is `.venv\Scripts\python`. Then seed the showcase case
-every screenshot below comes from:
+Then seed the showcase case every screenshot below comes from. Put your
+own account's address, the one you gave the installer, where these say
+`you@example.org`:
 
 ```bash
 .venv/bin/python scripts/bootstrap.py demo-network \
@@ -242,6 +255,12 @@ every screenshot below comes from:
     --case OP-SHOWCASE-26 --owner-email you@example.org
 ```
 
+> **Nobody holds the Security Officer role on a fresh install.** The
+> installer's account is a Lead investigator and `SYS_ADMIN`, so
+> collection runs and break-glass are refused until somebody holds that
+> role. [`release/INSTALL.md`](release/INSTALL.md#nobody-holds-the-security-officer-role-yet)
+> gives the command that makes a second person the officer.
+
 > **If TOTP rejects every code**, your host clock is out of step.
 > Diagnose with `bootstrap.py totp-diagnose`, or get in anyway with
 > `bootstrap.py session`, which prints a URL that opens the console already
@@ -252,18 +271,31 @@ every screenshot below comes from:
 
 ### Verifying the install
 
+Run it against a scratch database, never against the install's own: the
+suite writes permanent rows into append-only tables, and some tests migrate
+the database they are given.
+
 ```bash
-DATABASE_URL="postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal" \
-  .venv/bin/python -m pytest apps/api/tests packages/ontology -q
+set -a; . ./.env.local; set +a    # REDIS_URL, MinIO and Mailpit
+docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
+docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
+export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch
+.venv/bin/alembic upgrade head
+.venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-Expect **every test to pass with 0 skipped**, **2518 tests** (`def test_`
+With the containers up, expect **no failures** across **3448 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
 `release/CHANGELOG.md`). **Without `DATABASE_URL` roughly half the suite skips
 instead**. It is database-gated by design. That is a correct result,
-not a broken install.
+not a broken install. Some still skip on an install the installers made:
+the least-privilege role test, whose role only a production-shaped
+Postgres has, and, without Node.js, the console's browser-side checks.
+[`release/INSTALL.md`](release/INSTALL.md#verifying-the-install) lists
+each, and why a database test errors rather than skips when
+the containers are down. CI provides them all and fails on any skip.
 
 ---
 
@@ -304,11 +336,13 @@ a rising betweenness is a claim about a person.
 ![Evidence](docs/images/03-evidence.png)
 
 SHA-256 and BLAKE3 at ingest; every exhibit written under a per-object
-MinIO **COMPLIANCE** lock (the **WORM LOCKED** badge), so not even a root
-credential can alter it before retention expires (the compose bucket
-DEFAULT is `GOVERNANCE 365d`); an append-only hash-chained custody ledger
-that records every touch, **including reads**: the log open here has the
-exhibit's VIEWED row between ACQUIRED and HASH_VERIFIED.
+MinIO **COMPLIANCE** lock that runs to the case's retention date (the
+**WORM until** chip), so not even a root credential can alter it before
+then (the compose bucket DEFAULT is `GOVERNANCE 365d`); an append-only
+hash-chained custody ledger that records every touch, **including
+reads**: the log open here has the exhibit's VIEWED row between ACQUIRED
+and HASH_VERIFIED. The email is attacker markup, so it is produced only
+through the separate sample origin, never served from this one.
 
 ### Competing hypotheses (ACH)
 ![ACH](docs/images/10-ach.png)
@@ -364,7 +398,8 @@ party's**, not attributed to the vendor.
 
 Retention schedules, each flagged **unconfirmed** until a named person
 confirms its period with a written reason: the placeholder the build
-shipped still runs, but never silently. Legal holds that override every
+shipped still runs, but never silently, and a category with live records
+and no rule at all says so, with the 365-day fallback it runs on. Legal holds that override every
 deletion path; purge tombstones that outlive what they describe;
 break-glass access that is loud, capped at eight hours, and must be
 reviewed afterwards by a security officer who is not the person who used
@@ -374,11 +409,11 @@ it.
 ![Entity list](docs/images/02-entities.png)
 
 Every entity in the case with its type, label and TLP marking, filterable
-by type. The type colour is the same one the sociogram uses, so the two
-views read as one thing. Pick a row and the inspector opens on it: local
-metrics, every tie at the entity with its sign, and each assertion behind
-it with its Admiralty grading; further down come the exhibits linked to it
-and any selectors observed for it.
+by type and label. The type colour is the same one the sociogram uses, so the two
+views read as one thing. Pick a row and the inspector opens on it: each
+assertion behind it with its Admiralty grading, the exhibits linked to
+it, and every tie at the entity with its sign; further down come its
+local metrics and any selectors observed for it.
 
 ### Capture and triage
 ![Capture and triage](docs/images/04-triage.png)
@@ -408,8 +443,9 @@ the break-glass alert here, ignores them.
 Filtered by your own clearance and compartments, so an over-classified
 element is *invisible* rather than discoverable-then-403. Names,
 selectors, attributes and exhibit titles all match, and an entity found
-through a selector or an attribute says which one. The two columns load
-independently: one failing does not blank the other.
+through a selector or an attribute says which one; collected documents,
+claims and deception records are searched too. Each result group loads
+independently: one failing does not blank the others.
 
 ### Feeds and ingest
 ![Feeds and ingest](docs/images/09-feeds.png)
@@ -576,7 +612,7 @@ test named after it.
 | **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** (pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain**) Louvain can produce internally disconnected communities. |
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
-| **Migrations** | Alembic | 65 revisions (Alembic head 0065), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 68 revisions (Alembic head 0068), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -596,7 +632,7 @@ enforces it.
 
 ### Testing
 
-**2518 tests** (`def test_` functions across two pytest roots, maintained by
+**3448 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -622,7 +658,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   65 Alembic revisions
+│   └── migrations/versions/   68 Alembic revisions
 ├── docs/                      00-19, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots

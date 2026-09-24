@@ -540,7 +540,9 @@ _UTC_LABELLED = ("ingestRow", "deadLetterRow", "unhealthyRow", "neverPolledRow",
                  # the Lab and Deception sites the fix round moved (the
                  # finding's own evidence is the Lab's "SUBMITTED 15:18")
                  "captureRow", "openCapture", "callRow", "sampleRow",
-                 "openSample", "detonationRow")
+                 # The analysis time moved out of openSample into its own
+                 # builder with the Lab's analysis rows (g09, 2026-09-23).
+                 "analysisRow", "detonationRow")
 
 
 @pytest.mark.parametrize("name", _UTC_LABELLED)
@@ -578,7 +580,11 @@ def test_the_observed_at_field_says_utc_and_is_read_as_utc():
 def test_the_inspector_shows_days_as_days_and_both_ends_of_an_interval():
     body = _fn("renderInspector")
     assert "fmtInterval(e.valid_from, e.valid_to)" in body
-    assert "fmtInterval(n.valid_from, n.valid_to)" in body
+    # The node's line is built by nodeSubLine since ux05-inspector:first-
+    # last-seen-always-dash (2026-09-23), which repaints it with the
+    # observed window once the claims arrive.
+    assert "nodeSubLine(n, null)" in body
+    assert "fmtInterval(n.valid_from, n.valid_to)" in _fn("nodeSubLine")
     assert "fmtTime(e.valid_from)" not in body
     assert "fmtWhen(a.observed_at)" in _fn("renderAssertions")
 
@@ -711,6 +717,18 @@ def test_the_state_strip_does_not_steal_the_workspace_row():
     css = re.sub(r"/\*.*?\*/", "", APP_CSS.read_text(encoding="utf-8"), flags=re.S)
     assert "grid-template-rows: var(--appbar-h) auto 1fr" in css
     assert ".app > .main { grid-row: 3; }" in css
+
+
+def test_the_workspace_cannot_be_scrolled_out_from_under_the_header():
+    """README screenshot review, 2026-09-24: Trend's scrollIntoView, on a
+    heading its pane could not bring to the top, scrolled #main, which is
+    overflow:hidden and so still a scroll container nobody can scroll
+    back. `overflow: clip` leaves nothing for a script to scroll, for all
+    of the console's scrollIntoView calls at once."""
+    css = re.sub(r"/\*.*?\*/", "", APP_CSS.read_text(encoding="utf-8"), flags=re.S)
+    m = re.search(r"(?m)^\.main\s*\{([^}]*)\}", css)
+    assert m, "app.css has no .main rule"
+    assert re.search(r"overflow:\s*clip", m.group(1)), m.group(1)
 
 
 # ---------------------------------------------------------------------------

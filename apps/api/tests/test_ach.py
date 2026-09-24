@@ -430,3 +430,101 @@ def test_a_warning_agrees_with_the_count_it_states():
     for m in (one, two, both, every, flat_one, flat_two):
         assert not any(re.search(r"\w\((?:s|es)\)", w) for w in m.warnings), (
             m.warnings)
+
+
+# --- usability review, 2026-09-23 (ux11-ach) --------------------------------
+
+def test_a_row_that_says_the_same_thing_everywhere_moves_no_score():
+    """half-scored-row-called-undiagnostic. The warning and the method said
+    such a row is "excluded from the ranking" while every row was summed:
+    a row scored -2 against each hypothesis lifted all of them and printed
+    inconsistency that no evidence discriminated."""
+    sharp = _item("sharp", {H1: STRONGLY_INCONSISTENT, H2: CONSISTENT,
+                            H3: NEUTRAL})
+    flat = _item("flat", {H1: STRONGLY_INCONSISTENT, H2: STRONGLY_INCONSISTENT,
+                          H3: STRONGLY_INCONSISTENT})
+    with_flat = {h.hypothesis_id: h for h in score(HYPOTHESES, [sharp, flat]).hypotheses}
+    without = {h.hypothesis_id: h for h in score(HYPOTHESES, [sharp]).hypotheses}
+    for hid in (H1, H2, H3):
+        assert with_flat[hid].inconsistency == without[hid].inconsistency, hid
+        assert with_flat[hid].support == without[hid].support, hid
+        # It WAS looked at, and that is recorded.
+        assert with_flat[hid].assessed == without[hid].assessed + 1
+    m = score(HYPOTHESES, [sharp, flat])
+    assert any("left out of every score" in w for w in m.warnings), m.warnings
+
+
+def test_an_unfinished_row_still_counts_where_it_was_scored():
+    """The other side: a row with a blank is unknown, not undiagnostic, so
+    the cells it has still count, and the hypothesis it lacks shows the gap
+    as NOT assessed."""
+    half = _item("-2, blank, -2", {H1: STRONGLY_INCONSISTENT,
+                                   H3: STRONGLY_INCONSISTENT})
+    m = score(HYPOTHESES, [half])
+    by_id = {h.hypothesis_id: h for h in m.hypotheses}
+    assert by_id[H1].inconsistency == 2.0 and by_id[H3].inconsistency == 2.0
+    assert by_id[H2].unassessed == 1
+    assert m.evidence[0].is_incomplete
+
+
+def test_a_retired_hypothesis_is_scored_for_the_record_and_never_ranked():
+    """no-hypothesis-lifecycle-in-console. With rejection reachable from the
+    console, "Include rejected" fed a ruled-out theory to the ranking as a
+    live competitor: nothing against it, so it led."""
+    rejected = uuid4()
+    item = _item("a", {H1: INCONSISTENT, H2: CONSISTENT, rejected: CONSISTENT})
+    m = score([(H1, "one"), (H2, "two")], [item], retired=[(rejected, "out")])
+    assert [h.hypothesis_id for h in m.hypotheses] == [H2, H1]
+    assert m.least_inconsistent == H2
+    assert [h.hypothesis_id for h in m.retired] == [rejected]
+    assert m.retired[0].retired and m.retired[0].support == 1.0
+    # A blank against a retired hypothesis is not a gap in the matrix.
+    lone = _item("b", {H1: CONSISTENT, H2: INCONSISTENT})
+    m = score([(H1, "one"), (H2, "two")], [lone], retired=[(rejected, "out")])
+    assert m.refute_first is None and not m.evidence[0].is_incomplete
+    from noctornal_api.ach import as_response
+    body = as_response(m)
+    assert [h["retired"] for h in body["hypotheses"]] == [False, False, True]
+    # Only retired hypotheses: still listed, still no leader.
+    alone = score([], [lone], retired=[(rejected, "out")])
+    assert alone.least_inconsistent is None and len(alone.retired) == 1
+
+
+def test_with_every_hypothesis_ruled_out_the_rows_stay_in_the_matrix():
+    """Release review c18 (2026-09-24). With no live hypothesis `score`
+    returned an EMPTY evidence list while the retired cards counted the
+    stances, so GET /ach sent evidence 0 beside cells 2 and "against 0.72,
+    assessed 1", and the pane said nothing had been scored."""
+    from noctornal_api.ach import as_response
+    h1, h2, h3 = uuid4(), uuid4(), uuid4()
+    against = _item("rv_delta posts from the reseller's panel",
+                    {h2: STRONGLY_INCONSISTENT}, reliability="B", credibility="2")
+    m = score([], [against], retired=[(h1, "one"), (h2, "two"), (h3, "three")])
+    assert [d.assertion_id for d in m.evidence] == [against.assertion_id], (
+        "the record of what ruled a hypothesis out left the grid")
+    row = m.evidence[0]
+    # Nothing live to compare against: unfinished at zero, not a next test.
+    assert row.is_incomplete and row.score == 0.0 and row.assessed_against == 0
+    assert m.refute_first is None and m.least_inconsistent is None
+    assert len(m.warnings) == 1 and m.warnings[0].startswith("No hypotheses.")
+    two = next(h for h in m.retired if h.hypothesis_id == h2)
+    assert (two.assessed, two.inconsistency) == (1, round(2 * against.weight, 4))
+    body = as_response(m)
+    assert len(body["evidence"]) == 1 and body["evidence"][0]["is_incomplete"]
+
+
+def test_the_method_and_each_row_say_how_the_weighting_works():
+    """grading-weight-unexplained. A single C3 "strongly inconsistent" read
+    0.98 beside a -2..+2 scale, and nothing said why."""
+    from noctornal_api.ach import as_response
+    c3 = _item("C3 row", {H1: STRONGLY_INCONSISTENT, H2: STRONGLY_CONSISTENT},
+               reliability="C", credibility="3")
+    body = as_response(score([(H1, "one"), (H2, "two")], [c3]))
+    assert "weighted by the Admiralty grade" in body["method"]
+    assert "1.00 for A1" in body["method"] and "0.49 for C3" in body["method"]
+    assert "0.04 for F6" in body["method"]
+    row = body["evidence"][0]
+    assert (row["spread"], row["weight"]) == (4, 0.49)
+    assert row["diagnosticity"] == round(row["spread"] * row["weight"], 4)
+    # The weakest grade still prints above zero at two decimals.
+    assert source_weight("F", "6") >= 0.01

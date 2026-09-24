@@ -134,6 +134,20 @@ Samples have their own cap (`NOCTORNAL_MAX_SAMPLE_BYTES`, same default)
 and the sample bucket is deliberately not locked (docs/11), so that one is
 about memory and the quarantine queue rather than permanent storage.
 
+How long the lock holds. An exhibit is locked until its case's retention
+date, and for at least `EVIDENCE_RETENTION_DAYS` (365 by default) from
+the moment it is lodged. Extending the case's retention date lengthens
+every live exhibit's lock to the new date; a lock that could not be
+lengthened is reported and audited, and the date stands. No lock is set
+more than `EVIDENCE_LOCK_HORIZON_DAYS` (ten years by default) ahead in one
+step, because a mistyped year would otherwise make every exhibit
+undeletable for good: a case retained past that has its locks offered for
+lengthening again as they fall behind. The Evidence pane counts any
+exhibit whose lock ends before the case's retention date, its chip says
+so, and a Lead investigator can lengthen those locks from the pane.
+Extending the date asks for confirmation first, with the date spelled
+out, because nobody can shorten a lock once it is set.
+
 Above the cap there is no partial path. Do not split an exhibit into
 pieces to get it under: the digest of the whole is what custody attests.
 Either raise the cap for that deployment, deliberately and with the

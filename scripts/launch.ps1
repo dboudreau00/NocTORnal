@@ -115,12 +115,17 @@ Write-Host "  repo: $RepoRoot"
 
 Write-Step 'Checking the Python environment'
 
+# Every remedy printed below carries -c constraints.txt, the pins the
+# installers, CI and the image install from. Without it pip resolves each
+# >= floor to the newest release, and a developer who follows the remedy
+# word for word runs a stack nobody tested (c3, 2026-09-24).
+
 if (-not (Test-Path -LiteralPath $Python)) {
     Stop-With "no virtual environment at $($RepoRoot)\.venv" @(
         'Create it and install the packages, from the repo root:',
         '  python -m venv .venv',
-        '  .venv\Scripts\python -m pip install -r db\requirements.txt',
-        '  .venv\Scripts\python -m pip install -e packages\ontology -e apps\api'
+        '  .venv\Scripts\python -m pip install -c constraints.txt -r db\requirements.txt',
+        '  .venv\Scripts\python -m pip install -c constraints.txt -e packages\ontology -e apps\api'
     )
 }
 
@@ -130,8 +135,8 @@ if ($probe.Code -ne 0) {
     Write-Indented $probe.Text
     Stop-With 'the virtual environment is missing packages the API needs' @(
         'Install them, from the repo root:',
-        '  .venv\Scripts\python -m pip install -r db\requirements.txt',
-        '  .venv\Scripts\python -m pip install -e packages\ontology -e apps\api',
+        '  .venv\Scripts\python -m pip install -c constraints.txt -r db\requirements.txt',
+        '  .venv\Scripts\python -m pip install -c constraints.txt -e packages\ontology -e apps\api',
         '',
         'Then run this script again.'
     )
@@ -221,7 +226,10 @@ else {
     if ($up.Code -ne 0) {
         Stop-With 'docker compose up failed' @(
             'Read the output above. Common causes:',
-            '  - a port is already taken (5432, 6379, 9000, 9001, 8080, 4222, 8025)',
+            # The ports the compose file publishes today. 8080 and 4222
+            # were OpenFGA and NATS, removed in R13, and Mailpit's 1025
+            # was missing (Alpha 6 pre-release check, 2026-09-23).
+            '  - a port is already taken (5432, 6379, 9000, 9001, 1025, 8025)',
             '    stop whatever else is using it, or stop a stale stack:',
             "      docker compose -f `"$ComposeFile`" down",
             '  - an image could not be pulled: check the network and try again'
@@ -333,13 +341,24 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
         Add-Content -LiteralPath $EnvLocal -Value "NOCTORNAL_TOTP_KEK=$generated"
     }
     else {
+        # The header and the box below say everything the key seals, from
+        # security/sealed.py's SEALED_COLUMNS, and what the ingest pepper
+        # keys if it is kept here too. They said only that users would
+        # re-enrol their authenticators (Alpha 6 pre-release check,
+        # 2026-09-23).
         $header = @(
             '# NocTORnal local key store. Created by scripts/launch.ps1.',
             '#',
-            '# NOCTORNAL_TOTP_KEK seals every TOTP secret at rest. LOSING THIS FILE',
-            '# MEANS EVERY USER MUST RE-ENROL THEIR AUTHENTICATOR. Back it up',
-            '# somewhere you trust; it is deliberately not committed (.gitignore',
-            '# covers .env.*) and there is no default anywhere in the code.',
+            '# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted:',
+            '# enrolled authenticators, collection persona credentials, stored victim',
+            '# credentials and each sample''s data key. LOSING THIS FILE LOSES ALL OF',
+            '# THEM: every user must re-enrol their authenticator, and no stored',
+            '# credential or sample, preserved samples included, can be decrypted',
+            '# again. If NOCTORNAL_INGEST_PEPPER is kept here too, losing it means',
+            '# reissuing every ingest key, and stored victim-credential fingerprints',
+            '# no longer match new ones for the same value. Back it up somewhere you',
+            '# trust; it is deliberately not committed (.gitignore covers .env.*) and',
+            '# there is no default anywhere in the code.',
             '#',
             '# Anything else you add here as KEY=VALUE is loaded into the',
             '# environment on launch.',
@@ -356,9 +375,11 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
     Write-Host '    A NEW TOTP KEY WAS GENERATED AND SAVED TO:' -ForegroundColor Yellow
     Write-Host "      $EnvLocal" -ForegroundColor Yellow
     Write-Host '' -ForegroundColor Yellow
-    Write-Host '    That file is now your key store. It seals every TOTP secret in' -ForegroundColor Yellow
-    Write-Host '    the database. If you lose it, every user has to re-enrol their' -ForegroundColor Yellow
-    Write-Host '    authenticator app - there is no recovery and no default key.' -ForegroundColor Yellow
+    Write-Host '    That file is now your key store. The key seals every secret the' -ForegroundColor Yellow
+    Write-Host '    database stores encrypted: authenticators, persona and victim' -ForegroundColor Yellow
+    Write-Host '    credentials, and the keys of stored samples. If you lose it, every' -ForegroundColor Yellow
+    Write-Host '    user has to re-enrol their authenticator app, and none of the rest' -ForegroundColor Yellow
+    Write-Host '    can be decrypted again. There is no recovery and no default key.' -ForegroundColor Yellow
     Write-Host '    Keep a backup. It is git-ignored, so it will never be committed.' -ForegroundColor Yellow
     Write-Host '    ------------------------------------------------------------' -ForegroundColor Yellow
     Write-Host ''
@@ -375,15 +396,21 @@ Write-Step 'Setting the service connection details'
 
 # Dev-only credentials, mirroring infra/docker-compose.yml. They are the only
 # literal secrets allowed in this repo, they only ever address containers on
-# localhost, and a real deployment supplies all of these from the environment
-# or Vault instead.
+# this machine's loopback, and a real deployment supplies all of these from
+# the environment or Vault instead.
+#
+# 127.0.0.1 rather than localhost: the compose file publishes on 127.0.0.1
+# only, so nothing answers on ::1, and Windows by default tries ::1 first
+# and waits about two seconds for each refused connection before trying
+# IPv4 (Alpha 6 pre-release check, 2026-09-23). These apply only where
+# .env.local and the environment say nothing.
 $defaults = [ordered]@{
-    DATABASE_URL     = 'postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal'
+    DATABASE_URL     = 'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'
     # Rate limiting. Unset, the limiter falls back to per-process metering
     # and warns; set, the meter is shared and a second uvicorn worker does
     # not double every limit.
-    REDIS_URL        = 'redis://localhost:6379/0'
-    MINIO_ENDPOINT   = 'localhost:9000'
+    REDIS_URL        = 'redis://127.0.0.1:6379/0'
+    MINIO_ENDPOINT   = '127.0.0.1:9000'
     MINIO_ACCESS_KEY = 'noctornal'
     MINIO_SECRET_KEY = 'dev_only_change_me'
     EVIDENCE_BUCKET  = 'noctornal-evidence'
@@ -408,7 +435,7 @@ foreach ($name in $defaults.Keys) {
     # a silent default -- and this quietly replaced it with the local
     # development stack, which is the one outcome an operator who blanked
     # it was trying to prevent. `REDIS_URL=` is the other: emptied to force
-    # per-process metering, restored to localhost here.
+    # per-process metering, restored to the dev stack's Redis here.
     $current = [System.Environment]::GetEnvironmentVariable($name, 'Process')
     if ($null -eq $current) {
         [System.Environment]::SetEnvironmentVariable($name, $defaults[$name], 'Process')
@@ -471,6 +498,21 @@ Write-Step 'Checking for a user account'
 $countCode = 'import noctornal_api.db as d; print(d.connect().execute(''select count(*) from iam.app_user'').fetchone()[0])'
 $count = Invoke-Capture $Python @('-c', $countCode)
 
+# Active SECURITY_OFFICER holders, read for the closing message only. The
+# account `create-user` makes by default holds CASE_OWNER and SYS_ADMIN, so
+# on a fresh install nobody holds this role and the readiness register's
+# blocking security_officer_present check fails with nothing on screen to
+# say so (Alpha 6 pre-release check, 2026-09-23). No double quotes inside
+# the Python: Windows PowerShell 5.1 does not escape them when it passes an
+# argument to a native program. -1 means the count could not be read.
+$officerCode = 'import noctornal_api.db as d; print(d.connect().execute(''select count(distinct u.id) from iam.app_user u join iam.user_role ur on ur.user_id = u.id where ur.role_key = %s and u.is_active'', (''SECURITY_OFFICER'',)).fetchone()[0])'
+$officers = -1
+$officerCount = Invoke-Capture $Python @('-c', $officerCode)
+if ($officerCount.Code -eq 0) {
+    $parsed = 0
+    if ([int]::TryParse($officerCount.Text.Trim(), [ref] $parsed)) { $officers = $parsed }
+}
+
 if ($count.Code -ne 0) {
     # Not fatal: a failed count must not stop the API from starting.
     Write-Note 'could not count users (the API may still work) - output was:'
@@ -479,7 +521,10 @@ if ($count.Code -ne 0) {
 else {
     $users = 0
     if ([int]::TryParse($count.Text.Trim(), [ref] $users) -and $users -gt 0) {
-        Write-Good "$users user account(s) exist"
+        # Agreed with the count, not bracketed (Alpha 6 pre-release check,
+        # 2026-09-23).
+        if ($users -eq 1) { Write-Good '1 user account exists' }
+        else { Write-Good "$users user accounts exist" }
     }
     else {
         $bootstrap = Join-Path $RepoRoot 'scripts\bootstrap.py'
@@ -492,6 +537,10 @@ else {
         # One line on purpose: it is meant to be copied, and a wrapped command
         # needs a different continuation character in PowerShell than in cmd.
         Write-Host '      .venv\Scripts\python scripts\bootstrap.py create-user --email you@example.com --name "Your Name"' -ForegroundColor White
+        Write-Host ''
+        Write-Host '    It prints a password once and a QR for your authenticator. Sign' -ForegroundColor Yellow
+        Write-Host "    in with them at http://127.0.0.1:$Port/ui/ and use the same address" -ForegroundColor Yellow
+        Write-Host '    as --owner-email in the README''s "First run" recipe.' -ForegroundColor Yellow
         Write-Host ''
         if (-not (Test-Path -LiteralPath $bootstrap)) {
             Write-Host '    Note: scripts\bootstrap.py does not exist in this checkout yet,' -ForegroundColor Yellow
@@ -510,9 +559,13 @@ else {
 Write-Step 'Starting the API'
 
 if (Test-PortInUse -Number $Port) {
+    # The installer's form too: install.ps1 hands off to this script, so a
+    # reader who ran the installer is told how to re-run what they ran.
     Stop-With "port $Port is already in use" @(
         'Either something else is on that port, or an earlier copy of the API is',
-        'still running. Stop it, or pick another port:',
+        "still running (then the stack is already up at http://127.0.0.1:$Port/ui/).",
+        'Stop it, or pick another port:',
+        "  powershell -ExecutionPolicy Bypass -File .\release\install.ps1 -Port $($Port + 1)",
         "  .\scripts\launch.ps1 -Port $($Port + 1)"
     )
 }
@@ -521,9 +574,40 @@ Write-Host ''
 Write-Host '  Everything is up. Open this in your browser:' -ForegroundColor Green
 Write-Host "      http://127.0.0.1:$Port/ui/" -ForegroundColor White
 Write-Host ''
+# What to do next, for the Windows installer as for install.sh: the
+# README's showcase recipe with this platform's interpreter, and the
+# Security Officer the first account does not hold (Alpha 6 pre-release
+# check, 2026-09-23).
+Write-Host '  Next, in a second terminal at the repo root (no exports needed:'
+Write-Host '  bootstrap.py reads .env.local). To fill the console with the'
+Write-Host '  showcase case the README screenshots come from, follow README.md,'
+Write-Host '  section "First run", with your address as the owner. It starts with:'
+Write-Host '      .venv\Scripts\python scripts\bootstrap.py demo-network --owner-email you@example.org --code OP-SHOWCASE-26 --classification CLEAR'
+if ($officers -le 0) {
+    Write-Host ''
+    if ($officers -eq 0) {
+        Write-Host '  Nobody holds the Security Officer role yet; the account' -ForegroundColor Yellow
+        Write-Host '  create-user makes by default does not. Until somebody does, the' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host '  The Security Officer holders could not be counted. The account' -ForegroundColor Yellow
+        Write-Host '  create-user makes by default is not one. Until somebody is, the' -ForegroundColor Yellow
+    }
+    Write-Host '  readiness register''s blocking check security_officer_present' -ForegroundColor Yellow
+    Write-Host '  fails, so collection runs are refused, and break-glass is refused' -ForegroundColor Yellow
+    Write-Host '  because nobody could review it. Give the role to a second person,' -ForegroundColor Yellow
+    Write-Host '  not to your own account (release\INSTALL.md, "After installing"):' -ForegroundColor Yellow
+    # security.officer@, not officer@: officer@example.org is the account
+    # seed_readme_showcase.py creates, so after the README recipe this
+    # command exited 1 with "already exists", and run first it would have
+    # made the seeder adopt the real officer (Alpha 6 pre-release check,
+    # 2026-09-23).
+    Write-Host '      .venv\Scripts\python scripts\bootstrap.py create-user --email security.officer@example.org --name "Officer Name" --roles SECURITY_OFFICER'
+}
+Write-Host ''
 Write-Host '  Also available:'
-Write-Host '      http://localhost:9001   MinIO console (evidence store)'
-Write-Host '      http://localhost:8025   Mailpit (captured e-mail)'
+Write-Host '      http://127.0.0.1:9001   MinIO console (evidence store)'
+Write-Host '      http://127.0.0.1:8025   Mailpit (captured e-mail)'
 
 # The OpenAPI page is off unless NOCTORNAL_ENABLE_DOCS says otherwise: it
 # describes the shape of a case system, so it stays opt-in. Advertise the URL

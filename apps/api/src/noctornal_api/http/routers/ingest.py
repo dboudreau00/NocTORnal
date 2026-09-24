@@ -36,6 +36,7 @@ determination, and none of the controls here substitute for it.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 from uuid import UUID
 
 import psycopg
@@ -46,9 +47,11 @@ from noctornal_api.http.deps import (
     CurrentUser,
     audit_auth_event,
     authorize_object,
+    counted_at_case_gate,
     current_user,
     effective_labels,
     get_conn,
+    refuse_if_case_read_only,
     require_global,
     require_step_up,
     user_ceiling,
@@ -56,10 +59,15 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit, read_body_capped
 from noctornal_api.ingest import (
+    CATEGORIES,
+    HIGH_RISK_CATEGORIES,
+    TRIAGE_STATES,
     AuthorisationRequired,
     CaseMismatch,
     IngestError,
     IngestService,
+    RepairInvalid,
+    redact_structure,
 )
 from noctornal_api.rawstore import MissingObject, RawBatchStorage, RawStoreError
 from noctornal_api.security.access import (
@@ -87,18 +95,22 @@ def _with_raw(conn: psycopg.Connection, **kw) -> IngestService:
     except RawStoreError as exc:
         raise Problem(
             503, "Storage unavailable",
-            "raw ingest storage is not configured, and docs/12 requires the "
-            "raw payload to be persisted before parsing. Set MINIO_ENDPOINT / "
+            "raw ingest storage is not configured, and the raw payload "
+            "must be persisted before parsing. Set MINIO_ENDPOINT / "
             "MINIO_ACCESS_KEY / MINIO_SECRET_KEY and INGEST_BUCKET.") from exc
     return IngestService(conn, storage, **kw)
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
+#: The console prints this when a key is issued. It names the legal-review
+#: item by its register number, which counsel uses, and not a design
+#: document's path, which the reader cannot open (ux19-copy
+#: developer-speak-in-copy, 2026-09-23; L4's notice changed the same way).
 L2_NOTICE = (
-    "docs/16 L2 is BLOCKING and unresolved: the lawful basis for holding "
+    "Legal review item L2 is still open: the lawful basis for holding "
     "stealer-log data about thousands of uninvolved people, victim "
-    "notification obligations, and the real retention period are external "
-    "determinations. The 90-day default is a placeholder."
+    "notification obligations, and the real retention period are for "
+    "counsel to determine. The 90-day default is a placeholder."
 )
 
 
@@ -376,7 +388,7 @@ async def submit(
         "notice": ("Accepted for later parsing. Nothing has been parsed, "
                    "categorised or written to a case yet. Unparseable "
                    "fragments go to the dead-letter queue with the raw "
-                   "bytes rather than being dropped (invariant 12)."),
+                   "bytes rather than being dropped."),
     }
 
 
@@ -394,8 +406,11 @@ class IssueKeyBody(BaseModel):
     default_reliability: str = "F"
     ip_allowlist: list[str] = Field(default_factory=list)
     #: Mandatory expiry. docs/12 treats a key with no expiry as one nobody
-    #: will ever notice is still live.
-    ttl_days: int = Field(default=90, ge=1, le=730)
+    #: will ever notice is still live. The ceiling is the service's
+    #: MAX_KEY_TTL (365 days): this said 730, so a request for 400 passed
+    #: validation and came back as the service's refusal, and the Keys
+    #: form (2026-09-23) needs one number to offer.
+    ttl_days: int = Field(default=90, ge=1, le=365)
 
 
 @router.post("/keys", response_model=dict, status_code=201,
@@ -429,7 +444,7 @@ def issue_key(
         "expires_at": issued.expires_at.isoformat(),
         "notice": ("This secret is shown ONCE and is not stored in "
                    "recoverable form. The key is write-only: it can submit "
-                   "batches and read nothing (invariant 11)."),
+                   "batches and read nothing."),
     }
 
 
@@ -443,10 +458,15 @@ def revoke_key(
     user: CurrentUser = Depends(require_global("ingest.manage")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
+    """Revoke a key. Step-up gated through `ingest.manage`, audited with
+    the reason, and 404 for a key that is unknown or already revoked (it
+    answered "revoked": true for both until 2026-09-23)."""
     try:
         IngestService(conn).revoke_key(
             key_row_id, actor_id=user.user_id, reason=body.reason)
     except IngestError as exc:
+        if "no such live key" in str(exc):
+            raise Problem(404, "Not found", safe_detail(exc)) from exc
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(key_row_id), "revoked": True}
 
@@ -516,7 +536,7 @@ def parse_batch(
             "batch accepted before storage was configured cannot be "
             "re-parsed; the partner has to resend. Parsing an empty payload "
             "would mark the batch PARSED with zero records, which is a "
-            "silent loss (invariant 12).") from exc
+            "silent loss.") from exc
     except IngestError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     try:
@@ -534,7 +554,7 @@ def parse_batch(
                    "never values. The verbatim bytes stay in the batch's raw "
                    "object under its own retention. Silent drops are how you "
                    "find out six months later that a feed has been "
-                   "half-failing (invariant 12)."),
+                   "half-failing."),
     }
 
 
@@ -542,6 +562,7 @@ def parse_batch(
             dependencies=[Depends(rate_limit("search"))])
 def dead_letters(
     api_key_id: UUID | None = Query(None),
+    case_id: UUID | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
@@ -589,6 +610,16 @@ def dead_letters(
     `rescore`): which verb applies depends on what the row IS. A caller
     holding neither verb is refused 403 with the same AUTHZ_DENIED audit
     `require_global` would have written.
+
+    **`case_id` narrows to one case (2026-09-23).** The Feeds pane is
+    opened inside a case, and it showed the same deployment-wide list in
+    every case under "N unparsed fragments", which read as that case's
+    failures when none of them were (ux12-feeds:dead-letters-no-feed-no-
+    scope). With `case_id` the listing is the dead letters of batches that
+    fed THAT case, unattached ones left out; a case the caller may not
+    read is the same 404 `/records` gives. Each row also carries its
+    `api_key_id`, which is what the `api_key_id` filter takes, so the pane
+    can filter by the feed it names.
     """
     reads, _ = _holds_global(conn, user, "ingest.read")
     manages, fresh = _holds_global(conn, user, "ingest.manage")
@@ -604,6 +635,17 @@ def dead_letters(
     allowed = _authorised_cases_for_ingest(conn, user) if reads else []
     unattached = manages and fresh
     withheld = "re-authentication required" if manages and not fresh else None
+    # The cases whose batches bound the fetch, and whether unattached rows
+    # join them. `allowed` stays whole for naming a row's cases.
+    fed_scope = allowed
+    with_unattached = unattached
+    if case_id is not None:
+        if case_id not in allowed:
+            raise Problem(404, "Not found", "no such case")
+        fed_scope = [case_id]
+        with_unattached = False
+        # Nothing unattached was asked for, so nothing was withheld.
+        withheld = None
 
     if api_key_id is not None and not unattached:
         # A key is visible to a case reader only if it fed one of their
@@ -637,7 +679,7 @@ def dead_letters(
                   ARRAY(SELECT DISTINCT r.case_id FROM ingest.record r
                          WHERE r.batch_id = dl.batch_id
                            AND r.case_id = ANY(%s::uuid[])),
-                  dl.compartments
+                  dl.compartments, dl.api_key_id
              FROM ingest.dead_letter dl
              LEFT JOIN ingest.api_key k ON k.id = dl.api_key_id
             WHERE (%s::uuid IS NULL OR dl.api_key_id = %s)
@@ -652,7 +694,7 @@ def dead_letters(
                                              AND r.case_id IS NOT NULL)))
             ORDER BY dl.occurred_at DESC LIMIT %s""",
         (allowed, api_key_id, api_key_id, clearance.name, list(compartments),
-         allowed, unattached, limit)).fetchall()
+         fed_scope, with_unattached, limit)).fetchall()
 
     # The decision on each ROW is the gate's, not the query's (2026-09-11).
     # The predicates above bound the fetch and the LIMIT; what is returned
@@ -687,6 +729,13 @@ def dead_letters(
         return decided[key]
 
     rows = [row for row in rows if visible(row)]
+    # Who may repair and replay what, so the pane offers the action only
+    # where the replay route would take it: `ingest.replay` for any row it
+    # lists, and the operator for an unattached row into quarantine
+    # (`replay`'s docstring). Every reader was offered it and a REVIEWER
+    # met a 403 inside the form (fix round, 2026-09-23). Asked of the gate
+    # with no audit row: a listing asks, it does not refuse.
+    replays, _ = _holds_global(conn, user, "ingest.replay")
     out = {"dead_letters": [
         {"id": str(r[0]), "batch_id": str(r[1]) if r[1] else None,
          "error_class": r[2], "error_detail": r[3],
@@ -702,13 +751,19 @@ def dead_letters(
          # rows never said which key. `/records` already shows both to
          # the same readers.
          "feed": r[11], "key_id": r[12],
+         "api_key_id": str(r[15]) if r[15] else None,
          "case_ids": [str(c) for c in (r[13] or [])],
-         "unattached": not (r[13] or [])}
+         "unattached": not (r[13] or []),
+         "can_replay": bool(replays or not (r[13] or []))}
         for r in rows],
         "count": len(rows),
         "scope": {"cases": [str(c) for c in allowed],
-                  "unattached": unattached,
-                  "unattached_withheld": withheld},
+                  "unattached": with_unattached,
+                  "unattached_withheld": withheld,
+                  # Whether a replay may name a case at all; the case's
+                  # own gate still answers for that case.
+                  "replay_into_case": replays,
+                  **({"case": str(case_id)} if case_id else {})},
         "notice": ("Fragments are structurally redacted: keys, types and "
                    "lengths only, never values. Rows recorded before "
                    "2026-07-25 are withheld until the repair script runs. "
@@ -729,21 +784,153 @@ class ReplayBody(BaseModel):
     case_id: UUID | None = None
 
 
+class _Reach(NamedTuple):
+    """How the caller sees one dead letter (`_dead_letter_reach`), and
+    what a replay needs to gate on: the fragment's own labels, which are
+    the labels of the record a replay makes (the issuing key's ceiling and
+    forced compartment, on both), and the cases its batch fed."""
+    #: "case", "operator", or None when the listing would not show it.
+    how: str | None
+    classification: str | None = None
+    compartments: frozenset[str] = frozenset()
+    #: Every case a record of its batch went to: the dead letter's own.
+    fed: tuple[UUID, ...] = ()
+    #: Those of `fed` the caller reads it through (`how == "case"`).
+    seen: tuple[UUID, ...] = ()
+
+
+def _dead_letter_reach(conn: psycopg.Connection, user: CurrentUser,
+                       dead_letter_id: UUID) -> _Reach:
+    """How the caller sees this dead letter, if at all: the listing's rule
+    for one row. "case" through a case its batch fed (`ingest.read` on
+    that case against the row's own labels); "operator" for a row whose
+    batch fed no case (the operator verb, fresh, against the same labels);
+    None when the listing would not show it.
+
+    Asked as questions (`_case_allows`), so nothing here counts a
+    break-glass use: `replay` counts once, at the gate that lets the
+    replay through (r2 c5, 2026-09-24)."""
+    row = conn.execute(
+        """SELECT dl.classification, dl.compartments,
+                  ARRAY(SELECT DISTINCT r.case_id FROM ingest.record r
+                         WHERE r.batch_id = dl.batch_id
+                           AND r.case_id IS NOT NULL)
+             FROM ingest.dead_letter dl
+            WHERE dl.id = %s AND dl.purged_at IS NULL""",
+        (dead_letter_id,)).fetchone()
+    if row is None:
+        return _Reach(None)
+    labels = (row[0], frozenset(row[1] or []))
+    fed = tuple(row[2] or ())
+    if fed:
+        seen = tuple(case for case in fed
+                     if _case_allows(conn, user, case, "ingest.read",
+                                     classification=labels[0],
+                                     compartments=labels[1]))
+        return _Reach("case" if seen else None, *labels, fed, seen)
+    decision = _decision_global(conn, user, "ingest.manage",
+                                classification=labels[0],
+                                compartments=labels[1])
+    return _Reach("operator" if decision is not None and decision.allowed
+                  else None, *labels)
+
+
+# A read-only case (CLOSED, ARCHIVED or PURGED) refuses a record put into
+# it or triaged in it: that is content, not governance (the owner's
+# decision in force for Alpha 6). The refusal is g13's one gate,
+# `deps.refuse_if_case_read_only`: the states `cases.CONTENT_READ_ONLY_STATES`,
+# the 409 titled `CASE_READ_ONLY_TITLE` the console turns read-only on,
+# and a CASE_READ_ONLY_REFUSED audit row. Replay, attach and category
+# correction gate on `ingest.replay`, a content verb, so `authorize_object`
+# refuses them itself; record triage gates on `ingest.read`, a reader's
+# verb, and calls the gate by hand. (A second copy of the check here
+# refused only CLOSED and ARCHIVED, titled its 409 "Conflict" and wrote no
+# audit row: merged away 2026-09-24.)
+
+
 @router.post("/dead-letters/{dead_letter_id}/replay", response_model=dict,
              dependencies=[Depends(rate_limit("capture"))])
 def replay(
     dead_letter_id: UUID, body: ReplayBody,
-    user: CurrentUser = Depends(require_global("ingest.replay")),
+    user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Re-parse a repaired fragment after fixing the parser."""
+    """Re-parse a repaired fragment after fixing the parser.
+
+    **The dead letter is gated by what it IS (2026-09-23).** The route
+    checked the global verb and, when a case was named, that case, and
+    never the dead letter: any `ingest.replay` holder could replay a RED
+    or compartmented fragment from a feed into a case they did not read,
+    by id, and make a record of it. The console offers Replay since the
+    same date, so the dead letter now has to be one the caller's listing
+    would show them (`_dead_letter_reach`), and a row they may not see
+    gets the same 404 an unknown id gets.
+
+    **The operator replays an unattached one into quarantine.** A dead
+    letter whose batch fed no case is listed only to the operator
+    (`ingest.manage`, fresh), and `ingest.replay` belongs to the analyst
+    and lead investigator roles, so on a deployment that keeps those
+    duties apart nobody could replay it at all (fix round, 2026-09-23).
+    Re-parsing into quarantine is the job the operator verb already does
+    for a whole batch (`/batches/{id}/parse` with no case), so that one
+    path is theirs; putting the record into a case still needs
+    `ingest.replay` on that case, exactly as attaching one does.
+
+    **The target is gated at the fragment's labels, and counted (r2 c5,
+    2026-09-24).** The only gate at the dead letter's own labels was the
+    reach question, which counts nothing, and the case named was gated at
+    its own labels. So a RED fragment on an AMBER case, visible only
+    under a grant, was replayed into a RED record with the grant unused on
+    the officer's card, and a grant on one case let a RED record into
+    another case the caller is not cleared for there. Now the case named
+    is asked `ingest.replay` with the fragment's labels, as attach asks
+    with the record's; a replay into quarantine of a row seen through a
+    case is counted at that case (`ingest.read`, the fragment's labels),
+    preferring a case the caller reads without a grant, so the grant is
+    counted only where it is what let the replay through.
+
+    **Never between cases (r2 c19, 2026-09-24).** A dead letter's case is
+    any case its batch fed, and the record a replay makes keeps the
+    batch. A replay into some other case the caller works therefore made
+    the whole batch's dead letters that case's too: its readers listed
+    them, feed and key included, and could replay them. Attach refuses a
+    move between cases, and so does this. A row that belongs to no case
+    has none to leave, and goes into a case as a quarantined record is
+    attached to one.
+    """
+    reach = _dead_letter_reach(conn, user, dead_letter_id)
+    if not (reach.how == "operator" and body.case_id is None):
+        # Every other replay needs the verb the route has always required,
+        # refused and audited exactly as the dependency refused it.
+        require_global("ingest.replay")(user=user, conn=conn)
+    if reach.how is None:
+        raise Problem(404, "Not found", "no such dead letter")
+    labels = {"classification": reach.classification,
+              "compartments": reach.compartments}
     if body.case_id is not None:
+        # Refuses a read-only case too: `ingest.replay` is a content verb.
+        # Before the move check, so whether this batch fed a case is told
+        # only to a caller that case's gate has let through.
         authorize_object(conn, user, case_id=body.case_id,
-                         permission_key="ingest.replay")
+                         permission_key="ingest.replay", **labels)
+        if reach.how == "case" and body.case_id not in reach.fed:
+            raise Problem(
+                409, "Conflict",
+                "this dead letter's feed went to another case. Replay puts "
+                "it back into its own case or into quarantine, never into "
+                "a different one.")
+    elif reach.how == "case":
+        # False sorts first: a case the caller reads without the grant.
+        via = min(reach.seen,
+                  key=lambda case: counted_at_case_gate(conn, user, case))
+        authorize_object(conn, user, case_id=via,
+                         permission_key="ingest.read", **labels)
     try:
         record_id = IngestService(conn).replay(
             dead_letter_id, actor_id=user.user_id, repaired=body.repaired,
             case_id=body.case_id)
+    except RepairInvalid as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     except IngestError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {"dead_letter_id": str(dead_letter_id),
@@ -757,11 +944,76 @@ def replay(
 # The triage queue itself
 # ---------------------------------------------------------------------------
 
-#: Shared by `/records` and `/quarantine`. One projection, so the two
-#: endpoints cannot drift into returning different shapes for the same row
-#: -- and so a column added for one is never accidentally exposed by the
-#: other under a different permission.
-_QUEUE_SQL = """
+#: Shared by `/records`, `/quarantine` and `/records/{id}`. One
+#: projection, so the endpoints cannot drift into returning different
+#: shapes for the same row -- and so a column added for one is never
+#: accidentally exposed by another under a different permission.
+#:
+#: Named parameters since 2026-09-23, because the projection itself now
+#: takes the caller's scope: `vis` (the cases the caller reads the queue
+#: of), `qok` (whether unattached rows are theirs, the operator's), and
+#: their ceiling (`clearance`, `comps`). Those bound three things a row
+#: used to say about records the caller could not see:
+#:
+#: - `duplicate_feeds`, `duplicate_visible`, `duplicate_sources`: which
+#:   FEEDS sent the folded copies, over the copies the caller may read.
+#:   "ALSO SENT BY 1 other" read as a second feed corroborating a leak
+#:   post when the same partner had resent it through a mirror
+#:   (ux12-feeds:also-sent-by-false-corroboration). `duplicate_count`
+#:   stays the total, as before. `duplicate_sources` counts the readable
+#:   copies PER FEED and marks the row's own feed, because the fix round
+#:   (2026-09-23) found the console calling copies "all from this feed:
+#:   a resend, not a second source" when only the readable ones were: a
+#:   copy the caller cannot see may be the second source, and near-
+#:   duplicate matching runs across the whole deployment, so such copies
+#:   are the ordinary case. Resends and other feeds are counted apart,
+#:   and whatever is left of the total is said to be unseen.
+#: - `duplicate_of*`: what a folded row is a duplicate OF, when the caller
+#:   may read that record, so the console can put it under its primary.
+#: - `triage_*` and `category_was`: the latest triage decision and the
+#:   classifier's original category, read back from the audit chain
+#:   (IngestService, "the queue's verbs").
+#:
+#: **One page, then the projection (fix round, 2026-09-23).** The first
+#: version joined the per-row lookups (the folded copies, the primary,
+#: the triage and correction events) to EVERY record in scope before the
+#: sort and the LIMIT, and `ingest.record` has no index on
+#: `duplicate_of`, so the copies of each record were a scan of the whole
+#: table: quadratic, and a queue read over a case of 50,000 records had
+#: not answered after 212 seconds. Now the page is chosen first (`page`,
+#: the filters, the order and the limit, over `ingest.record` alone), the
+#: copies of the whole page are counted in ONE pass (`dup`), and the
+#: lookups run for the page's rows only: the same read takes tens of
+#: milliseconds. The total count comes from the same pass, where it used
+#: to be one scan per returned row. An index on `duplicate_of` would make
+#: that pass a lookup; it needs a migration, and the chain is closed for
+#: this release.
+def _queue_sql(where: str, tail: str = "") -> str:
+    """The queue projection over the records `where` selects.
+
+    `where` is appended to `r.purged_at IS NULL` and `tail` is the page's
+    ORDER BY and LIMIT; both are fixed strings from this module with named
+    parameters, never caller text.
+    """
+    return f"""
+        WITH page AS MATERIALIZED (
+             SELECT r.id FROM ingest.record r
+              WHERE r.purged_at IS NULL{where}
+              {tail}),
+        dup AS MATERIALIZED (
+             SELECT d.duplicate_of AS primary_id, dk.name,
+                    count(*) AS total,
+                    count(*) FILTER (
+                        WHERE d.purged_at IS NULL
+                          AND d.classification <= %(clearance)s::core.tlp
+                          AND d.compartments <@ %(comps)s
+                          AND (d.case_id = ANY(%(vis)s::uuid[])
+                               OR (%(qok)s AND d.case_id IS NULL))) AS seen
+               FROM ingest.record d
+               JOIN ingest.batch db ON db.id = d.batch_id
+               JOIN ingest.api_key dk ON dk.id = db.api_key_id
+              WHERE d.duplicate_of IN (SELECT id FROM page)
+              GROUP BY d.duplicate_of, dk.name)
         SELECT r.id, r.case_id, r.category, r.category_confidence,
                r.category_source, r.priority, r.priority_detail,
                r.created_at, r.duplicate_of, r.classification,
@@ -769,15 +1021,104 @@ _QUEUE_SQL = """
                k.name, k.key_id,
                (SELECT count(*) FROM ingest.victim_credential vc
                  WHERE vc.record_id = r.id),
-               (SELECT count(*) FROM ingest.record d
-                 WHERE d.duplicate_of = r.id)
-          FROM ingest.record r
+               coalesce(dupx.total, 0)::bigint,
+               dupx.feeds, dupx.seen::bigint,
+               prim.received_at, prim.feed, prim.visible,
+               tri.detail, tri.occurred_at, tri.actor,
+               cor.detail, dupx.sources
+          FROM page
+          JOIN ingest.record r ON r.id = page.id
           JOIN ingest.batch b ON b.id = r.batch_id
           JOIN ingest.api_key k ON k.id = b.api_key_id
-         WHERE r.purged_at IS NULL"""
+          LEFT JOIN LATERAL (
+                SELECT sum(x.total) AS total,
+                       array_agg(x.name ORDER BY x.name)
+                           FILTER (WHERE x.seen > 0) AS feeds,
+                       coalesce(sum(x.seen), 0) AS seen,
+                       coalesce(jsonb_agg(jsonb_build_object(
+                                    'feed', x.name, 'copies', x.seen,
+                                    'this_feed', x.name = k.name)
+                                ORDER BY x.name = k.name DESC, x.name)
+                                    FILTER (WHERE x.seen > 0),
+                                '[]'::jsonb) AS sources
+                  FROM dup x WHERE x.primary_id = r.id) dupx ON true
+          LEFT JOIN LATERAL (
+                SELECT pb.received_at, pk.name AS feed, true AS visible
+                  FROM ingest.record p
+                  JOIN ingest.batch pb ON pb.id = p.batch_id
+                  JOIN ingest.api_key pk ON pk.id = pb.api_key_id
+                 WHERE p.id = r.duplicate_of AND p.purged_at IS NULL
+                   AND p.classification <= %(clearance)s::core.tlp
+                   AND p.compartments <@ %(comps)s
+                   AND (p.case_id = ANY(%(vis)s::uuid[])
+                        OR (%(qok)s AND p.case_id IS NULL))) prim ON true
+          LEFT JOIN LATERAL (
+                SELECT e.detail, e.occurred_at, u.display_name AS actor
+                  FROM audit.event e
+                  LEFT JOIN iam.app_user u ON u.id = e.actor_id
+                 WHERE e.object_id = r.id
+                   AND e.action = 'INGEST_RECORD_TRIAGED'
+                 ORDER BY e.seq DESC LIMIT 1) tri ON true
+          LEFT JOIN LATERAL (
+                SELECT e.detail FROM audit.event e
+                 WHERE e.object_id = r.id
+                   AND e.action = 'INGEST_CATEGORY_CORRECTED'
+                 ORDER BY e.seq ASC LIMIT 1) cor ON true
+         ORDER BY r.priority DESC, r.created_at DESC"""
 
 
-def _queue_row(r) -> dict:
+#: The queue's order, and the page's.
+_PAGE_TAIL = "ORDER BY r.priority DESC, r.created_at DESC LIMIT %(limit)s"
+
+#: The latest triage state of `r`, for the page's filter: the same lookup
+#: the projection's `tri` makes, asked only when a triage filter is on.
+_TRIAGE_STATE = """coalesce((SELECT e.detail ->> 'state' FROM audit.event e
+                         WHERE e.object_id = r.id
+                           AND e.action = 'INGEST_RECORD_TRIAGED'
+                         ORDER BY e.seq DESC LIMIT 1), 'NEW')"""
+
+
+def _visible_detail(detail: dict | None, record_case: UUID | None,
+                    allowed: set[str]) -> dict | None:
+    """The score's reasons, with every watch the caller may not read taken
+    out.
+
+    A record in a case is scored against that case's watches and the
+    case-less ones, which its readers may see. A record in QUARANTINE is
+    scored against every watch, because routing it is the operator's job,
+    and a watch on a case the operator is not on is that case's content:
+    its name and the selector it watches are withheld and the term says
+    only that such a watch exists. The score itself already said as much.
+
+    A record never scored keeps the null it always had: `{}` in its place
+    was an API shape change nobody had asked for (fix round, 2026-09-23).
+    """
+    if detail is None:
+        return None
+    detail = dict(detail)
+    terms = []
+    for term in detail.get("terms") or []:
+        if term.get("term") != "selector":
+            terms.append(term)
+            continue
+        watches = [w for w in term.get("watches") or []
+                   if w.get("case_id") is None
+                   or (record_case is not None
+                       and w.get("case_id") == str(record_case))
+                   or w.get("case_id") in allowed]
+        if watches:
+            terms.append({**term, "watches": watches})
+        else:
+            terms.append({"term": "selector", "points": term.get("points"),
+                          "hidden": True, "watches": []})
+    if "terms" in detail:
+        detail["terms"] = terms
+    return detail
+
+
+def _queue_row(r, allowed: set[str] | None = None) -> dict:
+    triage = r[22] or {}
+    corrected = r[25] or None
     return {
         "id": str(r[0]),
         "case_id": str(r[1]) if r[1] else None,
@@ -786,7 +1127,7 @@ def _queue_row(r) -> dict:
         "category_confidence": float(r[3]),
         "category_source": r[4],
         "priority": float(r[5]),
-        "priority_detail": r[6],
+        "priority_detail": _visible_detail(r[6], r[1], allowed or set()),
         "created_at": r[7].isoformat(),
         "is_duplicate": r[8] is not None,
         "classification": r[9],
@@ -796,7 +1137,93 @@ def _queue_row(r) -> dict:
         "feed": r[13], "key_id": r[14],
         "credential_count": r[15],
         "duplicate_count": r[16],
+        # Which feeds sent the folded copies the caller may read, and how
+        # many of the copies that is. A copy from the row's own feed is a
+        # resend, not a second source.
+        "duplicate_feeds": list(r[17] or []),
+        "duplicate_visible": int(r[18] or 0),
+        # The same copies per feed, {feed, copies, this_feed}: resends
+        # from the row's own feed apart from copies another feed sent.
+        "duplicate_sources": [
+            {"feed": s.get("feed"), "copies": int(s.get("copies") or 0),
+             "this_feed": bool(s.get("this_feed"))}
+            for s in (r[26] or [])],
+        # What a folded row folds INTO. Null when the caller may not read
+        # the primary: an id from another case or compartment is itself a
+        # disclosure.
+        "duplicate_of": (str(r[8]) if r[8] is not None and r[21] else None),
+        "duplicate_of_received_at": r[19].isoformat() if r[19] else None,
+        "duplicate_of_feed": r[20],
+        "triage_state": triage.get("state") or "NEW",
+        "triage_reason": triage.get("reason"),
+        "triage_linked_to": triage.get("linked_to"),
+        "triage_at": r[23].isoformat() if r[23] else None,
+        "triage_by": r[24],
+        # The classifier's own output, when an analyst has corrected it.
+        "category_was": corrected.get("from") if corrected else None,
     }
+
+
+def _queue_params(allowed, quarantine_ok: bool, clearance, compartments,
+                  **extra) -> dict:
+    return {"vis": [UUID(str(c)) for c in allowed], "qok": quarantine_ok,
+            "clearance": clearance.name, "comps": list(compartments),
+            **extra}
+
+
+def _facets(conn: psycopg.Connection, scope: list, clearance,
+            compartments) -> dict:
+    """Counts over the WHOLE of a case queue, whatever filter is on.
+
+    ux12-feeds:category-filter-collapses-and-sticks (2026-09-23). The
+    Category select was rebuilt from the page it had just filtered, so
+    choosing STEALER_LOG left STEALER_LOG as the only choice; and a filter
+    carried into another case answered "Nothing in the queue for this
+    case." for a queue holding other categories. The select is built from
+    these counts instead, which the filter does not narrow.
+
+    `watched_untriaged` is the Feeds rail badge: records that match a
+    watched selector and nobody has triaged yet (ux12-feeds:feeds-badge-
+    never-set). Folded duplicates are not counted: the badge is a count
+    of things to look at, and a copy of one is not a second one.
+
+    Two statements, not one, since the fix round (2026-09-23): the badge
+    is read on every case open, and asking the audit chain for the triage
+    state of EVERY record in the case to count the few that matched a
+    watch made a large stealer-log case pay per record on each open. The
+    category counts touch no audit row; the triage state is looked up only
+    for the records that matched a watched selector.
+    """
+    bound = (scope, clearance.name, list(compartments))
+    rows = conn.execute(
+        """SELECT r.category, count(*)
+             FROM ingest.record r
+            WHERE r.purged_at IS NULL AND r.duplicate_of IS NULL
+              AND r.case_id = ANY(%s)
+              AND r.classification <= %s::core.tlp
+              AND r.compartments <@ %s
+            GROUP BY r.category ORDER BY r.category""", bound).fetchall()
+    watched = conn.execute(
+        """WITH hit AS MATERIALIZED (
+               SELECT r.id FROM ingest.record r
+                WHERE r.purged_at IS NULL AND r.duplicate_of IS NULL
+                  AND r.case_id = ANY(%s)
+                  AND r.classification <= %s::core.tlp
+                  AND r.compartments <@ %s
+                  AND coalesce((r.priority_detail
+                                ->> 'watched_selector_hits')::int, 0) > 0)
+           SELECT count(*) FROM hit
+            WHERE coalesce((SELECT e.detail ->> 'state' FROM audit.event e
+                             WHERE e.object_id = hit.id
+                               AND e.action = 'INGEST_RECORD_TRIAGED'
+                             ORDER BY e.seq DESC LIMIT 1), 'NEW') = 'NEW'""",
+        bound).fetchone()[0]
+    return {"categories": {row[0]: row[1] for row in rows},
+            "total": sum(row[1] for row in rows),
+            "watched_untriaged": int(watched),
+            # Every category the database accepts, for the row's Correct
+            # category control: the list the CHECK enforces, not a copy.
+            "known": list(CATEGORIES)}
 
 
 @router.get("/records", response_model=dict,
@@ -805,6 +1232,7 @@ def records(
     case_id: UUID | None = Query(None),
     category: str | None = Query(None),
     include_duplicates: bool = Query(False),
+    triage_state: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     user: CurrentUser = Depends(require_global("ingest.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -819,7 +1247,8 @@ def records(
     Near-duplicates are hidden by default and counted rather than dropped:
     "the same leak post from nine sources" is the failure this exists to
     prevent, and silently discarding the other eight is a different failure
-    (invariant 12). `duplicate_count` says how many were folded away.
+    (invariant 12). `duplicate_count` says how many were folded away, and
+    `duplicate_feeds` which feeds sent the ones the caller may read.
 
     **The payload is not returned.** A record can hold a whole stealer log;
     this is a queue, and the fields here are the ones an analyst triages on.
@@ -828,7 +1257,18 @@ def records(
     a different job with a different verb, and a hidden branch inside one
     endpoint that widens what it returns based on a second permission is
     exactly the shape that becomes a hole.
+
+    `triage_state` filters on the latest triage decision (NEW is "none
+    yet"); `facets` counts the whole scope by category whatever the
+    filters say, and carries the watched-and-untriaged count the rail
+    badge shows.
     """
+    if triage_state is not None:
+        triage_state = triage_state.strip().upper()
+        if triage_state not in TRIAGE_STATES:
+            raise Problem(400, "Invalid request",
+                          "triage_state must be one of "
+                          + ", ".join(TRIAGE_STATES))
     clearance, compartments = user_ceiling(conn, user.user_id)
     allowed = _authorised_cases_for_ingest(conn, user)
     if case_id is not None and case_id not in allowed:
@@ -836,17 +1276,23 @@ def records(
     scope = [case_id] if case_id is not None else allowed
 
     rows = conn.execute(
-        _QUEUE_SQL + """
-              AND r.case_id = ANY(%s)
-              AND (%s::text IS NULL OR r.category = %s)
-              AND (%s OR r.duplicate_of IS NULL)
-              AND r.classification <= %s::core.tlp
-              AND r.compartments <@ %s
-            ORDER BY r.priority DESC, r.created_at DESC
-            LIMIT %s""",
-        (scope, category, category, include_duplicates,
-         clearance.name, list(compartments), limit)).fetchall()
-    return {"records": [_queue_row(r) for r in rows], "count": len(rows),
+        _queue_sql(
+            """
+              AND r.case_id = ANY(%(scope)s)
+              AND r.classification <= %(clearance)s::core.tlp
+              AND r.compartments <@ %(comps)s"""
+            + ("" if category is None else " AND r.category = %(category)s")
+            + ("" if include_duplicates else " AND r.duplicate_of IS NULL")
+            + ("" if triage_state is None
+               else f" AND {_TRIAGE_STATE} = %(triage)s"),
+            _PAGE_TAIL),
+        _queue_params(allowed, False, clearance, compartments,
+                      scope=scope, category=category,
+                      dupes=include_duplicates, triage=triage_state,
+                      limit=limit)).fetchall()
+    seen = {str(c) for c in allowed}
+    return {"records": [_queue_row(r, seen) for r in rows], "count": len(rows),
+            "facets": _facets(conn, scope, clearance, compartments),
             "notice": (
                 "Near-duplicates are folded, not dropped, and duplicate_count "
                 "says how many. Payloads are not returned here: a record can "
@@ -866,6 +1312,8 @@ def quarantine(
     granted by a case assignment, so the ordinary five-part gate hides it
     from everybody — and if nobody can see it, nothing is ever attached and
     the material sits there until its retention clock destroys it.
+    `POST /records/{id}/attach` is how the operator attaches one
+    (2026-09-23).
 
     `ingest.manage` is the operator verb: it already covers issuing keys
     and parsing batches, which is the same job. It is deliberately NOT
@@ -877,18 +1325,234 @@ def quarantine(
     unclassified: the record carries the issuing key's ceiling.
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
+    allowed = _authorised_cases_for_ingest(conn, user)
     rows = conn.execute(
-        _QUEUE_SQL + """
+        _queue_sql("""
               AND r.case_id IS NULL
-              AND r.classification <= %s::core.tlp
-              AND r.compartments <@ %s
-            ORDER BY r.priority DESC, r.created_at DESC
-            LIMIT %s""",
-        (clearance.name, list(compartments), limit)).fetchall()
-    return {"records": [_queue_row(r) for r in rows], "count": len(rows),
+              AND r.classification <= %(clearance)s::core.tlp
+              AND r.compartments <@ %(comps)s""", _PAGE_TAIL),
+        _queue_params(allowed, True, clearance, compartments,
+                      limit=limit)).fetchall()
+    seen = {str(c) for c in allowed}
+    return {"records": [_queue_row(r, seen) for r in rows], "count": len(rows),
             "notice": ("Unattached material. Attaching it to a case is what "
                        "puts it under that case's authority and review "
                        "clock; until then it expires on the category's.")}
+
+
+@router.get("/records/{record_id}", response_model=dict,
+            dependencies=[Depends(rate_limit("search"))])
+def record_detail(
+    record_id: UUID,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """One queue record's METADATA: never its payload.
+
+    ux12-feeds:queue-is-a-dead-end (2026-09-23): a row could not be opened.
+    This is what Open shows: the score's reasons, the feed and key, the
+    batch it arrived in and that batch's digest (the custody of the raw
+    object), the SHAPE of the payload (its keys and each value's type and
+    length, through the same `redact_structure` the dead letters use,
+    never a value), the folded copies the caller may read, and the
+    record's own history (triage, attachment, category corrections)
+    from the audit chain.
+
+    Gated like `rescore`, by what the record is: `ingest.read` on its case
+    with its labels, or the operator verb for a quarantined one, and a 404
+    either way for a record the caller may not read.
+    """
+    _authorise_record(conn, user, record_id, "ingest.read")
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    allowed = _authorised_cases_for_ingest(conn, user)
+    # Quarantined copies and primaries are the operator's, fresh: a case
+    # reader opening a case record does not see quarantine through it.
+    manages, fresh = _holds_global(conn, user, "ingest.manage")
+    qok = manages and fresh
+    row = conn.execute(
+        _queue_sql(" AND r.id = %(rid)s"),
+        _queue_params(allowed, qok, clearance, compartments,
+                      rid=record_id)).fetchone()
+    if row is None:
+        raise Problem(404, "Not found", "no such record")
+    seen = {str(c) for c in allowed}
+    out = _queue_row(row, seen)
+    batch = conn.execute(
+        """SELECT b.id, b.received_at, b.raw_bytes, b.raw_sha256,
+                  b.detected_format, b.content_type, b.parsed_at,
+                  b.parser_version, b.state, k.environment,
+                  k.declared_category, r.payload
+             FROM ingest.record r
+             JOIN ingest.batch b ON b.id = r.batch_id
+             JOIN ingest.api_key k ON k.id = b.api_key_id
+            WHERE r.id = %s""", (record_id,)).fetchone()
+    out["batch"] = {
+        "id": str(batch[0]),
+        "received_at": batch[1].isoformat() if batch[1] else None,
+        "raw_bytes": batch[2],
+        "raw_sha256": bytes(batch[3]).hex() if batch[3] else None,
+        "detected_format": batch[4], "content_type": batch[5],
+        "parsed_at": batch[6].isoformat() if batch[6] else None,
+        "parser_version": batch[7], "state": batch[8],
+        "key_environment": batch[9], "key_declared_category": batch[10],
+    }
+    out["payload_shape"] = redact_structure(batch[11])
+    copies = conn.execute(
+        """SELECT d.id, b.received_at, k.name
+             FROM ingest.record d
+             JOIN ingest.batch b ON b.id = d.batch_id
+             JOIN ingest.api_key k ON k.id = b.api_key_id
+            WHERE d.duplicate_of = %s AND d.purged_at IS NULL
+              AND d.classification <= %s::core.tlp
+              AND d.compartments <@ %s
+              AND (d.case_id = ANY(%s::uuid[]) OR (%s AND d.case_id IS NULL))
+            ORDER BY b.received_at""",
+        (record_id, clearance.name, list(compartments),
+         [UUID(str(c)) for c in allowed], qok)).fetchall()
+    out["copies"] = [{"id": str(c[0]),
+                      "received_at": c[1].isoformat() if c[1] else None,
+                      "feed": c[2]} for c in copies]
+    history = conn.execute(
+        """SELECT e.action, e.occurred_at, u.display_name, e.detail
+             FROM audit.event e
+             LEFT JOIN iam.app_user u ON u.id = e.actor_id
+            WHERE e.object_id = %s
+              AND e.action IN ('INGEST_RECORD_TRIAGED',
+                               'INGEST_RECORD_ATTACHED',
+                               'INGEST_CATEGORY_CORRECTED')
+            ORDER BY e.seq""", (record_id,)).fetchall()
+    out["history"] = [{"action": h[0], "at": h[1].isoformat(), "by": h[2],
+                       "detail": h[3]} for h in history]
+    out["notice"] = ("Metadata only. The payload is never shown here: its "
+                     "shape is, with every value replaced by its type and "
+                     "length.")
+    return out
+
+
+class TriageRecordBody(BaseModel):
+    state: str
+    reason: str | None = None
+    linked_to: str | None = None
+
+
+@router.post("/records/{record_id}/triage", response_model=dict)
+def triage_record(
+    record_id: UUID, body: TriageRecordBody,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Mark a queue record Triaged, Linked (to what) or Discarded (why),
+    or put it back to New. Audited, and the latest decision is the
+    record's state.
+
+    The reader's verb, like triage of a collected document: the analyst
+    working the queue is the one who decides a hit is noise, so a case
+    record needs `ingest.read` on its case with its labels, and a
+    quarantined one the operator verb. 404 for a record the caller may
+    not read.
+    """
+    case_id = _authorise_record(conn, user, record_id, "ingest.read")
+    if case_id is not None:
+        # After the access decision, never before (deps.py): a caller the
+        # record gate refused has had its 404 and learns nothing here.
+        refuse_if_case_read_only(conn, user, case_id, "ingest.read")
+    try:
+        return IngestService(conn).triage_record(
+            record_id, actor_id=user.user_id, state=body.state,
+            reason=body.reason, linked_to=body.linked_to)
+    except IngestError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
+class AttachRecordBody(BaseModel):
+    case_id: UUID
+    reason: str
+
+
+@router.post("/records/{record_id}/attach", response_model=dict)
+def attach_record(
+    record_id: UUID, body: AttachRecordBody,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Attach a quarantined record to a case.
+
+    Two gates, one per side. The RECORD needs the operator verb, fresh (it
+    is in quarantine, so nothing else reaches it). The TARGET case needs
+    `ingest.replay` on it with the record's labels: the verb that already
+    puts a repaired dead letter into a case, which is the same act, and
+    one the case's own team holds. Not `ingest.manage` on the case, which
+    is what parsing a batch into a case asks for: that permission lives
+    only in the SYS_ADMIN role, and a case assignment carries a case role,
+    so no real assignment ever grants it and the verb could never be used.
+    The upshot is the right one: material goes into a case on the word of
+    somebody who works that case. A record already in a case is refused;
+    a read-only case (CLOSED, ARCHIVED or PURGED) is refused by the gate.
+    """
+    current = _authorise_record(conn, user, record_id, "ingest.read")
+    if current is not None:
+        raise Problem(409, "Conflict",
+                      "this record is already attached to a case. Attach "
+                      "moves material out of quarantine, never between "
+                      "cases.")
+    _cid, classification, compartments = _own_record(conn, record_id)
+    # Refuses a read-only case too: `ingest.replay` is a content verb.
+    authorize_object(conn, user, case_id=body.case_id,
+                     permission_key="ingest.replay",
+                     classification=classification,
+                     compartments=compartments)
+    try:
+        return IngestService(conn).attach_record(
+            record_id, case_id=body.case_id, actor_id=user.user_id,
+            reason=body.reason)
+    except IngestError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+
+
+class CategoryBody(BaseModel):
+    category: str
+    reason: str
+
+
+@router.post("/records/{record_id}/category", response_model=dict)
+def correct_category(
+    record_id: UUID, body: CategoryBody,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Correct the classifier's category (ux12-feeds:confidence-label-
+    ambiguous, 2026-09-23). docs/12: "Keep the confidence and let analysts
+    correct it; corrections are training data."
+
+    `ingest.replay` on the record's case, the repair verb: a category
+    decides the record's retention, its handling rules and its score, so
+    changing it is a repair of what the machine made, which REVIEWER, who
+    reads the queue, does not do. A quarantined record needs the operator
+    verb. The classifier's output is kept in the audit event and returned
+    on the row as `category_was`.
+    """
+    # Read first, 404 for a record the caller may not see; then the repair
+    # verb, which refuses 403 like any other missing verb on a case the
+    # caller is on, because they already know the record is there.
+    case_id = _authorise_record(conn, user, record_id, "ingest.read")
+    if case_id is not None:
+        _cid, classification, compartments = _own_record(conn, record_id)
+        # Refuses a read-only case too: `ingest.replay` is a content verb.
+        # Not counted: the read gate above resolved these same labels and
+        # counted this request if a grant was what let it through, and a
+        # correction read as two uses on the officer's card (r2 u1,
+        # 2026-09-24). The verb, the lifecycle and the refusal are asked
+        # all the same.
+        authorize_object(conn, user, case_id=case_id,
+                         permission_key="ingest.replay", count_use=False,
+                         classification=classification,
+                         compartments=compartments)
+    try:
+        return IngestService(conn).correct_category(
+            record_id, actor_id=user.user_id, category=body.category,
+            reason=body.reason)
+    except IngestError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 @router.post("/records/{record_id}/score", response_model=dict)
@@ -914,13 +1578,73 @@ def rescore(
     operator unable to sort the one queue nobody else works, while leaving
     the quarantine branch checking nothing at all. Both halves were wrong
     in the same line.
+
+    Answers the score before and after and the reasons (ux12-feeds:
+    rescore-silent, 2026-09-23): the button reloaded the list and said
+    nothing, so an unchanged score looked like a click that did not work.
     """
-    _authorise_record(conn, user, record_id, "ingest.read")
+    record_case = _authorise_record(conn, user, record_id, "ingest.read")
+    before = conn.execute(
+        "SELECT priority FROM ingest.record WHERE id = %s",
+        (record_id,)).fetchone()
     try:
-        score = IngestService(conn).score_record(record_id)
+        IngestService(conn).score_records([record_id], actor_id=user.user_id)
     except IngestError as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
-    return {"record_id": str(record_id), "priority": score}
+    after = conn.execute(
+        "SELECT priority, priority_detail FROM ingest.record WHERE id = %s",
+        (record_id,)).fetchone()
+    if before is None or after is None:
+        raise Problem(404, "Not found", "no such record")
+    allowed = {str(c) for c in _authorised_cases_for_ingest(conn, user)}
+    return {"record_id": str(record_id), "priority": float(after[0]),
+            "priority_before": float(before[0]),
+            "priority_detail": _visible_detail(after[1], record_case, allowed)}
+
+
+class RescoreAllBody(BaseModel):
+    case_id: UUID
+
+
+@router.post("/records/rescore", response_model=dict,
+             dependencies=[Depends(rate_limit("capture"))])
+def rescore_case(
+    body: RescoreAllBody,
+    user: CurrentUser = Depends(require_global("ingest.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Rescore every record in one case's queue the caller may read.
+
+    The reason to rescore is that a watch changed, and a watch changes for
+    a whole case at once; pressing Rescore on each row is how the records
+    below the first screen never get asked (ux12-feeds:rescore-silent).
+    Metered under `capture`: one call, many writes. The case gate and the
+    caller's labels bound it exactly as `/records` bounds the listing.
+
+    **One break-glass use when a grant let it in (r2 c6, 2026-09-24).**
+    The membership test is a question and counts nothing, which is right
+    for the listing it was written for and wrong for a request that then
+    writes every record's priority: on a case reached only through a
+    grant, a whole-case rescore left the officer's card reading unused.
+    So the request is gated once more at the case's own labels, counted.
+    The record filter stays at the caller's own ceiling, not the grant's,
+    as `/records` filters it: raising it would reach records above the
+    caller's clearance on a case within it, which this gate would not
+    count.
+    """
+    allowed = _authorised_cases_for_ingest(conn, user)
+    if body.case_id not in allowed:
+        raise Problem(404, "Not found", "no such case")
+    authorize_object(conn, user, case_id=body.case_id,
+                     permission_key="ingest.read")
+    clearance, compartments = user_ceiling(conn, user.user_id)
+    ids = [row[0] for row in conn.execute(
+        """SELECT id FROM ingest.record
+            WHERE case_id = %s AND purged_at IS NULL
+              AND classification <= %s::core.tlp AND compartments <@ %s""",
+        (body.case_id, clearance.name, list(compartments))).fetchall()]
+    result = IngestService(conn).score_records(ids, actor_id=user.user_id)
+    return {"case_id": str(body.case_id), **result}
 
 
 @router.get("/keys", response_model=dict)
@@ -957,7 +1681,18 @@ def keys(
         "revoked_at": r[10].isoformat() if r[10] else None,
         "revoked_reason": r[11],
         "batch_count": r[12],
-    } for r in rows], "count": len(rows)}
+    } for r in rows], "count": len(rows),
+        # What the Issue form may offer (ux12-feeds:keys-tab-read-only,
+        # 2026-09-23): the categories the database accepts, which of them
+        # need a compartment, and the compartments THIS caller holds. A key
+        # forced into a compartment its issuer cannot read files every
+        # record it brings where nobody on the operator side can see it.
+        "form": {
+            "categories": list(CATEGORIES),
+            "needs_compartment": sorted(HIGH_RISK_CATEGORIES),
+            "compartments": sorted(user_ceiling(conn, user.user_id)[1]),
+            "max_ttl_days": 365,
+        }}
 
 
 # ---------------------------------------------------------------------------

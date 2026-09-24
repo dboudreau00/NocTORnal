@@ -338,3 +338,51 @@ def test_the_generated_env_declares_where_rejected_samples_go(path: Path):
                  f"{DISPOSITION_ENV}={PRESERVE}"):
         assert line in src, (
             f"{path.name} generates .env.local without {line!r}")
+
+
+# ---------------------------------------------------------------------------
+# 127.0.0.1, not localhost (Alpha 6 pre-release check, 2026-09-23)
+# ---------------------------------------------------------------------------
+#
+# The dev stack publishes every port on 127.0.0.1 only, so nothing answers
+# on ::1. A client that resolves localhost to ::1 first, which is the
+# Windows default order, waits about two seconds for each refused attempt
+# (measured at 2.01 to 2.05 s) before it tries IPv4. So every address the
+# installers write into .env.local, and every default the launchers apply,
+# names 127.0.0.1.
+
+#: file -> the addresses it must write or apply. launch.sh sets no Redis
+#: or SMTP default and has none to hold.
+_LOOPBACK_SETTINGS = {
+    "install.sh": ("DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal",
+                   "REDIS_URL=redis://127.0.0.1:6379/0",
+                   "MINIO_ENDPOINT=127.0.0.1:9000",
+                   "SMTP_HOST=127.0.0.1"),
+    "install.ps1": ("'DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'",
+                    "'REDIS_URL=redis://127.0.0.1:6379/0'",
+                    "'MINIO_ENDPOINT=127.0.0.1:9000'",
+                    "'SMTP_HOST=127.0.0.1'"),
+    "launch.sh": ("set_default DATABASE_URL     'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'",
+                  "set_default MINIO_ENDPOINT   '127.0.0.1:9000'"),
+    "launch.ps1": ("DATABASE_URL     = 'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'",
+                   "REDIS_URL        = 'redis://127.0.0.1:6379/0'",
+                   "MINIO_ENDPOINT   = '127.0.0.1:9000'"),
+}
+
+
+@pytest.mark.parametrize("path", (*INSTALLERS, *LAUNCHERS), ids=lambda p: p.name)
+def test_the_dev_addresses_name_127_0_0_1_not_localhost(path: Path):
+    src = path.read_text(encoding="utf-8")
+    for setting in _LOOPBACK_SETTINGS[path.name]:
+        assert setting in src, f"{path.name} no longer writes {setting!r}"
+    # No line that is not a comment names localhost at all: a heredoc body
+    # or a string is what reaches .env.local, a default or the screen. The
+    # generated file's own comment lines start with `#` and may.
+    code = [line for line in src.splitlines()
+            if not line.strip().startswith("#")
+            and not line.strip().startswith("'#")]
+    offenders = [line.strip() for line in code if "localhost" in line]
+    assert not offenders, (
+        f"{path.name} still writes or prints localhost; nothing listens on "
+        f"::1, so a client that tries it first waits for the refusal: "
+        f"{offenders}")

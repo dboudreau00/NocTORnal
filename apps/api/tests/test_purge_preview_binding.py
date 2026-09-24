@@ -68,6 +68,10 @@ def route(monkeypatch):
     purger = _Purger([_item(2), _item(3, held=True)])
     monkeypatch.setattr(governance, "_case_scoped", lambda *a, **k: None)
     monkeypatch.setattr(governance, "_purger", lambda conn: purger)
+    # The dry run's item list reads exhibit titles from the database since
+    # 2026-09-23 (ux15-report:due-list-no-forward-view-no-names); this half
+    # has none, and the list is proven in test_retention_due_named_pg.py.
+    monkeypatch.setattr(governance, "_due_rows", lambda conn, user, items: [])
     user = governance.CurrentUser(user_id=UUID(int=7), session_id=UUID(int=8),
                                   session_mfa_at=AT)
 

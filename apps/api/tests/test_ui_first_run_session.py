@@ -463,9 +463,20 @@ new N('account-codes-new', sheet, 'BUTTON');
 new N('account-close', sheet, 'BUTTON');
 const app = new N('view-app', body);
 new N('btn-account', app, 'BUTTON');
-const row = new N('triage-row', app, 'BUTTON');
-new N('triage-list', app);
+// A triage card inside the list, as the queue draws one: the letters act
+// only in the list (ux18-a11y:triage-letter-keys-global) and on a card,
+// never on a button (ux08-triage:triage-keys-fire-on-browser-chords).
+const triageList = new N('triage-list', app);
+const row = new N('triage-row', triageList, 'DIV',
+  { classList: { contains: (c) => c === 'triage-card' } });
+document.body = body;
 new N('keys-scrim', body, 'DIV', { hidden: true });
+window.confirm = () => true;
+function anyDialogOpen() {
+  return ['account-scrim', 'reauth-scrim', 'keys-scrim'].some((id) => !byId[id].hidden);
+}
+function triageLettersOn() { return true; }
+function triageAcceptQuestion() { return 'Accept?'; }
 
 const state = { tab: 'triage', triage: [{ id: 'p1' }], triageIndex: 0 };
 const SESSION = { mode: null, codesLeft: 3, confirmWaiters: [] };
@@ -481,7 +492,8 @@ function submitReauth() {} function openReauth() {} function openAccount() {}
 function adoptStepUp() {} function api() {} function hideIdleWarning() {}
 function fail() {} function issueRecoveryCodes() {}
 """ + "\n".join(_fn(n) for n in (
-        "onTriageKey", "setAccountOpen", "topSessionSheet", "closeOverSheets",
+        "triageKeyTarget", "onTriageKey", "setAccountOpen", "topSessionSheet",
+        "closeOverSheets",
         "warningBesides", "sheetFocusables", "onSheetKey", "keepKeysInSheet",
         "escapeSessionSheet", "initSession")) + r"""
 initSession();
@@ -591,7 +603,8 @@ def test_a_mid_session_401_keeps_the_app_and_says_what_was_not_saved():
     assert "addEventListener('beforeunload', guardUnsaved)" in lapsed
     assert "NOT saved" in _fn("describeLapse")
     # The sheet signs the SAME account back in.
-    assert "email: SESSION.email" in _fn("submitReauth")
+    assert "reauthSignIn(errBox)" in _fn("submitReauth")
+    assert _fn("reauthSignIn").count("email: SESSION.email") == 2
     assert re.search(r'id="reauth-email"[^>]*\breadonly\b', _html())
     # A lapsed session is not signed in, for the shortcuts and the socket.
     assert "!SESSION.lapsed" in _fn("signedIn")
@@ -676,12 +689,13 @@ def test_a_sign_in_in_another_tab_moves_this_tabs_limits_too():
         + "".join(f"function {n}() {{ calls.push('{n}'); }}\n" for n in (
             "hideIdleWarning", "noteSessionActivity", "renderAccountChip",
             "forgetResume", "clearSessionBanners", "connectLive", "showCaseList",
-            "sessionBanner", "refreshGlassChip"))
+            "sessionBanner", "refreshGlassChip", "relinkLive"))
         + "function closeReauth() { calls.push('closeReauth'); SESSION.mode = null; }\n"
         "function setAccountOpen(on) { calls.push('account:' + on); }\n"
         "function guardUnsaved() {}\n"
         + "\n".join(_fn(n) for n in ("adoptStepUp", "sessionRenewed",
-                                     "onSessionMessage", "describeLapse"))
+                                     "onSessionMessage", "describeLapse",
+                                     "lapseReason"))
         + "\nconst out = {};\n"
         "const renewed = { t: 'renewed', user: 'u', expiresIn: 43200, stepUpIn: 900 };\n"
         # 1. A live tab, no sheet, holding the old session's deadline.
@@ -715,6 +729,11 @@ def test_a_sign_in_in_another_tab_moves_this_tabs_limits_too():
     assert "closeReauth" not in got["live"]["calls"]
     assert "clearSessionBanners" not in got["live"]["calls"]
     assert "hideIdleWarning" in got["live"]["calls"]
+    # The socket is moved onto the new session too (verifier of
+    # ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23); a lapsed
+    # tab reopens it through connectLive instead.
+    assert "relinkLive" in got["live"]["calls"]
+    assert "relinkLive" not in got["lapsedCase"]["calls"]
     assert got["lapsedCase"]["lapsed"] is False
     assert {"closeReauth", "connectLive"} <= set(got["lapsedCase"]["calls"])
     assert "your case" not in got["listText"] and "case list" in got["listText"], (
@@ -799,6 +818,9 @@ async function fetch(url, init) {
 const SESSION = {};
 function closeReauth() { log.push('closeReauth'); SESSION.mode = null; }
 function endSession(title) { log.push('endSession:' + title); cookie = null; }
+// The page is discarded after the hand-over (ux01-firstrun:logout-leaves-
+// case-in-page, 2026-09-23); its own test is in test_ui_signin_and_cases.
+function discardPage() { log.push('discardPage'); }
 """ + _fn("revokeIfStillOurs") + "\n" + _fn("leaveReauth") + r"""
 const ok = (body) => ({ ok: true, status: 200, json: async () => body });
 const reset = (extra) => { log.length = 0; cookie = 'csrf-1';
@@ -836,16 +858,17 @@ const reset = (extra) => { log.length = 0; cookie = 'csrf-1';
         'GET /api/v1/auth/me {} bounded',
         'POST /api/v1/auth/logout {"x-csrf-token":"csrf-1"} bounded',
     ], got["same"]
-    assert got["same"][2:4] == ["closeReauth", "endSession:Signed out"], (
-        "the sign-out must go out BEFORE endSession drops the CSRF cookie")
-    assert "focus:login-password" in got["same"]
+    assert got["same"][2:] == ["closeReauth", "endSession:Signed out", "discardPage"], (
+        "the sign-out must go out BEFORE endSession drops the CSRF cookie, "
+        "and the page goes last")
     assert not any("logout" in line for line in got["other"]), (
         "another analyst's session, signed in from another tab, was revoked")
     for case in ("other", "gone", "unreachable"):
-        assert got[case][-3:-1] == ["closeReauth", "endSession:Signed out"], (case, got[case])
-    assert got["refused"][:2] == ["closeReauth", "endSession:Signed out"], (
+        assert got[case][-3:] == ["closeReauth", "endSession:Signed out", "discardPage"], (
+            case, got[case])
+    assert got["refused"] == ["closeReauth", "endSession:Signed out", "discardPage"], (
         "a request was sent for a session the server had already refused")
-    assert not any("endSession" in line or "logout" in line
+    assert not any("endSession" in line or "logout" in line or "discard" in line
                    for line in got["renewedMeanwhile"]), (
         "the tab signed out after another tab had signed it back in")
     logout = [line for line in got["pairChanged"] if "logout" in line]

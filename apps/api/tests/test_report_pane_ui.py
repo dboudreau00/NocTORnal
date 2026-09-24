@@ -83,7 +83,9 @@ def test_only_the_gate_s_verdict_is_shown_as_an_egress_refusal():
         "a permission or sign-in 403 is still presented as an egress refusal")
     assert "reportAccessRefusal(err)" in release
     refusal = _fn("reportAccessRefusal")
-    assert "Lead investigator" in refusal and "report.export" in refusal
+    # The role, and no permission code (ux19-copy developer-speak-in-copy,
+    # 2026-09-23): an analyst acts on who can give access, not on a key.
+    assert "Lead investigator" in refusal and "report.export" not in refusal
 
 
 def test_the_new_copy_has_no_dashes():

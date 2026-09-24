@@ -116,7 +116,9 @@ def test_the_reviewed_lines_use_the_helpers():
     for fn, call in (
             ("loadApprovals", "countOf(rows.length, 'request', 'requests')"),
             ("loadUnverified", "countOf(claims.length, 'claim', 'claims')"),
-            ("renderSelectors", "countOf(s.observation_cnt, 'time', 'times')"),
+            # The observation count moved into selectorSeenWords with its
+            # dates (ux05-inspector:first-last-seen-always-dash, 2026-09-23).
+            ("selectorSeenWords", "countOf(n, 'time', 'times')"),
             ("custodyVerdict", "countOf(r.forks, 'fork', 'forks')"),
             ("loadReadiness", "agree(failed, 'needs', 'need')"),
             ("renderBlockingBanner",
@@ -178,22 +180,30 @@ console.log(JSON.stringify([
 @needs_node
 def test_the_cohesion_line_agrees_for_one_and_for_many(tmp_path):
     """The Analysis frame read "1 communities" beside a hedged count of
-    components."""
-    got = _run(["countOf", "agree", "renderCohesion"], """
+    components. Since 2026-09-23 the line is in plain words, with the
+    cluster sizes and a reading of the modularity (ux10-analytics:
+    communities-anonymous-table-unsortable), and still agrees."""
+    got = _run(["countOf", "agree", "andList", "modularityReading",
+                "communityNo", "graphButton", "renderCohesion"], """
 const lines = [];
 for (const c of [
     {community_count: 1, modularity: 0.4123, components: 1, component_sizes: [6]},
-    {community_count: 3, modularity: 0.5, components: 2, component_sizes: [4, 2]}]) {
+    {community_count: 3, modularity: 0.5, components: 2, component_sizes: [4, 2]},
+    {community_count: 4, modularity: 0.334, components: 1, component_sizes: [30],
+     community_sizes: [{community: 0, size: 11}, {community: 1, size: 8},
+                       {community: 2, size: 6}, {community: 3, size: 5}]}]) {
   renderCohesion({cohesion: c});
   lines.push(text($('an-cohesion').children[0].children[0]));
 }
 console.log(JSON.stringify(lines));
-""", tmp_path, extra="function metricNum(v, dp) { return Number(v).toFixed(dp); }")
+""", tmp_path, extra="function metricNum(v, dp) { return Number(v).toFixed(dp); }\n"
+                     "const state = { analyticsCommunityNo: null };")
     assert got == [
-        "1 community (Leiden, modularity 0.412) across 1 connected component "
-        "of size 6.",
-        "3 communities (Leiden, modularity 0.500) across 2 connected "
-        "components of sizes 4, 2.",
+        "1 cluster across 1 connected component of 6 entities.",
+        "3 clusters, strongly separated, across 2 connected components of "
+        "sizes 4 and 2.",
+        "4 clusters (sizes 11, 8, 6 and 5), moderately separated, across 1 "
+        "connected component of 30 entities.",
     ]
 
 
@@ -245,6 +255,8 @@ def test_the_readiness_summary_agrees_its_verb(tmp_path):
     got = _run(["countOf", "agree", "loadReadiness"], """
 let reply;
 async function api() { return reply; }
+function admStepUp(call) { return call(); }
+function admStepUpRefused() { return false; }
 function renderBlockingBanner() {}
 function readinessRow() { return el('div'); }
 function refusalText(err, fallback) { return fallback; }
@@ -266,8 +278,12 @@ function refusalText(err, fallback) { return fallback; }
 _ACH_BODY = """
 function fact(k, v, cls) { return el('span', 'fact ' + (cls || ''), k + ' ' + v); }
 function withSafeLabel(r) { return r; }
-const hyp = (id) => ({id: id, statement: id, inconsistency: 0, support: 0,
-                      assessed: 1, unassessed: 0});
+function visibleText(s) { return s === null || s === undefined ? '' : String(s); }
+function fmtTime(x) { return String(x); }
+const ACH_STATUS = [];
+const ACH_STATUS_CHIP = {};
+const hyp = (id, i) => ({id: id, number: i + 1, statement: id, inconsistency: 0,
+                         support: 0, assessed: 1, unassessed: 0});
 function nextLine(evidence, cells, hypotheses) {
   renderAchRanking({hypotheses: hypotheses, evidence: evidence, cells: cells,
                     refute_first: 'a1', least_inconsistent: null});
@@ -282,7 +298,9 @@ def test_the_next_test_line_reads_as_english_for_both_kinds_of_row(tmp_path):
     """An unfinished row's diagnosticity is unknown, so it is not "the most
     diagnostic item"; the columns it lacks are listed as a sentence lists
     them; and a blank cell is not "a neutral" but a neutral one."""
-    got = _run(["achNextTest", "renderAchRanking"], """
+    # The ranking's helpers since the ux11-ach pass (2026-09-23).
+    got = _run(["achNextTest", "renderAchRanking", "achKey", "achColumns",
+                "achNum", "achAnd", "achCard", "achSubject"], """
 const four = ['h1', 'h2', 'h3', 'h4'].map(hyp);
 console.log(JSON.stringify([
   nextLine([{assertion_id: 'a1', label: 'hal_quarry', is_incomplete: true}],
@@ -300,9 +318,9 @@ console.log(JSON.stringify([
     assert unfinished == (
         "next test Score hal_quarry against H2, H3 and H4. Its row is "
         "unfinished, so its diagnosticity is unknown rather than zero, and "
-        "finishing the row is the cheapest work available here."), unfinished
+        "finishing the row is the cheapest work available here. Score it now"), unfinished
     assert partial == (
         "next test Score same builder against H3 and H4. It is the most "
         "diagnostic item with a blank cell, and a blank cell is a gap, not a "
-        "neutral one."), partial
+        "neutral one. Score it now"), partial
     assert "against H4. It is the most diagnostic" in single, single

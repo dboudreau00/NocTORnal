@@ -10,7 +10,7 @@
     anything (release finding R1). That script has since been DELETED, not
     merely deprecated: it defaulted to this same destination path, so the
     superseded one could silently overwrite a good package with six files
-    that install nothing -- and its name is the one that sounds correct to
+    that install nothing, and its name is the one that sounds correct to
     run. This is now the only packaging script.
 
     ## Why `git archive` and never a zip of the working tree (R2)
@@ -21,7 +21,7 @@
 
       .env.local   the real TOTP KEK. Double damage: the secret leaks, AND
                    both installers see the file exists and skip secret
-                   generation -- so the recipient runs on the dev key and
+                   generation, so the recipient runs on the dev key and
                    never gets an ingest pepper.
       .venv        a copied Windows venv passes install.ps1's existence
                    check but its pyvenv.cfg points at THIS machine's
@@ -84,7 +84,10 @@ try {
     $dirty = git status --porcelain
     if ($dirty) {
         Warn 'The working tree has uncommitted changes. They will NOT be'
-        Warn 'packaged -- git archive exports the commit, not the directory:'
+        # Colons and full stops where two hyphens stood in for a dash, in
+        # this and every other printed line (Alpha 6 pre-release check,
+        # 2026-09-23).
+        Warn 'packaged, because git archive exports the commit, not the directory:'
         $dirty -split "`n" | Select-Object -First 12 | ForEach-Object {
             if ($_) { Write-Host "      $_" -ForegroundColor DarkYellow }
         }
@@ -131,16 +134,19 @@ try {
         if (Test-Path (Join-Path $Destination $name)) { $leaked += $name }
     }
     if ($leaked.Count) {
-        Die ("PACKAGE IS UNSAFE -- it contains: " + ($leaked -join ', ') +
+        Die ("PACKAGE IS UNSAFE. It contains: " + ($leaked -join ', ') +
              "`n  Do not hand this over. git archive should have excluded them.")
     }
     Good 'no .env.local, no .venv, no .git, no screenshots'
 
+    # constraints.txt since 2026-09-23 (sec-pin-dependencies): both
+    # installers refuse to run without it.
     foreach ($needed in @('alembic.ini', 'release/install.ps1',
                           'release/install.sh', 'apps/api/pyproject.toml',
+                          'constraints.txt',
                           'infra/docker-compose.yml', 'LICENSE')) {
         if (-not (Test-Path (Join-Path $Destination $needed))) {
-            Die "PACKAGE IS INCOMPLETE -- missing $needed"
+            Die "PACKAGE IS INCOMPLETE: missing $needed"
         }
     }
     Good 'installers, alembic.ini, compose file and LICENSE all present'
@@ -164,7 +170,7 @@ try {
         (Join-Path $Destination 'release\install.ps1'),
         [ref]$null, [ref]$psErrors) | Out-Null
     if ($psErrors -and $psErrors.Count) {
-        Die ("install.ps1 does not parse -- " + $psErrors[0].Message +
+        Die ("install.ps1 does not parse: " + $psErrors[0].Message +
              " (line " + $psErrors[0].Extent.StartLineNumber + ")")
     }
     Good 'install.ps1 parses'

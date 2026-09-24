@@ -29,12 +29,14 @@ from __future__ import annotations
 import email
 import email.policy
 import hashlib
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
@@ -898,12 +900,15 @@ def selector_candidates_for_call(call: dict) -> list[dict]:
         kind = "SIP_URI" if pai.lower().startswith(("sip:", "sips:", "tel:")) else "PHONE"
         out.append({"selector_type": kind, "value": pai, "strength": "durable",
                     "why": "P-Asserted-Identity is set by the trusted network"})
-    for uri_field in ("sip_from_uri", "sip_to_uri"):
+    # The field in words: the reason is shown on the call row, and a raw
+    # column name there read as developer speak (2026-09-23).
+    for uri_field, words in (("sip_from_uri", "the SIP From URI"),
+                             ("sip_to_uri", "the SIP To URI")):
         value = (call.get(uri_field) or "").strip()
         if value:
             out.append({"selector_type": "SIP_URI", "value": value,
                         "strength": "durable",
-                        "why": f"{uri_field} came from the trunk, not the display"})
+                        "why": f"{words} came from the trunk, not the display"})
     called = (call.get("called_number_e164") or "").strip()
     if called:
         out.append({"selector_type": "PHONE", "value": called,
@@ -992,6 +997,321 @@ def _boundary_seq(hops: list[Hop]) -> int:
         if hop.is_trusted_boundary:
             return hop.seq
     return 0
+
+
+def merge_candidates(candidates: list[dict]) -> list[dict]:
+    """Selector candidates de-duplicated by `(selector_type, value)`, the
+    reasons merged in order.
+
+    ux14-deception:calls-vouched-and-tooltip-only (2026-09-23). A call
+    whose `sip_from_uri` and P-Asserted-Identity carry the same URI listed
+    it twice, so a reader could not tell two selectors from three. One row
+    per selector, every reason it was offered on that row, and the
+    strongest strength any reason gave it.
+    """
+    out: list[dict] = []
+    seen: dict[tuple, dict] = {}
+    for c in candidates:
+        key = (c.get("selector_type"), c.get("value"))
+        if key in seen:
+            row = seen[key]
+            if c.get("why") and c["why"] not in row["reasons"]:
+                row["reasons"].append(c["why"])
+                row["why"] = "; ".join(row["reasons"])
+            if c.get("strength") == "durable":
+                row["strength"] = "durable"
+            continue
+        row = {**c, "reasons": [c["why"]] if c.get("why") else []}
+        seen[key] = row
+        out.append(row)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Across the three channels (ux14-deception:ecrime-no-cross-channel-pivot)
+# ---------------------------------------------------------------------------
+#
+# The case this pane was built for is one actor running a phishing kit, a
+# BEC mail and a spoofed bank call from one VPS within an hour, and the pane
+# showed three silos: the shared address was on the capture's last hop, the
+# message's trusted Received hop and the call's source, and an analyst had
+# to copy it between sub-tabs by hand to notice (the call's never showed at
+# all). docs/19 calls cross-channel reuse "precisely the question this
+# platform exists to answer". Each record now says where else in the case
+# its hosts and addresses were seen, computed over what the caller may see.
+#
+# What takes part is what the infrastructure recorded, and what the sender
+# typed is named as such: the hosts in the message's Return-Path and
+# Message-ID are the sender's, and a Received hop below the boundary is
+# never used at all (it is a claim, and matching on it is the classic BEC
+# attribution error). The sending address takes part only when the boundary
+# is confirmed, for `selector_candidates_for_email`'s reason: at an assumed
+# hop 0 it can be the recipient's own relay.
+
+def _host_of(value: str | None) -> str | None:
+    """The host of a URL, a bare host, or None. Lower case, no trailing
+    dot, so `Evil.Example.` and `evil.example` meet."""
+    if not value:
+        return None
+    text = value.strip()
+    if "://" not in text:
+        text = "http://" + text
+    try:
+        host = urlsplit(text).hostname
+    except ValueError:
+        return None
+    host = (host or "").rstrip(".").lower()
+    return host or None
+
+
+def _sip_host(uri: str | None) -> str | None:
+    """`sip:44471@trunk-04.example;user=phone` -> `trunk-04.example`."""
+    if not uri:
+        return None
+    text = uri.strip()
+    if not text.lower().startswith(("sip:", "sips:")):
+        return None
+    rest = text.split(":", 1)[1]
+    rest = rest.split("@", 1)[1] if "@" in rest else rest
+    host = re.split(r"[;:>?]", rest, maxsplit=1)[0]
+    return host.rstrip(".").lower() or None
+
+
+def _ip_of(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return None
+
+
+#: How each channel is named when another record points at it.
+CHANNEL_WORDS = {"capture": "web capture", "email": "email", "call": "call"}
+
+
+def _observe(bucket: dict, channel: str, record_id: str, kind: str,
+             value: str | None, where: str, *, claimed: bool = False) -> None:
+    """File one observable under `(kind, value)`: which record, and where
+    in it. `claimed` marks a value the sender typed rather than one a
+    machine recorded, so the console can say so."""
+    if not value:
+        return
+    bucket.setdefault((kind, value), []).append(
+        {"channel": channel, "id": record_id, "where": where,
+         "claimed": claimed})
+
+
+def cross_channel(observed: dict) -> dict[tuple[str, str], list[dict]]:
+    """`{(channel, record id): [also-seen entries]}` from the observables
+    `DeceptionService._observables` filed.
+
+    One entry per value a record shares with at least one OTHER record:
+    the value (defanged when it is a host), where it sits in this record,
+    and every other record it sits in, with where. Two sightings inside
+    one record are one entry: that the final URL and the last hop share a
+    host is not news."""
+    out: dict[tuple[str, str], list[dict]] = {}
+    for (kind, value), sightings in observed.items():
+        records = {(s["channel"], s["id"]) for s in sightings}
+        if len(records) < 2:
+            continue
+        for record in sorted(records):
+            here = [s for s in sightings if (s["channel"], s["id"]) == record]
+            elsewhere: dict[tuple[str, str], list[str]] = {}
+            claimed: dict[tuple[str, str], bool] = {}
+            for s in sightings:
+                key = (s["channel"], s["id"])
+                if key == record:
+                    continue
+                elsewhere.setdefault(key, [])
+                if s["where"] not in elsewhere[key]:
+                    elsewhere[key].append(s["where"])
+                claimed[key] = claimed.get(key, True) and s["claimed"]
+            out.setdefault(record, []).append({
+                "kind": kind, "value": value,
+                "value_defanged": defang(value) if kind == "host" else value,
+                "here": ", ".join(dict.fromkeys(h["where"] for h in here)),
+                "here_claimed": all(h["claimed"] for h in here),
+                "elsewhere": [
+                    {"channel": ch, "id": rid,
+                     "channel_words": CHANNEL_WORDS[ch],
+                     "where": ", ".join(wheres),
+                     "claimed": claimed[(ch, rid)]}
+                    for (ch, rid), wheres in sorted(elsewhere.items())],
+            })
+    for entries in out.values():
+        entries.sort(key=lambda e: (e["kind"] != "ip", e["value"]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# In case search (ux14-deception:ecrime-no-cross-channel-pivot)
+# ---------------------------------------------------------------------------
+#
+# The finding's last part: "index deception hosts, IPs and URLs in case
+# search". Search found the entity and the exhibit that named an address and
+# never the phishing page, the message or the call it sat on, because
+# nothing searched these tables. The same observables `cross_channel` reads,
+# whole URLs included, matched by fragment over what the caller may see.
+
+#: Fewer characters than this match nearly every address in a case, which
+#: is a list, not an answer. The Search pane's own floor is the same.
+SEARCH_MIN = 3
+
+
+def search_needle(query: str | None) -> str:
+    """The query as it is matched: lower case, and refanged, so a value
+    pasted from a defanged report (`hxxps://evil[.]example`) finds the
+    stored one. The inverse of what `defang` writes, and nothing more."""
+    text = (query or "").strip().lower().replace("[.]", ".")
+    return re.sub(r"\bhxxp", "http", text)
+
+
+def search_observed(observed: dict, needle: str
+                    ) -> dict[tuple[str, str], list[dict]]:
+    """`{(channel, record id): [matches]}`: every host, address or URL in
+    `observed` (as `_observables` files them) that contains `needle`, with
+    where it sits in the record. `exact` marks a whole-value match, which
+    ranks the record first. A value the sender typed stays marked as such."""
+    out: dict[tuple[str, str], list[dict]] = {}
+    if len(needle) < SEARCH_MIN:
+        return out
+    for (kind, value), sightings in observed.items():
+        low = value.lower()
+        if needle not in low:
+            continue
+        for s in sightings:
+            entries = out.setdefault((s["channel"], s["id"]), [])
+            same = next((e for e in entries
+                         if e["kind"] == kind and e["value"] == value), None)
+            if same is None:
+                entries.append({
+                    "kind": kind, "value": value,
+                    "value_defanged": (defang(value) if kind in ("host", "url")
+                                       else value),
+                    "where": [s["where"]], "claimed": s["claimed"],
+                    "exact": low == needle})
+                continue
+            if s["where"] not in same["where"]:
+                same["where"].append(s["where"])
+            same["claimed"] = same["claimed"] and s["claimed"]
+    for entries in out.values():
+        for e in entries:
+            e["where"] = ", ".join(e["where"])
+        entries.sort(key=lambda e: (not e["exact"],
+                                    ("ip", "host", "url").index(e["kind"]),
+                                    e["value"]))
+    return out
+
+
+#: The path segment each channel's routes live under.
+CHANNEL_PATHS = {"capture": "captures", "email": "emails", "call": "calls"}
+
+
+# ---------------------------------------------------------------------------
+# Proposals from a record's durable fields
+# ---------------------------------------------------------------------------
+#
+# The per-row action the review asked for, so an overlap reaches the graph
+# through the normal proposal path rather than by an analyst retyping it.
+# Candidates are DERIVED here from the stored record and the caller names
+# one by its key: `routers/proposals.py` refuses caller-authored proposals,
+# and the same rule holds for these. INFRA for hosts and addresses, LURE for
+# the pretext. The presented caller ID never appears (invariant 9), and a
+# sending address appears only when the boundary is confirmed.
+
+def _ip_selector(ip: str) -> str:
+    return "IPV6" if ":" in ip else "IPV4"
+
+
+#: The SIP fields that name the VICTIM's end of a call, by its direction.
+#: Never proposed as the actor's infrastructure and never an "also seen
+#: in" overlap, for the reason the called number is kept out of the
+#: search label: on a vishing call (INBOUND_TO_VICTIM) the To URI is the
+#: callee, so its host is the victim's own PBX or carrier, and two calls
+#: to two employees of one company read as calls sharing infrastructure,
+#: with that PBX one Triage click from the actor's graph (final review
+#: u17, 2026-09-24). When the victim placed the call the ends swap: From
+#: and P-Asserted-Identity name the victim. When the direction is not
+#: known, To is left out too, and From stays, as it always has.
+_VICTIM_SIP_FIELDS = {
+    "OUTBOUND_FROM_VICTIM": frozenset({"sip_from_uri", "p_asserted_identity"}),
+}
+_VICTIM_SIP_DEFAULT = frozenset({"sip_to_uri"})
+
+
+def _victim_sip_fields(direction: str | None) -> frozenset[str]:
+    return _VICTIM_SIP_FIELDS.get(direction or "", _VICTIM_SIP_DEFAULT)
+
+
+def proposal_candidates(channel: str, record: dict) -> list[dict]:
+    """What one record can propose, each with a stable `key`."""
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(key, node_type, label, selector_type, why):
+        if not label or key in seen:
+            return
+        seen.add(key)
+        out.append({"key": key, "node_type": node_type, "label": label,
+                    "label_defanged": (defang(label)
+                                       if selector_type == "DOMAIN" else label),
+                    "selector_type": selector_type, "why": why})
+
+    if channel == "capture":
+        for h in record.get("hops") or []:
+            host = _host_of(h.get("url"))
+            add(f"host:{host}", "INFRA", host, "DOMAIN",
+                f"host of redirect hop {h['seq']}")
+            ip = _ip_of(h.get("resolved_ip"))
+            add(f"ip:{ip}", "INFRA", ip, _ip_selector(ip) if ip else None,
+                f"address redirect hop {h['seq']} resolved to when captured"
+                + (f" (AS{h['asn']})" if h.get("asn") else ""))
+        for field_name, words in (("requested_url", "requested URL"),
+                                  ("final_url", "final URL")):
+            host = _host_of(record.get(field_name))
+            add(f"host:{host}", "INFRA", host, "DOMAIN", f"host of the {words}")
+        title = record.get("page_title_defanged")
+        if title:
+            add("lure", "LURE", title, None,
+                "the page's title, as the kit wrote it: the pretext itself")
+    elif channel == "email":
+        origin = record.get("sending_host") or {}
+        ip = _ip_of(origin.get("ip"))
+        if ip and origin.get("boundary_confirmed"):
+            add(f"ip:{ip}", "INFRA", ip, _ip_selector(ip),
+                f"the address that connected to "
+                f"{origin.get('observed_by') or 'the recipient relay'}, "
+                f"Received hop {origin.get('seq')}, written by the "
+                f"recipient's own relay")
+        for url in record.get("extracted_urls") or []:
+            host = _host_of(url)
+            add(f"host:{host}", "INFRA", host, "DOMAIN",
+                "host of a URL in the message body")
+        subject = record.get("subject_defanged")
+        if subject:
+            add("lure", "LURE", subject, None,
+                "the message's subject, as the sender wrote it: the pretext")
+    elif channel == "call":
+        ip = _ip_of(record.get("source_ip"))
+        add(f"ip:{ip}", "INFRA", ip, _ip_selector(ip) if ip else None,
+            "the address the call's signalling came from, as the network "
+            "recorded it")
+        durable = record.get("durable") or {}
+        victim = _victim_sip_fields(record.get("direction"))
+        for field_name, words in (("sip_from_uri", "SIP From"),
+                                  ("sip_to_uri", "SIP To")):
+            if field_name in victim:
+                continue
+            host = _sip_host(record.get(field_name))
+            add(f"host:{host}", "INFRA", host, "DOMAIN",
+                f"host in the {words} URI the trunk carried")
+        if "p_asserted_identity" not in victim:
+            host = _sip_host(durable.get("p_asserted_identity"))
+            add(f"host:{host}", "INFRA", host, "DOMAIN",
+                "host in the P-Asserted-Identity the network set")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1156,7 +1476,30 @@ class DeceptionService:
                  WHERE x.case_id = %s AND {_labels_clause()}
                  ORDER BY x.captured_at DESC LIMIT %s""",
             (case_id, clearance, list(compartments), limit)).fetchall()
-        return [_capture_row(r) for r in rows]
+        out = [_capture_row(r) for r in rows]
+        # The chain rides on the list row too, in one query for the page:
+        # the row's "also seen in" and its proposals are drawn from the
+        # hops, and a row that could not say where its final hop resolved
+        # hid the address the three channels share (ux14-deception:
+        # ecrime-no-cross-channel-pivot, 2026-09-23).
+        chains = self._hops_for([r["id"] for r in out])
+        for row in out:
+            row["hops"] = chains.get(row["id"], [])
+        return out
+
+    def _hops_for(self, capture_ids: list[str]) -> dict[str, list[dict]]:
+        """`{capture id: [hop, ...]}` in `seq` order, one query."""
+        if not capture_ids:
+            return {}
+        chains: dict[str, list[dict]] = {}
+        for h in self._c.execute(
+                """SELECT capture_id, seq, url, http_status, resolved_ip, asn,
+                          server_header, hop_kind
+                     FROM deception.capture_hop
+                    WHERE capture_id = ANY(%s::uuid[]) ORDER BY capture_id, seq""",
+                (capture_ids,)).fetchall():
+            chains.setdefault(str(h[0]), []).append(_hop_row(h[1:]))
+        return chains
 
     def capture(self, capture_id: UUID, *, clearance: str,
                 compartments: frozenset[str] = frozenset()) -> dict | None:
@@ -1175,16 +1518,7 @@ class DeceptionService:
         if row is None:
             return None
         out = _capture_row(row)
-        out["hops"] = [
-            {"seq": h[0], "url": h[1], "url_defanged": defang(h[1]),
-             "http_status": h[2], "resolved_ip": str(h[3]) if h[3] else None,
-             "asn": h[4], "server_header": h[5], "hop_kind": h[6]}
-            for h in self._c.execute(
-                """SELECT seq, url, http_status, resolved_ip, asn,
-                          server_header, hop_kind
-                     FROM deception.capture_hop
-                    WHERE capture_id = %s ORDER BY seq""",
-                (capture_id,)).fetchall()]
+        out["hops"] = self._hops_for([out["id"]]).get(out["id"], [])
         return out
 
     # -- email -----------------------------------------------------------
@@ -1435,6 +1769,333 @@ class DeceptionService:
             (case_id, clearance, list(compartments), limit)).fetchall()
         return [_call_row(r) for r in rows]
 
+    # -- across the channels ---------------------------------------------
+    def _observables(self, case_id: UUID, clearance: str,
+                     compartments: frozenset[str], *,
+                     with_urls: bool = False,
+                     victim_side: bool = False) -> dict:
+        """Every host and address each record in the case carries, filed
+        by value, over the records THIS caller may see: an overlap with a
+        record above their labels must not be announced by a pointer to
+        it. See `cross_channel` for what takes part and why.
+
+        `with_urls` files each whole URL too, under kind `url`, for
+        `search`: an analyst pastes a URL as often as a host. Left out of
+        `cross_channel`, where two records sharing a host already says
+        what two sharing a URL would.
+
+        `victim_side` files the SIP hosts that name the victim's end of a
+        call (`_victim_sip_fields`), also for `search` alone: finding the
+        calls made to one company's PBX is a fair question, but two calls
+        to it are not two calls sharing the actor's infrastructure (final
+        review u17, 2026-09-24)."""
+        bucket: dict = {}
+        labels = (case_id, clearance, list(compartments))
+        joined = 'LEFT JOIN core."case" c ON c.id = x.case_id'
+        for cid, req, fin in self._c.execute(
+                f"""SELECT x.id, x.requested_url, x.final_url
+                      FROM deception.capture x {joined}
+                     WHERE x.case_id = %s AND {_labels_clause()}""", labels):
+            _observe(bucket, "capture", str(cid), "host", _host_of(req),
+                     "requested URL")
+            _observe(bucket, "capture", str(cid), "host", _host_of(fin),
+                     "final URL")
+            if with_urls:
+                _observe(bucket, "capture", str(cid), "url", req,
+                         "requested URL")
+                _observe(bucket, "capture", str(cid), "url", fin, "final URL")
+        for cid, seq, url, ip in self._c.execute(
+                f"""SELECT h.capture_id, h.seq, h.url, h.resolved_ip
+                      FROM deception.capture_hop h
+                      JOIN deception.capture x ON x.id = h.capture_id {joined}
+                     WHERE x.case_id = %s AND {_labels_clause()}""", labels):
+            _observe(bucket, "capture", str(cid), "host", _host_of(url),
+                     f"redirect hop {seq}")
+            _observe(bucket, "capture", str(cid), "ip", _ip_of(ip),
+                     f"address of redirect hop {seq}")
+            if with_urls:
+                _observe(bucket, "capture", str(cid), "url", url,
+                         f"redirect hop {seq}")
+        for mid, urls, return_path, message_id in self._c.execute(
+                f"""SELECT x.id, x.extracted_urls, x.header_return_path,
+                           x.message_id
+                      FROM deception.email_message x {joined}
+                     WHERE x.case_id = %s AND {_labels_clause()}""", labels):
+            for url in urls or []:
+                _observe(bucket, "email", str(mid), "host", _host_of(url),
+                         "URL in the body")
+                if with_urls:
+                    _observe(bucket, "email", str(mid), "url", url,
+                             "URL in the body")
+            _observe(bucket, "email", str(mid), "host", _domain_of(return_path),
+                     "Return-Path domain", claimed=True)
+            _observe(bucket, "email", str(mid), "host", _domain_of(message_id),
+                     "Message-ID host", claimed=True)
+        for mid, seq, host, ip in self._c.execute(
+                f"""SELECT h.message_id, h.seq, h.from_host, h.from_ip
+                      FROM deception.email_hop h
+                      JOIN deception.email_message x ON x.id = h.message_id
+                           {joined}
+                     WHERE x.case_id = %s AND {_labels_clause()}
+                       AND h.is_trusted_boundary AND h.seq > 0""", labels):
+            _observe(bucket, "email", str(mid), "ip", _ip_of(ip),
+                     f"sending address, Received hop {seq}")
+            _observe(bucket, "email", str(mid), "host", _host_of(host),
+                     f"sending host name as it gave it, Received hop {seq}",
+                     claimed=True)
+        for cid, ip, sip_from, sip_to, pai, direction in self._c.execute(
+                f"""SELECT x.id, x.source_ip, x.sip_from_uri, x.sip_to_uri,
+                           x.p_asserted_identity, x.direction
+                      FROM deception.call_record x {joined}
+                     WHERE x.case_id = %s AND {_labels_clause()}""", labels):
+            _observe(bucket, "call", str(cid), "ip", _ip_of(ip),
+                     "source address")
+            victim = _victim_sip_fields(direction)
+            for field_name, value, where in (
+                    ("sip_from_uri", sip_from, "SIP From host"),
+                    ("sip_to_uri", sip_to, "SIP To host"),
+                    ("p_asserted_identity", pai, "P-Asserted-Identity host")):
+                if victim_side or field_name not in victim:
+                    _observe(bucket, "call", str(cid), "host",
+                             _sip_host(value), where)
+        return bucket
+
+    def annotate(self, case_id: UUID, channel: str, rows: list[dict], *,
+                 clearance: str, compartments: frozenset[str]) -> list[dict]:
+        """Add `also_seen` and `proposable` to each row of one channel."""
+        if not rows:
+            return rows
+        seen = cross_channel(self._observables(case_id, clearance,
+                                               compartments))
+        for row in rows:
+            row["also_seen"] = seen.get((channel, row["id"]), [])
+            row["proposable"] = proposal_candidates(channel, row)
+        return rows
+
+    def search(self, case_id: UUID, query: str, *, clearance: str,
+               compartments: frozenset[str], limit: int = 50) -> dict:
+        """The captures, messages and calls in this case that carry a host,
+        address or URL containing `query`, over what the caller may see.
+
+        `{hits, total, limit, too_short}`; each hit names its channel, the
+        path segment its routes use, a label (the URL defanged, the subject
+        defanged, or the call's source address; never the number called,
+        which is the victim's), when it happened, and what matched where.
+        Records with a whole-value match first, then the newest."""
+        needle = search_needle(query)
+        if len(needle) < SEARCH_MIN:
+            return {"hits": [], "total": 0, "limit": limit, "too_short": True}
+        found = search_observed(
+            self._observables(case_id, clearance, compartments,
+                              with_urls=True, victim_side=True), needle)
+        about: dict[tuple[str, str], tuple[str, object]] = {}
+        labels = (clearance, list(compartments))
+        joined = 'LEFT JOIN core."case" c ON c.id = x.case_id'
+
+        def ids(channel: str) -> list[UUID]:
+            return [UUID(rid) for (ch, rid) in found if ch == channel]
+
+        # The labels again on the second read, rather than trusting the ids
+        # the first one produced: one rule, applied wherever rows are read.
+        if ids("capture"):
+            for rid, fin, req, at in self._c.execute(
+                    f"""SELECT x.id, x.final_url, x.requested_url, x.captured_at
+                          FROM deception.capture x {joined}
+                         WHERE x.id = ANY(%s) AND x.case_id = %s
+                           AND {_labels_clause()}""",
+                    (ids("capture"), case_id) + labels):
+                about[("capture", str(rid))] = (defang(fin or req or ""), at)
+        if ids("email"):
+            # Dated as `first_lure` dates a message: by the boundary hop's
+            # Received time, never by the sender's Date header.
+            for rid, subject, at in self._c.execute(
+                    f"""SELECT x.id, x.subject,
+                               coalesce(b.received_at, x.recorded_at)
+                          FROM deception.email_message x {joined}
+                          LEFT JOIN LATERAL (
+                                SELECT h.received_at FROM deception.email_hop h
+                                 WHERE h.message_id = x.id
+                                   AND (h.is_trusted_boundary OR h.seq = 0)
+                                 ORDER BY h.is_trusted_boundary DESC, h.seq
+                                 LIMIT 1) b ON true
+                         WHERE x.id = ANY(%s) AND x.case_id = %s
+                           AND {_labels_clause()}""",
+                    (ids("email"), case_id) + labels):
+                about[("email", str(rid))] = (
+                    _defanged_str(subject) or "(no subject)", at)
+        if ids("call"):
+            for rid, ip, at in self._c.execute(
+                    f"""SELECT x.id, x.source_ip, x.started_at
+                          FROM deception.call_record x {joined}
+                         WHERE x.id = ANY(%s) AND x.case_id = %s
+                           AND {_labels_clause()}""",
+                    (ids("call"), case_id) + labels):
+                about[("call", str(rid))] = (
+                    "from " + (_ip_of(ip) or "an unrecorded address"), at)
+        hits = []
+        for (channel, rid), matches in found.items():
+            if (channel, rid) not in about:
+                continue
+            label, at = about[(channel, rid)]
+            hits.append({
+                "channel": channel, "path": CHANNEL_PATHS[channel], "id": rid,
+                "channel_words": CHANNEL_WORDS[channel], "label": label,
+                "at": at.isoformat() if at else None,
+                "exact": any(m["exact"] for m in matches),
+                "matches": matches})
+        hits.sort(key=lambda h: h["at"] or "", reverse=True)
+        hits.sort(key=lambda h: not h["exact"])
+        return {"hits": hits[:limit], "total": len(hits), "limit": limit,
+                "too_short": False}
+
+    def first_lure(self, case_id: UUID, *, clearance: str,
+                   compartments: frozenset[str]) -> dict | None:
+        """The earliest message or call in the case the caller may see:
+        what a capture's certificate date is read against.
+
+        ux14-deception:web-durable-ids-missing (2026-09-23): a certificate
+        issued five days before the first lure is one of the two strongest
+        phishing signals docs/19 names, and nothing showed the issue date
+        at all.
+
+        A message is dated by the time on its trust-boundary Received hop
+        (the marked boundary, or hop 0 when none is marked, as everywhere
+        in this module), which the recipient's own relay wrote, and failing
+        that by when it was recorded here. Never by its Date header: the
+        sender writes that, this pane calls it a claim everywhere else, and
+        a backdated or forward-dated one moved the "issued N days before
+        the first lure" finding wherever the sender liked (the verifier,
+        2026-09-23). `basis` says which time was used: `received`,
+        `recorded` or, for a call, `started`, as the network recorded it."""
+        labels = (case_id, clearance, list(compartments))
+        joined = 'LEFT JOIN core."case" c ON c.id = x.case_id'
+        rows = self._c.execute(
+            f"""SELECT 'email', x.id,
+                       coalesce(b.received_at, x.recorded_at),
+                       CASE WHEN b.received_at IS NOT NULL THEN 'received'
+                            ELSE 'recorded' END
+                  FROM deception.email_message x {joined}
+                  LEFT JOIN LATERAL (
+                        SELECT h.received_at FROM deception.email_hop h
+                         WHERE h.message_id = x.id
+                           AND (h.is_trusted_boundary OR h.seq = 0)
+                         ORDER BY h.is_trusted_boundary DESC, h.seq
+                         LIMIT 1) b ON true
+                 WHERE x.case_id = %s AND {_labels_clause()}
+                UNION ALL
+                SELECT 'call', x.id, x.started_at, 'started'
+                  FROM deception.call_record x {joined}
+                 WHERE x.case_id = %s AND {_labels_clause()}
+                 ORDER BY 3 LIMIT 1""", labels + labels).fetchone()
+        if rows is None:
+            return None
+        return {"channel": rows[0], "id": str(rows[1]),
+                "channel_words": CHANNEL_WORDS[rows[0]],
+                "at": rows[2].isoformat(), "basis": rows[3]}
+
+    def propose(self, case_id: UUID, channel: str, record: dict, key: str,
+                *, clearance: str, compartments: frozenset[str]) -> dict:
+        """Put one candidate from `proposal_candidates` into the case's
+        triage queue. The record is the one the router fetched under the
+        caller's labels; `key` picks a candidate and nothing else.
+
+        Refused on a closed or archived case (read-only for content), and
+        for a record carrying a compartment its case does not, because an
+        accepted proposal is written at the case's compartments and would
+        shed that restriction. Already queued, or already an entity, is
+        answered as that rather than queued twice.
+
+        "Already an entity" only for an entity the caller may see
+        (`clearance`, `compartments`: the same ceiling the record was read
+        under). It returned the id of ANY node with that label, so a case
+        member below a RED node's labels learnt that it existed and got
+        its id by proposing a value from a record they could see (the
+        verifier, 2026-09-23). A node above the caller's labels is treated
+        as absent and the proposal is queued at the record's own labels:
+        whoever reviews it, and may see both, decides whether they are one
+        thing.
+
+        "Already proposed" on the same terms, for a proposal the caller's
+        Triage queue would show them (`proposals._READABLE`, the queue's
+        own predicate). The queue is filtered per reader, so a proposal
+        raised from a RED capture is not an AMBER member's to see, and
+        this lookup matched it anyway: they learnt that RED material
+        carried the host, got its id and its review state, and their own
+        AMBER suggestion was never queued, for good once the RED one was
+        rejected (final review c20, 2026-09-24). One above them is treated
+        as absent, and theirs is queued beside it."""
+        from noctornal_api.proposals import (
+            _READABLE,
+            _SOURCE_FROM,
+            KIND_NODE,
+            ProposalStore,
+        )
+
+        case = self._c.execute(
+            'SELECT code, status, compartments FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        if case is None:
+            raise DeceptionError("no such case")
+        code, status, case_comps = case
+        if status in ("CLOSED", "ARCHIVED", "PURGED"):
+            raise DeceptionError(
+                f"{code} is {status.lower()}, and a closed case takes no new "
+                f"content; reopen it to propose into it")
+        extra = sorted(frozenset(record.get("compartments") or [])
+                       - frozenset(case_comps or []))
+        if extra:
+            raise DeceptionError(
+                "this record carries compartments its case does not ("
+                + ", ".join(extra) + "), and an accepted proposal would be "
+                "written without them. Record it in the graph by hand.")
+        wanted = next((c for c in proposal_candidates(channel, record)
+                       if c["key"] == key), None)
+        if wanted is None:
+            raise DeceptionError("this record offers nothing under that key")
+        label = wanted["label"]
+        selector_type = wanted["selector_type"]
+        queued = self._c.execute(
+            "SELECT p.id, p.state" + _SOURCE_FROM
+            + """ WHERE p.case_id = %(case_id)s AND p.kind = %(kind)s
+                    AND p.payload->>'node_type' = %(node_type)s
+                    AND p.payload->>'label' = %(label)s
+                    AND """ + _READABLE + " LIMIT 1",
+            {"case_id": case_id, "kind": KIND_NODE,
+             "node_type": wanted["node_type"], "label": label,
+             "clearance": clearance, "held": sorted(compartments)}).fetchone()
+        if queued:
+            return {"proposal_id": str(queued[0]), "state": queued[1],
+                    "created": False, "label": label}
+        exists = self._c.execute(
+            f"""SELECT x.id FROM core.node x
+                  LEFT JOIN core."case" c ON c.id = x.case_id
+                 WHERE x.case_id = %s AND x.node_type = %s AND x.label = %s
+                   AND x.deleted_at IS NULL AND {_labels_clause()}
+                 LIMIT 1""",
+            (case_id, wanted["node_type"], label, clearance,
+             list(compartments))).fetchone()
+        if exists:
+            return {"proposal_id": None, "state": "IN_GRAPH",
+                    "node_id": str(exists[0]), "created": False,
+                    "label": label}
+        attrs = {"channel": channel, "record_id": record["id"]}
+        if selector_type:
+            attrs["selector_type"] = selector_type
+        proposal_id = ProposalStore(self._c).propose(
+            case_id=case_id, kind=KIND_NODE, origin=f"deception/{channel}",
+            payload={"node_type": wanted["node_type"], "label": label,
+                     "classification": record["classification"],
+                     "attrs": attrs},
+            rationale=(f"From a {CHANNEL_WORDS[channel]} in this case: "
+                       f"{wanted['why']}. "
+                       + ("Proposed from what the infrastructure recorded, "
+                          "never from what the victim was shown."
+                          if wanted["node_type"] == "INFRA" else
+                          "A lure is the story the victim was told, as the "
+                          "sender wrote it; it names nobody.")))
+        return {"proposal_id": str(proposal_id), "state": "PROPOSED",
+                "created": True, "label": label}
+
     # -- internal --------------------------------------------------------
     def _raise_to_case_floor(self, case_id: UUID, classification: str,
                              compartments: frozenset[str]
@@ -1503,6 +2164,18 @@ def _capture_row(r) -> dict:
         # is not an attribution a reader can act on.
         "captured_by_name": r[31] if len(r) > 31 else None,
     }
+
+
+def _hop_row(h) -> dict:
+    """One redirect hop: `(seq, url, http_status, resolved_ip, asn,
+    server_header, hop_kind)`. `server_header` is the site's own words,
+    so it is drawn in its defanged form, like every other string the kit
+    chose."""
+    return {"seq": h[0], "url": h[1], "url_defanged": defang(h[1]),
+            "http_status": h[2], "resolved_ip": str(h[3]) if h[3] else None,
+            "asn": h[4], "server_header": h[5],
+            "server_header_defanged": _defanged_str(h[5]),
+            "hop_kind": h[6]}
 
 
 def _sending_host(hop) -> dict | None:

@@ -160,7 +160,11 @@ def test_a_payload_classification_above_the_reviewer_is_refused_too(conn, client
                     "classification": "RED"})
     before = _nodes(conn, w["case"])
     r = _accept(client, conn, w, pid)
-    assert r.status_code == 403, r.text
+    # A RED payload is RED material: the AMBER reviewer's queue never
+    # showed it, so accept answers the same 404 as reject and defer rather
+    # than a 403 that confirms it exists (ux08-triage:accept-downgrades-
+    # classification, 2026-09-23). Either way nothing is written.
+    assert r.status_code == 404, r.text
     assert _nodes(conn, w["case"]) == before
     assert _state(conn, pid)[0] == "PROPOSED"
 
@@ -250,8 +254,14 @@ def test_an_attribute_claim_about_another_cases_entity_is_refused(
 def test_the_service_and_the_route_share_one_label_rule():
     """Pure: the label checked is the label written. Two copies of this
     expression is how the route came to check nothing."""
-    from noctornal_api.proposals import accepted_classification
+    from noctornal_api.proposals import ProposalError, accepted_classification
     assert accepted_classification({}, None) == "AMBER"
     assert accepted_classification(None, None) == "AMBER"
     assert accepted_classification({"classification": "RED"}, None) == "RED"
-    assert accepted_classification({"classification": "RED"}, "GREEN") == "GREEN"
+    # Raising is allowed; lowering below what the proposal came from is
+    # not (ux08-triage:accept-downgrades-classification, 2026-09-23). This
+    # line asserted "GREEN" until then: a RED suggestion accepted at GREEN
+    # on request, a handling downgrade by keystroke.
+    assert accepted_classification({"classification": "AMBER"}, "RED") == "RED"
+    with pytest.raises(ProposalError, match="cannot be accepted at GREEN"):
+        accepted_classification({"classification": "RED"}, "GREEN")

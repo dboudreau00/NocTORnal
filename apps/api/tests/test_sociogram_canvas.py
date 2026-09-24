@@ -171,9 +171,19 @@ def test_state_rings_stand_clear_of_the_type_ring():
     for (_, o1, w1), (k2, o2, w2) in zip(rings, rings[1:], strict=False):
         assert o2 - w2 / 2 >= o1 + w1 / 2, f"the {k2} ring overlaps the one inside it"
     draw = _fn("draw")
-    assert "canvasDisc(n.sx, n.sy, r - ringW / 2)" in draw, "the type ring is not inset"
+    # Traced in the type's own outline since 2026-09-23 (a victim is a
+    # square, context a diamond), and still inset.
+    assert "nodeOutline(shape, n.sx, n.sy, r - ringW / 2)" in draw, (
+        "the type ring is not inset")
     for key in ("proposal", "selected", "pinned", "anchor", "ego"):
         assert f"stateRing(n, '{key}'" in draw
+    # A square or diamond's rounded corner may pass r by no more than a
+    # sliver, and never into the first state ring's gap, at any zoom.
+    half, corner = _const("SHAPE_HALF_FRAC"), _const("SHAPE_CORNER_FRAC")
+    reach = (half - half * corner) * 2 ** 0.5 + half * corner
+    assert reach <= 1.05, f"a shaped node reaches {reach:.3f} r"
+    assert (reach - 1) * _const("NODE_R_MAX") * 1.6 < off - width / 2, (
+        "a shaped node's corner runs into the proposal ring's gap when zoomed in")
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +423,7 @@ def _top_fn(name: str) -> str:
     return js[start:js.index("\n}\n", start) + 2]
 
 
-_VIEW_FNS = ("clamp", "fitPad", "frameAll", "takeView", "revealNode", "inView",
+_VIEW_FNS = ("clamp", "fitPad", "fitMargins", "frameAll", "takeView", "revealNode", "inView",
              "revealPoint", "revealLink", "linkOf", "followSelection",
              "pickOnCanvas", "resizeGraph")
 
@@ -424,6 +434,9 @@ const ctx = { setTransform() {} };
 const state = { view: { scale: 1, tx: 0, ty: 0 }, graph: null, selection: null,
                 needFit: false, viewFitted: false, zoomFloor: null, viewport: null };
 let draws = 0;
+// The canvas chrome's plates (c12): none unless a scenario sets them.
+const canvasChrome = { stale: false, boxes: [], top: 0, bottom: 0 };
+function chromeBoxes() { return canvasChrome; }
 function buildGround() {}
 function draw() { draws += 1; if (state.graph) followSelection(state.graph); }
 """
@@ -545,6 +558,33 @@ for (const [w, h] of [[922, 287], [996, 389], [886, 239], [1310, 620]]) {
   out.pendingFit = { needFit: state.needFit, fitted: state.viewFitted,
                      off: g.nodes.filter(offCanvas).length };
 }
+// F. With the canvas chrome over the top and the foot (c12, 2026-09-24):
+//    the 1366x768 head row reaches 35px down and the foot row 35px up.
+//    Every entity Fit places sits clear of both bands by the largest node
+//    radius, and selecting any of them still keeps the fit.
+out.chrome = {};
+for (const [w, h] of [[922, 489], [922, 455], [996, 389], [886, 239]]) {
+  const g = setup(w, h);
+  canvasChrome.top = 35; canvasChrome.bottom = 35;
+  frameAll();
+  let under = 0, moved = 0;
+  const v0 = JSON.stringify(state.view);
+  for (const n of g.nodes) {
+    const s = screen(n);
+    if (s[1] < canvasChrome.top + NODE_R_MAX - 0.01 || s[1] > h - canvasChrome.bottom - NODE_R_MAX + 0.01) {
+      under += 1;
+    }
+    state.selection = { kind: 'node', id: n.id };
+    draw();
+    if (JSON.stringify(state.view) !== v0) {
+      moved += 1;
+      state.view = JSON.parse(v0);
+      state.viewFitted = true;
+    }
+  }
+  out.chrome[w + 'x' + h] = { under: under, moved: moved };
+  canvasChrome.top = 0; canvasChrome.bottom = 0;
+}
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -556,7 +596,8 @@ def _run_view_scenarios() -> dict:
     js = _js()
     assert "\nlet pickedOnCanvas = false;\n" in js, "the pointer-pick flag is gone"
     consts = "\n".join(f"const {c} = {_const(c)};"
-                       for c in ("ZOOM_MIN", "ZOOM_MAX", "FIT_MIN", "FIT_MAX"))
+                       for c in ("ZOOM_MIN", "ZOOM_MAX", "FIT_MIN", "FIT_MAX",
+                                 "NODE_R_MAX"))
     script = "\n".join([_STUBS, consts, "let pickedOnCanvas = false;",
                         *(_top_fn(f) for f in _VIEW_FNS), _SCENARIOS])
     run = subprocess.run([node, "-e", script], capture_output=True, text=True,
@@ -574,7 +615,8 @@ def test_selecting_an_entity_on_a_fitted_view_keeps_the_fit():
     inview = _top_fn("inView")
     assert "fitPad(w, h) - 1" in inview, "the reveal margin is no longer capped by Fit's"
     assert "Math.min(40" not in inview
-    assert "const pad = fitPad(w, h);" in _top_fn("frameAll")
+    assert "const m = fitMargins(w, h);" in _top_fn("frameAll")
+    assert "const pad = fitPad(w, h);" in _top_fn("fitMargins")
     out = _run_view_scenarios()
     assert out["fitted"] == {"922x287": 0, "996x389": 0, "886x239": 0, "1310x620": 0}, (
         f"selecting on a fitted view moved it: {out['fitted']}")
@@ -608,6 +650,24 @@ def test_a_selection_made_on_another_tab_is_revealed_on_return():
     assert hidden["idleDraws"] == 0, "resizeGraph now repaints when nothing is pending"
     # The same early return also stranded a fit the layout finished unseen.
     assert out["pendingFit"] == {"needFit": False, "fitted": True, "off": 0}, out["pendingFit"]
+
+
+def test_fit_keeps_every_entity_clear_of_the_canvas_chrome():
+    """c12 (2026-09-24): Fit's padding kept node centres 45px from the top
+    of a 1366x768 canvas whose head row reaches 35px down, so a top-row
+    hub and the name above it sat under the Pin button, and a bottom-row
+    entity under the names pill. Fit's top and bottom margins now clear
+    the measured chrome bands by the largest node radius, and are never
+    narrower than fitPad, so selecting a fitted entity still never moves
+    the view."""
+    fit = _top_fn("fitMargins")
+    assert "chromeBoxes()" in fit and "NODE_R_MAX" in fit
+    assert "Math.max(pad," in fit, "a chrome margin may fall below fitPad, under inView's cap"
+    out = _run_view_scenarios()
+    assert out["chrome"] == {
+        "922x489": {"under": 0, "moved": 0}, "922x455": {"under": 0, "moved": 0},
+        "996x389": {"under": 0, "moved": 0}, "886x239": {"under": 0, "moved": 0},
+    }, out["chrome"]
 
 
 def test_docs_describe_the_reveal_as_it_behaves():

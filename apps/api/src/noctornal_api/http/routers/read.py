@@ -13,13 +13,15 @@ claim has been retracted or superseded.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+
+from noctornal_ontology import SELECTOR_TYPES
 
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -29,12 +31,21 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem
 
+# The register's reading of an exhibit's storage lock, so the inspector's
+# list states it as the Evidence pane's card does (x-inspector-chips).
+from noctornal_api.http.routers.evidence import (
+    NEWEST_LOCK_SQL,
+    case_lock_bounds,
+    lock_is_short,
+    lock_state,
+)
+
 # The five-part gate asked as a question rather than raised as a refusal.
 # Reused, not re-decided: `search` already answers "may this caller see
 # exhibits / collected documents too?" for its combined results, and a
 # second copy of an authorization rule is how two of them drift apart.
 from noctornal_api.http.routers.search import _allowed_on_case, _holds_global
-from noctornal_api.projections import evidence_backing_sql
+from noctornal_api.projections import evidence_backing_sql, seen_params, seen_sql
 
 router = APIRouter(prefix="/cases/{case_id}", tags=["read"])
 
@@ -47,6 +58,10 @@ class NodeOut(BaseModel):
     label: str
     classification: str
     attrs: dict
+    #: The earliest and latest `observed_at` among the entity's live claims
+    #: (or the stored column, whichever is earlier or later), derived by
+    #: `projections.seen_sql` because nothing writes the columns
+    #: (gap-first-seen, 2026-09-23). None when no live claim says when.
     first_seen: datetime | None
     last_seen: datetime | None
     created_at: datetime
@@ -193,6 +208,20 @@ class ElementEvidenceOut(EvidenceOut):
     #: Whether this exhibit makes the element count as evidenced. False
     #: only when it has been purged; everything else listed here counts.
     counts: bool = True
+    #: The storage lock as the Evidence pane's card states it, so the
+    #: inspector's list can draw the same chip (x-inspector-chips,
+    #: 2026-09-24): it showed a bare "WORM" for ever, the claim the card
+    #: stopped making on 2026-09-23 because the lock lapses. Read the way
+    #: the register reads them (`routers.evidence.lock_state`).
+    lock_until: date | None = None
+    lock_ends_at: datetime | None = None
+    lock_lapsed: bool = False
+    #: The lock ends before the case's retention date, as the register
+    #: says (`routers.evidence.lock_is_short`; verifier, 2026-09-24).
+    lock_short_of_case: bool = False
+    legal_hold: bool = False
+    is_hostile_markup: bool = False
+    purged_at: datetime | None = None
 
 
 # --- helpers ------------------------------------------------------------
@@ -236,14 +265,17 @@ def list_nodes(
     clearance, compartments = _ceiling(conn, user, case_id)
     rows = conn.execute(
         """SELECT id, node_type, label, classification, attrs,
-                  first_seen, last_seen, created_at, valid_from, valid_to
-             FROM core.node
+                  """ + seen_sql() + """, created_at, valid_from, valid_to
+             FROM core.node n
             WHERE case_id = %s
               AND deleted_at IS NULL AND merged_into_id IS NULL
               AND classification <= %s::core.tlp AND compartments <@ %s
               AND (%s::text IS NULL OR node_type = %s)
             ORDER BY created_at DESC LIMIT %s""",
-        (case_id, clearance, compartments, node_type, node_type, limit),
+        # seen_sql's binds first: the reader's ceiling gates the merge tree
+        # its dates are read over (release review c10, 2026-09-24).
+        (*seen_params(clearance, compartments),
+         case_id, clearance, compartments, node_type, node_type, limit),
     ).fetchall()
     return [
         NodeOut(id=str(r[0]), node_type=r[1], label=r[2], classification=r[3],
@@ -262,11 +294,12 @@ def get_node(
     clearance, compartments = _ceiling(conn, user, case_id)
     row = conn.execute(
         """SELECT id, node_type, label, classification, attrs,
-                  first_seen, last_seen, created_at, valid_from, valid_to
-             FROM core.node
+                  """ + seen_sql() + """, created_at, valid_from, valid_to
+             FROM core.node n
             WHERE id = %s AND case_id = %s AND deleted_at IS NULL
               AND classification <= %s::core.tlp AND compartments <@ %s""",
-        (node_id, case_id, clearance, compartments),
+        (*seen_params(clearance, compartments),
+         node_id, case_id, clearance, compartments),
     ).fetchone()
     if row is None:
         raise Problem(404, "Not found", "node does not exist in this case")
@@ -317,14 +350,21 @@ def node_selectors(
     clearance, compartments = _ceiling(conn, user, case_id)
     if not _visible_node(conn, case_id, node_id, clearance, compartments):
         raise Problem(404, "Not found", "node does not exist in this case")
+    # first_seen and last_seen travel with the count since ux05-inspector:
+    # first-last-seen-always-dash (2026-09-23): "observed 1 time" came
+    # with no date although core.selector keeps both, so the one place an
+    # actor's activity window IS recorded never reached the inspector.
     rows = conn.execute(
-        """SELECT selector_type, raw_value, norm_value, observation_cnt
+        """SELECT selector_type, raw_value, norm_value, observation_cnt,
+                  first_seen, last_seen
              FROM core.selector WHERE node_id = %s AND case_id = %s
             ORDER BY selector_type""",
         (node_id, case_id),
     ).fetchall()
     return [{"selector_type": r[0], "raw_value": r[1], "norm_value": r[2],
-             "observation_cnt": r[3]} for r in rows]
+             "observation_cnt": r[3],
+             "first_seen": r[4].isoformat() if r[4] else None,
+             "last_seen": r[5].isoformat() if r[5] else None} for r in rows]
 
 
 # --- edges --------------------------------------------------------------
@@ -443,9 +483,12 @@ def ontology(
         """SELECT key, display_name, category FROM core.node_type
             WHERE is_active ORDER BY sort_order""",
     ).fetchall()
+    # `inverse_name` since ux06-entry:edge-type-note-stale (2026-09-23): the
+    # Link form reads the chosen type back both ways ("A vouched for B",
+    # "B was vouched by A") before the analyst commits to a direction.
     edges = conn.execute(
         """SELECT key, display_name, src_node_types, dst_node_types,
-                  default_sign, is_social_tie
+                  default_sign, is_social_tie, inverse_name
              FROM core.edge_type WHERE is_active ORDER BY key""",
     ).fetchall()
     return {
@@ -453,7 +496,15 @@ def ontology(
                        for r in nodes],
         "edge_types": [{"key": r[0], "display_name": r[1], "src": list(r[2]),
                         "dst": list(r[3]), "default_sign": r[4],
-                        "is_social_tie": r[5]} for r in edges],
+                        "is_social_tie": r[5], "inverse_name": r[6]}
+                       for r in edges],
+        # The selector vocabulary, for the Add entity form's selector
+        # picker (ux06-entry:selector-entities-bypass-normalisation,
+        # 2026-09-23). Straight from the ontology package, the one source
+        # of truth the store normalises with.
+        "selector_types": [{"key": s.key, "display_name": s.display_name,
+                            "is_strong": s.is_strong}
+                           for s in SELECTOR_TYPES],
     }
 
 
@@ -589,23 +640,35 @@ def _element_evidence(conn, column: str, element_id: UUID, case_id: UUID,
                    e.classification, e.acquisition_method, e.acquired_at,
                    e.is_worm_locked, e.purged_at,
                    b.kind, b.assertion_id, b.basis, b.at, b.by_user,
-                   u.display_name, b.relevance, b.page_ref
+                   u.display_name, b.relevance, b.page_ref,
+                   e.retention_until, e.legal_hold, e.is_hostile_markup,
+                   lk.lock_ends_at
               FROM ({evidence_backing_sql(column, '%s')}) b
               JOIN core.evidence e ON e.id = b.evidence_id
               LEFT JOIN iam.app_user u ON u.id = b.by_user
+              -- The lock's newest end, as the register reads it.
+              {NEWEST_LOCK_SQL.format(ev='e')}
              WHERE e.case_id = %s
                AND e.classification <= %s::core.tlp AND e.compartments <@ %s
              ORDER BY e.acquired_at DESC, e.id, b.at""",
         (element_id, element_id, case_id, clearance, compartments),
     ).fetchall()
+    now = datetime.now(timezone.utc)
+    short_before, _ = case_lock_bounds(conn, case_id, now) if rows else (None, None)
     out: dict[str, ElementEvidenceOut] = {}
     for r in rows:
         key = str(r[0])
         if key not in out:
             base = _evidence_out(r[:9])
+            ends_at, lapsed = lock_state(r[18], {"lock_ends_at": r[21]}, now)
             out[key] = ElementEvidenceOut(
                 **base.model_dump(), backing=[], purged=r[9] is not None,
-                counts=r[9] is None)
+                counts=r[9] is None, lock_until=r[18], lock_ends_at=ends_at,
+                lock_lapsed=lapsed,
+                lock_short_of_case=(bool(r[8]) and r[9] is None and lock_is_short(
+                    r[18], ends_at, short_before)),
+                legal_hold=bool(r[19]),
+                is_hostile_markup=bool(r[20]), purged_at=r[9])
         out[key].backing.append(EvidenceBacking(
             kind=r[10], assertion_id=str(r[11]) if r[11] else None,
             basis=r[12], at=r[13], by=str(r[14]), by_name=r[15],

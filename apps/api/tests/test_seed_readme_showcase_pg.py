@@ -277,7 +277,9 @@ def test_what_the_new_entities_move_is_the_population_alone(estate, inferred):
     _r, pct = _rank_and_percentile(btw)
     assert pct == [before["per"][x]["betweenness_percentile"] for x in people]
     con = [after["per"][x]["constraint"] for x in people]
-    _r, pct = _rank_and_percentile([v if v is not None else float("-inf")
+    # Least constrained first, as the suite ranks it since 2026-09-23
+    # (ux10-analytics:rank-percentile-opposite-directions).
+    _r, pct = _rank_and_percentile([-v if v is not None else float("-inf")
                                     for v in con])
     assert pct == [before["per"][x]["constraint_percentile"] for x in people]
     assert after["communities"] == before["communities"] + 5

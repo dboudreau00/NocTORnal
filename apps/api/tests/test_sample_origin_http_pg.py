@@ -464,8 +464,16 @@ def test_the_lab_pane_downloads_from_the_policys_sample_origin():
         "double-submit applies")
     assert "fetch(API + '/samples/'" not in body, (
         "a same-origin download is one the application process refuses")
-    assert js.count("fetchFromSampleOrigin(") == 1, (
-        "exactly one call leaves the page's origin, and it is the download")
+    # Two calls since 2026-09-24 (x-hostile-export): the Lab's download and
+    # the production of an exhibit of attacker markup, which docs/19
+    # section 1.1 sends out through the same origin. Named, so a third
+    # cross-origin call is a decision rather than an accident.
+    assert js.count("fetchFromSampleOrigin(") == 2, (
+        "exactly two calls leave the page's origin: the Lab's download and "
+        "an exhibit's production")
+    produce = js[js.index("async function produceExhibit("):]
+    assert "fetchFromSampleOrigin(minted.download_url" in produce[
+        :produce.index("\n}\n")]
     assert "const fetchFromSampleOrigin = window.fetch.bind(window);" in js
     # The button is enabled by the ORIGIN, not by a boolean that used to
     # read true for a value the server refused.

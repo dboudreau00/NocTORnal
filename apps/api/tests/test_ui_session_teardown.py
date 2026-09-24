@@ -155,6 +155,9 @@ const watchPresence = stub('watch'), forgetHeldLive = stub('forgetHeld');
 const halfSession = () => false, endSession = stub('endSession');
 const refreshGlassChip = stub('refreshGlassChip');
 const adoptSessionFacts = stub('facts'), applyResume = stub('resume');
+const renderHeaderRole = stub('headerRole');   // ux02-cases, 2026-09-23
+const relinkLive = stub('relinkLive');         // ux01-firstrun, 2026-09-23
+const endReauthChange = stub('endReauthChange'); // final review u5, 2026-09-24
 const api = async () => me;
 """ + "\n".join(_fn(n) for n in (
         "clearSessionSecrets", "stopSessionClock", "sessionLapsed",
@@ -214,6 +217,9 @@ const api = async () => ({ user_id: 'u' });
 const rememberResume = stub('rememberResume'), closePalette = stub('closePalette');
 const stopGraph = stub('stopGraph'), disconnectLive = stub('disconnectLive');
 const stopSessionClock = stub('stopClock'), sessionBanner = stub('sessionBanner');
+// The case chrome and the header role go with the session (ux01-firstrun,
+// ux02-cases, 2026-09-23); their own tests are in test_ui_signin_and_cases.
+const hideCaseChrome = stub('hideCaseChrome'), renderHeaderRole = stub('headerRole');
 const CSRF_COOKIE = '__Host-csrf';
 """ + _fn("startApp") + "\n" + _fn("endSession") + r"""
 const firstRun = () => {   // what probeFirstRun and the card leave behind
@@ -261,6 +267,9 @@ const setTimeout = (fn, ms) => { timers.push(ms); return timers.length; };
 const clearTimeout = () => {};
 const _refetchSoon = () => log.push('refetch');
 const _badgeSoon = () => log.push('badge');
+// The triage queue's own refetch (ux08-triage:stale-badges-and-list,
+// 2026-09-23): a reopened socket reloads it with the rest.
+const _triageSoon = () => log.push('triage');
 const sockets = [];
 class FakeWS {
   constructor(url) { this.url = url; this.readyState = 0; this.listeners = {};
@@ -285,7 +294,8 @@ let _wsTimer = null;
 
 def _live_source(body: str) -> str:
     js = _js()
-    decls = [_const("LIVE_AWAY_MS"), _const("_liveHeld")]
+    decls = [_const("LIVE_AWAY_MS"), _const("_liveHeld"),
+             _const("LIVE_SESSION_ENDED")]
     for name in ("_lastPresence", "_presenceWatched"):
         m = re.search(rf"^let {name} = .*;$", js, flags=re.M)
         assert m, f"app.js has no top-level let {name}"
@@ -293,7 +303,8 @@ def _live_source(body: str) -> str:
     return (_DOM + _LIVE_STUBS + "".join(decls)
             + "\n".join(_fn(n) for n in (
                 "liveAway", "watchPresence", "notePresence", "forgetHeldLive",
-                "onLiveChange", "liveStatus", "connectLive", "disconnectLive"))
+                "onLiveChange", "liveStatus", "noteLiveSessionEnded",
+                "connectLive", "disconnectLive"))
             + "\nconst tick = () => new Promise((r) => r());\n"
             + "(async () => {\nconst out = {};\n" + body
             + "\nprocess.stdout.write(JSON.stringify(out));\n})();\n")
@@ -411,6 +422,9 @@ function signedIn() { return signed; }
 async function loadCaseGraph() { log.push('graph'); }
 async function refreshSociogram() { log.push('sociogram'); }
 function refreshInboxBadge() { log.push('badge'); }
+// The badge refetch also reloads an open inbox list since
+// ux08-triage:stale-badges-and-list (2026-09-23); none is open here.
+function inboxOnScreen() { return false; }
 """ + _const("_refetchSoon") + _const("_badgeSoon") + r"""
 (async () => {
   await _refetchSoon(); _badgeSoon();
@@ -441,9 +455,16 @@ const stub = (n) => function () { log.push(n); };
 const hideIdleWarning = stub('hideIdleWarning'), guardUnsaved = stub('guard');
 const clearSessionSecrets = stub('secrets');
 const endSession = () => { log.push('endSession'); stopSessionClock(); };
-""" + "\n".join(_fn(n) for n in ("closeReauth", "leaveReauth", "stopSessionClock")) + r"""
-const type = () => { $('reauth-password').value = 'hunter2'; $('reauth-totp').value = '123456'; };
-const left = () => [$('reauth-password').value, $('reauth-totp').value];
+const discardPage = stub('discardPage');       // ux01-firstrun, 2026-09-23
+""" + _const("REAUTH_CHANGE") + "\n".join(
+        _fn(n) for n in ("closeReauth", "leaveReauth", "stopSessionClock",
+                         "endReauthChange")) + r"""
+// And a one-time password held for the sheet's new-password stage (final
+// review u5, 2026-09-24): it still signs in until it is replaced.
+const type = () => { $('reauth-password').value = 'hunter2'; $('reauth-totp').value = '123456';
+  REAUTH_CHANGE.password = 'one-time'; $('reauth-new').value = 'typed new'; };
+const left = () => [$('reauth-password').value, $('reauth-totp').value,
+  REAUTH_CHANGE.password === null ? '' : 'held', $('reauth-new').value];
 (async () => {
   const out = {};
   type(); await leaveReauth(); out.cancel = left();
@@ -454,7 +475,8 @@ const left = () => [$('reauth-password').value, $('reauth-totp').value];
 """
     got = _run_node(source)
     for path in ("cancel", "someoneElse", "teardown"):
-        assert got[path] == ["", ""], f"{path} left the password in the page: {got[path]}"
+        assert got[path] == ["", "", "", ""], (
+            f"{path} left the password in the page: {got[path]}")
 
 
 # ---------------------------------------------------------------------------

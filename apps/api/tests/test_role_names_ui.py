@@ -62,7 +62,10 @@ def test_the_account_card_shows_names_not_keys():
     assert not re.search(r"u\.roles \|\| \[\]\)\.join\(", row), (
         "the account card joins raw role keys again")
     assert "map(roleLabel)" in row
-    assert "'Revoke ' + roleLabel(r)" in row, (
+    # The revoke buttons are on the card's removal row since 2026-09-23
+    # (ux16-admin authz-changes-one-click), apart from Grant.
+    removal = _function(_js(), "function removalRow(")
+    assert "'Revoke ' + roleLabel(r)" in removal, (
         "the revoke buttons still say the key")
 
 
@@ -70,19 +73,30 @@ def test_a_relabelled_option_still_submits_the_key():
     """An <option> with no value attribute submits its TEXT. Relabelling
     one to "Lead investigator (CASE_OWNER)" without pinning the value
     first would send that string to POST /admin/users, which refuses it
-    as an unknown role."""
+    as an unknown role.
+
+    Since 2026-09-23 the create form's roles are checkboxes (ux16-admin
+    create-roles-multiselect) whose VALUE is the key in the markup, and the
+    name is written into a span beside it, never into the value. The grant
+    picker (`grantPair`) still builds options, each with its key as value.
+    """
     js = _js()
-    relabel = _function(js, "function labelRoleOptions(")
-    assert relabel.index("o.value = key") < relabel.index("o.textContent"), (
-        "labelRoleOptions changes an option's text before pinning its value")
-    row = _function(js, "function adminUserRow(")
-    picker = row[row.index("const roleSel"):row.index("if (roleSel.options.length)")]
+    relabel = _function(js, "function labelRoleChecks(")
+    assert "input.value =" not in relabel and ".value = " not in relabel, (
+        "labelRoleChecks writes a checkbox's value; the key must stay put")
+    assert "roleOptionText(input.value)" in relabel
+    html = INDEX.read_text(encoding="utf-8")
+    roles = html[html.index('id="adm-roles"'):html.index("</fieldset>",
+                                                        html.index('id="adm-roles"'))]
+    assert re.findall(r'<input type="checkbox" value="[A-Z_]+"', roles), (
+        "the create form's role checkboxes carry no key as value")
+    grant = _function(js, "function grantPair(")
+    picker = grant[grant.index("for (const r of missing)"):]
     assert "o.value = r" in picker, (
         "the grant picker's options carry a name as text and no key as value")
-    # The create form's picker is relabelled whenever the names load, and
+    # The create form's roles are relabelled whenever the names load, and
     # the names load with every account list.
-    assert "labelRoleOptions($('adm-roles'))" in _function(
-        js, "async function loadRoleNames(")
+    assert "labelRoleChecks()" in _function(js, "async function loadRoleNames(")
     loader = _function(js, "async function loadAdminUsers(")
     assert "loadRoleNames()" in loader
 

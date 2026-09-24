@@ -119,6 +119,13 @@ class HypothesisScore:
     #: result and a rank.
     assessed: int
     unassessed: int
+    #: A REJECTED or SUPERSEDED hypothesis, scored for the record and never
+    #: ranked. Once the console could reject one (ux11-ach:no-hypothesis-
+    #: lifecycle-in-console, 2026-09-23), "Include rejected" fed it to the
+    #: ranking as a live competitor: a ruled-out theory with nothing against
+    #: it could be named least inconsistent, and its blank cells kept rows
+    #: "unfinished" that no live hypothesis needed scored.
+    retired: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,6 +149,12 @@ class Diagnosticity:
     #: tell "agrees everywhere" from "agrees everywhere it has been looked
     #: at". 0 means unknown, and then only the two-cell floor applies.
     live_hypotheses: int = 0
+    #: The two factors of `score`, so a reader can do the arithmetic: the
+    #: spread of the stances (0..4) and the source weight it is multiplied
+    #: by. "1.96" beside a -2..+2 scale could not be reconciled with it
+    #: (ux11-ach:grading-weight-unexplained, 2026-09-23).
+    spread: int = 0
+    weight: float = 0.0
 
     @property
     def is_incomplete(self) -> bool:
@@ -176,6 +189,9 @@ class Matrix:
     #: correction for confirmation bias, and a matrix nobody reads the
     #: caveats on is a matrix that launders the bias instead.
     warnings: list[str] = field(default_factory=list)
+    #: Ruled-out hypotheses, scored the same way for the record and kept
+    #: out of `hypotheses`, the ranking, the warnings and the next test.
+    retired: list[HypothesisScore] = field(default_factory=list)
 
 
 def _of_items(k: int, total: int) -> str:
@@ -190,41 +206,75 @@ def _of_items(k: int, total: int) -> str:
     return f"{k} of {total} items"
 
 
+def _sums(hid: UUID, statement: str, evidence: list[EvidenceItem],
+          flat: set[UUID], *, retired: bool = False) -> HypothesisScore:
+    """One hypothesis's weighted sums over the matrix.
+
+    `flat` holds the rows that say the same thing about every live
+    hypothesis. They count as ASSESSED (somebody did look) and add nothing
+    to either sum. The warning and the method text both said such a row is
+    "excluded from the ranking" while this loop summed every row, so a row
+    scored "-2" against each hypothesis lifted all of them by the same
+    amount and printed inconsistency no evidence discriminated
+    (ux11-ach:half-scored-row-called-undiagnostic, 2026-09-23). Heuer drops
+    non-diagnostic evidence from the tally for the same reason."""
+    inconsistency = 0.0
+    support = 0.0
+    assessed = 0
+    for item in evidence:
+        stance = item.stances.get(hid)
+        if stance is None:
+            continue
+        assessed += 1
+        if item.assertion_id in flat:
+            continue
+        if stance < 0:
+            inconsistency += abs(stance) * item.weight
+        elif stance > 0:
+            support += stance * item.weight
+    return HypothesisScore(
+        hypothesis_id=hid, statement=statement,
+        inconsistency=round(inconsistency, 4), support=round(support, 4),
+        assessed=assessed, unassessed=len(evidence) - assessed, retired=retired)
+
+
 def score(hypotheses: list[tuple[UUID, str]],
-          evidence: list[EvidenceItem]) -> Matrix:
-    """Score a matrix. Pure: same inputs, same numbers, no clock, no DB."""
+          evidence: list[EvidenceItem], *,
+          retired: list[tuple[UUID, str]] | tuple = ()) -> Matrix:
+    """Score a matrix. Pure: same inputs, same numbers, no clock, no DB.
+
+    `hypotheses` are the live competitors. `retired` are the ones ruled out
+    (REJECTED, SUPERSEDED): scored with the same sums for the record, never
+    ranked, and never counted when asking whether a row is finished."""
     warnings: list[str] = []
+    diagnosticity = [_diagnosticity(item, hypotheses) for item in evidence]
+    flat = {d.assertion_id for d in diagnosticity
+            if not d.is_incomplete and not d.is_diagnostic}
+    ruled_out = sorted(
+        (_sums(hid, statement, evidence, flat, retired=True)
+         for hid, statement in retired),
+        key=lambda h: (h.inconsistency, -h.support))
     if not hypotheses:
-        return Matrix([], [], None, None,
+        # The rows are kept (release review c18, 2026-09-24). Every
+        # hypothesis ruled out used to return an EMPTY evidence list while
+        # `ruled_out` above had counted the stances, so GET /ach sent
+        # evidence 0 beside cells 2 and "against 0.72, assessed 1" on a
+        # card, and the pane said nothing had been scored: the record of
+        # what ruled each hypothesis out vanished from the grid. With no
+        # live hypothesis every row reads unfinished at 0 and none is a
+        # next test, so the one warning below is still the whole story.
+        return Matrix([], sorted(diagnosticity, key=lambda d: -d.score), None, None,
                       ["No hypotheses. ACH needs at least two: a single "
                        "hypothesis with evidence gathered for it is what ACH "
-                       "exists to correct."])
+                       "exists to correct."], retired=ruled_out)
     if len(hypotheses) == 1:
         warnings.append(
             "Only one hypothesis. ACH cannot discriminate between one thing; "
             "add the alternative you think is wrong. That is the whole "
             "method.")
 
-    scored: list[HypothesisScore] = []
-    for hid, statement in hypotheses:
-        inconsistency = 0.0
-        support = 0.0
-        assessed = 0
-        for item in evidence:
-            stance = item.stances.get(hid)
-            if stance is None:
-                continue
-            assessed += 1
-            if stance < 0:
-                inconsistency += abs(stance) * item.weight
-            elif stance > 0:
-                support += stance * item.weight
-        scored.append(HypothesisScore(
-            hypothesis_id=hid, statement=statement,
-            inconsistency=round(inconsistency, 4), support=round(support, 4),
-            assessed=assessed, unassessed=len(evidence) - assessed))
-
-    diagnosticity = [_diagnosticity(item, hypotheses) for item in evidence]
+    scored = [_sums(hid, statement, evidence, flat)
+              for hid, statement in hypotheses]
 
     # THE ranking. Least inconsistency first; support breaks ties only, and
     # only because something has to. Never the other way round.
@@ -279,13 +329,17 @@ def score(hypotheses: list[tuple[UUID, str]],
     # unfinished" headed the ACH capture (README screenshot set review,
     # 2026-09-23).
     if undiagnostic:
+        # True now that `_sums` leaves these rows out (2026-09-23): the
+        # sentence went into the report while the rows still moved every
+        # score.
         one = len(undiagnostic) == 1
         warnings.append(
             f"{_of_items(len(undiagnostic), len(diagnosticity))} "
             f"{'says' if one else 'say'} the same thing about every "
             f"hypothesis and {'settles' if one else 'settle'} nothing. "
             f"{'It is' if one else 'They are'} kept in the record and "
-            f"excluded from the ranking.")
+            f"left out of every score, since {'it' if one else 'they'} "
+            f"would add the same weight to each hypothesis.")
     if incomplete:
         one = len(incomplete) == 1
         warnings.append(
@@ -320,7 +374,8 @@ def score(hypotheses: list[tuple[UUID, str]],
 
     return Matrix(hypotheses=ranked, evidence=sorted(
         diagnosticity, key=lambda d: -d.score),
-        least_inconsistent=least, refute_first=refute_first, warnings=warnings)
+        least_inconsistent=least, refute_first=refute_first, warnings=warnings,
+        retired=ruled_out)
 
 
 def _diagnosticity(item: EvidenceItem,
@@ -344,21 +399,27 @@ def _diagnosticity(item: EvidenceItem,
         # 0.0 as a verdict on the evidence.
         return Diagnosticity(item.assertion_id, item.label, 0.0, False,
                              assessed_against=len(stances),
-                             live_hypotheses=len(hypotheses))
+                             live_hypotheses=len(hypotheses),
+                             weight=item.weight)
     spread = max(stances) - min(stances)
     return Diagnosticity(
         assertion_id=item.assertion_id, label=item.label,
         score=round(spread * item.weight, 4), is_diagnostic=spread > 0,
-        assessed_against=len(stances), live_hypotheses=len(hypotheses))
+        assessed_against=len(stances), live_hypotheses=len(hypotheses),
+        spread=spread, weight=item.weight)
 
 
 def as_response(matrix: Matrix) -> dict:
     return {
+        # The ranked live hypotheses first, then the ruled-out ones marked
+        # `retired`, so a reader of the list meets the competitors in rank
+        # order and the record after them.
         "hypotheses": [
             {"id": str(h.hypothesis_id), "statement": h.statement,
              "inconsistency": h.inconsistency, "support": h.support,
-             "assessed": h.assessed, "unassessed": h.unassessed}
-            for h in matrix.hypotheses],
+             "assessed": h.assessed, "unassessed": h.unassessed,
+             "retired": h.retired}
+            for h in [*matrix.hypotheses, *matrix.retired]],
         "evidence": [
             {"assertion_id": str(d.assertion_id), "label": d.label,
              "diagnosticity": d.score, "is_diagnostic": d.is_diagnostic,
@@ -367,7 +428,8 @@ def as_response(matrix: Matrix) -> dict:
              # nothing". They look identical at 0.0 and mean opposite
              # things: one is a judgement about the evidence, the other is
              # a gap in the matrix.
-             "is_incomplete": d.is_incomplete}
+             "is_incomplete": d.is_incomplete,
+             "spread": d.spread, "weight": d.weight}
             for d in matrix.evidence],
         "least_inconsistent": (str(matrix.least_inconsistent)
                                if matrix.least_inconsistent else None),
@@ -378,12 +440,21 @@ def as_response(matrix: Matrix) -> dict:
         # is "the same stance against every hypothesis", which an item
         # inconsistent with everything meets as well as one consistent
         # with everything, and a row with a blank cell does not meet yet.
+        # The weighting sentence is ux11-ach:grading-weight-unexplained
+        # (2026-09-23): a single "strongly inconsistent" printed as 0.98, and
+        # nothing on the page said a C3 source counts 0.49 of an A1.
         "method": (
             "Ranked by INCONSISTENCY, ascending. The hypothesis that survives "
             "is the one with the least evidence against it, not the most "
             "evidence for it. Counting support ranks whichever theory the "
             "team has collected for longest (Heuer). Evidence that says the "
             "same thing about every hypothesis is kept in the record and "
-            "excluded from the ranking, because it discriminates nothing."
+            "excluded from the ranking, because it discriminates nothing. "
+            f"Each stance is weighted by the Admiralty grade of the "
+            f"assertion behind it, from {source_weight('A', '1'):.2f} for A1 "
+            f"to {source_weight('C', '3'):.2f} for C3 and "
+            f"{source_weight('F', '6'):.2f} for F6 (an ungraded source counts "
+            f"as F6), so a score is the sum of stance times weight, not a "
+            f"count of cells."
         ),
     }

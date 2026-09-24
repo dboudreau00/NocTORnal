@@ -208,7 +208,7 @@ def bind(
     if body.verification == "CONFIRMED":
         raise Problem(
             400, "Invalid request",
-            "CONFIRMED cannot be asserted directly. docs/10: only CONFIRMED "
+            "CONFIRMED cannot be asserted directly. Only CONFIRMED "
             "carries weight in automatic identity resolution, so it is "
             "earned by a verified signature over the identifier, not "
             "declared. POST to /pgp/verify with the signed message and the "
@@ -603,10 +603,13 @@ def open_conversation(
     except CommsError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(conv_id),
-            "notice": ("docs/16 L4 is BLOCKING and unresolved: interception "
+            # The legal-review item by its register number, which counsel
+            # uses, and not by a design document's path (ux19-copy
+            # developer-speak-in-copy, 2026-09-23).
+            "notice": ("Legal review item L4 is still open: interception "
                        "law, one-party versus two-party consent, and the "
                        "retention of uninvolved third parties' content in a "
-                       "group channel are external determinations. Recording "
+                       "group channel are for counsel to determine. Recording "
                        "the provenance is not the same as having the "
                        "authority for it.")}
 

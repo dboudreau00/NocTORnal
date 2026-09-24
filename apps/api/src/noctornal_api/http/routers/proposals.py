@@ -32,6 +32,7 @@ from noctornal_api.http.deps import (
     check_writable_labels,
     get_conn,
     require,
+    user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
@@ -44,7 +45,10 @@ from noctornal_api.proposals import (
     ProposalReview,
     ProposalRow,
     ProposalStore,
+    SourceLabels,
     accepted_classification,
+    attribute_label_problem,
+    strictest,
 )
 
 log = logging.getLogger(__name__)
@@ -67,6 +71,31 @@ class ProposalOut(BaseModel):
     applied_node_id: str | None
     applied_edge_id: str | None
     created_at: str
+    #: ux08-triage:source-document-not-reachable (2026-09-23). The row
+    #: always had its document; the model dropped it, so a card could
+    #: neither name the capture it came from nor open it.
+    document_id: str | None = None
+    document_title: str | None = None
+    #: The label an Accept writes by default for NODE and EDGE (the
+    #: capture's, never below the case), and the label of the source for
+    #: an ATTRIBUTE claim. The card shows it as its TLP chip and offers
+    #: nothing below it (ux08-triage:accept-downgrades-classification,
+    #: 2026-09-23).
+    classification: str | None = None
+    #: The entities the payload names, by label and type, for the ones
+    #: this reader may see (ux08-triage:attribute-proposal-no-label-no-
+    #: value, 2026-09-23).
+    refs: dict = Field(default_factory=dict)
+    #: Only on the reply to an accept: the assertion it wrote, so the
+    #: console's Undo can retract an ATTRIBUTE claim.
+    applied_assertion_id: str | None = None
+    #: Why an Accept would be refused, for an ATTRIBUTE claim whose entity
+    #: is labelled below the material it was found in (final review c1,
+    #: 2026-09-24). The card wore the material's TLP chip and offered
+    #: Accept, and the accept wrote the claim at the entity's lower label.
+    #: Null when the claim may be accepted, or when the reader cannot see
+    #: the entity (the card already says so, and its label is not theirs).
+    accept_blocked: str | None = None
 
 
 class DispositionBody(BaseModel):
@@ -78,7 +107,11 @@ class RequiredNoteBody(BaseModel):
     note: str = Field(min_length=1)
 
 
-def _out(p: ProposalRow) -> ProposalOut:
+def _out(p: ProposalRow, *, classification: str | None = None,
+         refs: dict | None = None,
+         documents: dict | None = None,
+         accept_blocked: str | None = None) -> ProposalOut:
+    doc = (documents or {}).get(str(p.document_id)) if p.document_id else None
     return ProposalOut(
         id=str(p.id), kind=p.kind, payload=p.payload, origin=p.origin,
         score=p.score, rationale=p.rationale, state=p.state,
@@ -87,15 +120,72 @@ def _out(p: ProposalRow) -> ProposalOut:
         applied_node_id=str(p.applied_node_id) if p.applied_node_id else None,
         applied_edge_id=str(p.applied_edge_id) if p.applied_edge_id else None,
         created_at=p.created_at.isoformat(),
+        document_id=str(p.document_id) if p.document_id else None,
+        document_title=doc["title"] if doc else None,
+        classification=classification,
+        refs=refs or {},
+        applied_assertion_id=(str(p.applied_assertion_id)
+                              if p.applied_assertion_id else None),
+        accept_blocked=accept_blocked,
     )
 
 
-def _owned(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> ProposalRow:
+def _named_ids(p: ProposalRow) -> set[str]:
+    """The entity ids a proposal's payload names."""
+    payload = p.payload or {}
+    if p.kind == KIND_ATTRIBUTE:
+        keys = ("node_id",)
+    elif p.kind == KIND_EDGE:
+        keys = ("src_node_id", "dst_node_id")
+    else:
+        keys = ()
+    return {str(payload[k]) for k in keys if payload.get(k)}
+
+
+def _display_label(p: ProposalRow, labels: SourceLabels) -> str | None:
+    """What the card's chip says: for NODE and EDGE the label an Accept
+    writes by default, for ATTRIBUTE the strictest of the material and the
+    case (its accept writes onto an existing entity, at that entity's
+    labels, so there is no new label to choose; an entity labelled below
+    this chip refuses the accept, and the card carries `accept_blocked`
+    to say so, final review c1, 2026-09-24)."""
+    if p.kind in (KIND_NODE, KIND_EDGE):
+        try:
+            return accepted_classification(p.payload, None,
+                                           source=labels.source,
+                                           floor=labels.floor)
+        except ProposalError:
+            return labels.floor
+    return strictest((p.payload or {}).get("classification"), labels.source,
+                     labels.floor)
+
+
+def _reader_ceiling(conn: psycopg.Connection, user: CurrentUser,
+                    case_id: UUID) -> tuple[str, frozenset[str]]:
+    """The reader's clearance for a read of this one case, a case-scoped
+    break-glass grant included (`user_ceiling` with the case)."""
+    clearance, held = user_ceiling(conn, user.user_id, case_id)
+    return clearance.name, held
+
+
+def _owned(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID,
+           user: CurrentUser | None = None) -> ProposalRow:
     """A proposal reached through this case's path must belong to it — the
-    gate authorised the case, not some other case's queue."""
+    gate authorised the case, not some other case's queue.
+
+    With `user`, it must also be one the queue would have SHOWN them: a
+    proposal from material above their clearance is the same 404 as one
+    that does not exist, so it cannot be rejected or deferred by id by
+    somebody who was never shown it (ux08-triage:accept-downgrades-
+    classification, 2026-09-23)."""
     row = ProposalStore(conn).get(proposal_id)
     if row is None or row.case_id != case_id:
         raise Problem(404, "Not found", "no such proposal in this case")
+    if user is not None:
+        clearance, held = _reader_ceiling(conn, user, case_id)
+        if not ProposalStore(conn).readable(proposal_id, clearance=clearance,
+                                            compartments=held):
+            raise Problem(404, "Not found", "no such proposal in this case")
     return row
 
 
@@ -127,9 +217,16 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
     foreign one; this path did not look.
     """
     if row.kind in (KIND_NODE, KIND_EDGE):
-        check_writable_labels(
-            conn, user,
-            classification=accepted_classification(row.payload, requested))
+        labels = ProposalStore(conn).source_labels(row.id)
+        try:
+            written = accepted_classification(
+                row.payload, requested, source=labels.source,
+                floor=labels.floor)
+        except ProposalError as exc:
+            # A label below the capture's, or one that is no label at all:
+            # refused before anything is checked or written.
+            raise Problem(409, "Conflict", safe_detail(exc)) from exc
+        check_writable_labels(conn, user, classification=written)
         return
     if row.kind != KIND_ATTRIBUTE:
         return  # the service refuses an unknown kind, writing nothing
@@ -147,9 +244,20 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
                       "the entity this proposal makes a claim about is not in "
                       "this case; nothing was written")
     authorize_object(conn, user, case_id=case_id,
-                     permission_key="proposal.review",
+                     permission_key="proposal.review", after_case_gate=True,
                      classification=labels[1],
                      compartments=frozenset(labels[2] or []))
+    # And the claim may not land below what it was found in (final review
+    # c1, 2026-09-24): the assertion is read at the entity's labels, so a
+    # RED, compartmented contact block's identifier accepted onto a CLEAR
+    # entity was served to every CLEAR reader of it. After the gate above,
+    # so only somebody who may see the entity is told its label.
+    problem = attribute_label_problem(
+        row.payload, ProposalStore(conn).source_labels(row.id),
+        labels[1], labels[2])
+    if problem:
+        raise Problem(409, "Conflict",
+                      f"{problem} Nothing was written: reject or defer it.")
 
 
 class CaptureBody(BaseModel):
@@ -183,15 +291,30 @@ def capture(
     docs/12 gives bulk ingest its own write-only key model precisely so
     that path never runs through an analyst's session.
     """
-    from noctornal_api.extraction import CaptureService, ExtractionError
+    from noctornal_api.extraction import (
+        CaptureRefused,
+        CaptureService,
+        ExtractionError,
+    )
 
-    check_writable_labels(conn, user, classification=body.classification)
+    # The label the document will actually be stored at, never below the
+    # case, is the one held to the caller's ceiling (final review c15,
+    # 2026-09-24); a compartmented case refuses before anything is read.
+    try:
+        stored = CaptureService(conn).stored_label(case_id, body.classification)
+    except CaptureRefused as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except ExtractionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    check_writable_labels(conn, user, classification=stored)
     try:
         result = CaptureService(conn).capture(
             case_id=case_id, text=body.text, title=body.title,
             external_url=body.external_url, author_handle=body.author_handle,
             classification=body.classification,
         )
+    except CaptureRefused as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except ExtractionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
@@ -219,15 +342,28 @@ def capture(
     # downstream is this codebase's signature defect: a failure reported as
     # the wrong thing rather than as a crash.
     try:
+        # At the capture's label, not only the case's (final review u12,
+        # 2026-09-24): an owner below it is not told what it raised.
         owner_notified: bool | None = notify_events.proposals_queued(
             conn, case_id=case_id, count=len(result.proposal_ids),
-            actor_id=user.user_id)
+            actor_id=user.user_id, classification=result.classification)
     except Exception:  # noqa: BLE001 - reported in the response, not raised
         log.exception("capture %s was recorded but its notification failed",
                       result.document_id)
         owner_notified = None
+    # The labels go back only where the caller may read them (c15
+    # follow-up, 2026-09-24). On a re-paste they are the EARLIER capture's
+    # as well, and that can sit above this caller: an AMBER analyst
+    # re-pasting text first captured at RED was told "RED", the label of a
+    # document the collection keeps from them. Null says only that it is
+    # above them. The audit row above keeps both, for its own readers.
+    reply = result.summary()
+    clearance, _held = _reader_ceiling(conn, user, case_id)
+    for key in ("classification", "document_classification"):
+        if strictest(reply.get(key), clearance) != clearance:
+            reply[key] = None
     return {
-        **result.summary(),
+        **reply,
         # true = told. false = deliberately not told (no proposals, or the
         # owner is the person who pasted it -- see proposals_queued).
         # null = the attempt itself failed and is in the log.
@@ -242,21 +378,129 @@ def queue(
     case_id: UUID,
     state: str = Query(STATE_PROPOSED),
     limit: int = Query(100, ge=1, le=500),
-    _: CurrentUser = Depends(require("case.read")),
+    user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """The triage queue, most confident first. The counts travel with it so
-    the interface can show what is waiting without a second round trip."""
+    the interface can show what is waiting without a second round trip.
+
+    Filtered by the reader's clearance against what each proposal came
+    from, not only by the case gate (ux08-triage:accept-downgrades-
+    classification, 2026-09-23): a rationale quotes the captured text, and
+    a RED capture's text was shown to every reader of an AMBER case.
+
+    `pending_by_node` is what the sociogram's proposal ring is drawn from
+    (ux08-triage:graph-says-unreviewed-triage-says-nothing): the same
+    queue, so the ring and this pane cannot disagree about what waits."""
+    from noctornal_api.extraction import CaptureService
+
     if state not in _STATES:
         raise Problem(400, "Invalid request",
                       f"unknown state {state!r}; one of {', '.join(sorted(_STATES))}")
+    clearance, held = _reader_ceiling(conn, user, case_id)
     store = ProposalStore(conn)
+    rows = store.queue(case_id, state=state, limit=limit,
+                       clearance=clearance, compartments=held)
+    named: set[str] = set()
+    for p in rows:
+        named |= _named_ids(p)
+    refs = store.node_refs(case_id, named, clearance=clearance,
+                           compartments=held)
+    docs = store.documents({p.document_id for p in rows if p.document_id})
+    labelled = store.source_labels_many([p.id for p in rows])
+    # The labels of the entities ATTRIBUTE claims would land on, for the
+    # ones this reader was shown (c1, 2026-09-24): a card whose Accept the
+    # server would refuse says so rather than offering it.
+    targets = store.entity_labels(case_id, set(refs))
+    out = []
+    for p in rows:
+        labels = labelled[p.id]
+        blocked = None
+        if p.kind == KIND_ATTRIBUTE:
+            target = targets.get(str((p.payload or {}).get("node_id")))
+            if target is not None:
+                blocked = attribute_label_problem(p.payload, labels, *target)
+        out.append(_out(
+            p, classification=_display_label(p, labels),
+            refs={k: v for k, v in refs.items() if k in _named_ids(p)},
+            documents=docs, accept_blocked=blocked))
     return {
         "state": state,
-        "counts": store.counts(case_id),
-        "proposals": [_out(p) for p in store.queue(case_id, state=state,
-                                                   limit=limit)],
+        "counts": store.counts(case_id, clearance=clearance,
+                               compartments=held),
+        "proposals": out,
+        "pending_by_node": store.pending_by_node(
+            case_id, clearance=clearance, compartments=held),
+        # Why the capture form above this queue is off, or null (final
+        # review c15, 2026-09-24): a compartmented case refuses captures,
+        # and the case record the console holds does not name its
+        # compartments.
+        "capture_refused": CaptureService(conn).refusal(case_id),
     }
+
+
+#: How much of a captured document the source view returns on each side of
+#: the match. Enough to read the paragraph a handle sat in; a capture can be
+#: a megabyte, and the card is not the place to read all of it.
+SOURCE_WINDOW = 1500
+
+
+@router.get("/{proposal_id}/source", response_model=dict)
+def source(
+    case_id: UUID, proposal_id: UUID,
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The captured text a proposal came from, around the match.
+
+    ux08-triage:source-document-not-reachable (2026-09-23). A card showed
+    about ninety characters of context and "found at characters N-M of
+    the captured document", with no title and no way to open the capture:
+    deciding whether a handle was quoted, signed or real sometimes needs
+    the paragraph, and tracing a proposal to its evidence meant leaving
+    Triage to search for the document. `collect.document` hangs off a
+    source rather than a case, so this is reached THROUGH the proposal:
+    the case gate, the proposal's case, and the reader's clearance against
+    the proposal's labels, which include the document's. Anything the
+    reader may not see is the same 404 a proposal that does not exist
+    gets.
+    """
+    row = _owned(conn, case_id, proposal_id)
+    clearance, held = _reader_ceiling(conn, user, case_id)
+    store = ProposalStore(conn)
+    if not store.readable(proposal_id, clearance=clearance, compartments=held):
+        raise Problem(404, "Not found", "no such proposal in this case")
+    if row.document_id is None:
+        raise Problem(404, "Not found",
+                      "this proposal names no captured document; its "
+                      "rationale says where it came from")
+    doc = conn.execute(
+        """SELECT id, title, body_text, classification, captured_at,
+                  external_url, purged_at
+             FROM collect.document WHERE id = %s""",
+        (row.document_id,)).fetchone()
+    if doc is None:
+        raise Problem(404, "Not found", "the captured document is gone")
+    attrs = (row.payload or {}).get("attrs") or {}
+    start, end = attrs.get("char_start"), attrs.get("char_end")
+    body = doc[2] or ""
+    out = {
+        "document_id": str(doc[0]), "title": doc[1],
+        "classification": doc[3],
+        "captured_at": doc[4].isoformat() if doc[4] else None,
+        "external_url": doc[5], "purged": doc[6] is not None,
+        "length": len(body),
+    }
+    if doc[6] is not None:
+        return {**out, "text": "", "offset": 0, "match": None}
+    if (isinstance(start, int) and isinstance(end, int)
+            and 0 <= start <= end <= len(body)):
+        lo = max(0, start - SOURCE_WINDOW)
+        hi = min(len(body), end + SOURCE_WINDOW)
+        match = {"start": start - lo, "end": end - lo}
+    else:
+        lo, hi, match = 0, min(len(body), 2 * SOURCE_WINDOW), None
+    return {**out, "text": body[lo:hi], "offset": lo, "match": match}
 
 
 @router.post("/{proposal_id}/accept", response_model=ProposalOut)
@@ -274,7 +518,19 @@ def accept(
 
     Nor a path around the label ceiling: see `_check_accept_labels`.
     """
-    row = _owned(conn, case_id, proposal_id)
+    # A proposal the queue never showed this reader is the same 404 here
+    # as on reject and defer, and it is decided FIRST. The material behind
+    # the claim counts, not only its target: an ATTRIBUTE is gated below on
+    # its entity, and a contact block classified over that entity would
+    # otherwise be accepted by someone the queue never showed it to.
+    #
+    # ux08-triage:accept-downgrades-classification, verifier's fix round
+    # (2026-09-23). This check used to run after `_check_accept_labels`
+    # and answer 403, so an AMBER reader holding a hidden proposal's id
+    # and asking for a label below its capture was told "this proposal
+    # came from RED material": the label the queue had kept from them,
+    # confirmed by the refusal.
+    row = _owned(conn, case_id, proposal_id, user)
     _check_accept_labels(conn, user, case_id, row, body.classification)
     try:
         return _out(ProposalReview(conn).accept(
@@ -292,7 +548,7 @@ def reject(
 ) -> ProposalOut:
     """Dispose without applying. The note is required: parser drift is
     found by reading rejections."""
-    _owned(conn, case_id, proposal_id)
+    _owned(conn, case_id, proposal_id, user)
     try:
         return _out(ProposalReview(conn).reject(
             proposal_id, reviewed_by=user.user_id, note=body.note))
@@ -308,7 +564,7 @@ def defer(
 ) -> ProposalOut:
     """Park an ambiguous suggestion. A queue whose only options are yes and
     no forces a decision on items that do not deserve one yet."""
-    _owned(conn, case_id, proposal_id)
+    _owned(conn, case_id, proposal_id, user)
     try:
         return _out(ProposalReview(conn).defer(
             proposal_id, reviewed_by=user.user_id, note=body.note))

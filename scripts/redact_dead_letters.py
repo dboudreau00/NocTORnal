@@ -2,7 +2,7 @@
 
 docs/17 F15(d). `ingest.dead_letter` held verbatim fragments in a table
 with no classification, no compartments and no retention, and the route in
-was routine rather than adversarial -- a partner whose schema drifts
+was routine rather than adversarial: a partner whose schema drifts
 dead-letters their whole feed, and `categorise` sends anything with
 top-level `email` + `password` down that path.
 
@@ -17,7 +17,7 @@ deliberately and sees what it changed.
 
 What it does to each row where `redacted` is false:
 
-  * replaces `raw_fragment` with `redact_fragment(...)` -- keys, types,
+  * replaces `raw_fragment` with `redact_fragment(...)`: keys, types,
     lengths, never a value;
   * records `fragment_sha256` of the ORIGINAL first, so a later repair can
     be checked against the batch's raw object;
@@ -48,6 +48,15 @@ load_env_local()
 BATCH = 500
 
 
+def _rows(n: int, described: str = "") -> str:
+    """`n` rows, agreed in number: "1 row", "0 rows", "3 unredacted
+    dead-letter rows". It printed a bracketed plural, and docs/18 quotes
+    this output word for word, so the two change together (Alpha 6
+    pre-release check, 2026-09-23)."""
+    noun = "row" if n == 1 else "rows"
+    return f"{n} {described} {noun}" if described else f"{n} {noun}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true",
@@ -60,7 +69,7 @@ def main() -> int:
     total = conn.execute(
         "SELECT count(*) FROM ingest.dead_letter WHERE NOT redacted"
     ).fetchone()[0]
-    print(f"{total} unredacted dead-letter row(s)")
+    print(_rows(total, "unredacted dead-letter"))
     if total == 0:
         print("nothing to do")
         return 0
@@ -69,7 +78,7 @@ def main() -> int:
             """SELECT id, error_class, length(raw_fragment), occurred_at
                  FROM ingest.dead_letter WHERE NOT redacted
                 ORDER BY occurred_at LIMIT 20""").fetchall()
-        print("\nfirst 20, by age (lengths only -- this is a dry run and it "
+        print("\nfirst 20, by age (lengths only: this is a dry run and it "
               "is not going to print the content it exists to remove):")
         for row in rows:
             print(f"  {row[0]}  {row[3]:%Y-%m-%d}  {row[1]:<24} "
@@ -101,7 +110,7 @@ def main() -> int:
         print(f"  {done}/{total}")
         if args.limit and done >= args.limit:
             break
-    print(f"redacted {done} row(s)")
+    print(f"redacted {_rows(done)}")
     return 0
 
 

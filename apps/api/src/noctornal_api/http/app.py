@@ -51,6 +51,7 @@ from noctornal_api.http.routers import (
     proposals,
     read,
     reports,
+    roles,
     samples,
     search,
     setup,
@@ -119,6 +120,23 @@ def ui_csp() -> str:
 _DOWNLOAD_PATH = re.compile(
     rf"^{re.escape(API_PREFIX)}/samples/[0-9a-fA-F-]{{36}}/download$")
 
+#: `POST /api/v1/cases/{case_id}/evidence/{evidence_id}/download`, where an
+#: exhibit of attacker markup is produced on a ticket (x-hostile-export,
+#: 2026-09-24). docs/19 section 1.1 sends those bytes out through the
+#: sample origin and nowhere else, and this process served nothing there
+#: but sample downloads, so an `.eml` exhibit could not leave at all. The
+#: second path the sample origin answers, matched by shape like the first.
+_EXHIBIT_DOWNLOAD_PATH = re.compile(
+    rf"^{re.escape(API_PREFIX)}/cases/[0-9a-fA-F-]{{36}}"
+    rf"/evidence/[0-9a-fA-F-]{{36}}/download$")
+
+
+def _is_download_path(path: str) -> bool:
+    """Either of the two paths that put hostile bytes on a disk, the only
+    ones a cross-origin request is ever answered on."""
+    return bool(_DOWNLOAD_PATH.match(path) or _EXHIBIT_DOWNLOAD_PATH.match(path))
+
+
 #: Six hundred seconds: the preflight is one config comparison, and a
 #: browser that re-asks every download costs nothing worth caching longer.
 _PREFLIGHT_MAX_AGE = "600"
@@ -136,11 +154,16 @@ def _allowed_on_sample_origin(request: Request) -> bool:
     check and the readiness register makes the split a property of the
     process rather than of a proxy allow-list nobody tests. Until
     2026-09-09 docs/16 C9 asked a human to confirm this by hand.
+
+    "The download" is two paths since 2026-09-24: a sample's, and the
+    production of an exhibit of attacker markup, which docs/19 section 1.1
+    sends out through this origin alone (x-hostile-export). Neither reads
+    a session; each takes a one-shot ticket minted on the application.
     """
     path = request.url.path
     if path == "/healthz":
         return True
-    if _DOWNLOAD_PATH.match(path):
+    if _is_download_path(path):
         return request.method in ("POST", "OPTIONS")
     return path == f"{API_PREFIX}/admin/readiness" and request.method == "GET"
 
@@ -150,7 +173,7 @@ def _preflight(request: Request) -> Response | None:
     one this process answers. `download_cors_headers` decides whether the
     Origin is the configured application origin; this only adds what a
     preflight needs on top of what every download answer carries."""
-    if request.method != "OPTIONS" or not _DOWNLOAD_PATH.match(request.url.path):
+    if request.method != "OPTIONS" or not _is_download_path(request.url.path):
         return None
     cors = download_cors_headers(request.headers.get("origin"))
     if not cors:
@@ -241,8 +264,8 @@ def create_app() -> FastAPI:
             response = problem_response(
                 404, "Not found",
                 f"this process is the sample origin and serves sample "
-                f"downloads only (invariant 10); the application is at "
-                f"{split.app}")
+                f"downloads and exhibit productions only; the application "
+                f"is at {split.app}")
         else:
             response = _preflight(request) or await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
@@ -252,7 +275,7 @@ def create_app() -> FastAPI:
             # default-src 'none'.
             response.headers["Content-Security-Policy"] = ui_csp()
             response.headers["Cache-Control"] = "no-cache"
-        if _DOWNLOAD_PATH.match(request.url.path):
+        if _is_download_path(request.url.path):
             # On every answer the download path gives -- the bytes, a 401,
             # a 404, the limiter's 429 -- so the console can read the
             # refusal as well as the archive. Empty unless this process is
@@ -277,6 +300,9 @@ def create_app() -> FastAPI:
                    # against. Free text until 2026-09-02, and a typo in
                    # it was silent no-access.
                    compartments.router,
+                   # Which roles hold which permission, so a refusal can
+                   # name a role rather than a code (2026-09-23).
+                   roles.router,
                    cases.router, graph.router,
                    # Oversight, not case access: `audit.read` is held by
                    # SECURITY_OFFICER alone, and the chain had no verifier

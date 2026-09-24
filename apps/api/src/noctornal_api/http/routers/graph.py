@@ -33,10 +33,12 @@ from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from noctornal_api.graph import (
+    REVIEW_STATES,
     AssertionInput,
     GraphWriteError,
     GraphWriteService,
     TieConfidenceConflict,
+    TieReviewUnchanged,
 )
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -48,16 +50,30 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.selectors import SelectorStore
 from noctornal_api.wording import count_of
+from noctornal_ontology import SELECTOR_TYPES, normalise, refusal
 
 router = APIRouter(prefix="/cases/{case_id}", tags=["graph"])
 
 
 class AssertionBody(BaseModel):
-    basis: str = "DIRECT_OBSERVATION"
-    reliability: str = "F"
-    credibility: str = "6"
-    confidence: str = "LOW"
+    """The claim a write records, and its grading.
+
+    The four grading fields are REQUIRED (gap-api-grade-required,
+    2026-09-23). They used to default to DIRECT_OBSERVATION, F, 6 and LOW,
+    and the create bodies defaulted the whole assertion, so a script that
+    sent a bare label recorded "we saw this ourselves" in the caller's name
+    at a grade nobody chose. A reviewer six months later cannot tell that
+    from a considered F6, ACH weights the cell by it, and the confidence
+    filter acts on it. A missing field is now a 422 whose detail names it
+    (`body.assertion.basis: Field required`), and nothing is filled in. The
+    values themselves are checked by the database enums, as before.
+    """
+    basis: str
+    reliability: str
+    credibility: str
+    confidence: str
     rationale: str | None = None
     # E1: an assertion can carry its exhibit at the moment the claim is
     # made. The column has always existed; nothing in the UI used it, which
@@ -72,12 +88,19 @@ class CreateNodeBody(BaseModel):
     label: str
     classification: str = "AMBER"
     attrs: dict = {}
-    assertion: AssertionBody = AssertionBody()
+    # Required, with its grading: see AssertionBody.
+    assertion: AssertionBody
     # U3: the interval this was true in WORLD time. "Was in LockBit until
     # March" is the normal case, not the exception, and the timeline
     # scrubber and trust decay both have nothing to work with without it.
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    # ux06-entry:selector-entities-bypass-normalisation (2026-09-23): what
+    # kind of selector the label IS, for a SELECTOR, COMMS_ACCOUNT or
+    # WALLET entity. Given, the label is normalised (and refused when it
+    # reduces to nothing) and recorded in the selector index against the
+    # new entity, in the same transaction. See `create_node`.
+    selector_type: str | None = Field(default=None, max_length=64)
 
 
 class CreateEdgeBody(BaseModel):
@@ -93,7 +116,8 @@ class CreateEdgeBody(BaseModel):
     src_node_id: UUID
     dst_node_id: UUID
     classification: str = "AMBER"
-    assertion: AssertionBody = AssertionBody()
+    # Required, with its grading: see AssertionBody.
+    assertion: AssertionBody
     valid_from: datetime | None = None
     valid_to: datetime | None = None
     confidence: str | None = None
@@ -155,20 +179,236 @@ def _check_evidence(conn: psycopg.Connection, case_id: UUID,
         raise Problem(404, "Not found", "no such exhibit in this case")
 
 
-@router.post("/nodes", response_model=IdOut, status_code=201)
+class NodeCreatedOut(IdOut):
+    """A new entity, and what became of its selector when it had one.
+
+    `selector_owner_id` is set when the selector was ALREADY recorded
+    against another entity the caller can see: the index keeps the first
+    owner (re-attribution is deliberate, never a side effect), so the new
+    entity does not get it, and the two are a merge lead. A strong
+    selector held by two entities is how one actor becomes two."""
+    selector_norm: str | None = None
+    selector_owner_id: str | None = None
+    selector_is_strong: bool | None = None
+
+
+@router.post("/nodes", response_model=NodeCreatedOut, status_code=201)
 def create_node(case_id: UUID, body: CreateNodeBody,
                 user: CurrentUser = Depends(require("graph.node.create")),
-                conn: psycopg.Connection = Depends(get_conn)) -> IdOut:
+                conn: psycopg.Connection = Depends(get_conn)) -> NodeCreatedOut:
     check_writable_labels(conn, user, classification=body.classification)
     _check_evidence(conn, case_id, body.assertion.evidence_id)
     _interval_sane(body.valid_from, body.valid_to)
-    node_id = GraphWriteService(conn).create_node(
-        case_id=case_id, node_type=body.node_type, label=body.label,
-        created_by=user.user_id, assertion=_assertion(body.assertion, user.user_id),
-        attrs=body.attrs, classification=body.classification,
-        valid_from=body.valid_from, valid_to=body.valid_to,
-    )
-    return IdOut(id=str(node_id))
+    selector = _selector_for(body.node_type, body.selector_type, body.label)
+
+    def write() -> UUID:
+        return GraphWriteService(conn).create_node(
+            case_id=case_id, node_type=body.node_type, label=body.label,
+            created_by=user.user_id,
+            assertion=_assertion(body.assertion, user.user_id),
+            attrs=body.attrs, classification=body.classification,
+            valid_from=body.valid_from, valid_to=body.valid_to,
+        )
+
+    if selector is None:
+        return NodeCreatedOut(id=str(write()))
+    # One transaction, so an entity whose selector could not be recorded
+    # does not exist either. The index is observation bookkeeping, not a
+    # graph element (selectors.py), so recording it needs no second
+    # assertion: the entity's founding claim is the observation, and its
+    # observed time dates the selector.
+    with conn.transaction():
+        node_id = write()
+        row = SelectorStore(conn).record(
+            case_id=case_id, selector_type=selector.key,
+            raw_value=body.label, node_id=node_id,
+            observed_at=body.assertion.observed_at)
+    out = NodeCreatedOut(id=str(node_id), selector_norm=row.norm_value,
+                         selector_is_strong=selector.is_strong)
+    if row.node_id is not None and row.node_id != node_id and _node_visible(
+            conn, user, case_id, row.node_id):
+        out.selector_owner_id = str(row.node_id)
+    return out
+
+
+# --- before an entity is created: is it already here? ---------------------
+#
+# ux06-entry:no-duplicate-check-on-create and ux06-entry:selector-entities-
+# bypass-normalisation (2026-09-23). Add entity posted straight to /nodes:
+# "Harrow_Skua2" for an existing "harrow_skua2" made a second persona that
+# split the actor's ties and degree, and a hand-entered selector was taken
+# raw, so '@Vendor' never met 'vendor' and a bare Telegram id the Comms pane
+# refuses went in unchallenged. docs/01 calls merging "the operation most
+# likely to quietly corrupt a case"; the cheapest merge is the one never
+# needed. The form asks here as the label is typed.
+
+#: Entity types whose label IS a selector value.
+SELECTOR_NODE_TYPES = frozenset({"SELECTOR", "COMMS_ACCOUNT", "WALLET"})
+_SELECTOR_TYPES = {s.key: s for s in SELECTOR_TYPES}
+#: The most same-label matches returned. A list of ten look-alikes is
+#: already the finding; the check is a warning, not a search.
+CHECK_MATCHES_MAX = 10
+
+
+def _selector_for(node_type: str, selector_type: str | None, label: str):
+    """The selector type a create names, validated, or None. Refused with
+    the ontology's own reason when the label reduces to nothing, which is
+    the rule `SelectorStore` enforces on every other path in."""
+    if selector_type is None:
+        return None
+    if node_type not in SELECTOR_NODE_TYPES:
+        raise Problem(400, "Invalid request",
+                      "selector_type is for a Selector, Comms account or "
+                      "Crypto wallet entity, whose label is the selector")
+    st = _SELECTOR_TYPES.get(selector_type)
+    if st is None:
+        raise Problem(400, "Invalid request",
+                      f"unknown selector type {selector_type!r}")
+    if not normalise(st.key, label).strip():
+        raise Problem(400, "Invalid request", refusal(st.key, label))
+    return st
+
+
+def _node_visible(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                  node_id: UUID) -> bool:
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    return conn.execute(
+        """SELECT 1 FROM core.node
+            WHERE id = %s AND case_id = %s AND deleted_at IS NULL
+              AND classification <= %s::core.tlp AND compartments <@ %s""",
+        (node_id, case_id, clearance.name, list(compartments)),
+    ).fetchone() is not None
+
+
+@router.get("/graph/nodes/count", response_model=dict)
+def count_nodes(
+    case_id: UUID,
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """How many live entities of this case the caller can see: the same
+    rows `GET /nodes` lists, without the page. The entity list fetches the
+    newest 1000 and counted that page as the case, so a larger case read
+    "1000 of 1000" while its oldest entities were missing from the list,
+    the Link pickers and the palette (ux06-entry:entity-list-no-find,
+    2026-09-23). Counting only what the caller can see keeps it from being
+    a measure of what they cannot.
+
+    `edges` is the same for the ties, by the rule `GET /edges` lists them
+    (both ends visible, inferred ties included, as the console loads
+    them): the count line's "N relationships in the case" was the length
+    of a page that stops at 1000 too (the 2026-09-23 verifier)."""
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    ceiling = (clearance.name, list(compartments))
+    total = conn.execute(
+        """SELECT count(*) FROM core.node
+            WHERE case_id = %s AND deleted_at IS NULL AND merged_into_id IS NULL
+              AND classification <= %s::core.tlp AND compartments <@ %s""",
+        (case_id, *ceiling),
+    ).fetchone()[0]
+    edges = conn.execute(
+        """SELECT count(*)
+             FROM core.edge e
+             JOIN core.node s ON s.id = e.src_node_id
+             JOIN core.node d ON d.id = e.dst_node_id
+            WHERE e.case_id = %s AND e.deleted_at IS NULL
+              AND e.classification <= %s::core.tlp AND e.compartments <@ %s
+              AND s.deleted_at IS NULL AND d.deleted_at IS NULL
+              AND s.classification <= %s::core.tlp AND s.compartments <@ %s
+              AND d.classification <= %s::core.tlp AND d.compartments <@ %s""",
+        (case_id, *ceiling, *ceiling, *ceiling),
+    ).fetchone()[0]
+    return {"total": total, "edges": edges}
+
+
+class NodeCheckBody(BaseModel):
+    """What the Add entity form holds so far. POST, not GET, so a label,
+    which is case content (a forum handle, a wallet), never rides in a URL
+    into an access log."""
+    node_type: str = Field(max_length=64)
+    label: str = Field(max_length=2000)
+    selector_type: str | None = Field(default=None, max_length=64)
+
+
+class NodeMatchOut(BaseModel):
+    id: str
+    label: str
+    node_type: str
+
+
+class NodeCheckOut(BaseModel):
+    #: Live entities of the same type whose label matches once case and
+    #: runs of whitespace are folded, newest first.
+    same_label: list[NodeMatchOut]
+    #: The canonical form the selector index will hold, or None.
+    selector_norm: str | None = None
+    #: Why the label cannot be a selector of that type, or None.
+    selector_refusal: str | None = None
+    selector_is_strong: bool | None = None
+    #: The entity this selector is already recorded against, when the
+    #: caller can see it.
+    selector_owner: NodeMatchOut | None = None
+
+
+@router.post("/graph/nodes/check", response_model=NodeCheckOut)
+def check_new_node(
+    case_id: UUID, body: NodeCheckBody,
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> NodeCheckOut:
+    """Is the entity about to be created already in this case?
+
+    Reads only, and only what the caller may see: every match is filtered
+    by their own ceiling, so a RED look-alike stays invisible to an AMBER
+    analyst, exactly as it is in the entity list. Case and runs of
+    whitespace are folded, which is the typing slip the review showed;
+    anything looser (edit distance, homoglyphs) would flood the form with
+    false leads on a forum full of "vendor1", "vendor_1", "vendorl".
+    For a selector type, the label is also normalised the way the index
+    will hold it, and the index is asked who already owns that value.
+    """
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    label = body.label.strip()
+    out = NodeCheckOut(same_label=[])
+    if label:
+        rows = conn.execute(
+            """SELECT id, label, node_type FROM core.node
+                WHERE case_id = %s AND node_type = %s
+                  AND deleted_at IS NULL AND merged_into_id IS NULL
+                  AND classification <= %s::core.tlp AND compartments <@ %s
+                  AND lower(regexp_replace(btrim(label), '\\s+', ' ', 'g'))
+                      = lower(regexp_replace(btrim(%s), '\\s+', ' ', 'g'))
+                ORDER BY created_at DESC LIMIT %s""",
+            (case_id, body.node_type, clearance.name, list(compartments),
+             label, CHECK_MATCHES_MAX),
+        ).fetchall()
+        out.same_label = [NodeMatchOut(id=str(r[0]), label=r[1], node_type=r[2])
+                          for r in rows]
+    if (body.selector_type is None or body.node_type not in SELECTOR_NODE_TYPES
+            or not label):
+        return out
+    st = _SELECTOR_TYPES.get(body.selector_type)
+    if st is None:
+        raise Problem(400, "Invalid request",
+                      f"unknown selector type {body.selector_type!r}")
+    out.selector_is_strong = st.is_strong
+    norm = normalise(st.key, label)
+    if not norm.strip():
+        out.selector_refusal = refusal(st.key, label)
+        return out
+    out.selector_norm = norm
+    owner = conn.execute(
+        """SELECT n.id, n.label, n.node_type
+             FROM core.selector s JOIN core.node n ON n.id = s.node_id
+            WHERE s.case_id = %s AND s.selector_type = %s AND s.norm_value = %s
+              AND n.deleted_at IS NULL
+              AND n.classification <= %s::core.tlp AND n.compartments <@ %s""",
+        (case_id, st.key, norm, clearance.name, list(compartments)),
+    ).fetchone()
+    if owner is not None:
+        out.selector_owner = NodeMatchOut(id=str(owner[0]), label=owner[1],
+                                          node_type=owner[2])
+    return out
 
 
 @router.post("/edges", response_model=IdOut, status_code=201)
@@ -243,8 +483,10 @@ def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> 
     # CR7: re-authorise against the ELEMENT's labels, not just the case's.
     # A RED node can live in an AMBER case, and asserting about it is a
     # write against the node.
+    # A second gate, after the route's at the case's labels: it counts a
+    # break-glass use only if that one did not (sec-breakglass-double-count).
     authorize_object(conn, user, case_id=case_id,
-                     permission_key="assertion.create",
+                     permission_key="assertion.create", after_case_gate=True,
                      classification=found[1], compartments=found[2])
     _check_evidence(conn, case_id, body.evidence_id)
     try:
@@ -314,7 +556,7 @@ def retract_assertion(
                               row[1] or row[2]) if (row[1] or row[2]) else None
     if subject is not None:
         authorize_object(conn, user, case_id=case_id,
-                         permission_key="assertion.retract",
+                         permission_key="assertion.retract", after_case_gate=True,
                          classification=subject[1], compartments=subject[2])
     try:
         GraphWriteService(conn).retract_assertion(
@@ -424,7 +666,7 @@ def _gate_for_change(
     if row is None or row[0] != case_id:
         raise Problem(404, "Not found", f"no such {table} in this case")
     authorize_object(conn, user, case_id=case_id,
-                     permission_key=permission_key,
+                     permission_key=permission_key, after_case_gate=True,
                      classification=row[1], compartments=frozenset(row[2] or []))
     if row[3] is not None:
         # 409, not 404: the caller is cleared for this element and it does
@@ -495,7 +737,9 @@ class UpdateNodeBody(BaseModel):
     """
     label: str | None = None
     attrs: dict | None = None
-    assertion: AssertionBody = AssertionBody()
+    # A correction records a claim, so it is graded like one: required,
+    # with no defaults (gap-api-grade-required, 2026-09-23).
+    assertion: AssertionBody
 
 
 class UpdateEdgeBody(BaseModel):
@@ -511,7 +755,9 @@ class UpdateEdgeBody(BaseModel):
     weight: float | None = Field(default=None, ge=0, le=9_999_999_999.9999)
     confidence: str | None = None      # validated by the service against the DB enum
     attrs: dict | None = None
-    assertion: AssertionBody = AssertionBody()
+    # Required, as on UpdateNodeBody. A re-grade sends the same value here
+    # and in `confidence`: see update_edge.
+    assertion: AssertionBody
 
 
 class RetireBody(BaseModel):
@@ -535,9 +781,11 @@ def update_node(
     """Correct a node's label and/or attributes.
 
     **An assertion is required** — "we corrected this" is a claim about the
-    world and needs a basis like any other (invariant 1). The default body
-    grades it F/6/LOW, which is honest for an uncited correction; cite the
-    exhibit that prompted it via `assertion.evidence_id` if there is one.
+    world and needs a basis like any other (invariant 1). So is its
+    grading: the body used to grade an ungraded correction F/6/LOW on the
+    caller's behalf, as DIRECT_OBSERVATION, and now a missing field is a 422
+    naming it (gap-api-grade-required, 2026-09-23). Cite the exhibit that
+    prompted it via `assertion.evidence_id` if there is one.
 
     `attrs` REPLACES the attribute object wholesale. See `UpdateNodeBody`.
 
@@ -618,6 +866,10 @@ def update_edge(
     the tie and its claims (ux05 two-disagreeing-confidences). Sending
     both `confidence` and a different `assertion.confidence` is therefore
     refused as contradictory rather than one being silently preferred.
+    Since the assertion's grading became required (gap-api-grade-required,
+    2026-09-23) a re-grade always carries both, so it sends the one value
+    twice: `confidence` says the correction IS a re-grade of the tie (its
+    `claim_path`), and `assertion.confidence` is that claim's grade.
 
     Lowering a tie beneath a claim that is still live is a 409: see
     `GraphWriteService.update_edge` for why, and for the remedy the
@@ -628,12 +880,12 @@ def update_edge(
     compartments. See `GraphWriteService.update_edge`.
     """
     if (body.confidence is not None
-            and "confidence" in body.assertion.model_fields_set
             and body.assertion.confidence != body.confidence):
         raise Problem(400, "Invalid request",
                       "confidence and assertion.confidence disagree. A tie's "
                       "confidence is its assertions' grade, so a re-grade is "
-                      "the correction's own grade: send one value")
+                      "the correction's own grade: send the same value in "
+                      "both")
     old_weight, old_confidence, old_attrs = _gate_for_change(
         conn, user, case_id=case_id, table="edge", element_id=edge_id,
         permission_key="graph.edge.update")
@@ -819,3 +1071,188 @@ def soft_delete_edge(
                  "is attributed), but the tie is now out of the live graph, "
                  "and out of as-of views of the past too."),
     }
+
+
+# --- reviewing a tie ------------------------------------------------------
+#
+# gap-tie-review and ux05 review-state-never-leaves-proposed (2026-09-23).
+# `core.edge.review` defaulted to PROPOSED and nothing anywhere set it, so
+# every tie in every case read "review PROPOSED", every node on the canvas
+# carried the "unreviewed proposal" ring, and the inspector's "Unreviewed
+# proposals" count always equalled its "Ties in projection". A signal that
+# can never clear carries no information, and this one told analysts there
+# was work pending that no control could complete.
+#
+# Two halves. A tie is now BORN in the right state (`GraphWriteService.
+# create_edge`: a person's own claim is ACCEPTED, a machine's is PROPOSED,
+# and a Triage acceptance passes ACCEPTED). And these two routes let a
+# person dispose of what is still pending, or reopen a disposal, with the
+# decision recorded where a Triage acceptance is: the audit log.
+#
+# Gated on `proposal.review`, the verb Triage disposes of a machine's
+# suggestion with, and so held by the Lead investigator (CASE_OWNER) and
+# the REVIEWER, not by the ANALYST: the owner's decision for this gap. The
+# gate runs against the TIE's own labels, the CR7 rule every other change
+# here follows, and outside the write transaction so a refusal's
+# AUTHZ_DENIED row is kept (see `_gate_for_change`).
+
+#: The longest review note accepted. A note is a sentence or two for the
+#: next reader, not a report; the cap keeps an audit row from carrying a
+#: pasted document.
+REVIEW_NOTE_MAX = 2000
+
+
+class ReviewBody(BaseModel):
+    """A disposal of one tie.
+
+    `review` is ACCEPTED, DISPUTED, or PROPOSED to reopen. A note is
+    required for DISPUTED and for a reopening, because the next reader
+    needs the reason more than they need the verdict; it is optional for
+    ACCEPTED, where the claims and their grading already say why."""
+    review: str = Field(max_length=32)
+    note: str | None = Field(default=None, max_length=REVIEW_NOTE_MAX)
+
+
+#: Why a note is demanded, per state that demands one.
+_NOTE_REQUIRED = {
+    "DISPUTED": "a dispute needs a note saying what is doubted, so the next "
+                "reader can act on it",
+    "PROPOSED": "reopening a review needs a note saying why the earlier "
+                "decision no longer stands",
+}
+
+
+@router.post("/graph/edges/{edge_id}/review", response_model=dict,
+             dependencies=[Depends(rate_limit("request"))])
+def review_edge(
+    case_id: UUID, edge_id: UUID, body: ReviewBody,
+    user: CurrentUser = Depends(require("proposal.review")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Accept or dispute a tie, or reopen its review.
+
+    Refused: REJECTED and SUPERSEDED (400, naming what to do instead; see
+    `graph.REVIEW_STATES`), a state the tie is already in (409, and no
+    audit row), a retired tie (409), a tie in another case or one that
+    does not exist (404, identical), and a caller who lacks
+    `proposal.review` or the clearance for the tie (403).
+
+    The decision goes to `audit.event` as EDGE_REVIEWED with the state
+    left, the state set and the note, in the same transaction as the
+    change, so a review that happened without its record is not a state
+    this code can reach. `GET .../review` reads it back.
+    """
+    wanted = body.review.strip().upper()
+    if wanted not in REVIEW_STATES:
+        raise Problem(
+            400, "Invalid request",
+            f"a review sets ACCEPTED or DISPUTED, or PROPOSED to reopen it, "
+            f"not {body.review!r}. A tie that is wrong is retired, or its "
+            f"claims are retracted with their reasons: a REJECTED tie left "
+            f"in the live graph would say two opposite things at once")
+    note = (body.note or "").strip() or None
+    if wanted in _NOTE_REQUIRED and note is None:
+        raise Problem(400, "Invalid request", _NOTE_REQUIRED[wanted])
+    _gate_for_change(conn, user, case_id=case_id, table="edge",
+                     element_id=edge_id, permission_key="proposal.review")
+    try:
+        with conn.transaction():
+            previous = GraphWriteService(conn).review_edge(
+                edge_id, case_id=case_id, review=wanted)
+            _audit_change(conn, user, case_id, action="EDGE_REVIEWED",
+                          object_type="edge", object_id=edge_id,
+                          detail={"review": wanted, "previous": previous,
+                                  "note": note})
+    except TieReviewUnchanged as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return {"edge_id": str(edge_id), "review": wanted, "previous": previous}
+
+
+class ReviewEventOut(BaseModel):
+    review: str
+    previous: str | None
+    note: str | None
+    by: str | None
+    by_name: str | None
+    at: datetime
+
+
+class ReviewOut(BaseModel):
+    """A tie's review state and how it got there, newest decision first."""
+    edge_id: str
+    review: str
+    #: Who entered the tie and when: with no decision below, the state is
+    #: the one it was born in (`GraphWriteService.create_edge`).
+    created_by_name: str | None
+    created_at: datetime
+    #: Set when the tie was applied from a Triage proposal: who accepted
+    #: it and when. That acceptance is the tie's first disposal.
+    accepted_from_triage_by: str | None = None
+    accepted_from_triage_at: datetime | None = None
+    history: list[ReviewEventOut]
+
+
+@router.get("/graph/edges/{edge_id}/review", response_model=ReviewOut)
+def edge_review(
+    case_id: UUID, edge_id: UUID,
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> ReviewOut:
+    """Who put a tie in its review state, when, and why.
+
+    `edge.review` has no reviewer column (no migration was open for one),
+    so the record is the EDGE_REVIEWED audit rows `review_edge` writes.
+    Their `detail` is never returned by `/audit`, which keeps case content
+    away from the one role that reads the whole log; it is returned HERE
+    only to a caller who may read this case and this tie, the same reader
+    the tie's own assertions and their authors' names go to. A tie above
+    the caller's clearance is the same 404 as one that does not exist.
+    """
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    row = conn.execute(
+        """SELECT e.review::text, e.created_at, u.display_name
+             FROM core.edge e
+             LEFT JOIN iam.app_user u ON u.id = e.created_by
+            WHERE e.id = %s AND e.case_id = %s AND e.deleted_at IS NULL
+              AND e.classification <= %s::core.tlp AND e.compartments <@ %s""",
+        (edge_id, case_id, clearance.name, list(compartments)),
+    ).fetchone()
+    if row is None:
+        raise Problem(404, "Not found", "no such edge in this case")
+    triage = conn.execute(
+        """SELECT u.display_name, p.reviewed_at
+             FROM collect.proposal p
+             LEFT JOIN iam.app_user u ON u.id = p.reviewed_by
+            WHERE p.applied_edge_id = %s AND p.case_id = %s
+              AND p.state = 'ACCEPTED'
+            ORDER BY p.reviewed_at DESC LIMIT 1""",
+        (edge_id, case_id),
+    ).fetchone()
+    events = conn.execute(
+        """SELECT ev.detail, ev.actor_id, u.display_name, ev.occurred_at
+             FROM audit.event ev
+             LEFT JOIN iam.app_user u ON u.id = ev.actor_id
+            WHERE ev.object_id = %s AND ev.object_type = 'edge'
+              AND ev.action = 'EDGE_REVIEWED' AND ev.case_id = %s
+            ORDER BY ev.seq DESC LIMIT 50""",
+        (edge_id, case_id),
+    ).fetchall()
+    history = []
+    for detail, actor, name, at in events:
+        d = detail or {}
+        # A row with no actor was written by the system, not a person: the
+        # upgrade (migration 0067) names itself in `by`
+        # (ux05-inspector:review-state-never-leaves-proposed, 2026-09-23),
+        # and the history says that rather than "by unknown".
+        if actor is None and not name:
+            name = d.get("by") or None
+        history.append(ReviewEventOut(
+            review=d.get("review") or "", previous=d.get("previous"),
+            note=d.get("note"), by=str(actor) if actor else None,
+            by_name=name, at=at))
+    return ReviewOut(
+        edge_id=str(edge_id), review=row[0], created_at=row[1],
+        created_by_name=row[2],
+        accepted_from_triage_by=triage[0] if triage else None,
+        accepted_from_triage_at=triage[1] if triage else None,
+        history=history)

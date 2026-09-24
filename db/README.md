@@ -67,8 +67,13 @@ absolutely nothing where the role does not exist.
 
 **The ordering is load-bearing.** The role must exist *before* `alembic upgrade
 head` runs 0060; a role created afterwards is a role 0060 has already declined
-to grant. Adding one to a running deployment therefore means a fresh volume
-(initdb scripts never re-run) and then `alembic upgrade head` again. The same
+to grant, and running `alembic upgrade head` again grants nothing, because
+Alembic does not re-run a revision it has recorded. On an existing database,
+create the role as a superuser before upgrading it past 0060. For a role that
+arrived later, run [`release/alpha6-upgrade/app-role-grants.sql`](../release/alpha6-upgrade/app-role-grants.sql)
+with psql as the owner: it is 0060's `UPGRADE_SQL` followed by 0063's `REVOKE
+DELETE ON lab.preservation_authorisation`, copied from the migrations (see the
+0060 docstring), and running it twice changes nothing. The same ordering
 applies to CI: a job that wants `apps/api/tests/test_app_role_privileges_pg.py`
 to run rather than skip must `CREATE ROLE` before the migration step and export
 `NOCTORNAL_APP_DB_ROLE=noctornal_app`.

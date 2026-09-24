@@ -2,13 +2,443 @@
 
 ## Unreleased
 
+### A review of the last pass, before tagging
+
+The pass below was reviewed as a whole against a running copy of the demo
+estate before anything was tagged. It found 50 problems, each shown to be
+real before it was fixed: 24 were traced end to end when they were
+reported, and the 26 smaller ones were proved by whoever fixed them. All
+50 are fixed. The finding the pass had left half done, producing an exhibit
+of attacker markup, is finished too.
+
+**Security.**
+- Accepting a claim from a contact block wrote its identifier onto the
+  entity it named, at that entity's labels. A block classified RED under
+  a compartment, attached to a CLEAR persona, put the RED identifier and
+  the forum address it came from in front of every reader of the case,
+  including the readers the Triage queue had hidden the proposal from,
+  while the card showed a TLP:RED chip. The accept is now refused (409)
+  unless the entity already carries the block's classification and
+  compartments, the card says why and offers no Accept, and the service
+  checks the same rule for every caller, not only the route.
+- A capture was stored at the level picked on the form, AMBER by default,
+  whatever the case was, and a document is case-less: a RED case's
+  capture could be listed among AMBER readers' collected documents. A
+  capture is now stored no lower than its case, the form starts at the
+  case's level and offers nothing below it, and a capture into a
+  compartmented case is refused, because a collected document cannot yet
+  carry compartments. Text captured before keeps the label it was first
+  stored at, and a reply never names a label above the reader.
+- The deception pane's Propose looked for an existing proposal without
+  the reader's labels, so it both revealed and silently swallowed
+  proposals above them. It now reads the queue the way Triage does.
+- Dead-letter replay under break-glass counted no use of the grant, made
+  a record at the fragment's own labels without checking the target case
+  was cleared for them, and could put a fragment into a case its batch
+  never fed, which then showed that batch's other dead letters to the new
+  case's readers. Each replay is now counted and gated at the fragment's
+  labels, and a fragment goes back only to its own case or to
+  quarantine. Exhibit export and category correction each counted two
+  uses of a grant per request and now count one; a case-wide rescore
+  reached only through a grant now counts its one.
+- `collection.fetch` had a timeout per socket operation and none
+  overall, so a watched source that answered one byte at a time could
+  hold the collector pass and the notification drain for as long as it
+  liked. Each fetch now has a wall-clock allowance covering every hop,
+  connection, handshake, header and body, and `collection_poll.py` a
+  budget for the whole pass (`--max-seconds`); a source it runs out of
+  time for is counted as deferred.
+- The Lab accepted assignment, analysis, proposals, detonation requests
+  and rejection on a sample whose case was CLOSED or ARCHIVED. They are
+  refused like every other content write, and the card says so.
+- An account an administrator created kept the password the
+  administrator had seen. It must be replaced at its first sign-in, as a
+  reset one already was, and so must one made with `bootstrap.py
+  create-user` while any other account exists. A refused must-change
+  sign-in no longer spends a single-use recovery code or reads as the
+  account's last sign-in.
+- The tab title carried the case code and its TLP marking, and the
+  browser keeps titles in its history after sign-out. It reads "Case"
+  now.
+- The ingest key secret stayed on screen through pane changes and case
+  switches. It is cleared as the Administration one-time credentials are.
+
+**Exhibits of attacker markup can be produced.** A captured email, page
+or HAR is never served from the console's origin, and until now that
+meant it could not be produced at all. Export on such an exhibit now
+mints a one-shot ticket (the same permission and fresh sign-in as any
+export; migration 0068 lets a ticket name an exhibit), and the file is
+fetched from the separate sample origin as an encrypted archive, with an
+EXPORTED custody row.
+
+**An exhibit's lock follows its case.** An exhibit was locked in storage
+for 365 days from lodging whatever its case's retention. It is now
+locked to the case's retention date when that is later, and extending
+the date lengthens every exhibit's lock, both capped at ten years ahead
+in one step (`EVIDENCE_LOCK_HORIZON_DAYS`). Nobody can shorten a lock,
+so the case record asks before saving a later date, with the date
+spelled out. An exhibit locked for less time than its case is retained
+says so, and the Evidence pane can lengthen those locks. The count it
+reports covers only exhibits the reader may see.
+
+**Analysis, ACH and first seen.**
+- The Analysis pane counted a DISPUTED tie as reviewed, and told the
+  analyst every tie behind the brokers and the removal set had been
+  reviewed when some were disputed.
+- A renamed entity kept its old name in cached results, and the run
+  still read as current. Stored runs are keyed on labels and types too
+  now, so every run stored before this release reads as not current
+  once, until it is run again.
+- Moving the as-of time while a run was computing put the old instant's
+  results under the new graph. The trend chart left out the run just
+  made.
+- ACH hid every stance once no hypothesis was left live, and said
+  nothing had been scored; its assertion picker survived a case switch
+  and offered the last case's claim; and the pane now says when cells
+  above the reader were left out.
+- An entity's first and last seen dropped every sighting of a persona
+  merged into it, and an entity accepted from Triage had none, although
+  its capture is dated.
+
+**Smaller.** A sign-in more than 15 minutes old, on any case action that
+needs a fresh one, is asked to sign in again; it used to be told it
+lacked a permission it holds, which only report export had been taught
+not to say. Canvas names are placed clear of the on-canvas controls,
+which had cut handles into other plausible handles. The Evidence register
+refreshes after an exhibit is linked, claimed or retracted. The coverage
+chip counts what a focus draws. Triage acts on the proposal the analyst
+picked even after a live reload, and every A, R or D dialog names it; a
+Reviewer is not offered an Undo their role cannot perform; a closed
+case's proposals no longer count as waiting. The Case record and Status
+dialogs are modal. The tag picker no longer sends its prompt as a tag.
+The Share dialog's end time is UTC, as every other time is. A malformed
+certificate hash is a 422 instead of a 500, and a vishing call no longer
+proposes the victim's own SIP host as attacker infrastructure. A
+`REDIS_URL` carrying its password as a query argument is accepted, and
+redacted in logs. An ElastiCache limiter is no longer reported as
+shared. The launchers print install commands that use
+`constraints.txt`. The demo seeders and tests use `.example` hosts.
+
+The README screenshots were taken again on this console, and taking them
+found two more. On a tall window, Trend in the Analysis pane scrolled the
+whole workspace up under the header, where nothing the analyst could do
+scrolled it back; the workspace can no longer be scrolled by a script at
+all. And the trend printed its lowest value in the top right corner,
+which on a rising line is where the newest and highest point sits; both
+ends now share one label on the left.
+
+### The rest of the review, the seven gaps, and security work
+
+The 154 findings of the 2026-09-22 review that the sections below left
+open are closed before this release instead of after it: 148 are fixed,
+5 turned out to be fixed already on the release candidate, and one is
+fixed in part (the last bullet of this section says what is left). Each
+fix was checked by someone other than its author before it was merged,
+and the merged result was reviewed again as a whole. The seven gaps the
+known-open list named are closed too, and six pieces of security work
+were done that no finding asked for.
+
+**A CLOSED or ARCHIVED case is read-only.** The server accepted writes to
+a closed case. Now every route that writes case content (the graph,
+claims, corrections, tie review, evidence and its links, captures,
+proposals, comms, analysis, tags, samples) answers 409 "Case is
+read-only" on a CLOSED, ARCHIVED or PURGED case and writes a
+`CASE_READ_ONLY_REFUSED` audit event. The check sits in
+`authorize_object`, which every one of those routes already calls, so a
+route added later inherits it. Governance still works on a closed case:
+reopening it, legal holds, retention, sharing, break-glass and purge.
+The console turns the write controls off on such a case, including the
+ones a pane draws after it opens, and says what the server refuses.
+
+**Password reset, issued by an administrator.** There was no way to reset
+a password. An administrator now resets a colleague's password from the
+account card in Administration (`POST /api/v1/admin/users/{id}/password`,
+`user.manage` with a fresh sign-in). The reset issues a one-time
+password, shown once, signs out every session the account had, and clears
+any lockout. The next sign-in with it opens no session: it asks for a new
+password, and only then signs in (migration 0066 adds the flag that
+enforces this). Anyone can change their own password under Account
+(`POST /api/v1/auth/password`, the current password required). The last
+administrator, whom nobody can reset from the console, is reset with
+`scripts/bootstrap.py reset-password --email ...`, which calls the same
+service. There is no emailed link, by decision: a reset goes through a
+person who knows the colleague.
+
+**The API no longer grades a claim for you.** A request that left the
+grade out was recorded as a direct observation graded F6 and LOW, which
+no analyst chose. Basis, reliability, credibility and confidence are now
+required on every body that records a claim, and a missing one is a 422
+naming it. The console's Correct... is a graded form for the same
+reason. Corrections recorded before this release keep the old defaults,
+and the console still labels them as corrections rather than by that
+basis.
+
+**First seen is derived.** Nothing ever wrote an entity's first-seen
+date, so the column was always blank. First and last seen now come from
+the observation dates of the entity's live claims, read where they are
+shown, with no migration and nothing new to keep in step.
+
+**A tie can be reviewed.** Every tie read review PROPOSED forever,
+including ties an analyst entered and proposals a reviewer had accepted,
+so every node wore the unreviewed ring and the inspector's "Unreviewed
+proposals" equalled its tie count. A tie a person enters is now ACCEPTED
+when it is made, one founded on a machine's claim is PROPOSED, and the
+tie inspector has a Review section (`proposal.review`, an
+`EDGE_REVIEWED` audit event, and the tie's review history). Migration
+0067 gives the ties entered before this release the state they would
+have had, with an `EDGE_REVIEWED` event each, "by the Alpha 6 upgrade".
+
+**A capture's classification reaches its proposals.** A proposal raised
+from a RED capture was accepted at AMBER unless the reviewer changed it.
+The capture's level is now written into each proposal, shown on the
+Triage card, and is the default and the floor of the accept: the
+strictest of the proposal, its source and the case. A reader who was
+never shown a proposal gets a 404 on accepting it, as on reject and
+defer, instead of a refusal that named the proposal's label.
+
+**Rejecting a sample needs a fresh sign-in,** since a rejection moves the
+bytes into a store they leave only with two people.
+
+**Security work.**
+- `collection.fetch` checked where a name resolved and then let the
+  socket layer resolve it again, so a resolver that answered a public
+  address to the check and a private one to the connect got through (DNS
+  rebinding). Each hop is now resolved once, every answer is checked, and
+  the socket connects to the checked addresses by number, with the Host
+  header, SNI and certificate check still on the name. Redirects are
+  followed hop by hop under the same rule, a URL carrying a user name and
+  password is refused, and a TLS context that does not verify is refused.
+  A policy-enforcing egress proxy for persona traffic is still not built.
+- A production process refuses to start when any service credential is a
+  value published in this repository or a vendor default (the
+  development compose passwords, MinIO's own default), naming the
+  variable and never the value. The readiness register reports the same
+  on every process as `credentials_not_published`. User names and access
+  keys are not refused; replace them anyway.
+- `redis_limiter_isolated`, a new readiness row, reports when the rate
+  limiter's Redis also holds other keys, which an eviction policy or a
+  flush aimed at them would take with it. It reads counts only, never a
+  key or a value.
+- The dependencies are pinned. `constraints.txt` fixes all 47
+  distributions the API installs, each checked for wheels on Linux,
+  Windows and macOS for Python 3.12 to 3.14, and the installers, CI and
+  the production image all install through it. Mailpit is pinned to a
+  release instead of `latest`.
+- On a case above the invoker's clearance, one request under break-glass
+  could record two uses of the grant, so a grant ran out at half its
+  allowance and its review read double. Each request now records one.
+- A registered compartment can be renamed or retired from Administration
+  (`POST /api/v1/compartments/{key}/rename` and `/retire`, with a fresh
+  sign-in). A retirement is refused while anything still carries the
+  key, and the refusal counts what does and names only what the
+  administrator can already open.
+
+**The rest, by pane.** The highs among the 154:
+- Triage. Ctrl+A, Ctrl+D and Ctrl+R accepted, deferred and rejected the
+  focused proposal, and the single letters fired from anywhere on the
+  pane. Letters now work only in the list, A asks first, an accept can be
+  undone, and browser chords are left to the browser. Cards say what a
+  proposal attaches to what, carry their TLP mark, and open the document
+  they came from. The graph's "unreviewed proposals" ring now counts what
+  Triage lists.
+- Approvals and notifications. "Open approvals" opened the current case's
+  approvals, not the request's. A merge approval showed two UUIDs and no
+  requester; it names both entities, which one leaves the graph, and who
+  asked, and offers only the buttons the server allows that person.
+- Analysis. Results stayed on screen as current after the graph or the
+  as-of time moved; they are now marked stale or cleared. The trend
+  plotted when someone pressed Run instead of the world time measured,
+  and cut off its newest runs on first use. "Brokers worth a look" called
+  ordinary high-degree actors structural-hole spanners.
+- Competing hypotheses. A row never scored against one hypothesis was
+  called undiagnostic; a stance's note was never shown and was erased on
+  every rescore; "refute this first" never appeared; a hypothesis could
+  not be accepted, rejected, edited or removed from the console; and
+  Cancel on "Why withdraw it?" withdrew the assumption anyway.
+- Feeds. Dead letters did not say which feed failed, showed one global
+  list in every case, and could not be replayed; a watched-selector hit
+  named no selector; queue and quarantine records could not be opened,
+  linked, discarded or attached.
+- The graph. Ordinary navigation spent the analytics budget until Node
+  size switched off and the evidence headline disappeared; metrics now
+  have their own allowance and are cached. At 200% zoom the timeline,
+  legend and most projection controls could not be reached.
+- Evidence. The upload form could not record when, where or under what
+  authority an exhibit was obtained.
+- The Lab. A malware analyst could not assign a sample or record findings
+  from the console.
+- Administration. Compartment read-ins could be neither seen nor set, so
+  nobody could be given access to a compartmented case from the console.
+
+The mediums and lows are in the same panes: custody rows a court can
+read (names, UTC to the second, the lock's end), the exhibit register
+paged instead of capped at 200, search across collected documents and
+claims, quiet hours applied in the zone they are labelled with, loading
+states that stop claiming "Every source is healthy." before anything has
+loaded, error banners below the app bar that expire, the case record
+shown and correctable, the open case and pane kept in the address so a
+reload or Back returns to it, and contrast raised to AA on every raised
+sheet.
+
+- Left open. An exhibit of attacker markup (a captured `.eml`, page or
+  HAR) is still not exported: it has to leave through the separate sample
+  origin, which today serves samples only, and the console says so and
+  names the digest to cite. Also still to do: object locks are not
+  extended when a case's retention is, the Analysis pane has no
+  reviewed-ties-only projection, and the cron scripts and the migration
+  job do not refuse a published credential the way the API does.
+
+### What the release checks found
+
+Before this release was tagged, the installer was run on a clean Ubuntu
+24.04 machine, then run again on the fixed tree, and the documents were
+read against the code. `release/CLEAN-VM-INSTALL.md` records both runs,
+in sections 9 and 10.
+
+**The development stack no longer puts its services on the network.**
+`infra/docker-compose.yml` published Postgres, Redis, MinIO and its
+console, and Mailpit on every interface, with the passwords written in
+that file, and every release before this one did the same. On a Linux
+host, anyone who could reach the machine could log in to Postgres as a
+superuser and to MinIO as root. A host firewall did not help: Docker
+forwards a published port through its own NAT rules before ufw sees the
+packet, and on the clean machine Redis and Postgres still answered with
+ufw denying all incoming traffic. Every port is now bound to 127.0.0.1,
+`test_compose_exposure.py` refuses any other binding, and `SECURITY.md`,
+which said the file published its ports to localhost, says 127.0.0.1. A
+stack started from an earlier release keeps its old bindings until
+`docker compose -f infra/docker-compose.yml up -d` recreates its
+containers, which keeps the data volumes; the upgrade notes above include
+that step.
+
+**Redis no longer evicts the rate limiter's meters.** The development
+Redis ran `allkeys-lru`, so under memory pressure it could delete a live
+meter, and a deleted meter admits the subject it was refusing with a full
+burst. Every start of the API printed RATE-LIMIT REDIS EVICTS KEYS, and
+the readiness register's `redis_limiter_store` failed on a fresh
+install, over a setting the bundled stack had chosen. It runs
+`noeviction` now, as the production file already did: at its 1 GB cap it
+refuses writes, and each limit falls back to its declared
+`on_backend_failure`.
+
+**minio-init's log no longer opens with an error.** It waited for MinIO by
+running `mc alias set` until it worked, and the attempts made before MinIO
+listened logged "mc: <ERROR> Unable to initialize new alias ... connection
+refused" on every clean start, which is the line anyone reading the log
+after an unrelated failure would take for its cause. The wait is quiet
+now, and bounded: if MinIO has not accepted the credentials after about
+two minutes, it shows the real error once and exits 1.
+
+**Mailpit answers SMTP at once.** It looked up the reverse DNS of every
+client before greeting it, and on the development machine the greeting
+took between 1 and 10 seconds, against a send timeout of 10.
+`--smtp-disable-rdns` turns the lookup off; on the clean machine the
+greeting took 4 ms.
+
+**The installers and `release/INSTALL.md`.**
+- Both Windows recovery commands in `INSTALL.md`, the `create-user` one
+  and the TOTP-bypass session one, had a BACKSPACE byte where
+  `scripts\bootstrap.py` belonged, so each printed as `scriptsootstrap.py`
+  and failed when copied. Every tagged release from Alpha 1 to Alpha 5.2
+  shipped them that way.
+- The first command printed after the account was made was
+  `python scripts/bootstrap.py demo-case`, which exits 127 on a stock
+  Ubuntu (it has no `python`) and names the wrong seeder. `install.sh`,
+  `launch.ps1` and `bootstrap.py create-user` now print the console
+  address and the README's First run command with the project's
+  interpreter, `.venv/bin/python` or `.venv\Scripts\python`, and
+  `bootstrap.py`'s import hint names `.venv` instead of a `pip install`
+  that PEP 668 refuses.
+- The Debian and Ubuntu advice is
+  `sudo apt update && sudo apt install python3.12-venv`: on a fresh cloud
+  image the package lists are empty, and the install alone answers "has
+  no installation candidate".
+- Nobody holds the Security Officer role on a fresh install, so the
+  blocking `security_officer_present` check fails, collection runs and
+  break-glass are refused, and nobody can read the audit trail.
+  `install.sh` and `launch.ps1` count the officers and, when there are
+  none, say so and print the command that makes a second person one.
+  The command's example address is `security.officer@example.org`, which
+  the showcase seeder does not use. `INSTALL.md` says the same, and that the readiness
+  register wants a sign-in from the last 15 minutes.
+- The banners and `INSTALL.md` said four legal decisions and pointed at a
+  README section that does not exist. They say five, L1 to L5, and name
+  the heading in the README at the project root. `release/README.md`,
+  `release/MANUAL.md` and `ARCHITECTURE.md` say five too, and
+  `release/MANUAL.md` no longer says that a rejection destroys the sample.
+- A new `.env.local` names every service `127.0.0.1` rather than
+  `localhost`. Nothing listens on `::1` once the ports are bound to
+  127.0.0.1, and Windows tries `::1` first
+  for `localhost` and waits about two seconds for the refusal. An existing
+  `.env.local` is never rewritten; the upgrade notes above say what to
+  change in it.
+- `install.sh` checks the API port before starting it and stops with the
+  message `INSTALL.md` quotes. `--help` in both shell scripts stops at the
+  end of the header. Both launchers name the ports the compose file
+  publishes. `alembic` with no `DATABASE_URL` refuses in one line that
+  names `.env.local`, where it ended in a traceback. The README and
+  `INSTALL.md` share one prerequisites table, from the clean machine's
+  measurements. `INSTALL.md`'s test recipe makes a scratch database,
+  because some tests migrate the database they are given down and back
+  up.
+- The warning printed when `.env.local` is written spoke of
+  authenticators alone. The installers and launchers now say that the key
+  in it seals persona and victim credentials and every stored sample's
+  key as well, and that none of them can be decrypted without it.
+- What the installers, the launchers and `scripts/*.py` print, `--help`
+  text included, carries no em dash, en dash or spaced double hyphen, as
+  the server's copy already did, and the installers and launchers agree
+  their plurals with their counts.
+
+Tests hold each of these against the scripts and the code.
+
+**Control bytes are refused in every tracked text file.**
+`scripts/check_source_hygiene.py` looked for NUL and not for the
+BACKSPACE that broke those two commands, and it read a fixed list of
+suffixes that left out `start.cmd`, the Dockerfile, the Caddyfile and
+other tracked text. It now refuses every control byte except tab, line
+feed and carriage return, in every text file the repository tracks.
+`test_source_hygiene.py` proves the check on bytes built for it, and
+compares the files it reads with the files git calls text.
+
+**Upgrading from Alpha 5.2 has written steps.** The upgrade notes above
+take an existing deployment through it in order, and
+`release/alpha6-upgrade/` holds the SQL they use.
+`0064-ties-before.sql`, run before migrating, lists every tie migration
+0064 will change and the value each holds now, because the upgraded
+database keeps no record of them. `0064-ties-after.sql` lists the ties an
+analyst had lowered, for a second look. `app-role-grants.sql` grants a
+least-privilege role created after the upgrade what 0060 and 0063 would
+have, because Alembic never re-runs a revision it has recorded.
+`test_alpha6_upgrade_contract.py` holds the grants file to the
+migrations, and `test_alpha6_upgrade_ties_pg.py` runs both tie queries
+against a database shaped the way Alpha 5.2 leaves one and holds them to
+what 0064 does. The production README's backups paragraph now gives the
+command that copies the evidence and raw buckets, through the
+`minio-init` service since MinIO publishes no port there, where it had
+two commented `mc mirror` lines and no alias to run them with. It also
+says that `secrets.env` goes with every backup, because the TOTP key in
+it seals persona credentials, victim credentials and every sample's data
+key as well as the second factors.
+
+For script clients, `POST /samples/{id}/reject` no longer documents
+itself as destroying the bytes, and its `purge_bytes` field says what
+each value does, so the API document shows the change of default.
+
+**Two smaller ones.** The production compose file tags the image it
+builds, and nothing held that tag to the version, so this release would
+have gone on building `noctornal-api:0.5.2`; `test_version_contract.py`
+now requires the two to be equal. And `scripts/refresh_counters.py`, which
+regenerates the counters the documents quote, crashed on Python 3.12, the
+documented minimum, because `Path.read_text` takes `newline` only from
+3.13. It reads bytes and decodes them now.
+
 ### New README screenshots, and what taking them found
 
 All 16 screenshots in the README are new, taken from the restyled console
-on the TLP:CLEAR showcase case. Each image was designed against its README
-paragraph, critiqued adversarially, taken with the rest of the set in one
-run, and reviewed again as a set. Several captions changed to say what the
-console actually does.
+on the TLP:CLEAR showcase case, each against the README paragraph it
+illustrates. Several captions changed to say what the console actually
+does.
 
 **The showcase case is TLP:CLEAR now.** The README promised a CLEAR case,
 but its own recipe could only make an AMBER one: `demo-network` hard-coded
@@ -34,9 +464,9 @@ projection's metrics for the fifteen identities do not change, because the
 analytics paragraph depends on them.
 
 **Copy.**
-- Every em dash, en dash, spaced double hyphen and "(s)" plural is gone
-  from the console and from server strings a user can see. Tests now
-  refuse all four.
+- Every em dash, en dash, spaced double hyphen and bracketed plural ending
+  is gone from the console and from server strings a user can see. Tests
+  now refuse all four.
 - Counts agree in number, including in stored notification text.
 - Times are printed the way the console prints them everywhere.
 - The Lab says KiB, as the Evidence pane does.
@@ -65,10 +495,9 @@ analytics paragraph depends on them.
 
 ### A second review, of the merged result
 
-The ten groups above were each verified alone. A 32-agent adversarial
-review of the merged tree then found 43 problems; the 20 most severe went
-to a verifier each, and all 20 held. Every one of the 43 is fixed, the 23
-unverified ones after being shown real first.
+A second review, of the usability fixes below taken together, found 43
+more problems. Each was shown to be real before it was fixed, and all 43
+are fixed.
 
 **Security.**
 - A report's competing hypotheses went out whatever the target level, and
@@ -129,11 +558,13 @@ unverified ones after being shown real first.
 
 ### The 2026-09-22 usability and code review, and the owner's decisions
 
-A 42-agent review of the console and the code behind it produced 229
-verified findings (12 critical, 78 high, 105 medium, 34 low). This pass
+The 2026-09-22 review of the console and the code behind it produced 229
+verified findings (12 critical, 78 high, 105 medium, 34 low). This release
 fixes 75 of them: all twelve criticals, 53 highs and the ten medium and low
-findings that share their code. The other 154 stay on the review's list.
-Alembic head moves from 0061 to **0065**.
+findings that share their code. The other 154 stay on the review's list, in
+`ROADMAP-REMAINING.md`. The fixes add migrations 0062 to 0065, so with
+Wave 1's 0060 and Wave 2's 0061 an Alpha 5.2 database, which stands at
+Alembic 0059, moves to **0065**.
 
 **Owner decisions, recorded in docs/00 (61 to 64) and docs/17.**
 - A rejected malware sample is preserved by default, not destroyed. Its
@@ -163,9 +594,14 @@ Alembic head moves from 0061 to **0065**.
 - The hollow "unevidenced" mark had never drawn. It now uses area and is
   never a fade, because opacity is reserved for confidence.
 - A tie's confidence comes from one place: its strongest live assertion.
-  Migration 0064 backfills the ties whose stored value disagreed. The
-  confidence picked on Add relationship now reaches the tie; before, every
-  new link was stored as LOW.
+  Migration 0064 backfills the ties whose stored value disagreed, and
+  writes no audit event for them. That includes raising a tie an analyst
+  had lowered with a correction beneath a claim that is still live. The
+  upgrade notes above give a query to run before upgrading, which records
+  every tie it will change, and one to run after, which lists the lowered
+  ties for an analyst to look at again.
+  The confidence picked on Add relationship now reaches the tie; before,
+  every new link was stored as LOW.
 - Parallel ties bow apart, and `[` and `]` step through them.
 - Fit frames the whole case.
 - Labels thin out by priority instead of vanishing below 0.7x.
@@ -307,7 +743,8 @@ production deployment without meeting a boot refusal; and the shell scripts
 shipped `100644`, so `./release/install.sh` answered "Permission denied".
 
 All five are fixed and re-verified on the same VM. A single run with a file
-on stdin and no terminal now installs and serves: migrations to `0061`, an
+on stdin and no terminal now installs and serves: migrations to `0061` (the
+head that day), an
 account with password and TOTP, `/ui/` answering 200. Five static checks in
 `test_script_invariants.py` hold them, in the same style as that file's
 existing installer tests, because nothing here is reachable by running the
@@ -424,7 +861,7 @@ defect this tree keeps finding in itself; this is the third instance.
 ### Roadmap items 8 to 13: a size policy, a key ring, a refusal, one alpha, and the gate on dead letters
 
 **8. The exhibit size cap is a declared policy.** It was a module constant
--- 256 MiB, changed by editing source -- on an upload whose every accepted
+(256 MiB, changed by editing source) on an upload whose every accepted
 byte is locked under COMPLIANCE for the retention period, which is a
 decision about a permanent commitment nobody in the deployment had taken.
 `NOCTORNAL_MAX_EVIDENCE_BYTES` declares it (bytes, or `512MiB`), read once
@@ -443,16 +880,16 @@ says what to do above the cap: not split the exhibit.
 blob and read by nothing: `decrypt` accepted it and used the one
 environment key regardless, docs/05 promised a rotation runbook nothing
 could run, and a KEK that changed under a live database surfaced as an
-`InvalidTag` out of a login -- a 500 to the analyst -- while the register
+`InvalidTag` out of a login (a 500 to the analyst) while the register
 stayed green because its only KEK check asked whether the value was 32
 bytes. Now a ring: `NOCTORNAL_TOTP_KEK` is the active key under
 `NOCTORNAL_TOTP_KEK_ID` (default `env:v1`), `NOCTORNAL_TOTP_KEK_RETIRED`
 holds `id=base64` keys that only open, and `decrypt` selects by the
 blob's recorded id. The readiness check `kek_ring_opens_stored_secrets`
 opens up to a thousand rows per (table, key id) across the five sealed
-columns and COUNTS -- because before the ring every blob was recorded as
-`env:v1` whatever key sealed it, and one row's verdict is not a group's
--- and says which of the two faults it found: no key of that id, or a key
+columns and COUNTS, because before the ring every blob was recorded as
+`env:v1` whatever key sealed it, and one row's verdict is not a group's.
+It says which of the two faults it found: no key of that id, or a key
 of that id that does not open the blob. Login answers **503 by name**
 (`AuthOutcome.SECOND_FACTOR_UNAVAILABLE`), after the password verified,
 burning no lockout attempt and naming the check. `scripts/rewrap_secrets.py
@@ -463,7 +900,7 @@ and the production README.
 
 The development database this was written against is the case the check
 exists for: 93 enrolled accounts and 153 samples, all `env:v1`, of which
-65 accounts and 69 samples opened under no key on the machine -- test
+65 accounts and 69 samples opened under no key on the machine: test
 rows left by killed runs on 2026-09-10, sealed by a `.env.local` that has
 since been regenerated. The register on that machine is red on the new
 check until they are deleted, which is the correct answer; CI's fresh
@@ -475,12 +912,12 @@ since 2026-07-26: `1234567890` was assumed `u:` on a strong selector, so
 an MTProto channel observed as a bare number merged with a same-numbered
 user. `telegram_id_norm` now returns nothing durable for it and
 `noctornal_ontology.refusal()` says why in one sentence naming `u:<id>`
-and `c:<id>` -- the sentence `SelectorStore` raises, `comms.normalise`
+and `c:<id>`. It is the sentence `SelectorStore` raises, `comms.normalise`
 returns as its note (it also accepts the typed forms now, which it did
-not) and the contact-block parser records beside an unresolved
+not), and the contact-block parser records beside an unresolved
 `Telegram:` line. Closing it exposed a hole beside it: `SelectorStore.
 record` stored whatever the normaliser returned, and for anything it
-could not reduce that was `''` -- one row per case per type for every
+could not reduce that was `''`: one row per case per type for every
 unreducible observation, a merge lead between strangers on a strong type.
 An empty canonical form is refused. Rows typed by assumption before today
 keep their `u:` (nothing can recompute a type that was never observed);
@@ -497,8 +934,8 @@ and a test holds app.js, theme.css and docs/06 to one number.
 **12. The dead-letter listing's decisions are `evaluate()`'s.** `GET
 /ingest/dead-letters` decided access three ways of its own: a SQL
 restatement of `require_global`, a SQL restatement of four of the five
-case checks, and label predicates in the query -- correct on the day they
-were written, and every authorization defect this tree has shipped was a
+case checks, and label predicates in the query. Each was correct on the
+day it was written, and every authorization defect this tree has shipped was a
 query that never called the gate. `PgAccessResolver.resolve_global`
 resolves a global verb into an `AccessContext` (the relationship check
 satisfied by construction, stated); `_holds_global` reads the verb and
@@ -509,7 +946,7 @@ unattached row. The SQL predicates only bound the fetch. Three tests
 replace `evaluate` with a verdict of their own and watch rows appear and
 vanish with it.
 
-**13. One scheduler, one adapter -- "only if you collect".** The
+**13. One scheduler, one adapter: "only if you collect".** The
 scheduler half is Wave 1: the cron sidecar in the production compose runs
 `scripts/collection_poll.py` on a five-minute resolution and each source
 keeps its own jittered cadence. The adapter half is unchanged: RSS is the
@@ -520,7 +957,7 @@ built untested.
 **Also.** `scripts/refresh_counters.py`'s head pattern was a lookbehind on
 a single space, and the roadmap's live paragraph wraps between "head" and
 the number, so that one paragraph said `0060` on a `0061` tree while every
-other document was held exactly -- the defect the tool exists to kill,
+other document was held exactly: the defect the tool exists to kill,
 inside the tool. The pattern crosses a line break now.
 
 ### Wave 2: the console holds no credential
@@ -559,9 +996,8 @@ that response now mint a session directly, the way `bootstrap.py` does.
 broken: `doLogin` still read `out.token` from a response that had become a
 204, `_fetch` returns null for a 204, and every form sign-in threw, was
 swallowed by the catch, and told the analyst "Unexpected error" while the
-server had in fact signed them in and set the cookies. Three reviewers
-found it independently. There is now a pure test that login answers 204
-with no body, which nothing had covered.
+server had in fact signed them in and set the cookies. There is now a pure
+test that login answers 204 with no body, which nothing had covered.
 
 Two security defects were closed after the first pass. The redemption
 audited every failed presentation including one that matched no row (a
@@ -592,12 +1028,11 @@ weaker: a cross-site page cannot make `Origin` and `Host` agree.
 **Known.** The one residual on the ticket is stated in `0061` and in
 docs/17 F22: a ticket minted under a session revoked inside the following
 sixty seconds can still be redeemed, by a holder whose account is still
-active, still permitted, and for a sample they may still read. (This paragraph
-also recorded, as not fixed, that a `NOCTORNAL_TOTP_KEK` mismatching the one
-an account was enrolled under made `POST /auth/login` answer 500 and that
-the `totp_kek_set` readiness check could not see it. The key ring above
-closed both on 2026-09-11; as with Wave 1's note, this is an unreleased
-section and correcting it is the point.)
+active, still permitted, and for a sample they may still read. When this
+wave landed, a `NOCTORNAL_TOTP_KEK` that did not match the one an account
+was enrolled under made `POST /auth/login` answer 500, and the
+`totp_kek_set` readiness check could not see it; the key ring above closed
+both on 2026-09-11.
 
 ### Wave 1: it can be deployed as a service rather than run as a script
 
@@ -616,8 +1051,8 @@ else waits for it. `infra/production/README.md` is the operator procedure,
 including what this deployment still does not give you.
 
 **The API no longer owns the tables it writes.** `noctornal_app` is
-created at initdb -- the only place `CREATE ROLE` can live, since this
-tree forbids the migration role from being a superuser -- and migration
+created at initdb (the only place `CREATE ROLE` can live, since this
+tree forbids the migration role from being a superuser), and migration
 0060 grants it. Verified against a running stack: the API connects as
 `noctornal_app`, `core.node` is owned by `noctornal`, and
 `ALTER TABLE audit.event DISABLE TRIGGER USER` comes back **"must be owner
@@ -632,7 +1067,7 @@ there rather than skipping.
 
 **A production process refuses to start on a development secret.**
 `config.verify_environment()` reports every problem at once, each with what
-it costs, and only when `NOCTORNAL_ENV=production` -- a laptop and CI are
+it costs, and only when `NOCTORNAL_ENV=production`: a laptop and CI are
 untouched, which is why the check is still there in a week. Measured: a
 container given `dev_only_change_me` in its DSN, `SMTP_ALLOW_PLAINTEXT`
 and `NOCTORNAL_ENABLE_DOCS` names all three and does not boot.
@@ -640,10 +1075,10 @@ and `NOCTORNAL_ENABLE_DOCS` names all three and does not boot.
 **The readiness register now refuses a quiet green.** Four of the thirteen
 checks are blocking, `report()` carries `blocking_failures`, and two things
 consult it: `POST /collection/sources/{id}/run` answers 409, and so does
-the unattended cron path. That second one was found by adversarial review
-after the first had shipped in this same change -- a gate on the attended
-route only would have let the cron poll real sources on a deployment whose
-blockers were red, which is precisely the claim the tier is making. Two new
+the unattended cron path. The second was added after the first, in this
+same change: a gate on the attended route only would have let the cron
+poll real sources on a deployment whose blockers were red, which is
+precisely the claim the tier is making. Two new
 checks: `ingest_pepper_set` and `app_db_role_not_owner`.
 
 **The sample origin is a compose service.** The same image, a second
@@ -653,20 +1088,18 @@ and `sample` on the other, from the server process's own environment.
 **Things that run on a timer now run.** A `cron` service runs
 `scripts/notify_drain.py` and the new `scripts/collection_poll.py`. The
 collection runner respects each source's jittered `next_due_at` rather than
-imposing a cadence -- docs/04 and docs/18 both name a scheduler on a
-regular tick as an operational-security failure -- and a new per-source
+imposing a cadence (docs/04 and docs/18 both name a scheduler on a
+regular tick as an operational-security failure), and a new per-source
 advisory lock stops two runners corrupting one source.
 
 **Known, and not fixed here.** No real SMTP relay exists on the build
 machine, so "a priority-1 notification leaves the building" is the one line
-in this wave that is wired and documented but unproven. (The next clause
-said the websocket and the Lab download still authenticated from the
-login-body token and that a reloaded session was not live. Wave 2 above
-closed all three, and since this section is an unreleased note rather than
-a dated record, correcting it is the point.) `docker exec` does not
-inherit a variable exported
-inside a container's entrypoint, which made two verification probes report
-failures the deployment did not have -- both were the probe, and
+in this wave that is wired and documented but unproven. When this wave
+landed, the websocket and the Lab download still authenticated from the
+login-body token and a reloaded session was not live; Wave 2 above closed
+all three. `docker exec` does not inherit a variable exported inside a
+container's entrypoint, which made two verification probes report
+failures the deployment did not have. Both were the probe, and
 `/proc/1/environ` is what to read instead.
 
 ## Alpha 5.2: 2026-09-10
@@ -781,7 +1214,7 @@ Not in this release, by decision: the cookie pair on the websocket and
 the sample origin, a `key_id` that selects a KEK, a COMPLIANCE bucket
 default, the Telegram bare-positive refusal, the confidence-threshold
 alignment, RLS under a non-owner role, a collector process (and
-nothing of L1)L5 in software.
+nothing of L1 to L5 in software).
 
 ## Alpha 5: 2026-09-09
 

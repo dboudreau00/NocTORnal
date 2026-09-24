@@ -60,6 +60,10 @@ development, silently, and a deployment that meant to be production would
 then start on whatever it was given. The refusals cannot default to ON
 without breaking every laptop and CI run, so the mitigation is that the
 value is written in exactly one file that ships with this repository.
+Since 2026-09-23 (sec-dev-secrets-in-production) the readiness row
+`credentials_not_published` asks `published_credentials` on every process
+whatever this variable says, so a misspelt production running on a
+published password is at least reported, if not refused.
 """
 from __future__ import annotations
 
@@ -67,7 +71,8 @@ import os
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from urllib.parse import urlsplit
+from dataclasses import dataclass
+from urllib.parse import parse_qs, urlsplit
 
 #: The literal every development stack in this repository ships as its
 #: password: `infra/docker-compose.yml`, `scripts/launch.ps1`,
@@ -112,6 +117,218 @@ _CREDENTIAL_NAME_MARKERS = (
 
 def _carries_credential(name: str) -> bool:
     return any(marker in name.upper() for marker in _CREDENTIAL_NAME_MARKERS)
+
+
+#: Names that hold the IDENTITY half of a credential pair rather than its
+#: secret: MinIO's access key is the account name the secret belongs to,
+#: a `_KEK_ID` labels a key without being one. `_KEY` marks all of them as
+#: credentials above, but a published identity is not a leak: knowing that
+#: an account is called `minioadmin` or `noctornal` opens nothing without
+#: the secret beside it, and that secret is scanned in its own variable.
+#: So the published-value rule below passes over them (the 2026-09-23
+#: review of sec-dev-secrets-in-production found it refusing an operator
+#: who kept MinIO's customary root user name with a strong password, which
+#: is the false refusal the paragraph above warns about).
+#:
+#: A secret word in the name wins over the suffix, because
+#: `AWS_SECRET_ACCESS_KEY` ends like an access key and is the secret.
+#: `apps/api/tests/test_published_credentials.py` classifies the files it
+#: scans with this same function, so the two cannot drift apart.
+_IDENTITY_SUFFIXES = ("_ACCESS_KEY", "_USER", "_USERNAME", "_ROLE", "_ID")
+_SECRET_WORDS = ("PASSWORD", "SECRET")
+
+
+def _names_identity(name: str) -> bool:
+    upper = name.upper()
+    return (upper.endswith(_IDENTITY_SUFFIXES)
+            and not any(word in upper for word in _SECRET_WORDS))
+
+
+# ---------------------------------------------------------------------------
+# Every credential value somebody has already published
+# (sec-dev-secrets-in-production, 2026-09-23)
+# ---------------------------------------------------------------------------
+#
+# Until 2026-09-23 the scan above knew ONE published value, DEV_CREDENTIAL,
+# and this repository publishes more than one. A production deployment that
+# copied infra/production/secrets.env.example and replaced nothing but the
+# KEK started cleanly on `replace-me-redis-password`, a pepper lifted from a
+# test file was a working pepper, the CI workflow's KEK sealed every second
+# factor with a key printed in `.github/workflows/ci.yml`, and a REDIS_URL
+# copied from `.env.local` pointed the limiter at a Redis that asks nobody
+# for a password. Each of those is a secret an attacker reads rather than
+# guesses. `published_credentials` is the one reader of the whole set:
+# `verify_environment` refuses a production boot on it, and the readiness
+# register's `credentials_not_published` row reports it on every process,
+# so a deployment whose NOCTORNAL_ENV was misspelt is still told.
+#
+# The markers are matched inside a credential's value, case aside, because
+# each is a fragment nobody generating a secret produces by accident and
+# every place this repository writes one embeds it in something longer (a
+# DSN, a `replace-me-<what>` label). `apps/api/tests/test_published_
+# credentials.py` reads the files that publish them and fails if one of
+# their credential values is not refused, so a new published value cannot
+# be added to those files without this list learning it.
+_PUBLISHED_MARKERS: tuple[tuple[str, str], ...] = (
+    (DEV_CREDENTIAL,
+     f"the development credential {DEV_CREDENTIAL!r}, which is committed to "
+     f"this repository in infra/docker-compose.yml, the CI workflow and the "
+     f"installers"),
+    ("replace-me",
+     "a 'replace-me' placeholder, which infra/production/secrets.env.example "
+     "ships in place of every secret it asks for"),
+    ("not-a-real-one",
+     "the throwaway value the test suites and the demo seeders set (it ends "
+     "'not-a-real-one')"),
+)
+
+#: Whole values a COMPONENT publishes rather than this repository: MinIO
+#: starts on `minioadmin` for both halves of its root credential when it is
+#: given none (infra/production/compose.yml says why that matters).
+#: Matched as the whole value, not a fragment, and only in the secret half:
+#: `minioadmin` as the root USER is MinIO's customary name and harmless
+#: beside a strong password, which is also where MinIO's own
+#: default-credential warning draws the line (see `_names_identity`).
+_PUBLISHED_VALUES: dict[str, str] = {
+    "minioadmin": "'minioadmin', the root credential MinIO starts on when it "
+                  "is given none",
+}
+
+#: The short name each kind is listed under in the readiness evidence,
+#: where one line has to carry several variables.
+_PUBLISHED_LABELS: dict[str, str] = {
+    DEV_CREDENTIAL: "the development password",
+    "replace-me": "a secrets.env.example placeholder",
+    "not-a-real-one": "the test suites' throwaway value",
+    "minioadmin": "MinIO's built-in root credential",
+    "kek": "a key of one repeated byte, as CI and the test suites publish",
+    "redis": "no password, the development stack's shape",
+}
+
+
+@dataclass(frozen=True)
+class PublishedCredential:
+    """One variable carrying a value somebody has already published.
+
+    `kind` is the marker, the vendor value, `kek` or `redis`; `refusal` is
+    the whole sentence a production boot is refused with. Neither quotes
+    the variable's value: a published marker is named, the secret around
+    it never is.
+    """
+    variable: str
+    kind: str
+    refusal: str
+
+    @property
+    def label(self) -> str:
+        return _PUBLISHED_LABELS[self.kind]
+
+
+def _published_in(value: str) -> tuple[str, str] | None:
+    """`(kind, description)` of the published value `value` carries, or None."""
+    folded = value.lower()
+    for marker, description in _PUBLISHED_MARKERS:
+        if marker.lower() in folded:
+            return marker, description
+    whole = value.strip().lower()
+    if whole in _PUBLISHED_VALUES:
+        return whole, _PUBLISHED_VALUES[whole]
+    return None
+
+
+def _redis_url_without_password(url: str) -> bool:
+    """A plain `redis://` URL with no password in it.
+
+    `rediss://` and `unix://` are left alone on purpose: a TLS client
+    certificate and a socket's file permissions are both ways to
+    authenticate that put nothing in the URL, and refusing them would stop
+    a correctly secured deployment for looking unlike ours.
+
+    A `password` query argument counts as a password, because redis-py's
+    `parse_url` passes it to the connection exactly as it does the
+    userinfo one: `redis://redis:6379/0?password=...` authenticates, and
+    refusing it at boot for "asking for no password" stopped a correctly
+    secured deployment with a sentence that was false (c23, 2026-09-24).
+    `parse_qs` drops a blank value as redis-py does, so `?password=` with
+    nothing after it is still refused, and the name is matched exactly
+    because redis-py matches it exactly.
+    """
+    parts = urlsplit(url)
+    return (parts.scheme.lower() == "redis" and not parts.password
+            and not parse_qs(parts.query).get("password"))
+
+
+def published_credentials(env: Mapping[str, str] | None = None) -> list[PublishedCredential]:
+    """Every credential in `env` that somebody has already published, one
+    entry per variable, sorted by name. Reads `os.environ` by default and
+    opens nothing.
+
+    Mode-blind: it answers in development too, where the answer is
+    expected to be long, because the readiness register reports it on every
+    process and only `verify_environment` turns it into a refusal.
+    """
+    if env is None:
+        env = os.environ
+    found: dict[str, PublishedCredential] = {}
+    for name in sorted(env):
+        if not _carries_credential(name) or _names_identity(name):
+            continue
+        published = _published_in(env[name])
+        if published is None:
+            continue
+        kind, description = published
+        # A component's default is published by its documentation, not by
+        # this repository's source, and the sentence says which.
+        reader = ("MinIO's documentation" if kind in _PUBLISHED_VALUES
+                  else "the source")
+        found[name] = PublishedCredential(
+            name, kind,
+            f"{name} still carries {description}, so anyone who has read "
+            f"{reader} already holds this deployment's secret.")
+
+    redis_url = env.get("REDIS_URL", "").strip()
+    if ("REDIS_URL" not in found and redis_url
+            and _redis_url_without_password(redis_url)):
+        found["REDIS_URL"] = PublishedCredential(
+            "REDIS_URL", "redis",
+            "REDIS_URL names a redis:// server that asks for no password, "
+            "which is the development stack's shape (every installer writes "
+            "redis://127.0.0.1:6379/0), so anything that can reach it can "
+            "delete the limiter's meters, which admits whoever they were "
+            "refusing, or fill it until every limit that fails closed refuses "
+            "everyone.")
+
+    # The KEK through the envelope's own reader, so "the key" means what
+    # every seal means by it (a trailing newline and all). One byte
+    # repeated is the shape of both keys this repository prints, CI's
+    # base64 of 32 'A's and the suites' 32 zero bytes, and os.urandom has
+    # a 2**-248 chance of producing it, so a refusal on it cannot fire on
+    # a key anybody generated.
+    if "NOCTORNAL_TOTP_KEK" not in found and env.get("NOCTORNAL_TOTP_KEK"):
+        from noctornal_api.security.envelope import _load_kek
+
+        with _borrowing(env, "NOCTORNAL_TOTP_KEK"):
+            try:
+                key = _load_kek()
+            except (RuntimeError, ValueError):
+                key = b""  # unusable; verify_environment says so on its own
+        if key and len(set(key)) == 1:
+            found["NOCTORNAL_TOTP_KEK"] = PublishedCredential(
+                "NOCTORNAL_TOTP_KEK", "kek",
+                "NOCTORNAL_TOTP_KEK decodes to one byte repeated 32 times, the "
+                "shape of the key the CI workflow and the test suites publish "
+                "and of no key a random generator produces, so every TOTP "
+                "secret, persona credential and sample data key it seals opens "
+                "for anyone who has read the source.")
+    return [found[name] for name in sorted(found)]
+
+
+#: The two legal declarations (docs/16 L1). Not credentials, so the scan
+#: above passes over them, but secrets.env.example ships a placeholder in
+#: both and `samples.policy_declared` accepts any non-empty string, so a
+#: template copied as it stands declared a policy nobody wrote and turned
+#: the blocking `prohibited_content_policy` row green on it.
+_DECLARATIONS = ("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "NOCTORNAL_DESIGNATED_PERSON")
 
 
 @contextmanager
@@ -281,14 +498,24 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     # same environment: `os.environ` iterates in whatever order the
     # process was handed, and two workers printing the same refusals in
     # different orders reads like two different faults.
-    for name in sorted(env):
-        if DEV_CREDENTIAL in env[name] and _carries_credential(name):
+    #
+    # Every published value, not only DEV_CREDENTIAL, through the one
+    # reader the readiness register also asks (sec-dev-secrets-in-
+    # production, 2026-09-23). A variable refused here is not refused again
+    # below for the same value: one variable, one refusal.
+    published = published_credentials(env)
+    problems.extend(p.refusal for p in published)
+    already = {p.variable for p in published}
+
+    for name in _DECLARATIONS:
+        if "replace-me" in env.get(name, "").lower():
             problems.append(
-                f"{name} still carries the development credential "
-                f"{DEV_CREDENTIAL!r}, which is committed to this repository in "
-                f"infra/docker-compose.yml, the CI workflow and the installers, "
-                f"so anyone who has read the source already holds this "
-                f"deployment's secret.")
+                f"{name} still carries the placeholder "
+                f"infra/production/secrets.env.example ships, so sample ingest "
+                f"would run under a declaration nobody made: a placeholder is "
+                f"not a reference an auditor can follow, and the readiness "
+                f"register would report the prohibited-content policy as "
+                f"declared (docs/16 L1).")
 
     # The verdict is `envelope._load_kek`'s, the reader every seal and
     # every open already calls; only the choice of sentence is local, and
@@ -305,7 +532,9 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
             _load_kek()
         except (RuntimeError, ValueError):
             kek_usable = False
-            if not env.get("NOCTORNAL_TOTP_KEK"):
+            if "NOCTORNAL_TOTP_KEK" in already:
+                pass  # the placeholder was the refusal; its shape is not news
+            elif not env.get("NOCTORNAL_TOTP_KEK"):
                 problems.append(
                     "NOCTORNAL_TOTP_KEK is not set, so no TOTP secret can be "
                     "sealed or opened: nobody can enrol, and nobody with an "

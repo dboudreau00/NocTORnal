@@ -535,6 +535,8 @@ def test_the_invoke_notice_says_only_what_is_counted(conn, client):
     assert _count(conn, gid) == 2
     got = client.post(f"{case}/nodes/{node}/assertions", headers=auth,
                       json={"basis": "DIRECT_OBSERVATION",
+                            "reliability": "F", "credibility": "6",
+                            "confidence": "LOW",
                             "rationale": "seen on the forum"})
     assert got.status_code == 201, got.text
     assert _count(conn, gid) == 3

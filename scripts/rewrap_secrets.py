@@ -12,8 +12,8 @@ not already under the active key, and leaves the rest exactly as found.
 `--legacy-key-file` is for the pre-ring world: before 2026-09-11 every
 blob was recorded under `env:v1` whatever key sealed it, so a deployment
 that ever changed its KEK holds rows under two keys and one id, which no
-ring can express. Given the old key (base64, in a file -- never on the
-command line, which is in `ps` and the shell history), rows the ring
+ring can express. Given the old key (base64, in a file and never on
+the command line, which is in `ps` and the shell history), rows the ring
 cannot open are tried under it and, when it opens them, re-sealed under
 the active key. Rows nothing opens are counted and left; the readiness
 check `kek_ring_opens_stored_secrets` keeps naming them, and an account

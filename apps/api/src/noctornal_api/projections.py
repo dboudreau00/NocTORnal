@@ -57,7 +57,11 @@ PRESETS: dict[str, dict] = {
                        "TX_INPUT", "TX_OUTPUT"],
     },
     "all": {
-        "label": "All ties",
+        # "All social ties", was "All ties" (ux19-copy
+        # one-concept-many-names, 2026-09-23): the case holds identity
+        # links this preset leaves out, so "all" beside a count lower than
+        # the case's read as relationships lost.
+        "label": "All social ties",
         "description": "Every edge type marked as a social tie in the "
                        "ontology. Identity plumbing (SAME_AS, ALIAS_OF) stays "
                        "out, because it would make whichever persona you "
@@ -143,6 +147,68 @@ def evidenced_sql(column: str, alias: str) -> str:
                           AND bx.purged_at IS NULL
                           AND bx.classification <= %s::core.tlp
                           AND bx.compartments <@ %s)"""
+
+
+def seen_sql() -> str:
+    """`first_seen, last_seen` for the node aliased `n`, derived from the
+    entity's live observations. Two select-list items. Takes FOUR bind
+    parameters, the reader's clearance and compartments twice over, in the
+    order `seen_params` returns them.
+
+    gap-first-seen (decided 2026-09-23). Nothing writes
+    `core.node.first_seen` or `last_seen`: `create_node` never set them and
+    no importer does, so the entity list's First seen column and the
+    inspector's "first seen / last seen" were blank on every estate while
+    the claims under them said when the entity was observed. The dates are
+    derived instead, without a migration: the earliest and latest
+    `observed_at` among the entity's LIVE claims (not retracted, not
+    superseded, the projection's own rule), combined with the stored column
+    so a value an importer does write one day still counts. LEAST and
+    GREATEST skip a NULL, so either side alone is enough and neither
+    alone blanks the other. Only the entity's claims count, not claims
+    about its ties: a tie's claim is about the relationship. A withdrawn
+    sighting stops moving the dates the moment it is withdrawn.
+
+    "The entity's claims" include those of every record merged into it
+    (release review c10, 2026-09-24). A merge asserts the two records were
+    always the same thing, and it leaves the absorbed record's claims on
+    that record (merges.py), which every list and the canvas then hide: so
+    merging a 2024 persona into its 2025 one dropped the 2024 sighting from
+    the First seen column and the timeline, with no sign anything was left
+    out. The walk is recursive because a record that has absorbed others
+    can itself be merged onward, and a reversed merge clears the redirect,
+    so it stops counting at once. Every hop is held to the READER's
+    ceiling, as `curation._merge_chain` holds its chain: an assertion has
+    no marking of its own, so an absorbed RED or compartmented persona's
+    observation dates would otherwise reach a reader who may see only the
+    survivor. A hidden hop ends the walk there. UNION rather than UNION ALL
+    so a malformed cycle ends the walk instead of the query.
+
+    The walk runs only for an entity something has been merged into (one
+    probe of the partial index on `merged_into_id`); every other entity
+    reads its own claims as before. Walking for all of them cost about a
+    third more on NIGHTJAR's 146-entity projection, and most never absorb
+    anything.
+    """
+    live = " AND sa.retracted_at IS NULL AND sa.superseded_at IS NULL"
+    own = ("(SELECT {agg}(sa.observed_at) FROM core.assertion sa"
+           " WHERE sa.node_id = n.id" + live + ")")
+    tree = ("(WITH RECURSIVE seen_tree(id) AS (SELECT n.id UNION"
+            " SELECT m.id FROM core.node m JOIN seen_tree t ON m.merged_into_id = t.id"
+            " WHERE m.case_id = n.case_id AND m.deleted_at IS NULL"
+            " AND m.classification <= %s::core.tlp AND m.compartments <@ %s)"
+            " SELECT {agg}(sa.observed_at) FROM core.assertion sa"
+            " WHERE sa.node_id IN (SELECT id FROM seen_tree)" + live + ")")
+    span = ("CASE WHEN EXISTS (SELECT 1 FROM core.node mx WHERE mx.merged_into_id = n.id)"
+            " THEN " + tree + " ELSE " + own + " END")
+    return (f"LEAST(n.first_seen, {span.format(agg='min')}) AS first_seen, "
+            f"GREATEST(n.last_seen, {span.format(agg='max')}) AS last_seen")
+
+
+def seen_params(clearance: str, compartments) -> tuple:
+    """The four binds `seen_sql` takes, in order. One helper so no caller
+    counts them by hand."""
+    return (clearance, compartments, clearance, compartments)
 
 
 class ProjectionError(Exception):
@@ -247,7 +313,10 @@ class GraphService:
 
         nodes = self._c.execute(
             """SELECT id, node_type, label, classification, attrs,
-                      valid_from, valid_to, first_seen, last_seen,
+                      valid_from, valid_to,
+                      -- Derived from the live claims (gap-first-seen,
+                      -- 2026-09-23): nothing writes the columns.
+                      """ + seen_sql() + """,
                       -- E2: does an exhibit back this element? A case is
                       -- defensible in proportion to how much of it is
                       -- evidenced, and that should be visible on the canvas
@@ -278,7 +347,8 @@ class GraphService:
                        OR (valid_from IS NULL OR valid_from <= %s)
                        AND (valid_to IS NULL OR valid_to >= %s))
                 ORDER BY created_at LIMIT %s""",
-            (self._clearance, self._comp,
+            (*seen_params(self._clearance, self._comp),
+             self._clearance, self._comp,
              p.case_id, self._clearance, self._comp,
              p.as_of, p.as_of, p.as_of, limit + 1),
         ).fetchall()

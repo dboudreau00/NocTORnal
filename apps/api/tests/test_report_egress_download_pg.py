@@ -290,6 +290,40 @@ def test_a_stale_sign_in_is_asked_to_sign_in_not_told_it_lacks_the_role(
     assert _release(client, token, case_id).status_code == 200
 
 
+def test_every_case_gate_asks_a_stale_sign_in_to_sign_in(conn):
+    """The report route's own fix, generalised (ROADMAP "a stale sign-in
+    reads as missing permission", 2026-09-24): `authorize_object` itself
+    answers a caller whose ONLY failed check is step-up freshness with the
+    global gate's "re-authentication required", which the console
+    recognises. A role a sign-in would not fix still reads "missing
+    permission", and the denial row is written either way."""
+    from datetime import datetime, timedelta, timezone
+
+    from noctornal_api.http.deps import CurrentUser, authorize_object
+    from noctornal_api.http.errors import Problem
+
+    owner, _, case_id = _network(conn)
+    stale = CurrentUser(user_id=owner, session_id=uuid4(),
+                        session_mfa_at=datetime.now(timezone.utc) - timedelta(minutes=20))
+    with pytest.raises(Problem) as refused:
+        authorize_object(conn, stale, case_id=case_id,
+                         permission_key="report.export")
+    assert refused.value.status == 403
+    assert refused.value.detail == "re-authentication required"
+    assert _denials(conn, owner)[-1] == (
+        case_id, {"permission": "report.export",
+                  "failed_checks": ["step_up_freshness"]})
+
+    analyst, _ = _user(conn)
+    _assign(conn, case_id, analyst, "ANALYST", owner)
+    stale_analyst = CurrentUser(user_id=analyst, session_id=uuid4(),
+                                session_mfa_at=stale.session_mfa_at)
+    with pytest.raises(Problem) as role:
+        authorize_object(conn, stale_analyst, case_id=case_id,
+                         permission_key="report.export")
+    assert "missing permission report.export" in role.value.detail
+
+
 def _denials(conn, uid):
     """Every AUTHZ_DENIED row this caller has, oldest first."""
     return [(row[0], row[1]) for row in conn.execute(

@@ -46,8 +46,12 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.analytics import (
+    CONSTRAINT_ORDER,
     AnalyticsError,
     AnalyticsParams,
+    _least_constrained_first,
+    _rank_and_percentile,
+    assign_broker_leads,
     graph_hash,
     key_player,
     materialise,
@@ -57,6 +61,110 @@ from noctornal_api.projections import GraphService, Projection
 
 SUITE = "sna_suite"
 KPP_NEG = "kpp_neg"
+
+#: The node-row limit every run projects at. One constant, because the
+#: currency check has to re-project exactly as the run did: a different
+#: limit is a different node set and so a different hash.
+PROJECT_LIMIT = 5000
+
+
+def upgrade_stored(payload: dict) -> dict:
+    """A stored suite payload brought up to the rules this build computes by.
+
+    `metric_run.result` is the exact payload a run served, and a cache hit
+    or `latest` hands it back. Two things it carries were computed by rules
+    replaced on 2026-09-23, and serving them unchanged would put the old
+    defects back on screen for every run made before the upgrade:
+
+    - `constraint_percentile` ran against `constraint_rank`
+      (ux10-analytics:rank-percentile-opposite-directions);
+    - the broker leads used an absolute constraint cut-off that tagged the
+      busiest actors (ux10-analytics:broker-lead-card-overclaims).
+
+    Both are recomputed from the payload's own per-node numbers, so the
+    answer is what this build would have said about the same graph, and
+    the payload says which parts were redone (`upgraded`). The
+    community sizes the pane now prints are counted from the rows too. A
+    payload that already carries `constraint_order` is returned as is,
+    apart from the disputed count below.
+    """
+    payload = _with_disputed(payload)
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list) or payload.get("constraint_order") == CONSTRAINT_ORDER:
+        return payload
+    out = {**payload, "nodes": [dict(n) for n in nodes]}
+    rows = out["nodes"]
+    _, pct = _rank_and_percentile(
+        _least_constrained_first([n.get("constraint") for n in rows]))
+    for n, p in zip(rows, pct, strict=True):
+        n["constraint_percentile"] = p
+    out["broker_rule"] = assign_broker_leads(rows)
+    out["constraint_order"] = CONSTRAINT_ORDER
+    cohesion = dict(out.get("cohesion") or {})
+    if "community_sizes" not in cohesion:
+        sizes: dict[int, int] = {}
+        for n in rows:
+            if n.get("community") is not None:
+                sizes[n["community"]] = sizes.get(n["community"], 0) + 1
+        cohesion["community_sizes"] = [
+            {"community": c, "size": s}
+            for c, s in sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0]))]
+        out["cohesion"] = cohesion
+    out["upgraded"] = [*out.get("upgraded", []),
+                       "constraint_percentile", "broker_leads", "community_sizes"]
+    return out
+
+
+def _with_disputed(payload: dict) -> dict:
+    """A stored `review_coverage` given the disputed count it was stored
+    without (release review c11, 2026-09-24).
+
+    Runs computed before DISPUTED was counted left those ties in no bucket.
+    They are the remainder: `graph.REVIEW_STATES` lets a reviewer set only
+    ACCEPTED, DISPUTED or PROPOSED, REJECTED is counted, and nothing sets
+    SUPERSEDED on a tie. So `ties` less the three counted states is exactly
+    the disputed ties, and the pane can warn about a stored run as it does
+    about a fresh one rather than read it as all settled. A payload that
+    already counts them is returned as is (the same object)."""
+    rc = payload.get("review_coverage")
+    if not isinstance(rc, dict) or "disputed" in rc:
+        return payload
+    counted = sum(int(rc.get(k) or 0) for k in ("proposed", "accepted", "rejected"))
+    disputed = max(0, int(rc.get("ties") or 0) - counted)
+    return {**payload, "review_coverage": {**rc, "disputed": disputed},
+            "upgraded": [*payload.get("upgraded", []), "review_coverage"]}
+
+
+def upgraded_constraint_percentile(node_count: int | None, *, defined: int | None,
+                                   above: int | None, equal: int | None,
+                                   stored: float) -> float:
+    """One pre-fix `node_metric` constraint percentile, re-ranked the way
+    `upgrade_stored` re-ranks the payload, from the run's own rows.
+
+    "100 minus the stored one" is exact only for a graph with no isolates
+    (found reviewing the 2026-09-23 fix): the old percentile put every
+    isolate (undefined constraint) BELOW the actors, and so does the new
+    one, so turning the old one round moves the actors down by the
+    isolates' share. A NIGHTJAR-shaped run (46 of 146 nodes without a
+    constraint) read rank 1 at about p68 in the trend table while the
+    actor table said p98 for the same run: the very "1st beside a middling
+    percentile" this fix exists to remove
+    (ux10-analytics:rank-percentile-opposite-directions).
+
+    So the percentile is counted again, with `_rank_and_percentile`'s
+    mid-rank definition over `_least_constrained_first`: strictly below an
+    actor are the isolates (`node_count - defined`, since an isolate's
+    undefined constraint writes no row) and every actor MORE constrained
+    (`above`), plus half the ties (`equal`, the actor itself included). The
+    expression is the helper's own, so the two tables agree to the digit.
+    Without the counts (a run with no `node_count`) the old turn-round is
+    the best there is, and is kept rather than printing nothing.
+    """
+    if not node_count or defined is None or above is None or equal is None:
+        return round(100.0 - stored, 2)
+    below = (node_count - defined) + above
+    return round(100.0 * (below + 0.5 * equal) / node_count, 2)
+
 
 # Metrics stored per node in analytics.node_metric. Graph-level results
 # (balance, cut vertices, key player) live in metric_run.result -- they are
@@ -85,10 +193,12 @@ class RunResult:
     #: caller asked for a hash match rather than a moment in time.
     computed_at: datetime | None = None
     #: THE CURRENCY VERDICT, split out of `cached` on 2026-09-02. True when
-    #: this answer is known to describe the caller's graph as it stands now
-    #: -- either it was just computed, or `_lookup` matched on `graph_hash`.
-    #: None means NOT CHECKED, and is what `latest` returns: it reads the
-    #: newest stored run without re-projecting the graph, so it cannot know.
+    #: this answer is known to describe the caller's graph as it stands now,
+    #: either because it was just computed or because its `graph_hash`
+    #: matches the graph projected for this request. False when that
+    #: comparison was made and failed: `latest` re-projects and compares
+    #: since 2026-09-23, so it says "checked, and stale" here rather than
+    #: "not checked". None means NOT CHECKED, which no path returns today.
     #:
     #: Before the split, `latest` and a `_lookup` hit both reached the wire
     #: as `cached: true` with nothing to separate them, so a client that
@@ -98,8 +208,8 @@ class RunResult:
     #: reported as freshness is this codebase's signature defect, and a
     #: timestamp is not a substitute: `computed_at` says when, never whether.
     #:
-    #: No path sets this False today. The three-valued field exists so that
-    #: a future "read it back AND re-hash" path has somewhere honest to put
+    #: The three-valued field existed for exactly the "read it back AND
+    #: re-hash" path `latest` became, so it had somewhere honest to put
     #: "checked, and stale" instead of overloading `cached` again.
     #: Defaults to None -- "not checked" -- rather than True, so a future
     #: construction site that forgets the field cannot silently claim
@@ -186,21 +296,19 @@ class AnalyticsRunService:
         case saw nothing, ran the suite again, and was served the cached
         row anyway.
 
-        Deliberately does NOT re-project the graph. The question is "what
-        did the last run say", not "is the last run still current" --
-        that second question is what `suite()`'s hash lookup answers, and
-        an analyst who wants it presses the button. Nor does it insert a
-        projection row: a read that leaves a row behind is not a read.
-
-        Because it does not re-project, it CANNOT answer the second
-        question, so it returns `current=None` -- not checked. Until
-        2026-09-02 it returned only `cached=True`, which on every other
-        path means "`_lookup` matched the graph hash", i.e. nothing has
-        changed since that run. The two meanings reached the wire as one
-        field, so opening the pane on a changed graph would have reported
-        a stale answer as a current one. `cached` now says only that the
-        bytes came out of storage, which is true here and says nothing
-        about the graph.
+        CHECKED AGAINST THE GRAPH since 2026-09-23. It used to read the row
+        back without re-projecting and answer `current=None`, not checked,
+        and the pane could only say "not recomputed": whether the numbers
+        still described the case was a question an analyst had to spend a
+        metered run to ask, so in practice they were read as current
+        (ux10-analytics:stored-run-currency-and-timestamp and
+        analysis-survives-graph-changes). Projecting is a read, the same
+        read the sociogram makes on every refresh, and the digest it gives
+        is the one `_lookup` matches on: so `current` is now True when the
+        caller's graph hashes as it did when the run was computed and False
+        when it has moved. `cached` still says only that the bytes came out
+        of storage. Nothing is computed and no projection row is written:
+        a read that leaves a row behind is not a read.
 
         Scoped by `visibility_clearance` / `visibility_compartments`
         exactly as `history` and `_lookup` are, and for the same reason:
@@ -208,24 +316,68 @@ class AnalyticsRunService:
         served to a lesser one, because the score's explanation would lie
         in nodes they may not see.
         """
+        row = self._newest(p, params, SUITE)
+        if row is None:
+            return None
+        run_id, payload, finished_at, digest, _extra = row
+        return RunResult(upgrade_stored(payload), run_id, cached=True,
+                         computed_at=finished_at,
+                         current=self._matches(p, params, {}, digest))
+
+    def latest_key_player(self, p: Projection, params: AnalyticsParams, *,
+                          n_remove: int) -> RunResult | None:
+        """The most recent COMPLETE key-player run for this projection and
+        removal-set size, checked against the graph as `latest` is.
+
+        ux10-analytics:kpp-blank-on-stored-run (2026-09-23). The pane opened
+        on the stored suite and left "Key player: who holds this network
+        together" as an empty heading, which reads as "nobody does" or as a
+        broken feature, although the key-player run was stored beside the
+        suite. It is read back here the same way, keyed on the size it was
+        computed for, because a 3-actor set says nothing about a 4-actor one.
+        """
+        row = self._newest(p, params, KPP_NEG, n_remove=n_remove)
+        if row is None:
+            return None
+        run_id, payload, finished_at, digest, _extra = row
+        return RunResult(payload, run_id, cached=True, computed_at=finished_at,
+                         current=self._matches(p, params, {"n_remove": n_remove},
+                                               digest))
+
+    def currency(self, p: Projection, params: AnalyticsParams,
+                 run_id: UUID) -> dict | None:
+        """Whether ONE stored run still describes the caller's graph, or
+        None when the caller cannot see that run.
+
+        The pane calls this after the graph under it moves (an edit, a
+        retirement, another analyst's change arriving live) instead of
+        blanking numbers that may still hold or leaving numbers that may
+        not (ux10-analytics:analysis-survives-graph-changes, 2026-09-23).
+        The run must have been computed under the projection the caller
+        names: asked about another projection the answer would compare two
+        different questions, so that is a refusal, not a False.
+        """
         row = self._c.execute(
-            """SELECT r.id, r.result, r.finished_at
+            """SELECT r.algorithm, r.params, r.graph_hash, r.finished_at, pr.name
                  FROM analytics.metric_run r
                  JOIN analytics.projection pr ON pr.id = r.projection_id
-                WHERE pr.case_id = %s AND pr.name = %s
-                  AND r.algorithm = %s AND r.status = 'COMPLETE'
+                WHERE r.id = %s AND pr.case_id = %s AND r.status = 'COMPLETE'
                   AND r.visibility_clearance = %s::core.tlp
-                  AND r.visibility_compartments = %s
-                ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
-                LIMIT 1""",
-            (p.case_id, self._projection_name(p, params), SUITE,
-             self._clearance, sorted(self._comp)),
+                  AND r.visibility_compartments = %s""",
+            (run_id, p.case_id, self._clearance, sorted(self._comp)),
         ).fetchone()
         if row is None:
             return None
-        run_id, payload, finished_at = row
-        return RunResult(payload, run_id, cached=True, computed_at=finished_at,
-                         current=None)
+        algorithm, run_params, digest, finished_at, name = row
+        if name != self._projection_name(p, params):
+            raise AnalyticsError(
+                "that run was computed under a different projection; ask "
+                "about it with the parameters it was run with")
+        extra = ({"n_remove": int((run_params or {}).get("n_remove"))}
+                 if algorithm == KPP_NEG else {})
+        return {"run_id": str(run_id), "algorithm": algorithm,
+                "computed_at": finished_at.isoformat() if finished_at else None,
+                "current": self._matches(p, params, extra, digest)}
 
     def history(self, case_id: UUID, node_id: UUID, metric: str,
                 limit: int = 50) -> list[dict]:
@@ -235,13 +387,39 @@ class AnalyticsRunService:
         Scoped to runs computed at the caller's own visibility, so an
         analyst cannot read back a series computed over a graph they were
         never allowed to see.
+
+        Each point says which world time it measured (`as_of`, None for the
+        live graph, when the run's own start is the world time) and the
+        projection it was measured under, because points taken at different
+        confidence floors or with inferred ties in and out are different
+        measurements and the chart must not join them into one line
+        (ux10-analytics:trend-mixes-run-time-and-world-time, 2026-09-23).
+        A constraint percentile stored before `constraint_order` existed ran
+        the other way, and is re-ranked here so one column means one thing:
+        see `upgraded_constraint_percentile` for why "100 minus it" is not
+        the answer.
         """
         rows = self._c.execute(
             """SELECT r.started_at, nm.value, nm.rank, nm.percentile,
-                      r.is_approximate, r.node_count, pr.preset, pr.params
+                      r.is_approximate, r.node_count, pr.preset, pr.params,
+                      r.id, (r.result ->> 'constraint_order') IS NOT NULL,
+                      c.defined, c.above, c.equal
                  FROM analytics.node_metric nm
                  JOIN analytics.metric_run r ON r.id = nm.metric_run_id
                  JOIN analytics.projection pr ON pr.id = r.projection_id
+                 -- The run's other constraint rows, counted only for a
+                 -- constraint point from a run stored before the fix; the
+                 -- outer-only conditions make it a one-time filter, so
+                 -- every other point skips the scan.
+                 LEFT JOIN LATERAL (
+                     SELECT count(*) AS defined,
+                            count(*) FILTER (WHERE o.value > nm.value) AS above,
+                            count(*) FILTER (WHERE o.value = nm.value) AS equal
+                       FROM analytics.node_metric o
+                      WHERE o.metric_run_id = r.id AND o.metric = 'constraint'
+                        AND nm.metric = 'constraint'
+                        AND (r.result ->> 'constraint_order') IS NULL
+                 ) c ON true
                 WHERE pr.case_id = %s AND nm.node_id = %s AND nm.metric = %s
                   AND r.status = 'COMPLETE'
                   AND r.visibility_clearance = %s::core.tlp
@@ -251,13 +429,56 @@ class AnalyticsRunService:
             (case_id, node_id, metric, self._clearance,
              sorted(self._comp), limit),
         ).fetchall()
-        return [
-            {"at": r[0].isoformat(), "value": r[1], "rank": r[2],
-             "percentile": float(r[3]) if r[3] is not None else None,
-             "is_approximate": r[4], "node_count": r[5],
-             "preset": r[6], "params": r[7]}
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            pct = float(r[3]) if r[3] is not None else None
+            if metric == "constraint" and pct is not None and not r[9]:
+                pct = upgraded_constraint_percentile(
+                    r[5], defined=r[10], above=r[11], equal=r[12], stored=pct)
+            params = r[7] or {}
+            out.append({
+                "at": r[0].isoformat(), "value": r[1], "rank": r[2],
+                "percentile": pct, "is_approximate": r[4],
+                "node_count": r[5], "preset": r[6], "params": params,
+                "run_id": str(r[8]),
+                "as_of": params.get("as_of"),
+                "min_confidence": params.get("min_confidence"),
+                "include_inferred": params.get("include_inferred"),
+                "decay_half_life_months": params.get("decay_half_life_months"),
+            })
+        return out
+
+    def _newest(self, p: Projection, params: AnalyticsParams, algorithm: str,
+                *, n_remove: int | None = None):
+        """The newest COMPLETE run of one algorithm for this projection at
+        the caller's visibility: (id, result, finished_at, graph_hash,
+        params), or None. The key-player size narrows it when given."""
+        return self._c.execute(
+            """SELECT r.id, r.result, r.finished_at, r.graph_hash, r.params
+                 FROM analytics.metric_run r
+                 JOIN analytics.projection pr ON pr.id = r.projection_id
+                WHERE pr.case_id = %s AND pr.name = %s
+                  AND r.algorithm = %s AND r.status = 'COMPLETE'
+                  AND r.visibility_clearance = %s::core.tlp
+                  AND r.visibility_compartments = %s
+                  AND (%s::int IS NULL OR (r.params ->> 'n_remove')::int = %s)
+                ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
+                LIMIT 1""",
+            (p.case_id, self._projection_name(p, params), algorithm,
+             self._clearance, sorted(self._comp), n_remove, n_remove),
+        ).fetchone()
+
+    def _matches(self, p: Projection, params: AnalyticsParams, extra: dict,
+                 stored: bytes | None) -> bool:
+        """Does the caller's graph, projected now, hash as a run's did?
+
+        The same projection, limit and key derivation `_run` uses, so a
+        True here is exactly the condition under which `_lookup` would
+        serve that run again, and a False is exactly a cache miss."""
+        if stored is None:
+            return False
+        sub = self._graph.project(p, limit=PROJECT_LIMIT)
+        return self._cache_key(sub, p, params, extra) == bytes(stored)
 
     # -- internals ---------------------------------------------------------
     def _run(self, p: Projection, params: AnalyticsParams, algorithm: str,
@@ -265,7 +486,7 @@ class AnalyticsRunService:
         # Project FIRST. This is the clearance-filtered graph, and it is
         # also what the cache key is derived from, so there is no path that
         # serves a cached number without re-deriving the caller's own view.
-        sub = self._graph.project(p, limit=5000)
+        sub = self._graph.project(p, limit=PROJECT_LIMIT)
         digest = self._cache_key(sub, p, params, extra_params)
         projection_id = self._upsert_projection(p, params)
 
@@ -274,12 +495,12 @@ class AnalyticsRunService:
             if hit is not None:
                 run_id, payload = hit
                 # `current=True` is stated rather than left to the default:
-                # this is the ONE path that earns it by comparison, because
-                # `_lookup` matched `digest` -- the hash of the graph just
-                # projected above -- against the hash the run was computed
-                # under. `latest` reads the same table with no such
-                # comparison and must say `current=None`.
-                return RunResult(payload, run_id, cached=True, current=True)
+                # this path earns it by comparison, because `_lookup`
+                # matched `digest` (the hash of the graph just projected
+                # above) against the hash the run was computed under.
+                # `latest` makes the same comparison through `_matches`.
+                return RunResult(upgrade_stored(payload), run_id, cached=True,
+                                 current=True)
 
         started = time.monotonic()
         run_id = uuid4()

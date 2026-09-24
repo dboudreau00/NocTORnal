@@ -65,6 +65,62 @@
 
     <p id="login-error" class="form-error" role="alert" hidden></p>
     <button id="login-submit" type="submit" class="btn primary">Sign in</button>
+    <!-- ux01-firstrun:lockout-reads-as-typo (2026-09-23). A locked
+         account, a drifted clock and a typo all get one answer, on purpose:
+         a distinct answer would say which factor was right. This line is
+         always true, so it says what that answer cannot. The numbers are
+         held to security/auth.py by test_ui_signin_and_cases. -->
+    <p id="login-policy" class="help">Five failed attempts lock an account
+      for 15 minutes, and a locked account gets the same answer even with
+      the right password. An administrator can unlock it sooner
+      (Administration, the account's card, Unlock). If your code keeps
+      failing, check that your phone sets its clock automatically.</p>
+  </form>
+
+  <!-- A new password, after an administrator's reset (gap-password-reset,
+       2026-09-23). Shown only when the server has answered a sign-in with
+       password-change-required, which it does only after the password AND
+       the code were right. The one-time password stays in this page's
+       memory, never in a field or in storage, until this card is done. -->
+  <form id="newpw-form" class="card login-card" hidden novalidate>
+    <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
+    <h1 id="newpw-title" class="h-lg" tabindex="-1">Choose a new password</h1>
+    <p class="muted">An administrator issued the password you signed in
+      with, so it has to be replaced before it opens a session. It is not
+      used again after this.</p>
+    <label class="field">
+      <span class="label">Work email</span>
+      <input id="newpw-email" type="email" autocomplete="username" readonly
+             spellcheck="false">
+    </label>
+    <label class="field">
+      <span class="label">New password</span>
+      <input id="newpw-new" type="password" autocomplete="new-password"
+             minlength="12" required aria-describedby="newpw-help">
+    </label>
+    <label class="field">
+      <span class="label">New password again</span>
+      <input id="newpw-again" type="password" autocomplete="new-password"
+             minlength="12" required>
+    </label>
+    <p id="newpw-help" class="help">At least 12 characters. Length is the
+      only rule: a long phrase is better than a short mix of symbols.</p>
+    <div class="field">
+      <label class="label" for="newpw-code">A fresh authenticator code</label>
+      <input id="newpw-code" type="text" name="totp_code" class="mono"
+             autocomplete="one-time-code" maxlength="24" required
+             aria-describedby="newpw-code-help">
+      <span id="newpw-code-help" class="help">An authenticator code works
+        once, so wait for your app to show the next one. A recovery code is
+        used up only when the new password is set, so the one you just used
+        still works.</span>
+    </div>
+    <p id="newpw-error" class="form-error" role="alert" hidden></p>
+    <div class="setup-actions">
+      <button id="newpw-cancel" type="button" class="btn ghost">Cancel</button>
+      <button id="newpw-submit" type="submit" class="btn primary">
+        Set password and sign in</button>
+    </div>
   </form>
 
   <!-- FIRST RUN. Shown instead of sign-in while iam.app_user is empty —
@@ -214,17 +270,43 @@
       <input id="reauth-email" type="email" autocomplete="username" readonly
              spellcheck="false">
     </label>
-    <label class="field">
+    <label id="reauth-password-field" class="field">
       <span class="label">Password</span>
       <input id="reauth-password" type="password"
              autocomplete="current-password" required>
     </label>
-    <label class="field">
-      <span class="label">Authenticator or recovery code</span>
+    <!-- A new password, asked for in this sheet (final review u5,
+         2026-09-24). A reset signs a working person out, and the one-time
+         password they then type here is answered password-change-required;
+         that used to end the session and discard the screen this sheet had
+         just promised to keep. Shown only in that stage
+         (`startReauthChange`); the one-time password stays in memory. -->
+    <div id="reauth-newpw" class="stack" hidden>
+      <label class="field">
+        <span class="label">New password</span>
+        <input id="reauth-new" type="password" autocomplete="new-password"
+               minlength="12" aria-describedby="reauth-new-help">
+      </label>
+      <label class="field">
+        <span class="label">New password again</span>
+        <input id="reauth-again" type="password" autocomplete="new-password"
+               minlength="12">
+      </label>
+      <p id="reauth-new-help" class="help">At least 12 characters. Length is
+        the only rule: a long phrase is better than a short mix of
+        symbols.</p>
+    </div>
+    <div class="field">
+      <label id="reauth-totp-label" class="label" for="reauth-totp">Authenticator
+        or recovery code</label>
       <input id="reauth-totp" type="text" class="mono"
              autocomplete="one-time-code" maxlength="24"
-             pattern="[0-9]{6}|[A-Za-z0-9 \-]{15,24}" required>
-    </label>
+             pattern="[0-9]{6}|[A-Za-z0-9 \-]{15,24}" required
+             aria-describedby="reauth-totp-help">
+      <!-- Empty, and so read as nothing, except in the new-password stage,
+           which writes it (`REAUTH_CODE_HELP`). -->
+      <span id="reauth-totp-help" class="help" hidden></span>
+    </div>
     <p id="reauth-error" class="form-error" role="alert" hidden></p>
     <div class="stance-actions">
       <button id="reauth-leave" type="button" class="btn ghost">
@@ -269,6 +351,46 @@
           Generate recovery codes</button>
       </div>
     </section>
+    <!-- Your own password (gap-password-reset, 2026-09-23). There was no
+         way to change it at all. The current password and a code are asked
+         for here rather than a recent sign-in, so a session somebody walked
+         away from cannot be used to lock its owner out. -->
+    <section class="stack" aria-labelledby="account-pw-title">
+      <h3 id="account-pw-title" class="h-xs">Password</h3>
+      <details id="account-pw-box" class="account-pw">
+        <summary>Change your password</summary>
+        <form id="account-pw-form" class="stack" novalidate>
+          <label class="field">
+            <span class="label">Current password</span>
+            <input id="account-pw-current" type="password"
+                   autocomplete="current-password" required>
+          </label>
+          <label class="field">
+            <span class="label">New password</span>
+            <input id="account-pw-new" type="password" autocomplete="new-password"
+                   minlength="12" required aria-describedby="account-pw-help">
+          </label>
+          <label class="field">
+            <span class="label">New password again</span>
+            <input id="account-pw-again" type="password"
+                   autocomplete="new-password" minlength="12" required>
+          </label>
+          <label class="field">
+            <span class="label">Authenticator or recovery code</span>
+            <input id="account-pw-code" type="text" class="mono"
+                   autocomplete="one-time-code" maxlength="24" required>
+          </label>
+          <p id="account-pw-help" class="help">At least 12 characters. Length
+            is the only rule: a long phrase is better than a short mix of
+            symbols. Your other sessions are signed out; this one stays.</p>
+          <p id="account-pw-msg" class="msg" role="status" hidden></p>
+          <div class="setup-actions">
+            <button id="account-pw-submit" type="submit" class="btn">
+              Change password</button>
+          </div>
+        </form>
+      </details>
+    </section>
     <div class="stance-actions">
       <button id="account-close" type="button" class="btn">Close</button>
     </div>
@@ -304,23 +426,32 @@
          has to be the whole message. -->
     <span id="live-dot" class="live-dot live-off" role="status"
           aria-live="polite" aria-label="Live update status"></span>
+    <!-- "Jump to", not "Search" (ux09-search two-searches-disagree,
+         2026-09-23): the control opens the command palette, which jumps to
+         entities, panes and commands, while the Search pane is the full
+         search. Two controls both called Search gave two different answers
+         to the same query. The palette's last row runs the full search. -->
     <button id="btn-palette" type="button" class="btn appbar-search"
             aria-keyshortcuts="Control+K Meta+K"
-            aria-label="Open the command palette"><svg viewBox="0 0 20 20"
+            aria-label="Jump to an entity, a pane or a command"><svg viewBox="0 0 20 20"
             fill="none" stroke="currentColor" stroke-width="1.6"
             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
             focusable="false"><circle cx="9" cy="9" r="5.2"/><path
             d="m12.9 12.9 3.9 3.9"/></svg><span
-            class="appbar-search-label">Search</span><kbd id="palette-key"
+            class="appbar-search-label">Jump to</span><kbd id="palette-key"
             class="kbd">Ctrl K</kbd></button>
     <!-- Case lifecycle. `case.update`, `case.grant` and `case.close` were
          seeded in 0017 and granted in 0021, and until 2026-07-30 a case
          could not be corrected, shared or closed from a browser at all —
          only through scripts/bootstrap.py. -->
+    <!-- Case… opens the case record, not a title prompt: lawful basis,
+         authority, retention and review, and the corrections the server
+         allows (ux02-cases:case-record-invisible-and-uneditable,
+         2026-09-23). Status… opens the legal moves only. -->
     <button id="btn-case-edit" type="button" class="btn ghost small"
-            hidden title="Correct this case's title or summary">Case…</button>
+            hidden title="The case record: lawful basis, authority, retention, review, and corrections to them">Case…</button>
     <button id="btn-case-share" type="button" class="btn ghost small"
-            hidden title="Assign another analyst to this case">Share…</button>
+            hidden title="Who is on this case, and adding a colleague">Share…</button>
     <button id="btn-case-status" type="button" class="btn ghost small"
             hidden title="Move this case through its lifecycle">Status…</button>
     <button id="btn-cases" type="button" class="btn ghost" hidden>All cases</button>
@@ -334,14 +465,30 @@
          inside a case's Lifecycle pane. -->
     <button id="btn-admin" type="button" class="btn ghost small" hidden
             title="Accounts and the readiness register. They cover the whole deployment, so no case is needed.">Administration</button>
+    <!-- Beside the way in, so an administrator on the case list learns that
+         blocking checks are failing without opening anything (2026-09-23). -->
+    <span id="adm-blocking-flag" class="chip bad" hidden></span>
+    <!-- The Inbox from anywhere, a case open or not (ux08-triage:
+         no-work-waiting-at-sign-in, 2026-09-23). It lived only in the case
+         rail, so a security officer whose alerts belong to no case had to
+         open an unrelated case to read them. The badge is the rail
+         badge's twin, marked urgent while an urgent item is
+         unacknowledged. -->
+    <button id="btn-inbox" type="button" class="btn ghost small hdr-inbox"
+            title="Your notifications, across every case">Inbox<span
+            id="hdr-inbox-badge" class="hdr-badge" hidden></span></button>
     <!-- A button since 2026-09-22: it opens Account, the one place the
          recovery codes the sign-in form mentions can be issued. The flag
          shows when there are none, because that is when a lost phone
          becomes a call to an administrator. -->
+    <!-- The name, then what this person is here: their role on the open
+         case and their clearance. It said "analyst" for every account,
+         owners and administrators included
+         (ux02-cases:header-says-analyst-no-permission-cues, 2026-09-23). -->
     <button id="btn-account" type="button" class="hdr-user"
             title="Account: recovery codes and session">
-      <span class="muted small">analyst</span>
       <code id="hdr-user" class="mono">…</code>
+      <span id="hdr-role" class="muted small hdr-role"></span>
       <span id="hdr-codes-flag" class="chip warn" hidden></span>
     </button>
     <button id="btn-logout" type="button" class="btn ghost">Log out</button>
@@ -349,8 +496,10 @@
 
   <!-- Shown for any case that is not ACTIVE, across every pane, because
        the Add entity form and the canvas's "add an entity to begin" invited
-       new work on CLOSED and ARCHIVED cases without a word. The server does
-       not refuse such writes, so this is the only thing that says it. -->
+       new work on CLOSED and ARCHIVED cases without a word. Since
+       gap-closed-case-writes (2026-09-23) the server refuses content writes
+       on such a case and app.js `applyCaseReadOnly` turns the content
+       controls off; this strip is where the console says why. -->
   <div id="case-state-strip" class="case-state-strip" role="status" hidden>
     <span id="case-state-text"></span>
     <button id="case-state-change" type="button" class="btn small">
@@ -363,6 +512,23 @@
     <section id="view-cases" class="cases-view">
       <div class="cases-col">
         <h1 class="h-md">Cases</h1>
+        <!-- ux02-cases:case-list-lacks-triage-fields (2026-09-23). The list
+             showed code, title, status and TLP only, in creation order with
+             no date, and a CLOSED case looked like an ACTIVE one. It now
+             leads with the cases open for work, says so, and shows the
+             review date, the reader's own role and when each was opened. -->
+        <div class="cases-tools">
+          <label class="field inline">
+            <span class="label">Show</span>
+            <select id="cases-filter" class="select">
+              <option value="all">Every case</option>
+              <option value="open">Open for work (draft, active, dormant)</option>
+              <option value="shut">Closed, archived or purged</option>
+            </select>
+          </label>
+          <span id="cases-sort-note" class="muted small">Sorted by status,
+            open for work first, then newest first.</span>
+        </div>
         <div class="card">
           <div class="scroll-x">
             <table class="table" id="cases-table">
@@ -371,8 +537,15 @@
                 <tr>
                   <th scope="col">Code</th>
                   <th scope="col">Title</th>
-                  <th scope="col">Status</th>
+                  <th scope="col" aria-sort="ascending">Status</th>
                   <th scope="col">Classification</th>
+                  <th scope="col">Your role</th>
+                  <th scope="col">Review due</th>
+                  <th scope="col">Created</th>
+                  <!-- ux08-triage:no-work-waiting-at-sign-in (2026-09-23):
+                       what needs the analyst, per case, before opening
+                       any. Filled by paintCaseWaiting. -->
+                  <th scope="col">Waiting for you</th>
                   <th scope="col"><span class="sr-only">Open</span></th>
                 </tr>
               </thead>
@@ -380,6 +553,7 @@
             </table>
           </div>
           <p id="cases-empty" class="empty" hidden>No cases are open to you yet.</p>
+          <p id="cases-filtered" class="empty" hidden></p>
         </div>
       </div>
 
@@ -442,6 +616,12 @@
          reset puts it back in the workspace, so the pane exists once and
          the in-case Admin tab keeps working unchanged. -->
     <section id="view-admin" class="admin-view" aria-label="Administration"
+             hidden></section>
+
+    <!-- The Inbox with no case open. Empty in the markup, like
+         view-admin: `openInbox` moves #pane-inbox in here and the
+         case-switch reset puts it back in the workspace. -->
+    <section id="view-inbox" class="admin-view" aria-label="Inbox"
              hidden></section>
 
     <!-- ─────────────────────── WORKSPACE ─────────────────────── -->
@@ -541,7 +721,11 @@
                 tabindex="-1" data-tab="governance"
                 title="Retention, legal holds, purge record, break-glass">
           <span class="rail-glyph" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16.7 10a6.7 6.7 0 1 1-2-4.8"/><path d="M16.9 3.3v3.5h-3.5"/><path d="M10 6.3V10l2.5 1.6"/></svg></span>
-          <span class="rail-cap">Lifecycle</span>
+          <!-- "Records", was "Lifecycle" (ux19-copy one-concept-many-names,
+               2026-09-23): an analyst told to close a case picked the rail's
+               "Lifecycle" and landed on retention rules and a purge, while
+               the case's own status is the header's Status control. -->
+          <span class="rail-cap">Records</span>
         </button>
         <button id="tab-admin" type="button" class="tab rail-btn"
                 role="tab" aria-controls="pane-admin" aria-selected="false"
@@ -549,6 +733,9 @@
                 title="Analyst accounts: create, roles, clearance, unlock">
           <span class="rail-glyph" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.6 6.2h12.8M3.6 10h12.8M3.6 13.8h12.8"/><circle cx="8" cy="6.2" r="1.7"/><circle cx="13" cy="10" r="1.7"/><circle cx="7" cy="13.8" r="1.7"/></svg></span>
           <span class="rail-cap">Admin</span>
+          <!-- Failing blocking checks, for an administrator (ux16-admin
+               blocking-banner-buried-under-account-list, 2026-09-23). -->
+          <span id="admin-badge" class="rail-badge danger" hidden></span>
         </button>
         <button id="tab-samples" type="button" class="tab rail-btn danger-tab"
                 role="tab" aria-controls="pane-samples" aria-selected="false"
@@ -570,13 +757,18 @@
                 aria-controls="pane-add-node" aria-selected="false" tabindex="-1"
                 data-tab="add-node" title="Add entity">
           <span class="rail-glyph" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="6.8"/><path d="M10 6.9v6.2M6.9 10h6.2"/></svg></span>
-          <span class="rail-cap">Entity</span>
+          <!-- "Add entity" and "Add link", were "Entity" and "Link" beside
+               the list tile "Entities" (ux19-copy one-concept-many-names,
+               2026-09-23). The last two tiles, so a two-line caption shifts
+               nothing below it. -->
+          <span class="rail-cap rail-cap-two">Add entity</span>
         </button>
         <button id="tab-add-edge" type="button" class="tab rail-btn" role="tab"
                 aria-controls="pane-add-edge" aria-selected="false" tabindex="-1"
-                data-tab="add-edge" title="Add relationship">
+                data-tab="add-edge"
+                title="Add link: a relationship between two entities">
           <span class="rail-glyph" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8.5 11.5a3.3 3.3 0 0 0 4.7 0l2.3-2.3a3.3 3.3 0 0 0-4.7-4.7l-1.1 1.1"/><path d="M11.5 8.5a3.3 3.3 0 0 0-4.7 0l-2.3 2.3a3.3 3.3 0 0 0 4.7 4.7l1.1-1.1"/></svg></span>
-          <span class="rail-cap">Link</span>
+          <span class="rail-cap rail-cap-two">Add link</span>
         </button>
       </nav>
 
@@ -587,7 +779,13 @@
                  aria-labelledby="tab-graph" tabindex="-1">
 
           <!-- Projection controls. docs/03: no metric is ever computed against
-               "the graph" — only against a named, parameterised projection. -->
+               "the graph", only against a named, parameterised projection.
+               ONE row at laptop widths (ux03 control-bar-squeezes-canvas,
+               ux04 canvas-squeezed-on-laptop, 2026-09-23): the preset's
+               gloss is behind its own button, the size metric's in the
+               select's hover text, and the layout controls sit on the
+               canvas they act on. Four rows of controls left a 1366x768
+               sociogram 257px tall. -->
           <div class="proj-bar">
             <div class="proj-grp">
               <label class="field inline">
@@ -595,8 +793,12 @@
                 <select id="sel-preset" class="select"
                         aria-describedby="preset-desc"></select>
               </label>
+              <button id="btn-preset-about" type="button" class="btn ghost small about-btn"
+                      aria-expanded="false" aria-controls="preset-desc"
+                      aria-label="About this projection"
+                      title="What this projection includes, and why">i</button>
               <label class="field inline">
-                <span class="label">Min confidence</span>
+                <span class="label">Confidence</span>
                 <select id="sel-minconf" class="select"></select>
               </label>
               <label class="check">
@@ -611,20 +813,10 @@
                 <input id="chk-provenance" type="checkbox" checked>
                 <span>Mark unevidenced</span>
               </label>
-            </div>
-
-            <div class="proj-grp">
               <label class="field inline">
                 <span class="label">Node size</span>
-                <select id="sel-metric" class="select"
-                        aria-describedby="metric-note"></select>
+                <select id="sel-metric" class="select"></select>
               </label>
-              <span id="metric-note" class="help" role="status"></span>
-              <span id="evidence-coverage" class="muted small" role="status"></span>
-              <!-- U1: the layout runs off the main thread, so its progress
-                   has to be visible somewhere or a big graph just looks
-                   like it is doing nothing. -->
-              <span id="layout-status" class="muted small" role="status"></span>
             </div>
 
             <div class="proj-grp push">
@@ -635,14 +827,9 @@
                   <span class="kbd">Esc</span>
                 </button>
               </span>
-              <button id="btn-fit" type="button" class="btn ghost small">Fit</button>
-              <button id="btn-relayout" type="button" class="btn ghost small">Re-layout</button>
-              <button id="btn-save-layout" type="button" class="btn ghost small">Save layout</button>
-              <button id="btn-clear-pins" type="button" class="btn ghost small">Clear pins</button>
-              <button id="btn-refresh" type="button" class="btn ghost small">Reload graph</button>
             </div>
 
-            <p id="preset-desc" class="proj-desc"></p>
+            <p id="preset-desc" class="proj-desc" hidden></p>
           </div>
 
           <div class="canvas-wrap">
@@ -653,48 +840,125 @@
                     the selected entity. Shift with an arrow key pans, and Home
                     returns to the selection. Enter focuses the selected entity's ego
                     network. P marks a path anchor and then traces the shortest
-                    path to the selection. Space held hides inferred edges. Plus
+                    path to the selection. U pins the selected entity where it is,
+                    or unpins it. Space held hides inferred edges, anywhere on
+                    this tab except where Space already does something: in a
+                    field, or on a focused button or box. Plus
                     and minus zoom, zero fits, escape leaves focus mode or clears
                     the selection.
                     T moves to the selection's relationships in the
                     inspector, where every tie can be opened."></canvas>
-            <p id="graph-empty" class="canvas-empty" hidden>
-              Nothing in this projection. Widen it, or add an entity to begin.
-            </p>
-            <!-- What the canvas is not showing: entities outside the view
-                 and names held back to avoid overprinting (2026-09-22). -->
+            <!-- Says WHICH is empty, the case or the projection, and offers
+                 the one thing that would fill it (ux03 empty-case-says-widen,
+                 2026-09-23). Written by renderGraphEmpty. -->
+            <div id="graph-empty" class="canvas-empty" hidden>
+              <p id="graph-empty-text"></p>
+              <button id="graph-empty-act" type="button" class="btn small" hidden></button>
+            </div>
+            <!-- The head and the foot of the canvas are each ONE row that
+                 wraps, so the chrome on the left and the controls on the
+                 right can never sit on each other. As separate absolute
+                 boxes the canvas note covered the names note at 1024 wide
+                 (fix round, 2026-09-23). -->
+            <div class="canvas-head">
+            <!-- What changes how the picture may be read, ON the picture:
+                 evidence coverage, a truncated page, material above your
+                 clearance, metrics that did not load, and Space held. They
+                 were at the foot of the pane in the readout (ux03
+                 readout-buries-warnings, 2026-09-23). -->
+            <div id="graph-status" class="canvas-status" role="status">
+              <span id="evidence-coverage" class="cs-chip" hidden></span>
+              <span id="graph-warnings" class="cs-group"></span>
+              <!-- U1: the layout runs off the main thread, so its progress
+                   has to be visible somewhere or a big graph just looks
+                   like it is doing nothing. -->
+              <span id="layout-status" class="cs-chip" hidden></span>
+              <span id="graph-hold" class="cs-chip cs-hold" hidden></span>
+            </div>
+            <!-- The layout controls, on the canvas they act on. Clear pins
+                 confirms with a count and offers Undo, and Save layout is
+                 marked while hand placements are unsaved (ux03
+                 pin-layout-work-lost, 2026-09-23). -->
+            <div class="canvas-tools canvas-tools-layout" role="group" aria-label="Layout">
+              <button id="btn-pin" type="button" class="btn small" hidden></button>
+              <button id="btn-relayout" type="button" class="btn small">Re-layout</button>
+              <button id="btn-save-layout" type="button" class="btn small">Save layout</button>
+              <button id="btn-clear-pins" type="button" class="btn small">Clear pins</button>
+              <button id="btn-refresh" type="button" class="btn small"
+                      title="Fetch the case and this projection again">Reload</button>
+            </div>
+            </div>
+            <div class="canvas-foot">
+            <!-- What the canvas is not showing: entities outside the view,
+                 and a tie's twins on the same pair (2026-09-22). -->
             <p id="graph-note" class="canvas-note" hidden></p>
+            <!-- The zoom level and its controls, which were nowhere (ux03
+                 zoom-state-invisible, 2026-09-23). -->
+            <div class="canvas-tools canvas-tools-zoom" role="group" aria-label="Zoom">
+              <span id="legend-names" class="cs-note" hidden
+                    title="Names are placed largest node first and never over a
+                    node, a mark or another name. Zooming in makes room for
+                    more. The selected entity and the one under the pointer
+                    are always named."></span>
+              <button id="btn-zoom-out" type="button" class="btn small zoom-btn"
+                      aria-label="Zoom out" title="Zoom out (minus key)">&minus;</button>
+              <span id="zoom-level" class="zoom-level mono"
+                    title="Zoom. More names fit as you zoom in; the + and &minus; sign
+                    marks on ties show from 120%, relationship types from
+                    190%.">100%</span>
+              <button id="btn-zoom-in" type="button" class="btn small zoom-btn"
+                      aria-label="Zoom in" title="Zoom in (plus key)">+</button>
+              <button id="btn-fit" type="button" class="btn small"
+                      title="Fit every entity (0)">Fit</button>
+            </div>
+            </div>
+            <!-- What the keyboard just did, for a screen reader: the arrow
+                 keys changed the selection in silence
+                 (ux18-a11y:canvas-selection-silent, 2026-09-23). -->
+            <p id="graph-say" class="sr-only" role="status"
+               aria-live="polite"></p>
           </div>
 
           <!-- THE SIGNATURE ELEMENT (docs/06): drag it and the graph plays
                through history. Density marks show collection volume, so a gap
-               in coverage is not mistaken for a gap in activity. -->
+               in coverage is not mistaken for a gap in activity. Two rows:
+               the dates flank the strip and the slider they label. -->
           <div id="scrubber" class="scrubber">
             <div class="tl-head">
               <span class="label">Timeline (world time)</span>
+              <span id="tl-note" class="help tl-note"></span>
               <span id="tl-current" class="tl-current mono">as-of: now</span>
-              <button id="btn-asof-now" type="button" class="btn small">as-of: now</button>
+              <!-- "Jump to now": the button and the status beside it both read
+                   "as-of: now", a state where an action belonged (ux19-copy
+                   raw-enums-and-polish, 2026-09-23). -->
+              <button id="btn-asof-now" type="button" class="btn small">Jump to now</button>
             </div>
-            <canvas id="tl-density" class="tl-density" aria-hidden="true"></canvas>
-            <input id="tl-range" type="range" min="0" max="1000" step="1" value="1000"
-                   aria-label="As-of position in world time"
-                   aria-describedby="tl-note">
-            <div class="tl-labels">
-              <span id="tl-min" class="mono small muted"></span>
-              <span id="tl-note" class="help"></span>
-              <span id="tl-max" class="mono small muted"></span>
+            <div class="tl-track">
+              <span id="tl-min" class="mono small muted tl-min"></span>
+              <canvas id="tl-density" class="tl-density" aria-hidden="true"></canvas>
+              <input id="tl-range" type="range" min="0" max="1000" step="1" value="1000"
+                     aria-label="As-of position in world time"
+                     aria-describedby="tl-note">
+              <span id="tl-max" class="mono small muted tl-max"></span>
             </div>
           </div>
 
           <div class="graph-bar">
             <div class="legend" aria-label="Legend">
               <span class="lg"><i class="swatch hue-actor-persona"></i>Persona</span>
-              <span class="lg"><i class="swatch hue-actor-person"></i>Person</span>
+              <span class="lg" title="An assessed person is drawn with a second
+                    ring inside the first, so it never rests on hue alone."><i
+                    class="swatch dbl hue-actor-person"></i>Person</span>
               <span class="lg"><i class="swatch hue-actor-group"></i>Group</span>
+              <span class="lg" title="A victim is a SQUARE in the Group hue: a
+                    target, not a member (2026-09-23)."><i
+                    class="swatch sq hue-actor-group"></i>Victim</span>
               <span class="lg"><i class="swatch hue-artefact-infra"></i>Infra / comms</span>
               <span class="lg"><i class="swatch hue-artefact-finance"></i>Finance</span>
               <span class="lg"><i class="swatch hue-artefact-malware"></i>Malware</span>
-              <span class="lg"><i class="swatch hue-context"></i>Context</span>
+              <span class="lg" title="Events, incidents, campaigns and places are
+                    DIAMONDS: things that happened, not entities."><i
+                    class="swatch dia hue-context"></i>Context</span>
               <span class="legend-sep" aria-hidden="true"></span>
               <span class="lg"><i class="line pos"></i>vouch / positive</span>
               <span class="lg"><i class="line neg"></i>dispute / negative</span>
@@ -702,9 +966,9 @@
               <span class="lg"><i class="line inf"></i><strong>dashed = inferred</strong></span>
               <span class="lg" title="Sign is never carried by hue alone: from 120%
                     zoom a positive tie is marked + at its midpoint and a negative
-                    tie −. The dash pattern cannot carry sign, because solid
+                    tie &minus;. The dash pattern cannot carry sign, because solid
                     versus dashed already means asserted versus inferred.">
-                <code class="mono">+ / −</code>&nbsp;sign mark (zoomed in)</span>
+                <code class="mono">+ / &minus;</code>&nbsp;sign mark (from 120%)</span>
               <span class="legend-sep" aria-hidden="true"></span>
               <!-- E2, spelled out rather than left to the checkbox's hover
                    title (ux03 unevidenced-hollow-never-drawn, ux07, 2026-09-22). -->
@@ -716,33 +980,57 @@
                     rests on no exhibit. It is a shape, not a fade, because opacity
                     already means confidence."><i class="line bead"></i>bead = tie with no exhibit</span>
               <span class="legend-sep" aria-hidden="true"></span>
-              <span class="lg"><i class="ring prop"></i>unreviewed proposal</span>
+              <!-- Every ring the canvas draws, each with its own pattern
+                   (ux04 legend-missing-drawn-encodings, 2026-09-23). The
+                   dashed ring is drawn from the Triage queue and from a
+                   tie's review, so it clears when the proposal is
+                   dispositioned or the tie reviewed; it read "unreviewed
+                   proposal" over a column nothing wrote
+                   (ux08-triage:graph-says-unreviewed-triage-says-nothing,
+                   gap-tie-review, 2026-09-23). -->
+              <span class="lg" title="A proposal about this entity is waiting in the Triage queue, or a tie at it is still PROPOSED. Accepting, rejecting or deferring the proposal in Triage, or accepting or disputing the tie under Review in the inspector, clears the ring."><i class="ring prop"></i>proposal in Triage or tie to review</span>
               <span class="lg"><i class="ring sel"></i>selected</span>
               <span class="lg"><i class="ring pin"></i>pinned</span>
+              <span class="lg" title="Shift-click or P marks the first end of a
+                    path; the next shift-click or P traces it."><i
+                    class="ring anchor"></i>path anchor</span>
+              <span class="lg" title="The entity an ego focus is centred on
+                    (double-click or Enter)."><i class="ring ego"></i>ego centre</span>
+              <span class="lg" title="Pointing at an entity dims everything
+                    outside its neighbourhood, whatever its confidence.">hover dims the rest</span>
               <span class="legend-sep" aria-hidden="true"></span>
-              <span id="legend-size" class="lg muted">size = degree</span>
-              <span id="legend-names" class="lg muted" hidden
-                    title="Names are placed largest node first and never over a
-                    node, a mark or another name. Zooming in makes room for
-                    more. The selected entity and the one under the pointer
-                    are always named."></span>
+              <span class="lg size-key-lg"><canvas id="size-key" class="size-key"
+                    aria-hidden="true"></canvas><span id="legend-size"
+                    class="muted">area = degree</span></span>
               <span class="lg muted" title="Confidence encodes as opacity, because hue
                     is already spent on node type. An entity takes the best
                     confidence among its ties in this projection, and one with no
-                    tie that meets the filter takes the lowest step. The numeric
-                    value is in the inspector, so it is never opacity alone.">opacity = confidence</span>
+                    tie that meets the filter takes the lowest step. A tie with no
+                    confidence recorded is drawn at full opacity rather than at a
+                    made-up step. The numeric value is in the inspector, so it is
+                    never opacity alone.">opacity = confidence</span>
             </div>
-            <p id="proj-readout" class="proj-readout mono" role="status"></p>
+            <p id="proj-readout" class="proj-readout" role="status"></p>
+            <!-- The keyboard's half as well as the mouse's
+                 (ux18-a11y:canvas-keys-undocumented, 2026-09-23): the arrows,
+                 Enter, P, plus and minus, 0 and Esc were written only into
+                 the canvas's accessible name, which a sighted keyboard user
+                 never reads. -->
             <p class="canvas-keys">
               <span class="kbd">drag</span> pan ·
-              <span class="kbd">shift-arrows</span> pan ·
-              <span class="kbd">scroll</span> zoom ·
+              <span class="kbd">drag a node</span> move and pin ·
+              <span class="kbd">U</span> pin or unpin ·
+              <span class="kbd">scroll</span> <span class="kbd">+</span> <span class="kbd">&minus;</span> zoom ·
+              <span class="kbd">0</span> fit ·
               <span class="kbd">click</span> inspect ·
+              <span class="kbd">&larr; &rarr;</span> select ·
               <span class="kbd">[ ]</span> ties ·
-              <span class="kbd">dbl-click</span> ego ·
-              <span class="kbd">shift-click</span> path ·
-              <span class="kbd">space</span> hide inferred ·
-              <span class="kbd" id="canvas-keys-palette">Ctrl K</span> palette
+              <span class="kbd">shift-arrows</span> pan ·
+              <span class="kbd">dbl-click</span> or <span class="kbd">Enter</span> ego ·
+              <span class="kbd">shift-click</span> or <span class="kbd">P</span> path ·
+              <span class="kbd">Esc</span> clear ·
+              <span class="kbd">hold space</span> hide inferred ·
+              <span class="kbd" id="canvas-keys-palette">Ctrl K</span> jump to
             </p>
           </div>
         </section>
@@ -750,22 +1038,32 @@
         <!-- ENTITIES -->
         <section id="pane-entities" class="pane" role="tabpanel"
                  aria-labelledby="tab-entities" tabindex="-1" hidden>
+          <!-- A label filter and sortable columns since ux06-entry:entity-
+               list-no-find (2026-09-23): "is it already here?" is the check
+               an analyst makes before adding an entity, and a type filter
+               over a newest-first list could not answer it. -->
           <div class="pane-head">
             <label class="field inline">
               <span class="label">Type filter</span>
               <select id="ent-filter" class="select"></select>
             </label>
-            <span id="ent-count" class="muted small"></span>
+            <label class="field inline">
+              <span class="label">Label</span>
+              <input id="ent-find" type="search" autocomplete="off"
+                     spellcheck="false" placeholder="Part of a label"
+                     aria-describedby="ent-count">
+            </label>
+            <span id="ent-count" class="muted small" role="status"></span>
           </div>
           <div class="scroll-x">
             <table class="table">
               <caption class="sr-only">Entities in this case</caption>
               <thead>
                 <tr>
-                  <th scope="col">Type</th>
-                  <th scope="col">Label</th>
-                  <th scope="col">Classification</th>
-                  <th scope="col">First seen</th>
+                  <th scope="col" data-sort="type" aria-sort="none"><button type="button" class="th-sort">Type</button></th>
+                  <th scope="col" data-sort="label" aria-sort="none"><button type="button" class="th-sort">Label</button></th>
+                  <th scope="col" data-sort="classification" aria-sort="none"><button type="button" class="th-sort">Classification</button></th>
+                  <th scope="col" data-sort="first_seen" aria-sort="none"><button type="button" class="th-sort">First seen</button></th>
                 </tr>
               </thead>
               <tbody id="ent-body"></tbody>
@@ -814,10 +1112,20 @@
                 summary and a link, never the detail below</strong>; anything
                 above TLP:AMBER does not leave the platform at all
                 (invariant&nbsp;8).</p>
+              <!-- "Needs action" replaced "Unread only" (ux08-triage:
+                   urgent-read-vs-ack-invisible, 2026-09-23): reading an
+                   urgent alarm does not stop it escalating, and the unread
+                   filter hid it the moment it was glanced at. -->
               <label class="field inline">
-                <input id="inbox-unread-only" type="checkbox" />
-                <span class="label">Unread only</span>
+                <input id="inbox-needs-action" type="checkbox" />
+                <span class="label">Needs action only</span>
               </label>
+              <p class="help">Needs action is anything unread, and any
+                urgent notification not yet acknowledged. Urgent ones nobody
+                has acknowledged stay at the top and say when they escalate:
+                reading one does not stop that, Acknowledge does.</p>
+              <p id="inbox-msg" class="msg" role="status" hidden></p>
+              <p id="inbox-read-all-msg" class="msg" role="status" hidden></p>
             </div>
 
             <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
@@ -828,8 +1136,14 @@
               <p class="help">Quiet hours defer, they never drop: a
                 deferred notification is still queued with a due time. Priority&nbsp;1
                 (an evidence integrity alarm, a break-glass) ignores them, which
-                is the only reason silencing a channel overnight is safe.</p>
+                is the only reason silencing a channel overnight is safe. The
+                hours are read in the zone shown beside them, UTC unless you
+                choose another. Under each channel is what its minimum
+                priority delivers and what it leaves out.</p>
               <div id="inbox-prefs" class="stack"></div>
+              <p id="inbox-prefs-empty" class="empty" hidden>No delivery
+                channel can be set here: in-app notifications are always
+                on.</p>
             </details>
         
           </div>
@@ -871,7 +1185,13 @@
               Selectors are extracted with their offsets and raised as
               proposals: <strong>nothing enters the graph here</strong>.
               The document is stored as the record of what was looked at,
-              even if nothing is found.</p>
+              even if nothing is found, and never below the case's own
+              classification. Text captured before is not stored twice: it
+              keeps the label it was first stored at, and what it raises
+              here carries the stricter of that label and this capture's.</p>
+            <!-- Why a compartmented case takes no capture (final review
+                 c15, 2026-09-24): filled by syncCaptureForm in app.js. -->
+            <p id="cap-scope" class="msg warn" role="status" hidden></p>
             <label class="field">
               <span class="label">Title</span>
               <input id="cap-title" spellcheck="false"
@@ -915,16 +1235,36 @@
           <!-- Was "docs/09 asks for this to be keyboard driven...": a note
                to the developer, shown to the analyst (README screenshot
                review, 2026-09-23). -->
+          <!-- Says what A does, and where the keys act (ux08-triage:
+               triage-keys-fire-on-browser-chords, 2026-09-23): they fired
+               on a focused button too, and the sheet promised a
+               confirmation step that Accept never had. -->
+          <!-- ux18-a11y:triage-letter-keys-global (2026-09-23): the letters
+               fired from anywhere on the pane, a rail tab or the ? sheet
+               included, and A wrote at once. They now act only inside the
+               list, A asks first, and the ? sheet can turn them off. -->
           <p class="help">
             <kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept
             &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer.
-            The keys work whenever no form field has the focus (a text box
-            or a menu such as Queue), so an hour of triage never needs the
-            mouse.
+            The keys work while the list below has the focus (Tab to it, or
+            click a suggestion), never in a field, on a button or with Ctrl,
+            Alt or Cmd held. A asks before it accepts, and the line above
+            the queue then says what was accepted and offers an Undo when
+            your role can retire it; R and D ask for a reason first. Each
+            question names the suggestion it acts on. They can be turned
+            off in the keyboard sheet (<kbd class="kbd">?</kbd>).
           </p>
 
-          <div id="triage-list"></div>
-          <p id="triage-empty" class="empty">Nothing awaiting review.</p>
+          <p id="triage-last" class="msg" role="status" hidden></p>
+          <div id="triage-list" class="triage-list" role="group" tabindex="0"
+               aria-label="Suggestions awaiting review. J and K move, A accepts, R rejects, D defers."></div>
+          <!-- Every empty line that a read answers ships hidden: shown by
+               default, "Nothing awaiting review." and "Every source is
+               healthy." were on screen while the read was still in flight
+               (ux17-failure:loading-shows-empty-claims, 2026-09-23). The
+               loader says "Loading…" here first (listPending in app.js),
+               and the words below appear only after an answer. -->
+          <p id="triage-empty" class="empty" hidden>Nothing awaiting review.</p>
 
           <!-- DUAL CONTROL. Until 2026-08-10 approvals had no analyst
                surface at all: the notification centre's "Open approvals"
@@ -957,13 +1297,17 @@
             <span id="apr-counts" class="muted small"></span>
           </div>
           <div id="apr-list"></div>
-          <p id="apr-empty" class="empty">No approval requests in this case.</p>
+          <p id="apr-empty" class="empty" hidden>No approval requests in this case.</p>
         </section>
 
-        <!-- ANALYSIS (Phase 3). Every number here is computed against the
-             SAME projection the sociogram is showing, and the parameters are
-             restated on the panel because a metric without its projection is
-             not reproducible (docs/03). -->
+        <!-- ANALYSIS. Every number here was computed against the projection
+             the sociogram was showing at the time of the run, and the
+             parameters are restated on the panel because a metric without
+             its projection is not reproducible (docs/03). A projection change
+             clears the results; a change to the graph under the same
+             projection is checked against the server and marked stale when
+             it moved (ux10-analytics:analysis-survives-graph-changes,
+             2026-09-23). -->
         <section id="pane-analytics" class="pane" role="tabpanel"
                  aria-labelledby="tab-analytics" tabindex="-1" hidden>
           <div class="pane-head">
@@ -980,11 +1324,11 @@
             <label class="field inline">
               <span class="label">Removal set</span>
               <select id="an-kpp-n" class="select">
-                <option value="1">1 actor</option>
-                <option value="2">2 actors</option>
-                <option value="3" selected>3 actors</option>
-                <option value="4">4 actors</option>
-                <option value="5">5 actors</option>
+                <option value="1">1 entity</option>
+                <option value="2">2 entities</option>
+                <option value="3" selected>3 entities</option>
+                <option value="4">4 entities</option>
+                <option value="5">5 entities</option>
               </select>
             </label>
             <span id="an-status" class="muted small"></span>
@@ -1003,25 +1347,42 @@
                  low-degree/high-betweenness pattern, not just print it. -->
             <div id="an-leads"></div>
 
-            <h3 class="h3">Actors by brokerage</h3>
+            <!-- "Actor" was this pane's word for what every other pane
+                 calls an entity (ux19-copy one-concept-many-names,
+                 2026-09-23). -->
+            <h3 class="h3">Entities by brokerage</h3>
             <p class="muted small">
               Rank and percentile sit beside every value: a betweenness of
               0.0341 means nothing on its own, "3rd of 214" does. Constraint
-              is ranked ascending: rank 1 is the LEAST constrained
-              actor, the one spanning a structural hole.
+              runs the same way as the rest: rank 1 and the highest
+              percentile are the LEAST constrained entity, the one spanning a
+              structural hole. Select a column heading to sort by it, and a
+              name to show that entity on the graph.
             </p>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Cluster</span>
+                <select id="an-community" class="select"></select>
+              </label>
+              <button id="an-community-show" type="button" class="btn ghost small"
+                      disabled>Show on graph</button>
+            </div>
             <div class="scroll-x">
-              <table class="table">
-                <caption class="sr-only">Structural metrics per actor</caption>
+              <table id="an-table" class="table">
+                <caption class="sr-only">Structural metrics per entity</caption>
                 <thead>
+                  <!-- Sortable since 2026-09-23 (ux10-analytics:
+                       communities-anonymous-table-unsortable): each heading
+                       is a button, and aria-sort says which one orders the
+                       rows. -->
                   <tr>
-                    <th scope="col">Actor</th>
-                    <th scope="col">Deg</th>
-                    <th scope="col">Vouches in/out</th>
-                    <th scope="col">Betweenness</th>
-                    <th scope="col">Constraint</th>
-                    <th scope="col">Eff. size</th>
-                    <th scope="col">Community</th>
+                    <th scope="col" data-sort="label" aria-sort="none"><button type="button" class="th-sort">Entity</button></th>
+                    <th scope="col" data-sort="degree" aria-sort="none"><button type="button" class="th-sort">Deg</button></th>
+                    <th scope="col" data-sort="vouches" aria-sort="none"><button type="button" class="th-sort">Vouches in/out</button></th>
+                    <th scope="col" data-sort="betweenness" aria-sort="descending"><button type="button" class="th-sort">Betweenness</button></th>
+                    <th scope="col" data-sort="constraint" aria-sort="none"><button type="button" class="th-sort">Constraint (low = broker)</button></th>
+                    <th scope="col" data-sort="effective_size" aria-sort="none"><button type="button" class="th-sort">Eff. size</button></th>
+                    <th scope="col" data-sort="community" aria-sort="none"><button type="button" class="th-sort">Cluster</button></th>
                     <th scope="col">Trend</th>
                   </tr>
                 </thead>
@@ -1029,18 +1390,21 @@
               </table>
             </div>
 
-            <h3 class="h3">Trend: one actor across past runs</h3>
+            <h3 id="an-hist-head" class="h3" tabindex="-1">Trend: one entity across past runs</h3>
             <p class="help">
               A rising betweenness is a claim about a PERSON, so it is worth
               being exact about what this shows: every completed run in this
               case that <strong>recorded</strong> the metric, at your
-              visibility, oldest on the left. Runs use different parameters,
-              and Newman-style weights are not comparable across them. The
-              preset is printed against each point for that reason.
-              <strong>A run in which this actor had no defined value does
-              not appear here at all</strong> (an isolate has no constraint
-              to measure), and this endpoint cannot tell that apart from no
-              run having happened, so the line spans such a period
+              visibility, placed at the moment it measured (its as-of time,
+              or when it ran if it measured the graph as it stood), oldest on
+              the left. Only runs under the projection shown above are joined
+              into a line: a run at another confidence floor, with inferred
+              ties in or out, or with other decay measured something else, so
+              those appear only when you include other projections, as
+              separate rings. <strong>A run in which this entity had no
+              defined value does not appear here at all</strong> (an isolate
+              has no constraint to measure), and that cannot be told apart
+              from no run having happened, so the line spans such a period
               rather than breaking, and a long straight segment is not
               evidence that nothing changed.
             </p>
@@ -1057,6 +1421,10 @@
                   <option value="hierarchy">Hierarchy</option>
                 </select>
               </label>
+              <label class="check">
+                <input id="an-hist-all" type="checkbox">
+                <span>Include other projections</span>
+              </label>
               <span id="an-hist-who" class="muted small"></span>
             </div>
             <!-- aria-hidden like #tl-density: the canvas is a picture of the
@@ -1064,11 +1432,11 @@
             <canvas id="an-hist-chart" class="hist-chart" aria-hidden="true">
             </canvas>
             <p id="an-hist-empty" class="empty">
-              Pick an actor in the table above to chart it.</p>
+              Pick an entity in the table above to chart it.</p>
             <div class="scroll-x">
               <table class="table">
                 <caption class="sr-only">
-                  Metric history for the selected actor: every recorded run,
+                  Metric history for the selected entity: every recorded run,
                   newest first, with the world time it measured (as of), its
                   value, rank and parameters.</caption>
                 <thead>
@@ -1078,7 +1446,7 @@
                     <th scope="col">Value</th>
                     <th scope="col">Rank</th>
                     <th scope="col">Percentile</th>
-                    <th scope="col">Preset</th>
+                    <th scope="col">Projection</th>
                   </tr>
                 </thead>
                 <tbody id="an-hist-body"></tbody>
@@ -1120,16 +1488,79 @@
               <span class="label">Classification</span>
               <select id="ev-class" class="select"></select>
             </label>
+            <!-- Provenance (ux07-evidence:upload-drops-provenance,
+                 2026-09-23): when, where and under what authority the
+                 material was obtained, kept apart from when the server
+                 received it. The API took a description and a source and
+                 the form never sent them. -->
+            <label class="field">
+              <span class="label">Acquired at (UTC)</span>
+              <input id="ev-acquired" type="datetime-local" step="1"
+                     aria-describedby="ev-acquired-help">
+            </label>
+            <label class="field grow">
+              <span class="label">Source (URL or location)</span>
+              <input id="ev-source" spellcheck="false" maxlength="2000"
+                     placeholder="where it came from">
+            </label>
+            <label id="ev-authority-field" class="field" hidden>
+              <span class="label">Authority reference</span>
+              <input id="ev-authority" spellcheck="false" maxlength="200"
+                     placeholder="warrant or production order">
+            </label>
+            <label class="field ev-full">
+              <span class="label">Description</span>
+              <textarea id="ev-desc" rows="2" maxlength="4000"
+                        placeholder="what it is and what is in it"></textarea>
+            </label>
+            <p id="ev-acquired-help" class="help ev-full">When the material was
+              obtained, in UTC. Leave it blank only for material obtained just
+              now: a blank field records the moment the server receives it.
+              Legal process needs the authority reference it was obtained
+              under.</p>
             <button type="submit" class="btn primary">Upload exhibit</button>
             <p id="ev-error" class="form-error" role="alert" hidden></p>
             <p id="ev-result" class="form-ok" role="status" hidden></p>
           </form>
           <p id="ev-cap" class="help" hidden></p>
-          <p class="help">Uploads are write-once. The digest below is computed by
-            the server on receipt and is what a later verification is checked
-            against.</p>
+          <p class="help">Uploads are write-once. The digest on each exhibit is
+            computed by the server on receipt and is what a later verification
+            is checked against. Every verification and export is written to
+            the exhibit's custody record in your name.</p>
+          <!-- The register's own controls (ux07-evidence:evidence-list-
+               silently-capped and no-forward-trace-from-exhibit): a count
+               that says how many there are, a filter, and the exhibits
+               nothing rests on. -->
+          <form id="ev-find" class="row ev-find" role="search" novalidate>
+            <label class="field grow">
+              <span class="label">Find an exhibit</span>
+              <input id="ev-q" type="search" maxlength="200" spellcheck="false"
+                     placeholder="a word of the title or description">
+            </label>
+            <label class="check">
+              <input id="ev-unbacked" type="checkbox">
+              <span>Only exhibits nothing rests on</span>
+            </label>
+            <button type="submit" class="btn small">Find</button>
+          </form>
+          <p id="ev-count" class="help" role="status" hidden></p>
+          <!-- Locks set before they followed the case's retention date, and
+               the one control that lengthens them (x-lock-extension,
+               2026-09-24). Drawn by renderEvidence from the register. -->
+          <div id="ev-locks" class="row ev-locks" hidden>
+            <p id="ev-locks-text" class="help"></p>
+            <button id="ev-locks-go" type="button" class="btn small">Lengthen
+              their locks…</button>
+          </div>
+          <p id="ev-locks-msg" class="msg" role="status" hidden></p>
           <div id="ev-list" class="ev-list"></div>
           <p id="ev-empty" class="empty" hidden>No exhibits held for this case.</p>
+          <div id="ev-pager" class="row ev-pager" hidden>
+            <button id="ev-prev" type="button" class="btn small">Newer</button>
+            <button id="ev-next" type="button" class="btn small">Older</button>
+            <button id="ev-all" type="button" class="btn small ghost" hidden>
+              Show every exhibit</button>
+          </div>
         </section>
 
         <!-- SEARCH -->
@@ -1147,9 +1578,13 @@
             or more characters finds entity names, exhibit titles and the
             selectors attributed to an entity (wallets, Jabber and Tox ids,
             emails, handles). A value pasted with its type in front, as in
-            ICQ: 123456789, is searched as that type. Attributes and exhibit
-            text match on word starts.</p>
+            ICQ: 123456789, is searched as that type. Attribute values,
+            exhibit text and collected documents match on word starts.
+            Assertions are the live claims, found by their rationale, the
+            exhibit they cite, or a grading such as C3.</p>
           <p id="search-scope" class="search-scope" role="status" hidden></p>
+          <!-- Four columns since 2026-09-23 (ux09-search
+               documents-unsearchable and assertions-unsearchable). -->
           <div class="search-cols">
             <div>
               <h3 class="h-sm">Entities</h3>
@@ -1159,6 +1594,26 @@
               <h3 class="h-sm">Evidence</h3>
               <div id="search-evidence" class="hit-list"></div>
             </div>
+            <div>
+              <h3 class="h-sm">Collected documents</h3>
+              <div id="search-documents" class="hit-list"></div>
+            </div>
+            <div>
+              <h3 class="h-sm">Assertions</h3>
+              <div id="search-assertions" class="hit-list"></div>
+            </div>
+          </div>
+          <!-- Deception records, filled by searchDeceptionRecords (app.js,
+               Deception section): the hosts, addresses and URLs on this
+               case's web captures, messages and calls, which no search
+               reached (ux14-deception:ecrime-no-cross-channel-pivot,
+               2026-09-23). A block of its own under the columns. -->
+          <div class="search-deception">
+            <h3 class="h-sm">Deception records</h3>
+            <p class="help">Web captures, messages and calls whose hosts,
+              addresses or URLs contain the query. A defanged value, as in
+              hxxps://portal[.]example, finds the live one.</p>
+            <div id="search-deception" class="hit-list"></div>
           </div>
         </section>
 
@@ -1310,7 +1765,7 @@
             <span id="comms-unverified-count" class="muted small"></span>
           </div>
           <div id="comms-unverified"></div>
-          <p id="comms-unverified-empty" class="empty">
+          <p id="comms-unverified-empty" class="empty" hidden>
             Nothing awaiting verification.</p>
 
           <!-- Co-participation. An INFERRED tie, and invariant 4 says an
@@ -1371,14 +1826,23 @@
                nothing read them, so a watch that fired four hundred times
                showed an analyst the number 400 and nothing to open. -->
           <div id="feeds-collected" class="subpane" hidden>
-            <h3 class="h3">Watch hits: what fired on this case</h3>
+            <!-- Named for what fills it (ux12-feeds:watched-hit-unnamed-
+                 and-contradicted, 2026-09-23). "What fired on this case"
+                 sat one tab away from an Ingest queue whose rows said
+                 "1 watched selector hit", and said "no watch has matched
+                 anything" about the same case: two lists, one word. This
+                 one is the collector's polls; the queue is partner feeds. -->
+            <h3 class="h3">Watch hits: what this case's polls matched</h3>
             <p class="help">
               Unacknowledged first, then by score: a hit nobody has looked
               at outranks a higher-scoring one somebody has already dealt
               with. <strong>Suppressed hits are shown</strong>, with their
               reason. A watch drowning in one recurring thread and a
               watch that has gone quiet look identical if you hide them,
-              and they need opposite responses.
+              and they need opposite responses: suppress the first,
+              unsuppress what alert hygiene hid wrongly. Partner feed
+              records that contain a watched selector are not listed here:
+              they are scored to the top of the Ingest queue.
             </p>
             <div class="pane-head">
               <label class="field inline check">
@@ -1424,10 +1888,27 @@
           <!-- INGEST QUEUE -->
           <div id="feeds-queue" class="subpane">
             <div class="pane-head">
+              <!-- Options come from counts over the whole queue, not from
+                   the page the filter just narrowed (ux12-feeds:category-
+                   filter-collapses-and-sticks, 2026-09-23). -->
               <label class="field inline">
                 <span class="label">Category</span>
                 <select id="ing-category" class="select">
                   <option value="">All</option>
+                </select>
+              </label>
+              <!-- The queue's triage states (ux12-feeds:queue-is-a-dead-
+                   end, 2026-09-23). "Needs triage" is the default, so a
+                   record somebody has dealt with leaves the top of the
+                   queue instead of being re-read by the next analyst. -->
+              <label class="field inline">
+                <span class="label">Show</span>
+                <select id="ing-triage" class="select">
+                  <option value="NEW" selected>Needs triage</option>
+                  <option value="">Everything</option>
+                  <option value="TRIAGED">Triaged</option>
+                  <option value="LINKED">Linked</option>
+                  <option value="DISCARDED">Discarded</option>
                 </select>
               </label>
               <label class="field inline check">
@@ -1435,16 +1916,26 @@
                 <span class="label">Show folded duplicates</span>
               </label>
               <button id="ing-refresh" type="button" class="btn">Refresh</button>
+              <button id="ing-rescore-all" type="button" class="btn ghost"
+                      title="Score every record in this case's queue again. Do this after a watch's selectors change: a record scores only against the selectors that existed when it was scored.">Rescore all</button>
               <span id="ing-counts" class="muted small"></span>
             </div>
             <p class="help">
               Near-duplicates are <strong>folded, not dropped</strong>:
-              the count on a row says how many other feeds sent the same
-              thing. Payloads are never listed here: a record can hold a whole
-              stealer log, and this is a queue.
+              a row says how many copies were folded into it and which
+              feeds sent them. A copy from the row's own feed is a resend,
+              not a second source, so it is not corroboration. Each row
+              shows every term of its score; a selector one of this case's
+              watches names is worth the most. Payloads are never listed
+              here: a record can hold a whole stealer log, and this is a
+              queue. Open shows a record's metadata and the shape of its
+              payload, never a value.
             </p>
+            <p id="ing-flash" class="form-ok" role="status" hidden></p>
             <div id="ing-list"></div>
-            <p id="ing-empty" class="empty">Nothing in the queue for this case.</p>
+            <p id="ing-empty" class="empty" hidden>Nothing in the queue for this case.</p>
+            <button id="ing-clear-filter" type="button" class="btn ghost small"
+                    hidden>Clear the filters</button>
 
             <details id="ing-quarantine-box" class="card" hidden>
               <summary>Quarantine: material attached to no case</summary>
@@ -1452,20 +1943,24 @@
                 A record with no case cannot be reached by a case
                 assignment, so nobody sees it through the ordinary gate. It
                 still expires: until it is attached to a case it runs on the
-                <em>category's</em> retention clock, not a case's.
+                <em>category's</em> retention clock, not a case's. Attach to
+                case puts one under a case's authority; its expiry stays
+                the category's.
               </p>
               <div id="ing-quarantine-list"></div>
-              <p id="ing-quarantine-empty" class="empty">Nothing unattached.</p>
+              <p id="ing-quarantine-empty" class="empty" hidden>Nothing unattached.</p>
             </details>
           </div>
 
           <!-- DEAD LETTERS -->
           <div id="feeds-dead" class="subpane" hidden>
+            <!-- Was "Invariant 12: nothing is silently dropped..." (ux19-copy
+                 developer-speak-in-copy, 2026-09-23). -->
             <p class="help">
-              Invariant 12: nothing is silently dropped. A rising rate on one
-              key is usually a partner changing their schema without telling
-              you, and it is invisible unless somebody looks. That is what
-              this is for.
+              Every record that could not be taken in is kept here, never
+              dropped. A rising count on one key usually means a partner
+              changed their format without telling you, and nobody knows
+              until somebody looks here.
             </p>
             <!-- Said per path (README screenshot review, 2026-09-23). It
                  read "keys, types and lengths, never values" above rows
@@ -1481,12 +1976,33 @@
               delimiter and replacing every value, address and token. Rows
               recorded before the redactor existed are withheld and marked.
             </p>
+            <!-- Scoped, named and repairable (ux12-feeds:dead-letters-no-
+                 feed-no-scope, 2026-09-23). The list was the deployment's
+                 in every case, under a count that read as this case's
+                 failures; no row said which feed failed, which is the one
+                 thing the tab exists to show; a lapsed step-up hid the
+                 unattached rows without a word; and nothing could be
+                 repaired. It opens on this case's feeds, groups by feed
+                 and error, filters by feed, says what was withheld, and
+                 offers Repair and replay. -->
             <div class="pane-head">
+              <label class="field inline check">
+                <input id="dl-all" type="checkbox">
+                <span class="label">All my feeds, not only this case's</span>
+              </label>
+              <label class="field inline">
+                <span class="label">Feed</span>
+                <select id="dl-feed" class="select">
+                  <option value="">Every feed</option>
+                </select>
+              </label>
               <button id="dl-refresh" type="button" class="btn">Refresh</button>
               <span id="dl-counts" class="muted small"></span>
             </div>
+            <div id="dl-withheld" class="help warn" role="status" hidden></div>
+            <div id="dl-groups" class="dl-groups"></div>
             <div id="dl-list"></div>
-            <p id="dl-empty" class="empty">Nothing has failed to parse.</p>
+            <p id="dl-empty" class="empty" hidden>Nothing has failed to parse.</p>
           </div>
 
           <!-- COLLECTION SOURCES -->
@@ -1506,7 +2022,7 @@
               failures are the signal.
             </p>
             <div id="src-unhealthy"></div>
-            <p id="src-unhealthy-empty" class="empty">Every source is healthy.</p>
+            <p id="src-unhealthy-empty" class="empty" hidden>Every source is healthy.</p>
 
             <h2 class="h-sm">Never polled</h2>
             <p class="help">
@@ -1515,11 +2031,19 @@
               have been aspirational.
             </p>
             <div id="src-never"></div>
-            <p id="src-never-empty" class="empty">Every source has been polled.</p>
+            <p id="src-never-empty" class="empty" hidden>Every source has been polled.</p>
 
             <h2 class="h-sm">Due to poll</h2>
+            <!-- Why Poll now is off, before anybody presses it
+                 (ux12-feeds:poll-now-one-click-and-blocked, 2026-09-23). -->
+            <div id="src-run-state" class="help warn" hidden>
+              <p id="src-run-reason"></p>
+              <button id="src-run-readiness" type="button"
+                      class="btn ghost small" hidden>Open readiness in
+                Admin</button>
+            </div>
             <div id="src-due"></div>
-            <p id="src-due-empty" class="empty">Nothing is due.</p>
+            <p id="src-due-empty" class="empty" hidden>Nothing is due.</p>
 
             <h2 class="h-sm">Personas</h2>
             <p class="help">
@@ -1527,19 +2051,22 @@
               flagged is how you burn the next one too.
             </p>
             <div id="src-personas"></div>
-            <p id="src-personas-empty" class="empty">No personas.</p>
+            <p id="src-personas-empty" class="empty" hidden>No personas.</p>
 
             <h2 class="h-sm">Recent runs</h2>
             <div id="src-runs"></div>
-            <p id="src-runs-empty" class="empty">No runs recorded.</p>
+            <p id="src-runs-empty" class="empty" hidden>No runs recorded.</p>
           </div>
 
           <!-- INGEST KEYS -->
           <div id="feeds-keys" class="subpane" hidden>
+            <!-- Was "(invariant 11) ... there is a CHECK constraint saying
+                 so" (ux19-copy developer-speak-in-copy, 2026-09-23). -->
             <p class="help">
-              Keys are <strong>write-only</strong> (invariant 11). A leaked
-              key means junk data in a quarantine bucket, never the case file:
-              there is a CHECK constraint saying so.
+              Keys are <strong>write-only</strong>: a key can submit records
+              and read nothing back. A leaked key means junk data in a
+              quarantine bucket, never the case file, and the database
+              itself enforces that.
             </p>
             <div class="pane-head">
               <label class="field inline check">
@@ -1549,8 +2076,70 @@
               <button id="key-refresh" type="button" class="btn">Refresh</button>
               <span id="key-counts" class="muted small"></span>
             </div>
+            <!-- Issue and Revoke (ux12-feeds:keys-tab-read-only,
+                 2026-09-23). The tab warned that a key might be "somebody
+                 else's" and offered no way to revoke it, or to issue one
+                 for a new partner, short of a shell. Both need a sign-in
+                 from the last 15 minutes; the secret shows once. -->
+            <details id="key-issue-box" class="card" hidden>
+              <summary>Issue a key for a partner feed</summary>
+              <form id="key-issue-form" class="row-form" novalidate>
+                <label class="field grow">
+                  <span class="label">Feed name</span>
+                  <input id="key-name" type="text" minlength="3" required
+                         autocomplete="off" spellcheck="false">
+                </label>
+                <label class="field">
+                  <span class="label">Declared category</span>
+                  <select id="key-category" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Compartment</span>
+                  <select id="key-compartment" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Classification ceiling</span>
+                  <select id="key-ceiling" class="select">
+                    <option>CLEAR</option>
+                    <option>GREEN</option>
+                    <option selected>AMBER</option>
+                    <option>AMBER_STRICT</option>
+                    <option>RED</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Environment</span>
+                  <select id="key-env" class="select">
+                    <option value="live" selected>live</option>
+                    <option value="test">test</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Expires after (days)</span>
+                  <input id="key-ttl" type="number" min="1" max="365" value="90"
+                         required>
+                </label>
+                <label class="field grow">
+                  <span class="label">Partner addresses (optional)</span>
+                  <input id="key-allow" type="text" autocomplete="off"
+                         spellcheck="false"
+                         placeholder="203.0.113.0/24, 198.51.100.7">
+                </label>
+                <button id="key-issue-btn" type="submit" class="btn primary">
+                  Issue key</button>
+              </form>
+              <p class="help">
+                A key is write-only: it can submit batches and read nothing.
+                Expiry is mandatory, at most a year. A stealer log, credential
+                dump or database leak feed must name a compartment you hold,
+                or every record it sends is refused at parse. Leave the
+                addresses empty to accept the key from anywhere.
+              </p>
+              <p id="key-issue-error" class="form-error" role="alert" hidden></p>
+            </details>
+            <div id="key-secret-out"></div>
             <div id="key-list"></div>
-            <p id="key-empty" class="empty">No keys issued.</p>
+            <p id="key-empty" class="empty" hidden>No keys issued.</p>
           </div>
         </section>
 
@@ -1589,7 +2178,8 @@
               <button id="ach-refresh" type="button" class="btn">Refresh</button>
               <label class="field inline check">
                 <input id="ach-rejected" type="checkbox">
-                <span class="label">Include rejected</span>
+                <span class="label"
+                      title="Rejected and superseded hypotheses, listed after the ranking and never ranked">Include ruled out</span>
               </label>
               <span id="ach-counts" class="muted small"></span>
             </div>
@@ -1598,22 +2188,30 @@
             <div id="ach-warnings"></div>
 
             <div id="ach-ranking"></div>
-            <p id="ach-empty" class="empty">
+            <p id="ach-empty" class="empty" hidden>
               No hypotheses yet. ACH is worth the effort when you have at
               least three, including one you expect to lose.
             </p>
 
             <h2 class="h-sm">The matrix</h2>
+            <!-- Numbered by the order the hypotheses were written, not by
+                 rank (ux11-ach:h-numbers-unstable-and-unlabelled,
+                 2026-09-23): the help said "in the order ranked above",
+                 so a save that moved the ranking renamed every column. -->
             <p class="help">
               A cell is how one piece of evidence stands against one
-              hypothesis. The columns are numbered H1, H2 and so on in the
-              order ranked above. Evidence that says the same thing about
+              hypothesis. H1, H2 and so on number the hypotheses in the
+              order they were written, and a number stays with its
+              hypothesis whatever the ranking does. Each row names what its
+              evidence is about and what it claims, with the Admiralty
+              grade and the weight every cell in it counts at; the name
+              opens it in the graph. Evidence that says the same thing about
               <em>every</em> hypothesis is kept in the record and excluded
               from the ranking, because it discriminates nothing, and its
               row is dimmed. A row with a blank cell that agrees with itself
               so far is unfinished, not undiagnostic: its diagnosticity
               reads <em>unfinished</em> until it is scored against the
-              rest.
+              rest, and the blanks it still needs are outlined.
             </p>
             <div id="ach-matrix" class="scroll-x"></div>
 
@@ -1654,7 +2252,7 @@
                       disabled>Score it</button>
             </details>
 
-            <details class="card">
+            <details class="card" id="ach-add-card">
               <summary>Add a hypothesis</summary>
               <p class="help">
                 Write the one you think is wrong too. A set of hypotheses that
@@ -1847,7 +2445,7 @@
         <section id="pane-governance" class="pane" role="tabpanel"
                  aria-labelledby="tab-governance" tabindex="-1" hidden>
 
-          <div class="subtabs" role="tablist" aria-label="Lifecycle sections">
+          <div class="subtabs" role="tablist" aria-label="Records sections">
             <button type="button" class="subtab" role="tab"
                     aria-selected="true" data-subtab="retention"
                     aria-controls="gov-retention">Retention</button>
@@ -1917,12 +2515,15 @@
           <!-- RETENTION -->
           <div id="gov-retention" class="subpane">
             <h2 class="h-sm">Rules <span class="chip">deployment-wide</span></h2>
+            <!-- Instruction, not design rationale (ux19-copy
+                 developer-speak-in-copy, 2026-09-23): this said "A rule
+                 nobody has confirmed is a number somebody typed". -->
             <p class="help">
               These periods govern data about people who are not under
               investigation, in every case in the deployment and not only
-              this one. A rule nobody has confirmed is a number somebody
-              typed, and it becomes policy by default if it is never
-              surfaced.
+              this one. A rule marked unconfirmed still holds the period
+              this build shipped with: confirm it below with the period
+              your legal basis sets, or that period applies by default.
             </p>
             <div id="ret-rules"></div>
             <p id="ret-rules-notice" class="help warn" hidden></p>
@@ -1960,16 +2561,37 @@
             <p id="ret-confirm-msg" class="msg" hidden></p>
 
             <h2 class="h-sm">Due for destruction</h2>
+            <!-- Was "An analyst who cannot see when their case's material
+                 expires discovers a deadline by missing it." (ux19-copy
+                 developer-speak-in-copy, 2026-09-23). -->
             <p class="help">
-              An analyst who cannot see when their case's material expires
-              discovers a deadline by missing it.
+              This case's material that has reached, or is nearing, the end
+              of its retention period, soonest first. Check it here before
+              the deadline passes; a legal hold keeps anything it covers.
             </p>
+            <!-- Forward, and by name (ux15-report:due-list-no-forward-view-
+                 no-names, 2026-09-23). The list asked only for what had
+                 already expired, so an item first appeared here at the
+                 moment it became destroyable, and a row read "evidence, id
+                 3f2a91bc". The case's own clocks are stated first, the
+                 window looks ahead, and each row names its exhibit or its
+                 category. -->
+            <p id="ret-case-clocks" class="help" hidden></p>
             <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Show</span>
+                <select id="ret-window" class="select">
+                  <option value="0">Past their deadline now</option>
+                  <option value="30">Due within 30 days</option>
+                  <option value="90" selected>Due within 90 days</option>
+                  <option value="365">Due within a year</option>
+                </select>
+              </label>
               <button id="ret-refresh" type="button" class="btn">Refresh</button>
               <span id="ret-counts" class="muted small"></span>
             </div>
             <div id="ret-due"></div>
-            <p id="ret-due-empty" class="empty">Nothing is due.</p>
+            <p id="ret-due-empty" class="empty" hidden>Nothing is due.</p>
 
             <!-- Destruction takes two deliberate steps and a typed case code
                  (ux15 purge-one-click-destroy, ux17 purge-no-confirmation,
@@ -2035,7 +2657,7 @@
               <span id="tomb-counts" class="muted small"></span>
             </div>
             <div id="tomb-list"></div>
-            <p id="tomb-empty" class="empty">Nothing has been destroyed.</p>
+            <p id="tomb-empty" class="empty" hidden>Nothing has been destroyed.</p>
           </div>
 
           <!-- BREAK-GLASS. The form names a case, a level and a duration,
@@ -2098,7 +2720,7 @@
                 <span id="glass-counts" class="muted small"></span>
               </div>
               <div id="glass-queue"></div>
-              <p id="glass-empty" class="empty">Nothing awaiting review.</p>
+              <p id="glass-empty" class="empty" hidden>Nothing awaiting review.</p>
             </div>
           </div>
         </section>
@@ -2118,86 +2740,187 @@
              dangerous act it is. -->
         <!-- ADMIN. Analyst accounts, behind user.manage (SYS_ADMIN,
              step-up). Credentials render once and are never retrievable;
-             the pane says so wherever it shows one. -->
+             the pane says so wherever it shows one.
+
+             Three sections since 2026-09-23 (ux16-admin
+             blocking-banner-buried-under-account-list). The blocking banner
+             that "must not be scrolled past" sat under the create form and
+             one 250px card per account, so a unit of twenty analysts pushed
+             it about 5,000px down, and nothing outside the pane said that
+             work was being refused. Readiness is now its own section, the
+             pane opens on it while anything blocks, and the rail tab and
+             the Administration button carry the count. -->
         <section id="pane-admin" class="pane" role="tabpanel"
                  aria-labelledby="tab-admin" tabindex="-1" hidden>
-          <h2 class="h-sm">Create analyst</h2>
-          <form id="adm-create" class="card row-form" novalidate>
-            <label class="field grow">
-              <span class="label">Work email</span>
-              <input id="adm-email" type="email" required spellcheck="false"
-                     autocomplete="off">
-            </label>
-            <label class="field grow">
-              <span class="label">Display name</span>
-              <input id="adm-name" type="text" required autocomplete="off">
-            </label>
-            <label class="field">
-              <span class="label">Clearance</span>
-              <select id="adm-clearance" class="select">
-                <option>GREEN</option>
-                <option selected>AMBER</option>
-                <option>RED</option>
-                <option>CLEAR</option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="label">Roles</span>
-              <!-- Must match iam_admin.GRANTABLE_ROLES exactly; asserted
-                   by test_ui_invariants. The server widened its allowlist
-                   to ten roles while these two pickers still offered six,
-                   so COLLECTOR was grantable by curl and unreachable from
-                   the panel that exists to avoid curl. -->
-              <select id="adm-roles" class="select" multiple size="4">
-                <option selected>ANALYST</option>
-                <option>CASE_OWNER</option>
-                <option>COLLECTOR</option>
-                <option>CONTRIBUTOR</option>
-                <option>LIAISON</option>
-                <option>MALWARE_ANALYST</option>
-                <option>READ_ONLY</option>
-                <option>REVIEWER</option>
-                <option>SECURITY_OFFICER</option>
-                <option>SYS_ADMIN</option>
-              </select>
-            </label>
-            <button id="adm-create-btn" type="submit" class="btn primary">
-              Create</button>
-          </form>
-          <p id="adm-create-error" class="form-error" role="alert" hidden></p>
-          <div id="adm-creds"></div>
+          <div class="subtabs" role="tablist" aria-label="Administration sections">
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="true" data-subtab="readiness"
+                    aria-controls="adm-readiness">Readiness<span
+                    id="adm-sub-badge" class="subtab-badge" hidden></span></button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="accounts"
+                    aria-controls="adm-accounts">Accounts</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="compartments"
+                    aria-controls="adm-compartments">Compartments</button>
+          </div>
+          <!-- What an account action did, said to a screen reader
+               (`admSay`). Outside every section, so it is never hidden with
+               one: the card that shows the outcome is drawn anew after a
+               success, already written, and a status region that arrives
+               written is not announced (final review u19, 2026-09-24). -->
+          <p id="adm-say" class="sr-only" role="status" aria-live="polite"></p>
 
-          <h2 class="h-sm">Accounts</h2>
-          <div class="pane-head">
-            <button id="adm-refresh" type="button" class="btn">Refresh</button>
-            <span id="adm-counts" class="muted small"></span>
+          <!-- What the deployment can check about itself (docs/16). Every
+               line is a claim about THIS deployment with the evidence beside
+               it, so a "ready" that is only a green tick cannot be mistaken
+               for one that was checked. A probe against a service that is
+               down is a FAILED check with the error as its evidence, never a
+               500. The intro no longer says "the code-side half" (ux16-admin
+               readiness-help-overclaims, 2026-09-23): the backend removed
+               that phrase as an overclaim, and "nothing here can close L1"
+               sat above a first blocking check that is L1's declaration. -->
+          <div id="adm-readiness" class="subpane">
+            <p class="help">What this deployment can check about itself.
+              Passing does not make it lawful: the legal sign-offs (L1 to L5)
+              are decisions people make, and some checks below only record
+              that a declaration was made.</p>
+            <div class="row audit-actions">
+              <button id="btn-readiness" type="button" class="btn">Check readiness</button>
+              <span id="rdy-summary" class="help"></span>
+            </div>
+            <!-- The failing BLOCKING checks: `POST
+                 /collection/sources/{id}/run` refuses while any of them
+                 fails (readiness.BLOCKING_CHECKS), and each refuses more
+                 besides, which the headline now says. `role="alert"`, and no
+                 dismiss control anywhere: this is the one notice on this
+                 pane that is not allowed to be scrolled past. Populated by
+                 `renderBlockingBanner`; empty and hidden while all pass. -->
+            <div id="rdy-blocking" class="rdy-blocking" role="alert" hidden></div>
+            <div id="rdy-list" class="stack"></div>
           </div>
-          <div id="adm-list"></div>
-          <p id="adm-empty" class="empty">No accounts loaded.</p>
-        
-          <!-- The code-side half of the legal register (docs/16). Every line is
-               a claim about THIS deployment with the evidence beside it, so a
-               "ready" that is only a green tick cannot be mistaken for one that
-               was checked. A probe against a service that is down is a FAILED
-               check with the error as its evidence, never a 500. -->
-          <h2 class="h-sm">Readiness</h2>
-          <p class="help">What the deployment can prove about itself right now.
-            This is the code-side half only: the legal sign-off items (L1 to L5)
-            are not software and nothing here can close them.</p>
-          <div class="row audit-actions">
-            <button id="btn-readiness" type="button" class="btn">Check readiness</button>
-            <span id="rdy-summary" class="help"></span>
+
+          <div id="adm-accounts" class="subpane" hidden>
+            <div class="pane-head">
+              <button id="adm-refresh" type="button" class="btn">Refresh</button>
+              <!-- Counts only. Refusals used to be written here, at the top of
+                   a long list in the dimmest text on the pane; they now land
+                   on the card that was acted on (ux16-admin
+                   refusals-land-far-from-row, 2026-09-23). -->
+              <span id="adm-counts" class="muted small"></span>
+            </div>
+            <details id="adm-create-box" class="card adm-create">
+              <summary class="adm-create-sum">Create analyst</summary>
+              <form id="adm-create" class="stack" novalidate>
+                <div class="row-form">
+                  <label class="field grow">
+                    <span class="label">Work email</span>
+                    <input id="adm-email" type="email" required spellcheck="false"
+                           autocomplete="off">
+                  </label>
+                  <label class="field grow">
+                    <span class="label">Display name</span>
+                    <input id="adm-name" type="text" required autocomplete="off">
+                  </label>
+                  <label class="field">
+                    <span class="label">Clearance</span>
+                    <select id="adm-clearance" class="select">
+                      <option>GREEN</option>
+                      <option selected>AMBER</option>
+                      <option>RED</option>
+                      <option>CLEAR</option>
+                    </select>
+                  </label>
+                </div>
+                <!-- Checkboxes, not the 4-row native listbox they replace
+                     (ux16-admin create-roles-multiselect, 2026-09-23): a plain
+                     click on CASE_OWNER silently deselected the pre-chosen
+                     ANALYST, nothing said Ctrl-click, and two of the ten roles
+                     were below the fold of an 86px box. Must match
+                     iam_admin.GRANTABLE_ROLES exactly; asserted by
+                     test_ui_invariants. The name and one-line description of
+                     each come from GET /admin/roles. -->
+                <fieldset id="adm-roles" class="adm-roles">
+                  <legend class="label">Roles</legend>
+                  <label class="check adm-role"><input type="checkbox" value="ANALYST" checked><span class="adm-role-name">ANALYST</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="CASE_OWNER"><span class="adm-role-name">CASE_OWNER</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="COLLECTOR"><span class="adm-role-name">COLLECTOR</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="CONTRIBUTOR"><span class="adm-role-name">CONTRIBUTOR</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="LIAISON"><span class="adm-role-name">LIAISON</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="MALWARE_ANALYST"><span class="adm-role-name">MALWARE_ANALYST</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="READ_ONLY"><span class="adm-role-name">READ_ONLY</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="REVIEWER"><span class="adm-role-name">REVIEWER</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="SECURITY_OFFICER"><span class="adm-role-name">SECURITY_OFFICER</span><span class="help adm-role-desc"></span></label>
+                  <label class="check adm-role"><input type="checkbox" value="SYS_ADMIN"><span class="adm-role-name">SYS_ADMIN</span><span class="help adm-role-desc"></span></label>
+                </fieldset>
+                <!-- Read-ins at creation (ux16-admin
+                     no-compartment-readins-in-ui, 2026-09-23). Filled from
+                     GET /compartments; hidden while none is registered. -->
+                <fieldset id="adm-create-comps" class="adm-comps" hidden>
+                  <legend class="label">Read into compartments (optional)</legend>
+                  <div id="adm-create-comp-list" class="adm-comp-list"></div>
+                </fieldset>
+                <div class="setup-actions">
+                  <p id="adm-create-summary" class="help" aria-live="polite"></p>
+                  <button id="adm-create-btn" type="submit" class="btn primary">
+                    Create</button>
+                </div>
+                <p id="adm-create-error" class="form-error" role="alert" hidden></p>
+              </form>
+            </details>
+            <!-- One-time credentials. `#adm-creds` is moved INTO the card of
+                 the account it belongs to, and back here only while no card
+                 claims it (ux16-admin one-time-creds-card-unanchored,
+                 2026-09-23): it rendered here, unnamed, thousands of pixels
+                 above the card whose Re-enrol was pressed. -->
+            <div id="adm-creds-home"><div id="adm-creds"></div></div>
+            <div id="adm-list"></div>
+            <p id="adm-empty" class="empty" hidden>No accounts loaded.</p>
           </div>
-          <!-- Four of the thirteen checks BLOCK: `POST
-               /collection/sources/{id}/run` refuses while any of them fails
-               (readiness.BLOCKING_CHECKS). They get a banner above the list
-               rather than a row inside it, because the failure that mattered
-               was a red row on a pane nobody had to open. `role="alert"`, and
-               no dismiss control anywhere: this is the one notice on this
-               pane that is not allowed to be scrolled past. Populated by
-               `renderBlockingBanner`; empty and hidden while all four pass. -->
-          <div id="rdy-blocking" class="rdy-blocking" role="alert" hidden></div>
-          <div id="rdy-list" class="stack"></div>
+
+          <!-- The compartment registry. Read-ins could be neither seen nor
+               set from this pane, so granting access to a compartmented case
+               meant curl, and diagnosing a refusal was impossible (ux16-admin
+               no-compartment-readins-in-ui, 2026-09-23). A user's read-ins
+               are set on their card under Accounts. -->
+          <div id="adm-compartments" class="subpane adm-section" hidden>
+            <p class="help">A compartment is a need-to-know lock on a case:
+              only accounts read into every compartment a case carries can
+              open it, whatever their clearance. The key is what the lock
+              compares, exactly, so it is upper case with no spaces; the label
+              is what people read.</p>
+            <form id="adm-comp-form" class="card row-form" novalidate>
+              <label class="field">
+                <span class="label">Key</span>
+                <input id="adm-comp-key" type="text" class="mono" required
+                       maxlength="32" spellcheck="false" autocomplete="off"
+                       pattern="[A-Z0-9_\-]{2,32}" aria-describedby="adm-comp-key-help">
+              </label>
+              <label class="field grow">
+                <span class="label">Label</span>
+                <input id="adm-comp-label" type="text" required autocomplete="off">
+              </label>
+              <button id="adm-comp-btn" type="submit" class="btn">Register</button>
+            </form>
+            <p id="adm-comp-key-help" class="help">2 to 32 characters: A to Z,
+              0 to 9, underscore and hyphen. A registered key cannot be
+              renamed by registering it again.</p>
+            <p id="adm-comp-msg" class="msg" role="status" hidden></p>
+            <div id="adm-comp-list"></div>
+            <p id="adm-comp-empty" class="empty" hidden>No compartments are registered.</p>
+            <!-- Renaming and retiring a registered compartment
+                 (sec-compartment-retirement, 2026-09-23): the database
+                 refuses either while a row carries the key, so this was a
+                 hand-written UPDATE on every compartment column. Each card
+                 carries `compartmentLifecycleControls`; user.manage, step-up. -->
+            <h2 class="h-sm">Rename or retire</h2>
+            <div class="pane-head">
+              <button id="adm-cmp-life-refresh" type="button" class="btn">Refresh</button>
+              <p id="adm-cmp-life-msg" class="msg" role="status" hidden></p>
+            </div>
+            <div id="adm-cmp-life"></div>
+            <p id="adm-cmp-life-empty" class="empty" hidden>No compartments loaded.</p>
+          </div>
         </section>
 
         <section id="pane-samples" class="pane" role="tabpanel"
@@ -2251,9 +2974,14 @@
             <div id="smp-list" class="rows"></div>
             <p id="smp-empty" class="empty" hidden></p>
 
+            <!-- Opens UNDER the row it was opened from (app.js moves it
+                 there and parks it back here before the list is redrawn),
+                 and takes focus on its heading. Below the whole list it
+                 opened off-screen, so Open looked like it did nothing
+                 (ux13-lab:detail-opens-offscreen, 2026-09-23). -->
             <div id="smp-detail" class="card detail-card" hidden>
               <div class="pane-head">
-                <h2 class="h-sm" id="smp-detail-title">Sample</h2>
+                <h2 class="h-sm" id="smp-detail-title" tabindex="-1">Sample</h2>
                 <button id="smp-close" type="button" class="btn subtle">
                   Close</button>
               </div>
@@ -2271,6 +2999,12 @@
                 under its filename. Nothing reaches the analysis queue
                 before triage has run.
               </p>
+              <!-- The refusal, in the form, before anybody chooses a file
+                   (ux13-lab:submit-form-ignores-refusal-and-scope,
+                   2026-09-23). Submit stayed live while ingest was
+                   refused, so an analyst uploaded up to the cap for a
+                   guaranteed "Refused for legal reasons". -->
+              <p id="smp-refusal" class="msg warn" role="status" hidden></p>
               <label class="field">
                 <span class="label">File</span>
                 <input id="smp-file" type="file">
@@ -2294,6 +3028,15 @@
                   <option value="RED">RED</option>
                 </select>
               </label>
+              <!-- Extra restriction for the sample itself, beyond its
+                   case's, which is the normal direction for a sample that
+                   carries a source's fingerprints. Only compartments the
+                   analyst is read into are offered: the server refuses
+                   any other. -->
+              <fieldset class="field smp-compartments">
+                <legend class="label">Compartments</legend>
+                <div id="smp-compartments" class="check-list"></div>
+              </fieldset>
               <label class="field">
                 <span class="label">Where it came from</span>
                 <input id="smp-note" type="text" spellcheck="false"
@@ -2387,8 +3130,107 @@
               infrastructure from this machine and tell them the
               investigation exists.
             </p>
+            <!-- ux14-deception:no-deception-ingest-ui (2026-09-23): the
+                 console could list captures and never record one, so a
+                 victim's report of a phishing page needed API tooling.
+                 Recorded from what somebody else captured (the victim, an
+                 analyst's own upload, a passive feed); an ACTIVE fetch is
+                 the collection tooling's, with its egress profile, which
+                 the table requires. -->
+            <details id="dcp-cap-new" class="card ingest-form">
+              <summary>Record a capture</summary>
+              <div class="stack">
+                <label class="field">
+                  <span class="label">Requested URL</span>
+                  <input id="dcp-capf-url" type="text" spellcheck="false"
+                         autocomplete="off"
+                         placeholder="the link the victim was sent or clicked">
+                </label>
+                <label class="field">
+                  <span class="label">Where it came from</span>
+                  <select id="dcp-capf-method" class="select">
+                    <option value="VICTIM_SUPPLIED">Supplied by the victim</option>
+                    <option value="ANALYST_UPLOAD">An analyst's own capture, uploaded</option>
+                    <option value="PASSIVE_FEED">A passive feed</option>
+                  </select>
+                </label>
+                <div class="row">
+                  <label class="field">
+                    <span class="label">Final URL</span>
+                    <input id="dcp-capf-final" type="text" spellcheck="false"
+                           autocomplete="off" placeholder="where the chain ended">
+                  </label>
+                  <label class="field">
+                    <span class="label">HTTP status</span>
+                    <input id="dcp-capf-status" type="number" min="100" max="599">
+                  </label>
+                </div>
+                <label class="field">
+                  <span class="label">Page title</span>
+                  <input id="dcp-capf-title" type="text" spellcheck="false">
+                </label>
+                <label class="field">
+                  <span class="label">Redirect chain, one hop per line</span>
+                  <textarea id="dcp-capf-hops" rows="3" class="input mono" spellcheck="false"
+                            placeholder="URL, then any of: status, address, AS number. For example https://a.example/r 302 203.0.113.90 AS64496"></textarea>
+                </label>
+                <div class="row">
+                  <label class="field">
+                    <span class="label">Certificate subject</span>
+                    <input id="dcp-capf-tls-subject" type="text" spellcheck="false">
+                  </label>
+                  <label class="field">
+                    <span class="label">Certificate issuer</span>
+                    <input id="dcp-capf-tls-issuer" type="text" spellcheck="false">
+                  </label>
+                </div>
+                <div class="row">
+                  <label class="field">
+                    <span class="label">Certificate issued (UTC day)</span>
+                    <input id="dcp-capf-tls-from" type="date">
+                  </label>
+                  <label class="field">
+                    <span class="label">Certificate expires (UTC day)</span>
+                    <input id="dcp-capf-tls-to" type="date">
+                  </label>
+                </div>
+                <div class="row">
+                  <label class="field">
+                    <span class="label">TLS public-key hash (SHA-256, hex)</span>
+                    <input id="dcp-capf-spki" type="text" spellcheck="false" class="mono">
+                  </label>
+                  <label class="field">
+                    <span class="label">Favicon hash (MMH3)</span>
+                    <input id="dcp-capf-favicon" type="text" spellcheck="false" class="mono">
+                  </label>
+                </div>
+                <label class="field">
+                  <span class="label">Screenshot exhibit</span>
+                  <select id="dcp-capf-shot" class="select"></select>
+                </label>
+                <label class="field inline check">
+                  <input id="dcp-capf-submitted" type="checkbox">
+                  <span class="label">An analyst entered input into this page</span>
+                </label>
+                <label class="field" id="dcp-capf-authority-field" hidden>
+                  <span class="label">Written authority for that (legal item L5)</span>
+                  <input id="dcp-capf-authority" type="text" spellcheck="false"
+                         placeholder="the reference of the authority it was done under">
+                </label>
+                <label class="field">
+                  <span class="label">Note</span>
+                  <textarea id="dcp-capf-note" rows="2" class="input"></textarea>
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="dcp-capf-class" class="select"></select>
+                </label>
+                <p id="dcp-capf-msg" class="msg" hidden></p>
+                <button id="dcp-capf-save" type="button" class="btn primary">Record the capture</button>
+              </div>
+            </details>
             <div id="dcp-cap-list" class="rows"></div>
-            <p id="dcp-cap-empty" class="empty">No captures recorded.</p>
+            <p id="dcp-cap-empty" class="empty" hidden>No captures recorded. Record one above, or send one to the ingest API.</p>
 
             <div id="dcp-cap-detail" class="card detail-card" hidden>
               <div class="pane-head">
@@ -2421,8 +3263,42 @@
               its extracted plain text is shown, with every URL in it
               <strong>defanged</strong>.
             </p>
+            <!-- The .eml upload (ux14-deception:no-deception-ingest-ui,
+                 2026-09-23). The file is kept as a hostile exhibit, write
+                 once, and its headers are parsed from that exhibit. -->
+            <details id="dcp-eml-new" class="card ingest-form">
+              <summary>Upload a message (.eml)</summary>
+              <div class="stack">
+                <label class="field">
+                  <span class="label">The message, as a .eml file</span>
+                  <input id="dcp-emlf-file" type="file" accept=".eml,message/rfc822">
+                </label>
+                <label class="field">
+                  <span class="label">Direction</span>
+                  <select id="dcp-emlf-direction" class="select">
+                    <option value="INBOUND_TO_VICTIM">Received by the victim</option>
+                    <option value="OUTBOUND_FROM_VICTIM">Sent by the victim</option>
+                    <option value="INTERNAL">Inside the victim's organisation</option>
+                    <option value="UNKNOWN">Not known</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">The display name imitates (optional)</span>
+                  <input id="dcp-emlf-impersonates" type="text" spellcheck="false"
+                         placeholder="for example the victim's CFO">
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="dcp-emlf-class" class="select"></select>
+                </label>
+                <p class="help">Kept as an exhibit exactly as uploaded, and never
+                  rendered. What the headers prove is read from that exhibit.</p>
+                <p id="dcp-emlf-msg" class="msg" hidden></p>
+                <button id="dcp-emlf-save" type="button" class="btn primary">Upload the message</button>
+              </div>
+            </details>
             <div id="dcp-eml-list" class="rows"></div>
-            <p id="dcp-eml-empty" class="empty">No messages recorded.</p>
+            <p id="dcp-eml-empty" class="empty" hidden>No messages recorded. Upload one above, or send one to the ingest API.</p>
 
             <div id="dcp-eml-detail" class="card detail-card" hidden>
               <div class="pane-head">
@@ -2444,13 +3320,165 @@
             </div>
             <p class="help">
               Caller ID is the attack, not a detail. What the victim's
-              handset displayed is shown separately from what the carrier
-              vouched for, and the presented number never becomes a
-              selector: putting it on an actor would attribute the crime
+              handset displayed is shown separately from what the network
+              recorded, and the presented number never becomes a
+              selector: putting it on an entity would attribute the crime
               to whoever's number the attacker picked.
             </p>
+            <!-- Record a call (ux14-deception:no-deception-ingest-ui,
+                 2026-09-23). What the victim saw and what the network
+                 recorded are two separate groups here as on the row, so a
+                 presented number cannot be typed where a network field
+                 goes without the form saying which is which. -->
+            <details id="dcp-call-new" class="card ingest-form">
+              <summary>Record a call</summary>
+              <div class="stack">
+                <div class="row">
+                  <label class="field">
+                    <span class="label">Started (UTC day)</span>
+                    <input id="dcp-callf-day" type="date">
+                  </label>
+                  <label class="field">
+                    <span class="label">Started (UTC time)</span>
+                    <input id="dcp-callf-time" type="time" step="1">
+                  </label>
+                  <label class="field">
+                    <span class="label">Duration, seconds</span>
+                    <input id="dcp-callf-duration" type="number" min="0">
+                  </label>
+                </div>
+                <div class="row">
+                  <label class="field">
+                    <span class="label">Direction</span>
+                    <select id="dcp-callf-direction" class="select">
+                      <option value="INBOUND_TO_VICTIM">To the victim</option>
+                      <option value="OUTBOUND_FROM_VICTIM">From the victim</option>
+                      <option value="UNKNOWN">Not known</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="label">Where the record came from</span>
+                    <select id="dcp-callf-source" class="select">
+                      <option value="VICTIM_STATEMENT">The victim's statement</option>
+                      <option value="HANDSET_LOG">The victim's handset log</option>
+                      <option value="CARRIER_CDR">A carrier call record</option>
+                      <option value="PBX_LOG">A switchboard log</option>
+                      <option value="SIP_CAPTURE">A SIP capture</option>
+                      <option value="THIRD_PARTY_REPORT">A third party's report</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="label">Outcome</span>
+                    <select id="dcp-callf-disposition" class="select">
+                      <option value="">Not recorded</option>
+                      <option value="ANSWERED">Answered</option>
+                      <option value="NO_ANSWER">Not answered</option>
+                      <option value="BUSY">Busy</option>
+                      <option value="VOICEMAIL">Voicemail</option>
+                      <option value="REJECTED">Rejected</option>
+                      <option value="FAILED">Failed</option>
+                    </select>
+                  </label>
+                </div>
+                <fieldset class="field presented-block ingest-group">
+                  <legend class="label">What the victim saw (chosen by the caller)</legend>
+                  <div class="row">
+                    <label class="field">
+                      <span class="label">Number, as it was displayed</span>
+                      <input id="dcp-callf-shown" type="text" spellcheck="false">
+                    </label>
+                    <label class="field">
+                      <span class="label">The same number in E.164</span>
+                      <input id="dcp-callf-shown-e164" type="text" spellcheck="false"
+                             placeholder="+442079460018">
+                    </label>
+                    <label class="field">
+                      <span class="label">Name displayed</span>
+                      <input id="dcp-callf-shown-name" type="text" spellcheck="false">
+                    </label>
+                  </div>
+                </fieldset>
+                <fieldset class="field recorded-block ingest-group">
+                  <legend class="label">What the network recorded</legend>
+                  <div class="row">
+                    <label class="field">
+                      <span class="label">Originating trunk</span>
+                      <input id="dcp-callf-trunk" type="text" spellcheck="false">
+                    </label>
+                    <label class="field">
+                      <span class="label">P-Asserted-Identity</span>
+                      <input id="dcp-callf-pai" type="text" spellcheck="false">
+                    </label>
+                    <label class="field">
+                      <span class="label">Carrier</span>
+                      <input id="dcp-callf-carrier" type="text" spellcheck="false">
+                    </label>
+                  </div>
+                  <div class="row">
+                    <label class="field">
+                      <span class="label">STIR/SHAKEN attestation</span>
+                      <select id="dcp-callf-att" class="select">
+                        <option value="">None arrived</option>
+                        <option value="A">A: vouches the caller may use the number</option>
+                        <option value="B">B: knows the customer, not the number</option>
+                        <option value="C">C: a gateway, vouches for nothing</option>
+                      </select>
+                    </label>
+                    <label class="field inline check">
+                      <input id="dcp-callf-verified" type="checkbox">
+                      <span class="label">Its signature was checked and held</span>
+                    </label>
+                  </div>
+                  <div class="row">
+                    <label class="field">
+                      <span class="label">Number called (E.164)</span>
+                      <input id="dcp-callf-called" type="text" spellcheck="false">
+                    </label>
+                    <label class="field">
+                      <span class="label">Source address</span>
+                      <input id="dcp-callf-ip" type="text" spellcheck="false">
+                    </label>
+                    <label class="field">
+                      <span class="label">SIP Call-ID</span>
+                      <input id="dcp-callf-callid" type="text" spellcheck="false">
+                    </label>
+                  </div>
+                  <div class="row">
+                    <label class="field">
+                      <span class="label">SIP From URI</span>
+                      <input id="dcp-callf-from" type="text" spellcheck="false">
+                    </label>
+                    <label class="field">
+                      <span class="label">SIP To URI</span>
+                      <input id="dcp-callf-to" type="text" spellcheck="false">
+                    </label>
+                  </div>
+                </fieldset>
+                <div class="row">
+                  <label class="field">
+                    <span class="label">Recording exhibit</span>
+                    <select id="dcp-callf-recording" class="select"></select>
+                  </label>
+                  <label class="field" id="dcp-callf-basis-field" hidden>
+                    <span class="label">Lawful basis for the recording (legal item L4)</span>
+                    <input id="dcp-callf-basis" type="text" spellcheck="false"
+                           placeholder="the order or consent it was obtained under">
+                  </label>
+                </div>
+                <label class="field">
+                  <span class="label">Note</span>
+                  <textarea id="dcp-callf-note" rows="2" class="input"></textarea>
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="dcp-callf-class" class="select"></select>
+                </label>
+                <p id="dcp-callf-msg" class="msg" hidden></p>
+                <button id="dcp-callf-save" type="button" class="btn primary">Record the call</button>
+              </div>
+            </details>
             <div id="dcp-call-list" class="rows"></div>
-            <p id="dcp-call-empty" class="empty">No calls recorded.</p>
+            <p id="dcp-call-empty" class="empty" hidden>No calls recorded. Record one above, or send one to the ingest API.</p>
           </div>
         </section>
 
@@ -2465,10 +3493,25 @@
               <span class="label">Entity type</span>
               <select id="node-type" class="select" required></select>
             </label>
+            <!-- A Selector, Comms account or Crypto wallet entity's label IS
+                 a selector, so it says which kind, is normalised the way
+                 the selector index holds it, and is refused when it
+                 reduces to nothing (ux06-entry:selector-entities-bypass-
+                 normalisation, 2026-09-23). Shown for those three types. -->
+            <label class="field" id="node-sel-type-field" hidden>
+              <span class="label">Selector type</span>
+              <select id="node-sel-type" class="select"
+                      aria-describedby="node-check"></select>
+            </label>
             <label class="field">
               <span class="label">Label</span>
-              <input id="node-label" required spellcheck="false">
+              <input id="node-label" required spellcheck="false"
+                     aria-describedby="node-check">
             </label>
+            <!-- What is already in the case under this label, and how a
+                 selector will be indexed, asked as the label is typed
+                 (ux06-entry:no-duplicate-check-on-create, 2026-09-23). -->
+            <div id="node-check" class="node-check" role="status" hidden></div>
             <label class="field">
               <span class="label">Classification</span>
               <select id="node-class" class="select"></select>
@@ -2533,6 +3576,14 @@
                          placeholder="forum/thread/8841">
                 </label>
               </div>
+              <!-- Off by default (ux06-entry:post-create-state, 2026-09-23):
+                   the next entry used to inherit the last exhibit and
+                   observed time silently while its reference was cleared,
+                   so a claim could be filed against the wrong exhibit. -->
+              <label class="check">
+                <input id="node-keep-source" type="checkbox">
+                <span>Keep this exhibit, observed time and reference for the next entry</span>
+              </label>
             </fieldset>
 
             <!-- U3: the interval this was true in WORLD time. "Was in
@@ -2542,15 +3593,20 @@
               <legend>Valid interval (world time)</legend>
               <div class="row">
                 <label class="field">
-                  <span class="label">From</span>
+                  <span class="label">From (UTC day)</span>
                   <input id="node-valid-from" type="date">
                 </label>
                 <label class="field">
-                  <span class="label">Until</span>
+                  <span class="label">Until (UTC day)</span>
                   <input id="node-valid-to" type="date">
                 </label>
               </div>
-              <span class="help">Leave blank if the claim has no known start or is
+              <!-- The zone is said here since ux06-entry:valid-interval-
+                   shifts-day (2026-09-23): the days are stored and shown
+                   as UTC calendar days, the same zone as every other time
+                   in the console. -->
+              <span class="help">Dates are calendar days in UTC, shown back
+                exactly as entered. Leave blank if the claim has no known start or is
                 still current. This drives the timeline scrubber and the
                 trust-decay half-life; it is not when you recorded it.</span>
             </fieldset>
@@ -2561,11 +3617,18 @@
           </form>
         </section>
 
-        <!-- ADD RELATIONSHIP -->
+        <!-- ADD LINK. The heading and the button are the rail's words: the
+             rail said "Add link" and the pane it opened "Add relationship"
+             (ux19-copy one-concept-many-names, 2026-09-23). "Link" is the
+             one word for it a rail tile has room for, so the first line
+             says what a link is. -->
         <section id="pane-add-edge" class="pane" role="tabpanel"
                  aria-labelledby="tab-add-edge" tabindex="-1" hidden>
           <form id="edge-form" class="card stack narrow" novalidate>
-            <h2 class="h-sm">Add relationship</h2>
+            <h2 class="h-sm">Add link</h2>
+            <p class="help">A link records one relationship between two
+              entities: who communicates with whom, who vouched for whom,
+              which person a persona is attributed to.</p>
             <p class="help assertion-note">Nothing is a fact. Every element needs a
               source. It is recorded as an assertion, and the confidence you
               give it is the confidence the tie is drawn and filtered at.
@@ -2607,8 +3670,12 @@
             <div class="field">
               <label class="label" for="edge-type">Relationship type</label>
               <select id="edge-type" class="select" required
-                      aria-describedby="edge-type-note"></select>
+                      aria-describedby="edge-type-note edge-type-count"></select>
               <span id="edge-type-note" class="help" role="status"></span>
+              <!-- The permitted count on its own line, so describing the
+                   chosen type never replaces it (ux06-entry:edge-type-note-
+                   stale, 2026-09-23). -->
+              <span id="edge-type-count" class="help"></span>
             </div>
             <label class="field">
               <span class="label">Classification</span>
@@ -2671,6 +3738,10 @@
                          placeholder="forum/thread/8841">
                 </label>
               </div>
+              <label class="check">
+                <input id="edge-keep-source" type="checkbox">
+                <span>Keep this exhibit, observed time and reference for the next entry</span>
+              </label>
             </fieldset>
 
             <!-- U3: the interval this was true in WORLD time. "Was in
@@ -2680,22 +3751,23 @@
               <legend>Valid interval (world time)</legend>
               <div class="row">
                 <label class="field">
-                  <span class="label">From</span>
+                  <span class="label">From (UTC day)</span>
                   <input id="edge-valid-from" type="date">
                 </label>
                 <label class="field">
-                  <span class="label">Until</span>
+                  <span class="label">Until (UTC day)</span>
                   <input id="edge-valid-to" type="date">
                 </label>
               </div>
-              <span class="help">Leave blank if the relationship has no known start or is
+              <span class="help">Dates are calendar days in UTC, shown back
+                exactly as entered. Leave blank if the relationship has no known start or is
                 still current. This drives the timeline scrubber and the
                 trust-decay half-life; it is not when you recorded it.</span>
             </fieldset>
 
             <p id="edge-error" class="form-error" role="alert" hidden></p>
             <p id="edge-ok" class="form-ok" role="status" hidden></p>
-            <button type="submit" class="btn primary">Create relationship</button>
+            <button type="submit" class="btn primary">Create link</button>
           </form>
         </section>
       </div>
@@ -2716,6 +3788,20 @@
                screen-reader user hears what they just selected. -->
           <p id="insp-label" class="insp-label" tabindex="-1"></p>
           <p id="insp-sub" class="mono small muted"></p>
+
+          <!-- What the last create made, shown on the element it made
+               (ux06-entry:post-create-state, 2026-09-23). Here, not in the
+               corner banner stack: that stack is fixed over the top of this
+               rail, so the outcome covered the name of the element it was
+               about, stacked one card per entry in batch work and outlived a
+               case switch (the 2026-09-23 verifier). It goes when the
+               selection moves on, when it is dismissed, and on a case
+               switch. -->
+          <div id="insp-created" class="insp-created" role="status" hidden>
+            <div id="insp-created-text" class="insp-created-text"></div>
+            <button id="insp-created-close" type="button" class="banner-close"
+                    aria-label="Dismiss message">×</button>
+          </div>
 
           <!-- Correct or retire the selected element. Both were seeded as
                permissions in 0017 and granted in 0021, and nothing checked
@@ -2738,40 +3824,76 @@
                     title="Open the Link form with this entity as the target">Link to this…</button>
           </div>
 
-          <section id="insp-metrics-sec" class="insp-sec">
-            <div class="insp-sec-head">
-              <h3 class="h-sm">Metrics</h3>
-              <span id="insp-metrics-scope" class="chip stale"></span>
-            </div>
-            <div id="insp-metrics" class="metric-grid"></div>
-            <p id="insp-metrics-proj" class="assert-meta"></p>
-            <!-- Was "Brokerage ... is Phase 3 and is not computed here":
-                 a build-plan phase that has shipped, read by an analyst as
-                 "not built" beside a computed key-player card (README
-                 screenshot review, 2026-09-23). -->
-            <p class="help">These are <strong>local</strong> measures: each one
-              describes the entity's own neighbourhood. Brokerage (betweenness,
-              Burt's constraint, key-player fragmentation) is global and lives
-              in the Analysis pane, so nothing on this panel tells you who
-              bridges two clusters.</p>
-          </section>
+          <!-- Correct the selected element as a graded claim
+               (gap-api-grade-required, 2026-09-23). The API grades nothing
+               for its caller any more, and the Correct... prompts sent a
+               reason alone and left the server to grade the rest
+               DIRECT_OBSERVATION F6 LOW, a grade nobody chose. This form
+               asks, the way the create forms and Add a claim do, with
+               nothing chosen for the analyst. On an entity it corrects the
+               label; on a tie, its confidence, which is the correction's
+               own grade (migration 0064). -->
+          <div id="insp-fix" class="insp-claim" hidden>
+            <form id="fix-form" class="stack" novalidate aria-labelledby="fix-heading">
+              <h3 id="fix-heading" class="h-sm">Correct this entity</h3>
+              <p id="fix-help" class="help"></p>
+              <div id="fix-label-field" class="field">
+                <label class="label" for="fix-label">Corrected label</label>
+                <input id="fix-label" spellcheck="false" autocomplete="off">
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Basis</span>
+                  <select id="fix-basis" class="select" required></select>
+                </label>
+                <label class="field">
+                  <span id="fix-conf-label" class="label">Confidence (ICD 203)</span>
+                  <select id="fix-conf" class="select" required></select>
+                </label>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Source reliability</span>
+                  <select id="fix-rel" class="select" required></select>
+                </label>
+                <label class="field">
+                  <span class="label">Info credibility</span>
+                  <select id="fix-cred" class="select" required></select>
+                </label>
+              </div>
+              <div class="field">
+                <label class="label" for="fix-rationale">Why is it being corrected?
+                  <span id="fix-rat-req" class="req" hidden>required for inference</span></label>
+                <textarea id="fix-rationale" rows="2"></textarea>
+              </div>
+              <div class="field">
+                <label class="label" for="fix-evidence">Supporting exhibit</label>
+                <select id="fix-evidence" class="select"></select>
+              </div>
+              <div class="row">
+                <label class="field">
+                  <span class="label">Observed at (UTC)</span>
+                  <input id="fix-observed" type="datetime-local">
+                </label>
+                <label class="field">
+                  <span class="label">Source reference</span>
+                  <input id="fix-ref" spellcheck="false">
+                </label>
+              </div>
+              <p id="fix-error" class="form-error" role="alert" hidden></p>
+              <div class="claim-actions">
+                <button id="fix-submit" type="submit" class="btn small primary">Record the correction</button>
+                <button id="fix-cancel" type="button" class="btn ghost small">Cancel</button>
+              </div>
+            </form>
+          </div>
 
-          <!-- Every tie at the selected entity, or, for a selected tie, its
-               two ends and every other tie between the same pair. Until
-               2026-09-22 a canvas click was the only way to open a tie, so
-               a tie drawn under another one could never be opened and a
-               keyboard user could open none (ux05 parallel-ties-unreachable,
-               ux18 edges-mouse-only). Each row is a button into the tie
-               inspector; T on the sociogram jumps here. -->
-          <section id="insp-rel-sec" class="insp-sec" hidden>
-            <div class="insp-sec-head">
-              <h3 class="h-sm" id="insp-rel-heading">Relationships</h3>
-              <span id="insp-rel-count" class="chip stale"></span>
-            </div>
-            <div id="insp-rel" class="insp-list tie-list" role="group" tabindex="-1"
-                 aria-labelledby="insp-rel-heading"></div>
-          </section>
-
+          <!-- Assertions and Evidence come FIRST, then the ties, then the
+               numbers (ux05-inspector:why-below-metrics, 2026-09-23). The
+               empty state promises "see why it is believed", docs/06 orders
+               the rail assertions / evidence / metrics, and with Metrics on
+               top the evidential basis sat below the fold on a 1366x768
+               laptop for every entity an analyst clicked through. -->
           <section class="insp-sec">
             <div class="insp-sec-head">
               <h3 class="h-sm">Assertions</h3>
@@ -2853,6 +3975,85 @@
             <div id="insp-evidence" class="insp-list"></div>
           </section>
 
+          <!-- The selected TIE's review (gap-tie-review and ux05
+               review-state-never-leaves-proposed, 2026-09-23). Nothing
+               could ever move a tie out of PROPOSED, so every tie read as
+               an unreviewed machine proposal and the canvas ringed every
+               node. A person's own tie is now born ACCEPTED; what is still
+               waiting is disposed of here, with proposal.review, and the
+               decision is audited. Shown on a tie only, and AFTER its
+               claims and exhibits: a disposal is made having read them,
+               and the state is in the line under the tie's name too. -->
+          <section id="insp-review-sec" class="insp-sec" hidden>
+            <div class="insp-sec-head">
+              <h3 class="h-sm" id="insp-review-heading">Review</h3>
+              <span id="insp-review-state" class="chip"></span>
+            </div>
+            <p id="insp-review-says" class="help"></p>
+            <div id="insp-review-history" class="insp-list"></div>
+            <form id="review-form" class="stack insp-review-form" novalidate
+                  aria-labelledby="insp-review-heading">
+              <div class="field">
+                <label class="label" for="review-note">Note
+                  <span class="help">(required to dispute or reopen)</span></label>
+                <textarea id="review-note" rows="2" maxlength="2000"></textarea>
+              </div>
+              <p id="review-error" class="form-error" role="alert" hidden></p>
+              <p id="review-ok" class="form-ok" role="status" hidden></p>
+              <div class="claim-actions">
+                <button id="review-accept" type="button" class="btn small primary">Accept</button>
+                <button id="review-dispute" type="button" class="btn small">Dispute</button>
+                <button id="review-reopen" type="button" class="btn ghost small">Reopen review</button>
+              </div>
+            </form>
+          </section>
+
+          <!-- Every tie at the selected entity, or, for a selected tie, its
+               two ends and every other tie between the same pair. Until
+               2026-09-22 a canvas click was the only way to open a tie, so
+               a tie drawn under another one could never be opened and a
+               keyboard user could open none (ux05 parallel-ties-unreachable,
+               ux18 edges-mouse-only). Each row is a button into the tie
+               inspector; T on the sociogram jumps here. -->
+          <section id="insp-rel-sec" class="insp-sec" hidden>
+            <div class="insp-sec-head">
+              <h3 class="h-sm" id="insp-rel-heading">Relationships</h3>
+              <span id="insp-rel-count" class="chip stale"></span>
+            </div>
+            <div id="insp-rel" class="insp-list tie-list" role="group" tabindex="-1"
+                 aria-labelledby="insp-rel-heading"></div>
+          </section>
+
+          <section id="insp-metrics-sec" class="insp-sec">
+            <div class="insp-sec-head">
+              <h3 class="h-sm">Metrics</h3>
+              <span id="insp-metrics-scope" class="chip stale"></span>
+            </div>
+            <div id="insp-metrics" class="metric-grid"></div>
+            <p id="insp-metrics-dyad" class="metric-note" hidden></p>
+            <p id="insp-metrics-proj" class="assert-meta"></p>
+            <!-- Was "Brokerage ... is Phase 3 and is not computed here":
+                 a build-plan phase that has shipped, read by an analyst as
+                 "not built" beside a computed key-player card (README
+                 screenshot review, 2026-09-23). Behind a disclosure since
+                 ux05-inspector:why-below-metrics (2026-09-23): five lines
+                 of help on every selection pushed the evidence down. -->
+            <!-- An instruction since 2026-09-23 (ux19-copy stale-phase3-claim):
+                 it described where brokerage lives and stopped there. -->
+            <details class="insp-more">
+              <summary>What these measures cover</summary>
+            <p class="help">These are <strong>local</strong> measures: each one
+              describes the entity's own neighbourhood. Brokerage (betweenness,
+              Burt's constraint, key-player fragmentation) is global, so it is
+              not on this panel: run it on the Analysis pane to see who
+              bridges two clusters.</p>
+            </details>
+            <!-- This entity's brokerage from the run on the Analysis pane,
+                 and the way there (ux10-analytics:explanations-in-developer-
+                 language, 2026-09-23). Filled by renderInspectorAnalysis. -->
+            <p id="insp-an-brief" class="help"></p>
+          </section>
+
           <!-- Tags: an analyst's organisational overlay, NOT a claim about
                the entity. It carries no assertion and no evidential weight,
                which is why it renders as plain chips and never next to a
@@ -2926,10 +4127,43 @@
       <span class="label">Note: why it stands where it does (optional)</span>
       <textarea id="ach-stance-note" rows="2"></textarea>
     </label>
+    <!-- Who wrote the note and when, and the notes it replaced
+         (ux11-ach:stance-note-erased-on-rescore, 2026-09-23). -->
+    <div id="ach-stance-trail" class="stance-trail" hidden></div>
     <p id="ach-stance-msg" class="msg" hidden></p>
     <div class="stance-actions">
+      <!-- Back to not assessed, which "neutral" is not. The stance and its
+           note stay in the audit trail. -->
+      <button id="ach-stance-clear" type="button" class="btn subtle stance-clear"
+              title="The cell goes back to a blank. The stance and its note stay in the audit trail."
+              hidden>Clear: back to not assessed</button>
       <button id="ach-stance-cancel" type="button" class="btn">Cancel</button>
       <button id="ach-stance-save" type="submit" class="btn primary">Save stance</button>
+    </div>
+  </form>
+</div>
+
+<!-- Decisions on the ACH pane (2026-09-23): a hypothesis's status and
+     wording, and the assumption reviews that need a sentence. They were a
+     window.prompt whose Cancel still withdrew an assumption for good, or
+     not offered at all. Cancel, Escape and a click outside do nothing. -->
+<div id="ach-decide-scrim" class="palette-scrim" hidden>
+  <form id="ach-decide-form" class="palette stance-sheet" role="dialog"
+        aria-modal="true" aria-labelledby="ach-decide-title" novalidate>
+    <h2 id="ach-decide-title" class="h-sm"></h2>
+    <p id="ach-decide-subject" class="stance-evidence"></p>
+    <fieldset id="ach-decide-options" class="stance-options" hidden>
+      <legend class="label">New status</legend>
+    </fieldset>
+    <p id="ach-decide-what" class="help warn" hidden></p>
+    <label class="field">
+      <span id="ach-decide-note-label" class="label">Note</span>
+      <textarea id="ach-decide-note" rows="3"></textarea>
+    </label>
+    <p id="ach-decide-msg" class="msg" hidden></p>
+    <div class="stance-actions">
+      <button id="ach-decide-cancel" type="button" class="btn">Cancel</button>
+      <button id="ach-decide-go" type="submit" class="btn primary">Save</button>
     </div>
   </form>
 </div>
@@ -2969,7 +4203,7 @@
             <select id="share-role" class="select"></select>
           </label>
           <label class="field">
-            <span class="label">Access ends (optional, your local time)</span>
+            <span class="label">Access ends (optional, UTC)</span>
             <input id="share-expires" type="datetime-local">
           </label>
         </div>
@@ -2989,6 +4223,107 @@
   </div>
 </div>
 
+<!-- Case record (2026-09-23, ux02-cases:case-record-invisible-and-
+     uneditable). Case… was a prompt that could only rename. The record
+     written at creation (lawful basis, authority, retention, review) was
+     never shown again, so an analyst could not check what their collection
+     rested on, and an owner could not raise the case to RED, extend
+     retention or move a review date without a script. The corrections the
+     server allows are offered with its rules said beside them. -->
+<div id="case-scrim" class="palette-scrim" hidden>
+  <div id="case-sheet" class="palette case-sheet" role="dialog"
+       aria-modal="true" aria-labelledby="case-sheet-title">
+    <h2 id="case-sheet-title" class="h-sm" tabindex="-1">Case record</h2>
+    <dl id="case-facts" class="case-facts"></dl>
+    <form id="case-edit-form" class="case-edit stack" novalidate hidden>
+      <h3 class="h-xs">Correct the record</h3>
+      <label class="field">
+        <span class="label">Title</span>
+        <input id="case-edit-title" required>
+      </label>
+      <label class="field">
+        <span class="label">Summary</span>
+        <textarea id="case-edit-summary" rows="2"></textarea>
+      </label>
+      <label class="field">
+        <span class="label">Authority reference</span>
+        <input id="case-edit-authority" class="mono" spellcheck="false">
+      </label>
+      <div class="row">
+        <div class="field">
+          <label class="label" for="case-edit-review">Review due</label>
+          <input id="case-edit-review" type="date"
+                 aria-describedby="case-edit-dates-help">
+        </div>
+        <div class="field">
+          <label class="label" for="case-edit-retention">Retention until</label>
+          <input id="case-edit-retention" type="date"
+                 aria-describedby="case-edit-dates-help">
+        </div>
+      </div>
+      <p id="case-edit-dates-help" class="help">Retention can only be
+        extended here: evidence is selected for destruction by this date,
+        and destruction takes two people. Extending it also lengthens the
+        storage lock on the case's exhibits, which nobody can shorten
+        afterwards, so check the year. Review must fall on or before
+        retention.</p>
+      <div class="field">
+        <label class="label" for="case-edit-class">Classification</label>
+        <select id="case-edit-class" class="select"
+                aria-describedby="case-edit-class-help"></select>
+        <span id="case-edit-class-help" class="help">Classification can only
+          be raised here, and no higher than your own clearance. Anyone on
+          the case cleared below the new level loses access, and is named
+          once it is saved.</span>
+      </div>
+      <p class="help">The lawful basis cannot be changed after creation.</p>
+      <p id="case-edit-msg" class="msg" role="status" hidden></p>
+      <div class="stance-actions">
+        <button id="case-edit-save" type="submit" class="btn primary">
+          Save corrections</button>
+      </div>
+    </form>
+    <p id="case-edit-readonly" class="help" hidden></p>
+    <div class="stance-actions">
+      <button id="case-copy-link" type="button" class="btn ghost">
+        Copy link to this view</button>
+      <button id="case-close" type="button" class="btn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Status (2026-09-23, ux02-cases:status-prompt-free-text-one-way-
+     transitions). A free-text prompt listed all six statuses, pre-filled
+     CLOSED, and took ARCHIVED, which has no way back, for one typed word.
+     This offers only the moves the transition table allows from here, says
+     what each does, selects nothing, and asks for the case code before a
+     one-way move. -->
+<div id="status-scrim" class="palette-scrim" hidden>
+  <form id="status-form" class="palette stance-sheet" role="dialog"
+        aria-modal="true" aria-labelledby="status-title"
+        aria-describedby="status-now" novalidate>
+    <h2 id="status-title" class="h-sm">Change the case status</h2>
+    <p id="status-now"></p>
+    <fieldset id="status-options" class="stance-options">
+      <legend class="label">Move it to</legend>
+    </fieldset>
+    <p id="status-none" class="help" hidden></p>
+    <div id="status-confirm" class="field" hidden>
+      <label class="label" for="status-code">Type the case code to
+        confirm</label>
+      <input id="status-code" class="mono" autocomplete="off"
+             spellcheck="false" aria-describedby="status-confirm-help">
+      <span id="status-confirm-help" class="help"></span>
+    </div>
+    <p id="status-msg" class="msg" role="status" hidden></p>
+    <div class="stance-actions">
+      <button id="status-cancel" type="button" class="btn">Cancel</button>
+      <button id="status-save" type="submit" class="btn primary" disabled>
+        Change status</button>
+    </div>
+  </form>
+</div>
+
 <div id="keys-scrim" class="palette-scrim" hidden>
   <div class="palette keys-sheet" role="dialog" aria-modal="true"
        aria-labelledby="keys-heading">
@@ -2997,7 +4332,7 @@
       <h3 class="h-xs">Anywhere</h3>
       <dl class="keys">
         <dt><span class="kbd" id="keys-palette">Ctrl K</span></dt>
-        <dd>Command palette: entities, projections, commands</dd>
+        <dd>Jump to: entities, panes, projections and commands, and a full search of the case</dd>
         <dt><span class="kbd">?</span></dt>
         <dd>This sheet</dd>
         <dt><span class="kbd">Esc</span></dt>
@@ -3013,14 +4348,22 @@
       <h3 class="h-xs">Sociogram</h3>
       <dl class="keys">
         <dt><span class="kbd">drag</span></dt><dd>Pan</dd>
-        <dt><span class="kbd">scroll</span></dt><dd>Zoom</dd>
+        <dt><span class="kbd">drag a node</span></dt>
+        <dd>Move it and pin it there; Save layout keeps it for your next visit</dd>
+        <dt><span class="kbd">U</span></dt>
+        <dd>Pin the selected entity where it is, or unpin it</dd>
+        <dt><span class="kbd">scroll</span></dt><dd>Zoom; the level is shown on the canvas</dd>
         <dt><span class="kbd">click</span></dt><dd>Inspect an element</dd>
         <dt><span class="kbd">dbl-click</span></dt><dd>Ego network</dd>
         <dt><span class="kbd">shift-click</span></dt>
         <dd>Shortest path from the selection</dd>
         <dt><span class="kbd">space</span></dt>
         <dd>Hide inferred edges while held: the fastest way to see how
-            much of a picture is assessment rather than evidence</dd>
+            much of a picture is assessment rather than evidence. Works
+            anywhere on the graph tab, the timeline and the inspector
+            included, except where Space already does something: typing in
+            a field, or pressing a control you tabbed to or an inspector
+            button you just used</dd>
         <dt><span class="kbd">&larr;</span> <span class="kbd">&rarr;</span></dt>
         <dd>Previous / next entity; one off the canvas is brought into view</dd>
         <dt><span class="kbd">[</span> <span class="kbd">]</span></dt>
@@ -3039,18 +4382,32 @@
             at an entity, or every other tie between a tie's two ends</dd>
       </dl>
 
+      <!-- D was missing, and the note below promised "a confirmation step"
+           that A never had (ux08-triage:triage-keys-fire-on-browser-chords
+           and queue-vocabulary-and-empty-text, 2026-09-23). -->
       <h3 class="h-xs">Triage</h3>
       <dl class="keys">
         <dt><span class="kbd">J</span> <span class="kbd">K</span></dt>
         <dd>Next / previous proposal</dd>
-        <dt><span class="kbd">A</span></dt><dd>Accept</dd>
-        <dt><span class="kbd">R</span></dt><dd>Reject</dd>
+        <dt><span class="kbd">A</span></dt>
+        <dd>Accept, after a confirmation: the line above the queue then offers an Undo when your role can retire it</dd>
+        <dt><span class="kbd">R</span></dt><dd>Reject, with a reason</dd>
+        <dt><span class="kbd">D</span></dt><dd>Defer, with a note</dd>
       </dl>
     </div>
+    <label class="check keys-setting">
+      <input id="keys-triage-letters" type="checkbox" checked>
+      <span>Single-letter triage keys (J, K, A, R, D). They act only while
+        the triage list has the focus.</span>
+    </label>
     <p class="help">
-      Nothing here writes to the graph without a confirmation step. Accept
-      in triage promotes a <em>proposal</em>, which is still an assertion
-      with a source and a grading. Machines propose, analysts dispose.
+      The triage keys act only while the triage list has the focus, never
+      in a field, on a button or with Ctrl, Alt or Cmd held. No key here
+      writes to the graph without asking first: A asks for a confirmation,
+      R and D for a reason. Accept promotes a <em>proposal</em>: the
+      element is created inferred, graded low and recorded as a machine's
+      suggestion that you accepted, and Undo retires it where your role
+      can. Machines propose, analysts dispose.
     </p>
     <button id="keys-close" type="button" class="btn">Close</button>
   </div>
@@ -3059,7 +4416,7 @@
 <div id="palette-scrim" class="palette-scrim" hidden>
   <div id="palette" class="palette" role="dialog" aria-modal="true"
        aria-labelledby="palette-heading">
-    <h2 id="palette-heading" class="sr-only">Command palette</h2>
+    <h2 id="palette-heading" class="sr-only">Jump to</h2>
     <input id="palette-input" class="pal-input" type="text" role="combobox"
            autocomplete="off" spellcheck="false" aria-expanded="true"
            aria-controls="palette-list" aria-autocomplete="list"

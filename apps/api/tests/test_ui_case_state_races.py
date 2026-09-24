@@ -163,10 +163,11 @@ const out = {};
 
 def _analysis_harness() -> str:
     js = _js()
-    consts = js[js.index("const AN_EMPTY_TEXT = "):js.index("\nfunction blankAnalytics(")]
+    consts = js[js.index("const AN_EMPTY_TEXT = "):js.index("\n/** What a failed analysis request")]
     return _PRELUDE + r"""
 let drawn = [];
 let historyDrawn = [];
+let kppLoads = [];
 function renderAnalytics() { drawn.push(state.analytics.tag); show($('an-results'), true);
   show($('an-empty'), false); $('an-projection').textContent = 'Projection: '
   + state.analytics.tag; }
@@ -179,7 +180,14 @@ function safeLabelsDeep(x) { return x; }
 function fmtTime(v) { return String(v); }
 function refusalText(err, fallback) { return fallback; }
 function visibleText(s) { return s; }
+function countOf(n, one, many) { return n + ' ' + (Number(n) === 1 ? one : many); }
+function closeClause(t) { return String(t || ''); }
+/* The 2026-09-23 additions, each held by its own test elsewhere: the Node
+   size control and the key-player card are not what C3 is about. */
+function syncAnalysisSizeOptions() {}
+function loadKeyPlayer(storedOnly) { kppLoads.push(storedOnly); }
 """ + consts + "\n" + "".join(_fn(n) for n in (
+        "analysisFailureText", "ageText", "currencyText", "storedRunStatus",
         "blankAnalytics", "invalidateAnalytics", "runAnalysis",
         "loadLatestAnalysis", "loadMetricHistory")) + _reset("blankAnalytics(AN_EMPTY_TEXT)") + r"""
 function snap() {
@@ -348,6 +356,7 @@ async function refreshMetrics() {}
 async function reapplyFocus() { rendered.push(state.gnodes.map((n) => n.id)); }
 function renderProjectionBar() {}
 function renderInspector() {}
+function analyticsAfterGraphRefresh() {}
 function stopWorkerLayout() {}
 function stopGraph() { state.graph = null; }
 function setCanvasText() {}
@@ -446,6 +455,12 @@ function inlineProblem(n, err) { setMsg(n, String(err.title || err)); }
 function refusalText(err, fallback) { return err.title || fallback; }
 function fmtBytes(n) { return n + ' B'; }
 function shortId(id) { return String(id).slice(0, 8); }
+/* The Lab submit form's gate and its compartment checkboxes (g09,
+   ux13-lab:submit-form-ignores-refusal-and-scope, 2026-09-23): nothing
+   ticked, and nothing to repaint in this harness. */
+function paintSubmitGate() {}
+function loadSamplePolicy() {}
+$('smp-compartments').querySelectorAll = () => [];
 """ + "".join(_fn(n) for n in ("failureReason", "caseCodeNow") + names)
 
 
@@ -528,9 +543,13 @@ def test_a_lab_sample_goes_to_the_open_case_unless_no_case_is_chosen():
 
 def test_the_typed_forms_are_emptied_by_the_resets_they_belong_to():
     triage = _reset("'triage-list'")
-    for field in ("cap-text", "cap-title", "cap-url", "cap-result", "cap-error",
-                  "cap-class"):
+    for field in ("cap-text", "cap-title", "cap-url", "cap-result", "cap-error"):
         assert f"'{field}'" in triage, f"the triage reset leaves #{field}"
+    # The classification select is rebuilt for no case, not only set, since
+    # the capture form is fitted to each case's floor (g01, final review
+    # c15, 2026-09-24).
+    assert "syncCaptureForm(null, '');" in triage, "the triage reset leaves #cap-class"
+    assert "$('cap-class')" in _fn("syncCaptureForm")
     case_file = _reset("'ent-body'")
     for field in ("ev-file", "ev-title", "ev-result", "ev-error",
                   "ach-statement", "asm-statement", "asm-basis"):
@@ -568,6 +587,7 @@ function reloadAll() { effects.push('reloadAll'); }
 function loadEvidence() { effects.push('loadEvidence'); }
 function resetPalSel() { effects.push('resetPalSel'); }
 function runSearch() { effects.push('runSearch'); }
+function clearDeceptionSearch() { effects.push('clearDeceptionSearch'); }
 function describeGrant() { return ''; }
 function fmtClock(iso) { return iso; }
 const document = { createTextNode(t) { return { textContent: t }; } };
@@ -703,6 +723,8 @@ def test_a_grant_change_asks_the_search_pane_again():
     began = got["began"]
     assert began["seq"] == 2 and "runSearch" not in began["effects"]
     assert began["nodes"] == 0
+    # The Search pane's deception block goes with its columns (2026-09-23).
+    assert "clearDeceptionSearch" in began["effects"]
 
 
 # ---------------------------------------------------------------------------

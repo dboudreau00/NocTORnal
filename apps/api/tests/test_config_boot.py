@@ -26,6 +26,12 @@ import pytest
 
 from noctornal_api.config import DEV_CREDENTIAL, enforce_environment, verify_environment
 
+#: 32 DISTINCT bytes. Until 2026-09-23 this fixture used `b"k" * 32`, and a
+#: key of one repeated byte is now refused as the shape of the keys the CI
+#: workflow and the suites publish (sec-dev-secrets-in-production), so the
+#: good environment has to carry a key that looks generated.
+_KEK = base64.b64encode(bytes(range(1, 33))).decode()
+
 
 def _production() -> dict[str, str]:
     """An environment with nothing wrong with it. Every rule test below
@@ -36,7 +42,7 @@ def _production() -> dict[str, str]:
         "DATABASE_URL":
             "postgresql+psycopg://noctornal_app:Xk9pQ@db:5432/noctornal",
         "REDIS_URL": "redis://:Zm4tR@redis:6379/0",
-        "NOCTORNAL_TOTP_KEK": base64.b64encode(b"k" * 32).decode(),
+        "NOCTORNAL_TOTP_KEK": _KEK,
         "NOCTORNAL_INGEST_PEPPER": "9f2c1ad4e6b8",
         "NOCTORNAL_BASE_URL": "https://noctornal.example.gov",
         "NOCTORNAL_SESSION_STRICT_BINDING": "1",
@@ -142,7 +148,7 @@ def test_a_kek_with_a_trailing_newline_is_accepted():
     making the same mistake would not report a working deployment as
     broken, it would stop it from starting."""
     env = _production()
-    env["NOCTORNAL_TOTP_KEK"] = base64.b64encode(b"k" * 32).decode() + "\n"
+    env["NOCTORNAL_TOTP_KEK"] = _KEK + "\n"
     assert verify_environment(env) == []
 
 

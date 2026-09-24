@@ -420,13 +420,26 @@ defaults to 0 and X-Forwarded-For is ignored until it is set.
 
 ### C8: Redis is not shared with a cache
 
-The rate limiter's keys carry TTLs and `infra/docker-compose.yml` runs
-Redis with `allkeys-lru`, so under memory pressure rate-limit state is
-evictable and an evicted meter is a reset meter.
+The rate limiter is the only user of `REDIS_URL`, and its meters are keys
+with TTLs. Under an evicting `maxmemory-policy` (any `allkeys-*` or
+`volatile-*`) memory pressure deletes live meters, and an evicted meter is
+a reset meter: it admits the subject it was refusing with a full burst.
+Both compose files run Redis with `noeviction`, so at the 1 GB cap it
+refuses writes instead, and each limit falls back to its declared
+`on_backend_failure`. The development file ran `allkeys-lru` until Alpha 6.
+The readiness check `redis_limiter_store` reads the policy with `CONFIG
+GET` and fails on an evicting one, or reports it as unknown where `CONFIG`
+is disabled. `redis_limiter_isolated` counts the keys in the limiter's
+database that are not under its `rl:` prefix, and the keys in the
+instance's other databases, and fails on either; it reads no value and
+reports no key name.
 
 **Confirm** the production deployment gives the limiter its own Redis
-database or instance. This is a deployment fix, not a code one, and it is
-the kind that gets missed.
+instance, running `noeviction`: `maxmemory` is per instance, so a
+co-tenant in another database fills the same memory. The check sees a
+co-tenant only while it holds keys, and cannot see a second server behind
+the same address. This is a deployment fix, not a code one, and it is the
+kind that gets missed.
 
 ### C9: Sample origin split
 

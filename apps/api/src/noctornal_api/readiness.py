@@ -82,9 +82,13 @@ module reports that the declarations have been made. `ready=true` means
 
 Two register items are checked only as far as the code CAN check them,
 and each says so in its own passing evidence rather than leaving the
-operator to infer it. docs/16 C8: the check confirms Redis is reachable
-and reports its eviction policy, but whether the limiter has an instance
-to itself is a deployment fact nothing here can see. docs/16 C9: the
+operator to infer it. docs/16 C8: `redis_limiter_store` confirms Redis is
+reachable and reports its eviction policy, and since 2026-09-23
+(sec-redis-isolation) `redis_limiter_isolated` counts the keys in it that
+are not the limiter's and the keys in the instance's other databases,
+reading no value. A tenant holding no keys at that moment, or a second
+server behind the same address, stays invisible, and that row's passing
+evidence says so. docs/16 C9: the
 check reads `samples.origin_split()` -- the same verdict `download()`
 refuses or serves on -- so it can say that the sample origin is set, is
 an origin, is not a second name for the application's, and which of the
@@ -129,7 +133,7 @@ from pathlib import Path
 import psycopg
 
 from noctornal_api.config import EVIDENCE_CAP_ENV
-from noctornal_api.wording import count_of
+from noctornal_api.wording import agree, count_of
 
 log = logging.getLogger("noctornal.readiness")
 
@@ -175,17 +179,45 @@ class Check:
     copy of a rule that exists precisely so ONE list decides what
     refuses, and this module has already been bitten once by a check that
     kept its own copy of a rule (`_totp_kek_set`, below).
+
+    `consequence` and `ui_target` are stamped the same way and for the
+    same reason, and only on a FAILED row (2026-09-23). `consequence` is
+    what the product refuses while this check fails, in a sentence: the
+    admin banner's headline used to be hard-coded to "the collection poll
+    route is refused" while its own items said sample ingest, every
+    sample download and break-glass were refused too, so an operator who
+    read the headline alone decided the red box could wait
+    (ux16-admin:blocking-headline-understates-impact). `ui_target` names
+    where in the console the check is settled, as "tab/subtab", so the
+    pane can offer a way there instead of a path template for curl
+    (ux16-admin:readiness-actions-speak-api). `consequence` is empty when
+    the check passes; `ui_target` is empty when the check is settled by
+    configuration, and when it passes with no caveat.
+
+    `caveat` is the PROBE's, and only on a PASSING row (2026-09-23,
+    ux16-admin:security-officer-false-green): a standing condition the
+    operator has to see although the verdict is right to pass. A lone
+    SECURITY_OFFICER who can also invoke break-glass passes, because a
+    single-operator install is a design choice, and has no emergency
+    access at all. That sentence was first written into the evidence, and
+    the console folds passing rows away, so nobody would ever have read
+    it; a caveat is drawn outside the fold and marked. A failed row has an
+    action instead, so `_register_facts` drops a caveat from it.
     """
     check: str
     ok: bool
     evidence: str
     action: str = ""
     blocking: bool = False
+    consequence: str = ""
+    ui_target: str = ""
+    caveat: str = ""
 
     def as_dict(self) -> dict:
         return {"check": self.check, "ok": self.ok,
                 "evidence": self.evidence, "action": self.action,
-                "blocking": self.blocking}
+                "blocking": self.blocking, "consequence": self.consequence,
+                "ui_target": self.ui_target, "caveat": self.caveat}
 
 
 def _guarded(name: str, action: str, probe: Callable[[], Check]) -> Check:
@@ -296,12 +328,22 @@ def _retention_rules_confirmed(conn: psycopg.Connection) -> Check:
         return Check("retention_rules_confirmed", True, evidence)
     if total == 0:
         evidence += " (no rules at all: the seed did not run)"
+    # The console first (ux16-admin:readiness-actions-speak-api,
+    # 2026-09-23): Records, Retention has had a Confirm rule form since
+    # the day this action sent operators to curl, and `ui_target` below
+    # makes it a link. The route stays, second, for a scripted deployment.
+    # "Records", not "Lifecycle" (u23, 2026-09-24): the rail tab was
+    # renamed in the same pass this sentence was written, so it sent
+    # operators to a tab that no longer exists, one line above the
+    # console's own "open any case, then Records, Retention".
     return Check(
         "retention_rules_confirmed", False, evidence,
-        "confirm each placeholder with POST /retention/rules/{category} "
-        "(retention.manage, step-up); the periods are jurisdictional and the "
-        "build cannot choose them (docs/16 D3). GET /retention/rules lists "
-        "which are still placeholders")
+        "confirm each placeholder rule in the console under Records, "
+        "Retention (Confirm rule; it needs retention.manage and a sign-in "
+        "from the last 15 minutes). The periods are jurisdictional and the "
+        "build cannot choose them (docs/16 D3). Over the API: POST "
+        "/retention/rules/{category}, and GET /retention/rules lists which "
+        "are still placeholders")
 
 
 def _active_holders(conn: psycopg.Connection, role: str) -> int:
@@ -317,19 +359,63 @@ def _active_holders(conn: psycopg.Connection, role: str) -> int:
 def _security_officer_present(conn: psycopg.Connection) -> Check:
     """Break-glass REFUSES to grant when nobody can review it, so a
     deployment with no active SECURITY_OFFICER has no emergency access at
-    all -- and nothing said so until someone needed it."""
-    n = _active_holders(conn, "SECURITY_OFFICER")
+    all, and nothing said so until someone needed it.
+
+    The evidence names the holders, and says when the only one can also
+    INVOKE break-glass (ux16-admin:security-officer-false-green,
+    2026-09-23). Nobody reviews their own break-glass, so `invoke()`
+    refuses unless an officer OTHER than the invoker exists
+    (`break_glass.py`, final review C6): a lone officer who is also an
+    administrator or a Lead investigator has no emergency access at all,
+    and the register used to pass that with "1 active SECURITY_OFFICER
+    account" and nothing else.
+    The verdict does not move: a single-operator install holding every
+    role is a documented design choice (`iam_admin.create_first_admin`),
+    and failing a BLOCKING check on it would refuse collection on every
+    fresh install. What moves is that the register now says it, as the
+    row's `caveat` and not inside its evidence: the console folds passing
+    rows away, and a warning in a passing row's evidence sat in a fold
+    nothing opens, on exactly the out-of-the-box install it was written
+    for (the 2026-09-23 verifier's correction to the first fix).
+    """
+    rows = conn.execute(
+        """SELECT u.email,
+                  EXISTS (SELECT 1 FROM iam.user_role r2
+                            JOIN iam.role_permission rp
+                              ON rp.role_key = r2.role_key
+                           WHERE r2.user_id = u.id
+                             AND rp.permission_key = 'break_glass.invoke')
+             FROM iam.app_user u
+             JOIN iam.user_role ur ON ur.user_id = u.id
+            WHERE ur.role_key = 'SECURITY_OFFICER' AND u.is_active
+            ORDER BY u.email""").fetchall()
+    n = len(rows)
+    # Agreed, not a bracketed plural: the register prints this as its
+    # evidence (README screenshot set review, 2026-09-23). The count stays
+    # first, because tests and operators both read it as the verdict.
+    evidence = count_of(n, "active SECURITY_OFFICER account",
+                        "active SECURITY_OFFICER accounts")
+    if n:
+        shown = ", ".join(r[0] for r in rows[:5])
+        evidence += f" ({shown}{', and more' if n > 5 else ''})"
+    caveat = ""
+    if n == 1 and rows[0][1]:
+        caveat = (
+            f"{rows[0][0]} is the only Security Officer and can also invoke "
+            "break-glass. Nobody reviews their own, so break-glass is refused "
+            "to them until a second person holds this role. Grant "
+            "SECURITY_OFFICER to a second person, ideally one who "
+            "administers nothing and leads no case.")
     return Check(
-        "security_officer_present", n >= 1,
-        # Agreed, not a bracketed plural: the register prints this as
-        # its evidence (README screenshot set review, 2026-09-23).
-        count_of(n, "active SECURITY_OFFICER account",
-                 "active SECURITY_OFFICER accounts"),
+        "security_officer_present", n >= 1, evidence,
         "" if n >= 1 else
-        "grant SECURITY_OFFICER to an active account "
-        "(POST /admin/users/{user_id}/roles); break-glass refuses every "
-        "request while nobody can review it, and audit.read is held by "
-        "this role alone")
+        "grant SECURITY_OFFICER to an active account in the console under "
+        "Admin, Accounts (Grant role), ideally to someone who is not the "
+        "administrator configuring this: nobody reviews their own "
+        "break-glass. Break-glass refuses every request while nobody can "
+        "review it, and audit.read is held by this role alone. Over the "
+        "API: POST /admin/users/{user_id}/roles",
+        caveat=caveat)
 
 
 def _sys_admin_present(conn: psycopg.Connection) -> Check:
@@ -340,9 +426,9 @@ def _sys_admin_present(conn: psycopg.Connection) -> Check:
         "sys_admin_present", n >= 1,
         count_of(n, "active SYS_ADMIN account", "active SYS_ADMIN accounts"),
         "" if n >= 1 else
-        "grant SYS_ADMIN to an active account; user.manage is held by "
-        "SYS_ADMIN alone, so with none the only repair path is "
-        "scripts/bootstrap.py on the server")
+        "grant SYS_ADMIN to an active account (Admin, Accounts); "
+        "user.manage is held by SYS_ADMIN alone, so with none the only "
+        "repair path is scripts/bootstrap.py on the server")
 
 
 def _totp_kek_set(conn: psycopg.Connection) -> Check:
@@ -479,6 +565,59 @@ def _ingest_pepper_set(conn: psycopg.Connection) -> Check:
         f"{_PEPPER_ENV} is set and is {len(pepper)} bytes; it is deliberately "
         f"a different secret from {_TOTP_KEK_ENV}, so a compromise of one is "
         f"not a compromise of the other")
+
+
+def _credentials_not_published(conn: psycopg.Connection) -> Check:
+    """Does any credential this process holds carry a value somebody has
+    already published? (sec-dev-secrets-in-production, 2026-09-23)
+
+    The verdict is `config.published_credentials`', the reader a
+    production boot refuses on, so this row and the boot cannot disagree
+    about what "published" means. It is here as well as there because the
+    boot refuses only under `NOCTORNAL_ENV=production`, exactly spelt, and
+    config.py names the misspelling as the edge it cannot close: a
+    deployment that meant production and wrote `prod` starts on the
+    development password with nothing said. This row says it on every
+    process.
+
+    It sees this process's environment and nothing else. The production
+    compose file hands every service the whole of secrets.env, so there
+    that is every credential the stack has; a Postgres or MinIO configured
+    somewhere this process cannot read is not covered, and the passing
+    evidence says so rather than claiming the store's own password.
+
+    NOT blocking, and red on every development machine and in CI by
+    design, for the reason `app_db_role_not_owner` gives: a development
+    stack runs on the published password on purpose, and a refusal keyed
+    to a check that is red everywhere except production would be switched
+    off within a week. Values are never quoted, only variable names and
+    which published value each one carries.
+    """
+    from noctornal_api.config import ENV_VAR, PRODUCTION, published_credentials
+
+    name = "credentials_not_published"
+    found = published_credentials()
+    if not found:
+        return Check(
+            name, True,
+            "no credential in this process's environment carries a value this "
+            "repository, its CI workflow, its test suites or MinIO publish; a "
+            "store configured outside this environment is not visible from here")
+    listed = "; ".join(f"{p.variable} ({p.label})" for p in found)
+    production = os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    mode = ("this process runs as production, so it should not have started "
+            "at all" if production else
+            f"{ENV_VAR} is not {PRODUCTION}, so the boot check that refuses "
+            f"these did not run; a development stack runs on them by design")
+    return Check(
+        name, False,
+        f"{count_of(len(found), 'credential carries', 'credentials carry')} a "
+        f"value anyone who has read the source already holds: {listed}. {mode}",
+        "replace each with a value generated for this deployment (python -c "
+        "\"import secrets; print(secrets.token_urlsafe(32))\", or for the KEK "
+        "the base64 of 32 random bytes), give the limiter's Redis a password, "
+        "and restart; under NOCTORNAL_ENV=production the API refuses to start "
+        "on any of these")
 
 
 def _app_db_role_not_owner(conn: psycopg.Connection) -> Check:
@@ -716,20 +855,315 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
             "maxmemory-policy=noeviction, or point REDIS_URL at one that "
             "answers CONFIG GET (docs/16 C8)")
     if is_evicting_policy(policy):
+        # The bundled stack is named for what it runs now. The action said
+        # infra/docker-compose.yml sets allkeys-lru, which stopped being true
+        # when that file moved to noeviction (Alpha 6 pre-release check,
+        # 2026-09-23). An evicting policy seen here is an operator's own
+        # Redis, or a dev stack started from the older file and never
+        # recreated, so the action names the command that recreates it.
         return Check(
             "redis_limiter_store", False,
             f"Redis at {where} answers PING; maxmemory-policy={policy}, which "
             f"deletes live rate-limit meters under memory pressure, and a deleted "
             f"meter admits the subject it was refusing with a full burst",
             "run the limiter's Redis with maxmemory-policy=noeviction, or give "
-            "it its own instance (docs/16 C8; infra/docker-compose.yml sets "
-            "allkeys-lru and must not be copied into production as it is)")
+            "it its own instance (docs/16 C8). The bundled "
+            "infra/docker-compose.yml runs noeviction; a dev stack started "
+            "from an older copy of that file keeps its old policy until "
+            "`docker compose -f infra/docker-compose.yml up -d` recreates it")
     return Check(
         "redis_limiter_store", True,
         f"Redis at {where} answers PING; maxmemory-policy="
         f"{policy or '(unset, defaults to noeviction)'}; whether the "
-        f"limiter has this instance to itself is a deployment fact the "
-        f"runtime cannot see (docs/16 C8)")
+        f"limiter has this instance to itself is redis_limiter_isolated's "
+        f"question (docs/16 C8)")
+
+
+# ---------------------------------------------------------------------------
+# The limiter's Redis, to itself (sec-redis-isolation, 2026-09-23)
+# ---------------------------------------------------------------------------
+#
+# `noeviction` is half of docs/16 C8. The other half is that nothing else
+# lives in that Redis, and until 2026-09-23 the register said that half was
+# "a deployment fact the runtime cannot see". Part of it can be seen. A
+# cache, a queue or a session store sharing the instance leaves KEYS, and
+# the harm arrives through the memory those keys hold: `maxmemory` is per
+# instance, so under noeviction a co-tenant filling it makes every meter
+# write fail and every limit that fails closed refuse everyone, and under
+# an evicting policy the co-tenant's pressure is what deletes the meters.
+#
+# So the check counts two things and reads no value. Key NAMES in the
+# limiter's own database, with SCAN, split by whether they sit under the
+# limiter's prefix; and the key COUNT of every other database on the
+# instance, from INFO keyspace, which carries no name at all. The evidence
+# holds counts and never a key name: another tenant's names can carry a
+# user id or an email, and this evidence goes into a screenshot.
+#
+# What it cannot see, said in its passing evidence: a tenant that holds no
+# keys at the moment it looks, and a second instance behind the same
+# address. A green row means "nothing else has left keys here", which is
+# the part of C8 a runtime can establish.
+
+#: SCAN page size, and the most keys one probe will walk before it stops
+#: and says it did not finish. A limiter holds one meter per live subject
+#: per limit, and each expires within its window, so a real deployment
+#: holds hundreds; the ceiling is there so a Redis that turns out to be a
+#: million-key cache is reported as shared quickly rather than walked.
+_CENSUS_PAGE = 1000
+_CENSUS_LIMIT = 100_000
+_CENSUS_BUDGET_S = 2.0
+
+#: Keys a managed Redis writes into database 0 for its own bookkeeping,
+#: matched by exact name and never by pattern. c24 (2026-09-24): AWS
+#: documents that ElastiCache adds `ElastiCacheMasterReplicationTimestamp`
+#: to every Valkey or Redis OSS cluster to measure replication lag, so a
+#: limiter alone on ElastiCache was reported SHARED on every call, with an
+#: action ("move whatever else writes to this one elsewhere") nobody could
+#: carry out. The service is not a co-tenant: the key is one small value
+#: it rewrites in place, nothing that grows towards `maxmemory`. The
+#: evidence counts these separately and still never prints a name.
+_PROVIDER_BOOKKEEPING = frozenset({b"ElastiCacheMasterReplicationTimestamp"})
+
+
+def _limiter_prefix() -> bytes:
+    """The prefix every key the limiter writes starts with, meters and
+    audit throttles alike (`rl:<limit>:<subject>`, `rl:audit:...`).
+
+    Read from `RateLimiter`'s own constructor default, which is the value
+    `http.limits.build_limiter` builds with, so this cannot drift from what
+    the limiter writes if the default ever changes."""
+    import inspect
+
+    from noctornal_api.ratelimit import RateLimiter
+
+    prefix = inspect.signature(RateLimiter).parameters["key_prefix"].default
+    return f"{prefix}:".encode()
+
+
+@dataclass(frozen=True)
+class _Census:
+    """What one walk of the limiter's Redis found. Counts only."""
+    db: int
+    total: int                  # DBSIZE of the limiter's database
+    scanned: int                # keys the walk looked at (SCAN may repeat one)
+    foreign: int                # distinct keys outside the limiter's prefix
+    complete: bool              # the walk reached the end of the keyspace
+    others: dict[int, int] | None  # {db: key count}; None when INFO was refused
+    provider: int = 0           # distinct _PROVIDER_BOOKKEEPING keys, not foreign
+
+
+def _text(value) -> str:
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+
+
+def _limiter_db(client) -> int:
+    """The database number the client talks to, as redis-py parsed it out
+    of REDIS_URL (the `/N` path or `?db=N`)."""
+    kwargs = getattr(getattr(client, "connection_pool", None), "connection_kwargs", {})
+    try:
+        return int(kwargs.get("db", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _other_databases(client, own: int) -> dict[int, int] | None:
+    """`{db: keys}` for every database but `own` that holds a key, from
+    INFO keyspace; None when the server will not answer INFO."""
+    try:
+        info = client.info("keyspace")
+    except Exception as exc:  # noqa: BLE001 - an ACL or a renamed command
+        log.debug("INFO keyspace was refused: %s: %s", type(exc).__name__, exc)
+        return None
+    others: dict[int, int] = {}
+    for section, stats in (info or {}).items():
+        label = _text(section)
+        if not label.startswith("db"):
+            continue
+        try:
+            index = int(label[2:])
+        except ValueError:
+            continue
+        if isinstance(stats, dict):
+            keys = stats.get("keys", stats.get(b"keys", 0))
+        else:  # "keys=3,expires=1,avg_ttl=0", on a client that did not parse it
+            keys = dict(p.split("=", 1) for p in _text(stats).split(",")
+                        if "=" in p).get("keys", 0)
+        if index != own and int(keys):
+            others[index] = int(keys)
+    return others
+
+
+def _census(client, prefix: bytes, *, clock=time.monotonic) -> _Census:
+    """Walk the limiter's database with SCAN and count, never read.
+
+    SCAN, DBSIZE and INFO are the only commands sent: none of them returns
+    a value, and a key's name is compared with the prefix and dropped
+    (only the foreign ones are held, as a set, so a key SCAN returns twice
+    is counted once). SCAN rather than KEYS, because KEYS blocks the server
+    for the length of the walk and this Redis is on the request path.
+    The page, the ceiling and the budget are read at call time, so a test
+    can shrink them.
+    """
+    page, limit = _CENSUS_PAGE, _CENSUS_LIMIT
+    own = _limiter_db(client)
+    total = int(client.dbsize())
+    deadline = clock() + _CENSUS_BUDGET_S
+    foreign: set[bytes] = set()
+    provider: set[bytes] = set()
+    scanned = 0
+    cursor = 0
+    complete = False
+    while True:
+        cursor, keys = client.scan(cursor=cursor, count=page)
+        for key in keys:
+            name = key if isinstance(key, bytes) else str(key).encode()
+            scanned += 1
+            if name.startswith(prefix):
+                continue
+            # Only in database 0, where the service writes it: the same
+            # name anywhere else was put there by somebody else (c24,
+            # 2026-09-24).
+            if own == 0 and name in _PROVIDER_BOOKKEEPING:
+                provider.add(name)
+            else:
+                foreign.add(name)
+        if int(cursor) == 0:
+            complete = True
+            break
+        if scanned >= limit or clock() >= deadline:
+            break
+    return _Census(own, total, scanned, len(foreign), complete,
+                   _other_databases(client, own), len(provider))
+
+
+def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
+    """docs/16 C8, the half `redis_limiter_store` cannot answer: does the
+    limiter have its Redis to itself? See the block above for what is
+    counted, what is never read, and what stays invisible.
+
+    Not blocking, like the rest of C8: a shared Redis endangers the limits,
+    and refusing a collection poll over it would be refusing the wrong
+    thing. A walk that cannot finish, or a server that will not answer
+    SCAN or INFO, is NOT ok, on the rule `redis_limiter_store` states for
+    an unknown eviction policy: the register lists things confirmed.
+    """
+    from noctornal_api.http.limits import redacted_url
+    from noctornal_api.ratelimit_redis import CONNECT_TIMEOUT_S, RedisBackend
+
+    name = "redis_limiter_isolated"
+    action = (
+        "give the rate limiter a Redis instance of its own, running "
+        "maxmemory-policy=noeviction, and point REDIS_URL at it; move "
+        "whatever else writes to this one elsewhere (docs/16 C8)")
+    url = os.environ.get("REDIS_URL", "").strip()
+    if not url:
+        return Check(
+            name, False,
+            "REDIS_URL is not set, so there is no limiter Redis to inspect "
+            "(redis_limiter_store reports the same fault)",
+            "set REDIS_URL to a Redis reserved for the limiter, running with "
+            "maxmemory-policy=noeviction (docs/16 C8)")
+    where = redacted_url(url)
+    prefix = _limiter_prefix()
+    shown = prefix.decode()
+    backend = RedisBackend(url)
+    try:
+        if not backend.ping():
+            return Check(
+                name, False,
+                f"Redis at {where} did not answer PING within "
+                f"{CONNECT_TIMEOUT_S}s, so who else uses it cannot be read "
+                f"(redis_limiter_store reports the outage)",
+                "start Redis, or point REDIS_URL at the instance that is running")
+        # The backend's own client, so the walk runs under the limiter's
+        # timeouts and no-retry setting (ratelimit_redis.py, point 3): a
+        # sick Redis fails this row in a quarter of a second rather than
+        # holding the whole register.
+        try:
+            census = _census(backend._redis, prefix)
+        except Exception as exc:  # noqa: BLE001 - a refused SCAN is a verdict
+            return Check(
+                name, False,
+                f"Redis at {where} answers PING but would not list its keys "
+                f"({type(exc).__name__}: {str(exc)[:200]}), so whether anything "
+                f"else writes to it is UNKNOWN",
+                "confirm out of band that nothing but the rate limiter uses "
+                "this Redis, or let REDIS_URL's user run SCAN, DBSIZE and INFO "
+                "(docs/16 C8)")
+    finally:
+        backend.close()
+
+    db = f"database {census.db} at {where}"
+    others = census.others
+    shared: list[str] = []
+    if census.foreign:
+        shared.append(
+            f"{'at least ' if not census.complete else ''}"
+            f"{count_of(census.foreign, 'key', 'keys')} in it "
+            f"{agree(census.foreign, 'is', 'are')} not the limiter's "
+            f"(outside {shown}, of {census.total} in all)")
+    if others:
+        shared.append("other databases on the instance hold keys: " + ", ".join(
+            f"db{index} {count_of(n, 'key', 'keys')}"
+            for index, n in sorted(others.items())))
+    if shared:
+        if (not census.foreign and census.db != 0 and set(others or {}) == {0}
+                and others[0] <= len(_PROVIDER_BOOKKEEPING)):
+            # The one shape a managed service's bookkeeping leaves when the
+            # limiter is on another database: INFO carries counts only, so
+            # the key in db0 cannot be recognised from here, and the way to
+            # let it be is to put the limiter where it can (c24,
+            # 2026-09-24).
+            action += (
+                ". On AWS ElastiCache, database 0 always holds one key the "
+                "service writes for itself, which this check recognises only "
+                "in the limiter's own database: point REDIS_URL at database "
+                "0 there")
+        return Check(
+            name, False,
+            f"SHARED: the limiter uses {db}; {'; '.join(shared)}. maxmemory is "
+            f"per instance, so a co-tenant's memory is what fills it until "
+            f"every meter write fails, or what an evicting policy deletes "
+            f"meters to make room for. No key name or value was read into "
+            f"this evidence",
+            action)
+    if not census.complete:
+        return Check(
+            name, False,
+            f"{db}: the first {census.scanned} of {census.total} keys scanned "
+            f"are all under {shown}, and the walk stopped there, so the rest "
+            f"are UNKNOWN",
+            "confirm out of band that nothing but the rate limiter uses this "
+            "Redis (docs/16 C8); a limiter alone does not usually hold this "
+            "many live meters")
+    meters = census.total - census.provider
+    own = (f"{db} holds no keys (nothing has been metered yet)" if not census.total
+           else f"{db} holds {count_of(census.total, 'key', 'keys')}, "
+                f"{agree(census.total, 'and it is', 'all of them')} under the "
+                f"limiter's prefix {shown}")
+    if census.provider:
+        # Said, not silently dropped: a reader comparing this row with
+        # DBSIZE should find every key accounted for (c24, 2026-09-24).
+        bookkeeping = (
+            f"{count_of(census.provider, 'key', 'keys')} the hosting service "
+            f"writes for its own replication bookkeeping (AWS ElastiCache), "
+            f"which is not a co-tenant")
+        own = (f"{db} holds nothing metered yet, only {bookkeeping}"
+               if meters <= 0 else
+               f"{db} holds {count_of(census.total, 'key', 'keys')}: "
+               f"{meters} under the limiter's prefix {shown} and {bookkeeping}")
+    if others is None:
+        return Check(
+            name, False,
+            f"{own}, but INFO keyspace was refused, so the instance's other "
+            f"databases are UNKNOWN",
+            "confirm out of band that no other database on this instance is "
+            "in use, or let REDIS_URL's user run INFO (docs/16 C8)")
+    return Check(
+        name, True,
+        f"{own}, and no other database on the instance holds a key. A tenant "
+        f"that holds no keys right now, or a second server behind the same "
+        f"address, is not visible from here (docs/16 C8)")
 
 
 # ---------------------------------------------------------------------------
@@ -1771,11 +2205,19 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "hold must be in the ring (NOCTORNAL_TOTP_KEK / _RETIRED)"),
     ("ingest_pepper_set", _ingest_pepper_set,
      f"set {_PEPPER_ENV} to a long random string, once, and keep it"),
+    # sec-dev-secrets-in-production, 2026-09-23.
+    ("credentials_not_published", _credentials_not_published,
+     "replace every credential that carries a published value with one "
+     "generated for this deployment, and restart"),
     ("rate_limiting_enabled", _rate_limiting_enabled,
      "unset NOCTORNAL_RATELIMIT and restart the API"),
     ("redis_limiter_store", _redis_limiter_store,
      "fix REDIS_URL or start the Redis it names; run it with "
      "maxmemory-policy=noeviction (docs/16 C8)"),
+    # sec-redis-isolation, 2026-09-23.
+    ("redis_limiter_isolated", _redis_limiter_isolated,
+     "fix REDIS_URL or start the Redis it names; the limiter needs an "
+     "instance of its own (docs/16 C8)"),
     ("evidence_bucket_object_lock", _evidence_bucket_object_lock,
      "fix MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY or start the "
      "object store; the evidence bucket must be created with object lock"),
@@ -1881,6 +2323,52 @@ BLOCKING_CHECKS: tuple[str, ...] = (
 )
 
 
+#: What the product refuses while a BLOCKING check fails, beyond the
+#: collection poll that every one of them refuses (2026-09-23,
+#: ux16-admin:blocking-headline-understates-impact). The admin banner
+#: builds its headline from these, so it can no longer say "the poll
+#: route" while its own items say ingest, download and break-glass are
+#: refused too. Each is the refusal the check's own reader makes:
+#: `samples.policy_declared` gates ingest, `samples.origin_split` gates
+#: every download, and break-glass refuses to grant with no reviewer.
+CONSEQUENCES: dict[str, str] = {
+    "prohibited_content_policy": "Sample ingest is refused.",
+    "sample_origin_configured": "Every sample download is refused.",
+    "security_officer_present":
+        "Break-glass is refused, and nobody can read the audit trail.",
+}
+
+#: Where in the console a check is settled, as "tab/subtab" (2026-09-23,
+#: ux16-admin:readiness-actions-speak-api). A check absent from this map
+#: is settled by the API's configuration and a restart. Named by the
+#: console's own `data-tab` and `data-subtab` values, never by the
+#: labels, which the console owns.
+UI_TARGETS: dict[str, str] = {
+    "retention_rules_confirmed": "governance/retention",
+    "security_officer_present": "admin/accounts",
+    "sys_admin_present": "admin/accounts",
+}
+
+
+def _register_facts(name: str, check: Check) -> Check:
+    """The register's facts about a row: its tier always, and what it
+    refuses and where it is settled while it fails. Also for a probe that
+    crashed, which never got to say anything about itself.
+
+    A passing row with a caveat gets its `ui_target` too (2026-09-23,
+    ux16-admin:security-officer-false-green): the lone officer's caveat
+    says to grant the role to a second person, and the console can take
+    the operator to where that is done. A caveat on a failed row is
+    dropped: its action already says what to do, and a row that said two
+    different things about itself would leave the operator to choose."""
+    failing = not check.ok
+    caveat = "" if failing else check.caveat
+    return replace(check, blocking=name in BLOCKING_CHECKS,
+                   consequence=CONSEQUENCES.get(name, "") if failing else "",
+                   ui_target=UI_TARGETS.get(name, "") if failing or caveat else "",
+                   caveat=caveat)
+
+
 def run_checks(conn: psycopg.Connection) -> list[Check]:
     """Every check, in register order, each one guarded. `conn` is the
     caller's autocommit connection, so a check whose query fails does not
@@ -1891,8 +2379,8 @@ def run_checks(conn: psycopg.Connection) -> list[Check]:
     including for a check that crashed, where `_guarded` built the Check
     and the probe never ran at all.
     """
-    return [replace(_guarded(name, action, lambda probe=probe: probe(conn)),
-                    blocking=name in BLOCKING_CHECKS)
+    # `blocking=name in BLOCKING_CHECKS` is spelled inside `_register_facts`.
+    return [_register_facts(name, _guarded(name, action, lambda probe=probe: probe(conn)))
             for name, probe, action in _CHECKS]
 
 
@@ -1916,9 +2404,28 @@ def blocking_failures(conn: psycopg.Connection) -> list[str]:
     `_guarded`, so one that raises is a name in this list rather than a
     500 in the caller.
     """
-    return [name for name, probe, action in _CHECKS
-            if name in BLOCKING_CHECKS
-            and not _guarded(name, action, lambda probe=probe: probe(conn)).ok]
+    return [name for name, check in _blocking_rows(conn) if not check.ok]
+
+
+def _blocking_rows(conn: psycopg.Connection) -> list[tuple[str, Check]]:
+    """The blocking probes alone, each guarded and stamped, in register
+    order: the one run both `blocking_failures` and `blocking_state` read."""
+    return [(name, _register_facts(
+                name, _guarded(name, action, lambda probe=probe: probe(conn))))
+            for name, probe, action in _CHECKS if name in BLOCKING_CHECKS]
+
+
+def blocking_state(conn: psycopg.Connection) -> dict:
+    """`{failures, caveats}` from ONE run of the blocking probes, for the
+    console's badges (`GET /admin/access`). `failures` is exactly
+    `blocking_failures`; `caveats` names the blocking checks that pass
+    with a caveat (2026-09-23, ux16-admin:security-officer-false-green),
+    so the Readiness section can be marked while its passing rows say
+    something the operator has not read. Two separate calls could
+    disagree a few milliseconds apart; one run cannot."""
+    rows = _blocking_rows(conn)
+    return {"failures": [name for name, check in rows if not check.ok],
+            "caveats": [name for name, check in rows if check.caveat]}
 
 
 def report(conn: psycopg.Connection) -> dict:
@@ -1935,7 +2442,13 @@ def report(conn: psycopg.Connection) -> dict:
     operator standing in the middle of it.
     """
     checks = run_checks(conn)
+    # `checked_at` (2026-09-23, ux16-admin:readiness-stale-after-fix): with
+    # no time on it, a report taken before a fix, or before an API
+    # restart, could not be told from a fresh one, which is the stale
+    # report the console's own comments guard against. UTC, as every
+    # time the console shows is.
     return {"ready": all(c.ok for c in checks),
             "checks": [c.as_dict() for c in checks],
             "blocking_failures": [c.check for c in checks
-                                  if c.blocking and not c.ok]}
+                                  if c.blocking and not c.ok],
+            "checked_at": datetime.now(timezone.utc).isoformat()}

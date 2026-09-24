@@ -48,11 +48,13 @@ would also mean every existing role silently holds none of them.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import ipaddress
+import string
+from datetime import date, datetime
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from pydantic import BaseModel
 
 from noctornal_api.deception import (
@@ -60,6 +62,7 @@ from noctornal_api.deception import (
     DeceptionError,
     DeceptionService,
     defang,
+    merge_candidates,
     parse_eml,
     raster_type_of,
     selector_candidates_for_call,
@@ -112,22 +115,17 @@ def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
     and the exhibit routes already record it. Lists stay uncounted, as
     everywhere.
 
-    Not asked at all on a case classified above the caller's own
-    clearance. There the route's first gate was passable only through the
-    grant, so it has already counted this request, and asking again
-    counted one open as two: the inflation U19 removed from the inspector,
-    brought back here by the first U23 fix (fix-round verifier,
-    2026-09-23). Skipping it is safe for the reason above: it refuses
-    nothing the fetch did not."""
-    above = conn.execute(
-        'SELECT c.classification > u.tlp_clearance '
-        '  FROM core."case" c, iam.app_user u '
-        ' WHERE c.id = %s AND u.id = %s',
-        (case_id, user.user_id)).fetchone()
-    if above is not None and above[0]:
-        return
+    On a case classified above the caller's own clearance the route's
+    first gate was passable only through the grant, so it has already
+    counted this request, and asking again counted one open as two: the
+    inflation U19 removed from the inspector, brought back here by the
+    first U23 fix (fix-round verifier, 2026-09-23). That fix skipped this
+    gate there. It is asked everywhere now, as a SECOND gate
+    (`after_case_gate`), which counts only what the case's gate did not
+    (sec-breakglass-double-count, 2026-09-23): the item's own labels are
+    checked on every open, and the count is the same."""
     authorize_object(conn, user, case_id=case_id,
-                     permission_key="evidence.read",
+                     permission_key="evidence.read", after_case_gate=True,
                      classification=row["classification"],
                      compartments=frozenset(row.get("compartments") or []))
 
@@ -144,6 +142,12 @@ def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
 _CAPTURE_METHODS = frozenset({
     "MANUAL_BROWSER", "HEADLESS", "VENDOR_API", "ANALYST_UPLOAD",
     "VICTIM_SUPPLIED", "PASSIVE_FEED"})
+#: The methods by which somebody ELSE captured the page, which need no
+#: egress profile (`capture_active_needs_egress_profile`).
+_PASSIVE_METHODS = frozenset({"ANALYST_UPLOAD", "VICTIM_SUPPLIED",
+                              "PASSIVE_FEED"})
+_EMAIL_DIRECTIONS = frozenset({
+    "INBOUND_TO_VICTIM", "OUTBOUND_FROM_VICTIM", "INTERNAL", "UNKNOWN"})
 _HOP_KINDS = frozenset({
     "REQUESTED", "HTTP_30X", "META_REFRESH", "JS", "FRAME", "DNS_CNAME"})
 _CALL_DIRECTIONS = frozenset({
@@ -163,6 +167,28 @@ def _one_of(value, allowed, field):
     return value
 
 
+def _spki_sha256(value: str | None) -> bytes | None:
+    """The key hash as the 32 bytes the table holds, or a sentence.
+
+    Final review u16 (2026-09-24): the console's form sends the field as
+    typed, and hex of any other length (a SHA-1 pin, a hash cut short in
+    the copying) reached the capture_spki_is_a_sha256 CHECK as a 500 that
+    named no field. The colons and spaces a certificate viewer prints the
+    hash with are dropped first, since they are how it is copied."""
+    raw = "".join((value or "").replace(":", " ").split())
+    if not raw:
+        return None
+    said = ("the TLS public-key hash (tls_spki_sha256) is a SHA-256 of the "
+            "certificate's key, 64 hex characters, and this one ")
+    if set(raw) - set(string.hexdigits):
+        raise Problem(422, "Invalid field", said + "is not hex")
+    if len(raw) != 64:
+        raise Problem(422, "Invalid field",
+                      said + f"has {len(raw)}. A SHA-1 pin or a shortened "
+                      "hash cannot be read as one.")
+    return bytes.fromhex(raw)
+
+
 def _clean_hops(hops: list[dict]) -> list[dict]:
     """Validate the free-form hop list before it reaches the driver.
 
@@ -176,6 +202,29 @@ def _clean_hops(hops: list[dict]) -> list[dict]:
             raise Problem(422, "Invalid field",
                           f"hops[{i}] needs a non-empty url")
         _one_of(hop.get("hop_kind"), _HOP_KINDS, f"hops[{i}].hop_kind")
+        # The two typed columns, checked here for the same reason: the
+        # console's capture form sends them (ux14-deception:no-deception-
+        # ingest-ui, 2026-09-23), and a bad address reached the driver as
+        # an inet cast error, which is a 500.
+        if hop.get("resolved_ip") not in (None, ""):
+            try:
+                ipaddress.ip_address(str(hop["resolved_ip"]).strip())
+            except ValueError as exc:
+                raise Problem(422, "Invalid field",
+                              f"hops[{i}].resolved_ip is not an IP address"
+                              ) from exc
+        if hop.get("asn") not in (None, ""):
+            try:
+                if int(str(hop["asn"]).upper().removeprefix("AS")) < 0:
+                    raise ValueError
+            except ValueError as exc:
+                raise Problem(422, "Invalid field",
+                              f"hops[{i}].asn is not an AS number") from exc
+            hop = {**hop,
+                   "asn": int(str(hop["asn"]).upper().removeprefix("AS"))}
+        for key in ("resolved_ip", "asn", "http_status", "server_header"):
+            if hop.get(key) == "":
+                hop = {**hop, key: None}
         out.append(hop)
     return out
 
@@ -199,6 +248,13 @@ class CaptureIn(BaseModel):
     tls_subject: str | None = None
     tls_issuer: str | None = None
     tls_spki_sha256: str | None = None
+    #: The certificate's validity window. The table always had the columns
+    #: and this body had no field for either, so no capture recorded
+    #: through the API could carry the issue date the console now reads
+    #: against the first lure (ux14-deception:web-durable-ids-missing,
+    #: 2026-09-23).
+    tls_not_before: date | None = None
+    tls_not_after: date | None = None
     #: docs/19 §6, legal item L5. Entering credentials — including canary
     #: ones — into a phishing page may constitute unauthorised access.
     #: There is no code in this platform that does it; this records that a
@@ -246,11 +302,22 @@ def create_capture(
         if found is None or found[0] != case_id:
             raise Problem(404, "Not found", f"no such exhibit for {field}")
         authorize_object(conn, user, case_id=case_id,
-                         permission_key="evidence.read",
+                         permission_key="evidence.read", after_case_gate=True,
                          classification=found[1],
                          compartments=frozenset(found[2] or []))
     _one_of(body.capture_method, _CAPTURE_METHODS, "capture_method")
+    # The table refuses an ACTIVE capture with no egress profile; said
+    # here as a sentence, because the console's form now posts to this
+    # route and a CHECK violation is a 500 (2026-09-23).
+    if (body.capture_method not in _PASSIVE_METHODS
+            and not body.egress_profile_id):
+        raise Problem(422, "Invalid field",
+                      "an active capture (fetched from this estate) needs the "
+                      "egress profile it went out through; a capture somebody "
+                      "else made is VICTIM_SUPPLIED, ANALYST_UPLOAD or "
+                      "PASSIVE_FEED")
     hops = _clean_hops(body.hops)
+    spki = _spki_sha256(body.tls_spki_sha256)
     if not body.requested_url.strip():
         raise Problem(422, "Invalid field", "requested_url is required")
     try:
@@ -270,8 +337,9 @@ def create_capture(
             har_evidence_id=(UUID(body.har_evidence_id)
                              if body.har_evidence_id else None),
             tls={"subject": body.tls_subject, "issuer": body.tls_issuer,
-                 "spki_sha256": (bytes.fromhex(body.tls_spki_sha256)
-                                 if body.tls_spki_sha256 else None)},
+                 "not_before": body.tls_not_before,
+                 "not_after": body.tls_not_after,
+                 "spki_sha256": spki},
             submitted_input=body.submitted_input,
             submission_authority_ref=body.submission_authority_ref,
             classification=body.classification,
@@ -297,8 +365,15 @@ def list_captures(
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     clearance, comps = _ceiling(conn, user, case_id)
-    return {"captures": _svc(conn).captures(
-        case_id, clearance=clearance, compartments=comps, limit=min(limit, 500))}
+    svc = _svc(conn)
+    # `also_seen` and `proposable` on every row (ux14-deception:ecrime-no-
+    # cross-channel-pivot, 2026-09-23), computed over what THIS caller
+    # may see, like the rows themselves.
+    return {"captures": svc.annotate(
+        case_id, "capture",
+        svc.captures(case_id, clearance=clearance, compartments=comps,
+                     limit=min(limit, 500)),
+        clearance=clearance, compartments=comps)}
 
 
 @router.get("/captures/{capture_id}")
@@ -316,6 +391,13 @@ def get_capture(
         # existence oracle for a compartmented case.
         raise Problem(404, "Not found", "no such capture")
     _gate_the_item(conn, user, case_id, capture)
+    svc = _svc(conn)
+    svc.annotate(case_id, "capture", [capture], clearance=clearance,
+                 compartments=comps)
+    # What the certificate's issue date is read against: the earliest
+    # message or call in the case (ux14-deception:web-durable-ids-missing).
+    capture["first_lure"] = svc.first_lure(case_id, clearance=clearance,
+                                           compartments=comps)
     return capture
 
 
@@ -373,8 +455,12 @@ def capture_screenshot(
     # "an element is protected by BOTH its own labels and its case's",
     # violated on the one path in the product that hands bytes to a browser
     # to interpret.
+    #
+    # A second gate, after the route's own at the case's labels, so it
+    # counts a break-glass use only when that one did not: one screenshot
+    # served is one use (sec-breakglass-double-count, 2026-09-23).
     authorize_object(conn, user, case_id=case_id,
-                     permission_key="evidence.read",
+                     permission_key="evidence.read", after_case_gate=True,
                      classification=row[2],
                      compartments=frozenset(row[3] or []))
 
@@ -382,7 +468,7 @@ def capture_screenshot(
         raise Problem(
             409, "Not renderable",
             "this exhibit is marked as attacker-authored markup and is "
-            "download-only (invariant 10). Fetch it from the sample origin.")
+            "download-only. Fetch it from the sample origin.")
 
     try:
         data = EvidenceService(conn, EvidenceStorage()).view(
@@ -440,6 +526,11 @@ async def upload_email(
 
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload")
     check_writable_labels(conn, user, classification=classification)
+    # Checked BEFORE the exhibit is written. An unknown direction was a
+    # CHECK violation in `record_email`, after the .eml had already been
+    # stored write-once with nothing recording it (2026-09-23, now that
+    # the console's upload form posts here).
+    _one_of(direction, _EMAIL_DIRECTIONS, "direction")
 
     # The body was capped at MAX_EML_BYTES by BodyCappedRoute before the
     # multipart parser saw it (the marker above); `parse_eml` re-checks
@@ -484,9 +575,12 @@ def list_emails(
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     clearance, comps = _ceiling(conn, user, case_id)
-    return {"emails": _svc(conn).emails(
-        case_id, clearance=clearance, compartments=comps,
-        divergent_only=divergent_only, limit=min(limit, 500))}
+    svc = _svc(conn)
+    return {"emails": svc.annotate(
+        case_id, "email",
+        svc.emails(case_id, clearance=clearance, compartments=comps,
+                   divergent_only=divergent_only, limit=min(limit, 500)),
+        clearance=clearance, compartments=comps)}
 
 
 @router.get("/emails/{message_id}")
@@ -501,7 +595,8 @@ def get_email(
     if message is None or message["case_id"] != str(case_id):
         raise Problem(404, "Not found", "no such message")
     _gate_the_item(conn, user, case_id, message)
-    return message
+    return _svc(conn).annotate(case_id, "email", [message],
+                               clearance=clearance, compartments=comps)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +657,16 @@ def create_call(
     _one_of(body.disposition, _DISPOSITIONS, "disposition")
     _one_of(body.stir_shaken_attestation, _ATTESTATIONS,
             "stir_shaken_attestation")
+    # Two more of the table's CHECKs, said as sentences for the console's
+    # form rather than surfacing as 500s (2026-09-23).
+    if body.stir_shaken_verified and not body.stir_shaken_attestation:
+        raise Problem(422, "Invalid field",
+                      "a verified STIR/SHAKEN signature needs the attestation "
+                      "level it carried")
+    if body.ended_at is not None and body.ended_at < body.started_at:
+        raise Problem(422, "Invalid field", "the call ends before it starts")
+    if body.duration_seconds is not None and body.duration_seconds < 0:
+        raise Problem(422, "Invalid field", "a call's duration cannot be negative")
     if body.source_ip:
         import ipaddress
         try:
@@ -594,17 +699,104 @@ def list_calls(
 ) -> dict:
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     clearance, comps = _ceiling(conn, user, case_id)
-    calls = _svc(conn).calls(case_id, clearance=clearance,
-                             compartments=comps, limit=min(limit, 500))
+    svc = _svc(conn)
+    calls = svc.calls(case_id, clearance=clearance,
+                      compartments=comps, limit=min(limit, 500))
     for call in calls:
-        call["selector_candidates"] = selector_candidates_for_call({
-            **call["durable"], **{
-                "called_number_e164": call["called_number_e164"],
-                "sip_from_uri": call["sip_from_uri"],
-                "sip_to_uri": call["sip_to_uri"],
-                "presented_number_e164": call["presented"]["number_e164"],
-            }})
-    return {"calls": calls}
+        # One row per selector, reasons merged: the same SIP URI arriving
+        # as From and as P-Asserted-Identity was listed twice (ux14-
+        # deception:calls-vouched-and-tooltip-only, 2026-09-23).
+        call["selector_candidates"] = merge_candidates(
+            selector_candidates_for_call({
+                **call["durable"], **{
+                    "called_number_e164": call["called_number_e164"],
+                    "sip_from_uri": call["sip_from_uri"],
+                    "sip_to_uri": call["sip_to_uri"],
+                    "presented_number_e164": call["presented"]["number_e164"],
+                }}))
+    return {"calls": svc.annotate(case_id, "call", calls,
+                                  clearance=clearance, compartments=comps)}
+
+
+class ProposeBody(BaseModel):
+    #: A `key` from the record's `proposable` list. Nothing else is taken:
+    #: the proposal is derived from the stored record.
+    key: str
+
+
+#: The path segment each channel is listed under, and the channel's name.
+_PROPOSE_CHANNELS = {"captures": "capture", "emails": "email",
+                     "calls": "call"}
+
+
+@router.post("/{kind}/{record_id}/propose", status_code=201,
+             dependencies=[Depends(rate_limit("capture"))])
+def propose_from_record(
+    case_id: UUID, kind: str, record_id: UUID, body: ProposeBody,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Propose an INFRA or LURE entity from one capture's, message's or
+    call's durable fields, into this case's triage queue.
+
+    The overlap a record's "also seen in" shows reaches the graph through
+    the normal path: a proposal an analyst accepts or rejects in Triage
+    (ux14-deception:ecrime-no-cross-channel-pivot, 2026-09-23). Gated like
+    `/proposals/capture`, on `evidence.upload`: feeding the queue is a
+    collection act, and accepting stays `proposal.review`'s. The record
+    is fetched under the caller's labels, so a key cannot reach a record
+    they could not open, and the proposal is held to what they could
+    author (`check_writable_labels`, against their own ceiling, which a
+    break-glass grant does not raise): a proposal is a suggestion somebody
+    else will act on, and it is not written above its author's labels.
+    """
+    if kind not in _PROPOSE_CHANNELS:
+        raise Problem(404, "Not found", "no such record kind")
+    channel = _PROPOSE_CHANNELS[kind]
+    authorize_object(conn, user, case_id=case_id,
+                     permission_key="evidence.upload")
+    clearance, comps = _ceiling(conn, user, case_id)
+    svc = _svc(conn)
+    if channel == "capture":
+        record = svc.capture(record_id, clearance=clearance, compartments=comps)
+    elif channel == "email":
+        record = svc.email(record_id, clearance=clearance, compartments=comps)
+    else:
+        record = next((c for c in svc.calls(case_id, clearance=clearance,
+                                            compartments=comps, limit=500)
+                       if c["id"] == str(record_id)), None)
+    if record is None or record["case_id"] != str(case_id):
+        raise Problem(404, "Not found", f"no such {channel}")
+    check_writable_labels(
+        conn, user, classification=record["classification"],
+        compartments=frozenset(record.get("compartments") or []))
+    try:
+        return svc.propose(case_id, channel, record, body.key,
+                           clearance=clearance, compartments=comps)
+    except DeceptionError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+
+
+@router.get("/search", dependencies=[Depends(rate_limit("search"))])
+def search_records(
+    case_id: UUID,
+    q: str = Query(..., min_length=1, max_length=1024),
+    limit: int = Query(50, ge=1, le=200),
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The captures, messages and calls in this case whose hosts, addresses
+    or URLs contain `q` (defanged forms accepted), for the Search pane.
+
+    ux14-deception:ecrime-no-cross-channel-pivot (2026-09-23): "index
+    deception hosts, IPs and URLs in case search". Gated as the three lists
+    are, on `evidence.read`, filtered by the caller's own ceiling on this
+    case, and metered on the `search` meter with the pane's other columns.
+    The query cap is `routers/search.py`'s `MAX_QUERY`, for its reason."""
+    authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
+    clearance, comps = _ceiling(conn, user, case_id)
+    return _svc(conn).search(case_id, q, clearance=clearance,
+                             compartments=comps, limit=limit)
 
 
 @router.get("/defang")

@@ -539,10 +539,10 @@ class ReportBuilder:
         under NONE the element counts are never computed, so this one is
         not either, and the report says no more than the graph does.
         """
-        from noctornal_api.ach import EvidenceItem, as_response, score
+        from noctornal_api.ach import STANCE_LABEL, EvidenceItem, as_response, score
 
         rows = self._c.execute(
-            """SELECT id, statement, status FROM core.hypothesis
+            """SELECT id, statement, status::text FROM core.hypothesis
                 WHERE case_id = %s AND status::text <> 'SUPERSEDED'
                 ORDER BY created_at""", (case_id,)).fetchall()
         if not rows:
@@ -555,8 +555,47 @@ class ReportBuilder:
                 assertion_id=cell.assertion_id, label=cell.label,
                 reliability=cell.reliability, credibility=cell.credibility))
             item.stances[cell.hypothesis_id] = cell.stance
-        body = as_response(score([(r[0], r[1]) for r in rows], list(items.values())))
+        # A REJECTED hypothesis is printed for the record and scored as
+        # `retired`, never as a live competitor: once the console could
+        # reject one, a ruled-out theory could otherwise head the ranking
+        # and hold rows "unfinished" (ux11-ach:no-hypothesis-lifecycle-in-
+        # console, 2026-09-23).
+        body = as_response(score(
+            [(r[0], r[1]) for r in rows if r[2] != "REJECTED"],
+            list(items.values()),
+            retired=[(r[0], r[1]) for r in rows if r[2] == "REJECTED"]))
         body["statuses"] = {str(r[0]): r[2] for r in rows}
+        # The reason recorded with each hypothesis's CURRENT status, from
+        # the change that set it. Rejecting needs one, and the console says
+        # it is printed here; it was kept only in the audit trail and on
+        # the card, so a document listing a REJECTED hypothesis never said
+        # what ruled it out (verifier of ux11-ach:no-hypothesis-lifecycle-
+        # in-console, 2026-09-23). Free text about the case, like the
+        # statement beside it, so it goes in on the header's condition,
+        # which is the only condition this section is built under.
+        current = {r[0]: r[2] for r in rows}
+        changes = self._c.execute(
+            """SELECT DISTINCT ON (object_id)
+                      object_id, detail->>'status', detail->>'note'
+                 FROM audit.event
+                WHERE case_id = %s AND object_type = 'hypothesis'
+                  AND action = 'HYPOTHESIS_STATUS'
+                  AND object_id = ANY(%s)
+                ORDER BY object_id, seq DESC""",
+            (case_id, list(current))).fetchall()
+        body["status_notes"] = {
+            str(hid): note for hid, status, note in changes
+            if note and status == current.get(hid)}
+        # The reasoning behind each stance, for every cell that has one
+        # (ux11-ach:stance-note-erased-on-rescore, 2026-09-23). Only cells
+        # `ach_cells` returned at this target, against a hypothesis the
+        # section prints.
+        statement = {r[0]: r[1] for r in rows}
+        body["reasoning"] = [
+            {"evidence": c.label, "hypothesis": statement[c.hypothesis_id],
+             "stance": STANCE_LABEL.get(c.stance, str(c.stance)),
+             "note": c.note}
+            for c in cells if c.note and c.hypothesis_id in statement]
         return _Matrix(
             body=body,
             classifications=[c.classification for c in cells],
@@ -591,6 +630,11 @@ class AchCell:
     label: str
     classification: str
     compartments: tuple[str, ...]
+    #: Why the analyst put the stance where it is. Read through the same
+    #: filter as the rest of the cell, so a note travels only with a cell
+    #: the reader may see (ux11-ach:stance-note-erased-on-rescore,
+    #: 2026-09-23: the note was written and then never read by anything).
+    note: str | None = None
 
 
 #: Whether a matrix cell's assertion is about something a reader at
@@ -627,6 +671,10 @@ _ACH_CELL_FROM = """
       LEFT JOIN core.node n ON n.id = a.node_id
       LEFT JOIN core.edge e ON e.id = a.edge_id
       LEFT JOIN core.edge_type et ON et.key = e.edge_type
+      -- A tie's ends, for its label and its mark (`ach_cells`). One row
+      -- each, so the count in `ach_cells_withheld` is unchanged.
+      LEFT JOIN core.node tie_src ON tie_src.id = e.src_node_id
+      LEFT JOIN core.node tie_dst ON tie_dst.id = e.dst_node_id
      WHERE h.case_id = %(case_id)s
        -- Only LIVE assertions: a retracted source must not leave its
        -- conclusion standing (decision 24, applied to the matrix).
@@ -638,20 +686,45 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
     """The matrix cells a reader at `clearance`, read into `compartments`,
     may see. The ONE query both the report and GET /ach read the matrix
     through, so the two cannot disagree about what a stance may reveal."""
+    # A tie is labelled by both its ends and its type, "vellum_ram → leads →
+    # Meridian crew", not by the type alone: "leads" was one of six such
+    # ties on the demo case, and the report's reasoning table names each
+    # row (ux11-ach:evidence-row-is-a-name-not-a-claim, 2026-09-23). The
+    # ends are visible whenever the cell is: `_ACH_CELL_VISIBLE` admits a
+    # tie only when both are.
+    #
+    # So a tie's cell carries its ends' labels as well as its own, and its
+    # classification and compartments are the highest and the union of
+    # all three. The report marks itself from these and nothing else for
+    # an end the projection drops (a deleted, merged or dissolved node):
+    # with the tie's own mark alone, a GREEN tie to a deleted AMBER node
+    # printed the AMBER label in a document marked GREEN, which the egress
+    # check then cleared for a GREEN destination (verifier of ux11-ach,
+    # 2026-09-23). A stance note about a tie can name either end too.
     rows = conn.execute(
         """SELECT he.assertion_id, he.hypothesis_id, he.stance,
                   a.reliability, a.credibility,
-                  coalesce(n.label, et.display_name, a.claim_path,
+                  coalesce(n.label,
+                           tie_src.label
+                           || ' → ' || coalesce(et.display_name, e.edge_type)
+                           || ' → ' || tie_dst.label,
+                           et.display_name, a.claim_path,
                            a.rationale, 'assertion'),
-                  coalesce(n.classification, e.classification),
-                  coalesce(n.compartments, e.compartments)"""
+                  coalesce(n.classification,
+                           greatest(e.classification, tie_src.classification,
+                                    tie_dst.classification)),
+                  coalesce(n.compartments,
+                           e.compartments || tie_src.compartments
+                           || tie_dst.compartments),
+                  he.note"""
         + _ACH_CELL_FROM + " AND " + _ACH_CELL_VISIBLE
         + " ORDER BY he.assertion_id, he.hypothesis_id",
         {"case_id": case_id, "clearance": clearance,
          "compartments": sorted(compartments)}).fetchall()
     return [AchCell(assertion_id=r[0], hypothesis_id=r[1], stance=r[2],
                     reliability=r[3], credibility=r[4], label=r[5],
-                    classification=r[6], compartments=tuple(r[7] or ()))
+                    classification=r[6], compartments=tuple(r[7] or ()),
+                    note=r[8])
             for r in rows]
 
 
@@ -782,7 +855,11 @@ def render_markdown(report: Report) -> str:
         d[key] = [_cells(row) for row in d[key]]
     if d["hypotheses"]:
         d["hypotheses"] = {**d["hypotheses"], "hypotheses": [
-            _cells(h) for h in d["hypotheses"]["hypotheses"]]}
+            _cells(h) for h in d["hypotheses"]["hypotheses"]],
+            "reasoning": [_cells(r) for r in
+                          d["hypotheses"].get("reasoning") or []],
+            "status_notes": {k: _cell(v) for k, v in
+                             (d["hypotheses"].get("status_notes") or {}).items()}}
     tlp = d["classification"]
     # A missing value is said in words, as the console says it, and the
     # mark is set off from the case by the separator the console's case
@@ -936,6 +1013,31 @@ def render_markdown(report: Report) -> str:
                          f"{h['assessed']} |")
         for warning in d["hypotheses"].get("warnings", []):
             lines.append(f"\n> ⚠ {warning}")
+        # The reason recorded with a status, above all what ruled a
+        # REJECTED hypothesis out (verifier of ux11-ach:no-hypothesis-
+        # lifecycle-in-console, 2026-09-23): "rejected" with no reason is a
+        # verdict a reader cannot check.
+        reasons = d["hypotheses"].get("status_notes") or {}
+        stated = [h for h in d["hypotheses"]["hypotheses"]
+                  if reasons.get(str(h.get("id")))]
+        if stated:
+            lines += ["", "### The reason recorded with each status", "",
+                      "| Hypothesis | Status | Reason |", "|---|---|---|"]
+            for h in stated:
+                hid = str(h.get("id"))
+                lines.append(f"| {h['statement']} | "
+                             f"{_cell(statuses.get(hid, 'not recorded'))} | "
+                             f"{reasons[hid]} |")
+        # The analysts' reasons for their stances (ux11-ach:stance-note-
+        # erased-on-rescore, 2026-09-23), so a disclosed matrix carries its
+        # judgements and not only its arithmetic.
+        if d["hypotheses"].get("reasoning"):
+            lines += ["", "### Why each stance stands where it does", "",
+                      "| Evidence | Hypothesis | Stance | Note |",
+                      "|---|---|---|---|"]
+            for r in d["hypotheses"]["reasoning"]:
+                lines.append(f"| {r['evidence']} | {r['hypothesis']} | "
+                             f"{r['stance']} | {r['note']} |")
     elif d["redaction"].get("hypotheses_withheld"):
         # Said where the section would be, as for assumptions: a heading
         # that silently disappears reads as "no alternatives were

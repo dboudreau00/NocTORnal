@@ -176,6 +176,14 @@ KINDS: dict[str, Kind] = {
         "Emergency access was used on a case you own, or needs your review"),
     "CASE_REVIEW_DUE": Kind(
         "CASE_REVIEW_DUE", LOW, "A case you own is due for review"),
+    # ux12-feeds:feeds-badge-never-set (2026-09-23). A feed record that
+    # contains a selector one of the case's watches names is the one thing
+    # the ingest queue exists to surface, and nothing outside the Feeds
+    # pane said one had arrived. NORMAL, not URGENT: it is work, not an
+    # alarm. Raised by `IngestService._notify_selector_hits`.
+    "FEED_SELECTOR_HIT": Kind(
+        "FEED_SELECTOR_HIT", NORMAL,
+        "A feed record matched a selector a watch on your case is looking for"),
     # N3 (2026-09-02). Raised by `escalate_unacknowledged` when a priority-1
     # notification has sat unacknowledged past the window. URGENT itself,
     # and the one kind the sweep will never escalate -- or one silence
@@ -326,7 +334,8 @@ class NotificationService:
     # -- reading ----------------------------------------------------------
 
     def inbox(self, recipient_id: UUID, *, unread_only: bool = False,
-              limit: int = 50, case_id: UUID | None = None) -> list[Notification]:
+              limit: int = 50, case_id: UUID | None = None,
+              needs_action: bool = False) -> list[Notification]:
         """Filtered by the caller's CURRENT clearance, compartments AND case
         assignment.
 
@@ -334,11 +343,21 @@ class NotificationService:
         or expired assignment. Doing this in SQL rather than in Python means
         a paginated read cannot return a short page and call it the end of
         the list.
+
+        Unacknowledged priority-1 rows come first, then the rest newest
+        first, and `needs_action` keeps what is unread OR still
+        escalating (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23).
+        Ordered by time alone, an integrity alarm sat between a normal and
+        a low card; and "Unread only" hid an alarm the analyst had merely
+        glanced at, which `escalate_unacknowledged` still escalates an
+        hour later, because reading is not acknowledging (docs/07).
         """
         clauses = ["n.recipient_id = %s"]
         params: list = [recipient_id]
         if unread_only:
             clauses.append("n.read_at IS NULL")
+        if needs_action:
+            clauses.append(f"(n.read_at IS NULL OR {_ESCALATING})")
         if case_id is not None:
             clauses.append("n.case_id = %s")
             params.append(case_id)
@@ -347,7 +366,8 @@ class NotificationService:
         rows = self._c.execute(
             f"""SELECT {_N_COLUMNS} FROM notify.notification n
                  WHERE {' AND '.join(clauses)}
-                 ORDER BY n.created_at DESC LIMIT %s""",
+                 ORDER BY ({_ESCALATING}) DESC, n.created_at DESC
+                 LIMIT %s""",
             params).fetchall()
         return [_record(r) for r in rows]
 
@@ -359,6 +379,20 @@ class NotificationService:
         row = self._c.execute(
             f"""SELECT count(*) FROM notify.notification n
                  WHERE n.recipient_id = %s AND n.read_at IS NULL
+                   AND {readable_predicate('n')}""",
+            (recipient_id,)).fetchone()
+        return int(row[0])
+
+    def urgent_unacknowledged(self, recipient_id: UUID) -> int:
+        """How many priority-1 notifications this person has not yet
+        ACKNOWLEDGED, read or not: the ones `escalate_unacknowledged` will
+        pass to somebody else. Counted apart from unread, by the same read
+        filter, because a badge of unread alone dropped to zero on a glance
+        at an integrity alarm that was still going to escalate
+        (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23)."""
+        row = self._c.execute(
+            f"""SELECT count(*) FROM notify.notification n
+                 WHERE n.recipient_id = %s AND {_ESCALATING}
                    AND {readable_predicate('n')}""",
             (recipient_id,)).fetchone()
         return int(row[0])
@@ -661,8 +695,29 @@ def _require_transport(channel: str) -> None:
             "set it first.")
 
 
+#: How long a priority-1 notification may sit unacknowledged before the
+#: drain escalates it. Named so the inbox can say WHEN ("escalates at
+#: 14:05 UTC unless acknowledged") from the same number the sweep uses
+#: (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23).
+ESCALATE_AFTER = timedelta(hours=1)
+
+#: A row `escalate_unacknowledged` will escalate, or already has: urgent,
+#: unacknowledged, and not itself an escalation (those never escalate).
+_ESCALATING = ("(n.priority = 1 AND n.acknowledged_at IS NULL "
+               "AND n.kind <> 'ESCALATION')")
+
+
+def escalates_at(n: Notification) -> datetime | None:
+    """When the drain escalates this notification unless it is
+    acknowledged first, or None when it never will."""
+    if n.priority != URGENT or n.acknowledged_at is not None \
+            or n.kind == "ESCALATION":
+        return None
+    return n.created_at + ESCALATE_AFTER
+
+
 def escalate_unacknowledged(conn: psycopg.Connection, *,
-                            after: timedelta = timedelta(hours=1)) -> int:
+                            after: timedelta = ESCALATE_AFTER) -> int:
     """Escalate every priority-1 notification that has sat unacknowledged
     for longer than `after`. Returns how many ORIGINALS were escalated --
     each may produce several rows when it goes to the officers.
@@ -892,8 +947,8 @@ def _record(r) -> Notification:
 
 __all__ = [
     "IN_APP", "SMTP", "WEBHOOK", "JIRA", "URGENT", "NORMAL", "LOW",
-    "KINDS", "Kind", "Notification", "NotificationError",
+    "ESCALATE_AFTER", "KINDS", "Kind", "Notification", "NotificationError",
     "NotificationService", "Preference", "Tlp", "deliver_after",
     "effective_labels_for_notification", "escalate_unacknowledged",
-    "readable_predicate",
+    "escalates_at", "readable_predicate",
 ]

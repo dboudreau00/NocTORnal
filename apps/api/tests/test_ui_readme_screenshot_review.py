@@ -211,8 +211,10 @@ def test_a_delivery_preference_select_is_sized_to_its_options():
     assert "width: 100%" in _rule("select")
     assert "width: auto" in _rule(".pref-row select")
     prefs = _fn("loadInboxPreferences")
-    assert "priority.setAttribute('aria-label'" in prefs
-    assert "from.setAttribute('aria-label'" in prefs
+    # Named by a visible <label> since ux08-triage:prefs-unlabelled-and-
+    # opaque (2026-09-23), which is also the name a screen reader reads.
+    assert "prefField('Minimum priority', priority)" in prefs
+    assert "prefField('Quiet from', from)" in prefs
 
 
 def test_the_inbox_help_names_every_half_of_the_read_time_filter():
@@ -236,8 +238,11 @@ def test_the_inspector_does_not_call_brokerage_unbuilt():
     text = " ".join(_visible(_html()).split())
     assert "is Phase 3" not in text
     assert "not computed here" not in text
+    # An instruction since the ux19-copy stale-phase3-claim fix
+    # (2026-09-23): it says where to run brokerage, not only where it is.
     assert ("Brokerage (betweenness, Burt's constraint, key-player "
-            "fragmentation) is global and lives in the Analysis pane") in text
+            "fragmentation) is global, so it is not on this panel: run it on "
+            "the Analysis pane") in text
     assert '<span class="rail-cap">Analysis</span>' in _html()
 
 
@@ -251,11 +256,14 @@ def test_no_design_document_is_cited_to_the_analyst():
     strings = re.findall(r"'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`", code)
     cited = [s for s in strings if re.search(r"docs/\d\d", s)]
     assert not cited, cited
-    # True to onTriageKey, which also leaves the keys to a focused menu
-    # such as Queue: "not in a text field" was not.
-    assert "(INPUT|TEXTAREA|SELECT)" in _fn("onTriageKey")
-    assert ("The keys work whenever no form field has the focus (a text box "
-            "or a menu such as Queue)") in " ".join(visible.split())
+    # True to onTriageKey, which acts only inside the list since
+    # ux18-a11y:triage-letter-keys-global and only on a card or the list,
+    # never a button, a field or a chord, since ux08-triage:triage-keys-
+    # fire-on-browser-chords (2026-09-23).
+    assert "list.contains(target)" in _fn("onTriageKey")
+    assert "triageKeyTarget(target)" in _fn("onTriageKey")
+    assert ("The keys work while the list below has the focus"
+            ) in " ".join(visible.split())
 
 
 # ---------------------------------------------------------------------------
@@ -276,12 +284,35 @@ def test_refute_first_is_compared_with_evidence_not_with_hypotheses():
     assert "String(e.assertion_id) === String(body.refute_first)" in matrix
 
 
+def _ach_consts() -> str:
+    """ACH_STATUS and ACH_STATUS_CHIP, which the ranking cards read."""
+    js = _js()
+    found = [m.group(0) for name in ("ACH_STATUS", "ACH_STATUS_CHIP")
+             for m in [re.search(r"(?ms)^const " + name + r" = [\[{].*?^[\]}];", js)]
+             if m]
+    assert len(found) == 2, "ACH_STATUS or ACH_STATUS_CHIP is gone"
+    return "\n".join(found)
+
+
+#: The helpers the ACH renderers call since the ux11-ach pass (2026-09-23):
+#: the stable column key and order, the labelled score, the card, and the
+#: row's subject, claim and evidence cell.
+_ACH_HELPERS = ("achKey", "achColumns", "achNum", "achAnd", "achCard",
+                "achSubject", "achClaim", "achEvidenceCell")
+
+
+def _ach_sources() -> list[str]:
+    return [_deceptive(), _fn("visibleText"), _fn("withSafeLabel"),
+            _ach_consts(), *(_fn(n) for n in _ACH_HELPERS)]
+
+
 @needs_node
 def test_the_next_test_names_the_row_and_the_hypotheses_it_lacks(tmp_path):
-    got = _run([_deceptive(), _fn("visibleText"), _fn("withSafeLabel"),
-                _fn("achNextTest")], """
+    """The blank columns are named by their stable keys, in key order,
+    whatever order the ranking lists the hypotheses in."""
+    got = _run([*_ach_sources(), _fn("achNextTest")], """
 const body = {
-  hypotheses: [{id: 'h1'}, {id: 'h2'}, {id: 'h3'}],
+  hypotheses: [{id: 'h2', number: 2}, {id: 'h3', number: 3}, {id: 'h1', number: 1}],
   evidence: [{assertion_id: 'a1', label: 'same builder'},
              {assertion_id: 'a2', label: 'hal_\\u202Equarry'}],
   cells: [{assertion_id: 'a1', hypothesis_id: 'h1'},
@@ -299,6 +330,7 @@ console.log(JSON.stringify([
 """, tmp_path)
     found, none, hypothesis_id = got
     assert found["missing"] == ["H3"]
+    assert found["first"]["id"] == "h3", "Score it now opens the first blank"
     assert found["label"] == "hal_‹U+202E›quarry", "a forum label is made safe"
     assert none is None
     assert hypothesis_id is None, "a hypothesis id names no evidence row"
@@ -311,7 +343,6 @@ function clear(n) { n.children = []; }
 function show(n, on) { n.hidden = !on; }
 function fact(k, v, cls) { return el('span', 'fact ' + (cls || ''), k + ' ' + v); }
 function renderAchHypothesisPicker() {}
-function achBasisSuffix() { return ''; }
 const STANCE_CLASS = {'-2': 'st-cc', '-1': 'st-c', '0': 'st-n', '1': 'st-s', '2': 'st-ss'};
 function stanceText(s) { return String(s); }
 const _el = el;
@@ -321,12 +352,14 @@ el = function (tag, cls, text) {
   return n;
 };
 const body = {
-  hypotheses: [{id: 'h1', statement: 'separate operators', inconsistency: 0, support: 2.2,
-                assessed: 3, unassessed: 0},
-               {id: 'h2', statement: 'same operator', inconsistency: 1.4, support: 2.2,
-                assessed: 3, unassessed: 0},
-               {id: 'h3', statement: 'imitator', inconsistency: 0.7, support: 1.4,
-                assessed: 2, unassessed: 1}],
+  // Numbered in writing order, listed in rank order: the imitator was
+  // written first and ranks last (ux11-ach:h-numbers-unstable, 2026-09-23).
+  hypotheses: [{id: 'h1', number: 2, statement: 'separate operators', inconsistency: 0,
+                support: 2.2, assessed: 3, unassessed: 0},
+               {id: 'h2', number: 3, statement: 'same operator', inconsistency: 1.4,
+                support: 2.2, assessed: 3, unassessed: 0},
+               {id: 'h3', number: 1, statement: 'imitator', inconsistency: 0.7,
+                support: 1.4, assessed: 2, unassessed: 1}],
   evidence: [{assertion_id: 'a1', label: 'same builder', diagnosticity: 3,
               is_diagnostic: true, is_incomplete: false, assessed_against: 3},
              {assertion_id: 'a2', label: 'hal_quarry', diagnosticity: 0,
@@ -347,39 +380,53 @@ def test_the_next_test_marker_renders_on_its_evidence_row(tmp_path):
     old comparison could never draw now lands on the row `refute_first`
     names, the dash on that row says why it is unknown, and the ranking
     names the blank column."""
-    got = _run([_deceptive(), _fn("visibleText"), _fn("withSafeLabel"),
-                _fn("achNextTest"), _fn("achUnknownWhy"),
+    got = _run([*_ach_sources(), _fn("achNextTest"), _fn("achUnknownWhy"),
                 _fn("renderAchRanking"), _fn("renderAchMatrix"),
                 _MATRIX_STUBS], """
 renderAchRanking(body);
 renderAchMatrix(body);
 const text = (n) => (n.textContent || '') + (n.children || []).map(text).join('');
+const head = $('ach-matrix').children[0].children[0].children[0].children;
 const rows = $('ach-matrix').children[0].children[1].children;
 const diag = (r) => r.children[r.children.length - 1];
 console.log(JSON.stringify({
   ranking: $('ach-ranking').children.map(text),
+  header: head.map(text),
   rowClasses: rows.map((r) => r.className),
+  gaps: rows.map((r) => r.children.filter((c) => /st-gap/.test(c.className)).length),
   diagText: rows.map((r) => text(diag(r))),
   diagTitle: rows.map((r) => diag(r).title),
 }));
 """, tmp_path)
-    assert got["ranking"][0].startswith("0.0H1separate operators")
+    # The card carries its column's key, and the score says what it is.
+    assert got["ranking"][0].startswith("against 0.00H2separate operators")
+    assert got["ranking"][1].startswith("against 1.40H3same operator")
     assert "next test" in got["ranking"][-1]
-    assert "Score hal_quarry against H3" in got["ranking"][-1]
+    assert "Score hal_quarry against H1" in got["ranking"][-1]
+    assert got["ranking"][-1].endswith("Score it now")
+    # Columns in writing order, each with its statement, not rank order.
+    assert got["header"][1:4] == ["H1imitator", "H2separate operators",
+                                  "H3same operator"]
     assert got["rowClasses"] == ["", "row-incomplete"]
+    assert got["gaps"] == [0, 1], "the unfinished row's blank is outlined"
     assert "next test" not in got["diagText"][0]
     # The unknown row says so in the warning's own word, not with a glyph
     # a numeric column reads as "no value".
     assert got["diagText"][1].startswith("unfinished") and "next test" in got["diagText"][1]
     assert not _DASHES.search(got["diagText"][1])
     assert "2 of 3 hypotheses" in got["diagTitle"][1]
+    assert "Still to score: H1." in got["diagTitle"][1], (
+        "the row names the hypothesis it is owed")
     assert not any("refute this first" in r for r in got["ranking"])
 
 
 def test_the_ranking_ties_each_card_to_its_matrix_column_and_colours_against():
-    ranking = _code(_fn("renderAchRanking"))
-    assert "'H' + (i + 1)" in ranking, "a card must carry its matrix column's H number"
-    assert "' against'" in ranking and "' hot'" not in ranking
+    card = _code(_fn("achCard"))
+    assert "achKey(h)" in card, "a card must carry its matrix column's key"
+    assert "return 'H' + h.number;" in _code(_fn("achKey")), (
+        "the key is the stable number, never the rank")
+    assert "' against'" in card and "' hot'" not in card
+    assert "'against ' + achNum(h.inconsistency)" in card, "the score is labelled"
     assert "var(--danger)" in _rule(".score.against")
     assert "var(--accent)" in _rule(".score.hot"), (
         "`.score.hot` is shared with triage, lifecycle and deception and "
@@ -514,7 +561,7 @@ console.log(JSON.stringify(rows.map((c) => {
 """, tmp_path)
     named, unresolved = got
     assert named == ["by Demo Analyst", "Account fcfd6f27-0000"]
-    assert unresolved == ["actor fcfd6f27", "Account fcfd6f27-0000"]
+    assert unresolved == ["account fcfd6f27", "Account fcfd6f27-0000"]
 
 
 def test_the_custody_route_carries_the_actor_name():
@@ -533,8 +580,10 @@ def test_a_styled_select_draws_its_chevron_even_when_focused():
         rule = _rule(selector)
         assert "linear-gradient" in rule and "no-repeat" in rule, selector
     assert "url(" not in _rule("select.select")
-    # A listbox has nothing to drop down, and Admin's roles picker is one.
-    assert 'class="select" multiple' in _html()
+    # A listbox has nothing to drop down. Admin's roles picker was the
+    # console's one listbox until it became checkboxes (ux16-admin:
+    # create-roles-multiselect, 2026-09-23); the rule stays, so the next
+    # listbox does not grow a chevron.
     assert "background-image: none" in _rule("select.select[multiple]")
 
 
@@ -591,7 +640,15 @@ def test_a_refusal_detail_is_closed_before_the_sentence_after_it(tmp_path):
     """The Break-glass subtab printed "missing global permission
     break_glass.review The review belongs to the security officer", the
     server's clause and the console's sentence run together as one."""
-    got = _run([_API_ERROR, _fn("refusalText"), _fn("closeClause")], """
+    # With no role table read from the server (`permissionRoles` null) a
+    # refusal reads as it always did; the role-named form is held by
+    # test_a_refusal_names_the_roles_and_who_can_give_one in
+    # test_search_palette_copy_ui.py, and every context against the real
+    # grant table by test_every_refusal_reads_as_a_sentence_against_the_
+    # real_grant_table in test_search_columns_pg.py.
+    got = _run([_API_ERROR, _fn("refusalText"), _fn("closeClause"),
+                _fn("permissionRefusal"), _fn("roleWords"), _fn("rolesFor"),
+                _fn("listWords"), "let permissionRoles = null;"], """
 const e = (d) => new ApiError(403, 'Forbidden', d);
 console.log(JSON.stringify([
   refusalText(e('missing global permission break_glass.review'),
@@ -620,17 +677,24 @@ console.log(JSON.stringify([
 def test_a_triage_key_with_a_modifier_is_left_to_the_browser(tmp_path):
     """Ctrl+A (select all) accepted the highlighted proposal with no
     prompt; Ctrl+R and Ctrl+D opened the reject and defer prompts."""
-    got = _run([_fn("onTriageKey")], """
+    got = _run([_fn("triageKeyTarget"), _fn("onTriageKey")], """
 const calls = [];
 const state = { tab: 'triage', triage: [{id: 1}, {id: 2}], triageIndex: 0 };
 function acceptProposal() { calls.push('accept'); }
 function rejectProposal() { calls.push('reject'); }
 function deferProposal() { calls.push('defer'); }
 function renderTriage() {}
-function $() { return { children: [] }; }
+// The list holds the focus: since 2026-09-23 the letters act only inside
+// it, and A asks first (ux18-a11y:triage-letter-keys-global).
+function $() { return { children: [], hidden: true, contains: () => true }; }
+document.body = { tagName: 'BODY' };
+function anyDialogOpen() { return false; }
+function triageLettersOn() { return true; }
+function triageAcceptQuestion() { return 'Accept?'; }
+const window = { confirm: () => true };
 const press = (key, mods) => {
   let prevented = false;
-  onTriageKey(Object.assign({ key: key, target: { tagName: 'BODY' },
+  onTriageKey(Object.assign({ key: key, target: document.body,
     preventDefault() { prevented = true; } }, mods || {}));
   return prevented;
 };
@@ -695,7 +759,7 @@ def test_no_dash_reaches_the_reader_from_the_rewritten_functions():
 
 def test_no_dash_in_the_rewritten_help_lines():
     text = " ".join(_visible(_html()).split())
-    for anchor in ("Brokerage (betweenness", "The keys work whenever",
+    for anchor in ("Brokerage (betweenness", "The keys work while",
                    "Fragments are <strong>structurally redacted</strong>",
                    "filtered by your CURRENT clearance",
                    "A cell is how one piece of evidence"):

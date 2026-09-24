@@ -43,7 +43,12 @@ import psycopg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from noctornal_api.cases import CaseError, CaseService
+from noctornal_api.cases import (
+    CONTENT_READ_ONLY_STATES,
+    CaseError,
+    CaseService,
+    allowed_transitions,
+)
 from noctornal_api.http.deps import (
     CurrentUser,
     audit_auth_event,
@@ -89,6 +94,34 @@ class CaseOut(BaseModel):
     # after this instant postdates the close, which matters for disclosure
     # (ux02-cases:case-status-invisible-in-workspace, 2026-09-22).
     closed_at: datetime | None = None
+    # True while the case's CONTENT is read-only (`CONTENT_READ_ONLY_STATES`),
+    # which the gate enforces with a 409. Sent rather than re-derived so the
+    # console's read-only mode and the server's refusal cannot disagree on
+    # which states count (gap-closed-case-writes, 2026-09-23).
+    read_only: bool = False
+    # The rest of the case record, for the console's Case details panel.
+    # Lawful basis, authority, retention and review were written at
+    # creation and never shown again, so an analyst could not check what
+    # their collection rested on without leaving the console
+    # (ux02-cases:case-record-invisible-and-uneditable, 2026-09-23).
+    summary: str | None = None
+    authority_ref: str | None = None
+    # The legal moves from `status`, in lifecycle order: the Status dialog
+    # offers these and nothing else (ux02-cases:status-prompt-free-text-
+    # one-way-transitions, 2026-09-23). The transition route still decides.
+    allowed_transitions: list[str] = []
+    # The owner by name, and the CALLER's own standing on this case: the
+    # role that opens it for them, its display name (CASE_OWNER reads as
+    # Lead investigator), and what that role may do here. The console
+    # showed Status… and the edit controls to everyone and let a refusal
+    # say who could use them (ux02-cases:header-says-analyst-no-permission-
+    # cues, 2026-09-23). A hint for the console, never a gate: every route
+    # still runs the five-part check. Null and empty for a caller with no
+    # live assignment on the case.
+    owner_name: str | None = None
+    my_role: str | None = None
+    my_role_name: str | None = None
+    my_permissions: list[str] = []
 
 
 def _out(c) -> CaseOut:
@@ -97,8 +130,45 @@ def _out(c) -> CaseOut:
         classification=c.classification, owner_user_id=str(c.owner_user_id),
         legal_basis=c.legal_basis, retention_until=c.retention_until,
         review_due=c.review_due, created_at=c.created_at,
-        closed_at=c.closed_at,
+        closed_at=c.closed_at, summary=c.summary,
+        authority_ref=c.authority_ref,
+        allowed_transitions=allowed_transitions(c.status),
+        read_only=c.status in CONTENT_READ_ONLY_STATES,
     )
+
+
+def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID) -> list[CaseOut]:
+    """`_out` for each case, with the owner's name and the caller's live
+    role on it, read in two queries whatever the number of cases.
+
+    The role is the caller's unexpired assignment, which is what the gate
+    reads a role from (`CaseService` docstring): a global role confers
+    nothing on a case."""
+    out = [_out(c) for c in cases]
+    if not out:
+        return out
+    ids = [c.id for c in cases]
+    owners = {c.owner_user_id for c in cases}
+    names = {r[0]: r[1] for r in conn.execute(
+        "SELECT id, display_name FROM iam.app_user WHERE id = ANY(%s)",
+        (list(owners),)).fetchall()}
+    mine = {r[0]: (r[1], r[2], list(r[3] or [])) for r in conn.execute(
+        """SELECT a.case_id, a.role_key, r.display_name,
+                  ARRAY(SELECT rp.permission_key FROM iam.role_permission rp
+                         WHERE rp.role_key = a.role_key
+                         ORDER BY rp.permission_key)
+             FROM iam.case_assignment a
+             LEFT JOIN iam.role r ON r.key = a.role_key
+            WHERE a.user_id = %s AND a.case_id = ANY(%s)
+              AND (a.expires_at IS NULL OR a.expires_at > now())""",
+        (user_id, ids)).fetchall()}
+    for row, case in zip(out, cases, strict=True):
+        row.owner_name = names.get(case.owner_user_id)
+        role = mine.get(case.id)
+        if role:
+            row.my_role, row.my_role_name, row.my_permissions = (
+                role[0], role[1] or role[0], role[2])
+    return out
 
 
 def _now() -> datetime:
@@ -118,25 +188,28 @@ def create_case(body: CreateCaseBody,
         classification=body.classification, compartments=body.compartments,
         summary=body.summary, authority_ref=body.authority_ref,
     )
-    return _out(svc.get(case_id))
+    return _with_caller(conn, [svc.get(case_id)], user.user_id)[0]
 
 
 @router.get("/cases", response_model=list[CaseOut],
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_cases(user: CurrentUser = Depends(current_user),
                conn: psycopg.Connection = Depends(get_conn)) -> list[CaseOut]:
-    return [_out(c) for c in CaseService(conn).list_for_user(user.user_id)]
+    # With the caller's role on each, for the case list's "Your role"
+    # column (ux02-cases:case-list-lacks-triage-fields, 2026-09-23).
+    return _with_caller(conn, CaseService(conn).list_for_user(user.user_id),
+                        user.user_id)
 
 
 @router.get("/cases/{case_id}", response_model=CaseOut,
             dependencies=[Depends(rate_limit("graph.view"))])
 def get_case(case_id: UUID,
-             _: CurrentUser = Depends(require("case.read")),
+             user: CurrentUser = Depends(require("case.read")),
              conn: psycopg.Connection = Depends(get_conn)) -> CaseOut:
     case = CaseService(conn).get(case_id)
     if case is None:
         raise Problem(404, "Not found", "case does not exist")
-    return _out(case)
+    return _with_caller(conn, [case], user.user_id)[0]
 
 
 # ---------------------------------------------------------------------
@@ -316,10 +389,53 @@ def update_case(case_id: UUID, body: UpdateCaseBody,
         authority_ref=body.authority_ref, review_due=body.review_due,
         retention_until=body.retention_until, classification=classification,
     )
-    updated = svc.get(case_id)
+    # The exhibits' storage locks follow the date, AFTER it has committed
+    # (x-lock-extension, 2026-09-24). Each exhibit is locked at lodging for
+    # a fixed period and nothing lengthened it, so a case kept for longer
+    # kept exhibits the store would delete from day 366. Run whenever the
+    # date is supplied, not only when it moves, so saving the same date
+    # again retries an exhibit whose lock could not be lengthened: it is
+    # idempotent, and an exhibit already held that long is left alone.
+    # A failure never undoes the date; it is counted here and audited per
+    # exhibit (`EvidenceService.extend_locks` says why). The counts are of
+    # the exhibits THIS caller may see (verifier, 2026-09-24).
+    lock_extension = (_extend_exhibit_locks(conn, case_id, body.retention_until,
+                                            user.user_id)
+                      if body.retention_until is not None else None)
+    updated = _with_caller(conn, [svc.get(case_id)], user.user_id)[0]
     # Flattened rather than nested under a "case" key so a client that only
     # reads .status/.title sees the same shape GET /cases/{id} returns.
-    return {**_out(updated).model_dump(mode="json"), "access_lost": access_lost}
+    return {**updated.model_dump(mode="json"), "access_lost": access_lost,
+            "lock_extension": lock_extension}
+
+
+def _extend_exhibit_locks(conn: psycopg.Connection, case_id: UUID,
+                          retention_until: date, actor_id: UUID) -> dict:
+    """`EvidenceService.extend_locks`, with the store built here so a
+    deployment without one reports every exhibit as not extended rather
+    than failing a case edit that has already committed. The store is not
+    built at all for a case with no exhibits.
+
+    Counted under the caller's own ceiling, the one their register is
+    drawn under, so the answer never numbers an exhibit they cannot see
+    (x-lock-extension, verifier, 2026-09-24). Every live exhibit is still
+    locked: the date governs them all. Also the Evidence pane's
+    `POST /cases/{id}/evidence/locks`, which is why it is shared."""
+    from noctornal_api.evidence import EvidenceError, EvidenceService, EvidenceStorage
+    from noctornal_api.http.deps import user_ceiling
+
+    clearance, compartments = user_ceiling(conn, actor_id, case_id=case_id)
+    live = conn.execute(
+        """SELECT 1 FROM core.evidence
+            WHERE case_id = %s AND purged_at IS NULL AND is_worm_locked
+            LIMIT 1""", (case_id,)).fetchone()
+    try:
+        storage = EvidenceStorage() if live else None
+    except EvidenceError:
+        storage = None
+    return EvidenceService(conn, storage).extend_locks(
+        case_id, retention_until, actor_id,
+        ceiling=(clearance.name, sorted(compartments)))
 
 
 def _assignees_below(conn: psycopg.Connection, case_id: UUID,
@@ -815,6 +931,6 @@ def transition(case_id: UUID, body: TransitionBody,
     svc = CaseService(conn)
     if body.status == "PURGED":
         authorize_object(conn, user, case_id=case_id,
-                         permission_key="case.delete")
+                         permission_key="case.delete", after_case_gate=True)
     svc.transition_status(case_id, body.status, actor_id=user.user_id)
-    return _out(svc.get(case_id))
+    return _with_caller(conn, [svc.get(case_id)], user.user_id)[0]

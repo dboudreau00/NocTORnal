@@ -83,7 +83,15 @@ COPY . /app
 #
 # Both workspace packages, in dependency order: noctornal-api imports
 # noctornal_ontology at startup (the selector normalisers).
-RUN pip install --no-cache-dir -e packages/ontology -e apps/api
+#
+# `-c constraints.txt` (sec-pin-dependencies, 2026-09-23): the exact
+# versions the release's suite passed on, the same file the installers and
+# CI install with. Without it every build of this image resolved each `>=`
+# to whatever PyPI held that day, so two builds of one commit could run two
+# different stacks, neither of them the tested one. It is a constraints file
+# and not a second dependency list: it pins what the pyproject files ask
+# for and adds nothing, which is the drift the note above rules out.
+RUN pip install --no-cache-dir -c constraints.txt -e packages/ontology -e apps/api
 
 # An unprivileged account: no login shell, and no home directory of its own
 # to write to.

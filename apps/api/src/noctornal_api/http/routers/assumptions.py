@@ -62,11 +62,15 @@ def list_assumptions(
     return {"assumptions": [r.as_dict() for r in rows], "count": len(rows)}
 
 
+# `content_write=True` on both writes: `case.update` also edits the case's
+# governance record, which a CLOSED or ARCHIVED case keeps accepting, so
+# the verb alone cannot tell the gate that the register is content and
+# must be refused there (gap-closed-case-writes, 2026-09-23).
 @router.post("", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("request"))])
 def make_assumption(
     case_id: UUID, body: AssumptionBody,
-    user: CurrentUser = Depends(require("case.update")),
+    user: CurrentUser = Depends(require("case.update", content_write=True)),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
@@ -82,7 +86,7 @@ def make_assumption(
               dependencies=[Depends(rate_limit("request"))])
 def review_assumption(
     case_id: UUID, assumption_id: UUID, body: ReviewBody,
-    user: CurrentUser = Depends(require("case.update")),
+    user: CurrentUser = Depends(require("case.update", content_write=True)),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     if body.status not in STATUSES:

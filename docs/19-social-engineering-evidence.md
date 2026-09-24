@@ -46,7 +46,36 @@ Three consequences, enforced not documented:
 1. **DOM, HAR and `.eml` bytes are hostile.** `core.evidence` carries
    `is_hostile_markup`. A hostile row is download-only, and only from the
    separate sample origin. The same gate `lab.sample.download` already
-   passes through. The API origin never serves those bytes.
+   passes through. The API origin never serves those bytes:
+   `GET .../content` and `POST .../export` refuse such an exhibit with
+   409 and audit the refusal (`EVIDENCE_EGRESS_REFUSED`, reason
+   `hostile_markup`).
+
+   **Producing one** (Alpha 6, migration 0068). The exhibit's card offers
+   "Produce through the sample origin", which takes the Lab download's two
+   legs. The console mints a one-shot ticket on the application origin,
+   `POST /cases/{id}/evidence/{eid}/production-ticket`, under the gate
+   `POST .../export` applies: `evidence.export` on the case and on the
+   exhibit's labels, with a sign-in from the last 15 minutes. The mint
+   refuses a split that cannot serve, an exhibit that is not attacker
+   markup or was purged, and one the egress gate keeps in (AMBER_STRICT,
+   RED, compartmented), before a ticket exists. The ticket is a
+   `lab.download_ticket` row naming the exhibit (purpose
+   `exhibit_production`), good for one redemption within sixty seconds and
+   stored as its SHA-256 only. The console then spends it at the sample
+   origin, `POST /cases/{id}/evidence/{eid}/download`, with no cookie and
+   no header, the ticket in a form body. That path is the second one the
+   sample origin answers (`_allowed_on_sample_origin`), and the
+   application process refuses it. The redemption re-reads the holder's
+   account and `evidence.export` at the exhibit's live labels, re-checks
+   the exhibit and the egress gate, re-verifies the bytes against the
+   recorded digest, and serves them in the Lab's archive (ZIP, password
+   `infected`, entry named for the digest) with `nosniff` and a
+   sandboxing CSP. The custody log gets an EXPORTED row saying it was
+   produced through the sample origin, and the audit log carries the
+   ticket's issue, its redemption and every refusal that names a real
+   ticket. As with the Lab's ticket, the session behind the mint is not
+   re-read at redemption.
 2. **Screenshots are raster-only, and the type is *sniffed*, not
    believed.** `media_type` on `core.evidence` comes from
    `UploadFile.content_type`, which is client-supplied. The inline
@@ -234,12 +263,33 @@ merge half the internet, so clustering only, never auto-merge).
 | Invariant | How it lands here |
 |---|---|
 | 1, nothing is a fact | A capture/message/call row is **evidence**, not graph. Nodes and edges come from it only via `core.assertion`, like everything else. |
-| 3, machines propose | The header parser and the capture parser write `proposal` rows. Neither has a code path to `node` or `edge`. |
+| 3, machines propose | The header parser and the capture parser write `proposal` rows. Neither has a code path to `node` or `edge`. Each capture, message and call also offers the INFRA and LURE entities its durable fields support (`POST /cases/{id}/deception/{captures|emails|calls}/{record}/propose`, naming a candidate by key); the proposal is derived from the stored record, never from the request, the presented caller ID is never among them, and a sending address is offered only when the trust boundary is confirmed. |
 | 5, superseded, never overwritten | A re-capture of the same URL is a **new** capture row. Phishing pages change hourly; overwriting destroys the timeline that proves it. |
 | 8. TLP gates egress | BEC bodies are victim PII by construction. Nothing new: `check_egress` already covers exhibits and reports. |
 | 12, nothing silently dropped | An unparseable `.eml` is still recorded: its bytes land first as a WORM exhibit, and whatever the parser could not read is stored with the message as a parse gap (`parse_gaps`), so a failed parse reads as "not established", never as a finding. A call record arrives as fields, not bytes, and a malformed one is refused with a 422 naming the field. Neither goes to `ingest.dead_letter`, which serves the feed ingest and keeps a failed fragment redacted (JSON to its structure, anything else to a short head with its values masked) with the digest of what arrived, never the raw fragment; the verbatim bytes stay in the batch's raw object. |
 
 ---
+
+**Across the three channels.** Every capture, message and call returned by
+the list and detail routes carries `also_seen`: each host or address it
+shares with another record of the case, where it sits in each, and which
+of those sightings are values the sender typed (a Return-Path or
+Message-ID host, a HELO name) rather than ones a machine recorded. It is
+computed over the records the reader may see, so an overlap with a record
+above their labels is not pointed at. Received hops below the boundary
+never take part, and a sending address takes part only when the boundary
+is confirmed. The console draws it as "also seen in" with a button that
+opens the other record. The same hosts and addresses, and every whole
+URL, are searchable: `GET /cases/{id}/deception/search?q=` (gated on
+`evidence.read`, over the reader's labels, a defanged query accepted)
+backs a "Deception records" block in the Search pane. Proposing from a
+record says "already an entity" only of an entity the reader may see.
+A capture's certificate date is read against the case's first lure, and
+a message is dated for that by the Received time its trust boundary hop
+recorded, never by its Date header, which is the sender's.
+The console can also record all three channels:
+a capture somebody else made, an `.eml` upload, and a call, with the L4
+and L5 fields held as the table holds them.
 
 ## 5) Tradecraft: rendering a BEC email attacks the investigator
 

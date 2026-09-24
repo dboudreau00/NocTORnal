@@ -5,10 +5,11 @@ eviction, memory pressure removes keys the limiter still needs, and a
 removed meter is a meter that reads as empty: the next request from a
 subject that was being refused is admitted with a full burst. Nothing
 errors, nothing logs, the limiter just stops limiting whoever the cache
-happened to evict. docs/16 C8 records that `infra/docker-compose.yml`
-runs Redis with `allkeys-lru` for exactly this reason, and until
-2026-09-02 nothing in the process checked -- the operator had to know to
-look.
+happened to evict. `infra/docker-compose.yml` ran Redis with
+`allkeys-lru` until the Alpha 6 pre-release check (2026-09-23) and runs
+`noeviction` now, but an operator's own Redis can still evict (docs/16
+C8), and until 2026-09-02 nothing in the process checked: the operator
+had to know to look.
 
 `build_limiter` now reads `CONFIG GET maxmemory-policy` once at startup
 and warns in the same voice as the existing "RATE LIMITING IS DISABLED"

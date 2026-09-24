@@ -175,6 +175,18 @@ _CLOSE_POLICY = 1008
 _CLOSE_UNAUTHENTICATED = _CLOSE_POLICY
 _CLOSE_BUSY = 1013
 
+#: The reason sent with the policy close when the SESSION behind a socket
+#: has gone (idle or absolute expiry, a sign-out, a revocation), as distinct
+#: from the case gate refusing it. The console reads this reason to show the
+#: live dot as signed out and offer the in-place sign-in, rather than
+#: keeping a green "Live" over a session the next refetch will find dead
+#: (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23).
+SESSION_ENDED_REASON = "session ended"
+
+#: How long a quiet socket waits before it pings, and so the longest a dead
+#: session keeps a socket open. A module value so a test can shorten it.
+_PING_SECONDS = 25.0
+
 
 class _PendingBudget:
     """Slots for sockets that are not yet subscribed: reserved BEFORE
@@ -725,7 +737,7 @@ async def live(ws: WebSocket) -> None:
     if origin_split().serves_here:
         await ws.close(code=_CLOSE_BUSY,
                        reason="this process is the sample origin and serves "
-                              "sample downloads only")
+                              "sample and exhibit downloads only")
         return
     if _hub.count >= _MAX_SOCKETS:
         _refused("too many live subscribers", ip)
@@ -768,7 +780,7 @@ async def live(ws: WebSocket) -> None:
         _pending.release(ip)
     if auth is None:
         return
-    user_id, mfa_at, case_id = auth
+    user_id, mfa_at, case_id, token = auth
 
     if _hub.count >= _MAX_SOCKETS:
         log.warning("live socket refused: %d already open", _hub.count)
@@ -778,7 +790,7 @@ async def live(ws: WebSocket) -> None:
     try:
         await ws.send_json({"type": "ready",
                             "case_id": str(case_id) if case_id else None})
-        await _stream(ws, queue, user_id, case_id, mfa_at)
+        await _stream(ws, queue, user_id, case_id, mfa_at, token=token)
     except WebSocketDisconnect:
         pass
     except Exception:  # noqa: BLE001 — a dropped socket must not 500 the app
@@ -791,8 +803,10 @@ async def live(ws: WebSocket) -> None:
 
 async def _handshake(ws: WebSocket, ip: str | None):
     """The pre-subscribe half of the socket: wait for the hello, then
-    authenticate it. Returns `(user_id, mfa_at, case_id)`, or None after
-    having closed the socket with a reason the client can act on.
+    authenticate it. Returns `(user_id, mfa_at, case_id, token)`, or None
+    after having closed the socket with a reason the client can act on.
+    The token is kept so the stream can ask, without sliding it, whether
+    the session is still alive (`_session_alive`).
 
     Split out of `live()` on 2026-09-09 so that the pending slot is
     released by ONE `finally` around this call rather than before each
@@ -882,7 +896,7 @@ async def _handshake(ws: WebSocket, ip: str | None):
         await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no such case")
         return None
     user_id, mfa_at = session
-    return user_id, mfa_at, case_id
+    return user_id, mfa_at, case_id, token
 
 
 def _authenticate(token: str, case_id: UUID | None, ip: str | None,
@@ -976,8 +990,29 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
         conn.close()
 
 
+def _session_alive(token: str) -> bool:
+    """Whether the session this socket opened on still stands: not
+    revoked, not past its absolute limit, not idle past its window.
+
+    `touch=False`, and that is the whole point of the call. The socket
+    was only ever checked at its handshake, so a console left open kept a
+    green "Live" for as long as the tab lived after its session had died,
+    and the first colleague's edit then fired a refetch that threw the
+    analyst to the sign-in at a moment of somebody else's choosing
+    (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23). Asking
+    must not keep the session alive, or the idle timeout would never fire
+    for a tab that is merely open (final review C20)."""
+    conn = connect()
+    try:
+        return SessionService(PgSessionStore(conn)).validate(
+            token, touch=False).ok
+    finally:
+        conn.close()
+
+
 async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
-                  case_id: UUID | None, mfa_at) -> None:
+                  case_id: UUID | None, mfa_at, *,
+                  token: str | None = None) -> None:
     """Forward what this caller may see, until the socket goes away.
 
     Waits on the queue AND on the socket at the same time. Waiting only on
@@ -991,15 +1026,30 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
     A client that reconnects on a flaky link would churn through slots
     faster than they are returned, and the refusal would look like the
     server being broken.
+
+    The session is asked about on every idle ping and before every
+    delivery, and a dead one ends the socket with the policy close and
+    `SESSION_ENDED_REASON` (ux01-firstrun:live-dot-green-on-dead-session,
+    2026-09-23).
     """
     receiver = asyncio.create_task(ws.receive())
     getter: asyncio.Task | None = None
+
+    async def session_gone() -> bool:
+        if token is None or await asyncio.to_thread(_session_alive, token):
+            return False
+        # A peer that left meanwhile makes the close raise; it is gone
+        # either way.
+        with contextlib.suppress(Exception):
+            await ws.close(code=_CLOSE_POLICY, reason=SESSION_ENDED_REASON)
+        return True
+
     try:
         while True:
             if getter is None or getter.done():
                 getter = asyncio.create_task(queue.get())
             done, _ = await asyncio.wait(
-                {receiver, getter}, timeout=25,
+                {receiver, getter}, timeout=_PING_SECONDS,
                 return_when=asyncio.FIRST_COMPLETED)
 
             if receiver in done:
@@ -1015,6 +1065,10 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
                 message = _relevant(payload, user_id, case_id)
                 if message is None:
                     continue
+                # A change delivered to a dead session would only fire a
+                # refetch that 401s; the close says so first.
+                if await session_gone():
+                    return
                 # RE-CHECKED PER DELIVERY. A socket outlives an assignment;
                 # F19's headline finding was this shape with a shorter
                 # half-life.
@@ -1028,7 +1082,10 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
 
             # Neither fired: idle. The ping catches a peer that vanished
             # without closing — a laptop lid, a dropped VPN — which the
-            # receive above cannot see.
+            # receive above cannot see; the session check catches a session
+            # that ended while the socket stayed up.
+            if await session_gone():
+                return
             await ws.send_json({"type": "ping"})
     finally:
         for task in (receiver, getter):

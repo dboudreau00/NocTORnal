@@ -82,7 +82,7 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                  if self_loops_deleted else "")
               + f"\n\nReason given: {reason}\n\n"
               f"Merging is the operation most likely to quietly corrupt a "
-              f"case (docs/01). If this is wrong, it is reversible from the "
+              f"case. If this is wrong, it is reversible from the "
               f"entity-resolution panel and the reversal restores every "
               f"original endpoint exactly."),
         classification=classification, compartments=compartments,
@@ -199,7 +199,7 @@ def approval_decided(conn: psycopg.Connection, *, case_id: UUID,
 
 
 def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
-                     actor_id: UUID) -> bool:
+                     actor_id: UUID, classification: str | None = None) -> bool:
     """Triage had no notification at all: an analyst found out there was work
     by looking. Low priority and digest-friendly by default, because a
     capture that raises forty proposals must not raise forty emails.
@@ -214,10 +214,18 @@ def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
     by NOTHING -- the same shape `effective_labels_for_notification` had
     before F19. PROPOSAL_QUEUED sat in the preferences panel as a kind the
     user could tune for an event that could not happen.
+
+    `classification` is the capture's own label (final review u12,
+    2026-09-24), composed over the case's as an element's is. The notice
+    was labelled at the case alone, so a RED paste into an AMBER case told
+    an AMBER owner, by an email-safe summary, how many proposals RED
+    material had raised, and its Open led to a queue that showed them
+    nothing, since the queue filters each proposal by what it came from.
+    Now suppression 2 keeps it from anyone who could not read them.
     """
     if count <= 0:
         return False
-    code, classification, compartments = _case(conn, case_id)
+    code, case_classification, compartments = _case(conn, case_id)
     # Agreed in number, because the text is stored and read verbatim: the
     # inbox printed "3 proposal(s) were raised" (README screenshot set
     # review, 2026-09-23).
@@ -232,9 +240,14 @@ def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
         body=(f"{count} new {noun} {'was' if one else 'were'} raised from "
               f"captured material and {'is' if one else 'are'} waiting in "
               f"the triage queue.\n\nNothing has been "
-              f"written to the graph: extractors propose, analysts dispose "
-              f"(invariant 3)."),
-        classification=classification, compartments=compartments,
+              f"written to the graph: extractors propose, analysts "
+              f"dispose."),
+        classification=case_classification, compartments=compartments,
+        element_classification=classification,
+        # What the card's Open goes to: this case's triage queue. It named
+        # nothing, so the notice about waiting work had no route to the
+        # work (ux08-triage:notifications-no-path-to-object, 2026-09-23).
+        object_type="triage", object_id=case_id,
         actor_id=actor_id)
     return raised is not None
 
@@ -315,8 +328,16 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
         return None
     code, classification, compartments = _case(conn, case_id)
     labels = conn.execute(
-        "SELECT classification, compartments FROM core.evidence WHERE id = %s",
-        (evidence_id,)).fetchone()
+        "SELECT classification, compartments, title FROM core.evidence "
+        "WHERE id = %s", (evidence_id,)).fetchone()
+    # The exhibit by its TITLE in the body, which renders in-app only and
+    # may name case material; the id stays beside it as the durable
+    # reference. The body named a 36-character id and nothing else, so the
+    # most urgent notification in the product sent the analyst hunting
+    # for an exhibit by UUID (ux08-triage:notifications-no-path-to-object,
+    # 2026-09-23).
+    named = (f"Exhibit {labels[2]!r} ({evidence_id})"
+             if labels and labels[2] else f"Exhibit {evidence_id}")
     how = ("found on read: an analyst opened the exhibit and the bytes served "
            "did not match the hash recorded at acquisition, so the exhibit was "
            "refused rather than served"
@@ -332,7 +353,7 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
         summary=(f"An exhibit on {code} no longer matches the hash recorded "
                  f"when it was acquired. Treat the case's evidence as suspect "
                  f"until this is explained."),
-        body=(f"Exhibit {evidence_id} failed its integrity check. The "
+        body=(f"{named} failed its integrity check. The "
               f"mismatch was {how}.\n\n"
               f"Either the stored object or the recorded hash has changed "
               f"since acquisition. The object store is WORM-locked and the "
@@ -466,7 +487,7 @@ def escalation_to_owner(conn: psycopg.Connection, *, original: Notification,
               f"It is escalated to you as the case owner. Acknowledge it, or "
               f"have its recipient acknowledge it: an urgent notification "
               f"nobody has acknowledged is the one alert that mattered, "
-              f"muted by absence rather than by choice (docs/07). This "
+              f"muted by absence rather than by choice. This "
               f"escalation is raised once; it will not repeat."),
         classification=classification, compartments=compartments,
         object_type="notification", object_id=original.id)

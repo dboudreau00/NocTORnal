@@ -213,17 +213,17 @@ def test_a_wallet_finds_the_entity_that_holds_it_exact_and_partial(conn, world):
 
 def test_a_jabber_domain_fragment_finds_every_holder(conn, world):
     """"nightmarket" found none of the 73 personas holding a
-    @nightmarket.im id. A domain fragment now finds each holder, once,
+    @nightmarket.example id. A domain fragment now finds each holder, once,
     with the selector that matched."""
     owner, _, case_id = world
     tok = _tok()
     a = _node(conn, case_id, owner, "first persona")
     b = _node(conn, case_id, owner, "second persona")
     c = _node(conn, case_id, owner, "third persona")
-    _selector(conn, case_id, a, "JABBER", f"alpha@{tok}market.im")
-    _selector(conn, case_id, b, "JABBER", f"bravo@{tok}market.im")
-    _selector(conn, case_id, b, "EMAIL", f"bravo@{tok}market.im")
-    _selector(conn, case_id, c, "JABBER", "charlie@elsewhere.im")
+    _selector(conn, case_id, a, "JABBER", f"alpha@{tok}market.example")
+    _selector(conn, case_id, b, "JABBER", f"bravo@{tok}market.example")
+    _selector(conn, case_id, b, "EMAIL", f"bravo@{tok}market.example")
+    _selector(conn, case_id, c, "JABBER", "charlie@elsewhere.example")
 
     page = _nodes(conn, case_id, f"{tok}market")
     assert sorted(h.id for h in page.hits) == sorted([a, b])
@@ -234,7 +234,7 @@ def test_a_jabber_domain_fragment_finds_every_holder(conn, world):
         "the second matching selector on the same entity must be counted, "
         "not listed as a second hit")
 
-    exact = _nodes(conn, case_id, f"alpha@{tok}market.im")
+    exact = _nodes(conn, case_id, f"alpha@{tok}market.example")
     assert [h.id for h in exact.hits] == [a] and exact.hits[0].via.exact
 
 
@@ -245,7 +245,7 @@ def test_the_selector_lookup_lists_only_selector_matches(conn, world):
     tok = _tok()
     by_name = _node(conn, case_id, owner, f"{tok}market fan")
     by_selector = _node(conn, case_id, owner, "quiet persona")
-    _selector(conn, case_id, by_selector, "JABBER", f"quiet@{tok}market.im")
+    _selector(conn, case_id, by_selector, "JABBER", f"quiet@{tok}market.example")
 
     page = _svc(conn).selector_page(case_id=case_id, query=f"{tok}market",
                                     limit=10, clearance="RED",
@@ -253,7 +253,7 @@ def test_the_selector_lookup_lists_only_selector_matches(conn, world):
     assert [h.id for h in page.hits] == [by_selector]
     assert page.total == 1
     assert by_name not in [h.id for h in page.hits]
-    assert page.hits[0].via.value == f"quiet@{tok}market.im"
+    assert page.hits[0].via.value == f"quiet@{tok}market.example"
 
 
 def test_a_selector_never_reaches_past_the_callers_ceiling(conn, world):
@@ -503,7 +503,7 @@ def test_an_exact_selector_beats_a_fragment_on_the_same_entity(conn, client, wor
     handle = f"ember_{tok}"
     wallet = _wallet()
     _selector(conn, case_id, persona, "HANDLE", handle)
-    _selector(conn, case_id, persona, "JABBER", f"{handle}@nightmarket.im")
+    _selector(conn, case_id, persona, "JABBER", f"{handle}@nightmarket.example")
     _selector(conn, case_id, payer, "BTC_ADDR", wallet)
     _selector(conn, case_id, payer, "URL", "https://mempool.space/address/" + wallet)
 
@@ -662,7 +662,7 @@ def test_a_number_pasted_with_its_type_label_finds_its_holder(conn, client, worl
     _selector(conn, case_id, icq, "ICQ", "123456789")
     _selector(conn, case_id, discord, "DISCORD_ID", "123456789")
     _selector(conn, case_id, handset, "IMEI", "490154203237518")
-    _selector(conn, case_id, jabber, "JABBER", f"ember_{tok}@nightmarket.im")
+    _selector(conn, case_id, jabber, "JABBER", f"ember_{tok}@nightmarket.example")
     _selector(conn, case_id, red_icq, "ICQ", "987654321")
 
     for query, holder in (("ICQ: 123456789", icq), ("ICQ 123456789", icq),

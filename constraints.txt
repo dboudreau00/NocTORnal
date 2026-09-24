@@ -1,0 +1,82 @@
+# Exact versions of every Python distribution noctornal-api and
+# noctornal-ontology install, with their dev extras and db/requirements.txt.
+#
+# Why this exists (sec-pin-dependencies, 2026-09-23). Every dependency in
+# apps/api/pyproject.toml is a floor (`fastapi>=0.110`), which is right for
+# a package and wrong for a release: a clean install resolves each floor to
+# whatever is newest on the day, so the clean VM of the Alpha 6 pre-release
+# check ran starlette 1.7.0, uvicorn 0.53.0, alembic 1.20.0, psycopg 3.3.6
+# and SQLAlchemy 2.0.54 while the suite had passed on the versions below
+# (release/CLEAN-VM-INSTALL.md, F17 and G9). A test run proves the stack it
+# ran on, and nothing else.
+#
+# A CONSTRAINTS file, not a requirements file: it pins a version only when
+# something already asks for the distribution, and never adds one. So the
+# dependency SET stays declared in one place, the pyproject files, and this
+# file only decides which release of each. The installers, the Dockerfile and
+# CI all install with `-c constraints.txt`, and
+# apps/api/tests/test_dependency_pins.py holds all of them to it, holds every
+# declared dependency to a pin inside its declared range, and holds the pins
+# to the environment the suite is running in.
+#
+# These are the versions in the development environment the Alpha 6 suite
+# passed on. Every one of them publishes wheels for CPython 3.12, 3.13 and
+# 3.14 on Linux (x86_64 and aarch64), Windows and macOS, checked against PyPI
+# when this was written, so the installers' "3.12 or newer" still installs
+# without a compiler.
+#
+# To move a pin: change it here, reinstall with
+#     python -m pip install -c constraints.txt -e packages/ontology -e "apps/api[dev]"
+# run the suite, and commit the two together. A distribution a new
+# dependency brings in must be added here, or test_dependency_pins fails.
+#
+# Not pinned here: pip itself (the installers upgrade it first), and the
+# build backend an editable install fetches into its own isolated build.
+
+alembic==1.19.2
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+argon2-cffi==25.1.0
+argon2-cffi-bindings==26.1.0
+blake3==1.0.9
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+colorama==0.4.6
+cryptography==50.0.1
+fastapi==0.141.1
+greenlet==3.5.5
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.19
+igraph==1.0.0
+iniconfig==2.3.0
+leidenalg==0.12.0
+mako==1.4.1
+markupsafe==3.0.3
+minio==7.2.20
+packaging==26.3
+pluggy==1.6.0
+psycopg==3.3.5
+psycopg-binary==3.3.5
+pycparser==3.0
+pycryptodome==3.23.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+pygments==2.21.0
+pytest==9.1.1
+python-multipart==0.0.32
+qrcode==8.2
+redis==8.1.0
+ruff==0.6.9
+sqlalchemy==2.0.52
+starlette==1.6.0
+texttable==1.7.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.3
+urllib3==2.7.0
+uvicorn==0.52.4
+websockets==17.1

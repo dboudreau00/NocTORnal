@@ -36,6 +36,12 @@ account (clearance and global roles have no service) and the two audit
 rows the console's routes write beside their service calls: the capture
 route's DOCUMENT_CAPTURED and the edge correction route's EDGE_UPDATED.
 
+Each entity and tie is dated by its claim: the assertion's `observed_at`
+is the element's `valid_from`. That is also what fills the entity list's
+First seen column, which the read paths derive from the observed times of
+an entity's live claims (`projections.seen_sql`, gap-first-seen,
+2026-09-23), so `core.node.first_seen` needs no UPDATE around the service.
+
 ## The analytics story is not moved
 
 The README's analytics paragraph rests on demo-network's shape: oriel is the
@@ -87,10 +93,6 @@ What still moves, stated rather than discovered, and held exactly by
 
 ## What is NOT here, and why
 
-- `core.node.first_seen` exists and no service writes it
-  (`GraphWriteService.create_node` takes no first seen), so the entity
-  list's First seen column stays "not recorded". An UPDATE would be a graph
-  write around the service.
 - No exhibit is past its retention deadline. `RetentionService.due()` dates
   an exhibit by its CASE's `retention_until`, and ingest and document clocks
   are stamped now plus a positive rule, so the only way to put one exhibit
@@ -103,8 +105,11 @@ What still moves, stated rather than discovered, and held exactly by
   a second URGENT notice in the owner's inbox for a second emergency the
   case has no reason for (it holds one GREEN item). It is left for the
   officer account to review on camera.
-- Edge review state: every demo-network tie reads PROPOSED and no service
-  moves `core.edge.review`, so every node keeps its unreviewed ring.
+- Edge review state: every demo-network tie is a person's own claim, so it
+  is born ACCEPTED (`GraphWriteService.create_edge`, gap-tie-review,
+  2026-09-23) and no node carries the unreviewed ring. Leaving one PROPOSED
+  for the camera would need a tie founded on AUTOMATED_INFERENCE, which is
+  a machine's claim the showcase has no machine to make.
 
 ## Labels
 

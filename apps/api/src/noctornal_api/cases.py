@@ -34,6 +34,41 @@ _TRANSITIONS: dict[str, set[str]] = {
     "PURGED": set(),
 }
 
+#: The states in which a case's CONTENT is read-only: the graph,
+#: assertions, evidence and its links, captures, proposals, comms, ACH and
+#: assumptions, tags and sets, and samples attached to it. Governance is
+#: not content and keeps working in them: the status move (reopen
+#: included), legal holds, retention and purge, sharing and assignments,
+#: break-glass, report builds and releases (which write no content), and
+#: comms minimisation, which docs/16 L4 performs AT closure.
+#:
+#: gap-closed-case-writes (2026-09-23): until then a CLOSED or ARCHIVED
+#: case accepted every write the gate allowed, and material added after
+#: `closed_at` matters for disclosure. The console said so in a strip and
+#: the server did nothing. `http/deps.py` enforces this set at the one
+#: gate every content write passes; the console reads it as the case
+#: record's `read_only` rather than keeping a second copy. PURGED is in
+#: it because it only follows ARCHIVED and is marked for destruction.
+CONTENT_READ_ONLY_STATES: frozenset[str] = frozenset(
+    {"CLOSED", "ARCHIVED", "PURGED"})
+
+
+#: The order a person reads the lifecycle in.
+_LIFECYCLE_ORDER = ("DRAFT", "ACTIVE", "DORMANT", "CLOSED", "ARCHIVED", "PURGED")
+
+
+def allowed_transitions(status: str) -> list[str]:
+    """The statuses a case in `status` may move to, in lifecycle order.
+
+    Read out through `CaseOut.allowed_transitions` so the console's Status
+    dialog offers only the legal moves. It was a free-text prompt that
+    listed all six and pre-filled CLOSED, and the analyst learned which
+    were legal from a refusal
+    (ux02-cases:status-prompt-free-text-one-way-transitions, 2026-09-23).
+    `transition_status` still decides; this is the same table, read."""
+    allowed = _TRANSITIONS.get(status, set())
+    return [s for s in _LIFECYCLE_ORDER if s in allowed]
+
 
 class CaseError(Exception):
     pass

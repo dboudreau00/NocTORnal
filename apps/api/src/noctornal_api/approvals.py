@@ -140,7 +140,9 @@ class ApprovalRequest:
     #: failed. Reach is not stored, so a record read back from the table
     #: carries None for both -- which is "not recorded", not "failed". The
     #: router renders them only on the two writes, so a listing never
-    #: claims a failure it cannot know about.
+    #: claims a failure it cannot know about. (A listing does carry a
+    #: separate count of the APPROVAL_REQUESTED notifications a request
+    #: raised, which IS stored; see the router, 2026-09-23.)
     approvers_notified: int | None = None
     requester_notified: bool | None = None
 
@@ -394,6 +396,42 @@ class ApprovalService:
                      ORDER BY requested_at DESC LIMIT %s""",
                 (case_id, state, limit)).fetchall()
         return [_record(r) for r in rows]
+
+    def awaiting_signature(self, user_id: UUID, *, clearance: str,
+                           compartments: frozenset[str]) -> dict[str, int]:
+        """Undecided, unexpired requests this person could sign, per case.
+
+        ux08-triage:no-work-waiting-at-sign-in (2026-09-23). A request
+        whose notification had been read left no trace anywhere on the
+        rail: the Triage badge counted proposals only. This is the set the
+        decide route would accept a signature from, as far as roles go:
+        not the requester, and a live assignment on the case whose role
+        carries the operation's own permission (the same join
+        `notify_events.approval_requested` uses to choose whom to tell).
+        Only over cases whose labels the person dominates; the step-up
+        half is checked when they sign."""
+        pairs = [(k, op.permission) for k, op in OPERATIONS.items()]
+        rows = self._c.execute(
+            """SELECT r.case_id, count(DISTINCT r.id)
+                 FROM core.approval_request r
+                 JOIN core."case" c ON c.id = r.case_id
+                  AND c.classification <= %s::core.tlp
+                  AND c.compartments <@ %s::text[]
+                 JOIN unnest(%s::text[], %s::text[]) AS o(operation, permission)
+                   ON o.operation = r.operation
+                 JOIN iam.case_assignment ca
+                   ON ca.case_id = r.case_id AND ca.user_id = %s
+                  AND (ca.expires_at IS NULL OR ca.expires_at > now())
+                 JOIN iam.role_permission rp
+                   ON rp.role_key = ca.role_key
+                  AND rp.permission_key = o.permission
+                WHERE r.state = 'PENDING' AND r.expires_at > now()
+                  AND r.requested_by <> %s
+                GROUP BY r.case_id""",
+            (clearance, sorted(compartments),
+             [p[0] for p in pairs], [p[1] for p in pairs], user_id, user_id),
+        ).fetchall()
+        return {str(r[0]): r[1] for r in rows}
 
     # -- internals --------------------------------------------------------
 

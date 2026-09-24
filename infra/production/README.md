@@ -65,12 +65,19 @@ program, long after anyone would connect the two.
 python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 ```
 
-Losing that key means every user must re-enrol their authenticator. Back it
-up somewhere that is not this host. Rotating it does not: the envelope
-keeps a ring (`NOCTORNAL_TOTP_KEK_RETIRED`, see the template), the
-readiness check `kek_ring_opens_stored_secrets` says whether every stored
-secret still opens, and `scripts/rewrap_secrets.py --apply` moves them
-under the new key.
+Losing that key costs far more than the second factors. It seals every
+column `apps/api/src/noctornal_api/security/sealed.py` lists: each
+account's TOTP secret, each persona's collection credential, each stored
+victim credential and the data key of every sample, preserved samples
+included. A database restored without the key that sealed it opens none
+of them: no enrolled account can complete a sign-in (it answers 503), and
+no persona credential, victim credential or sample can be read again.
+Nothing recovers them short of the key, so back it up with every backup of
+the database, somewhere that is not this host. Rotating it loses nothing:
+the envelope keeps a ring (`NOCTORNAL_TOTP_KEK_RETIRED`, see the
+template), the readiness check `kek_ring_opens_stored_secrets` says
+whether every stored secret still opens, and
+`scripts/rewrap_secrets.py --apply` moves them under the new key.
 
 Then lock the file down. It holds every password in the deployment:
 
@@ -242,7 +249,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Sixteen checks, each with the evidence behind it and, when it fails, the
+Eighteen checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -266,7 +273,7 @@ working.
 
 ### What stays red, and what a red check refuses
 
-Four of the sixteen are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the eighteen are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -297,6 +304,16 @@ cap is read once at start. `kek_ring_opens_stored_secrets` opens stored
 secrets with the key ring and is the check that catches a KEK that
 changed under its id; it is green on a fresh stack and stays so through a
 rotation done as the template describes.
+
+Two report on what the boot check and `docs/16` C8 ask of the secrets file
+and of Redis. `credentials_not_published` names every credential that still
+carries a value this repository, its CI or MinIO publishes (a `replace-me`
+placeholder, the development password, a key of one repeated byte, a Redis
+URL with no password); in this deployment the API refuses to start on any
+of them, so it is green whenever you can read it. `redis_limiter_isolated`
+counts keys in the limiter's Redis that are not under its `rl:` prefix, and
+keys in that instance's other databases, without reading a value; it is
+green on this compose file's Redis, which nothing else uses.
 
 **1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
@@ -366,9 +383,11 @@ git pull
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
-**Backups, nothing here does this for you.** Two things must be copied off
-this host, together, or a restore gives you a case file whose exhibits are
-missing:
+**Backups, nothing here does this for you.** Three things must be copied
+off this host, together: the database, the evidence and raw buckets, and
+`secrets.env`. Without the buckets a restore gives you a case file whose
+exhibits are missing; without `secrets.env` it gives you one whose sealed
+columns never open again (step 1).
 
 ```sh
 # The database.
@@ -378,20 +397,54 @@ docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgre
 
 # The object store. Evidence AND raw captures: an exhibit restored
 # without the capture it was derived from has lost half of what makes it
-# an exhibit.
-#   mc mirror --overwrite local/noctornal-evidence /your/backup/evidence
-#   mc mirror --overwrite local/noctornal-raw      /your/backup/raw
-#
-# The samples bucket is deliberately NOT in this list. It holds live
-# malware, and docs/11's rejection path DESTROYS sample bytes. A mirror
-# of it puts a destroyed sample somewhere that path cannot reach, which
-# is the one outcome the whole prohibited-content decision exists to
-# prevent. Copy it only if counsel has said to, and to somewhere the
-# rejection procedure covers.
+# an exhibit. /srv/noctornal-backup is yours to choose.
+docker compose -p noctornal-prod -f infra/production/compose.yml \
+  run --rm --no-deps -v /srv/noctornal-backup:/backup \
+  --entrypoint /bin/sh minio-init -c '
+    set -e
+    mkdir -p /root/.mc/certs/CAs
+    cp /certs/public.crt /root/.mc/certs/CAs/minio.crt
+    mc alias set local https://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
+    mc mirror --overwrite "local/$EVIDENCE_BUCKET" /backup/evidence
+    mc mirror --overwrite "local/$INGEST_BUCKET" /backup/raw'
 ```
 
-Also copy `secrets.env` itself. Without `NOCTORNAL_TOTP_KEK` a restored
-database is a database nobody can complete a login against.
+The second command runs `mc` in a one-off container of the `minio-init`
+service, because that service already has what `mc` needs: the compose
+network (MinIO publishes no port), the root credentials and bucket names
+from `secrets.env`, and the certificate from step 3, which `mc` trusts
+only once it is copied into its own CA directory. The alias it sets lives
+and dies with that container; nothing on the host defines one.
+
+**The samples bucket is left out on purpose.** It holds live malware,
+encrypted, and a mirror of it escapes whatever
+`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` decided. Under `destroy`, a
+rejection deletes the bytes, and the mirror keeps them where the rejection
+cannot reach. Under `preserve`, the default, a rejection moves the bytes
+into the preservation bucket under a legal hold and deletes the working
+copy, and the mirror keeps a copy outside that hold and outside the
+two-person retrieval. Copy it only if counsel has said to, and to
+somewhere the rejection procedure covers.
+
+**Whether `noctornal-preserved` belongs in a backup is for counsel too.**
+It holds rejected malware under a legal hold that nothing in the product
+lifts, and the database keeps the data key that opens each object, so a
+copy of that bucket beside the dump and `secrets.env` is a readable copy
+of the malware, outside the hold. If counsel says to keep one, add a third
+mirror to the quoted script, after the raw one and before the closing
+quote:
+
+```sh
+    mc mirror --overwrite "local/${PRESERVE_BUCKET:-noctornal-preserved}" /backup/preserved
+```
+
+Know what it does not carry. A mirror to disk keeps the bytes only: not
+the legal hold, and not the object version each preserved sample's row
+names, which is the version a retrieval reads. Nothing in this release
+restores one.
+
+Copy `secrets.env` every time you copy the database, and keep it as
+carefully as the dump: together they open every sealed column.
 
 **Stopping.**
 

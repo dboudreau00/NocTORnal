@@ -32,10 +32,12 @@ so `tests/test_evidence_lock_live_pg.py` can keep demonstrating that.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
+import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from uuid import UUID
 
 import blake3 as _blake3
@@ -46,10 +48,93 @@ from minio.error import S3Error
 from minio.retention import Retention
 
 from noctornal_api.egress import NEVER_EGRESS
+# The Lab's ticket, reused for an exhibit (0068): its lifetime, and its
+# sampled counter for strings that match no ticket. Private to samples.py
+# and imported rather than copied, so the two tickets cannot drift apart.
+from noctornal_api.samples import DOWNLOAD_TICKET_TTL_SECONDS, _SampledWarning
 
+#: How long the storage layer's COMPLIANCE lock holds an exhibit, counted
+#: from the moment the server LODGES the bytes (the put in `ingest`), not
+#: from the acquisition time the uploader states. Once it ends the object
+#: store no longer refuses a delete, and what protects the bytes is the
+#: case's retention date, any legal hold and the dual-control purge
+#: (`retention.py`). The day is kept per exhibit in
+#: `core.evidence.retention_until`, the exact instant in the custody row
+#: that set it (`lock_ends_at`), and the console shows it on the chip
+#: (ux07-evidence:worm-chip-outlives-lock, 2026-09-23): a flag that said
+#: "cannot be replaced or deleted" for ever was a claim an analyst could
+#: repeat under oath and be wrong about from day 366.
+#:
+#: Since 2026-09-24 (x-lock-extension) this is the SHORTEST lock, not the
+#: only one: `ingest` locks to the case's retention date when that is later
+#: (`lock_target`), and extending the case's date lengthens every live
+#: exhibit's lock to it (`EvidenceService.extend_locks`). Until then
+#: nothing did, so a case kept for longer kept its exhibits deletable at
+#: the store from day 366 while every other record said they were held.
+#: Nothing shortens a lock, because nothing can: COMPLIANCE only lengthens.
 DEFAULT_RETENTION = timedelta(
     days=int(os.environ.get("EVIDENCE_RETENTION_DAYS", "365"))
 )
+
+#: The furthest ahead of NOW one step sets a lock that follows the case's
+#: retention date: at lodging, on an extension, or when the Evidence pane
+#: lengthens older locks. Ten years unless the deployment says otherwise.
+#:
+#: A bound because a COMPLIANCE lock is a commitment nobody can take back,
+#: an administrator and the dual-control purge included, while the case's
+#: date is one field that one `case.update` holder types (x-lock-extension,
+#: verifier, 2026-09-24: a mistyped year such as 2208 would have made every
+#: exhibit undeletable at the store for good). The DATE is kept as typed:
+#: it is what the purge reads, and a database row can be corrected where
+#: a lock cannot. Only the lock stops here, and a case retained past the horizon has its locks
+#: offered for lengthening again as they fall behind (`lock_short_before`).
+#: `tests/conftest.py` sets it to one day, as it does the default lock,
+#: so test runs do not lock objects in the dev bucket to test cases' dates.
+LOCK_HORIZON = timedelta(
+    days=int(os.environ.get("EVIDENCE_LOCK_HORIZON_DAYS", "3650"))
+)
+
+
+def case_lock_start(case_retention: date) -> datetime:
+    """00:00 UTC on the case's retention day: the instant `retention.due`
+    starts treating the case as due (`c.retention_until <= today`), so a
+    lock that ends there covers the case's whole retention and not a
+    second of the purge's."""
+    return datetime.combine(case_retention, time.min, tzinfo=timezone.utc)
+
+
+def lock_target(case_retention: date, now: datetime) -> tuple[datetime, bool]:
+    """(the instant a lock that follows the case should end, whether the
+    horizon cut it short of the case's date). In whole seconds, rounded
+    up, because that is how a retention date travels: the custody row then
+    records the instant the store holds, not one a fraction earlier."""
+    start = case_lock_start(case_retention)
+    furthest = now + LOCK_HORIZON
+    if furthest.microsecond:
+        furthest = furthest.replace(microsecond=0) + timedelta(seconds=1)
+    return (start, False) if start <= furthest else (furthest, True)
+
+
+def lock_short_before(case_retention: date | None,
+                      now: datetime) -> datetime | None:
+    """A live exhibit's lock that ends before this instant is SHORT of its
+    case: the store would let its bytes be deleted while the case still
+    holds them, and lengthening would change that. None when nothing can
+    be lengthened, because the case is already due.
+
+    Within the horizon that is the case's own retention instant. Past it,
+    a lock is only as long as the horizon allowed when it was set, so it
+    counts as short once it has fallen a whole default lock period behind
+    the horizon: a case retained for decades is asked about once a year,
+    not every day its horizon moves on (x-lock-extension, 2026-09-24)."""
+    if case_retention is None:
+        return None
+    start = case_lock_start(case_retention)
+    if start <= now:
+        return None
+    if start <= now + LOCK_HORIZON:
+        return start
+    return now + LOCK_HORIZON - DEFAULT_RETENTION
 
 # Classifications that must never cross the boundary via export (invariant
 # 8). Derived from egress.NEVER_EGRESS rather than restated: a second copy
@@ -388,10 +473,143 @@ class EvidenceStorage:
             resp.close()
             resp.release_conn()
 
+    def extend_lock(self, key: str, until: datetime) -> "LockExtension":
+        """Lengthen the COMPLIANCE lock on every stored version of `key` so
+        the store refuses a delete until `until`, and prove it did.
+
+        Every version rather than the latest, for `delete_all_versions`'
+        reason: the bucket is versioned, a keyless delete leaves the real
+        version behind a marker, and a lock on the marker's side of that
+        is a lock on nothing. Markers are skipped, since they hold no
+        bytes and take no retention.
+
+        A version already held that long is left alone, because it has to
+        be: COMPLIANCE only lengthens, and asking for an earlier date is
+        refused. A version held only under GOVERNANCE (the bucket default,
+        never what `put` writes) is raised to COMPLIANCE, no earlier than
+        it was already held. Each write is read back, and a store that
+        answers success without holding the date raises: that store is
+        the SeaweedFS case decision 64 names, reporting a lock it does not
+        enforce, and a custody row written from its word would be false.
+        """
+        # A retention date travels in whole seconds, so a fraction is rounded
+        # UP: rounding down would ask for a lock a moment short of `until`,
+        # and the read-back below would then call the store a liar.
+        if until.microsecond:
+            until = until.replace(microsecond=0) + timedelta(seconds=1)
+        versions = [
+            v for v in self._client.list_objects(
+                self._bucket, prefix=key, include_version=True)
+            if v.object_name == key and not v.is_delete_marker
+        ]
+        if not versions:
+            raise EvidenceError(f"no stored version of {key} to lock")
+        ends: list[datetime | None] = []
+        extended = 0
+        for v in versions:
+            held = self._client.get_object_retention(
+                self._bucket, key, version_id=v.version_id)
+            held_until = held.retain_until_date if held is not None else None
+            ends.append(held_until)
+            if (held is not None and held.mode == COMPLIANCE
+                    and held_until >= until):
+                continue
+            target = until if held_until is None else max(until, held_until)
+            self._client.set_object_retention(
+                self._bucket, key, Retention(COMPLIANCE, target),
+                version_id=v.version_id)
+            now_held = self._client.get_object_retention(
+                self._bucket, key, version_id=v.version_id)
+            if (now_held is None or now_held.mode != COMPLIANCE
+                    or now_held.retain_until_date < until):
+                raise EvidenceError(
+                    f"the store accepted a lock on {key} until "
+                    f"{until.isoformat()} and does not hold it")
+            extended += 1
+        # The weakest version is what the exhibit was protected until.
+        previous = None if None in ends else min(ends)
+        return LockExtension(key=key, versions=len(versions),
+                             extended=extended, previous=previous)
+
+
+@dataclass(frozen=True)
+class LockExtension:
+    """What `EvidenceStorage.extend_lock` did to one exhibit's object."""
+    key: str
+    #: Stored versions under the key (delete markers not counted).
+    versions: int
+    #: Of those, how many had their lock lengthened. 0: already held.
+    extended: int
+    #: The earliest lock end among the versions before, which is what the
+    #: exhibit was protected until; None when a version held no lock.
+    previous: datetime | None
+
 
 class IntegrityError(EvidenceError):
     """Stored bytes do not match the recorded hash — a tamper alarm. Read
     paths fail closed on this rather than serving the mismatched bytes."""
+
+
+log = logging.getLogger("noctornal.evidence")
+
+#: The purpose a ticket naming an exhibit carries (0068). The Lab's two are
+#: `samples.TICKET_DOWNLOAD` and `samples.TICKET_RETRIEVAL`; the table
+#: refuses this one on a row that names a sample and the others on a row
+#: that names an exhibit.
+TICKET_PRODUCTION = "exhibit_production"
+
+#: The verb a production is gated on at the mint (the route's gate, as
+#: `POST /export`) and re-read on the sample origin at redemption.
+EXPORT_PERMISSION = "evidence.export"
+
+
+class NotProducible(EvidenceError):
+    """The exhibit cannot leave through the sample origin, for a reason
+    about the exhibit or the deployment rather than the caller: it is not
+    attacker markup, it was purged, or this process is not the origin that
+    serves it. The router answers 409 with the sentence."""
+
+
+class ProductionRefused(EvidenceError):
+    """A production ticket could not be spent. ONE sentence for every
+    reason, as the Lab's (`samples._TICKET_REFUSED`), so a holder of a
+    stolen ticket learns nothing about why; the audit row says which."""
+
+
+#: Why a non-hostile exhibit is not produced this way. It has a way out
+#: already, from the application origin, and a second one for the same
+#: bytes would be two custody stories for one exhibit.
+NOT_HOSTILE_DETAIL = (
+    "this exhibit is not attacker markup, so the application origin serves "
+    "it: export it for disclosure from its card. The sample origin produces "
+    "attacker markup only.")
+
+#: Why a purged exhibit is not produced at all.
+PURGED_DETAIL = (
+    "this exhibit was purged under the case's retention: its bytes are gone, "
+    "and its record, digest and custody are all that remain.")
+
+_PRODUCTION_REFUSED = (
+    "this production ticket is not valid: it has been used, it has expired, "
+    "it was not issued for this exhibit, or the account it was issued to may "
+    "no longer export it. A ticket is good for one production within "
+    f"{DOWNLOAD_TICKET_TTL_SECONDS} seconds. Ask the console for another.")
+
+#: The unknown-ticket counter, the Lab's mechanism in its own instance so
+#: the two logs count their own origins' strings.
+_unknown_production_tickets = _SampledWarning()
+
+
+@dataclass(frozen=True)
+class ProductionTicket:
+    """What a production mint hands back. `raw` exists here and in the
+    response that carries it, nowhere else: the row holds its SHA-256
+    (0061's rule for the Lab's ticket)."""
+    id: UUID
+    raw: str
+    evidence_id: UUID
+    user_id: UUID
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -412,6 +630,11 @@ class CustodyEntry:
     #: screenshot review, 2026-09-23). None only for an account row that
     #: no longer resolves; the id is still there.
     actor_name: str | None = None
+    #: What the row itself says: how an exhibit was acquired, that bytes
+    #: already held were re-acquired, what a check found. Returned so two
+    #: ACQUIRED rows can be told apart (ux07-evidence:custody-rows-not-
+    #: court-legible, 2026-09-23); the route decides what leaves.
+    detail: dict | None = None
 
 
 class EvidenceService:
@@ -436,6 +659,7 @@ class EvidenceService:
         description: str | None = None,
         retain_until: datetime | None = None,
         is_hostile_markup: bool | None = None,
+        authority_ref: str | None = None,
     ) -> IngestResult:
         """Store bytes as an exhibit.
 
@@ -445,6 +669,15 @@ class EvidenceService:
         True explicitly to mark something the type does not reveal. Passing
         False overrides the derivation and is the only way to un-mark a
         hostile type, which is deliberately the awkward direction.
+
+        `acquired_at` is when the material was OBTAINED, which the caller
+        states; the row's `created_at` is when the server received it, and
+        the two are shown apart. `authority_ref` names the warrant or
+        production order a legal-process acquisition rests on. Both, and
+        whether a time was stated at all, are written into the ACQUIRED
+        custody row, the record that goes to court (ux07-evidence:upload-
+        drops-provenance, 2026-09-23: the form recorded the upload moment
+        as "acquired" and had nowhere to put the authority).
         """
         from noctornal_api.deception import is_hostile_media_type
 
@@ -463,7 +696,18 @@ class EvidenceService:
         # minute AFTER its own ACQUIRED, VIEWED and HASH_VERIFIED rows
         # (README screenshot set review, 03-evidence).
         acquired = acquired_at
-        retain = retain_until or (self._now() + DEFAULT_RETENTION)
+        retain = retain_until or self._lodging_lock(case_id)
+        # What the ACQUIRED row says about how the material came in. Keys
+        # with no value are left out rather than written as null, so a
+        # row reads as what was stated.
+        provenance = {"acquisition_method": acquisition_method,
+                      "acquired_at_stated": acquired_at is not None}
+        if acquired_at is not None:
+            provenance["acquired_at"] = acquired_at.isoformat()
+        if source_url:
+            provenance["source_url"] = source_url
+        if authority_ref:
+            provenance["authority_ref"] = authority_ref
 
         # Dedup within the case (UNIQUE(case_id, sha256)): identical bytes
         # are one exhibit. Every ingest attempt — including a deduplicated
@@ -478,8 +722,7 @@ class EvidenceService:
             with self._c.transaction():
                 self._custody(existing[0], "ACQUIRED", acquired_by,
                               detail={"sha256": shahex, "deduplicated": True,
-                                      "acquisition_method": acquisition_method,
-                                      "source_url": source_url})
+                                      **provenance})
                 self._audit("EVIDENCE_REACQUIRED", acquired_by, existing[0], case_id,
                             {"sha256": shahex})
             return IngestResult(existing[0], shahex, deduplicated=True)
@@ -517,8 +760,18 @@ class EvidenceService:
                 # the record that goes to court (ux07 custody-failed-hash-
                 # shown-as-not-checked). The deduplicated branch above stays
                 # NULL: it stored nothing and read nothing back.
+                # The lock's exact end, which `retention_until` (a date)
+                # cannot carry: the store's COMPLIANCE lock ends at this
+                # instant, part way through that day, and a register that
+                # counted the whole day overstated the storage guarantee by
+                # up to 24 hours (ux07-evidence:worm-chip-outlives-lock,
+                # verifier, 2026-09-23). Only on the original row: a
+                # deduplicated re-acquisition stores nothing and locks
+                # nothing.
                 self._custody(evidence_id, "ACQUIRED", acquired_by,
-                              detail={"sha256": shahex, "bytes": len(data)},
+                              detail={"sha256": shahex, "bytes": len(data),
+                                      "lock_ends_at": retain.isoformat(),
+                                      **provenance},
                               hash_verified=True)
                 self._audit("EVIDENCE_ACQUIRED", acquired_by, evidence_id, case_id,
                             {"sha256": shahex})
@@ -725,13 +978,409 @@ class EvidenceService:
     def custody_log(self, evidence_id: UUID) -> list[CustodyEntry]:
         rows = self._c.execute(
             """SELECT c.action, c.actor_id, c.occurred_at, c.hash_verified,
-                      u.display_name
+                      u.display_name, c.detail
                  FROM core.evidence_custody c
                  LEFT JOIN iam.app_user u ON u.id = c.actor_id
                 WHERE c.evidence_id = %s ORDER BY c.occurred_at, c.id""",
             (evidence_id,),
         ).fetchall()
-        return [CustodyEntry(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+        return [CustodyEntry(r[0], r[1], r[2], r[3], r[4], r[5] or {})
+                for r in rows]
+
+    def refuse_if_hostile(self, evidence_id: UUID, actor_id: UUID,
+                          *, purpose: str) -> bool:
+        """True, with the refusal audited, when the exhibit is attacker-
+        authored markup and so may not be served from the API origin.
+
+        docs/19 section 1.1: a DOM, HAR or `.eml` exhibit is download-only,
+        and only from the separate sample origin; "the API origin never
+        serves those bytes". `GET .../content` and `POST .../export` served
+        them anyway until 2026-09-23 (found while answering ux07-evidence:
+        no-exhibit-export-control, whose verifier pointed out that the
+        flagship case's only exhibit is an `.eml`). Deliberately NOT inside
+        `view()`: the seeders read through `view()` below the HTTP layer,
+        and the rule is about which origin answers a browser, so the
+        routes ask this after their access gate, where a refusal cannot
+        tell a caller anything about a row they may not see. Audited
+        because a refused egress unrecorded is indistinguishable from
+        nobody having tried."""
+        row = self._c.execute(
+            "SELECT is_hostile_markup, case_id FROM core.evidence WHERE id = %s",
+            (evidence_id,),
+        ).fetchone()
+        if row is None or not row[0]:
+            return False
+        with self._c.transaction():
+            self._audit("EVIDENCE_EGRESS_REFUSED", actor_id, evidence_id, row[1],
+                        {"reason": "hostile_markup", "purpose": purpose,
+                         "destination": "api_origin"})
+        return True
+
+    # -- attacker markup, produced through the sample origin (0068) -------
+    #
+    # x-hostile-export, 2026-09-24. `refuse_if_hostile` kept the API origin
+    # from serving these bytes and nothing let anybody produce them, so an
+    # `.eml` exhibit could never leave for a court or a partner. They now
+    # leave the way docs/19 section 1.1 says: from the separate sample
+    # origin, through the gate a Lab download passes. A one-shot ticket is
+    # minted HERE on the application origin under `evidence.export` and a
+    # fresh sign-in (the gate `POST /export` applies), and spent THERE,
+    # which re-derives the mint's decision before serving the Lab's
+    # password-protected archive and writing the EXPORTED custody row.
+
+    def _producible(self, evidence_id: UUID, case_id: UUID, actor_id: UUID,
+                    *, stage: str) -> None:
+        """Raise unless the exhibit may be produced through the sample
+        origin: attacker markup, unpurged, and allowed out by the egress
+        gate at its effective labels. Asked at the mint and again at the
+        redemption, so a label raised or a purge run inside the ticket's
+        minute bites before a byte moves.
+
+        The egress half is `export()`'s, composed the same way (stricter
+        classification of exhibit and case, union of compartments) and
+        audited the same way, with the stage it refused at."""
+        from noctornal_api.egress import can_egress
+        from noctornal_api.security.access import tlp_from_name
+
+        row = self._c.execute(
+            """SELECT e.is_hostile_markup, e.purged_at, e.classification,
+                      e.compartments, c.classification, c.compartments
+                 FROM core.evidence e
+                 JOIN core."case" c ON c.id = e.case_id
+                WHERE e.id = %s AND e.case_id = %s""",
+            (evidence_id, case_id),
+        ).fetchone()
+        if row is None:
+            raise EvidenceError(f"evidence {evidence_id} not found")
+        hostile, purged_at, cls, comp, case_cls, case_comp = row
+        if not hostile:
+            raise NotProducible(NOT_HOSTILE_DETAIL)
+        if purged_at is not None:
+            raise NotProducible(PURGED_DETAIL)
+        classification = max(tlp_from_name(cls), tlp_from_name(case_cls)).name
+        decision = can_egress(
+            classification, "export",
+            compartments=frozenset(comp or []) | frozenset(case_comp or []))
+        if decision.denied:
+            self._audit("EVIDENCE_EGRESS_REFUSED", actor_id, evidence_id, case_id,
+                        {"reason": decision.reason, "destination": "export",
+                         "purpose": "production", "stage": stage})
+            raise EvidenceError(f"export refused: {decision.explain()}")
+
+    def issue_production_ticket(self, evidence_id: UUID, *, case_id: UUID,
+                                actor_id: UUID, session_id: UUID | None = None,
+                                ip_hash: bytes | None = None,
+                                request_origin: str | None = None,
+                                ) -> "ProductionTicket":
+        """Mint a one-shot, sixty-second authority to produce ONE exhibit
+        of attacker markup from the sample origin.
+
+        The caller's gate is the route's (`evidence.export` on the case and
+        the exhibit, with a fresh sign-in, as `POST /export`). This makes
+        the two configuration refusals every Lab mint makes
+        (`samples._mint_split`: a split that cannot serve, or this process
+        being the sample origin, where no session may run) and the
+        exhibit's own (`_producible`), then writes the row 0068 allows. The
+        raw ticket leaves in the return value only; the row holds its
+        SHA-256, and the expiry is the DATABASE clock's, which the
+        redemption compares against (0061)."""
+        from noctornal_api.samples import _mint_split, new_download_ticket
+        from noctornal_api.security.tokens import hash_token
+
+        split = _mint_split(request_origin)
+        self._producible(evidence_id, case_id, actor_id, stage="mint")
+        raw = new_download_ticket()
+        row = self._c.execute(
+            """INSERT INTO lab.download_ticket
+                   (token_hash, evidence_id, user_id, session_id, expires_at,
+                    ip_hash, purpose)
+               VALUES (%s, %s, %s, %s, now() + %s, %s, %s)
+               RETURNING id, expires_at""",
+            (hash_token(raw), evidence_id, actor_id, session_id,
+             timedelta(seconds=DOWNLOAD_TICKET_TTL_SECONDS), ip_hash,
+             TICKET_PRODUCTION)).fetchone()
+        self._audit("EVIDENCE_PRODUCTION_TICKET_ISSUED", actor_id, evidence_id,
+                    case_id, {"ticket_id": str(row[0]),
+                              "expires_at": row[1].isoformat(),
+                              "ttl_seconds": DOWNLOAD_TICKET_TTL_SECONDS,
+                              "sample_origin": split.sample},
+                    session_id=session_id, ip_hash=ip_hash)
+        return ProductionTicket(id=row[0], raw=raw, evidence_id=evidence_id,
+                                user_id=actor_id, expires_at=row[1])
+
+    def redeem_production_ticket(self, presented: str, *, case_id: UUID,
+                                 evidence_id: UUID, ip_hash: bytes | None = None,
+                                 ) -> tuple[UUID, UUID]:
+        """Spend a production ticket. Returns `(holder, ticket_id)`; raises
+        `ProductionRefused`, with one sentence whatever the reason, on
+        anything else. `samples.redeem_download_ticket`'s shape, for its
+        reasons:
+
+        - ONE `UPDATE ... RETURNING` decides it, so two presentations of
+          one ticket cannot both succeed;
+        - the exhibit, its case and the purpose are in the predicate, so a
+          ticket presented on another exhibit's path (or a Lab ticket on
+          this one) matches nothing and is not burnt;
+        - an unknown string is counted in a sampled log line and never
+          written to the audit chain, because that refusal needs no
+          credential at all; the other reasons name a real ticket and a
+          real person and are audited;
+        - the holder's authority is RE-DERIVED here: an active account
+          holding `evidence.export` on this case at the exhibit's live
+          labels. Asked with `count_use=False`, since the mint already
+          counted any break-glass use and one request is one use, and with
+          the step-up satisfied at the ticket's issue, which the mint
+          demanded no more than sixty seconds ago. The SESSION is not
+          re-read: the residual 0061 states, unchanged.
+        """
+        from noctornal_api.security.access import (
+            AccessResolutionError,
+            evaluate,
+            tlp_from_name,
+        )
+        from noctornal_api.security.tokens import hash_token
+        from noctornal_api.stores import PgAccessResolver
+
+        digest = hash_token(presented or "")
+        row = self._c.execute(
+            """UPDATE lab.download_ticket
+                  SET redeemed_at = now()
+                WHERE token_hash = %s
+                  AND evidence_id = %s
+                  AND purpose = %s
+                  AND redeemed_at IS NULL
+                  AND expires_at > now()
+                  AND EXISTS (SELECT 1 FROM core.evidence e
+                               WHERE e.id = %s AND e.case_id = %s)
+            RETURNING id, user_id, session_id, token_hash, issued_at""",
+            (digest, evidence_id, TICKET_PRODUCTION, evidence_id, case_id),
+        ).fetchone()
+        if row is None:
+            reason, holder, named = self._production_refusal(
+                digest, evidence_id, case_id)
+            if reason == "unknown_ticket":
+                counted = _unknown_production_tickets.note()
+                if counted is not None:
+                    log.warning(
+                        "production ticket presented that matches no row (%d "
+                        "since the last line). Unaudited by design: this "
+                        "refusal needs no credential.", counted)
+            else:
+                self._audit("EVIDENCE_PRODUCTION_TICKET_REFUSED", holder,
+                            named[0], named[1], {"reason": reason},
+                            outcome="DENIED", ip_hash=ip_hash)
+            raise ProductionRefused(_PRODUCTION_REFUSED)
+        if not hmac.compare_digest(bytes(row[3]), digest):
+            # Cannot fire against the predicate above; there for the
+            # reason the Lab's is (`redeem_download_ticket`).
+            self._audit("EVIDENCE_PRODUCTION_TICKET_REFUSED", row[1],
+                        evidence_id, case_id,
+                        {"reason": "hash_mismatch_after_lookup"},
+                        outcome="DENIED", ip_hash=ip_hash)
+            raise ProductionRefused(_PRODUCTION_REFUSED)
+        ticket_id, holder, session_id, issued_at = row[0], row[1], row[2], row[4]
+        failed: list[str]
+        # The effective labels, composed as `deps.effective_labels` does
+        # (stricter classification, union of compartments), read live.
+        labels = self._c.execute(
+            """SELECT e.classification, e.compartments,
+                      c.classification, c.compartments
+                 FROM core.evidence e
+                 JOIN core."case" c ON c.id = e.case_id
+                WHERE e.id = %s""", (evidence_id,)).fetchone()
+        try:
+            eff_cls = max(tlp_from_name(labels[0]), tlp_from_name(labels[2])).name
+            eff_comp = frozenset(labels[1] or []) | frozenset(labels[3] or [])
+            decision = evaluate(PgAccessResolver(self._c).resolve(
+                user_id=holder, case_id=case_id,
+                permission_key=EXPORT_PERMISSION,
+                object_classification=eff_cls, object_compartments=eff_comp,
+                mfa_satisfied_at=issued_at, count_use=False))
+            failed = list(decision.failed_checks)
+        except AccessResolutionError:
+            failed = ["account_inactive"]
+        if failed:
+            self._audit("EVIDENCE_PRODUCTION_TICKET_REFUSED", holder,
+                        evidence_id, case_id,
+                        {"reason": "authority_withdrawn", "failed_checks": failed,
+                         "ticket_id": str(ticket_id), "spent": True},
+                        outcome="DENIED", session_id=session_id, ip_hash=ip_hash)
+            raise ProductionRefused(_PRODUCTION_REFUSED)
+        self._audit("EVIDENCE_PRODUCTION_TICKET_REDEEMED", holder, evidence_id,
+                    case_id, {"ticket_id": str(ticket_id)},
+                    session_id=session_id, ip_hash=ip_hash)
+        return holder, ticket_id
+
+    def _production_refusal(self, digest: bytes, evidence_id: UUID,
+                            case_id: UUID,
+                            ) -> tuple[str, UUID | None, tuple[UUID, UUID | None]]:
+        """Why a presentation matched nothing, for the audit row only: the
+        reason, the holder, and the (exhibit, case) the row is filed under,
+        which is the ticket's own exhibit when it names one."""
+        row = self._c.execute(
+            """SELECT t.user_id, t.evidence_id, t.redeemed_at,
+                      t.expires_at <= now(), e.case_id
+                 FROM lab.download_ticket t
+                 LEFT JOIN core.evidence e ON e.id = t.evidence_id
+                WHERE t.token_hash = %s""",
+            (digest,)).fetchone()
+        if row is None:
+            return "unknown_ticket", None, (evidence_id, None)
+        named = (row[1] or evidence_id, row[4])
+        if row[2] is not None:
+            return "already_redeemed", row[0], named
+        if row[3]:
+            return "expired", row[0], named
+        if row[1] is None:
+            return "issued_for_a_sample", row[0], named
+        if row[1] != evidence_id or row[4] != case_id:
+            return "issued_for_another_exhibit", row[0], named
+        return "redeemed_concurrently", row[0], named
+
+    def produce(self, evidence_id: UUID, *, case_id: UUID, actor_id: UUID,
+                ticket_id: UUID, request_origin: str | None = None,
+                ) -> tuple[bytes, str]:
+        """The exhibit's bytes in the Lab's archive (ZIP, password
+        `infected`), on the sample origin only, for a holder whose ticket
+        was just spent. Returns `(archive, sha256 hex)`.
+
+        Refuses on any process that is not the sample origin, for the
+        reason `SampleService.download` does and from the same
+        configuration (`samples.origin_split`). Then the exhibit's own
+        decision again (`_producible`), then the bytes, re-verified against
+        the recorded digest and refused on a mismatch as every read is
+        (`_fetch_verified`). The EXPORTED custody row names the ticket and
+        the origin, so the record says how the exhibit left."""
+        from noctornal_api.samples import archive, origin_split
+
+        split = origin_split(this=request_origin)
+        if not split.serves_here:
+            raise NotProducible(split.refusal)
+        self._producible(evidence_id, case_id, actor_id, stage="redemption")
+        data, _ = self._fetch_verified(evidence_id, actor_id)
+        digest = _sha256(data).hex()
+        with self._c.transaction():
+            self._custody(evidence_id, "EXPORTED", actor_id,
+                          detail={"via": "sample_origin",
+                                  "origin": split.sample,
+                                  "ticket_id": str(ticket_id),
+                                  "archive_format": "ZIP_INFECTED"})
+            self._audit("EVIDENCE_EXPORTED", actor_id, evidence_id, case_id,
+                        {"via": "sample_origin", "ticket_id": str(ticket_id)})
+        return archive(data, digest, what="exhibit"), digest
+
+    # -- the storage lock follows the case's retention --------------------
+
+    def _lodging_lock(self, case_id: UUID) -> datetime:
+        """The lock a newly lodged exhibit gets: the default period from
+        now, or the case's retention date when that is later, up to the
+        horizon (`lock_target`).
+
+        x-lock-extension, verifier, 2026-09-24. Only an EXTENSION followed
+        the case, so an exhibit lodged into a case already retained past a
+        year kept the year: OP-NIGHTJAR-26 is retained to 2028-12-31 and
+        its .eml was locked to 2027-09-23, while the policy said the lock
+        followed the case. Asked at the put, as the case stands then."""
+        now = self._now()
+        shortest = now + DEFAULT_RETENTION
+        row = self._c.execute(
+            'SELECT retention_until FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        if row is None or row[0] is None:
+            return shortest
+        target, _ = lock_target(row[0], now)
+        return max(shortest, target)
+
+    def extend_locks(self, case_id: UUID, retention_until: date,
+                     actor_id: UUID, *,
+                     ceiling: tuple[str, list[str]] | None = None) -> dict:
+        """Lengthen every live exhibit's storage lock in the case toward the
+        start of `retention_until`, UTC: the instant the purge starts
+        treating the case as due (`retention.due` selects on
+        `c.retention_until <= today`, deadline midnight UTC). No further
+        than `LOCK_HORIZON` from now, which the report says (`capped`).
+
+        x-lock-extension, 2026-09-24. The lock was fixed at lodging, so a
+        case whose retention was extended past it kept exhibits the store
+        would let anyone with the bucket's credentials delete, while the
+        register and the chip read as held. Called by `PATCH /cases/{id}`
+        AFTER the case's new date has committed, and by the Evidence pane's
+        "Lengthen" for locks set before they followed the case; it never
+        undoes the date: a lock that could not be lengthened is reported
+        and audited per exhibit, and the date stands, because the date is
+        what the purge reads and a date refused over a storage outage would
+        leave the case due sooner, the opposite of what was asked.
+
+        Each lengthened exhibit gets a LOCK_EXTENDED custody row carrying
+        the new `lock_ends_at` (the register reads the newest one) and the
+        previous end, and its `retention_until` day moves to the lock's.
+        An exhibit already held that long is left alone and counted.
+        Purged exhibits have no bytes to lock.
+
+        EVERY live exhibit is locked, and the report counts only those
+        within `ceiling`, the caller's (clearance, compartments), when one
+        is given (verifier, 2026-09-24): `case.update` says nothing about
+        exhibits above the caller, and a count that included them told an
+        AMBER owner a case held three exhibits where their register showed
+        one, as often as they cared to save the date. Which exhibits failed
+        is in the audit log, never in the answer."""
+        now = self._now()
+        until, capped = lock_target(retention_until, now)
+        clr, comp = ceiling if ceiling is not None else (None, None)
+        rows = self._c.execute(
+            """SELECT id, storage_key,
+                      (%(clr)s::text IS NULL
+                       OR (classification <= %(clr)s::core.tlp
+                           AND compartments <@ %(comp)s::text[])) AS counted
+                 FROM core.evidence
+                WHERE case_id = %(case)s AND purged_at IS NULL AND is_worm_locked
+                ORDER BY acquired_at, id""",
+            {"case": case_id, "clr": clr, "comp": comp}).fetchall()
+        report = {"lock_ends_at": until.isoformat(), "capped": capped,
+                  "exhibits": sum(1 for r in rows if r[2]),
+                  "extended": 0, "already_held": 0, "failed": 0,
+                  "date_passed": until <= now}
+        if not rows or report["date_passed"]:
+            # A lock cannot be set in the past, and the case is due on its
+            # own date whatever the store says, so there is nothing to do.
+            return report
+        for evidence_id, key, counted in rows:
+            tally = report if counted else {"extended": 0, "already_held": 0,
+                                            "failed": 0}
+            try:
+                if self._s is None:
+                    raise EvidenceError("the evidence store is not configured")
+                done = self._s.extend_lock(key, until)
+            except Exception as exc:  # noqa: BLE001 - reported per exhibit, never raised
+                tally["failed"] += 1
+                reason = (getattr(exc, "code", None) or type(exc).__name__)
+                log.warning("storage lock on exhibit %s not extended to %s: %s",
+                            evidence_id, until.isoformat(), reason)
+                self._audit("EVIDENCE_LOCK_EXTENSION_FAILED", actor_id,
+                            evidence_id, case_id,
+                            {"lock_ends_at": until.isoformat(), "reason": reason},
+                            outcome="FAILED")
+                continue
+            if not done.extended:
+                tally["already_held"] += 1
+                continue
+            with self._c.transaction():
+                self._c.execute(
+                    """UPDATE core.evidence SET retention_until = %s
+                        WHERE id = %s
+                          AND (retention_until IS NULL OR retention_until < %s)""",
+                    (until.date(), evidence_id, until.date()))
+                self._custody(evidence_id, "LOCK_EXTENDED", actor_id, detail={
+                    "lock_ends_at": until.isoformat(),
+                    "previous_lock_ends_at": (done.previous.isoformat()
+                                              if done.previous else None),
+                    "case_retention_until": retention_until.isoformat(),
+                    "capped_at_horizon": capped,
+                    "versions": done.versions})
+                self._audit("EVIDENCE_LOCK_EXTENDED", actor_id, evidence_id,
+                            case_id, {"lock_ends_at": until.isoformat()})
+            tally["extended"] += 1
+        return report
 
     # -- internal --------------------------------------------------------
     def _custody(self, evidence_id, action, actor_id, *, detail=None, hash_verified=None):
@@ -743,11 +1392,18 @@ class EvidenceService:
             (evidence_id, action, actor_id, Json(detail or {}), hash_verified),
         )
 
-    def _audit(self, action, actor_id, object_id, case_id, detail):
+    def _audit(self, action, actor_id, object_id, case_id, detail, *,
+               outcome="SUCCESS", session_id=None, ip_hash=None):
+        """`outcome`, `session_id` and `ip_hash` since 0068: a production
+        ticket's issue, redemption and refusals carry them as the Lab's
+        ticket events do. A refusal naming no holder is SYSTEM, not a USER
+        row with no actor (`deps.audit_auth_event`'s rule)."""
         from psycopg.types.json import Json
         self._c.execute(
             """INSERT INTO audit.event
-                   (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
-               VALUES (%s, 'USER', %s, 'evidence', %s, %s, %s)""",
-            (actor_id, action, object_id, case_id, Json(detail)),
+                   (actor_id, actor_kind, action, object_type, object_id, case_id,
+                    outcome, detail, session_id, ip_hash)
+               VALUES (%s, %s, %s, 'evidence', %s, %s, %s, %s, %s, %s)""",
+            (actor_id, "USER" if actor_id else "SYSTEM", action, object_id,
+             case_id, outcome, Json(detail), session_id, ip_hash),
         )

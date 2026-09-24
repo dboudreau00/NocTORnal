@@ -68,8 +68,9 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api.retention import UNRULED_RETAIN_DAYS
 from noctornal_api.security import envelope
-from noctornal_api.wording import count_of
+from noctornal_api.wording import agree, count_of
 
 KEY_PREFIX = "noct_sk"
 #: The searchable half. docs/12: a fixed prefix means leaked keys are
@@ -89,9 +90,41 @@ HIGH_RISK_CATEGORIES = frozenset({
     STEALER_LOG, "CREDENTIAL_DUMP", "DATABASE_LEAK",
 })
 
+#: Every category `ingest.record` accepts, in the order of migration 0033's
+#: `record_category_known` CHECK. Named here so the Keys form and the
+#: category correction offer the list the database enforces rather than a
+#: second copy in the console that drifts (ux12-feeds:keys-tab-read-only
+#: and confidence-label-ambiguous, 2026-09-23). Held to the constraint by
+#: test_feeds_review_pg.py.
+CATEGORIES: tuple[str, ...] = (
+    "STEALER_LOG", "CREDENTIAL_DUMP", "DATABASE_LEAK", "RANSOM_LEAK_POST",
+    "MARKET_LISTING", "FORUM_POST", "CHAT_EXPORT", "PASTE", "IOC_FEED",
+    "VENDOR_REPORT", "MALWARE_SAMPLE", "BLOCKCHAIN_TX", "SANCTIONS_LIST",
+    "COURT_RECORD", "TELEMETRY", "UNKNOWN",
+)
+
+#: The triage states a queue record can be in. The same four words the
+#: Collected documents list uses (`collect.document.triage_state`), so an
+#: analyst learns one vocabulary for "I have dealt with this". NEW is the
+#: absence of a decision, never a recorded one (see `triage_record`).
+TRIAGE_STATES: tuple[str, ...] = ("NEW", "TRIAGED", "LINKED", "DISCARDED")
+
+#: Points per term of the triage score, named so the row can show each
+#: term's contribution and the numbers cannot drift from the arithmetic.
+SELECTOR_POINTS = 10.0
+HIGH_RISK_POINTS = 2.0
+DUPLICATE_POINTS = -8.0
+
 
 class IngestError(Exception):
     pass
+
+
+class RepairInvalid(IngestError):
+    """A repaired fragment that is not one JSON object. Its own type so the
+    router answers 400 (the request is wrong) rather than 409 (the dead
+    letter is in the wrong state): until 2026-09-23 `json.loads` raised
+    straight through `replay` and a typo in a repair was a 500."""
 
 
 class AuthorisationRequired(IngestError):
@@ -112,7 +145,7 @@ def _pepper() -> bytes:
     if not raw:
         raise IngestError(
             "NOCTORNAL_INGEST_PEPPER is not set. Ingest keys are HMAC'd with "
-            "a pepper (docs/12); without one there is nothing to verify "
+            "a pepper; without one there is nothing to verify "
             "against and issuing a key would produce an unusable credential.")
     return raw.encode("utf-8")
 
@@ -559,7 +592,7 @@ class IngestService:
         if actual != claimed:
             raise CaseMismatch(
                 f"this {what} belongs to another case. An authorisation is "
-                f"granted for ONE case (docs/12), and decrypting across "
+                f"granted for ONE case, and decrypting across "
                 f"cases with it would also record the disclosure against "
                 f"the wrong one.")
 
@@ -599,14 +632,25 @@ class IngestService:
         if ttl > MAX_KEY_TTL:
             raise IngestError(
                 f"an ingest key may not outlive {MAX_KEY_TTL.days} days: "
-                f"docs/12 has no 'never' option, and an orphaned key is how "
+                f"there is no 'never' option, and an orphaned key is how "
                 f"an ingest path outlives its purpose")
         if declared_category == STEALER_LOG and not forced_compartment:
             raise IngestError(
                 "a stealer-log feed needs its own compartment, tighter than "
                 "the parent case. A single archive holds credentials, "
                 "cookies and documents belonging to one victim who is not "
-                "your subject, and a feed holds thousands (docs/12).")
+                "your subject, and a feed holds thousands.")
+        # The other high-risk categories too (2026-09-23). `_store_record`
+        # has always refused a CREDENTIAL_DUMP or DATABASE_LEAK record on a
+        # key with no compartment, so a key declared as either without one
+        # was issued happily and then dead-lettered every record it
+        # brought. Issuing is now possible from the Keys tab, which is the
+        # moment to say so.
+        if declared_category in HIGH_RISK_CATEGORIES and not forced_compartment:
+            raise IngestError(
+                f"a {declared_category} feed carries third-party personal "
+                f"data at scale and needs its own compartment. "
+                f"Without one every record it sends is refused at parse.")
 
         key_id = secrets.token_urlsafe(16)[:8].replace("-", "x").replace("_", "y")
         secret_half = "".join(
@@ -718,14 +762,27 @@ class IngestService:
 
     def revoke_key(self, key_row_id: UUID, *, actor_id: UUID,
                    reason: str) -> None:
+        """Revoke a live key, with the reason the Keys tab shows.
+
+        Raises for a key that does not exist or is already revoked. Until
+        2026-09-23 this ran a bare UPDATE and audited a revocation whether
+        or not a row matched, so a mistyped id answered "revoked": true and
+        wrote an INGEST_KEY_REVOKED event about nothing. The console now
+        offers Revoke on the Keys tab (ux12-feeds:keys-tab-read-only), and
+        a revocation that did not happen must not read as one that did.
+        """
         if not (reason or "").strip():
             raise IngestError("a revocation has to say why")
-        self._c.execute(
+        row = self._c.execute(
             "UPDATE ingest.api_key SET revoked_at = now(), revoked_reason = %s "
-            "WHERE id = %s AND revoked_at IS NULL",
-            (reason.strip(), key_row_id))
+            "WHERE id = %s AND revoked_at IS NULL RETURNING key_id, name",
+            (reason.strip(), key_row_id)).fetchone()
+        if row is None:
+            raise IngestError("no such live key: it does not exist or is "
+                              "already revoked")
         self._audit(None, actor_id, "INGEST_KEY_REVOKED",
-                    {"key": str(key_row_id), "reason": reason.strip()})
+                    {"key": str(key_row_id), "key_id": row[0],
+                     "name": row[1], "reason": reason.strip()})
 
     def stale_keys(self, days: int = 30) -> list[dict]:
         """Keys unused for `days`. docs/12: those are either dead
@@ -793,8 +850,8 @@ class IngestService:
             # always" is not satisfied by recording that we meant to.
             raise IngestError(
                 "no raw-payload storage is configured, so these bytes would "
-                "be acknowledged and dropped. docs/12 requires the raw "
-                "payload to be persisted BEFORE parsing, because that is "
+                "be acknowledged and dropped. The raw payload must be "
+                "persisted BEFORE parsing, because that is "
                 "what makes a wrong parser recoverable without asking a "
                 "partner to resend three months of feed.")
         self._storage.put(key_name, raw)
@@ -871,6 +928,7 @@ class IngestService:
         # with its already-inserted records committed and the fragment that
         # broke it never recorded. A batch must always end somewhere.
         state = "FAILED"
+        stored: list[UUID] = []
         try:
             seen = 0
             # The generator is advanced INSIDE the try, not by a `for`.
@@ -926,6 +984,7 @@ class IngestService:
                     created = self._store_record(
                         batch_id, key, payload, case_id=case_id)
                     result.records += 1
+                    stored.append(created["id"])
                     if created.get("duplicate"):
                         result.duplicates += 1
                 except Exception as exc:  # noqa: BLE001
@@ -970,8 +1029,23 @@ class IngestService:
         if result.dead and result.records == 0:
             result.warnings.append(
                 "every record in this batch dead-lettered. That is usually "
-                "the partner changing their schema without telling you "
-                "(docs/12), not a transient fault.")
+                "the partner changing their schema without telling you, "
+                "not a transient fault.")
+        # Scored as they arrive (ux12-feeds:feeds-badge-never-set,
+        # 2026-09-23). Nothing did: every parsed record sat at 0.0 until
+        # somebody pressed Rescore on it, which is the opposite of a
+        # watched selector surfacing in seconds. After the batch state is
+        # settled and outside the parse loop, so a scoring failure can
+        # neither dead-letter a record that parsed nor leave the batch in
+        # PARSING; it is a warning and the records keep their 0.0.
+        if stored:
+            try:
+                self.score_records(stored)
+            except Exception as exc:  # noqa: BLE001 - see above
+                result.warnings.append(
+                    f"the records were stored but could not be scored "
+                    f"({type(exc).__name__}); they sit at 0.0 until "
+                    f"rescored.")
         return result
 
     def _store_record(self, batch_id: UUID, key, payload: dict, *,
@@ -986,7 +1060,7 @@ class IngestService:
             raise IngestError(
                 f"a {category} record arrived on a key with no forced "
                 f"compartment. Third-party personal data at scale needs its "
-                f"own compartment (docs/12); fix the key declaration rather "
+                f"own compartment; fix the key declaration rather "
                 f"than the record.")
 
         body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1038,7 +1112,9 @@ class IngestService:
         row = self._c.execute(
             "SELECT retain_days FROM core.retention_rule WHERE category = %s",
             (category,)).fetchone()
-        days = row[0] if row else 365
+        # The fallback is named where the retention panel can read it
+        # (ux15-report:unruled-categories-invisible, 2026-09-23).
+        days = row[0] if row else UNRULED_RETAIN_DAYS
         return datetime.now(timezone.utc) + timedelta(days=days)
 
     def _dead_letter_retention(self, declared_category: str | None) -> datetime:
@@ -1133,32 +1209,67 @@ class IngestService:
         migration reasoned about one writer (`redact_dead_letters.py`) and
         missed this one; the fix belongs on both sides.
         """
-        row = self._c.execute(
-            """SELECT dl.batch_id, dl.api_key_id, dl.replayed_at, dl.redacted
-                 FROM ingest.dead_letter dl WHERE dl.id = %s""",
-            (dead_letter_id,)).fetchone()
-        if row is None:
-            raise IngestError("no such dead letter")
-        if row[2] is not None:
-            raise IngestError("already replayed")
-        if not row[3]:
-            raise IngestError(
-                "this dead letter predates the redactor and still holds its "
-                "fragment verbatim, so any UPDATE to it violates migration "
-                "0040's check. Run `scripts/redact_dead_letters.py --apply` "
-                "first. Replaying without it would create the record and "
-                "then fail to mark this row resolved.")
-        key = self._c.execute(
-            """SELECT id, declared_category, classification_ceiling,
-                      forced_compartment FROM ingest.api_key WHERE id = %s""",
-            (row[1],)).fetchone()
-        payload = json.loads(repaired)
-        created = self._store_record(row[0], key, payload, case_id=case_id)
-        self._c.execute(
-            """UPDATE ingest.dead_letter
-                  SET replayed_at = now(), replayed_by = %s, resolution = %s
-                WHERE id = %s""",
-            (actor_id, f"replayed as record {created['id']}", dead_letter_id))
+        # Parsed BEFORE anything is locked or written, and refused as its
+        # own error: a typo in a repair is the caller's to fix, and until
+        # 2026-09-23 `json.loads` raised through this method as a 500.
+        try:
+            payload = json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            raise RepairInvalid(
+                f"the repair is not valid JSON ({exc.msg} at line "
+                f"{exc.lineno}, column {exc.colno}). Nothing was written.") \
+                from exc
+        except (ValueError, RecursionError) as exc:
+            raise RepairInvalid(
+                "the repair is not valid JSON. Nothing was written.") from exc
+        if not isinstance(payload, dict):
+            raise RepairInvalid(
+                "the repair must be one JSON object, the shape a record has. "
+                "Nothing was written.")
+        # One transaction with the row locked, so two people pressing
+        # Replay on the same dead letter make one record, not two. The
+        # console offers the action since 2026-09-23 (ux12-feeds:dead-
+        # letters-no-feed-no-scope), and a double click is the ordinary
+        # case: the "already replayed" check was a read, then a write, on
+        # an autocommit connection.
+        with self._c.transaction():
+            row = self._c.execute(
+                """SELECT dl.batch_id, dl.api_key_id, dl.replayed_at,
+                          dl.redacted
+                     FROM ingest.dead_letter dl WHERE dl.id = %s
+                      AND dl.purged_at IS NULL
+                      FOR UPDATE""",
+                (dead_letter_id,)).fetchone()
+            if row is None:
+                raise IngestError("no such dead letter")
+            if row[2] is not None:
+                raise IngestError("already replayed")
+            if not row[3]:
+                raise IngestError(
+                    "this dead letter predates the redactor and still holds "
+                    "its fragment verbatim, so any UPDATE to it violates "
+                    "migration 0040's check. Run "
+                    "`scripts/redact_dead_letters.py --apply` first. "
+                    "Replaying without it would create the record and then "
+                    "fail to mark this row resolved.")
+            key = self._c.execute(
+                """SELECT id, declared_category, classification_ceiling,
+                          forced_compartment FROM ingest.api_key WHERE id = %s""",
+                (row[1],)).fetchone()
+            created = self._store_record(row[0], key, payload, case_id=case_id)
+            self._c.execute(
+                """UPDATE ingest.dead_letter
+                      SET replayed_at = now(), replayed_by = %s, resolution = %s
+                    WHERE id = %s""",
+                (actor_id, f"replayed as record {created['id']}",
+                 dead_letter_id))
+            # Audited: a replay puts a record in a queue on a person's say
+            # so, and nothing recorded who until 2026-09-23.
+            self._audit(case_id, actor_id, "INGEST_DEAD_LETTER_REPLAYED",
+                        {"record_id": str(created["id"]),
+                         "batch_id": str(row[0]) if row[0] else None},
+                        object_id=dead_letter_id)
+        self.score_records([created["id"]], actor_id=actor_id)
         return created["id"]
 
     # -- victim PII --------------------------------------------------------
@@ -1296,8 +1407,8 @@ class IngestService:
             raise AuthorisationRequired(
                 "revealing a victim credential needs a live, logged "
                 "authorisation for this case. Without one the platform is a "
-                "credential lookup service, and someone will use it as one "
-                "(docs/12).")
+                "credential lookup service, and someone will use it as "
+                "one.")
         row = (scope[1], scope[2])
         if row[0] is None:
             raise IngestError(
@@ -1370,45 +1481,388 @@ class IngestService:
         the enemy, and a queue nobody can prioritise is a queue nobody
         reads.
         """
+        return self._score(record_id, {})[0]
+
+    def _watches_for(self, case_id: UUID | None, cache: dict) -> list:
+        """The watch list a record in `case_id` scores against, read once
+        per case per scoring pass. `parse_batch` scores every record it
+        stores since 2026-09-23, and reading the list again for each of a
+        stealer log's thousands of records was a query per record for the
+        same answer (fix round, 2026-09-23)."""
+        if case_id not in cache:
+            # WHICH watches, and that is the fix (ux12-feeds:watched-hit-
+            # unnamed-and-contradicted, 2026-09-23). This read every active
+            # watch in the deployment and stored only a count, so a record
+            # in OP-KESTREL-26 rose to the top of KESTREL's queue on a
+            # selector OP-NIGHTJAR-26 was watching, nobody on KESTREL
+            # could find out which, and the score told them another case
+            # watches a selector this record carries. A record in a case
+            # now scores against that case's watches and the case-less
+            # ones; a record in quarantine, which no case can see yet,
+            # against all of them, because routing it to the case whose
+            # watch it matches is the operator's whole job. Each term is
+            # stored with the selector and the watch that earned it, and
+            # the router hides a watch the caller cannot read.
+            cache[case_id] = self._c.execute(
+                """SELECT w.id, w.name, w.case_id, s.selector
+                     FROM collect.watch w,
+                          unnest(w.selector_watch) AS s(selector)
+                    WHERE w.is_active AND s.selector IS NOT NULL
+                      AND btrim(s.selector) <> ''
+                      AND (%s::uuid IS NULL OR w.case_id IS NULL
+                           OR w.case_id = %s)
+                    ORDER BY lower(s.selector), w.name""",
+                (case_id, case_id)).fetchall()
+        return cache[case_id]
+
+    def _score(self, record_id: UUID, cache: dict) -> tuple[float, int]:
+        """(score, watched selectors matched) for one record, written."""
         row = self._c.execute(
-            """SELECT payload::text, category, duplicate_of, created_at
+            """SELECT payload::text, category, duplicate_of, created_at,
+                      case_id
                  FROM ingest.record WHERE id = %s""", (record_id,)).fetchone()
         if row is None:
             raise IngestError("no such record")
-        text, category, duplicate_of, created_at = row
+        text, category, duplicate_of, created_at, case_id = row
 
-        watched = self._c.execute(
-            "SELECT unnest(selector_watch) FROM collect.watch WHERE is_active"
-        ).fetchall()
-        hits = sum(1 for (needle,) in watched
-                   if needle and needle.lower() in text.lower())
+        watched = self._watches_for(case_id, cache)
+        haystack = text.lower()
+        matched: dict[str, dict] = {}
+        for watch_id, name, watch_case, selector in watched:
+            needle = selector.strip().lower()
+            if needle not in haystack:
+                continue
+            # One term per distinct selector. The same value on two
+            # watches is one thing found in the record, not two, and
+            # counting it twice let a duplicated watch double a score.
+            term = matched.setdefault(needle, {
+                "term": "selector", "points": SELECTOR_POINTS,
+                "selector": selector.strip(), "watches": []})
+            term["watches"].append({
+                "id": str(watch_id), "name": name,
+                "case_id": str(watch_case) if watch_case else None})
+        terms = list(matched.values())
+        if category in HIGH_RISK_CATEGORIES:
+            terms.append({"term": "category", "points": HIGH_RISK_POINTS,
+                          "category": category})
+        if duplicate_of is not None:
+            terms.append({"term": "duplicate", "points": DUPLICATE_POINTS})
+        hits = len(matched)
 
         detail = {
             "watched_selector_hits": hits,
             "near_duplicate": duplicate_of is not None,
             "category": category,
+            # Every term that moved the score, so the row can say
+            # "+10 selector x (watch y), +2 high-risk category" instead of
+            # a count that left two rows with one reason and two scores.
+            "terms": terms,
+            "scored_at": datetime.now(timezone.utc).isoformat(),
         }
-        score = 0.0
-        score += 10.0 * hits                       # w1, dominant
-        score += 2.0 if category in HIGH_RISK_CATEGORIES else 0.0
-        score -= 8.0 if duplicate_of is not None else 0.0   # w6
-        score = max(score, 0.0)
+        score = max(sum(t["points"] for t in terms), 0.0)
 
         self._c.execute(
             "UPDATE ingest.record SET priority = %s, priority_detail = %s "
             "WHERE id = %s", (score, Json(detail), record_id))
-        return score
+        return score, hits
+
+    def score_records(self, record_ids, *,
+                      actor_id: UUID | None = None) -> dict:
+        """Score several records and tell each case owner about new hits.
+
+        `{scored, changed, newly_hit}`. A record is NEWLY hit when it now
+        matches more watched selectors than it did before this pass, and
+        those are what the owner is told about, once per case and label
+        set rather than once per record: a batch of forty matching records
+        is one notification, not forty.
+
+        ux12-feeds:feeds-badge-never-set (2026-09-23). Nothing outside the
+        Feeds pane ever said a scored hit had arrived, and `parse_batch`
+        did not score at all: every parsed record sat at 0.0 until an
+        analyst pressed Rescore on it, so "a record containing a watched
+        selector should surface in seconds" (docs/12) held only for records
+        somebody had already found.
+        """
+        ids = [UUID(str(r)) for r in record_ids]
+        if not ids:
+            return {"scored": 0, "changed": 0, "newly_hit": 0}
+        before = {
+            r[0]: (float(r[1]), int((r[2] or {}).get("watched_selector_hits")
+                                    or 0))
+            for r in self._c.execute(
+                """SELECT id, priority, priority_detail FROM ingest.record
+                    WHERE id = ANY(%s)""", (ids,)).fetchall()}
+        changed = 0
+        fresh: list[UUID] = []
+        # One watch list per case for the whole pass, and the hit count
+        # from the scoring itself rather than read back: two statements a
+        # record, not four (fix round, 2026-09-23).
+        watches: dict = {}
+        for rid in ids:
+            if rid not in before:
+                continue
+            score, hits = self._score(rid, watches)
+            if score != before[rid][0]:
+                changed += 1
+            if hits > before[rid][1]:
+                fresh.append(rid)
+        if fresh:
+            self._notify_selector_hits(fresh, actor_id=actor_id)
+        return {"scored": len(before), "changed": changed,
+                "newly_hit": len(fresh)}
+
+    def _notify_selector_hits(self, record_ids: list[UUID], *,
+                              actor_id: UUID | None) -> None:
+        """One FEED_SELECTOR_HIT per case and label set, to the case owner.
+
+        The three-field discipline (notify_events.py): the subject and the
+        summary carry the case code and a count and never a selector,
+        because they may leave the building by email; the body names the
+        watches, because it is read in-app behind the gate. The record's
+        own labels are the element labels, so a stealer-log hit is marked
+        with its compartment and an owner who does not hold it is not told
+        (suppression 2), which is the compartment doing its job.
+
+        A failure here is logged and swallowed: the score is written and
+        the record is at the top of the queue, and a notification that
+        could not be raised must not undo that or fail the parse.
+        """
+        from noctornal_api.notifications import NotificationService
+
+        rows = self._c.execute(
+            """SELECT r.id, r.case_id, r.classification::text, r.compartments,
+                      r.priority_detail, c.code, c.classification::text,
+                      c.compartments
+                 FROM ingest.record r
+                 JOIN core."case" c ON c.id = r.case_id
+                WHERE r.id = ANY(%s) AND r.duplicate_of IS NULL""",
+            (record_ids,)).fetchall()
+        groups: dict[tuple, list] = {}
+        for row in rows:
+            key = (row[1], row[2], tuple(sorted(row[3] or [])))
+            groups.setdefault(key, []).append(row)
+        for (case_id, cls, comps), members in groups.items():
+            code, case_cls, case_comps = (members[0][5], members[0][6],
+                                          frozenset(members[0][7] or []))
+            n = len(members)
+            records = count_of(n, "feed record", "feed records")
+            verb = agree(n, "matches", "match")
+            # The summary's pronoun agrees with the count as the body's verb
+            # does: "1 feed record ... see them" was the slip the fix round
+            # caught (ux12-feeds:feeds-badge-never-set, 2026-09-23).
+            them = agree(n, "it", "them")
+            watches = sorted({
+                f"{t.get('selector')} (watch {w.get('name')})"
+                for m in members
+                for t in (m[4] or {}).get("terms", [])
+                if t.get("term") == "selector"
+                for w in t.get("watches", [])})
+            # Its own transaction (a savepoint inside a caller's), so a
+            # failed insert is rolled back to here and does not leave a
+            # caller's transaction aborted under a swallowed error.
+            try:
+                with self._c.transaction():
+                    NotificationService(self._c).notify_case_owner(
+                        case_id, kind="FEED_SELECTOR_HIT",
+                        subject=f"{code}: {records} {verb} a watched selector",
+                        summary=(f"{records} on {code} {verb} a selector one of "
+                                 f"the case's watches is looking for. Sign in to "
+                                 f"see {them} at the top of the ingest queue."),
+                        body=(f"{records} on {code} {verb} a watched selector "
+                              f"and {agree(n, 'is', 'are')} at the top of "
+                              f"Feeds, Ingest queue.\n\nMatched: "
+                              + ("; ".join(watches) or "see the queue") + "."),
+                        classification=case_cls, compartments=case_comps,
+                        element_classification=cls,
+                        element_compartments=frozenset(comps),
+                        object_type="ingest.record", object_id=members[0][0],
+                        actor_id=actor_id)
+            except Exception:  # noqa: BLE001 - see the docstring
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "could not raise FEED_SELECTOR_HIT for case %s", case_id,
+                    exc_info=True)
+
+    # -- the queue's verbs -------------------------------------------------
+    #
+    # ux12-feeds:queue-is-a-dead-end (2026-09-23). The queue could be
+    # looked at and nothing else: a record that surfaced because it matched
+    # a watched selector could not be marked dealt with, so it sat at the
+    # top for ever and the next analyst re-read it, and a quarantined
+    # record could not be attached to the case it belonged to, so it
+    # expired on the category clock (invariant 12's silent loss, by
+    # inaction). These are the verbs.
+    #
+    # The triage STATE lives in the audit chain, not in a column, and that
+    # is a decision for this release rather than a preference: the
+    # migration chain is closed for Alpha 6 and `ingest.record` has no
+    # triage column. Every triage decision has to be an audit event anyway
+    # (who dismissed a watched-selector hit, when, and why, is exactly
+    # what a disclosure review asks), and the chain is append-only and
+    # hash-linked, so the latest INGEST_RECORD_TRIAGED event for a record
+    # IS its state, read by `audit.event_object_id_idx`. A column can be
+    # added later as a cache of that event without changing what it means.
+
+    def _record_row(self, record_id: UUID) -> tuple:
+        row = self._c.execute(
+            """SELECT case_id, category, category_confidence, category_source,
+                      compartments, created_at, retain_until
+                 FROM ingest.record WHERE id = %s AND purged_at IS NULL""",
+            (record_id,)).fetchone()
+        if row is None:
+            raise IngestError("no such record")
+        return row
+
+    def triage_state(self, record_id: UUID) -> str:
+        row = self._c.execute(
+            """SELECT detail->>'state' FROM audit.event
+                WHERE object_id = %s AND action = 'INGEST_RECORD_TRIAGED'
+                ORDER BY seq DESC LIMIT 1""", (record_id,)).fetchone()
+        return (row[0] if row and row[0] else "NEW")
+
+    def triage_record(self, record_id: UUID, *, actor_id: UUID, state: str,
+                      reason: str | None = None,
+                      linked_to: str | None = None) -> dict:
+        """Record a triage decision on a queue record.
+
+        TRIAGED is "looked at, nothing to do yet"; LINKED says what it was
+        linked to; DISCARDED says why it is noise. NEW puts it back. A
+        discard needs a reason and a link needs its target, because both
+        are decisions somebody will be asked to defend, and the reason is
+        what the next analyst reads instead of re-reading the record.
+        """
+        state = (state or "").strip().upper()
+        if state not in TRIAGE_STATES:
+            raise IngestError(
+                "state must be one of " + ", ".join(TRIAGE_STATES))
+        reason = (reason or "").strip() or None
+        linked_to = (linked_to or "").strip() or None
+        if state == "DISCARDED" and (reason is None or len(reason) < 5):
+            raise IngestError(
+                "a discard has to say why, in at least five characters: the "
+                "reason is what the next analyst reads instead of the record")
+        if state == "LINKED" and (linked_to is None or len(linked_to) < 3):
+            raise IngestError(
+                "say what this record was linked to (an entity, a proposal "
+                "or an exhibit), in at least three characters")
+        case_id = self._record_row(record_id)[0]
+        previous = self.triage_state(record_id)
+        detail = {"state": state, "previous": previous}
+        if reason:
+            detail["reason"] = reason
+        if linked_to:
+            detail["linked_to"] = linked_to
+        self._audit(case_id, actor_id, "INGEST_RECORD_TRIAGED", detail,
+                    object_id=record_id)
+        return {"record_id": str(record_id), "state": state,
+                "previous": previous}
+
+    def attach_record(self, record_id: UUID, *, case_id: UUID,
+                      actor_id: UUID, reason: str) -> dict:
+        """Attach a quarantined record to a case.
+
+        The quarantine notice has always said "attaching it to a case is
+        what puts it under that case's authority", and there was no way to
+        attach one. Refused for a record that already has a case: moving
+        material between cases is a different act with a different
+        audience, and this verb must not become it. The category clock is
+        unchanged (`_retain_until`: a stealer log inside a two-year case
+        must not inherit that case's authority). The record is rescored
+        against its new case's watches.
+        """
+        reason = (reason or "").strip()
+        if len(reason) < 5:
+            raise IngestError("say why this record belongs to that case, in "
+                              "at least five characters")
+        row = self._c.execute(
+            """UPDATE ingest.record SET case_id = %s
+                WHERE id = %s AND case_id IS NULL AND purged_at IS NULL
+                RETURNING id""", (case_id, record_id)).fetchone()
+        if row is None:
+            raise IngestError(
+                "this record is not in quarantine: it is already attached to "
+                "a case, or it no longer exists")
+        self._audit(case_id, actor_id, "INGEST_RECORD_ATTACHED",
+                    {"reason": reason}, object_id=record_id)
+        self.score_records([record_id], actor_id=actor_id)
+        return {"record_id": str(record_id), "case_id": str(case_id)}
+
+    def correct_category(self, record_id: UUID, *, actor_id: UUID,
+                         category: str, reason: str) -> dict:
+        """An analyst's correction of the classifier's category.
+
+        docs/12: "Keep the confidence and let analysts correct it;
+        corrections are training data." The classifier's output is kept in
+        the audit event (`from`), the record carries the correction with
+        source ANALYST, and the row keeps showing what the machine said.
+
+        Rules, each the one `_store_record` applies on the way in:
+
+        - a high-risk category needs a compartment, and a record whose feed
+          declared none cannot be corrected into one (the fix is the key's
+          declaration and a re-parse, not the record);
+        - the expiry is the NEW category's clock counted from arrival, and
+          a correction never brings it FORWARD. Shortening a retention
+          period is a destruction decision, which belongs to retention and
+          purge where a legal hold is checked, not to a relabel.
+        """
+        category = (category or "").strip().upper()
+        if category not in CATEGORIES:
+            raise IngestError("unknown category " + repr(category))
+        reason = (reason or "").strip()
+        if len(reason) < 5:
+            raise IngestError("say why the category is wrong, in at least "
+                              "five characters: corrections are training "
+                              "data and the reason is the label")
+        (case_id, was, confidence, source, compartments, created_at,
+         retain_until) = self._record_row(record_id)
+        if category == was:
+            raise IngestError(f"the record is already {category}")
+        if category in HIGH_RISK_CATEGORIES and not (compartments or []):
+            raise IngestError(
+                f"a {category} record needs its own compartment, and this "
+                f"record's feed declared none. Fix the key's declaration and "
+                f"re-parse the batch rather than relabelling the record.")
+        rule = self._c.execute(
+            "SELECT retain_days FROM core.retention_rule WHERE category = %s",
+            (category,)).fetchone()
+        by_rule = created_at + timedelta(days=rule[0] if rule else 365)
+        until = by_rule if retain_until is None else max(retain_until, by_rule)
+        self._c.execute(
+            """UPDATE ingest.record
+                  SET category = %s, category_source = 'ANALYST',
+                      category_confidence = 1, retain_until = %s
+                WHERE id = %s""", (category, until, record_id))
+        self._audit(case_id, actor_id, "INGEST_CATEGORY_CORRECTED", {
+            "from": {"category": was, "confidence": float(confidence),
+                     "source": source},
+            "to": category, "reason": reason,
+            "retain_until": {
+                "was": retain_until.isoformat() if retain_until else None,
+                "now": until.isoformat()}},
+            object_id=record_id)
+        self.score_records([record_id], actor_id=actor_id)
+        return {"record_id": str(record_id), "category": category,
+                "previous": {"category": was, "confidence": float(confidence),
+                             "source": source},
+                "retain_until": until.isoformat(),
+                "retain_until_kept": until == retain_until}
 
     # -- internals ---------------------------------------------------------
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
-               detail: dict) -> None:
+               detail: dict, *, object_id: UUID | None = None) -> None:
+        """`object_id` names the record or dead letter an event is about.
+        Every event here used to carry NULL, which was harmless while the
+        events were only read by a person; the queue's verbs (2026-09-23)
+        read their own history back by it, through the object_id index."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
                     case_id, detail)
-               VALUES (%s, 'USER', %s, 'ingest', NULL, %s, %s)""",
-            (actor_id, action, case_id, Json(detail)))
+               VALUES (%s, 'USER', %s, 'ingest', %s, %s, %s)""",
+            (actor_id, action, object_id, case_id, Json(detail)))
 
 
 # ---------------------------------------------------------------------------

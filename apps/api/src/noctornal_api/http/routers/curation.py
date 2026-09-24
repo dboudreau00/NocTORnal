@@ -195,8 +195,10 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
     ).fetchone()
     if row is None or row[0] != case_id:
         raise Problem(404, "Not found", "no such node in this case")
+    # A second gate: it counts a break-glass use only if the route's gate
+    # at the case's labels did not (sec-breakglass-double-count, 2026-09-23).
     authorize_object(conn, user, case_id=case_id,
-                     permission_key="curation.manage",
+                     permission_key="curation.manage", after_case_gate=True,
                      classification=row[1], compartments=frozenset(row[2] or []))
     if require_live and row[3] is not None:
         raise Problem(409, "Conflict",

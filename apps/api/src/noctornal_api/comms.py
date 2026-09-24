@@ -689,10 +689,13 @@ class CommsService:
                 "that claim is exactly the one interception law turns on, "
                 "and an unverifiable version of it is worse than none")
         if provenance_class in _NEEDS_AUTHORITY and not (legal_authority or "").strip():
+            # No "(docs/16 L4)": an analyst reads this, and a design
+            # document's section number tells them nothing (ux19-copy
+            # developer-speak-in-copy, 2026-09-23).
             raise CommsError(
                 f"{provenance_class} needs a written authority. Capturing a "
                 f"conversation nobody in it consented to is not something "
-                f"this system will record without one (docs/16 L4)")
+                f"this system will record without one")
 
         row = self._c.execute(
             """INSERT INTO comms.conversation

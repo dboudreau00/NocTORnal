@@ -19,7 +19,10 @@ while [ $# -gt 0 ]; do
     --skip-docker) SKIP_DOCKER=1; shift ;;
     --port)        PORT="${2:?--port needs a number}"; shift 2 ;;
     --port=*)      PORT="${1#*=}"; shift ;;
-    -h|--help)     sed -n '2,12p' "$0"; exit 0 ;;
+    # The header comment and nothing after it. `sed -n '2,12p'` ran past
+    # the block and printed `set -euo pipefail` as part of the usage text,
+    # as install.sh's did (Alpha 6 pre-release check, 2026-09-23).
+    -h|--help)     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -67,12 +70,17 @@ printf '  repo: %s\n' "$REPO_ROOT"
 
 step 'Checking the Python environment'
 
+# Every remedy printed below carries -c constraints.txt, the pins the
+# installers, CI and the image install from. Without it pip resolves each
+# >= floor to the newest release, and a developer who follows the remedy
+# word for word runs a stack nobody tested (c3, 2026-09-24).
+
 if [ ! -x "$PYTHON" ]; then
   fail "no virtual environment at $REPO_ROOT/.venv" \
     'Create it and install the packages, from the repo root:' \
     '  python3 -m venv .venv' \
-    '  .venv/bin/python -m pip install -r db/requirements.txt' \
-    '  .venv/bin/python -m pip install -e packages/ontology -e apps/api'
+    '  .venv/bin/python -m pip install -c constraints.txt -r db/requirements.txt' \
+    '  .venv/bin/python -m pip install -c constraints.txt -e packages/ontology -e apps/api'
 fi
 
 # uvicorn and the two editable packages are what the last step actually needs.
@@ -80,8 +88,8 @@ if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_on
   printf '%s\n' "$probe" | indent
   fail 'the virtual environment is missing packages the API needs' \
     'Install them, from the repo root:' \
-    '  .venv/bin/python -m pip install -r db/requirements.txt' \
-    '  .venv/bin/python -m pip install -e packages/ontology -e apps/api' \
+    '  .venv/bin/python -m pip install -c constraints.txt -r db/requirements.txt' \
+    '  .venv/bin/python -m pip install -c constraints.txt -e packages/ontology -e apps/api' \
     '' \
     'Then run this script again.'
 fi
@@ -145,10 +153,14 @@ else
   # -f rather than a directory change: compose derives the project directory
   # from the compose file, so the relative volume paths (../db/init) still
   # resolve, and the caller's working directory is left alone.
+  #
+  # The port list below is the compose file's today. It named 8080 and 4222,
+  # OpenFGA's and NATS's, removed in R13, and left out Mailpit's 1025 (Alpha 6
+  # pre-release check, 2026-09-23).
   if ! docker compose -f "$COMPOSE_FILE" up -d 2>&1 | indent; then
     fail 'docker compose up failed' \
       'Read the output above. Common causes:' \
-      '  - a port is already taken (5432, 6379, 9000, 9001, 8080, 4222, 8025)' \
+      '  - a port is already taken (5432, 6379, 9000, 9001, 1025, 8025)' \
       '    stop whatever else is using it, or stop a stale stack:' \
       "      docker compose -f '$COMPOSE_FILE' down" \
       '  - an image could not be pulled: check the network and try again'
@@ -246,11 +258,21 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
     # anything else the operator put in there survives.
     printf 'NOCTORNAL_TOTP_KEK=%s\n' "$generated" >> "$ENV_LOCAL"
   else
+    # The header and the box below say everything the key seals, from
+    # security/sealed.py's SEALED_COLUMNS, and what the ingest pepper
+    # keys if it is kept here too. They said only that users would re-enrol
+    # their authenticators (Alpha 6 pre-release check, 2026-09-23).
     cat > "$ENV_LOCAL" <<EOF
 # NocTORnal local key store. Created by scripts/launch.sh.
 #
-# NOCTORNAL_TOTP_KEK seals every TOTP secret at rest. LOSING THIS FILE MEANS
-# EVERY USER MUST RE-ENROL THEIR AUTHENTICATOR. Back it up somewhere you
+# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted:
+# enrolled authenticators, collection persona credentials, stored victim
+# credentials and each sample's data key. LOSING THIS FILE LOSES ALL OF
+# THEM: every user must re-enrol their authenticator, and no stored
+# credential or sample, preserved samples included, can be decrypted
+# again. If NOCTORNAL_INGEST_PEPPER is kept here too, losing it means
+# reissuing every ingest key, and stored victim-credential fingerprints
+# no longer match new ones for the same value. Back it up somewhere you
 # trust; it is deliberately not committed (.gitignore covers .env.*) and
 # there is no default anywhere in the code.
 #
@@ -268,9 +290,11 @@ EOF
   printf '    A NEW TOTP KEY WAS GENERATED AND SAVED TO:\n'
   printf '      %s\n' "$ENV_LOCAL"
   printf '\n'
-  printf '    That file is now your key store. It seals every TOTP secret in\n'
-  printf '    the database. If you lose it, every user has to re-enrol their\n'
-  printf '    authenticator app - there is no recovery and no default key.\n'
+  printf '    That file is now your key store. The key seals every secret the\n'
+  printf '    database stores encrypted: authenticators, persona and victim\n'
+  printf '    credentials, and the keys of stored samples. If you lose it, every\n'
+  printf '    user has to re-enrol their authenticator app, and none of the rest\n'
+  printf '    can be decrypted again. There is no recovery and no default key.\n'
   printf '    Keep a backup. It is git-ignored, so it will never be committed.\n'
   printf '    ------------------------------------------------------------\n'
   printf '\n'
@@ -286,8 +310,14 @@ step 'Setting the service connection details'
 
 # Dev-only credentials, mirroring infra/docker-compose.yml. They are the only
 # literal secrets allowed in this repo, they only ever address containers on
-# localhost, and a real deployment supplies all of these from the environment
-# or Vault instead.
+# this machine's loopback, and a real deployment supplies all of these from
+# the environment or Vault instead.
+#
+# 127.0.0.1 rather than localhost: the compose file publishes on 127.0.0.1
+# only, so nothing answers on ::1, and a client that tries ::1 first waits
+# about two seconds per connection on a Windows default address order
+# (Alpha 6 pre-release check, 2026-09-23). These apply only where
+# .env.local and the environment say nothing.
 set_default() {
   local name="$1" value="$2"
   # Same "defined, not merely non-empty" rule as the .env.local loader
@@ -309,8 +339,8 @@ set_default() {
   fi
 }
 
-set_default DATABASE_URL     'postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal'
-set_default MINIO_ENDPOINT   'localhost:9000'
+set_default DATABASE_URL     'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'
+set_default MINIO_ENDPOINT   '127.0.0.1:9000'
 set_default MINIO_ACCESS_KEY 'noctornal'
 set_default MINIO_SECRET_KEY 'dev_only_change_me'
 set_default EVIDENCE_BUCKET  'noctornal-evidence'
@@ -356,8 +386,10 @@ if ! count_out="$("$PYTHON" -c "$count_code" 2>&1)"; then
   printf '%s\n' "$count_out" | indent
 else
   users="$(printf '%s' "$count_out" | tr -d '[:space:]')"
-  if [ "${users:-0}" != '0' ]; then
-    good "$users user account(s) exist"
+  if [ "${users:-0}" = '1' ]; then
+    good '1 user account exists'
+  elif [ "${users:-0}" != '0' ]; then
+    good "$users user accounts exist"
   else
     printf '\n'
     printf '    ============================================================\n'
@@ -368,6 +400,10 @@ else
     # One line on purpose: it is meant to be copied, and a wrapped command
     # invites a mangled continuation.
     printf '      .venv/bin/python scripts/bootstrap.py create-user --email you@example.com --name "Your Name"\n'
+    printf '\n'
+    printf '    It prints a password once and a QR for your authenticator. Sign\n'
+    printf '    in with them at http://127.0.0.1:%s/ui/ and use the same address\n' "$PORT"
+    printf '    as --owner-email in the README'"'"'s "First run" recipe.\n'
     printf '\n'
     if [ ! -f "$REPO_ROOT/scripts/bootstrap.py" ]; then
       printf '    Note: scripts/bootstrap.py does not exist in this checkout yet,\n'
@@ -390,8 +426,8 @@ printf '  Everything is up. Open this in your browser:\n'
 printf '      http://127.0.0.1:%s/ui/\n' "$PORT"
 printf '\n'
 printf '  Also available:\n'
-printf '      http://localhost:9001   MinIO console (evidence store)\n'
-printf '      http://localhost:8025   Mailpit (captured e-mail)\n'
+printf '      http://127.0.0.1:9001   MinIO console (evidence store)\n'
+printf '      http://127.0.0.1:8025   Mailpit (captured e-mail)\n'
 
 # The OpenAPI page is off unless NOCTORNAL_ENABLE_DOCS says otherwise: it
 # describes the shape of a case system, so it stays opt-in. Advertise the URL

@@ -1,8 +1,8 @@
 # What is left
 
 **State (2026-09-23):** branch `main` (the working branch; byte-identical to
-`deception-and-release-hardening` except `README.md`), Alembic head `0065`,
-2518 tests counted as `def test_` functions across the two pytest roots,
+`deception-and-release-hardening` except `README.md`), Alembic head `0068`,
+3448 tests counted as `def test_` functions across the two pytest roots,
 version 0.5.2 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
@@ -91,66 +91,46 @@ attribution.
 
 | Item | Note |
 |---|---|
-| DNS-rebinding-proof SSRF protection | `fetch()` re-validates every redirect hop and classifies addresses by what they are rather than by an enumerated list, but the name is resolved once here and again by the socket layer. The real fix is a proxy enforcing policy at connect time. |
+| An egress proxy for persona traffic | `fetch()` resolves each hop once, refuses a private or mixed answer, and connects to the checked addresses by number, so DNS rebinding is closed (docs/17). It consults no proxy, and nothing enforces an egress policy for persona traffic at a network boundary. |
 | RLS under the non-owner role | The production deployment connects as `noctornal_app`, which cannot disable the append-only triggers. Row-level security on top of that is not written. |
 | CI typecheck | No annotations to check against (decision 42). |
 | A collector process | The persona vault runs inside the API process, so invariant 7 is a property of the code's shape rather than of a network boundary. Splitting it out is behind L3 and a queue nothing has needed. |
-| Compartment retirement | Every compartment column is bound to `iam.compartment` (0059), and no route deletes or renames a registered key while a row carries it. |
-| Redis isolation | The limiter's meters need an instance running `noeviction`. The production compose sets it and the readiness register reports the policy, but whether the limiter has that instance to itself is a deployment fact the runtime cannot see. |
+| Redis isolation, enforced | `redis_limiter_isolated` reports keys in the limiter's Redis that the limiter did not write, and the production compose runs it `noeviction`. Whether another tenant will write there later is a deployment fact the runtime can only report, not prevent. |
+| The cron jobs and a published credential | Under `NOCTORNAL_ENV=production` the API refuses to start on a credential this repository publishes. `collection_poll.py`, `notify_drain.py` and the migration job do not run that check: they share `secrets.env` with the API, which will not start, but they would run. `verify_environment` also checks API-only settings, so the cron jobs need their own subset before they can call it. |
 
 ---
 
 ## Left from the 2026-09-22 review
 
-The 42-agent usability and code review found 229 verified problems. The fix
-pass that followed closed 75, every critical among them (release/CHANGELOG.md).
-**154 remain: 25 high, 102 medium, 27 low.** The highs, by area:
+The 2026-09-22 usability and code review found 229 verified problems, and
+Alpha 6 closes all of them: 75 in the first fix pass, every critical among
+them, and the other 154 before tagging (148 fixed, 5 already fixed on the
+release candidate, and 1 finished after a review of that pass). Two
+reviews of the fixes found 43 and then 50 more, all fixed. The seven gaps
+the known-open list named are closed too (release/CHANGELOG.md, Alpha 6).
 
-| Area | What is still wrong |
-|---|---|
-| Triage (6) | Single-key and Ctrl shortcuts accept a proposal with no confirmation; the graph's "unreviewed proposals" count and the Triage queue disagree and nothing reviews the graph's; a notification's "Open approvals" opens the current case; a merge approval shows two UUIDs and no requester; contact-block proposals name no identifier; triage cards carry no TLP and Accept files selectors as AMBER whatever the capture was |
-| ACH (5) | An unscored row reads as "settles nothing"; stance notes are never shown and are wiped on save; "refute this first" never appears; a hypothesis cannot be accepted, rejected, edited or removed; Cancel on withdrawing an assumption still withdraws it |
-| Analytics (4) | The navigation budget runs out and disables Node size; results stay on screen after the graph or as-of time changes; "brokers" mislabels median-constraint actors; the trend plots run time, not as-of time |
-| Feeds (3) | Dead letters hide the feed and have no replay; a watched-selector hit names no selector and scores every case's watches; queue and quarantine records cannot be acted on |
-| Elsewhere (7) | Every tie reads "review PROPOSED"; the upload form cannot record when, where or under what authority an exhibit was obtained; a malware analyst cannot assign a sample or record findings from the console; compartment read-ins cannot be seen or set in Admin; at 200% zoom most projection controls are out of reach; single-letter triage keys fire from anywhere on the pane |
+What is left is smaller, and none of it is a finding the review verified:
 
-Found during the pass and not yet fixed:
-
-- A `CLOSED` or `ARCHIVED` case still accepts writes on the server. The
-  console now says what state a case is in, but the API does not refuse.
-- There is no password reset, in the console, the API or
-  `scripts/bootstrap.py`. An administrator can re-enrol an authenticator
-  or clear a lockout; a forgotten password has no way back.
-- Rejecting a sample asks for no step-up, although it moves evidence into
-  a store it cannot leave without two people.
-- Console strings in `app.js` and `index.html` still carry dashes that the
-  documents no longer do.
-- On a case classified above the invoker's clearance, an exhibit, capture
-  screenshot or entity write under break-glass is counted twice: once by
-  the case gate and once by the item's own. Stopping it needs a
-  `count_use` passthrough on `deps.authorize_object`.
-- A capture's classification is not copied into the proposals it yields,
-  so they accept at AMBER whatever the capture was (the Triage row above,
-  confirmed again by the second review).
-- `GET /ach` now leaves out cells above the reader, but the ACH pane does
-  not say that anything was left out.
-- `url_norm` drops a URL's fragment, so fragment-keyed links (`mega.nz/#!`)
-  collapse into one selector. That is an ontology identity rule, not a
-  search defect.
-- A stale sign-in on any other step-up route still reads "missing
-  permission" rather than asking to re-authenticate; the report release
-  is the one route taught the difference.
-- The HTTP API still grades a claim for the caller when the body leaves
-  it out (`AssertionBody` defaults to DIRECT_OBSERVATION, F6, LOW). The
-  console forms no longer pre-grade anything, but invariant 1 at the API
-  wants the grading to be required.
-- Nothing writes `core.node.first_seen`, so the entity list's First seen
-  column can never fill through the product. Either give entity creation
-  a first seen or derive it from the earliest observation.
+- A capture into a compartmented case is refused. `collect.document` has
+  no compartments column, and a collected document is readable by
+  clearance alone, so storing one would leak the compartment. A column,
+  and the queue's readability rule reading it, would lift the refusal
+  (`CaptureService.refusal`).
+- Claims accepted from Triage before Alpha 6 carry no observation date,
+  and an ATTRIBUTE accepted onto a lower-labelled entity before Alpha 6
+  is still there. Neither is remediated by a migration: the first loses
+  nothing but a date, and the second needs an analyst to decide whether
+  to raise the entity or retract the claim.
+- The Analysis pane has no reviewed-ties-only projection; it says how many
+  ties behind a result are unreviewed or disputed instead.
+- `ingest.record` has no index on `duplicate_of`. The queue's duplicate
+  count runs per page and answered a 50,000-record case in tens of
+  milliseconds, so it is an optimisation, not a fix.
+- `url_norm` drops a URL's fragment, so fragment-keyed links
+  (`mega.nz/#!`) collapse into one selector. That is an ontology identity
+  rule, not a search defect.
 - The seeded retention rules' rationales cite design documents on screen
   (migration 0032 data); a data migration would reword them.
-- `nightmarket.im`, a real country-code domain, appears in the other demo
-  seeders and in tests. The README estate uses `.example` hosts throughout.
 
 ---
 
@@ -193,9 +173,9 @@ Everything here cost somebody a session.
   `btree_gist`, `citext`, `uuid-ossp`); without them the chain dies at 0004
   with "type vector does not exist", which reads as a migration bug and is
   not one.
-- **Do not run the suite while another agent runs theirs.** The end-to-end
-  cleanups delete by email pattern, so concurrent runs delete each other's
-  fixtures and the failures look real.
+- **Do not run two copies of the suite against one database at once.** The
+  end-to-end cleanups delete by email pattern, so concurrent runs delete
+  each other's fixtures and the failures look real.
 - **uvicorn runs without `--reload`.** A new route 404s until restart.
 - **TOTP codes are single-use.** Two sign-ins inside one 30-second step fail
   on the replay guard, not on the thing under test. Where the host clock is

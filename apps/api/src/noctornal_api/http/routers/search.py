@@ -19,6 +19,11 @@ selector-only form the command palette uses. The kind routes take
 `with_total=true` for `{hits, total, limit}`, so a capped list can say
 how many matched, and the combined `/search` always reports `total` and
 per-kind `totals`. How a query matches, and why, is in `curation.py`.
+
+Since 2026-09-23 the Search pane reads four columns, each from its own
+route: `/search/nodes`, `/search/evidence`, `/search/documents`
+(documents-unsearchable: the console never asked for them) and
+`/search/assertions` (assertions-unsearchable: no search reached a claim).
 """
 from __future__ import annotations
 
@@ -64,13 +69,29 @@ class HitOut(BaseModel):
     `attribute` is the key of the entity's own attribute that matched,
     when its name did not and neither `via` nor `merged_name` is set
     (README screenshot review, 2026-09-23): "broker" found three entities
-    through role=broker, and nothing on screen said so. Null otherwise."""
+    through role=broker, and nothing on screen said so. Null otherwise.
+
+    `node_type` (an entity's; null for an exhibit), `classification` and
+    `in_label` (the hit's own name or title matched) are what the pane
+    draws instead of the bare rank it printed until 2026-09-23
+    (hit-rows-unexplained): a type chip, a TLP chip and the reason.
+
+    `attributes` and `label_part` explain a query no single part holds:
+    the keys whose values hold the words the name does not, and whether
+    the name holds any. Without them the pane claimed the name for hits
+    whose names held none of the words (verifier of that fix, 2026-09-23).
+    Empty and false otherwise."""
     id: str
     label: str
     rank: float
     via: SelectorViaOut | None = None
     merged_name: str | None = None
     attribute: str | None = None
+    node_type: str | None = None
+    classification: str | None = None
+    in_label: bool = False
+    attributes: list[str] = []
+    label_part: bool = False
 
 
 class HitPage(BaseModel):
@@ -88,7 +109,10 @@ def _hit_out(h) -> HitOut:
     if h.via is not None:
         via = SelectorViaOut(**h.via.as_dict())
     return HitOut(id=str(h.id), label=h.label, rank=h.rank, via=via,
-                  merged_name=h.merged_name, attribute=h.attribute)
+                  merged_name=h.merged_name, attribute=h.attribute,
+                  node_type=h.node_type, classification=h.classification,
+                  in_label=h.in_label, attributes=list(h.attributes),
+                  label_part=h.label_part)
 
 
 def _page_out(page, limit: int, with_total: bool) -> list[HitOut] | HitPage:
@@ -272,6 +296,153 @@ def search_evidence(
         clearance=clearance.name, compartments=compartments,
     )
     return _page_out(page, limit, with_total)
+
+
+def _roles_holding(conn, permission_key: str) -> str:
+    """"Analyst, Lead investigator or Reviewer": the names of the roles
+    that hold a permission, read from `iam.role_permission` so that a
+    sentence naming them cannot drift from the grants."""
+    names = [r[0] for r in conn.execute(
+        """SELECT r.display_name FROM iam.role_permission rp
+             JOIN iam.role r ON r.key = rp.role_key
+            WHERE rp.permission_key = %s AND r.key <> 'SERVICE'
+            ORDER BY r.display_name""", (permission_key,)).fetchall()]
+    if len(names) < 2:
+        return names[0] if names else "no role"
+    return ", ".join(names[:-1]) + " or " + names[-1]
+
+
+class DocumentHitOut(BaseModel):
+    """A collected document as a Search hit. No `external_url`: the pane
+    draws no link to a forum, because opening one from an analyst's own
+    browser is the visit the collector exists to make instead."""
+    id: str
+    label: str
+    excerpt: str | None = None
+    source_name: str | None = None
+    posted_at: str | None = None
+    author_handle: str | None = None
+    classification: str | None = None
+    rank: float
+
+
+class DocumentPage(BaseModel):
+    """`not_searched` says why the list is empty when it is empty because
+    the caller may not read collected documents, which is not the same
+    answer as "none matched" (documents-unsearchable, 2026-09-23)."""
+    hits: list[DocumentHitOut]
+    total: int
+    limit: int
+    not_searched: str | None = None
+
+
+@router.get("/search/documents", response_model=DocumentPage,
+            dependencies=[Depends(rate_limit("search"))])
+def search_documents(
+    case_id: UUID,
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY),
+    limit: int = Query(50, ge=1, le=200),
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> DocumentPage:
+    """Collected documents, the Search pane's third column
+    (documents-unsearchable, 2026-09-23).
+
+    The console searched `/search/nodes` and `/search/evidence` and never
+    this half of the combined `/search`, so the collector's whole output
+    was invisible to the box an analyst types a lead into. A route of its
+    own rather than the combined one, because a column needs its own total
+    and its own "show more", and the combined list caps all three kinds
+    together at one `limit`, so a column could show none of the twelve
+    exhibits that matched.
+
+    Read at the caller's CASE-LESS ceiling, as the combined route reads
+    them and for its reason: a document hangs off a source that any number
+    of cases cite, so a break-glass grant on this case must not raise
+    them. A caller without the global `collection.read` that
+    `/collection/documents` demands is answered, not refused, with
+    `not_searched` naming the roles that read them: the question is asked
+    on every search, and a refusal would be an audited AUTHZ_DENIED each
+    time an analyst typed a query."""
+    if not _holds_global(conn, user, "collection.read"):
+        return DocumentPage(
+            hits=[], total=0, limit=limit,
+            not_searched=("Collected documents were not searched: reading "
+                          "them comes with the "
+                          + _roles_holding(conn, "collection.read")
+                          + " role, held across the deployment, and your "
+                          "account holds none of them. An administrator "
+                          "grants it."))
+    clearance, _ = user_ceiling(conn, user.user_id)
+    rows, total = SearchService(conn).document_page(
+        query=q, limit=limit, clearance=clearance.name)
+    return DocumentPage(
+        hits=[DocumentHitOut(
+            id=r["id"], label=r["label"], excerpt=r["excerpt"],
+            source_name=r["source_name"], posted_at=r["posted_at"],
+            author_handle=r["author_handle"],
+            classification=r["classification"], rank=r["rank"])
+            for r in rows],
+        total=total, limit=limit)
+
+
+class AssertionHitOut(BaseModel):
+    """A live claim as a Search hit, with the element it holds up
+    (assertions-unsearchable, 2026-09-23). `src_node_id` is a tie's source,
+    so the console can fetch a tie beyond the first page it holds."""
+    id: str
+    element_kind: str
+    element_id: str
+    element_label: str
+    edge_type: str | None = None
+    src_node_id: str | None = None
+    classification: str
+    rationale: str | None = None
+    grading: str
+    confidence: str
+    basis: str
+    exhibit_title: str | None = None
+    external_ref: str | None = None
+    matched_in: str
+    rank: float
+
+
+class AssertionPage(BaseModel):
+    hits: list[AssertionHitOut]
+    total: int
+    limit: int
+
+
+@router.get("/search/assertions", response_model=AssertionPage,
+            dependencies=[Depends(rate_limit("search"))])
+def search_assertions(
+    case_id: UUID,
+    q: str = Query(..., min_length=1, max_length=MAX_QUERY),
+    limit: int = Query(50, ge=1, le=200),
+    user: CurrentUser = Depends(require("case.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> AssertionPage:
+    """Live claims by their rationale, reference, claimed value, cited
+    exhibit's title, or exact grading ("C3"). Gated as the inspector's
+    assertion list: `case.read`, the case-scoped ceiling on the element,
+    and the exhibit's title only under `evidence.read` on the case."""
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    hits, total = SearchService(conn).assertion_page(
+        case_id=case_id, query=q, limit=limit,
+        clearance=clearance.name, compartments=compartments,
+        may_see_exhibits=_allowed_on_case(conn, user, case_id, "evidence.read"))
+    return AssertionPage(
+        hits=[AssertionHitOut(
+            id=str(h.id), element_kind=h.element_kind,
+            element_id=str(h.element_id), element_label=h.element_label,
+            edge_type=h.edge_type,
+            src_node_id=str(h.src_node_id) if h.src_node_id else None,
+            classification=h.classification, rationale=h.rationale,
+            grading=h.grading, confidence=h.confidence, basis=h.basis,
+            exhibit_title=h.exhibit_title, external_ref=h.external_ref,
+            matched_in=h.matched_in, rank=h.rank)
+            for h in hits],
+        total=total, limit=limit)
 
 
 class SelectorOut(BaseModel):

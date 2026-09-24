@@ -174,6 +174,14 @@ class NodeSetService:
 #   canonical form, with the node returned as the hit and the selector as
 #   its `via` (selectors-unsearchable). A wallet pasted from a chain trace
 #   answered "No matches." while ember_hobby held it.
+# - ATTRIBUTE VALUES, never attribute keys (hit-rows-unexplained,
+#   2026-09-23). The trigger builds the node vector from `attrs::text`, keys
+#   included, so "role" returned seven broker personas and "seen" every
+#   crew member (through the key first_seen_forum), none with any visible
+#   connection to the query. The index still narrows the candidates and
+#   `_values_tsv` rechecks them against the label and the values alone;
+#   rebuilding the trigger would be a migration, and the recheck gives the
+#   same answer.
 
 #: A fragment shorter than this matches word starts only. A trigram index
 #: cannot serve a one- or two-character ILIKE, and a two-letter fragment
@@ -216,6 +224,36 @@ def prefix_tsquery(query: str) -> str | None:
     if not terms:
         return None
     return " & ".join(f"{t}:*" for t in terms)
+
+
+def _json_values(expr: str) -> str:
+    """SQL for the string and number values anywhere inside the jsonb
+    `expr`, joined by spaces, keys left out. NULL when there are none.
+
+    `strict` because `.**` in lax mode visits an array's members twice."""
+    return (f"(SELECT string_agg(v #>> '{{}}', ' ') FROM jsonb_path_query("
+            f"{expr}, 'strict $.** ? (@.type() == \"string\" "
+            f"|| @.type() == \"number\")') AS v)")
+
+
+def _values_tsv(alias: str) -> str:
+    """SQL for the words of a node's own data: its label (weight A) and its
+    attribute VALUES (weight C), the node vector without the keys (see the
+    search notes above). Capped as the trigger caps `attrs::text`, because
+    `to_tsvector` refuses a vector over 1MB and a failed search is worse
+    than a truncated one."""
+    return (f"(setweight(to_tsvector('simple', coalesce({alias}.label, '')), 'A')"
+            f" || setweight(to_tsvector('simple', left(coalesce("
+            f"{_json_values(alias + '.attrs')}, ''), 500000)), 'C'))")
+
+
+def grading_query(query: str) -> str | None:
+    """"C3" as an Admiralty grading (source reliability A to F, information
+    credibility 1 to 6), or None. The assertion search matches it exactly,
+    because "every claim graded C3" is a question no word search answers
+    (ux09-search assertions-unsearchable, 2026-09-23)."""
+    m = re.fullmatch(r"\s*([A-Fa-f])\s*([1-6])\s*", query)
+    return (m.group(1).upper() + m.group(2)) if m else None
 
 
 def _alnum(value: str) -> str:
@@ -486,6 +524,24 @@ class SearchHit:
     #: mer_ledger through crew=meridian, and with nothing under them the
     #: hits read as a match on the "mer" prefix of their names.
     attribute: str | None = None
+    #: What the hit IS, so the pane can draw the type and TLP chips the
+    #: inspector draws (hit-rows-unexplained, 2026-09-23): the GROUP "Umbra
+    #: crew" and the personas it found read identically as a label and a
+    #: bare 0.608. `node_type` is None for an exhibit.
+    node_type: str | None = None
+    classification: str | None = None
+    #: Whether the hit's OWN label (an entity's name, an exhibit's title)
+    #: matched, which is the reason the pane gives when nothing above does.
+    in_label: bool = False
+    #: A query whose words no single part holds (verifier of the
+    #: hit-rows-unexplained fix, 2026-09-23): the attribute keys whose values
+    #: hold the words the name does not, in the order of those words, and
+    #: whether the name holds any of them. "meridian exchange" found 18
+    #: personas through crew=Meridian crew plus first_seen_forum=exchange,
+    #: and the pane said all 18 matched "via the name and attributes
+    #: together" although no name held either word.
+    attributes: tuple[str, ...] = ()
+    label_part: bool = False
 
 
 @dataclass(frozen=True)
@@ -496,6 +552,30 @@ class SearchPage:
     as the complete set (silent-truncation-50, 2026-09-22)."""
     hits: list[SearchHit]
     total: int
+
+
+@dataclass(frozen=True)
+class AssertionHit:
+    """One live claim a query found, with the element it is about, so the
+    pane can say which entity or tie it holds up and open it there
+    (assertions-unsearchable, 2026-09-23). `matched_in` is the part of the
+    claim that matched: 'grading', 'rationale', 'exhibit' (the title of the
+    exhibit it cites), 'reference' or 'claim' (the value it claims)."""
+    id: UUID
+    element_kind: str               # 'node' | 'edge'
+    element_id: UUID
+    element_label: str              # an entity's name, or "src → dst" for a tie
+    edge_type: str | None
+    src_node_id: UUID | None
+    classification: str             # the element's
+    rationale: str | None           # the first 240 characters
+    grading: str                    # "C3"
+    confidence: str
+    basis: str
+    exhibit_title: str | None
+    external_ref: str | None
+    matched_in: str
+    rank: float
 
 
 def _params(*, case_id: UUID, query: str, limit: int, clearance: str,
@@ -709,12 +789,18 @@ class SearchService:
         """
         p = _params(case_id=case_id, query=query, limit=limit,
                     clearance=clearance, compartments=compartments)
+        # `search_tsv` holds attribute keys (0016's trigger indexes
+        # attrs::text), so it only narrows the candidates here: each is
+        # rechecked against its label and attribute VALUES (`_values_tsv`),
+        # and ranked on the same, so a key is never the reason a node is
+        # found or placed (hit-rows-unexplained, 2026-09-23).
         rows = self._c.execute(
             "WITH RECURSIVE" + _SELECTOR_CTES + """,
   named AS (
-    SELECT id FROM core.node
+    SELECT id FROM core.node n
      WHERE case_id = %(case_id)s
        AND search_tsv @@ to_tsquery('simple', %(tsq)s)
+       AND """ + _values_tsv("n") + """ @@ to_tsquery('simple', %(tsq)s)
     UNION
     SELECT id FROM core.node
      WHERE case_id = %(case_id)s AND label ILIKE %(pattern)s
@@ -726,7 +812,7 @@ class SearchService:
            c.node_id AS entity_id, o.label AS merged_name,
            CASE WHEN lower(o.label) = lower(%(q)s) THEN 1.0::float8
                 ELSE LEAST(0.99::float8, GREATEST(
-                       coalesce(ts_rank(o.search_tsv,
+                       coalesce(ts_rank(""" + _values_tsv("o") + """,
                                         to_tsquery('simple', %(tsq)s)), 0)::float8,
                        similarity(o.label, %(q)s)::float8))
            END AS rank
@@ -745,17 +831,21 @@ class SearchService:
     SELECT entity_id FROM alias
   ),
   scored AS (
-    SELECT n.id, n.label,
+    SELECT n.id, n.label, n.node_type, n.classification,
            CASE WHEN lower(n.label) = lower(%(q)s) OR coalesce(b.exact, false)
                 THEN 1.0::float8
                 ELSE LEAST(0.99::float8, GREATEST(
-                       coalesce(ts_rank(n.search_tsv,
+                       coalesce(ts_rank(""" + _values_tsv("n") + """,
                                         to_tsquery('simple', %(tsq)s)), 0)::float8,
                        similarity(n.label, %(q)s)::float8,
                        coalesce(b.sim, 0)::float8))
            END AS own_rank,
            a.rank AS alias_rank, a.merged_name, own.id IS NOT NULL AS named_itself,
-           b.selector_type, b.raw_value, b.exact, b.more, b.merged_from
+           b.selector_type, b.raw_value, b.exact, b.more, b.merged_from,
+           coalesce(lower(n.label) = lower(%(q)s)
+                    OR to_tsvector('simple', coalesce(n.label, ''))
+                       @@ to_tsquery('simple', %(tsq)s)
+                    OR n.label ILIKE %(pattern)s, false) AS in_label
       FROM cand
       JOIN core.node n ON n.id = cand.id
       LEFT JOIN best b ON b.entity_id = n.id
@@ -770,18 +860,21 @@ class SearchService:
     SELECT id, label, GREATEST(own_rank, coalesce(alias_rank, 0)) AS rank,
            selector_type, raw_value, exact, more, merged_from,
            CASE WHEN NOT named_itself OR alias_rank > own_rank
-                THEN merged_name END AS merged_name
+                THEN merged_name END AS merged_name,
+           node_type, classification, in_label
       FROM scored
   )
 SELECT id, label, rank, selector_type, raw_value, exact, more, merged_from,
-       merged_name, count(*) OVER () AS total
+       merged_name, count(*) OVER () AS total,
+       node_type, classification::text, in_label
   FROM hits
  ORDER BY rank DESC, lower(label), id
  LIMIT %(limit)s""",
             p,
         ).fetchall()
         hits = [SearchHit(r[0], r[1], float(r[2]), _via(r[3], r[4], r[5], r[6], r[7]),
-                          merged_name=r[8])
+                          merged_name=r[8], node_type=r[10], classification=r[11],
+                          in_label=bool(r[12]))
                 for r in rows]
         return SearchPage(self._with_attribute_reasons(case_id, p, hits),
                           int(rows[0][9]) if rows else 0)
@@ -800,40 +893,76 @@ SELECT id, label, rank, selector_type, raw_value, exact, more, merged_from,
 
         A hit gets one only when its name does not match by itself and it
         carries no selector `via` and no `merged_name`, which is exactly
-        the hit the pane had nothing to say about. The attribute must
-        match the whole query on its own (key and value together, as the
-        search vector tokenises them), and the first such key is named. A
-        query split between the name and an attribute names none, since no
-        one attribute is the reason."""
+        the hit the pane had nothing to say about. When one attribute's
+        VALUE matches the whole query on its own, the first such key is
+        named. Its key no longer counts (hit-rows-unexplained, 2026-09-23):
+        a key is not why a node was found, since `node_page` finds none by
+        its keys.
+
+        A query split across parts names every part it was found in
+        (verifier of that fix, 2026-09-23): each word is looked for in the
+        name first and then in the attributes by key order, and the hit
+        carries the keys that hold the words the name does not
+        (`attributes`) and whether the name holds any (`label_part`). The
+        first rule named nothing here, and the pane then claimed the name
+        for 18 personas whose names held neither word of "meridian
+        exchange". The words are `prefix_tsquery`'s own terms, so a part
+        is named only when it holds a word the search itself matched."""
         if not p["tsq"]:
             return hits
         unexplained = [h.id for h in hits
                        if h.via is None and h.merged_name is None]
         if not unexplained:
             return hits
+        # Row 1 is the whole query, the rest are its words. A one-word query
+        # asks the same question twice, which is cheaper than a branch.
+        queries = [p["tsq"], *p["tsq"].split(" & ")]
         rows = self._c.execute(
-            """SELECT n.id,
+            """SELECT n.id, t.ord,
+                      to_tsvector('simple', coalesce(n.label, ''))
+                          @@ to_tsquery('simple', t.q) AS in_name,
                       (SELECT a.key
-                         FROM jsonb_each_text(
+                         FROM jsonb_each(
                                 CASE WHEN jsonb_typeof(n.attrs) = 'object'
                                      THEN n.attrs ELSE '{}'::jsonb END)
                                 AS a(key, value)
-                        WHERE to_tsvector('simple',
-                                          a.key || ' ' || coalesce(a.value, ''))
-                              @@ to_tsquery('simple', %(tsq)s)
+                        WHERE to_tsvector('simple', left(coalesce("""
+            + _json_values("a.value") + """, ''), 500000))
+                              @@ to_tsquery('simple', t.q)
                         ORDER BY a.key
                         LIMIT 1)
                  FROM core.node n
+                 CROSS JOIN unnest(%(queries)s::text[]) WITH ORDINALITY AS t(q, ord)
                 WHERE n.case_id = %(case_id)s AND n.id = ANY(%(ids)s)
                   AND NOT to_tsvector('simple', coalesce(n.label, ''))
                           @@ to_tsquery('simple', %(tsq)s)
-                  AND NOT coalesce(n.label ILIKE %(pattern)s, false)""",
+                  AND NOT coalesce(n.label ILIKE %(pattern)s, false)
+                ORDER BY n.id, t.ord""",
             {"tsq": p["tsq"], "pattern": p["pattern"], "case_id": case_id,
-             "ids": unexplained},
+             "ids": unexplained, "queries": queries},
         ).fetchall()
-        keys = {r[0]: r[1] for r in rows if r[1] is not None}
-        return [replace(h, attribute=keys[h.id]) if h.id in keys else h
-                for h in hits]
+        whole: dict[UUID, str] = {}
+        in_name_part: set[UUID] = set()
+        keys: dict[UUID, list[str]] = {}
+        for node_id, ord_, in_name, key in rows:
+            if ord_ == 1:
+                if key is not None:
+                    whole[node_id] = key
+            elif in_name:
+                in_name_part.add(node_id)
+            elif key is not None:
+                held = keys.setdefault(node_id, [])
+                if key not in held:
+                    held.append(key)
+        out = []
+        for h in hits:
+            if h.id in whole:
+                h = replace(h, attribute=whole[h.id])
+            elif keys.get(h.id):
+                h = replace(h, attributes=tuple(keys[h.id]),
+                            label_part=h.id in in_name_part)
+            out.append(h)
+        return out
 
     def search_nodes(
         self, *, case_id: UUID, query: str, limit: int = 50,
@@ -865,7 +994,7 @@ SELECT n.id, n.label,
        CASE WHEN b.exact THEN 1.0::float8
             ELSE LEAST(0.99::float8, coalesce(b.sim, 0)) END AS rank,
        b.selector_type, b.raw_value, b.exact, b.more, b.merged_from,
-       count(*) OVER () AS total
+       count(*) OVER () AS total, n.node_type, n.classification::text
   FROM best b
   JOIN core.node n ON n.id = b.entity_id
  WHERE n.case_id = %(case_id)s
@@ -876,7 +1005,8 @@ SELECT n.id, n.label,
  LIMIT %(limit)s""",
             p,
         ).fetchall()
-        hits = [SearchHit(r[0], r[1], float(r[2]), _via(r[3], r[4], r[5], r[6], r[7]))
+        hits = [SearchHit(r[0], r[1], float(r[2]), _via(r[3], r[4], r[5], r[6], r[7]),
+                          node_type=r[9], classification=r[10])
                 for r in rows]
         return SearchPage(hits, int(rows[0][8]) if rows else 0)
 
@@ -893,15 +1023,20 @@ SELECT n.id, n.label,
         p = _params(case_id=case_id, query=query, limit=limit,
                     clearance=clearance, compartments=compartments)
         rows = self._c.execute(
-            """SELECT id, title, rank, count(*) OVER () AS total
+            """SELECT id, title, rank, count(*) OVER () AS total,
+                      classification, in_label
                  FROM (
-                   SELECT e.id, e.title,
+                   SELECT e.id, e.title, e.classification::text,
                           CASE WHEN lower(e.title) = lower(%(q)s) THEN 1.0::float8
                                ELSE LEAST(0.99::float8, GREATEST(
                                       coalesce(ts_rank(e.search_tsv,
                                                to_tsquery('simple', %(tsq)s)), 0)::float8,
                                       similarity(e.title, %(q)s)::float8))
-                          END AS rank
+                          END AS rank,
+                          coalesce(lower(e.title) = lower(%(q)s)
+                                   OR to_tsvector('simple', coalesce(e.title, ''))
+                                      @@ to_tsquery('simple', %(tsq)s)
+                                   OR e.title ILIKE %(pattern)s, false) AS in_label
                      FROM core.evidence e
                     WHERE e.case_id = %(case_id)s
                       AND e.classification <= %(clearance)s::core.tlp
@@ -913,7 +1048,8 @@ SELECT n.id, n.label,
                 LIMIT %(limit)s""",
             p,
         ).fetchall()
-        return SearchPage([SearchHit(r[0], r[1], float(r[2])) for r in rows],
+        return SearchPage([SearchHit(r[0], r[1], float(r[2]), classification=r[4],
+                                     in_label=bool(r[5])) for r in rows],
                           int(rows[0][3]) if rows else 0)
 
     def search_evidence(
@@ -925,15 +1061,171 @@ SELECT n.id, n.label,
                                   clearance=clearance,
                                   compartments=compartments).hits
 
+    def assertion_page(
+        self, *, case_id: UUID, query: str, limit: int = 50,
+        clearance: str, compartments: frozenset[str],
+        may_see_exhibits: bool,
+    ) -> tuple[list[AssertionHit], int]:
+        """Live claims by word start over their rationale, reference,
+        claimed value and the title of the exhibit they cite, by a
+        fragment of the rationale, reference or exhibit title, or by an
+        exact Admiralty grading ("C3"): (hits, how many matched).
+
+        assertions-unsearchable (ux09-search, 2026-09-23). docs/06 calls
+        "why do we believe this?" the most-asked question in the product,
+        and "which claims cite the escrow message" or "every claim graded
+        C3" could not be asked anywhere: an analyst clicked through the
+        entities one at a time.
+
+        Gated as the inspector's assertion list is (routers/read.py): the
+        claim's element must be visible to the caller, an entity by its
+        own labels and a tie by its own AND both of its ends' (as
+        `GET /edges` requires, because a tie betrays a hidden end). A
+        deleted or merged-away element is not searched: its claims are
+        not on any inspector. The exhibit title is matched and returned
+        only under `may_see_exhibits` (evidence.read on the case) and the
+        caller's ceiling, exactly as the inspector names it, so a title
+        the caller may not read is never the reason a claim is found.
+
+        Live claims only: retracted and superseded ones are history, not
+        what the graph says now, and the partial indexes on
+        `assertion(node_id)` and `(edge_id)` hold live claims only, which
+        keeps this an index walk from the case's own elements. The text is
+        matched without an index of its own (a GIN index on it would need
+        a migration), which at the size of a case is a scan of its live
+        claims, bounded by the `search` rate limit like every search here.
+        """
+        p = _params(case_id=case_id, query=query, limit=limit,
+                    clearance=clearance, compartments=compartments)
+        p["grading"] = grading_query(query)
+        p["may_see_exhibits"] = bool(may_see_exhibits)
+        rows = self._c.execute(
+            """WITH live AS (
+    SELECT a.id, a.node_id, NULL::uuid AS edge_id, n.label AS element_label,
+           NULL::text AS edge_type, NULL::uuid AS src_node_id,
+           n.classification::text AS element_classification,
+           a.rationale, a.external_ref, a.claim_value, a.evidence_id,
+           a.reliability::text || a.credibility::text AS grading,
+           a.confidence::text AS confidence, a.basis::text AS basis,
+           a.recorded_at
+      FROM core.node n
+      JOIN core.assertion a ON a.node_id = n.id
+                           AND a.retracted_at IS NULL AND a.superseded_at IS NULL
+     WHERE n.case_id = %(case_id)s
+       AND n.deleted_at IS NULL AND n.merged_into_id IS NULL
+       AND n.classification <= %(clearance)s::core.tlp
+       AND n.compartments <@ %(compartments)s
+    UNION ALL
+    SELECT a.id, NULL::uuid, e.id, s.label || ' → ' || d.label,
+           e.edge_type, e.src_node_id, e.classification::text,
+           a.rationale, a.external_ref, a.claim_value, a.evidence_id,
+           a.reliability::text || a.credibility::text,
+           a.confidence::text, a.basis::text, a.recorded_at
+      FROM core.edge e
+      JOIN core.node s ON s.id = e.src_node_id
+      JOIN core.node d ON d.id = e.dst_node_id
+      JOIN core.assertion a ON a.edge_id = e.id
+                           AND a.retracted_at IS NULL AND a.superseded_at IS NULL
+     WHERE e.case_id = %(case_id)s AND e.deleted_at IS NULL
+       AND e.classification <= %(clearance)s::core.tlp
+       AND e.compartments <@ %(compartments)s
+       AND s.deleted_at IS NULL AND d.deleted_at IS NULL
+       AND s.classification <= %(clearance)s::core.tlp
+       AND s.compartments <@ %(compartments)s
+       AND d.classification <= %(clearance)s::core.tlp
+       AND d.compartments <@ %(compartments)s
+  ),
+  seen AS (
+    SELECT l.*, ev.title AS exhibit_title,
+           left(coalesce(""" + _json_values("l.claim_value") + """, ''), 2000)
+             AS claimed
+      FROM live l
+      LEFT JOIN core.evidence ev
+             ON %(may_see_exhibits)s AND ev.id = l.evidence_id
+            AND ev.case_id = %(case_id)s
+            AND ev.classification <= %(clearance)s::core.tlp
+            AND ev.compartments <@ %(compartments)s
+  ),
+  matched AS (
+    SELECT s.*,
+           to_tsvector('simple', left(concat_ws(' ', s.rationale, s.external_ref,
+                                                s.claimed, s.exhibit_title),
+                                      500000)) AS vec,
+           coalesce(s.grading = %(grading)s::text, false) AS by_grading,
+           coalesce(to_tsvector('simple', coalesce(s.rationale, ''))
+                      @@ to_tsquery('simple', %(tsq)s)
+                    OR s.rationale ILIKE %(pattern)s, false) AS in_rationale,
+           coalesce(to_tsvector('simple', coalesce(s.exhibit_title, ''))
+                      @@ to_tsquery('simple', %(tsq)s)
+                    OR s.exhibit_title ILIKE %(pattern)s, false) AS in_exhibit,
+           coalesce(to_tsvector('simple', coalesce(s.external_ref, ''))
+                      @@ to_tsquery('simple', %(tsq)s)
+                    OR s.external_ref ILIKE %(pattern)s, false) AS in_reference
+      FROM seen s
+  ),
+  hits AS (
+    SELECT m.*,
+           CASE WHEN m.by_grading THEN 1.0::float8
+                ELSE LEAST(0.99::float8, GREATEST(
+                       coalesce(ts_rank(m.vec, to_tsquery('simple', %(tsq)s)), 0)::float8,
+                       coalesce(similarity(m.rationale, %(q)s), 0)::float8,
+                       coalesce(similarity(m.exhibit_title, %(q)s), 0)::float8))
+           END AS rank
+      FROM matched m
+     WHERE m.by_grading OR m.in_rationale OR m.in_exhibit OR m.in_reference
+        OR m.vec @@ to_tsquery('simple', %(tsq)s)
+  )
+SELECT id, node_id, edge_id, element_label, edge_type, src_node_id,
+       element_classification, left(rationale, 240), grading, confidence,
+       basis, exhibit_title, external_ref,
+       CASE WHEN by_grading THEN 'grading'
+            WHEN in_rationale THEN 'rationale'
+            WHEN in_exhibit THEN 'exhibit'
+            WHEN in_reference THEN 'reference'
+            ELSE 'claim' END AS matched_in,
+       rank, count(*) OVER () AS total
+  FROM hits
+ ORDER BY rank DESC, recorded_at DESC, id
+ LIMIT %(limit)s""",
+            p,
+        ).fetchall()
+        hits = [AssertionHit(
+            id=r[0], element_kind="node" if r[1] is not None else "edge",
+            element_id=r[1] if r[1] is not None else r[2],
+            element_label=r[3] or "", edge_type=r[4], src_node_id=r[5],
+            classification=r[6], rationale=r[7], grading=r[8],
+            confidence=r[9], basis=r[10], exhibit_title=r[11],
+            external_ref=r[12], matched_in=r[13], rank=float(r[14]))
+            for r in rows]
+        return hits, (int(rows[0][15]) if rows else 0)
+
+    def document_page(self, *, query: str, limit: int = 50,
+                      clearance: str) -> tuple[list[dict], int]:
+        """Collected documents by word start over title and body, or by a
+        fragment of the author handle: (rows, how many matched).
+
+        The Search pane's own Documents column (documents-unsearchable,
+        2026-09-23). The console searched nodes and exhibits only, so a
+        handle or a domain that appeared only in collected forum posts
+        never turned up in the one box an analyst types a lead into.
+        Filtered exactly as `search_all`'s document half is (read its
+        docstring for why the SOURCE's label counts too), because it IS
+        that half: `search_all` calls this."""
+        p = _params(case_id=None, query=query, limit=limit,
+                    clearance=clearance, compartments=frozenset())
+        return self._document_rows(p)
+
     def _document_rows(self, p: dict) -> tuple[list[dict], int]:
         rows = self._c.execute(
             """SELECT id, label, excerpt, source_name, posted_at,
-                      external_url, rank, count(*) OVER () AS total
+                      external_url, rank, count(*) OVER () AS total,
+                      classification, author_handle
                  FROM (
                    SELECT d.id,
                           coalesce(nullif(d.title, ''), left(d.body_text, 80)) AS label,
                           left(d.body_text, 240) AS excerpt, s.name AS source_name,
                           d.posted_at, d.external_url,
+                          d.classification::text AS classification, d.author_handle,
                           LEAST(0.99::float8, GREATEST(
                             coalesce(ts_rank(d.search_tsv,
                                      to_tsquery('simple', %(tsq)s)), 0)::float8,
@@ -955,7 +1247,9 @@ SELECT n.id, n.label,
                 "excerpt": r[2], "source_name": r[3],
                 "posted_at": r[4].isoformat() if r[4] else None,
                 "external_url": r[5], "rank": float(r[6]), "via": None,
-                "merged_name": None, "attribute": None}
+                "merged_name": None, "attribute": None,
+                "node_type": None, "classification": r[8],
+                "author_handle": r[9]}
                for r in rows]
         return out, (int(rows[0][7]) if rows else 0)
 
@@ -1023,7 +1317,9 @@ SELECT n.id, n.label,
              "excerpt": None, "source_name": None, "posted_at": None,
              "external_url": None, "rank": h.rank,
              "via": h.via.as_dict() if h.via else None,
-             "merged_name": h.merged_name, "attribute": h.attribute}
+             "merged_name": h.merged_name, "attribute": h.attribute,
+             "node_type": h.node_type, "classification": h.classification,
+             "author_handle": None}
             for h in nodes.hits]
         totals = {"node": nodes.total, "evidence": 0, "document": 0}
         if include_evidence:
@@ -1033,7 +1329,9 @@ SELECT n.id, n.label,
             rows += [{"kind": "evidence", "id": str(h.id), "label": h.label or "",
                       "excerpt": None, "source_name": None, "posted_at": None,
                       "external_url": None, "rank": h.rank, "via": None,
-                      "merged_name": None, "attribute": None}
+                      "merged_name": None, "attribute": None,
+                      "node_type": None, "classification": h.classification,
+                      "author_handle": None}
                      for h in ev.hits]
             totals["evidence"] = ev.total
         if include_documents:

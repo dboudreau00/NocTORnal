@@ -102,7 +102,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install -e packages/ontology
+      # Pinned like every other install here (constraints.txt, below).
+      - run: pip install -c constraints.txt -e packages/ontology
       # The ontology generates TypeScript and SQL from one definition. If
       # the generated files stop matching, edge-type strings drift between
       # the front end and the database, which is silent data corruption
@@ -165,12 +166,19 @@ jobs:
 
       - name: Install
         run: |
-          pip install -r db/requirements.txt
+          # -c constraints.txt on every install (sec-pin-dependencies,
+          # 2026-09-23): the exact versions the release's suite passed on.
+          # Unpinned, this job tested whatever PyPI held that morning, which
+          # was not what a developer or an installer had, and a red build
+          # could arrive with no change in this repository to explain it.
+          # test_dependency_pins.py holds this file, the installers and the
+          # Dockerfile to it, and the installed environment to the pins.
+          pip install -c constraints.txt -r db/requirements.txt
           # The `dev` extra is the declared test toolset. Listing pytest and
           # httpx by hand here missed `qrcode`, the reference encoder the
           # console's QR test checks against, so that test skipped and this
           # job failed on the skip (2026-09-23).
-          pip install -e packages/ontology -e "apps/api[dev]"
+          pip install -c constraints.txt -e packages/ontology -e "apps/api[dev]"
 
       - name: Start MinIO
         run: |
@@ -197,9 +205,14 @@ jobs:
           # is again the wrong one: the health check has to reach Mailpit's
           # own /readyz, and `docker run` keeps CI on the same image and
           # ports infra/docker-compose.yml uses.
+          #
+          # The SAME pinned tag as that file (sec-pin-dependencies,
+          # 2026-09-23), for the reason the MinIO step gives: `:latest` is a
+          # dependency on somebody else's release day. test_dependency_pins.py
+          # fails if the two tags ever differ.
           docker run -d --name mailpit \
             -p 1025:1025 -p 8025:8025 \
-            axllent/mailpit:latest
+            axllent/mailpit:v1.31.0
           for i in $(seq 1 40); do
             if curl -fsS http://localhost:8025/readyz >/dev/null 2>&1; then
               echo "Mailpit ready after ${i} attempt(s)"; exit 0

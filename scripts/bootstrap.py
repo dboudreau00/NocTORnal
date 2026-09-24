@@ -18,6 +18,7 @@ Usage:
     python scripts/bootstrap.py create-user --email a@b.test --name "A B"
     python scripts/bootstrap.py demo-case --owner-email a@b.test
     python scripts/bootstrap.py list-users
+    python scripts/bootstrap.py reset-password --email a@b.test
 """
 from __future__ import annotations
 
@@ -43,6 +44,26 @@ for _src in (_REPO / "apps" / "api" / "src", _REPO / "packages" / "ontology" / "
     if _src.is_dir() and str(_src) not in sys.path:
         sys.path.append(str(_src))
 
+
+def _venv_python(windows: bool | None = None) -> str:
+    """The project's interpreter as the installers print it, relative to the
+    repository root. Commands this script suggests use it because a bare
+    `python` exits 127 on a stock Ubuntu, and `python3` there is the system
+    interpreter, which has none of the dependencies and whose pip PEP 668
+    refuses (Alpha 6 pre-release check, 2026-09-23)."""
+    if windows is None:
+        windows = os.name == "nt"
+    return r".venv\Scripts\python" if windows else ".venv/bin/python"
+
+
+def _this_script(windows: bool | None = None) -> str:
+    """This script, relative to the repository root, in the platform's
+    separators, so a suggested command can be pasted as printed."""
+    if windows is None:
+        windows = os.name == "nt"
+    return r"scripts\bootstrap.py" if windows else "scripts/bootstrap.py"
+
+
 try:
     import psycopg
     from psycopg.types.json import Json
@@ -55,10 +76,29 @@ try:
     from noctornal_api.selectors import SelectorError, SelectorStore
     from noctornal_api.stores import PgUserStore
 except ImportError as exc:
+    # The usual cause is an interpreter other than the project's: the
+    # installers put every dependency in .venv at the repository root. The
+    # hint never named .venv and said a bare `pip install`, which on a
+    # current Debian or Ubuntu system Python PEP 668 refuses (Alpha 6
+    # pre-release check, 2026-09-23). db/requirements.txt is gone from it
+    # because apps/api declares alembic, SQLAlchemy and psycopg itself.
+    # It carries -c constraints.txt because every dependency there is a >=
+    # floor, and without the pins pip takes the newest release of each: a
+    # stack nobody tested, arrived at by following our own advice (c3,
+    # 2026-09-24).
+    _py = _venv_python()
+    _pkgs = (r"packages\ontology -e apps\api" if os.name == "nt"
+             else "packages/ontology -e apps/api")
     print(f"bootstrap: cannot import the API package ({exc}).", file=sys.stderr)
-    print("Install the workspace first:", file=sys.stderr)
-    print("  pip install -r db/requirements.txt", file=sys.stderr)
-    print("  pip install -e packages/ontology -e apps/api", file=sys.stderr)
+    print("Run this script with the project's virtual environment, from the",
+          file=sys.stderr)
+    print("repository root:", file=sys.stderr)
+    print(f"  {_py} {_this_script()} <command>", file=sys.stderr)
+    print("If .venv is missing, the installer builds it. If it is there but",
+          file=sys.stderr)
+    print("incomplete, install the two packages into it:", file=sys.stderr)
+    print(f"  {_py} -m pip install -c constraints.txt -e {_pkgs}",
+          file=sys.stderr)
     raise SystemExit(2) from exc
 
 KEK_ENV = "NOCTORNAL_TOTP_KEK"
@@ -199,9 +239,15 @@ def _print_qr(uri: str) -> None:
     try:
         import qrcode
     except ImportError:
+        # The project's interpreter and the pins, as the import hint above
+        # gives them: a bare `pip` is the system one PEP 668 refuses, and
+        # an unpinned install takes whatever release is newest (c3,
+        # 2026-09-24).
         print("  No QR code: the optional `qrcode` package is not installed.")
-        print("  Run  pip install qrcode  for one, or enter the URI or the")
-        print("  base32 secret into your authenticator by hand. Either works.")
+        print("  For one, run this from the repository root:")
+        print(f"    {_venv_python()} -m pip install -c constraints.txt qrcode")
+        print("  or enter the URI or the base32 secret into your")
+        print("  authenticator by hand. Either works.")
         return
     qr = qrcode.QRCode(border=1)
     qr.add_data(uri)
@@ -221,7 +267,7 @@ def _print_qr(uri: str) -> None:
 
 def _audit_created(
     conn: psycopg.Connection, user_id: UUID, email: str,
-    roles: list[str], clearance: str,
+    roles: list[str], clearance: str, *, must_change_password: bool = False,
 ) -> None:
     # actor_kind SYSTEM with a NULL actor: at bootstrap there is by
     # definition no user to attribute this to, and the append-only log
@@ -232,8 +278,28 @@ def _audit_created(
            VALUES (NULL, 'SYSTEM', 'USER_CREATED', 'app_user', %s, %s)""",
         (user_id, Json({"email": email, "roles": roles,
                         "tlp_clearance": clearance,
+                        "must_change_password": must_change_password,
                         "via": "scripts/bootstrap.py"})),
     )
+
+
+def _issued_to_someone_else(conn: psycopg.Connection) -> bool:
+    """Whether the account about to be made is for another person.
+
+    The first account on an empty database is the operator's own: the
+    installer makes it, and they generated its password a minute earlier.
+    Any later one is someone else's, as the installers' own advice has it
+    (a Security Officer, `create-user ... --roles SECURITY_OFFICER`), and
+    an administrator-issued password must be replaced at its first sign-in,
+    exactly as one from Admin is. Left unflagged, the operator kept a
+    password that opened the officer's sessions under the officer's id, the
+    account that reviews their break-glass (final review c8, verifier,
+    2026-09-24). `bootstrap.py session` can still sign the operator in as
+    anyone, but that is audited as the shell, not as the officer's sign-in.
+    Read in the transaction that makes the account.
+    """
+    return bool(conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM iam.app_user)").fetchone()[0])
 
 
 def cmd_create_user(args: argparse.Namespace) -> None:
@@ -260,10 +326,13 @@ def cmd_create_user(args: argparse.Namespace) -> None:
             # secret while mfa_required is true, cannot log in and cannot be
             # fixed by re-running (the email is taken).
             with conn.transaction():
+                handed_over = _issued_to_someone_else(conn)
                 user_id = store.create_user(args.email, args.name, password)
                 conn.execute(
-                    "UPDATE iam.app_user SET tlp_clearance = %s WHERE id = %s",
-                    (args.clearance, user_id),
+                    """UPDATE iam.app_user
+                          SET tlp_clearance = %s, must_change_password = %s
+                        WHERE id = %s""",
+                    (args.clearance, handed_over, user_id),
                 )
                 for role in roles:
                     conn.execute(
@@ -272,7 +341,8 @@ def cmd_create_user(args: argparse.Namespace) -> None:
                         (user_id, role),
                     )
                 store.enroll_totp(user_id, secret)
-                _audit_created(conn, user_id, args.email, roles, args.clearance)
+                _audit_created(conn, user_id, args.email, roles, args.clearance,
+                               must_change_password=handed_over)
         except psycopg.errors.UniqueViolation:
             _fail(f"email {args.email} was taken while this ran, so nothing was changed")
 
@@ -294,6 +364,11 @@ def cmd_create_user(args: argparse.Namespace) -> None:
     else:
         print("  Password: as supplied on the command line. Note that it is")
         print("  now in your shell history.")
+    if handed_over:
+        print()
+        print("  Another account already exists, so this one is taken to be for")
+        print("  someone else. The password above opens no session: at their")
+        print("  first sign-in the console asks them to choose their own.")
     print()
     # The secret is printed as well as encoded: an operator without a camera,
     # or with an authenticator that will not scan, has no other way in.
@@ -310,12 +385,40 @@ def cmd_create_user(args: argparse.Namespace) -> None:
     print("  If your authenticator shows something else, the enrolment did not")
     print("  take. Fix it now rather than at the login screen.")
     print()
+    _print_next(args.email, roles)
+
+
+#: The console the installers and launchers start, on their default port.
+CONSOLE_URL = "http://127.0.0.1:8000/ui/"
+
+
+def _print_next(email: str, roles: list[str], *,
+                windows: bool | None = None) -> None:
+    """What to do after `create-user`, in the words install.sh and
+    launch.ps1 use.
+
+    It printed `python scripts/bootstrap.py demo-case`, which exits 127 on
+    a stock Ubuntu, and an API login for someone about to use the console.
+    On Linux the installer printed it just above its own, correct block
+    (Alpha 6 pre-release check, 2026-09-23). Now: the console, this
+    platform's interpreter and the README's showcase recipe. The recipe is
+    offered only to an account holding CASE_OWNER, because it makes that
+    account the showcase case's owner, and a second person given
+    SECURITY_OFFICER is not who that is for.
+    """
     print(RULE)
     print("Next")
     print(RULE)
-    print("  Log in:  POST /api/v1/auth/login  {email, password, totp_code}")
-    print("  Seed a case so the first screen is not empty:")
-    print(f"    python scripts/bootstrap.py demo-case --owner-email {args.email}")
+    print(f"  Sign in to the console at {CONSOLE_URL} (or on the port the API")
+    print("  was started with) with this address, the password and a code from")
+    print("  your authenticator.")
+    if "CASE_OWNER" in roles:
+        print()
+        print("  To fill it with the showcase case the README's screenshots come")
+        print('  from, follow README.md, section "First run", from the repository')
+        print("  root. It starts with:")
+        print(f"    {_venv_python(windows)} {_this_script(windows)} demo-network "
+              f"--owner-email {email} --code OP-SHOWCASE-26 --classification CLEAR")
     print(RULE)
 
 
@@ -519,7 +622,7 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
         # the same key observed either way collides on one row.
         observations = [
             ("PGP_FPR", "9F2C 4A11 0B7D 63E8 55AA 1D40 8C39 7E62 B10D 4F58", lynx),
-            ("JABBER", "spectre.lynx@nightmarket.im/desktop-01", lynx),
+            ("JABBER", "spectre.lynx@nightmarket.example/desktop-01", lynx),
             ("BTC_ADDR", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", wallet),
         ]
         recorded = []
@@ -863,6 +966,48 @@ def cmd_unlock(args: argparse.Namespace) -> None:
     print("  Why it locked is in the audit trail, not in the login response:")
     print("    SELECT occurred_at, detail->>'reason' FROM audit.event")
     print("     WHERE action = 'AUTH_FAILED' ORDER BY seq DESC LIMIT 10;")
+    print(RULE)
+
+
+def cmd_reset_password(args: argparse.Namespace) -> None:
+    """Issue a one-time password that must be replaced at the next sign-in.
+
+    gap-password-reset (2026-09-23). An administrator resets a colleague's
+    password from Admin; this is the same reset for the account nobody can
+    do that for, typically the last administrator. It calls
+    `IamAdminService.reset_password`, the service the Admin route calls,
+    rather than writing the hash itself, so the two paths cannot disagree
+    about what a reset does: generated password, must-change flag, every
+    live session revoked, lockout cleared, an audit row (actor SYSTEM, via
+    bootstrap.py). The authenticator is not touched; `reenrol-totp
+    --new-secret` is its own decision.
+    """
+    _require_database_url()
+    from noctornal_api.iam_admin import AdminError, IamAdminService
+    with connect() as conn:
+        user_id = _user_id(conn, args.email)
+        if user_id is None:
+            _fail(f"no user with email {args.email}")
+        try:
+            creds = IamAdminService(conn).reset_password(user_id, actor_id=None)
+        except AdminError as exc:
+            _fail(str(exc))
+
+    print(RULE)
+    print("One-time password issued")
+    print(RULE)
+    print(f"  Email      {creds.email}")
+    print(f"  Password   {creds.password}")
+    print()
+    print("  Shown once and not stored in a recoverable form. It signs in")
+    print("  once: that sign-in asks for a new password (and a fresh code")
+    print("  from the authenticator) before it opens a session, so this one")
+    print("  never becomes the account's password. Every session the account")
+    print("  had is signed out, and any lockout is cleared.")
+    print()
+    print("  The authenticator is unchanged. If it is lost as well:")
+    print(f"    python {_this_script()} reenrol-totp --email {creds.email} "
+          f"--new-secret")
     print(RULE)
 
 
@@ -1251,6 +1396,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     unlock.add_argument("--email", required=True)
     unlock.set_defaults(func=cmd_unlock)
+
+    reset = sub.add_parser(
+        "reset-password",
+        help="issue a one-time password that must be replaced at the next "
+             "sign-in (for the account no administrator can reset, such as "
+             "the last administrator)",
+    )
+    reset.add_argument("--email", required=True)
+    reset.set_defaults(func=cmd_reset_password)
 
     reenrol = sub.add_parser(
         "reenrol-totp",

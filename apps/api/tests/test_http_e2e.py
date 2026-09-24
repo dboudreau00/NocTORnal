@@ -22,6 +22,13 @@ pytestmark = pytest.mark.skipif(
 
 PASSWORD = "correct-horse-battery-staple"
 
+#: The grading a claim carries where a test is not about grading. The API
+#: grades nothing for the caller since gap-api-grade-required (2026-09-23),
+#: and these are the values its old defaults applied silently, so each test
+#: exercises what it did before, now stated.
+UNGRADED = {"basis": "DIRECT_OBSERVATION", "reliability": "F",
+            "credibility": "6", "confidence": "LOW"}
+
 
 @pytest.fixture
 def conn():
@@ -284,19 +291,19 @@ def test_full_journey_case_node_edge_search(conn, client):
     n1 = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
         "node_type": "IDENTITY", "label": "bassterlord the broker",
         "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "B",
-                      "credibility": "2"},
+                      "credibility": "2", "confidence": "LOW"},
     })
     assert n1.status_code == 201, n1.text
     n2 = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
         "node_type": "GROUP", "label": "TestCrew",
-        "assertion": {"basis": "DIRECT_OBSERVATION"},
+        "assertion": UNGRADED,
     })
     assert n2.status_code == 201
 
     e = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token), json={
         "edge_type": "MEMBER_OF", "src_node_id": n1.json()["id"],
         "dst_node_id": n2.json()["id"],
-        "assertion": {"basis": "DIRECT_OBSERVATION", "rationale": "membership post"},
+        "assertion": {**UNGRADED, "rationale": "membership post"},
     })
     assert e.status_code == 201, e.text
 
@@ -318,12 +325,15 @@ def test_illegal_edge_is_400_not_500(conn, client):
     token = _session(conn, email)
     case_id = _create_case(client, token)
     grp = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
-                      json={"node_type": "GROUP", "label": "crew"}).json()["id"]
+                      json={"node_type": "GROUP", "label": "crew",
+                            "assertion": UNGRADED}).json()["id"]
     idn = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
-                      json={"node_type": "IDENTITY", "label": "member"}).json()["id"]
+                      json={"node_type": "IDENTITY", "label": "member",
+                            "assertion": UNGRADED}).json()["id"]
     # VOUCHED_FOR is IDENTITY->IDENTITY; a GROUP source is illegal.
     r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token), json={
         "edge_type": "VOUCHED_FOR", "src_node_id": grp, "dst_node_id": idn,
+        "assertion": UNGRADED,
     })
     assert r.status_code == 400
     assert r.headers["content-type"].startswith("application/problem+json")
@@ -377,7 +387,8 @@ def test_read_only_assignee_cannot_write(conn, client):
     assert client.get(f"/api/v1/cases/{case_id}",
                       headers=_auth(reader_token)).status_code == 200
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(reader_token),
-                    json={"node_type": "IDENTITY", "label": "sneaky"})
+                    json={"node_type": "IDENTITY", "label": "sneaky",
+                          "assertion": UNGRADED})
     assert r.status_code == 403
 
 
@@ -499,6 +510,7 @@ def test_cannot_author_above_your_clearance(conn, client):
     case_id = _create_case(client, token)
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
         "node_type": "IDENTITY", "label": "too secret", "classification": "RED",
+        "assertion": UNGRADED,
     })
     assert r.status_code == 403 and "clearance" in r.text
 
@@ -513,7 +525,7 @@ def test_over_classified_element_is_invisible_in_search(conn, client):
     case_id = _create_case(client, owner_token)          # AMBER case
     red = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(owner_token),
                       json={"node_type": "IDENTITY", "label": "informant truename",
-                            "classification": "RED"})
+                            "classification": "RED", "assertion": UNGRADED})
     assert red.status_code == 201, red.text
 
     amber_id, amber_email, amber_secret = _make_user(conn, clearance="AMBER")
@@ -545,7 +557,8 @@ def test_db_error_does_not_leak_schema_internals(conn, client):
     token = _session(conn, email)
     case_id = _create_case(client, token)
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
-                    json={"node_type": "NOT_A_TYPE", "label": "x"})
+                    json={"node_type": "NOT_A_TYPE", "label": "x",
+                          "assertion": UNGRADED})
     assert r.status_code == 400
     body = r.text
     for leaked in ("node_node_type_fkey", "DETAIL:", "CONTEXT:", "PL/pgSQL",
@@ -609,7 +622,8 @@ def test_authz_denial_is_audited(conn, client):
     CaseService(conn).assign_user(case_id, reader_id, "READ_ONLY", granted_by=reader_id)
     reader_token = _session(conn, reader_email)
     client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(reader_token),
-                json={"node_type": "IDENTITY", "label": "nope"})
+                json={"node_type": "IDENTITY", "label": "nope",
+                      "assertion": UNGRADED})
     row = conn.execute(
         "SELECT detail FROM audit.event WHERE action = 'AUTHZ_DENIED' "
         "AND actor_id = %s ORDER BY seq DESC LIMIT 1", (reader_id,),
@@ -635,7 +649,8 @@ def test_cross_case_selector_node_rejected(conn, client):
     case_a = _create_case(client, token)
     case_b = _create_case(client, token)
     node_b = client.post(f"/api/v1/cases/{case_b}/nodes", headers=_auth(token),
-                         json={"node_type": "IDENTITY", "label": "in b"}).json()["id"]
+                         json={"node_type": "IDENTITY", "label": "in b",
+                               "assertion": UNGRADED}).json()["id"]
     r = client.post(f"/api/v1/cases/{case_a}/selectors", headers=_auth(token),
                     json={"selector_type": "HANDLE", "raw_value": "x",
                           "node_id": node_b})
@@ -662,7 +677,8 @@ def test_evidence_upload_download_custody_and_link(conn, client):
     token = _session(conn, email)
     case_id = _create_case(client, token)
     node_id = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
-                          json={"node_type": "IDENTITY", "label": "subject"}).json()["id"]
+                          json={"node_type": "IDENTITY", "label": "subject",
+                                "assertion": UNGRADED}).json()["id"]
 
     payload = b"exhibit-" + uuid4().hex.encode()
     up = client.post(
@@ -814,7 +830,7 @@ def _seed_small_graph(client, token, case_id) -> None:
         r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
             "node_type": "IDENTITY", "label": label,
             "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "B",
-                          "credibility": "2"},
+                          "credibility": "2", "confidence": "LOW"},
         })
         assert r.status_code == 201, r.text
         ids.append(r.json()["id"])
@@ -822,7 +838,7 @@ def _seed_small_graph(client, token, case_id) -> None:
         r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token), json={
             "edge_type": "VOUCHED_FOR", "src_node_id": ids[src],
             "dst_node_id": ids[dst],
-            "assertion": {"basis": "DIRECT_OBSERVATION", "rationale": "vouched"},
+            "assertion": {**UNGRADED, "rationale": "vouched"},
         })
         assert r.status_code == 201, r.text
 
@@ -949,7 +965,7 @@ def _two_identities(client, token, case_id) -> tuple[str, str]:
         r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
             "node_type": "IDENTITY", "label": label,
             "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "B",
-                          "credibility": "2"},
+                          "credibility": "2", "confidence": "LOW"},
         })
         assert r.status_code == 201, r.text
         ids.append(r.json()["id"])
