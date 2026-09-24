@@ -88,7 +88,7 @@ x-noctornal-app: &noctornal-app
   build:
     context: ../..
     dockerfile: Dockerfile
-  image: noctornal-api:0.5.2
+  image: noctornal-api:0.6.0
   env_file: [secrets.env]
   networks: [noctornal]
   restart: unless-stopped

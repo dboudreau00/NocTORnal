@@ -3,7 +3,7 @@
 **State (2026-09-23):** branch `main` (the working branch; byte-identical to
 `deception-and-release-hardening` except `README.md`), Alembic head `0068`,
 3448 tests counted as `def test_` functions across the two pytest roots,
-version 0.5.2 single-sourced from `pyproject.toml`. Those four counters are
+version 0.6.0 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
