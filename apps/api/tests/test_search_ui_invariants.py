@@ -53,7 +53,8 @@ def test_a_case_switch_clears_the_search_pane():
     resets = _case_switch_resets(_search_region())
     assert resets, "the search region registers no case-switch reset"
     body = "\n".join(resets)
-    for element in ("search-q", "search-nodes", "search-evidence", "search-scope"):
+    for element in ("search-q", "search-nodes", "search-evidence",
+                    "search-documents", "search-assertions", "search-scope"):
         assert f"'{element}'" in body, f"a case switch leaves #{element} standing"
     assert "searchSeq" in body, (
         "the reset must also retire any search still in flight, or its "
@@ -110,7 +111,9 @@ def test_a_selector_hit_shows_the_selector_and_defangs_it():
 def test_the_palette_looks_up_selectors_and_forgets_them_on_a_case_switch():
     js = _js()
     fetch = _function("fetchPaletteSelectors")
-    assert "'/search/selectors?with_total=true" in fetch
+    # The pane's own Entities route since 2026-09-23, so the palette and
+    # the pane match entities by one rule (two-searches-disagree).
+    assert "'/search/nodes?with_total=true" in fetch
     assert fetch.index("caseToken()") < fetch.index("await api(")
     assert "caseChanged(token)" in fetch
     start = js.index("const PAL_SEL_DELAY_MS")
@@ -124,7 +127,8 @@ def test_the_palette_looks_up_selectors_and_forgets_them_on_a_case_switch():
         "a reply that lands after a case switch must not fill the new "
         "case's cache")
     add = _function("addSelectorMatches")
-    assert "visibleText(hit.label)" in add and "visibleText(v.value)" in add
+    # The selector value is de-fanged inside viaLine, the pane's own line.
+    assert "visibleText(hit.label)" in add and "viaLine(hit, sq)" in add
     assert "schedulePaletteSelectors(" in _function("initPalette")
     assert "addSelectorMatches(" in _function("renderPalette")
 

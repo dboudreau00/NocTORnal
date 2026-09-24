@@ -598,7 +598,9 @@ def test_a_publisher_identity_from_another_case_is_refused(conn, client):
     foreign_node = client.post(
         f"/api/v1/cases/{theirs}/nodes", headers=_auth(token),
         json={"node_type": "IDENTITY", "label": "their_vendor",
-              "assertion": {"basis": "DIRECT_OBSERVATION"}})
+              "assertion": {"basis": "DIRECT_OBSERVATION",
+                            "reliability": "F", "credibility": "6",
+                            "confidence": "LOW"}})
     assert foreign_node.status_code == 201, foreign_node.text
 
     r = client.post(f"/api/v1/cases/{mine}/comms/contact-blocks",

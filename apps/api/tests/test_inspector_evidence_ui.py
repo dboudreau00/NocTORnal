@@ -203,11 +203,19 @@ def test_a_tie_can_be_opened_from_the_inspector_and_from_the_keyboard():
     assert 'id="insp-rel-sec"' in html and 'id="insp-rel"' in html
     assert "T moves to the selection's" in html, "the canvas label must name T"
     assert '<span class="kbd">T</span>' in html, "the ? sheet must list T"
-    # Every row carries what tells a vouch from a dispute.
+    # Every row carries what tells a vouch from a dispute. Not the raw
+    # `e.review` on every row since ux08-triage:graph-says-unreviewed-
+    # triage-says-nothing (2026-09-23), when nothing wrote that column and
+    # every tie read PROPOSED. gap-tie-review made it real, and the ring's
+    # "tie to review" is found here, so a PROPOSED or DISPUTED tie is
+    # marked, shown and spoken, through `tieReviewFlag` (merged 2026-09-24).
     button = _function("tieButton")
-    for fact in ("e.edge_type", "e.sign", "e.confidence", "e.review",
-                 "e.is_inferred"):
+    for fact in ("e.edge_type", "e.sign", "e.confidence", "e.is_inferred"):
         assert fact in button, fact
+    assert "el('span', 'tie-flag', e.review)" not in button, (
+        "the raw review column is printed on every row again")
+    assert "tieReviewFlag(e.review)" in button
+    assert "review.flag" in button and "review.spoken" in button
     assert "aria-label" in button
     assert js.count("function renderRelationships(") == 1
 

@@ -301,7 +301,7 @@ def _looks_third_party(label: str | None, whole_line: str) -> str | None:
         if hit or label.lower().strip() in _THIRD_PARTY_LABEL_WORDS:
             named = sorted(hit) or [label.lower().strip()]
             return (f"the label {label!r} names a third-party role "
-                    f"({', '.join(named)}). docs/10: attributing the "
+                    f"({', '.join(named)}). Attributing the "
                     f"escrow's identifier to the vendor is a serious and "
                     f"easy error")
     low = whole_line.lower()
@@ -524,12 +524,12 @@ def parse(text: str) -> list[ParsedEntry]:
             entry.role_reasons.append(
                 "published in the block with no third-party label or "
                 "disclaimer, so read as the publisher's own: a CLAIM, "
-                "which docs/10 says is a lead and not evidence")
+                "which is a lead and not evidence")
         else:
             entry.role = ROLE_UNPARSED
             entry.role_reasons.append(
                 "kept unresolved rather than guessed. Nothing is silently "
-                "dropped (invariant 12); an analyst can label this line.")
+                "dropped; an analyst can label this line.")
 
         # An UNPARSED entry asserts nothing, so it carries no kind and no
         # canonical form. The schema says the same thing in a CHECK.
@@ -1058,7 +1058,7 @@ class ContactBlockService:
         entry.role = ROLE_THIRD_PARTY
         entry.role_reasons.append(
             f"advertised by {publishers} distinct publishers across "
-            f"{blocks + 1} blocks. docs/10: a selector appearing in many "
+            f"{blocks + 1} blocks. A selector appearing in many "
             f"unrelated vendors' blocks is a SHARED SERVICE, not a shared "
             f"identity. Attributing it to any one of them is the escrow "
             f"error at scale")
@@ -1108,7 +1108,7 @@ class ContactBlockService:
                 f"{kind}. Co-declaration: the actor themselves asserted "
                 f"these identifiers belong to one operator, which is "
                 f"stronger than co-occurrence in a thread. This is a "
-                f"CLAIM. docs/10: only CONFIRMED carries weight in "
+                f"CLAIM. Only CONFIRMED carries weight in "
                 f"automatic identity resolution, and confirmation needs a "
                 f"signature over the identifier, not a parse of it. "
                 f"Scoring: {entry.score_reason}"),
@@ -1173,7 +1173,7 @@ class ContactBlockService:
                 for e in entries if e[6] == ROLE_SELF and e[5]],
             "notice": (
                 "Every SELF entry here is a CLAIM the publisher made, not a "
-                "confirmed control of the identifier. docs/10: only CONFIRMED "
+                "confirmed control of the identifier. Only CONFIRMED "
                 "should carry weight in automatic identity resolution."),
         }
 

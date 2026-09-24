@@ -2,7 +2,7 @@
 
 Development only. Drives headless Chrome through the `#case=…&tab=…` deep
 link the UI already supports, so each shot is a real render of a real pane
-against real data — not a mock, and not a screenshot of the pane the app
+against real data: not a mock, and not a screenshot of the pane the app
 happened to open on.
 
     .venv\\Scripts\\python scripts\\screenshot_ui.py --email you@example.com
@@ -11,7 +11,7 @@ happened to open on.
 Why headless Chrome and not the in-app browser: a screenshot needs the page
 to composite frames, which a hidden pane does not do. Chrome's
 `--virtual-time-budget` also gives a deterministic answer to "has it
-finished fetching yet" — a fixed sleep gives you a picture of a spinner
+finished fetching yet", where a fixed sleep gives you a picture of a spinner
 about one run in five.
 
 **The shots contain case material.** They are written to a gitignored
@@ -57,14 +57,14 @@ PANES = [
     ("analytics", "Structural analysis", 1500, 1000),
     ("search", "Search", 1300, 700),
     ("comms", "Channels and contact blocks", 1400, 1300),
-    ("feeds", "Feeds — ingest queue", 1500, 1300),
+    ("feeds", "Feeds: ingest queue", 1500, 1300),
     ("ach", "Competing hypotheses", 1500, 1100),
-    ("report", "Report — build and release", 1400, 1100),
-    ("governance", "Lifecycle — retention", 1400, 1200),
-    ("samples", "Lab — sample queue", 1400, 1200),
-    ("deception", "Deception — phishing, BEC, vishing", 1400, 1200),
+    ("report", "Report: build and release", 1400, 1100),
+    ("governance", "Records: retention", 1400, 1200),
+    ("samples", "Lab: sample queue", 1400, 1200),
+    ("deception", "Deception: phishing, BEC, vishing", 1400, 1200),
     ("add-node", "Add entity", 1200, 1000),
-    ("add-edge", "Add relationship", 1200, 1000),
+    ("add-edge", "Add link", 1200, 1000),
 ]
 
 
@@ -165,7 +165,7 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=4.0,
                         help="seconds between panes. Each shot is a full "
                              "app boot, and thirteen boots in forty seconds "
-                             "trips the analytics rate limit — which then "
+                             "trips the analytics rate limit, which then "
                              "appears as a banner in the screenshot. The "
                              "limiter is working; this paces around it.")
     args = parser.parse_args()
@@ -217,7 +217,7 @@ def main() -> int:
             if proc.stderr.strip():
                 print("       " + proc.stderr.strip().splitlines()[-1][:120])
 
-    print(f"\n{len(written)}/{len(PANES)} pane(s) captured.")
+    print(f"\n{len(written)} of {len(PANES)} panes captured.")
     print("These contain case material. Treat them as the classification of "
           "the case they show.")
     return 0 if len(written) == len(PANES) else 1

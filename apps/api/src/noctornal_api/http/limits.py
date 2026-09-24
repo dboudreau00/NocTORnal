@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 
 import psycopg
@@ -200,14 +201,20 @@ def build_limiter() -> RateLimiter:
 def _warn_if_evicting(backend, url: str) -> None:
     """Shout at startup if the limiter's Redis may delete its own meters.
 
-    docs/16 C8 has recorded since Phase 7 that `infra/docker-compose.yml`
-    runs Redis with `allkeys-lru`, under which memory pressure evicts
-    rate-limit keys and an evicted meter is a reset meter. Until
-    2026-09-02 that was a paragraph in a register: nothing in the process
-    read the policy, so a deployment that copied the compose file had a
-    limiter that silently stopped limiting whoever the cache evicted, and
-    the operator had to know to look. This is the same failure shape as
+    Under an evicting policy, memory pressure deletes rate-limit keys, and
+    an evicted meter is a reset meter (docs/16 C8). `infra/docker-compose.yml`
+    ran Redis with `allkeys-lru` from Phase 7 until the Alpha 6 pre-release
+    check (2026-09-23), and until 2026-09-02 nothing in the process read
+    the policy, so a deployment that copied the compose file had a limiter
+    that silently stopped limiting whoever the cache evicted, and the
+    operator had to know to look. This is the same failure shape as
     RATE LIMITING IS DISABLED, so it is reported in the same voice.
+
+    The bundled file runs `noeviction` now, so on that stack this stays
+    quiet. It still matters for an operator's own Redis, and for a dev
+    stack started from the older file and never recreated, which keeps
+    `allkeys-lru` until compose recreates the container; the warning says
+    how.
 
     A Redis that refuses CONFIG (managed offerings usually rename it away)
     is reported as UNKNOWN below WARNING: it is the true statement, and
@@ -231,19 +238,32 @@ def _warn_if_evicting(backend, url: str) -> None:
             "subject it was refusing with a full burst: the limiter stops "
             "limiting whoever the cache evicts, silently. Run the limiter's "
             "Redis with maxmemory-policy=noeviction, or give it its own "
-            "instance (docs/16 C8; infra/docker-compose.yml sets allkeys-lru).",
+            "instance (docs/16 C8). The bundled infra/docker-compose.yml runs "
+            "noeviction; a dev stack started from an older copy of that file "
+            "keeps its old policy until `docker compose -f "
+            "infra/docker-compose.yml up -d` recreates it.",
             EVICTION_WARNING, policy, redacted_url(url),
         )
+
+
+#: `password=` as a query argument, up to the next argument or fragment.
+_QUERY_PASSWORD = re.compile(r"(?i)([?&]password=)[^&#]*")
 
 
 def redacted_url(url: str) -> str:
     """A Redis URL may carry a password. It is going into a log line, or
     into readiness evidence an administrator reads -- never either with
-    the secret in it."""
+    the secret in it.
+
+    In the userinfo OR as a `password=` query argument, which redis-py
+    honours just the same: this masked only the first, so a URL with the
+    second went into the log and the readiness evidence whole (c23,
+    2026-09-24). Matched without regard to case, because masking a value
+    redis-py would not have read costs nothing."""
     if "@" in url:
         scheme, _, rest = url.partition("://")
-        return f"{scheme}://***@{rest.rpartition('@')[2]}"
-    return url
+        url = f"{scheme}://***@{rest.rpartition('@')[2]}"
+    return _QUERY_PASSWORD.sub(r"\1***", url)
 
 
 def limiter_of(request: Request) -> RateLimiter:

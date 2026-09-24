@@ -155,11 +155,13 @@ def path(
 
 
 # Adversarial review found this unmetered while `analytics.suite` was
-# metered: same `analytics.run` permission, comparable work, and no
-# result cache -- the analytics door was locked and this window was open.
-# It shares the suite's budget deliberately.
+# metered, and it was then put on the suite's budget. The console fetches
+# it with every projection it draws, so that budget ran out in ordinary
+# navigation and took the Analysis pane's Run with it (ux03
+# metrics-rate-limit-degrades-view, 2026-09-23). It has its own meter now,
+# `graph.metrics`, sized to the projection it describes: see ratelimit.py.
 @router.get("/metrics", response_model=dict,
-            dependencies=[Depends(rate_limit("analytics.suite"))])
+            dependencies=[Depends(rate_limit("graph.metrics"))])
 def metrics(
     case_id: UUID,
     preset: str = Query("all"),

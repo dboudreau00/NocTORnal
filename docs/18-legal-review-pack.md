@@ -94,7 +94,7 @@ pressure.
 |---|---|---|---|---|
 | **B1** | Dual control on entity merge *(D1)* | **OFF** | A merge here is a reversible ledger, and docs/05 scopes dual control to the genuinely irreversible. On, it slows every merge; off, one analyst can conflate two actors unilaterally, reversibly, but the derived analysis in the meantime is wrong. | |
 | **B2** | Withheld-material disclosure *(D2)* | **PRESENCE**, the existence of withheld material is disclosed, not its content | The alternative hides even the existence. Disclosure regimes differ on whether concealing the *fact* of withheld material is permissible. | |
-| **B3** | Retention periods *(D3)* | STEALER_LOG 90d · CREDENTIAL_DUMP 180d · DATABASE_LEAK 365d · CHAT_EXPORT 730d · PASTE 365d · TELEMETRY 180d, **all six flagged unconfirmed in the UI** | Numbers somebody typed, not numbers anyone chose. They govern data about uninvolved people. Confirming a rule in the Lifecycle pane is what turns a placeholder into a policy with a name against it. | |
+| **B3** | Retention periods *(D3)* | STEALER_LOG 90d · CREDENTIAL_DUMP 180d · DATABASE_LEAK 365d · CHAT_EXPORT 730d · PASTE 365d · TELEMETRY 180d, **all six flagged unconfirmed in the UI** | Numbers somebody typed, not numbers anyone chose. They govern data about uninvolved people. Confirming a rule in the Records pane is what turns a placeholder into a policy with a name against it. | |
 | **B4** | Purge destroys or preserves *(D4)* | **Destroys**, leaving an append-only tombstone | Object lock is COMPLIANCE-mode on evidence, so it can refuse a delete even to satisfy a deletion order (C2 / decision 50). The purge reports what storage refused rather than claiming success. | |
 | **B5** | Detonation exposure *(D5)* | **Nothing detonates.** The authorisation record exists; nothing submits | docs/11: integrate a sandbox, do not build one. Submitting a sample to a third-party sandbox may disclose it. | |
 | **B6** | Ingest key holders *(D6)* | Keys are write-only by construction (invariant 11, CHECK-enforced), max TTL 365d, default 90d | A leaked key means junk data, never the case file. The question is who may hold one and under what agreement. | |
@@ -153,7 +153,7 @@ values) and a database constraint refuses any new unredacted row.
 **Checked 2026-07-26 on the development database: nothing to repair
 here.** All three dead-letter rows present are `redacted = true`, labelled
 AMBER and on a clock, so every one of them was written after the fix.
-`scripts/redact_dead_letters.py` reports "0 unredacted dead-letter row(s)".
+`scripts/redact_dead_letters.py` reports "0 unredacted dead-letter rows".
 
 That closes item 1 **for this deployment only**, and the distinction
 matters: the script exists because any deployment that ran the code before

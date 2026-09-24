@@ -2,7 +2,7 @@
 
 Development only. Every row this writes goes through the real service, so
 what you see is what the parser, the categoriser, the redactor and the
-triage scorer actually do — a seed that INSERTs directly would show you a
+triage scorer actually do. A seed that INSERTs directly would show you a
 picture of the schema rather than a picture of the system.
 
     .venv\\Scripts\\python scripts\\seed_feeds_demo.py --case OP-NIGHTJAR-26
@@ -10,14 +10,14 @@ picture of the schema rather than a picture of the system.
 
 What it puts there, and why each one:
 
-  * a ransom-leak post and a MIRROR of the same post — so the folded
+  * a ransom-leak post and a MIRROR of the same post, so the folded
     duplicate count is non-zero and you can see near-duplicate suppression
     working rather than trusting that it does;
-  * a stealer log on a compartmented key, with two credentials — so the
+  * a stealer log on a compartmented key, with two credentials, so the
     masked view has something to mask;
-  * a wrapped stealer log (`{"log": {...}}`) — the shape that used to
+  * a wrapped stealer log (`{"log": {...}}`): the shape that used to
     classify as UNKNOWN and skip the compartment check;
-  * a fragment that will not parse AND is full of credentials — so the
+  * a fragment that will not parse AND is full of credentials, so the
     dead-letter queue shows a redacted fragment rather than an empty one;
   * an IOC feed record with a watched selector, so one row scores high and
     the queue is visibly ordered by something;
@@ -26,8 +26,8 @@ What it puts there, and why each one:
 The stealer feed's compartment (STEALER-2026) is REGISTERED in
 `iam.compartment` first if it is not already there: since migration 0059
 (2026-09-09) an ingest key cannot force an unregistered compartment, and
-before this script registered it, a fresh database -- or any database on
-which seed_showcase.py had not happened to run first -- killed the seeder
+before this script registered it, a fresh database (or any database on
+which seed_showcase.py had not happened to run first) killed the seeder
 with an IngestError at that exact call. The registration is printed and
 audited, because it widens the vocabulary every read-in is checked
 against. Reading the case owner INTO the compartment stays
@@ -145,6 +145,12 @@ def ingest(svc, key, payloads, case):
     return svc.parse_batch(batch.batch_id, raw=raw, case_id=case)
 
 
+def _count(n: int, noun: str) -> str:
+    """`1 record`, `2 records`: agreed with the count rather than
+    bracketed (Alpha 6 pre-release check, 2026-09-23)."""
+    return f"{n} {noun if n == 1 else noun + 's'}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", required=True, help="case CODE, e.g. OP-X-26")
@@ -205,7 +211,7 @@ def main() -> int:
         admin.register_compartment(key=COMPARTMENT,
                                    label=f"{COMPARTMENT} (demo seed)",
                                    actor_id=owner)
-        print(f"REGISTERED compartment {COMPARTMENT} -- this widens the "
+        print(f"REGISTERED compartment {COMPARTMENT}. This widens the "
               f"vocabulary every case and read-in is checked against, and "
               f"is audited as COMPARTMENT_REGISTERED.")
 
@@ -240,14 +246,14 @@ def main() -> int:
         (SOURCE_PREFIX + "abandoned-mirror",))
 
     result = ingest(svc, partner, [RANSOM_POST, IOC_RECORD], case)
-    print(f"partner feed: {result.records} record(s), {result.dead} dead")
+    print(f"partner feed: {_count(result.records, 'record')}, {result.dead} dead")
     mirrored = dict(RANSOM_POST, source_url="https://mirror.example/p/9941",
                     seen_at="2026-07-25T02:00:00Z", id=str(uuid4()))
     result = ingest(svc, partner, [mirrored], case)
-    print(f"  mirror: {result.duplicates} folded as near-duplicate(s)")
+    print(f"  mirror: {_count(result.duplicates, 'near-duplicate')} folded")
 
     result = ingest(svc, stealer, [STEALER_LOG, WRAPPED_STEALER], case)
-    print(f"stealer feed: {result.records} record(s), {result.dead} dead")
+    print(f"stealer feed: {_count(result.records, 'record')}, {result.dead} dead")
 
     # Credentials on the first stealer record, so the masked view has
     # something to mask.
@@ -263,7 +269,7 @@ def main() -> int:
     # The dead letter.
     batch = svc.accept(partner, BROKEN_FRAGMENT)
     result = svc.parse_batch(batch.batch_id, raw=BROKEN_FRAGMENT, case_id=case)
-    print(f"broken batch: {result.records} record(s), {result.dead} dead")
+    print(f"broken batch: {_count(result.records, 'record')}, {result.dead} dead")
 
     for (rid,) in conn.execute(
             "SELECT id FROM ingest.record WHERE case_id = %s", (case,)):

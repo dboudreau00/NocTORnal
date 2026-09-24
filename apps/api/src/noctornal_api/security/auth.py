@@ -31,7 +31,7 @@ correct; that is deferred (see docs/00 backlog).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Protocol
@@ -101,6 +101,11 @@ class AuthResult:
     outcome: AuthOutcome
     user_id: UUID | None = None
     audit_reason: str | None = None  # server-side audit only; never sent to a client
+    # The stored hash of a recovery code that VERIFIED and is not yet
+    # spent: set only by `authenticate(spend_recovery=False)`, and spent
+    # by `AuthService.spend` once the caller knows the sign-in goes ahead.
+    # A server-side handle, never sent anywhere.
+    recovery_hash: str | None = field(default=None, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -112,8 +117,21 @@ class AuthService:
         self._users = users
         self._now = now
 
-    def authenticate(self, email: str, password: str, totp_code: str | None) -> AuthResult:
+    def authenticate(self, email: str, password: str, totp_code: str | None,
+                     *, spend_recovery: bool = True) -> AuthResult:
+        """`spend_recovery=False` verifies a recovery code and leaves it
+        unspent, returning its hash for `spend` to use.
+
+        Sign-in passes False (final review u4, 2026-09-24): its must-change
+        and no-change-pending refusals come AFTER this, and a recovery code
+        spent on a refusal is gone for good. Finishing one reset cost two
+        codes, and a person down to their last code could never finish it.
+        A TOTP code is still spent here either way: that is its replay
+        protection, it costs nothing to wait for the next one, and the
+        console asks for a fresh one. Every other caller spends at once.
+        """
         now = self._now()
+        recovery_hash: str | None = None
         user = self._users.get_for_auth(email)
 
         # 1. Constant work on EVERY path: verify a real or dummy hash before
@@ -147,11 +165,18 @@ class AuthService:
             # verified on a real, active, unlocked account, so the extra
             # Argon2id work it does is not an enumeration oracle -- a caller
             # who reaches it already knows the password.
-            if self._consume_recovery(user.id, totp_code):
+            matched = self._match_recovery(user.id, totp_code)
+            if matched is None:
+                reason = "bad_recovery_code"
+            elif not spend_recovery:
+                success = True
+                reason = "ok_recovery_code"
+                recovery_hash = matched
+            elif self._users.consume_recovery_hash(user.id, matched):
                 success = True
                 reason = "ok_recovery_code"
             else:
-                reason = "bad_recovery_code"
+                reason = "bad_recovery_code"  # a concurrent login spent it first
         else:
             try:
                 secret = self._users.get_totp_secret(user.id)  # decrypt only when needed
@@ -183,7 +208,8 @@ class AuthService:
             # RECOVERY CODE is a notable event -- it means someone could not
             # complete their normal second factor -- and the audit trail is
             # the only place that distinction survives.
-            return AuthResult(AuthOutcome.OK, user.id, reason)
+            return AuthResult(AuthOutcome.OK, user.id, reason,
+                              recovery_hash=recovery_hash)
 
         # 3. Burn a lockout attempt for a real, active, not-already-locked
         #    account — this is what stops a correct-password/no-code probe
@@ -193,29 +219,45 @@ class AuthService:
             self._users.record_failed_login(user.id, MAX_FAILED_LOGINS, now + LOCKOUT_DURATION)
         return AuthResult(AuthOutcome.INVALID_CREDENTIALS, None, reason)
 
-    def _consume_recovery(self, user_id: UUID, submitted: str) -> bool:
-        """Verify a recovery code and spend it, atomically.
+    def spend(self, result: AuthResult) -> bool:
+        """Spend the recovery code `authenticate(spend_recovery=False)`
+        left verified, atomically. True when there was none to spend.
+
+        False when a concurrent sign-in spent the same code between the
+        check and now: the atomic removal still decides who wins, exactly
+        as it does inside `authenticate`, and the loser is counted as the
+        failed attempt it would have been there.
+        """
+        if not result.ok or result.recovery_hash is None:
+            return result.ok
+        if self._users.consume_recovery_hash(result.user_id, result.recovery_hash):
+            return True
+        self._users.record_failed_login(result.user_id, MAX_FAILED_LOGINS,
+                                        self._now() + LOCKOUT_DURATION)
+        return False
+
+    def _match_recovery(self, user_id: UUID, submitted: str) -> str | None:
+        """The stored hash a recovery code matches, or None.
 
         Every stored hash is checked rather than stopping at the first
         match, so the work done does not depend on WHICH code was
         submitted -- the position of a code in the set is not something a
         caller should be able to time.
 
-        The consume is what actually decides the outcome: if the atomic
-        removal reports the hash was already gone, a concurrent login spent
-        it first and this attempt fails. Single-use is enforced by the
-        database, not by the order of statements here.
+        Matching does not spend. The atomic consume that follows (here or
+        in `spend`) is what actually decides the outcome: if it reports the
+        hash was already gone, a concurrent login spent it first and this
+        attempt fails. Single-use is enforced by the database, not by the
+        order of statements here.
         """
         normalised = recovery.normalise(submitted)
         if not normalised:
-            return False
+            return None
         matched: str | None = None
         for stored in self._users.get_recovery_hashes(user_id):
             if passwords.verify_recovery_code(stored, normalised) and matched is None:
                 matched = stored
-        if matched is None:
-            return False
-        return self._users.consume_recovery_hash(user_id, matched)
+        return matched
 
 
 # A fixed valid Argon2id hash so unknown-user verification does real work

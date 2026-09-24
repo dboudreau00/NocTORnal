@@ -105,8 +105,11 @@ def pg_dump_command() -> list[str]:
     sys.exit(
         "pg_dump is not on PATH and NOCTORNAL_PG_DUMP is not set. This script "
         "does not fall back to a hand-written dump (see the module docstring "
-        "for why); point NOCTORNAL_PG_DUMP at a pg_dump, e.g.\n"
-        "  NOCTORNAL_PG_DUMP=\"wsl -d Ubuntu-24.04 -- docker exec "
+        "for why); point NOCTORNAL_PG_DUMP at a pg_dump, for example the\n"
+        "one in the development stack's container:\n"
+        "  NOCTORNAL_PG_DUMP=\"docker exec noctornal-postgres-1 pg_dump\"\n"
+        "or, where Docker runs inside WSL:\n"
+        "  NOCTORNAL_PG_DUMP=\"wsl -d Ubuntu-24.04 -e docker exec "
         "noctornal-postgres-1 pg_dump\""
     )
 
@@ -198,7 +201,8 @@ def dump(url: str) -> str:
     if "CREATE TABLE" not in text:
         # A dump with no tables is not a mirror of anything; refuse rather than
         # write a file that would make the next diff "pass".
-        sys.exit("pg_dump produced no CREATE TABLE statements -- wrong database?")
+        sys.exit("pg_dump produced no CREATE TABLE statements. Is DATABASE_URL "
+                 "pointing at the wrong database?")
     return header(current_revision(url)) + normalise(text)
 
 
@@ -231,12 +235,15 @@ def main(argv: list[str] | None = None) -> int:
             lineterm="", n=2,
         )
         lines = list(diff)
-        print(f"db/schema.sql is STALE: {len(lines)} diff line(s). Regenerate with "
+        noun = "line" if len(lines) == 1 else "lines"
+        print(f"db/schema.sql is STALE: {len(lines)} diff {noun}. Regenerate with "
               f"`python scripts/dump_schema.py` and commit the result.", file=sys.stderr)
         for line in lines[:400]:
             print(line, file=sys.stderr)
         if len(lines) > 400:
-            print(f"... {len(lines) - 400} more line(s)", file=sys.stderr)
+            more = len(lines) - 400
+            print(f"... {more} more {'line' if more == 1 else 'lines'}",
+                  file=sys.stderr)
         return 1
 
     args.out.write_text(fresh, encoding="utf-8", newline="\n")

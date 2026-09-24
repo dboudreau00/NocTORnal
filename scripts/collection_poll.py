@@ -107,6 +107,19 @@ which is already in the past, and `due_sources` orders by it, so the most
 overdue are first on the next pass. The cost of the cap is delay, never
 omission.
 
+## `--max-seconds`, and why a pass has a clock as well as a count
+
+`--limit` bounds how many polls a pass makes and says nothing about how
+long they take. Each fetch is held to `collection.MAX_FETCH_SECONDS`, but
+twenty five sources at a minute each is still most of half an hour, and
+infra/production/compose.yml runs `notify_drain.py` in the same loop,
+after this pass returns. Before c2 (2026-09-24) one source drip-feeding
+its answer held a pass for ever and stopped every notification with it.
+So a pass stops STARTING polls once it has run `--max-seconds`, and the
+sources it did not reach are counted `deferred` and are, exactly as
+above, the most overdue on the next pass. A poll already under way is
+never abandoned by this: it ends inside its own fetch allowance.
+
 ## The one write `--dry-run` cannot avoid
 
 It polls nothing: no fetch, no `collection_run` row, no reschedule of
@@ -122,9 +135,11 @@ for a dry run: a newly added source that has not been collected from.
 
 One counters line, `due=7 selected=7 polled=6 ...`, in `notify_drain.py`'s
 shape. `due` is what was ready, `selected` is what `--limit` left of it,
-and on a pass that actually polls, `polled + skipped + failed == selected`
--- so a quiet pass (`due=0`) is distinguishable at a glance from one that
-was locked out (`skipped=selected`) or one that is failing. A `--dry-run`
+and on a pass that actually polls,
+`polled + skipped + deferred + failed == selected`, so a quiet pass
+(`due=0`) is distinguishable at a glance from one that was locked out
+(`skipped=selected`), one that ran out of time (`deferred` above zero) or
+one that is failing. A `--dry-run`
 selects and then does nothing, so it reports `polled=0` and that sum is
 the one thing it does not satisfy.
 
@@ -182,12 +197,19 @@ that source's advisory lock, so this pass correctly did nothing to it. A
 cron that overlaps itself for a minute would otherwise mail its operator
 about a system that is working exactly as designed, and an alert that
 cries wolf is the alert people turn off.
+
+`deferred` is not a failure either, for the same reason: nothing was
+tried, and the sources it counts are first on the next pass. A `deferred`
+that is above zero on every pass is worth reading, though, because it
+means passes routinely run out of time, and the usual cause is a source
+that answers slowly on every poll.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+import time
 from uuid import UUID
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -216,6 +238,13 @@ load_env_local()
 #: the next pass takes (see the `--limit` note above).
 DEFAULT_LIMIT = 25
 
+#: How long one pass keeps STARTING polls (see `--max-seconds` above).
+#: Four minutes, so that with the one fetch still in flight a pass ends
+#: inside the five minute resolution this docstring recommends, and the
+#: compose loop's notification drain is never more than a pass behind
+#: (c2, 2026-09-24).
+DEFAULT_MAX_SECONDS = 240
+
 #: `run_once` requires an `actor_id` and does not read it: a poll writes
 #: `collection_run`, `document` and `watch_hit` rows and no `audit.event`,
 #: so nothing this pass writes carries an actor at all. The nil UUID is
@@ -242,18 +271,32 @@ def main() -> int:
              f"on the next pass.")
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="list what would be polled and poll nothing -- no fetch, no "
+        help="list what would be polled and poll nothing: no fetch, no "
              "run row, no reschedule. See the docstring for the one write "
              "it cannot avoid.")
+    parser.add_argument(
+        "--max-seconds", type=float, default=DEFAULT_MAX_SECONDS,
+        help=f"start no new poll once the pass has run this long (default "
+             f"{DEFAULT_MAX_SECONDS}; 0 means no limit). Sources not reached "
+             f"are counted deferred, stay due and are first on the next "
+             f"pass.")
     args = parser.parse_args()
+    # Read before anything else, so the pass's clock includes the
+    # readiness probes and the listing, which are part of how long the
+    # compose loop waits for this process.
+    began = time.monotonic()
     if args.limit < 0:
         # Rejected rather than quietly read as "no cap", which is what 0
         # means: an operator who typed `--limit -1` meant something, and
         # guessing which is how a pass polls four hundred sources.
         parser.error("--limit cannot be negative (0 means no cap)")
+    if args.max_seconds < 0:
+        # The same reasoning as `--limit`: a negative clock is a typo, and
+        # reading it as "no limit" is the guess that brings the hang back.
+        parser.error("--max-seconds cannot be negative (0 means no limit)")
 
     counters = {"due": 0, "selected": 0, "polled": 0, "skipped": 0,
-                "failed": 0, "items_seen": 0, "items_new": 0,
+                "deferred": 0, "failed": 0, "items_seen": 0, "items_new": 0,
                 "watch_hits": 0, "warnings": 0}
     conn = connect()
     try:
@@ -298,6 +341,13 @@ def main() -> int:
                 print(f"would poll {source['id']}  due {source['due_at']}  "
                       f"health {source['health']}  "
                       f"failures {source['consecutive_failures']}")
+                continue
+            if args.max_seconds and time.monotonic() - began >= args.max_seconds:
+                # Out of time for this pass. Nothing is attempted, so
+                # nothing failed: the source keeps its overdue
+                # `next_due_at` and sorts first next time (c2, 2026-09-24).
+                counters["deferred"] += 1
+                print(f"deferred {source['id']}  the pass ran out of time")
                 continue
             try:
                 result = service.run_once(source["id"], actor_id=_NO_ACTOR)

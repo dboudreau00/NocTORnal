@@ -5,6 +5,30 @@
 # policy, and runs the sample origin as a second process of the same code.)
 name: noctornal
 
+# Every published port is bound to 127.0.0.1 (Alpha 6 pre-release check,
+# 2026-09-23). Before that each one was published on every interface, and a
+# Linux install put Postgres (as a superuser), the MinIO root, Redis and
+# Mailpit on the network behind the passwords written in this file. A host
+# firewall is no help: Docker forwards a published port with its own NAT
+# rules before ufw's INPUT rules ever see the packet, so the address in
+# `ports:` is the only control this file has.
+#
+# Nothing in the development workflow needs more. The API binds 127.0.0.1,
+# minio-init reaches MinIO by service name on the compose network, and the
+# installers write 127.0.0.1 into .env.local (an older one that says
+# localhost still works). With Docker Engine
+# inside WSL 2, WSL forwards a 127.0.0.1 listener in the distribution to the
+# Windows host's 127.0.0.1, so that Windows workflow is unchanged.
+#
+# IPv4 only, on purpose. An explicit [::1] cannot be bound on a host with
+# IPv6 disabled, and one unbindable port fails the whole `up`. A client that
+# resolves localhost to ::1 first then connects on its second address; on
+# Windows that refused first attempt costs about two seconds, and naming
+# 127.0.0.1 instead of localhost in .env.local avoids it.
+#
+# apps/api/tests/test_compose_exposure.py fails on any published port here
+# that is not bound to loopback.
+
 services:
   postgres:
     # pgvector image. Ids are uuid4() app-side and gen_random_uuid() in
@@ -24,7 +48,7 @@ services:
       -c max_connections=200
       -c shared_buffers=512MB
       -c work_mem=32MB
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     # If init ever fails mid-run, pgdata keeps the PARTIAL cluster and the
     # init scripts will NOT re-run on restart — postgres comes up "healthy"
     # with a half-loaded schema. Recover with: docker compose down -v
@@ -49,10 +73,18 @@ services:
       retries: 10
       start_period: 30s
 
+  # The rate limiter is the only user of this Redis, and its GCRA meters must
+  # not be evicted: a deleted meter admits the subject it was refusing with a
+  # full burst. So `noeviction` (Alpha 6 pre-release check, 2026-09-23). This
+  # file ran `allkeys-lru`, which made every start of the API print RATE-LIMIT
+  # REDIS EVICTS KEYS and left readiness' redis_limiter_store red on a fresh
+  # install, over a setting the bundled stack chose and the user never did.
+  # At the 1gb cap Redis now refuses writes instead of deleting meters, and
+  # each limit falls back to its declared on_backend_failure.
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
-    ports: ["6379:6379"]
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy noeviction
+    ports: ["127.0.0.1:6379:6379"]
     volumes: [redisdata:/data]
 
   minio:
@@ -74,7 +106,7 @@ services:
     environment:
       MINIO_ROOT_USER: noctornal
       MINIO_ROOT_PASSWORD: dev_only_change_me
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: [miniodata:/data]
 
   # Creates the evidence bucket WITH OBJECT LOCK. Object lock cannot be
@@ -112,13 +144,30 @@ services:
   # A comment added inside the block on 2026-07-26 silently disabled the
   # samples-bucket creation it was written to explain, and `docker compose
   # config` was what caught it.
+  #
+  # The wait for MinIO is quiet, and bounded (Alpha 6 pre-release check,
+  # 2026-09-23). minio-init starts as soon as the minio container does, before
+  # the server listens, so the first `mc alias set` always failed and every
+  # clean start's log opened with "mc: <ERROR> Unable to initialize new
+  # alias ... connection refused": the expected first pass of the wait, and
+  # the line anyone reading the log after an unrelated failure would take
+  # for its cause. The wait now discards the probe's output. To keep a real
+  # fault (a wrong password, say) from looping forever in silence, after 120
+  # attempts it runs the probe once more with its output shown and exits 1
+  # if that fails too. `$$` is compose's escape for a literal `$`.
+  # test_compose_exposure.py runs this script with a stub `mc`.
   minio-init:
     image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on: [minio]
     entrypoint: >
       /bin/sh -c "
       set -e;
-      until mc alias set local http://minio:9000 noctornal dev_only_change_me; do sleep 1; done;
+      tries=0;
+      until mc alias set local http://minio:9000 noctornal dev_only_change_me >/dev/null 2>&1; do
+      tries=$$((tries + 1));
+      if [ $$tries -ge 120 ]; then mc alias set local http://minio:9000 noctornal dev_only_change_me || exit 1; fi;
+      sleep 1;
+      done;
       mc mb --ignore-existing --with-lock local/noctornal-evidence;
       mc mb --ignore-existing local/noctornal-raw;
       mc mb --ignore-existing local/noctornal-samples;
@@ -131,12 +180,28 @@ services:
   # for historical reasons and the mismatch confused anyone reading
   # `docker compose ps` against the docs (R21).
   mailpit:
-    image: axllent/mailpit:latest
+    # A release tag, not `latest` (sec-pin-dependencies, 2026-09-23), for
+    # the reason the minio note above gives twice over. v1.31.0 is the build
+    # this stack ran while the Alpha 6 suite passed (index digest
+    # sha256:c96991d9bef7...), and it resolved for an anonymous pull from
+    # Docker Hub the day it was pinned, as it did from ghcr.io/axllent/mailpit
+    # under the same digest, the mirror to move to if Docker Hub ever goes the
+    # way it went for MinIO. CI runs the same tag, and
+    # apps/api/tests/test_dependency_pins.py fails if the two differ.
+    image: axllent/mailpit:v1.31.0
     # 1025 SMTP, 8025 web UI. install.ps1/install.sh write matching
     # SMTP_HOST/SMTP_PORT/SMTP_ALLOW_PLAINTEXT into .env.local, or the
     # advertised "captured e-mail" demo silently does nothing (R11) --
     # transports.py defaults to port 587.
-    ports: ["1025:1025", "8025:8025"]
+    #
+    # --smtp-disable-rdns (Alpha 6 pre-release check, 2026-09-23): Mailpit
+    # looks up the reverse DNS of every SMTP client before it sends its
+    # greeting, and where that lookup is slow the greeting waits for it. On
+    # the development machine the greeting took 1 to 10 seconds, with or
+    # without the loopback bind, and transports.send_smtp gives up after 10.
+    # With the lookup off it arrives at once. Nothing here uses the name.
+    command: --smtp-disable-rdns
+    ports: ["127.0.0.1:1025:1025", "127.0.0.1:8025:8025"]
 
 # ---------------------------------------------------------------------------
 # REMOVED 2026-07-26 (R13): OpenFGA and NATS.

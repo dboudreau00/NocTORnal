@@ -152,6 +152,9 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+# The states whose content is read-only, from where the rule is written
+# down: samples attached to a case are its content (c7/c21, 2026-09-24).
+from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 # The one existing spelling of "does this ACTIVE account hold this global
 # permission", used at redemption. See `_still_authorised`.
 from noctornal_api.iam_admin import IamAdminService
@@ -215,6 +218,17 @@ TICKET_RETRIEVAL = "preserved_retrieval"
 #: friendlier refusal and not the control.
 MAX_AUTHORISATION_DAYS = 30
 
+#: The entity a selector a lab analysis extracted is proposed as (docs/11:
+#: "Extracted C2 infrastructure links samples to INFRA nodes"). Anything not
+#: named here is proposed as a SELECTOR, the shape the capture extractor
+#: already uses, so the triage card reads it the same way.
+_NODE_FOR_SELECTOR = {
+    "DOMAIN": "INFRA", "IPV4": "INFRA", "IPV6": "INFRA", "URL": "INFRA",
+    "ONION": "INFRA", "ASN": "INFRA",
+    "BTC_ADDR": "WALLET", "ETH_ADDR": "WALLET", "XMR_ADDR": "WALLET",
+    "TRON_ADDR": "WALLET",
+}
+
 #: How long a preserving rejection waits for the sample's row lock before
 #: giving up. The lock is taken BEFORE anything is copied, so a second
 #: rejection of the same sample waits for the first and then sees
@@ -268,8 +282,8 @@ def _db_error_in(exc: BaseException) -> psycopg.Error | None:
 #: Why a `destroy` rejection of a held sample is refused. Said twice, once
 #: before any lock and once under it (a hold placed in between counts).
 _HOLD_REFUSES_DESTROY = (
-    "this sample is under a legal hold, and docs/08 is "
-    "unqualified: a hold overrides all deletion, everywhere. "
+    "this sample is under a legal hold, and a hold is "
+    "unqualified: it overrides all deletion, everywhere. "
     "This deployment destroys rejected samples "
     f"({DISPOSITION_ENV}=destroy), so rejecting it would destroy "
     "material somebody has been ordered to preserve. If a "
@@ -404,6 +418,22 @@ class PolicyNotDeclared(SampleError):
     prohibited-content policy exists."""
 
 
+class SampleCaseReadOnly(SampleError):
+    """The sample's case is CLOSED, ARCHIVED or PURGED
+    (`cases.CONTENT_READ_ONLY_STATES`), and a sample attached to a case is
+    that case's content, so the Lab records nothing more against it.
+
+    c7/c21 (2026-09-24). Only `sample.submit` and the propose path refused
+    a read-only case; assign, record an analysis, request a detonation and
+    reject all worked on a closed case's sample, and under the `destroy`
+    disposition one analyst could destroy an ARCHIVED case's sample,
+    bypassing the retention purge's two-person control. The routers refuse
+    first, through `deps.refuse_if_case_read_only`, which audits and titles
+    the 409; this is the service's own check, for a caller that is not a
+    router and for a case closed after the router looked. Its message does
+    not name the case, which a Lab analyst may not be able to open."""
+
+
 class AuthorisationRequired(SampleError):
     """A preserved sample was asked for by somebody with no live
     authorisation for it. The router answers 451, as victim PII does: the
@@ -497,8 +527,8 @@ def policy_declared() -> tuple[bool, str]:
             "prohibited-content policy: set "
             "NOCTORNAL_PROHIBITED_CONTENT_POLICY to a reference an auditor "
             "can follow, and NOCTORNAL_DESIGNATED_PERSON to whoever material "
-            "is escalated to. Counsel must have written that policy first "
-            "(docs/11); this check records the declaration, it cannot verify "
+            "is escalated to. Counsel must have written that policy first; "
+            "this check records the declaration, it cannot verify "
             "it.")
     return True, reference
 
@@ -653,15 +683,15 @@ def origin_split(*, this: str | None = None) -> OriginSplit:
             f"sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN="
             f"{raw_sample!r} is not an origin. It must be scheme://host[:port] "
             f"with no path, query or credentials. A path is a location on "
-            f"an origin, not an origin, and docs/11 is explicit that "
-            f"app.internal/samples is not separate from app.internal.")
+            f"an origin, not an origin, and app.internal/samples is not "
+            f"separate from app.internal.")
     if app is not None and sample == app:
         return OriginSplit(
             "same_origin", sample, app, this_origin,
             f"sample downloads are refused: NOCTORNAL_SAMPLE_ORIGIN equals "
             f"the application origin ({app}, from NOCTORNAL_BASE_URL). Two "
             f"names for one origin is not a split, and serving hostile bytes "
-            f"there is the drive-by vector invariant 10 exists to prevent. "
+            f"there is a drive-by attack on every analyst's session. "
             f"Give samples their own host.")
     if this_origin != sample:
         return OriginSplit(
@@ -876,7 +906,7 @@ class _ZipCrypto:
 
 
 def archive(data: bytes, sha256_hex: str,
-            password: bytes = ARCHIVE_PASSWORD) -> bytes:
+            password: bytes = ARCHIVE_PASSWORD, *, what: str = "sample") -> bytes:
     """Wrap the sample so it cannot be double-clicked into running.
 
     Named for its hash, not its original filename -- the name is
@@ -884,6 +914,13 @@ def archive(data: bytes, sha256_hex: str,
     reappear. The comment states plainly what the password is worth,
     because the single commonest mistake with this convention is treating
     it as confidentiality.
+
+    `what` names the contents in that comment: "sample" for the Lab, and
+    "exhibit" for attacker markup produced through the sample origin
+    (x-hostile-export, 2026-09-24), which leaves in this same archive so
+    a captured page cannot be opened into a browser by a double-click
+    either. The entry stays `<sha256>.bin` for both: an `.html` entry is
+    exactly the double-click this archive exists to stop.
 
     **This produced a PLAIN ZIP until 2026-07-26.** The old docstring
     said "Python's zipfile writes ZipCrypto", which is false in the
@@ -933,7 +970,8 @@ def archive(data: bytes, sha256_hex: str,
         dos_date, crc, len(payload), len(data), len(name), 0, 0, 0, 0,
         0, 0) + name
     comment = (
-        b"NocTORnal sample. Password: infected. This password prevents "
+        b"NocTORnal " + what.encode("ascii") + b". Password: infected. "
+        b"This password prevents "
         b"accidental execution and stops scanners eating the file. It is "
         b"PUBLIC and provides NO confidentiality. Handle under the "
         b"classification this was released at."
@@ -1587,6 +1625,10 @@ class SampleService:
             raise SampleError("no such sample")
         if current.state == REJECTED:
             raise SampleError("already rejected")
+        # Before any disposition is chosen, so a read-only case's sample is
+        # refused as that and not as a store the deployment has not
+        # configured. Checked again under the row lock (`_lock_unrejected`).
+        self._refuse_if_case_read_only(sample_id)
 
         held, storage_key = self._hold_and_key(sample_id)
 
@@ -1634,9 +1676,42 @@ class SampleService:
             raise SampleError("no such sample")
         return bool(row[0] or row[1]), row[2]
 
+    def _refuse_if_case_read_only(self, sample_id: UUID) -> None:
+        """Raise `SampleCaseReadOnly` when the sample's case is in
+        `CONTENT_READ_ONLY_STATES`. A sample with no case has nothing to be
+        read-only for.
+
+        Every Lab write on an existing sample calls this first (c7/c21,
+        2026-09-24): the same rule `deps.refuse_if_case_read_only` applies
+        at the router, read from the same set, so the two cannot disagree
+        about which states are shut."""
+        row = self._c.execute(
+            """SELECT c.status FROM lab.sample s
+                 JOIN core."case" c ON c.id = s.case_id
+                WHERE s.id = %s""", (sample_id,)).fetchone()
+        if row is not None and row[0] in CONTENT_READ_ONLY_STATES:
+            raise SampleCaseReadOnly(
+                "the sample's case is read-only (closed, archived or purged), "
+                "so nothing more is recorded against its samples; a closed "
+                "case has to be reopened first")
+
+    def read_only_cases(self, case_ids) -> frozenset[str]:
+        """The ids, of those given, whose case is read-only for content, in
+        one query: what `case_read_only` on a queue row or a card is read
+        from, so the Lab offers no work the server would refuse (c21,
+        2026-09-24)."""
+        wanted = sorted({str(i) for i in case_ids if i})
+        if not wanted:
+            return frozenset()
+        rows = self._c.execute(
+            'SELECT id FROM core."case" WHERE id = ANY(%s::uuid[]) '
+            "AND status::text = ANY(%s)",
+            (wanted, sorted(CONTENT_READ_ONLY_STATES))).fetchall()
+        return frozenset(str(r[0]) for r in rows)
+
     def _lock_unrejected(self, sample_id: UUID, *, nothing: str) -> None:
         """Inside the caller's transaction: lock the sample's row, and
-        refuse if it is already REJECTED.
+        refuse if it is already REJECTED or its case is read-only.
 
         Every rejection path takes this lock before it changes anything
         (final review U5, 2026-09-23). The preserving path took it alone,
@@ -1666,6 +1741,11 @@ class SampleService:
             raise SampleError(
                 "already rejected (somebody else finished rejecting it while "
                 f"this rejection was waiting). {nothing}")
+        # Again under the lock, where every path re-reads what it depends
+        # on: a rejection that waited here while the case was closed must
+        # not dispose of a closed case's sample (c7, 2026-09-24). Like the
+        # hold, the case row itself is read, not locked.
+        self._refuse_if_case_read_only(sample_id)
 
     def _reject_destroying(self, sample_id: UUID, *, actor_id: UUID,
                            reason: str) -> Sample:
@@ -2064,6 +2144,7 @@ class SampleService:
 
     def assign(self, sample_id: UUID, *, analyst_id: UUID,
                actor_id: UUID) -> Sample:
+        self._refuse_if_case_read_only(sample_id)
         row = self._c.execute(
             """UPDATE lab.sample
                   SET assigned_to = %s, assigned_at = now(), state = 'ASSIGNED'
@@ -2094,7 +2175,12 @@ class SampleService:
         Reaching the graph is a separate, deliberate step: it becomes a
         `core.assertion` like everything else (invariant 1), never a column
         stamped on an actor.
+
+        Refused for a sample whose case is read-only: an attribution dated
+        after `closed_at` on a closed case's sample is the post-closure
+        material the rule exists to keep out (c7, 2026-09-24).
         """
+        self._refuse_if_case_read_only(sample_id)
         if kind not in {"STATIC", "YARA", "MANUAL_RE", "SANDBOX", "VENDOR"}:
             raise SampleError(f"unknown analysis kind {kind!r}")
         if family_assessment and not confidence:
@@ -3057,6 +3143,100 @@ class SampleService:
             "WHERE id = ANY(%s::uuid[])", (wanted,)).fetchall()
         return {str(r[0]): {"name": r[1], "email": r[2]} for r in rows}
 
+    def case_labels(self, case_ids) -> dict[str, tuple[str, frozenset[str]]]:
+        """`{case id: (classification, compartments)}` for the cases a page
+        of samples belongs to, in one query.
+
+        ux13-lab:label-chip-understates-handling (2026-09-23). `queue()` and
+        `visible()` gate on the sample's labels COMPOSED with its case's,
+        and the row chip showed the sample's own alone. A malware analyst,
+        who holds no case access and so sees no other marking, read a
+        sample from a compartmented case as plain AMBER. The router now
+        returns the composed labels, and this is where the case half comes
+        from."""
+        wanted = sorted({str(i) for i in case_ids if i})
+        if not wanted:
+            return {}
+        rows = self._c.execute(
+            'SELECT id, classification, compartments FROM core."case" '
+            "WHERE id = ANY(%s::uuid[])", (wanted,)).fetchall()
+        return {str(r[0]): (r[1], frozenset(r[2] or [])) for r in rows}
+
+    #: The composed labels of one sample, as a CTE the two people lists
+    #: below share. A person offered in either list must be able to see the
+    #: sample at the labels it is actually handled at, or they are named on
+    #: a record they cannot open.
+    _EFFECTIVE = """
+        WITH s AS (
+          SELECT greatest(s.classification,
+                          coalesce(c.classification, s.classification)) AS tlp,
+                 s.compartments || coalesce(c.compartments, '{}') AS comps,
+                 s.case_id
+            FROM lab.sample s
+            LEFT JOIN core."case" c ON c.id = s.case_id
+           WHERE s.id = %(sample)s)"""
+
+    def eligible_assignees(self, sample_id: UUID) -> list[dict]:
+        """Who a sample can be assigned to: an ACTIVE account holding
+        `sample.analyse` whose own clearance and compartments reach the
+        sample at its composed labels.
+
+        ux13-lab:no-assign-or-record-analysis (2026-09-23). The console had
+        no way to assign at all, and the API took any uuid, so the one way
+        to do it was to type an internal id, and a valid but wrong one
+        assigned the sample to somebody who could not even open it. The
+        console offers this list, and `assign` refuses anybody not on it.
+        """
+        rows = self._c.execute(
+            self._EFFECTIVE + """
+            SELECT DISTINCT u.id, u.display_name, u.email
+              FROM s, iam.app_user u
+              JOIN iam.user_role ur ON ur.user_id = u.id
+              JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+             WHERE rp.permission_key = 'sample.analyse' AND u.is_active
+               AND u.tlp_clearance >= s.tlp
+               AND s.comps <@ coalesce(u.compartments, '{}')
+             ORDER BY u.display_name, u.email""",
+            {"sample": sample_id}).fetchall()
+        return [{"id": str(r[0]), "name": r[1], "email": r[2]} for r in rows]
+
+    def detonation_authorisers(self, sample_id: UUID, *,
+                               exclude: UUID | None = None) -> list[dict]:
+        """Who may sign off a non-private detonation of this sample.
+
+        docs/11: "require case owner sign-off for anything non-private". So
+        a lead investigator (a CASE_OWNER assignment, unexpired) on the
+        sample's own case; for a sample with no case, an account holding
+        the CASE_OWNER role. Active, cleared to see the sample, and never
+        the person asking: a sign-off by the requester is one person, and
+        two-person controls stay two people.
+
+        ux13-lab:detonation-authoriser-uuid (2026-09-23). The form asked for
+        another person's internal uuid, which no analyst has, and any valid
+        uuid was accepted, so a mistype named the wrong human on the record
+        whose whole point is that a named human agreed.
+        """
+        rows = self._c.execute(
+            self._EFFECTIVE + """
+            SELECT u.id, u.display_name, u.email
+              FROM s, iam.app_user u
+             WHERE u.is_active
+               AND u.id IS DISTINCT FROM %(exclude)s
+               AND u.tlp_clearance >= s.tlp
+               AND s.comps <@ coalesce(u.compartments, '{}')
+               AND CASE WHEN s.case_id IS NOT NULL THEN EXISTS (
+                         SELECT 1 FROM iam.case_assignment a
+                          WHERE a.case_id = s.case_id AND a.user_id = u.id
+                            AND a.role_key = 'CASE_OWNER'
+                            AND (a.expires_at IS NULL OR a.expires_at > now()))
+                        ELSE EXISTS (
+                         SELECT 1 FROM iam.user_role ur
+                          WHERE ur.user_id = u.id AND ur.role_key = 'CASE_OWNER')
+                   END
+             ORDER BY u.display_name, u.email""",
+            {"sample": sample_id, "exclude": exclude}).fetchall()
+        return [{"id": str(r[0]), "name": r[1], "email": r[2]} for r in rows]
+
     def request_detonation(self, sample_id: UUID, *, requested_by: UUID,
                            target: str, exposure_level: str,
                            authorised_by: UUID | None = None,
@@ -3068,7 +3248,16 @@ class SampleService:
         operators watch public sandboxes for their own samples and treat a
         submission as a signal they have been noticed, which can end an
         operation that took months.
+
+        The authoriser of a non-private detonation must be somebody else,
+        and somebody `detonation_authorisers` lists: a lead investigator on
+        the sample's case who can see it (ux13-lab:detonation-authoriser-
+        uuid, 2026-09-23). The CHECK constraint only asks that a name be
+        there; this is what makes it the right name.
+
+        Refused for a sample whose case is read-only (c7, 2026-09-24).
         """
+        self._refuse_if_case_read_only(sample_id)
         if exposure_level not in {"NONE", "VENDOR", "PUBLIC"}:
             raise SampleError(f"unknown exposure level {exposure_level!r}")
         if exposure_level != "NONE" and (authorised_by is None or not note):
@@ -3076,6 +3265,18 @@ class SampleService:
                 "anything that leaves the building needs a named authoriser "
                 "and a note: submitting to a vendor or public sandbox exposes "
                 "the sample AND your interest in it")
+        if exposure_level != "NONE":
+            if authorised_by == requested_by:
+                raise SampleError(
+                    "you cannot authorise your own detonation: the sign-off "
+                    "is the control, and a second person has to give it")
+            allowed = {a["id"] for a in self.detonation_authorisers(
+                sample_id, exclude=requested_by)}
+            if str(authorised_by) not in allowed:
+                raise SampleError(
+                    "the authoriser must be an active lead investigator on "
+                    "this sample's case (for a sample with no case, a lead "
+                    "investigator) who is cleared to see the sample")
         row = self._c.execute(
             """INSERT INTO lab.detonation
                    (sample_id, target, exposure_level, authorised_by,
@@ -3179,18 +3380,186 @@ class SampleService:
         return _record(row) if row else None
 
     def analyses(self, sample_id: UUID) -> list[dict]:
+        """Every recorded analysis, with WHO recorded it by name and the
+        tool's version.
+
+        ux13-lab:no-assign-or-record-analysis (2026-09-23): the console
+        showed neither the analyst nor the version, and this read never
+        returned the version it was asked for (`tool_version` was read by
+        the console and selected by nobody)."""
         rows = self._c.execute(
-            """SELECT id, kind, analyst_id, tool, findings,
-                      extracted_selectors, yara_hits, family_assessment,
-                      confidence, narrative, created_at
-                 FROM lab.sample_analysis WHERE sample_id = %s
-                ORDER BY created_at DESC""", (sample_id,)).fetchall()
+            """SELECT a.id, a.kind, a.analyst_id, a.tool, a.findings,
+                      a.extracted_selectors, a.yara_hits, a.family_assessment,
+                      a.confidence, a.narrative, a.created_at, a.tool_version,
+                      u.display_name, u.email
+                 FROM lab.sample_analysis a
+                 LEFT JOIN iam.app_user u ON u.id = a.analyst_id
+                WHERE a.sample_id = %s
+                ORDER BY a.created_at DESC""", (sample_id,)).fetchall()
         return [{"id": str(r[0]), "kind": r[1],
                  "analyst_id": str(r[2]) if r[2] else None, "tool": r[3],
                  "findings": r[4], "extracted_selectors": r[5],
                  "yara_hits": r[6] or [], "family_assessment": r[7],
                  "confidence": r[8], "narrative": r[9],
-                 "created_at": r[10].isoformat()} for r in rows]
+                 "created_at": r[10].isoformat(),
+                 "tool_version": r[11],
+                 "analyst_name": r[12], "analyst_email": r[13]}
+                for r in rows]
+
+    def analysis(self, sample_id: UUID, analysis_id: UUID) -> dict | None:
+        """One analysis of one sample, or None."""
+        return next((a for a in self.analyses(sample_id)
+                     if a["id"] == str(analysis_id)), None)
+
+    def propose_extracted_selector(self, sample: Sample, analysis_id: UUID,
+                                   index: int, *, actor_id: UUID) -> dict:
+        """Put ONE selector a lab analysis extracted into the sample's case
+        triage queue, as a proposal. Never into the graph.
+
+        docs/11: "Findings flow back as assertions" and "the RE's
+        structured output is where most graph value comes from". Until
+        2026-09-23 the extracted C2 domains, addresses and wallets were
+        stored and shown nowhere, so the one thing that ties a sample to
+        actors never reached the case (ux13-lab:no-assign-or-record-
+        analysis). This is the "propose as assertion" path: machines and
+        the lab propose, the case's analysts dispose.
+
+        The proposal is DERIVED here from what the analysis recorded, and
+        the caller names only which entry: `routers/proposals.py` refuses
+        caller-authored proposals, because a queue that took them would be
+        a way to push arbitrary suggestions at an analyst. It is refused
+        for a sample with no case, for a case that is closed or archived
+        (read-only for content), and for a sample carrying a compartment
+        its case does not, because an accepted proposal is written with
+        the case's compartments and would shed that restriction.
+
+        The answer is the SAME whether a proposal was queued, one was
+        already there in any state, or the case already holds the entity:
+        `{"sent": True, "label": ...}` and nothing else. A malware analyst
+        holds no case access, can record an analysis with any selector
+        value they like, and then propose it; an answer that said "already
+        an entity" with its node id, or "already proposed (rejected)", or
+        named the case's code, let a role barred from case content probe
+        the case graph one value at a time (2026-09-23 verifier, on
+        ux13-lab:no-assign-or-record-analysis). What actually happened is
+        written to the audit trail, where a reviewer can read it, and the
+        case's own analysts see the queue.
+        """
+        from noctornal_ontology.definition import SELECTOR_TYPES
+        from noctornal_ontology.normalisers import normalise
+
+        from noctornal_api.proposals import KIND_NODE, ProposalStore
+
+        if sample.case_id is None:
+            raise SampleError(
+                "this sample is not attached to a case, so there is no triage "
+                "queue to propose into")
+        case = self._c.execute(
+            'SELECT status, classification, compartments '
+            'FROM core."case" WHERE id = %s', (sample.case_id,)).fetchone()
+        if case is None:
+            raise SampleError("no such case")
+        status, case_tlp, case_comps = case
+        # The shared set, not a literal copy of it (c7, 2026-09-24): a copy
+        # is how a state gets added in one place and missed in another.
+        if status in CONTENT_READ_ONLY_STATES:
+            # Not named by its code: the Lab shows a case the caller cannot
+            # open as "a case you cannot open", and this refusal must not
+            # be the way its code leaks.
+            raise SampleCaseReadOnly(
+                "the sample's case is closed, and a closed case takes no new "
+                "content; it has to be reopened before anything is proposed "
+                "into it")
+        extra = sorted(frozenset(sample.compartments)
+                       - frozenset(case_comps or []))
+        if extra:
+            raise SampleError(
+                "this sample carries compartments its case does not ("
+                + ", ".join(extra) + "), and an accepted proposal would be "
+                "written without them. Record it in the case by hand, with "
+                "the compartments it needs.")
+        found = self.analysis(sample.id, analysis_id)
+        if found is None:
+            raise SampleError("no such analysis on this sample")
+        entries = found["extracted_selectors"] or []
+        if not 0 <= index < len(entries):
+            raise SampleError("that analysis has no selector at that position")
+        entry = entries[index]
+        if not isinstance(entry, dict):
+            raise SampleError(
+                "that entry was recorded without a selector type, so it "
+                "cannot be proposed; record it again with its type")
+        kind = str(entry.get("selector_type") or entry.get("type") or "").upper()
+        raw = str(entry.get("value") or "").strip()
+        known = {s.key: s for s in SELECTOR_TYPES}
+        if kind not in known or not raw:
+            raise SampleError(
+                "that entry does not name a known selector type and a value")
+        try:
+            norm = normalise(kind, raw)
+        except (KeyError, ValueError) as exc:
+            raise SampleError(
+                f"the {known[kind].display_name.lower()} {raw!r} does not "
+                f"normalise: {exc}") from exc
+        node_type = _NODE_FOR_SELECTOR.get(kind, "SELECTOR")
+        audit = {"analysis_id": str(analysis_id), "index": index,
+                 "selector_type": kind}
+        sent = {"sent": True, "label": norm}
+        # Already proposed on this case (in any state), or already an
+        # entity: the extraction path's rule, for the same reason. A second
+        # click must not stack up a duplicate for somebody to reject. Both
+        # answer exactly as a new proposal does (see the docstring); only
+        # the audit trail says which it was.
+        queued = self._c.execute(
+            """SELECT id, state FROM collect.proposal
+                WHERE case_id = %s AND kind = %s
+                  AND payload->>'label' = %s
+                  AND payload->'attrs'->>'selector_type' = %s
+                LIMIT 1""",
+            (sample.case_id, KIND_NODE, norm, kind)).fetchone()
+        if queued:
+            self._audit("SAMPLE_SELECTOR_PROPOSED", sample_id=sample.id,
+                        actor_id=actor_id,
+                        detail={**audit, "outcome": "already_proposed",
+                                "proposal_id": str(queued[0])})
+            return sent
+        exists = self._c.execute(
+            """SELECT id FROM core.node
+                WHERE case_id = %s AND node_type = %s AND label = %s
+                  AND deleted_at IS NULL LIMIT 1""",
+            (sample.case_id, node_type, norm)).fetchone()
+        if exists:
+            self._audit("SAMPLE_SELECTOR_PROPOSED", sample_id=sample.id,
+                        actor_id=actor_id,
+                        detail={**audit, "outcome": "already_in_graph",
+                                "node_id": str(exists[0])})
+            return sent
+        who = found.get("analyst_name") or found.get("analyst_email") or "an analyst"
+        tool = found.get("tool")
+        when = found["created_at"][:10]
+        classification = max(tlp_from_name(sample.classification),
+                             tlp_from_name(case_tlp)).name
+        rationale = (
+            f"Extracted by {who} in a {found['kind'].lower()} analysis of "
+            f"sample {sample.sha256[:16]}"
+            + (f" with {tool}" if tool else "")
+            + f", recorded {when} (UTC). "
+            + (f"Why: {entry['why']}. " if entry.get("why") else "")
+            + "A lab finding about the sample, not yet a claim about any "
+              "actor.")
+        proposal_id = ProposalStore(self._c).propose(
+            case_id=sample.case_id, kind=KIND_NODE, origin="lab/analysis",
+            payload={"node_type": node_type, "label": norm,
+                     "classification": classification,
+                     "attrs": {"selector_type": kind, "raw_value": raw,
+                               "sample_id": str(sample.id),
+                               "analysis_id": str(analysis_id)}},
+            rationale=rationale)
+        self._audit("SAMPLE_SELECTOR_PROPOSED", sample_id=sample.id,
+                    actor_id=actor_id,
+                    detail={**audit, "outcome": "queued",
+                            "proposal_id": str(proposal_id)})
+        return sent
 
     def detonations(self, sample_id: UUID) -> list[dict]:
         """Every detonation REQUEST against this sample.

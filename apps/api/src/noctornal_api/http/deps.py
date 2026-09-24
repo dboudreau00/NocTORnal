@@ -16,6 +16,13 @@ Two rules that adversarial review forced into this file:
 2. Authorization is decided BEFORE existence is revealed. A caller who
    fails the gate gets the same 403 whether or not the row exists, so
    status codes are not an existence oracle.
+
+A third arrived with gap-closed-case-writes (2026-09-23):
+
+3. A CLOSED, ARCHIVED or PURGED case is read-only for CONTENT, and the
+   gate is where that is enforced, once, AFTER the access decision so the
+   409 that names the state tells nobody anything the gate would not.
+   See `CONTENT_WRITE_PERMISSIONS` for how a content write is recognised.
 """
 from __future__ import annotations
 
@@ -29,11 +36,13 @@ import psycopg
 from fastapi import Depends, Header, Path, Request
 from psycopg.types.json import Json
 
+from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.db import connect
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import client_ip
 from noctornal_api.security.access import (
     CHECK_ASSIGNMENT,
+    CHECK_STEP_UP,
     Tlp,
     evaluate,
     tlp_from_name,
@@ -244,24 +253,143 @@ def effective_labels(
     return strictest.name, case_comp | element_compartments
 
 
+#: The verbs that AUTHOR case content and are never used to read it. A gate
+#: call naming one of these is a content write, so on a case in
+#: `CONTENT_READ_ONLY_STATES` it is refused with a 409 whatever route made
+#: it (gap-closed-case-writes, 2026-09-23).
+#:
+#: Keyed on the verb, not the route, because the gate is the one place
+#: every case-scoped write already passes and the verb is the one thing
+#: it is always told. A new route that gates on one of these is covered
+#: without anyone remembering to cover it. Two verbs are deliberately NOT
+#: here although some of their routes write content, because they also
+#: gate reads or governance: `report.generate` (it reads the ACH matrix
+#: and builds reports) and `case.update` (it edits the governance record
+#: and the approval policy). Their content-writing routes, ACH and the
+#: assumptions register, say so with `require(..., content_write=True)`.
+#: Watch-hit triage under `collection.read` stays open on purpose: the
+#: collector keeps raising hits on a closed case's watches, and a queue
+#: nobody may clear nags forever. `test_closed_case_read_only.py`
+#: holds the route table to this: every unsafe case route is either a
+#: content write under this guard or named there as governance, and no
+#: read route gates on a verb in this set.
+#:
+#: `ingest.manage` and `ingest.replay` reach `authorize_object` only when
+#: they parse or replay records INTO a case; `sample.submit` only when a
+#: sample is attached to one. `comms.minimise` is absent on purpose:
+#: minimisation is performed at closure (docs/16 L4).
+CONTENT_WRITE_PERMISSIONS: frozenset[str] = frozenset({
+    "graph.node.create", "graph.node.update", "graph.node.delete",
+    "graph.edge.create", "graph.edge.update", "graph.edge.delete",
+    "assertion.create", "assertion.retract",
+    "graph.merge", "graph.unmerge",
+    "evidence.upload",
+    "proposal.review",
+    "comms.bind", "comms.stoplist.manage",
+    "curation.manage",
+    "sample.submit",
+    "ingest.manage", "ingest.replay",
+})
+
+#: The problem title of the refusal, and the console's way of recognising
+#: it (app.js `CASE_READ_ONLY_TITLE`, held equal by the test).
+CASE_READ_ONLY_TITLE = "Case is read-only"
+
+_GOVERNANCE_STILL_WORKS = (
+    "Governance still works: status, legal holds, retention, sharing and "
+    "break-glass.")
+
+#: What the 409 says, by state. Each names the state, what is refused,
+#: and the way out when there is one: only a CLOSED case can be reopened.
+_READ_ONLY_DETAIL = {
+    "CLOSED": (
+        "This case is CLOSED, so its content is read-only: nothing can be "
+        "added to, changed in or removed from its graph, evidence, "
+        "captures, proposals, comms, analysis, tags or samples. "
+        + _GOVERNANCE_STILL_WORKS
+        + " Reopen it (status ACTIVE) if the work is genuinely resuming."),
+    "ARCHIVED": (
+        "This case is ARCHIVED, so its content is read-only: nothing can be "
+        "added to, changed in or removed from its graph, evidence, "
+        "captures, proposals, comms, analysis, tags or samples. "
+        + _GOVERNANCE_STILL_WORKS
+        + " An archived case is a record and cannot be reopened."),
+    "PURGED": (
+        "This case is PURGED: it is marked for destruction and its content "
+        "is read-only."),
+}
+
+
+def refuse_if_case_read_only(conn: psycopg.Connection, user: CurrentUser,
+                             case_id: UUID, permission_key: str) -> None:
+    """409 when `case_id` is in a state whose content is read-only.
+
+    Called by `authorize_object` AFTER the access decision allowed, never
+    before: a caller the gate refuses must get the gate's 404 or 403 and
+    learn nothing about the case's state. Everyone who reaches this may
+    read the case, whose status is on its own record.
+
+    The refusal is audited. An attempt to change a closed case is exactly
+    what a disclosure review asks about, and a refusal nobody recorded is
+    indistinguishable from nobody having tried.
+
+    Not atomic with the write that follows: a case closed between this
+    read and that write lets the one write through. Closing that needs a
+    trigger on every content table, which is a migration and was left for
+    one.
+    """
+    row = conn.execute('SELECT status FROM core."case" WHERE id = %s',
+                       (case_id,)).fetchone()
+    if row is None or row[0] not in CONTENT_READ_ONLY_STATES:
+        return
+    status = row[0]
+    conn.execute(
+        """INSERT INTO audit.event
+               (actor_id, actor_kind, action, object_type, object_id,
+                case_id, outcome, detail)
+           VALUES (%s, 'USER', 'CASE_READ_ONLY_REFUSED', 'case', %s, %s,
+                   'DENIED', %s)""",
+        (user.user_id, case_id, case_id,
+         Json({"permission": permission_key, "status": status})))
+    raise Problem(409, CASE_READ_ONLY_TITLE, _READ_ONLY_DETAIL[status])
+
+
 def authorize_object(
     conn: psycopg.Connection,
     user: CurrentUser,
     *,
     case_id: UUID,
     permission_key: str,
+    # `count_use` is passed through to `PgAccessResolver.resolve`, and
+    # `after_case_gate=True` marks a SECOND gate, one a request reaches
+    # only after passing this gate at the case's own labels. A second gate
+    # counts a break-glass use only when the case's gate did not
+    # (`counted_at_case_gate`), so an exhibit opened, a capture screenshot
+    # served or an entity changed on a case above the caller's clearance
+    # is one use on the officer's card, not two
+    # (sec-breakglass-double-count, 2026-09-23). The defaults count, for
+    # the reason `resolve` gives: a forgotten flag over-counts, visibly.
+    count_use: bool = True,
+    after_case_gate: bool = False,
     classification: str | None = None,
     compartments: frozenset[str] = frozenset(),
+    content_write: bool = False,
 ) -> None:
     """The five-part gate against a specific element (or the case itself
     when classification is None). ONE complete decision — the verb check is
     included — and the effective labels are computed here so an element can
-    never be less protected than its case."""
+    never be less protected than its case.
+
+    Then, for a content write, the case's lifecycle: a verb in
+    `CONTENT_WRITE_PERMISSIONS`, or `content_write=True` from a route whose
+    verb also gates reads, is refused on a read-only case (rule 3 above)."""
     eff_cls, eff_comp = effective_labels(conn, case_id, classification, compartments)
+    if after_case_gate and count_use:
+        count_use = not counted_at_case_gate(conn, user, case_id)
     ctx = PgAccessResolver(conn).resolve(
         user_id=user.user_id, case_id=case_id, permission_key=permission_key,
         object_classification=eff_cls, object_compartments=eff_comp,
-        mfa_satisfied_at=user.session_mfa_at,
+        mfa_satisfied_at=user.session_mfa_at, count_use=count_use,
     )
     decision = evaluate(ctx)
     if not decision.allowed:
@@ -274,8 +402,19 @@ def authorize_object(
         # their own assignments), and is far more useful to a legitimate user.
         if CHECK_ASSIGNMENT in decision.failed_checks:
             raise Problem(404, "Not found", "case does not exist")
+        # A stale sign-in that is the ONLY thing missing is told so, in the
+        # global gate's words, which the console recognises and answers by
+        # asking for the sign-in. "missing permission X" told a Lead
+        # investigator fifteen minutes into a session that they lacked a
+        # step-up permission they hold (ROADMAP "a stale sign-in reads as
+        # missing permission", 2026-09-24; report export had its own fix).
+        # Only an assigned caller gets here, so it reveals nothing.
+        if tuple(decision.failed_checks) == (CHECK_STEP_UP,):
+            raise Problem(403, "Forbidden", "re-authentication required")
         raise Problem(403, "Forbidden",
                       f"missing permission {permission_key} on this case")
+    if content_write or permission_key in CONTENT_WRITE_PERMISSIONS:
+        refuse_if_case_read_only(conn, user, case_id, permission_key)
 
 
 def require_global(permission_key: str):
@@ -321,16 +460,22 @@ def require_global(permission_key: str):
     return _dep
 
 
-def require(permission_key: str):
+def require(permission_key: str, *, content_write: bool = False):
     """Dependency factory: gate a case-scoped endpoint behind `permission`.
     The case id comes from the path (/cases/{case_id}/...). Denials are
-    403; which of the five checks failed is audited, never disclosed."""
+    403; which of the five checks failed is audited, never disclosed.
+
+    `content_write=True` marks a route that writes case content under a
+    verb that also gates reads or governance (`case.update` on the
+    assumptions register, `report.generate` on ACH), so a read-only case
+    refuses it as it refuses every verb in `CONTENT_WRITE_PERMISSIONS`."""
     def _dep(
         case_id: UUID = Path(...),
         user: CurrentUser = Depends(current_user),
         conn: psycopg.Connection = Depends(get_conn),
     ) -> CurrentUser:
-        authorize_object(conn, user, case_id=case_id, permission_key=permission_key)
+        authorize_object(conn, user, case_id=case_id, permission_key=permission_key,
+                         content_write=content_write)
         return user
     return _dep
 
@@ -452,3 +597,40 @@ def user_ceiling(conn: psycopg.Connection, user_id: UUID,
         if granted is not None and granted > clearance:
             clearance = granted
     return clearance, held
+
+
+def counted_at_case_gate(conn: psycopg.Connection, user: CurrentUser,
+                         case_id: UUID) -> bool:
+    """Whether the gate this request has ALREADY passed at the case's own
+    labels recorded a break-glass use: true when the case is classified
+    above the caller's own clearance.
+
+    A request reaching a second gate (an exhibit's, a node's, a capture
+    screenshot's, an operation's own verb) has passed the case's gate
+    first. On a case above the caller's clearance that first gate was
+    passable only through a live grant, so `PgAccessResolver.resolve`
+    counted it there, and the second gate, whose labels are at least the
+    case's, counted it again: one exhibit opened read as two accesses on
+    the officer's card (sec-breakglass-double-count, 2026-09-23; docs/05).
+    So a second gate is asked with `authorize_object(...,
+    after_case_gate=True)`, which counts only when this answers False. On
+    a case within the caller's clearance the first gate counted nothing,
+    and the second still counts an item whose OWN labels needed the
+    grant, which is the use the officer's card describes.
+
+    One request the second gate then REFUSES (an item above the grant, a
+    compartment the caller is not read into) still carries the case
+    gate's count on a case above clearance. That is a request the grant
+    let past the case's gate, and so one that could tell an item that
+    exists from one that does not, which without the grant it could not.
+
+    Compared in the database, as `routers/deception._gate_the_item` did
+    before this existed, because `core.tlp` is an ordered enum and the
+    two columns are of that type. A case that has gone answers False,
+    which counts rather than hides."""
+    row = conn.execute(
+        'SELECT c.classification > u.tlp_clearance '
+        '  FROM core."case" c, iam.app_user u '
+        ' WHERE c.id = %s AND u.id = %s',
+        (case_id, user.user_id)).fetchone()
+    return bool(row and row[0])

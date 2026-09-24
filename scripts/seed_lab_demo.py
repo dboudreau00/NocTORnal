@@ -13,9 +13,9 @@ holding evidence.
 The spread is deliberate, because the point of looking at a queue is to see
 the differences:
 
-- a **packed PE** near maximum entropy — what a modern loader looks like;
-- a **plain PE** around 5.5 — an unpacked utility, or a dropper's stage one;
-- an **ELF** — the Linux half people forget to build a lane for;
+- a **packed PE** near maximum entropy: what a modern loader looks like;
+- a **plain PE** around 5.5: an unpacked utility, or a dropper's stage one;
+- an **ELF**: the Linux half people forget to build a lane for;
 - a **document** with an OOXML magic, which is a ZIP, which is why entropy
   alone never decides anything;
 - a **script**, low entropy, high nuisance;
@@ -205,7 +205,7 @@ def main() -> int:
                 confidence="MODERATE" if alphabet > 200 else None,
                 narrative=finding, tool="manual", tool_version="0")
     conn.commit()
-    print(f"seeded {made} sample(s)"
+    print(f"seeded {made} {'sample' if made == 1 else 'samples'}"
           + (f" onto {args.case}" if args.case else " unattached"))
     print("Nothing written here is malware: every payload is a synthetic "
           "buffer with a real magic and a chosen entropy profile.")

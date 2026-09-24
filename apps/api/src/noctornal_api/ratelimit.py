@@ -53,14 +53,20 @@ address is reversible by anyone motivated. It stops casual disclosure
 
 ## A note on the Redis eviction policy
 
-Every key written here carries a TTL. `infra/docker-compose.yml` runs
-Redis with `allkeys-lru`, so under memory pressure rate-limit state is
-evictable -- and an evicted meter is a reset meter. That is acceptable for
-a cache and not acceptable for a security control sharing an instance with
-one, which is why a real deployment should give the limiter its own Redis
-database (or its own instance) rather than sharing the projection cache's.
-Documented rather than solved, because solving it is a deployment
-decision, not a code change.
+Every key written here carries a TTL. Under an evicting `maxmemory-policy`
+(`allkeys-*` or `volatile-*`), memory pressure deletes rate-limit state,
+and an evicted meter is a reset meter. That is acceptable for a cache and
+not for a security control sharing an instance with one. The policy is set
+per Redis instance, not per database, so a limiter that shares an instance
+with a cache shares its eviction too: give the limiter an instance of its
+own, running `noeviction`.
+
+The bundled `infra/docker-compose.yml` runs `noeviction`, and the limiter
+is its only user; until the Alpha 6 pre-release check (2026-09-23) it ran
+`allkeys-lru`. The policy is a deployment decision the code cannot make,
+so the code reports it instead:
+`http/limits.py` warns at startup, and the readiness register's
+`redis_limiter_store` row fails, whenever the limiter's Redis evicts.
 """
 from __future__ import annotations
 
@@ -549,15 +555,29 @@ LIMITS: dict[str, Limit] = {
         "request.source", quota=3000, per_seconds=60, scope=Scope.IP, burst=600,
         on_backend_failure=OnBackendFailure.ALLOW, audit_every_seconds=600,
     ),
-    # The sociogram's read paths. `/graph/metrics` computes degree,
-    # clustering and k-core over a materialised projection behind the SAME
-    # `analytics.run` permission the metered suite uses, with no result
-    # cache -- so leaving it unmetered left the analytics door locked and
-    # the window open. It shares `analytics.suite`'s budget deliberately:
-    # two doors onto the same cost with two separate budgets is one budget
-    # that means nothing.
+    # The sociogram's read paths: the projection, ego networks, paths and
+    # the saved layout.
     "graph.view": Limit(
         "graph.view", quota=240, per_seconds=60, scope=Scope.USER, burst=80,
+        on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # `/graph/metrics`: degree, weighted degree, clustering and k-core over
+    # one projection, which the console fetches with every projection it
+    # draws. It was metered under `analytics.suite` (decision 45, item 6:
+    # "two doors onto one cost"), and ordinary navigation spent that budget
+    # in about ten control changes or one short timeline scrub: Node size
+    # disabled itself, every node changed size, and the Analysis pane's Run
+    # was refused as well (ux03 metrics-rate-limit-degrades-view,
+    # 2026-09-23). The premise did not hold. The suite runs igraph
+    # centralities (betweenness, communities, key players) over the
+    # projection; these four local counts cost about what drawing the
+    # projection costs, one `project()` and a pass over each neighbourhood,
+    # so they are metered like the projection they describe, on their own
+    # budget, still per analyst and still failing closed. The console
+    # caches each answer per projection and graph state and fetches them on
+    # scrubber release rather than at every pause of a drag.
+    "graph.metrics": Limit(
+        "graph.metrics", quota=120, per_seconds=60, scope=Scope.USER, burst=40,
         on_backend_failure=OnBackendFailure.DENY,
     ),
     # Destruction. The tightest quota here, and deliberately so.

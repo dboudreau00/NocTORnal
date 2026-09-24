@@ -273,10 +273,15 @@ def test_unattached_dead_letters_are_for_the_operator_verb(conn, client):
     by_operator = _listing(client, op_token)
     assert unattached in _ids(by_operator), "the operator sees the unattached row"
     assert attached not in _ids(by_operator), "and not the case's"
+    # `replay_into_case` since the fix round (2026-09-23): the operator
+    # holds no ingest.replay, so a replay may not name a case, and the
+    # unattached row is theirs to replay into quarantine (`can_replay`).
     assert by_operator["scope"] == {"cases": [], "unattached": True,
-                                    "unattached_withheld": None}
+                                    "unattached_withheld": None,
+                                    "replay_into_case": False}
     row = next(d for d in by_operator["dead_letters"] if d["id"] == unattached)
     assert row["unattached"] is True and row["case_ids"] == []
+    assert row["can_replay"] is True
 
 
 def test_a_stale_step_up_withholds_the_unattached_rows_out_loud(conn, client):
@@ -344,7 +349,10 @@ def test_the_console_and_the_endpoint_agree_on_the_contract(conn, client):
     app_js = (Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
               / "http" / "static" / "app.js").read_text(encoding="utf-8")
     start = app_js.index("async function loadDeadLetters()")
-    fn = app_js[start:start + 900]
+    # The whole function, not its first 900 characters: it grew a case
+    # scope and a feed filter ahead of the refusal branch (ux12-feeds:
+    # dead-letters-no-feed-no-scope, 2026-09-23).
+    fn = app_js[start:app_js.index("\n}\n", start)]
     assert "'/ingest/dead-letters?" in fn
     assert "body.dead_letters" in fn and "body.count" in fn
     assert "err.status === 403" in fn and "ingest.read" in fn
@@ -354,7 +362,8 @@ def test_the_console_and_the_endpoint_agree_on_the_contract(conn, client):
     body = _listing(client, token)
     assert body["dead_letters"] == [] and body["count"] == 0
     assert body["scope"] == {"cases": [], "unattached": False,
-                             "unattached_withheld": None}
+                             "unattached_withheld": None,
+                             "replay_into_case": True}
 
     _, none_email, none_secret = _make_user(conn, global_roles=())
     none_token = _session(conn, none_email)

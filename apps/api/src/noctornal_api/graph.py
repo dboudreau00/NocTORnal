@@ -35,6 +35,12 @@ class TieConfidenceConflict(GraphWriteError):
     with the state of the assertions. See `update_edge`."""
 
 
+class TieReviewUnchanged(GraphWriteError):
+    """A review asked for the state the tie is already in. Its own class so
+    the router answers 409 and writes no audit row: a second "accepted"
+    from a double click is not a second decision. See `review_edge`."""
+
+
 def _write_error(exc: psycopg.Error) -> GraphWriteError:
     """Wrap a database failure without copying its text into the message.
 
@@ -66,6 +72,20 @@ def _write_error(exc: psycopg.Error) -> GraphWriteError:
 #: a readable error instead of a psycopg InvalidTextRepresentation; the DB
 #: enum remains the source of truth and rejects anything else regardless.
 _CONFIDENCE = frozenset({"LOW", "MODERATE", "HIGH"})
+
+#: The review states a person may put a tie in (gap-tie-review and ux05
+#: review-state-never-leaves-proposed, 2026-09-23). ACCEPTED and DISPUTED
+#: are the two dispositions; PROPOSED reopens one. The other two values of
+#: `core.review_state` are refused on purpose: a REJECTED tie that stays in
+#: the live graph says two opposite things at once (the remedy for a wrong
+#: tie is Retire, or retracting the claims it rests on), and SUPERSEDED
+#: belongs to the model's own history, not to a reviewer's hand.
+REVIEW_STATES = ("ACCEPTED", "DISPUTED", "PROPOSED")
+
+#: The basis that marks a claim as a machine's. A tie founded on it is born
+#: PROPOSED; any other founding basis is a person's own assertion and is
+#: born ACCEPTED. See `create_edge`.
+MACHINE_BASIS = "AUTOMATED_INFERENCE"
 
 
 def _outvoted(now: str, wanted: str, higher: list[tuple]) -> str:
@@ -110,6 +130,14 @@ def _outvoted(now: str, wanted: str, higher: list[tuple]) -> str:
 
 # Admiralty + ICD-203 grading and basis, mirroring core enums. Kept as
 # strings; the DB enums are the source of truth and reject anything else.
+#
+# The F / 6 / LOW defaults below are for in-process FIXTURES only (the test
+# suite builds hundreds of throwaway claims with them). No product path
+# reaches them: the HTTP bodies require all four grading fields
+# (routers/graph.py AssertionBody, gap-api-grade-required, 2026-09-23),
+# proposal acceptance grades its AUTOMATED_INFERENCE claims explicitly, and
+# the seeders grade every claim they write. test_api_grade_required.py
+# fails any AssertionInput built outside the tests without all three.
 @dataclass(frozen=True)
 class AssertionInput:
     basis: str                 # DIRECT_OBSERVATION | ANALYST_INFERENCE | ...
@@ -181,8 +209,23 @@ class GraphWriteService:
         valid_to: datetime | None = None,
         is_inferred: bool = False,
         inference_method: str | None = None,
+        review: str | None = None,
     ) -> UUID:
         """Create an edge and its founding assertion, atomically.
+
+        **`review` is born from who is speaking** (ux05 review-state-never-
+        leaves-proposed, 2026-09-23). The column defaulted to PROPOSED and
+        this INSERT never set it, so an analyst's own direct observation,
+        and a suggestion they had already accepted in Triage, both read as
+        an unreviewed machine proposal forever, and the canvas ringed every
+        tie in every case. Invariant 3 is "machines propose, analysts
+        dispose", so a tie whose founding claim is a machine's
+        (`MACHINE_BASIS`) is born PROPOSED and waits for a person, and a tie
+        a person asserts is born ACCEPTED: there is nothing to dispose of.
+        A caller that has just disposed of a machine's suggestion says so
+        explicitly (`ProposalService.accept` passes ACCEPTED), because its
+        claim still carries the machine's basis, and it must: docs/03 wants
+        inference told from observation forever.
 
         THERE IS NO `confidence` PARAMETER, and that is the fix for ux05
         two-disagreeing-confidences and ux06 edge-confidence-not-stored
@@ -195,6 +238,12 @@ class GraphWriteService:
         the 0064 triggers keep it there as assertions are added and
         retracted.
         """
+        if review is None:
+            review = "PROPOSED" if assertion.basis == MACHINE_BASIS else "ACCEPTED"
+        if review not in REVIEW_STATES:
+            raise GraphWriteError(
+                f"review must be one of {', '.join(REVIEW_STATES)}, "
+                f"not {review!r}")
         try:
             with self._c.transaction():
                 if sign is None:
@@ -210,13 +259,14 @@ class GraphWriteService:
                            (case_id, edge_type, src_node_id, dst_node_id, sign,
                             weight, attrs, classification, compartments,
                             valid_from, valid_to, confidence, is_inferred,
-                            inference_method, created_by)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            inference_method, created_by, review)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                               %s, %s, %s, %s::core.review_state)
                        RETURNING id""",
                     (case_id, edge_type, src_node_id, dst_node_id, sign, weight,
                      Json(attrs or {}), classification, compartments or [],
                      valid_from, valid_to, assertion.confidence, is_inferred,
-                     inference_method, created_by),
+                     inference_method, created_by, review),
                 ).fetchone()[0]
                 self._insert_assertion(case_id, assertion, edge_id=edge_id)
             return edge_id
@@ -334,8 +384,10 @@ class GraphWriteService:
         that grades the tie higher, with the reason, and the tie drops.
         To keep the tie graded and evidenced at the lower grade, add that
         claim first (`add_assertion`, the console's Add a claim; final
-        review C14, 2026-09-23), since a correction made after the
-        retraction carries only the ungraded defaults and no exhibit.
+        review C14, 2026-09-23), since retracting first takes the tie out
+        of the live graph whenever nothing else supports it. (A correction
+        also used to be recorded at the HTTP API's ungraded defaults; its
+        grading is required since gap-api-grade-required, 2026-09-23.)
         That holds for the analyst's own earlier correction too. It is not
         superseded automatically, because invariant 5 as decided on
         2026-09-09 makes a correction "a retraction plus a new assertion",
@@ -560,6 +612,61 @@ class GraphWriteService:
                     raise GraphWriteError(
                         f"edge {edge_id} not found in this case, or already "
                         f"deleted")
+        except GraphWriteError:
+            raise
+        except psycopg.Error as exc:
+            raise _write_error(exc) from exc
+
+    # -- reviewing a tie --------------------------------------------------
+    def review_edge(self, edge_id: UUID, *, case_id: UUID, review: str) -> str:
+        """Put a live tie in a review state, returning the state it left.
+
+        gap-tie-review (2026-09-23). Nothing could ever move `core.edge.
+        review`: the canvas rang every node, the inspector's "Unreviewed
+        proposals" always equalled "Ties in projection", and it told
+        analysts there was work pending that no control could complete.
+        This is the control's service half. The router gates it on
+        `proposal.review`, the verb Triage already uses to dispose of a
+        machine's suggestion, and writes the audit row (who, when, the
+        state left and the note) in the same transaction, because the
+        table has no column for the reviewer: the audit log is where a
+        disposal is recorded, as it is for a Triage acceptance.
+
+        No assertion is written: a review is a person's disposal of a
+        claim, not a claim about the world, so it adds no support, moves
+        no confidence and changes nothing the projection draws except the
+        ring. The edge is locked first, the lock `update_edge` takes, so two
+        reviewers pressing at once are ordered and the second is told the
+        state the first left rather than overwriting it unseen.
+        """
+        if review not in REVIEW_STATES:
+            raise GraphWriteError(
+                f"a tie's review is one of {', '.join(REVIEW_STATES)}; "
+                f"{review!r} is not a state a reviewer sets")
+        try:
+            with self._c.transaction():
+                row = self._c.execute(
+                    """SELECT review::text FROM core.edge
+                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL
+                          FOR NO KEY UPDATE""",
+                    (edge_id, case_id),
+                ).fetchone()
+                if row is None:
+                    raise GraphWriteError(
+                        f"edge {edge_id} not found in this case, or already "
+                        f"deleted")
+                previous = row[0]
+                if previous == review:
+                    raise TieReviewUnchanged(
+                        f"this tie is already {review}, so nothing was "
+                        f"recorded")
+                self._c.execute(
+                    """UPDATE core.edge
+                          SET review = %s::core.review_state, updated_at = now()
+                        WHERE id = %s""",
+                    (review, edge_id),
+                )
+            return previous
         except GraphWriteError:
             raise
         except psycopg.Error as exc:

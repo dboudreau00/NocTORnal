@@ -180,10 +180,25 @@ class PgUserStore(UserStore):
         )
 
     def clear_failed_logins(self, user_id: UUID, at: datetime) -> None:
+        """Both factors were right: the failures before this no longer
+        count. `at` is when they were proved, and it is NOT the sign-in
+        time any more. This also stamped `last_login_at` until 2026-09-24
+        (final review u22), so the must-change refusal and an Account
+        password change, which open no session, read on the Admin card as
+        the "last password sign-in". That stamp is `record_sign_in`'s,
+        called where a session is minted."""
+        del at
         self._c.execute(
             """UPDATE iam.app_user
-                  SET failed_logins = 0, locked_until = NULL, last_login_at = %s
+                  SET failed_logins = 0, locked_until = NULL
                 WHERE id = %s""",
+            (user_id,),
+        )
+
+    def record_sign_in(self, user_id: UUID, at: datetime) -> None:
+        """A password sign-in minted a session (`routers/auth.py` login)."""
+        self._c.execute(
+            "UPDATE iam.app_user SET last_login_at = %s WHERE id = %s",
             (at, user_id),
         )
 

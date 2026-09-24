@@ -33,6 +33,7 @@ from noctornal_api.http.limits import (
     rate_limit,
     rate_limit_peek,
 )
+from noctornal_api.iam_admin import change_password, new_password_problem
 from noctornal_api.security.auth import AuthOutcome, AuthService
 from noctornal_api.security.sessions import (
     IDLE_TIMEOUT,
@@ -48,6 +49,10 @@ class LoginBody(BaseModel):
     email: str
     password: str
     totp_code: str | None = None
+    # The password the person chooses, sent only when the server has said
+    # it must be changed (0066; gap-password-reset, 2026-09-23). Absent
+    # on every ordinary sign-in.
+    new_password: str | None = None
 
 
 def _ip_hash(request: Request) -> bytes | None:
@@ -87,6 +92,18 @@ SECOND_FACTOR_UNAVAILABLE = (
 )
 
 
+#: The problem `type` of the refusal that asks for a new password. A URN
+#: rather than a sentence the console would have to pattern-match: the
+#: detail is prose for a person, and prose gets reworded.
+PASSWORD_CHANGE_REQUIRED_TYPE = "urn:noctornal:problem:password-change-required"
+
+PASSWORD_CHANGE_REQUIRED = (
+    "an administrator issued this password, so it has to be replaced "
+    "before it opens a session. Choose a new password and sign in again "
+    "with it and a fresh code from your authenticator."
+)
+
+
 @router.post("/login", status_code=204,
              dependencies=[Depends(rate_limit("auth.login")),
                            Depends(rate_limit_peek("auth.login_failed"))])
@@ -117,8 +134,21 @@ def login(body: LoginBody, request: Request,
     analyst. Targeted guessing against one account is the (decaying)
     account lockout's job.
     """
-    result = AuthService(PgUserStore(conn)).authenticate(
-        body.email, body.password, body.totp_code
+    # A chosen password is judged BEFORE the credentials are, so a rule
+    # failure spends no lockout attempt and no authenticator code, and
+    # says nothing about the account (it depends on nothing stored).
+    if body.new_password is not None:
+        problem = new_password_problem(body.new_password, email=body.email,
+                                       current=body.password)
+        if problem:
+            raise Problem(422, "Invalid field", problem)
+    # A recovery code is checked here and spent only once the sign-in is
+    # known to go ahead (`spend`, below): the must-change and
+    # no-change-pending refusals come first, and until 2026-09-24 each of
+    # them cost the person a single-use code (final review u4).
+    service = AuthService(PgUserStore(conn))
+    result = service.authenticate(
+        body.email, body.password, body.totp_code, spend_recovery=False
     )
     if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
         # The password verified; the stored second factor could not be
@@ -138,6 +168,19 @@ def login(body: LoginBody, request: Request,
         _audit(conn, "AUTH_FAILED", result.user_id,
                {"reason": result.audit_reason, "email": body.email}, request)
         raise Problem(401, "Unauthenticated", "invalid credentials")
+    must_change = _password_change_due(conn, result.user_id, body, request)
+    if not service.spend(result):
+        # The recovery code verified above was spent by a concurrent
+        # sign-in before this one could spend it. The same answer and the
+        # same trace as a spent code gets inside `authenticate`; nothing
+        # has been changed yet, the new password included.
+        consume_on_failure(request, "auth.login_failed")
+        _audit(conn, "AUTH_FAILED", None,
+               {"reason": "bad_recovery_code", "email": body.email}, request)
+        raise Problem(401, "Unauthenticated", "invalid credentials")
+    if must_change:
+        change_password(conn, result.user_id, body.new_password,
+                        keep_session=None, via="sign-in after a reset")
     # Where the session was minted (0058). `client_ip` is the rate
     # limiter's view of the peer -- the outermost trusted proxy's client
     # when NOCTORNAL_TRUSTED_PROXY_HOPS says so -- because a binding to the
@@ -147,6 +190,9 @@ def login(body: LoginBody, request: Request,
         uuid4(), result.user_id, mfa_satisfied=True,
         ip=client_ip(request), user_agent=request.headers.get("user-agent"),
     )
+    # The Admin card's "last password sign-in", stamped here, where a
+    # session exists, and nowhere else (final review u22, 2026-09-24).
+    PgUserStore(conn).record_sign_in(result.user_id, datetime.now(timezone.utc))
     _audit(conn, "AUTH_SUCCEEDED", result.user_id, {}, request)
     response = Response(status_code=204)
     # The pair is the WHOLE of a successful login now: the HttpOnly
@@ -181,6 +227,53 @@ def login(body: LoginBody, request: Request,
     # there is nowhere in a browser that the session token is legible.
     _set_session_cookies(response, token)
     return response
+
+
+def _password_change_due(conn, user_id, body: LoginBody,
+                         request: Request) -> bool:
+    """The must-change rule, at the one door a session comes through.
+
+    gap-password-reset (2026-09-23). An administrator-issued password is
+    known to whoever issued it, so it must never open a session: a reset
+    password, and since 2026-09-24 the password an administrator issues
+    with a new account (final review c8). Reached only AFTER both factors
+    verified, so the refusals below tell nobody anything a guesser did not
+    already have to know. Three outcomes:
+
+    - the flag is set and no new password came: 403 with
+      `PASSWORD_CHANGE_REQUIRED_TYPE`, and NO session. A TOTP code this
+      request carried has been spent (replay protection), so the console
+      asks for a fresh one with the new password. A recovery code has
+      not: `login` spends it only after this answers (final review u4);
+    - the flag is set and a new password came: True, and `login` stores
+      it and clears the flag in one statement (`iam_admin.change_password`)
+      once the second factor is spent, then mints the session with it;
+    - no flag, but a new password came: 409. Nothing asked for a change,
+      and quietly ignoring the field would leave the person believing
+      they had changed a password that is still the old one.
+
+    This is the ONLY check of the flag in the API, and that is enough:
+    `reset_password` revokes every live session, and no session can be
+    minted here while the flag stands. (`scripts/bootstrap.py session`
+    mints from the server's shell, whose operator holds the database.)
+    """
+    row = conn.execute(
+        "SELECT must_change_password FROM iam.app_user WHERE id = %s",
+        (user_id,)).fetchone()
+    must = bool(row and row[0])
+    if must and body.new_password is None:
+        _audit(conn, "AUTH_PASSWORD_CHANGE_REQUIRED", user_id, {}, request)
+        raise Problem(403, "Password change required",
+                      PASSWORD_CHANGE_REQUIRED,
+                      type_=PASSWORD_CHANGE_REQUIRED_TYPE)
+    if body.new_password is None:
+        return False
+    if not must:
+        raise Problem(409, "Conflict",
+                      "no password change is pending for this account, so "
+                      "nothing was changed. Sign in without a new password, "
+                      "then change it from Account")
+    return True
 
 
 @router.post("/logout", status_code=204)
@@ -312,6 +405,11 @@ class Me(BaseModel):
     # after its 403, because each refused POST /auth/recovery-codes still
     # spends a token of that route's rate limit (2026-09-22 fix round).
     step_up_fresh_seconds: int
+    # The account's own clearance, so the app bar can say what this
+    # person may open ("cleared RED") beside their role on the case, in
+    # place of a literal "analyst" printed for every account
+    # (ux02-cases:header-says-analyst-no-permission-cues, 2026-09-23).
+    tlp_clearance: str | None = None
 
 
 @router.get("/me", response_model=Me)
@@ -321,7 +419,8 @@ def me(user: CurrentUser = Depends(current_user),
     # carries, so an administrator's correction to a name shows up on the
     # analyst's next load and not their next login.
     row = conn.execute(
-        "SELECT display_name, email FROM iam.app_user WHERE id = %s",
+        "SELECT display_name, email, tlp_clearance FROM iam.app_user "
+        "WHERE id = %s",
         (user.user_id,),
     ).fetchone()
     if row is None:
@@ -329,7 +428,7 @@ def me(user: CurrentUser = Depends(current_user),
         # the row went between the two reads. Say so as an auth failure,
         # not as a 500 the client would retry.
         raise Problem(401, "Unauthenticated", "session refers to no account")
-    display_name, email = row
+    display_name, email, clearance = row
     expires = conn.execute(
         "SELECT expires_at FROM iam.session WHERE id = %s", (user.session_id,),
     ).fetchone()
@@ -350,6 +449,7 @@ def me(user: CurrentUser = Depends(current_user),
         idle_timeout_seconds=int(IDLE_TIMEOUT.total_seconds()),
         session_expires_in_seconds=max(0, int(left)),
         step_up_fresh_seconds=max(0, int(fresh_left)),
+        tlp_clearance=clearance,
     )
 
 
@@ -394,3 +494,67 @@ def issue_recovery_codes(
         note="Store these somewhere safe and offline. Each works once, they "
              "replace any previous set, and they cannot be shown again.",
     )
+
+
+class PasswordChangeBody(BaseModel):
+    current_password: str
+    totp_code: str
+    new_password: str
+
+
+# Metered like sign-in, because it IS a credential check: the current
+# password and a code are verified here with the same Argon2id work, so an
+# unmetered route would be the CPU amplifier and the guessing surface that
+# login's two meters exist to close, reachable by anyone holding a session.
+@router.post("/password", response_model=dict,
+             dependencies=[Depends(rate_limit("auth.login")),
+                           Depends(rate_limit_peek("auth.login_failed"))])
+def change_own_password(
+    body: PasswordChangeBody,
+    request: Request,
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Change your own password (gap-password-reset, 2026-09-23).
+
+    There was no way for a person to change their own password at all.
+    The current password AND a code from the authenticator are required,
+    in the request, rather than a step-up window: a session somebody
+    walked away from must not be enough to lock its owner out by replacing
+    the password, and a code typed now is the freshest proof there is.
+    Verified by `AuthService.authenticate`, the sign-in's own reader, so a
+    wrong current password here counts toward the account's lockout
+    exactly as a wrong sign-in does, and a session thief guessing it is
+    stopped by the same five failures.
+
+    A refusal is a 403, not a 401: the session is fine and stays signed
+    in, and a 401 would tell the console the session had ended. Which
+    factor was wrong is not said, for the reason login does not say it.
+    Every other session is signed out (`iam_admin.change_password`); the
+    one making the change is kept.
+    """
+    row = conn.execute("SELECT email FROM iam.app_user WHERE id = %s",
+                       (user.user_id,)).fetchone()
+    if row is None:
+        raise Problem(401, "Unauthenticated", "session refers to no account")
+    email = row[0]
+    problem = new_password_problem(body.new_password, email=email,
+                                   current=body.current_password)
+    if problem:
+        raise Problem(422, "Invalid field", problem)
+    result = AuthService(PgUserStore(conn)).authenticate(
+        email, body.current_password, body.totp_code)
+    if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
+        _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,
+               {"reason": result.audit_reason}, request)
+        raise Problem(503, "Service unavailable", SECOND_FACTOR_UNAVAILABLE)
+    if not result.ok or result.user_id != user.user_id:
+        consume_on_failure(request, "auth.login_failed")
+        _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,
+               {"reason": result.audit_reason}, request)
+        raise Problem(403, "Forbidden",
+                      "the current password or the code is not right. Five "
+                      "failures lock the account for 15 minutes.")
+    revoked = change_password(conn, user.user_id, body.new_password,
+                              keep_session=user.session_id, via="account")
+    return {"changed": True, "other_sessions_signed_out": revoked}

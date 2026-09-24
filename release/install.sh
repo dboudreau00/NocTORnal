@@ -9,15 +9,25 @@
 # Every step is idempotent and reports what it found rather than assuming.
 # Re-running this is safe.
 #
-# READ README.md FIRST. Four legal decisions gate any use of this software
+# READ THE README.md AT THE PROJECT ROOT FIRST, section "Five blocking
+# items". Five legal decisions, L1 to L5, gate any use of this software
 # against real material.
 #
-# Usage:
-#   ./install.sh                  start everything
-#   ./install.sh --port 8001      a different API port
-#   ./install.sh --skip-launch    install and configure, start nothing
+# Usage, from the project root:
+#   ./release/install.sh                  start everything
+#   ./release/install.sh --port 8001      a different API port
+#   ./release/install.sh --skip-launch    install and configure, start nothing
 #
 set -euo pipefail
+
+# --help prints the comment block above and stops at its end. It was a
+# fixed line range, `sed -n '2,20p'`, which ran one line past the block and
+# printed `set -euo pipefail` as the last line of the usage text (Alpha 6
+# pre-release check, 2026-09-23). Reading to the first non-comment line
+# cannot drift when the header is edited.
+usage() {
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
 
 PORT=8000
 SKIP_LAUNCH=0
@@ -25,7 +35,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --skip-launch) SKIP_LAUNCH=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -70,9 +80,9 @@ RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$(uname -s 2>/dev/null || echo unknown)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     stop_with "this is the macOS/Linux installer and you are on Windows." \
-      "Use the PowerShell installer instead:
+      "Use the PowerShell installer instead, from the project root:
 
-    powershell -ExecutionPolicy Bypass -File install.ps1
+    powershell -ExecutionPolicy Bypass -File .\\release\\install.ps1
 
 Running this script under Git Bash or MSYS would create a Unix-layout
 virtual environment on top of a Windows one and break both."
@@ -81,10 +91,15 @@ esac
 
 printf '\n  NocTORnal - Alpha Release\n'
 printf '  %s─────────────────────────%s\n' "$C_DIM" "$C_OFF"
-printf '  %sAlpha software. Not audited. Four legal decisions gate any use%s\n' "$C_YELLOW" "$C_OFF"
-printf '  %sagainst real material - see README.md, section "LEGAL STATUS".%s\n' "$C_YELLOW" "$C_OFF"
-printf '  %sInstalling is fine; pointing it at a real case is not, until%s\n' "$C_YELLOW" "$C_OFF"
-printf '  %sthose are settled.%s\n' "$C_YELLOW" "$C_OFF"
+# Five, L1 to L5, as the root README's table has them, and a heading that
+# exists there. The banner said four and pointed at a "LEGAL STATUS"
+# section only release/README.md has. It names the README at the project
+# root in full because release/README.md is the one beside this script
+# and has no such heading (Alpha 6 pre-release check, 2026-09-23).
+printf '  %sAlpha software. Not audited. Five legal decisions (L1 to L5)%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %sgate any use against real material: see "Five blocking items"%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %sin the README.md at the project root. Installing is fine;%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %spointing it at a real case is not, until those are settled.%s\n' "$C_YELLOW" "$C_OFF"
 
 # ---------------------------------------------------------------------------
 # Locate the application. The release directory may sit inside the source
@@ -111,7 +126,7 @@ fi
 that its parent contains alembic.ini. That parent has no alembic.ini.
 
 The usual cause is copying release/ out on its own. It is documentation and
-installers only -- there is no application source in it. Clone or download
+installers only, with no application source in it. Clone or download
 the whole repository and run:
 
     ./release/install.sh
@@ -138,8 +153,12 @@ for name in python3.13 python3.12 python3 python; do
   fi
   detail "found Python $ver at $(command -v "$name") - too old"
 done
+# `apt update` first, in this message and the venv one below: on a fresh
+# cloud image the package lists are empty and `apt install python3.12-venv`
+# answers "has no installation candidate" (Alpha 6 pre-release check,
+# 2026-09-23, on the clean VM).
 [[ -n "$PYTHON" ]] || stop_with "Python 3.12 or newer was not found." \
-  "Debian/Ubuntu:  sudo apt install python3.12 python3.12-venv
+  "Debian/Ubuntu:  sudo apt update && sudo apt install python3.12 python3.12-venv
 Fedora:         sudo dnf install python3.12
 macOS:          brew install python@3.12
 
@@ -167,8 +186,8 @@ if [[ -n "$missing_venv" ]]; then
   # interpreter found above installs the wrong one and changes nothing.
   py_pkg="$(basename "$PYTHON")-venv"
   stop_with "Python is installed but cannot build a virtual environment ($missing_venv missing)." \
-    "Debian/Ubuntu:  sudo apt install $py_pkg
-                (or: sudo apt install python3-venv)
+    "Debian/Ubuntu:  sudo apt update && sudo apt install $py_pkg
+                (or: sudo apt update && sudo apt install python3-venv)
 Fedora:         sudo dnf install python3-devel
 
 This is a separate package on Debian-family systems: the interpreter is
@@ -258,17 +277,28 @@ cause and running this again is all that is needed."; }
 fi
 
 detail 'installing dependencies'
+# Every install below is held to constraints.txt, the exact versions the
+# release's suite passed on (sec-pin-dependencies, 2026-09-23). Without it
+# each `>=` in the pyproject files resolved to whatever was newest that day,
+# and the clean VM of the Alpha 6 check ran a newer stack than the one
+# tested. Checked for here, so a missing file is named as that and not as
+# "dependency installation failed" with pip's error scrolled past.
+CONSTRAINTS="$REPO_ROOT/constraints.txt"
+[[ -f "$CONSTRAINTS" ]] || stop_with "constraints.txt is missing from $REPO_ROOT." \
+  "It pins every Python dependency to the version this release was tested
+on, and it ships with the release. Unpack the release again, or check out
+the whole repository, and run this again."
 "$VENV_PY" -m pip install --upgrade pip --quiet
 # BOTH packages, editable. The ontology package is the single source of the
 # selector normalisers and the API imports it; installing only the API
 # produces an ImportError at the first comms request rather than here.
-"$VENV_PY" -m pip install --quiet \
+"$VENV_PY" -m pip install --quiet -c "$CONSTRAINTS" \
   -e "$REPO_ROOT/packages/ontology" \
   -e "$REPO_ROOT/apps/api" \
   || stop_with "dependency installation failed." \
      "The output above says why. The commonest causes are no network
 access, or a proxy that needs pip configured for it."
-"$VENV_PY" -m pip install --quiet -e "$REPO_ROOT/apps/api[dev]" 2>/dev/null || true
+"$VENV_PY" -m pip install --quiet -c "$CONSTRAINTS" -e "$REPO_ROOT/apps/api[dev]" 2>/dev/null || true
 good 'dependencies installed'
 
 # ---------------------------------------------------------------------------
@@ -322,20 +352,35 @@ Nothing was written, so re-running this installer is safe."
   #
   # R11: the SMTP values make the advertised Mailpit demo actually work --
   # the default port in transports.py is 587 and Mailpit listens on 1025.
+  #
+  # 127.0.0.1, not localhost, in every address below. The dev stack
+  # publishes its ports on 127.0.0.1 only, so nothing answers on ::1, and a
+  # client that resolves localhost to ::1 first (the Windows default order)
+  # waits about two seconds for each refused attempt before trying IPv4
+  # (Alpha 6 pre-release check, 2026-09-23). The header names everything
+  # the two secrets protect, from security/sealed.py's SEALED_COLUMNS and
+  # ingest.py's HMAC; it named only authenticators and ingest keys.
   cat > "$ENV_LOCAL" <<EOF
 # Generated by install.sh. Machine-local; never commit this file.
-# Rotating either secret invalidates what it protects: the TOTP KEK makes
-# every enrolled authenticator unreadable, and the pepper invalidates
-# every issued ingest key.
+# BACK IT UP: nothing can recover these two secrets.
+# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted:
+# enrolled authenticators, collection persona credentials, stored victim
+# credentials and each sample's data key. Lost, or replaced other than by
+# the key rotation security/envelope.py describes, none of them opens
+# again: every user re-enrols an authenticator, and no stored sample,
+# preserved ones included, can be decrypted. NOCTORNAL_INGEST_PEPPER keys
+# the HMAC of every issued ingest key and every victim-credential
+# fingerprint: lost or changed, every ingest key must be reissued, and
+# stored fingerprints no longer match new ones for the same value.
 NOCTORNAL_TOTP_KEK=$KEK
 NOCTORNAL_INGEST_PEPPER=$PEPPER
 
 # Local development stack (infra/docker-compose.yml). Change these to
 # point at a real deployment; they are read by the API, by
 # scripts/launch.sh and by scripts/bootstrap.py.
-DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal
-REDIS_URL=redis://localhost:6379/0
-MINIO_ENDPOINT=localhost:9000
+DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal
+REDIS_URL=redis://127.0.0.1:6379/0
+MINIO_ENDPOINT=127.0.0.1:9000
 MINIO_ACCESS_KEY=noctornal
 MINIO_SECRET_KEY=dev_only_change_me
 EVIDENCE_BUCKET=noctornal-evidence
@@ -367,21 +412,27 @@ NOCTORNAL_MAX_SAMPLE_BYTES=64MB
 # Mailpit, on the dev stack only. SMTP_ALLOW_PLAINTEXT is required
 # explicitly: sending case material over an unencrypted connection is a
 # decision, not a default.
-SMTP_HOST=localhost
+SMTP_HOST=127.0.0.1
 SMTP_PORT=1025
 SMTP_ALLOW_PLAINTEXT=1
 EOF
   chmod 600 "$ENV_LOCAL"
   good 'wrote .env.local with fresh random keys (mode 600)'
-  note 'Back this file up. Losing the TOTP key locks every account out.'
+  note 'Back this file up. Without it every user must re-enrol their'
+  note 'authenticator, and no stored credential or sample can be decrypted'
+  note 'again. Its header lists what each secret protects.'
 fi
 
 # shellcheck disable=SC1090
 set -a; . "$ENV_LOCAL"; set +a
 
-export DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal}"
-export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
-export MINIO_ENDPOINT="${MINIO_ENDPOINT:-localhost:9000}"
+# The same 127.0.0.1 addresses as the file above, for a .env.local that
+# lacks a line. An existing .env.local is never rewritten, so one written
+# before Alpha 6 keeps localhost until its owner edits it (Alpha 6
+# pre-release check, 2026-09-23).
+export DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal}"
+export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+export MINIO_ENDPOINT="${MINIO_ENDPOINT:-127.0.0.1:9000}"
 export MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-noctornal}"
 export MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-dev_only_change_me}"
 export EVIDENCE_BUCKET="${EVIDENCE_BUCKET:-noctornal-evidence}"
@@ -467,6 +518,9 @@ with psycopg.connect(url) as c:
     print(c.execute("SELECT count(*) FROM iam.app_user").fetchone()[0])
 PY
 )"
+# Declared out here: the closing output below reads it on every path, and
+# under `set -u` an unset variable ends the script.
+ADMIN_EMAIL=""; ADMIN_NAME=""
 if [[ "$USERS" == "0" ]]; then
   # R4 (2026-07-26): this called `bootstrap.py init`, which does not
   # exist -- argparse exits 2 and `set -e` then killed the install at the
@@ -482,7 +536,6 @@ if [[ "$USERS" == "0" ]]; then
   # branch written to handle "they gave nothing" was unreachable: the
   # script simply stopped, mid-sentence, with no message at all. Anything
   # that is not a terminal reaches EOF here.
-  ADMIN_EMAIL=""; ADMIN_NAME=""
   printf '    Email: '
   read -r ADMIN_EMAIL || true
   printf '    Display name: '
@@ -493,12 +546,15 @@ if [[ "$USERS" == "0" ]]; then
     detail 'Create one later with:'
     detail "  .venv/bin/python scripts/bootstrap.py create-user \\"
     detail "      --email you@example.org --name 'Your Name'"
+    ADMIN_EMAIL=""
   else
     ( cd "$REPO_ROOT" && "$VENV_PY" scripts/bootstrap.py create-user \
         --email "$ADMIN_EMAIL" --name "$ADMIN_NAME" )
   fi
+elif [[ "$USERS" == "1" ]]; then
+  good '1 account already exists'
 else
-  good "$USERS account(s) already exist"
+  good "$USERS accounts already exist"
 fi
 
 # ---------------------------------------------------------------------------
@@ -506,8 +562,79 @@ fi
 # ---------------------------------------------------------------------------
 
 step 'Starting the API'
+
+# The port is checked BEFORE uvicorn, so a re-run while the API is already
+# up says what is wrong in this script's voice. It used to run every step
+# and then end in uvicorn's "[Errno 98] ... address already in use" and
+# exit 3, while INSTALL.md quoted a message only launch.ps1 printed (Alpha
+# 6 pre-release check, 2026-09-23). bash's /dev/tcp connects without any
+# extra tool; a refused connection means the port is free.
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  stop_with "port $PORT is already in use." \
+    "Either an earlier copy of the API is still running, in which case the
+stack is already up at http://127.0.0.1:$PORT/ui/, or something else
+holds the port. Stop it (Ctrl-C in the API's window), or pick another:
+
+    ./release/install.sh --port $((PORT + 1))"
+fi
+
+# What to do next, in this script's words. The account block printed by
+# bootstrap.py above is not the whole story for a new install: the console
+# is signed in to in a browser, the README's showcase recipe is what fills
+# it, and the account just created holds no Security Officer role (Alpha 6
+# pre-release check, 2026-09-23). The officer count is read, not assumed,
+# so a re-run on a stack that has one says nothing about it; a count that
+# cannot be read prints the advice anyway, because it costs less than a
+# blocked collection nobody can explain.
+OFFICERS="$( cd "$REPO_ROOT" && "$VENV_PY" - 2>/dev/null <<'PY'
+import os
+import psycopg
+url = os.environ["DATABASE_URL"].replace("postgresql+psycopg", "postgresql")
+with psycopg.connect(url) as c:
+    print(c.execute(
+        "SELECT count(DISTINCT u.id) FROM iam.app_user u"
+        " JOIN iam.user_role ur ON ur.user_id = u.id"
+        " WHERE ur.role_key = 'SECURITY_OFFICER' AND u.is_active"
+    ).fetchone()[0])
+PY
+)" || OFFICERS=""
+OWNER_EMAIL="${ADMIN_EMAIL:-you@example.org}"
+
+warn() { printf '  %s%s%s\n' "$C_YELLOW" "$1" "$C_OFF"; }
+
 detail "console:  http://127.0.0.1:$PORT/ui/"
+if [[ -n "$ADMIN_EMAIL" ]]; then
+  detail "sign in:  as $ADMIN_EMAIL, with the password and authenticator code above"
+fi
 detail 'stop it:  Ctrl-C'
+printf '\n'
+printf '  Next, in a second terminal in %s\n' "$REPO_ROOT"
+printf '  (no exports needed: bootstrap.py reads .env.local).\n'
+printf '\n'
+printf '  To fill the console with the showcase case the README screenshots\n'
+printf '  come from, follow README.md, section "First run", with your address\n'
+printf '  as the owner. It starts with:\n'
+printf '      .venv/bin/python scripts/bootstrap.py demo-network --owner-email %s --code OP-SHOWCASE-26 --classification CLEAR\n' "$OWNER_EMAIL"
+if [[ "$OFFICERS" == "0" || -z "$OFFICERS" ]]; then
+  printf '\n'
+  if [[ "$OFFICERS" == "0" ]]; then
+    warn 'Nobody holds the Security Officer role yet; the account this'
+    warn 'installer creates does not. Until somebody does, the readiness'
+  else
+    warn 'The Security Officer holders could not be counted. The account'
+    warn 'this installer creates is not one. Until somebody is, the readiness'
+  fi
+  warn "register's blocking check security_officer_present fails, so"
+  warn 'collection runs are refused, and break-glass is refused because'
+  warn 'nobody could review it. Give the role to a second person, not to'
+  warn 'your own account (release/INSTALL.md, "After installing"):'
+  # security.officer@, not officer@: officer@example.org is the account
+  # seed_readme_showcase.py creates, so after the README recipe this
+  # command exited 1 with "already exists", and run first it would have
+  # made the seeder adopt the real officer (Alpha 6 pre-release check,
+  # 2026-09-23).
+  printf '      .venv/bin/python scripts/bootstrap.py create-user --email security.officer@example.org --name "Officer Name" --roles SECURITY_OFFICER\n'
+fi
 printf '\n'
 printf '  %sSample ingest is refused until a prohibited-content policy is%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sdeclared (README, L1). That refusal is deliberate.%s\n' "$C_YELLOW" "$C_OFF"

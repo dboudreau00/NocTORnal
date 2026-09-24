@@ -71,6 +71,7 @@ access at all.
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import timedelta
 from uuid import UUID
 
@@ -88,12 +89,14 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from noctornal_api.http.deps import (
+    CASE_READ_ONLY_TITLE,
     SESSION_COOKIE,
     CurrentUser,
     authorize_object,
     check_writable_labels,
     current_user,
     get_conn,
+    refuse_if_case_read_only,
     require_global,
     require_step_up,
     session_token,
@@ -108,7 +111,9 @@ from noctornal_api.http.limits import (
     rate_limit,
 )
 from noctornal_api.config import SAMPLE_CAP_ENV, cap_is_declared
+from noctornal_api.iam_admin import IamAdminService
 from noctornal_api.ratelimit import ip_subject
+from noctornal_api.security.access import tlp_from_name
 from noctornal_api.samples import (
     AUTHORISE_PERMISSION,
     MAX_AUTHORISATION_DAYS,
@@ -122,6 +127,7 @@ from noctornal_api.samples import (
     AuthorisationRequired,
     PolicyNotDeclared,
     Sample,
+    SampleCaseReadOnly,
     SampleError,
     SampleService,
     disposition_setting,
@@ -245,6 +251,18 @@ class SampleOut(BaseModel):
     assigned_to_name: str | None = None
     assigned_to_email: str | None = None
     compartments: list[str] = []
+    #: The labels the sample is actually handled at: its own composed with
+    #: its case's, which is what `queue()` and `visible()` gate on. The row
+    #: chip showed `classification` and `compartments` alone, so a sample
+    #: from a compartmented case read as plain AMBER to the malware
+    #: analyst, whose only marking it is (ux13-lab:label-chip-understates-
+    #: handling, 2026-09-23). `inherited_compartments` are the ones that
+    #: come from the case and not the sample; `classification_inherited`
+    #: is true when the case raised the level above the sample's own.
+    effective_classification: str | None = None
+    effective_compartments: list[str] = []
+    inherited_compartments: list[str] = []
+    classification_inherited: bool = False
     #: F2 (0063). `bytes_disposition` is one of `in_sample_store`,
     #: `preserved`, `destroyed` or `kept`; the `preserved_*` fields say
     #: where a preserved sample went. `legal_hold` is the sample's own.
@@ -253,12 +271,27 @@ class SampleOut(BaseModel):
     preserved_key: str | None = None
     preserved_at: str | None = None
     legal_hold: bool = False
+    #: True when the sample's case is CLOSED, ARCHIVED or PURGED, so the
+    #: Lab work, detonation and reject routes refuse it with the case's
+    #: 409. Said on the row so the card offers none of that work: the Lab
+    #: lists samples from every case, so the open case's own state cannot
+    #: decide it (c21, 2026-09-24). The state itself is not named.
+    case_read_only: bool = False
 
 
-def _out(s: Sample, names: dict | None = None) -> SampleOut:
+def _out(s: Sample, names: dict | None = None,
+         case: tuple[str, frozenset[str]] | None = None,
+         case_read_only: bool = False) -> SampleOut:
+    """`case` is the sample's case's `(classification, compartments)`, or
+    None for a sample with no case (or one whose labels were not looked
+    up, when the sample's own labels are the handling labels: `submit`
+    has just raised them to the case's floor)."""
     names = names or {}
     sub = names.get(str(s.submitted_by), {})
     held = names.get(str(s.assigned_to), {}) if s.assigned_to else {}
+    own_tlp, own_comps = s.classification, frozenset(s.compartments)
+    case_tlp, case_comps = case if case else (own_tlp, frozenset())
+    effective = max(tlp_from_name(own_tlp), tlp_from_name(case_tlp)).name
     return SampleOut(
         id=str(s.id), case_id=str(s.case_id) if s.case_id else None,
         sha256=s.sha256, sha1=s.sha1, md5=s.md5,
@@ -272,23 +305,41 @@ def _out(s: Sample, names: dict | None = None) -> SampleOut:
         submitted_by_name=sub.get("name"), submitted_by_email=sub.get("email"),
         assigned_to_name=held.get("name"), assigned_to_email=held.get("email"),
         compartments=sorted(s.compartments),
+        effective_classification=effective,
+        effective_compartments=sorted(own_comps | case_comps),
+        inherited_compartments=sorted(case_comps - own_comps),
+        classification_inherited=effective != own_tlp,
         bytes_disposition=s.bytes_disposition,
         preserved_bucket=s.preserved_bucket, preserved_key=s.preserved_key,
         preserved_at=s.preserved_at.isoformat() if s.preserved_at else None,
         legal_hold=s.legal_hold,
+        case_read_only=case_read_only,
     )
 
 
 def _named(svc: SampleService, samples: list[Sample]) -> list[dict]:
     """`_out` for a list, with every submitter and assignee resolved in
-    one query rather than one per row."""
+    one query rather than one per row, and every case's labels in one
+    more, so each row carries the labels it is handled at, and whether
+    its case is read-only in one more again."""
     names = svc.people([s.submitted_by for s in samples]
                        + [s.assigned_to for s in samples])
-    return [_out(s, names).model_dump(mode="json") for s in samples]
+    cases = svc.case_labels([s.case_id for s in samples])
+    shut = svc.read_only_cases([s.case_id for s in samples])
+    return [_out(s, names, cases.get(str(s.case_id)),
+                 case_read_only=str(s.case_id) in shut).model_dump(mode="json")
+            for s in samples]
+
+
+def _named_one(svc: SampleService, sample: Sample) -> SampleOut:
+    """One sample the way the queue shows it, for the routes that answer
+    with the row they changed."""
+    return SampleOut(**_named(svc, [sample])[0])
 
 
 @router.get("/policy", response_model=dict)
-def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
+def policy_status(user: CurrentUser = Depends(current_user),
+                  conn: psycopg.Connection = Depends(get_conn)) -> dict:
     """Whether an operator has declared a prohibited-content policy, and
     whether a separate sample origin is configured -- and which one.
 
@@ -304,15 +355,26 @@ def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
     is set but unusable used to read as "configured" here while every
     download refused, and `sample_origin_problem` now carries the reason
     instead of the console guessing at one.
+
+    For the Lab's submit form (ux13-lab:submit-form-ignores-refusal-and-
+    scope, 2026-09-23): `designated_person` is who an analyst turned away
+    here is to contact, and `your_clearance` and `your_compartments` bound
+    the labels the form offers, so it cannot offer a label `submit` would
+    refuse. They are the caller's own and nobody else's.
     """
     declared, detail = policy_declared()
     split = origin_split()
     usable = split.split_problem is None
     disposition, disposition_problem = disposition_setting()
+    clearance, held = user_ceiling(conn, user.user_id)
     return {
         "policy_declared": declared,
         "policy_reference": detail if declared else None,
         "detail": None if declared else detail,
+        "designated_person":
+            os.environ.get("NOCTORNAL_DESIGNATED_PERSON", "").strip() or None,
+        "your_clearance": clearance.name,
+        "your_compartments": sorted(held),
         "sample_origin_configured": usable,
         "sample_origin": split.sample if usable else None,
         "sample_origin_problem": split.split_problem,
@@ -325,12 +387,16 @@ def policy_status(_: CurrentUser = Depends(current_user)) -> dict:
         "rejected_sample_disposition_problem": disposition_problem,
         "max_sample_bytes_declared": cap_is_declared(SAMPLE_CAP_ENV),
         "counsel_review_required": True,
+        # "before it is used in any absolute sense" was garbled, and the
+        # console printed its own copy of the first sentence in front of
+        # it, so the Lab banner said it twice (ux13-lab:legal-banner-copy,
+        # 2026-09-23).
         "notice": (
-            "Counsel must review this deployment before it is used in any "
-            "absolute sense. A store of attacker-supplied binaries will "
-            "eventually receive material whose possession alone is an "
-            "offence, and the handling rules differ by jurisdiction. This "
-            "software records a declaration; it cannot verify one."
+            "Counsel must review this deployment before it is used. A store "
+            "of attacker-supplied binaries will eventually receive material "
+            "whose possession alone is an offence, and the handling rules "
+            "differ by jurisdiction. This software records a declaration; "
+            "it cannot verify one."
         ),
     }
 
@@ -529,7 +595,13 @@ def detail(
     out = {"sample": _named(svc, [sample])[0],
            "analyses": svc.analyses(sample_id),
            "detonations": svc.detonations(sample_id),
-           "custody": svc.custody(sample_id)}
+           "custody": svc.custody(sample_id),
+           # What this reader may do here, so the card offers the lab's
+           # own work (assign, record an analysis, reject, detonate) to the
+           # people who can do it and says who can to everybody else.
+           # A hint for the console; every route below still decides for
+           # itself (ux13-lab:no-assign-or-record-analysis, 2026-09-23).
+           "you_may": _you_may(conn, user)}
     if sample.preserved_key:
         out["preservation"] = {
             "authorisations": svc.preservation_authorisations(sample_id),
@@ -540,6 +612,60 @@ def detail(
             "retrieve_permission": RETRIEVE_PERMISSION,
         }
     return out
+
+
+def _you_may(conn: psycopg.Connection, user: CurrentUser) -> dict:
+    """The lab verbs this caller holds, read the way `require_global`
+    reads them but without the step-up clause: this widens nothing, it
+    only decides which controls the card draws."""
+    iam = IamAdminService(conn)
+    return {"analyse": iam.holds_global_permission(user.user_id,
+                                                   "sample.analyse"),
+            "detonate": iam.holds_global_permission(user.user_id,
+                                                    "sample.detonate"),
+            "download": iam.holds_global_permission(user.user_id,
+                                                    "sample.download")}
+
+
+@router.get("/{sample_id}/people", response_model=dict)
+def people(
+    sample_id: UUID,
+    user: CurrentUser = Depends(require_global("sample.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The people the sample card's two pickers offer, by name.
+
+    `assignees`: who the sample can be assigned to (an active account
+    holding `sample.analyse` that can see this sample). `detonation_
+    authorisers`: who can sign off a non-private detonation (a lead
+    investigator on the sample's case, cleared for it, and not the
+    caller). Both used to be a free-text uuid box that nobody had a
+    value for (ux13-lab:no-assign-or-record-analysis,
+    ux13-lab:detonation-authoriser-uuid, 2026-09-23).
+
+    Each list goes only to a caller who can use it, so holding
+    `sample.read` alone does not make this a directory of the lab and
+    of the case's leads. 404 for a sample the caller may not see, the
+    same answer `detail` gives.
+    """
+    from noctornal_ontology.definition import SELECTOR_TYPES
+
+    _visible_or_404(conn, user, sample_id)
+    svc = SampleService(conn)
+    may = _you_may(conn, user)
+    return {
+        "assignees": svc.eligible_assignees(sample_id) if may["analyse"] else [],
+        "detonation_authorisers": (
+            svc.detonation_authorisers(sample_id, exclude=user.user_id)
+            if may["detonate"] else []),
+        # The record form's selector types. The console's copy of the
+        # ontology comes from a CASE route the malware analyst cannot
+        # call, so the lab carries the one list it needs.
+        "selector_types": ([{"key": t.key, "display_name": t.display_name}
+                            for t in SELECTOR_TYPES]
+                           if may["analyse"] else []),
+        "you_may": may,
+    }
 
 
 class DownloadTicketOut(BaseModel):
@@ -845,33 +971,66 @@ class RejectBody(BaseModel):
     #: operator chose `destroy`. False records the rejection and disposes
     #: of nothing. Until that date True meant destroy, on the first click
     #: (ux13-lab:reject-one-click-destroy). Kept in the request body, where
-    #: the custody row records it.
-    purge_bytes: bool = True
+    #: the custody row records it. The `description` is what a script
+    #: client reads in the API document, where this comment never appears:
+    #: the Alpha 6 pre-release check (2026-09-23) found the field
+    #: undescribed and the route still documented as destroying the bytes,
+    #: so a client written against Alpha 5.2 saw no sign that the same
+    #: request now preserves them.
+    purge_bytes: bool = Field(
+        default=True,
+        description=(
+            "true: dispose of the working copy as the deployment decided "
+            "(NOCTORNAL_REJECTED_SAMPLE_DISPOSITION). `preserve`, the "
+            "default since Alpha 6, keeps the bytes under a legal hold that "
+            "nothing in the product lifts; `destroy` deletes them for good, "
+            "which is what true meant until Alpha 6. false: record the "
+            "rejection and dispose of nothing. GET /samples/policy reports "
+            "the disposition in force."))
 
 
 @router.post("/{sample_id}/reject", response_model=SampleOut)
 def reject(
     sample_id: UUID, body: RejectBody,
     user: CurrentUser = Depends(require_global("sample.analyse")),
+    # A fresh sign-in, whatever `sample.analyse` itself requires. A
+    # rejection moves the evidence into the preservation store, which it
+    # cannot leave without two people, or destroys it for good under
+    # `destroy`; a session somebody walked away from must not be enough to
+    # do either (gap-reject-step-up, owner decision, 2026-09-23). The
+    # console asks for the sign-in before it sends (`smpStepUp`).
+    _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SampleOut:
-    """Record THAT something was rejected and why, without retaining the
-    content. The bytes go; the row stays.
+    """Record THAT something was rejected and why. The row stays; what
+    happens to the bytes is the deployment's decision. Needs a sign-in
+    from the last 15 minutes (step-up), like a download.
 
-    Unless the sample is under a legal hold, in which case the service
-    refuses and says so — docs/08: a hold overrides all deletion,
-    everywhere.
+    With `purge_bytes` true (the default) the working copy is disposed of
+    as `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` says. `preserve`, the
+    default since Alpha 6, copies the ciphertext into the preservation
+    store under a legal hold, keeps the data key, then deletes the working
+    copy; if the preservation store refuses the copy, the rejection is
+    refused and nothing changes. `destroy` deletes the object and zeroes
+    the data key, which is what `purge_bytes` true meant until Alpha 6.
+    With `purge_bytes` false the rejection is recorded and nothing is
+    disposed of. `GET /samples/policy` reports the disposition in force.
 
-    ## CR11 (2026-07-26) — the destructive path had no label check
+    Destruction of a sample under a legal hold (its own or its case's) is
+    refused, and the service says so: docs/08, a hold overrides all
+    deletion, everywhere. Preservation is not a deletion and proceeds.
 
-    `reject(purge_bytes=True)` is irreversible: it deletes the object and
-    zeroes the data key. It resolved the sample through `get()`, which is
+    ## CR11 (2026-07-26): the destructive path had no label check
+
+    `reject(purge_bytes=True)` was irreversible then, as it still is under
+    `destroy`: it deletes the object and zeroes the data key. It resolved
+    the sample through `get()`, which is
     `WHERE id = %s` with no clearance, compartment or case predicate, and
     the route gated only on the GLOBAL `sample.analyse` role.
 
     `download()` composes the sample's labels with its case's before it
-    will serve a byte. `reject()` — which destroys those same bytes
-    forever — did not. So a MALWARE_ANALYST, who deliberately holds no
+    will serve a byte. `reject()`, which then destroyed those same bytes
+    for good, did not. So a MALWARE_ANALYST, who deliberately holds no
     case access at all, could permanently destroy a sample belonging to a
     compartmented case knowing only its UUID.
 
@@ -880,9 +1039,15 @@ def reject(
     a particular sample exists in a case the caller cannot see.
     """
     clearance, comps = user_ceiling(conn, user.user_id)
-    if _svc(conn).visible(sample_id, clearance=clearance.name,
-                          compartments=comps) is None:
+    sample = _svc(conn).visible(sample_id, clearance=clearance.name,
+                                compartments=comps)
+    if sample is None:
         raise Problem(404, "Not found", "no such sample")
+    # A rejection changes the sample and disposes of its working copy, so a
+    # read-only case refuses it whatever the disposition: its material
+    # leaves only through the retention purge, which takes two people (c7,
+    # 2026-09-24).
+    _refuse_if_read_only(conn, user, sample, "sample.analyse")
     disposition, _problem = disposition_setting()
     try:
         # The preservation store is built only when this rejection will
@@ -895,10 +1060,12 @@ def reject(
         rejected = svc.reject(sample_id, actor_id=user.user_id,
                               reason=body.reason,
                               purge_bytes=body.purge_bytes)
+    except SampleCaseReadOnly as exc:
+        raise _read_only_problem(conn, user, sample, "sample.analyse",
+                                 exc) from exc
     except SampleError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    return _out(rejected, svc.people([rejected.submitted_by,
-                                      rejected.assigned_to]))
+    return _named_one(svc, rejected)
 
 
 class AssignBody(BaseModel):
@@ -911,11 +1078,45 @@ def assign(
     user: CurrentUser = Depends(require_global("sample.analyse")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SampleOut:
+    """Put a quarantined or triaged sample in one analyst's hands.
+
+    Two checks this route did not make until 2026-09-23 (ux13-lab:no-
+    assign-or-record-analysis). The sample must be one the CALLER can see,
+    the same 404 `detail` gives, because assigning by uuid was a write
+    against a sample in a case the caller cannot open, the shape CR11
+    closed on `reject`. And the assignee must be on
+    `eligible_assignees`: an active account holding `sample.analyse` that
+    can see the sample. Any uuid used to do, so a valid but wrong one
+    handed the sample to somebody who could not open it or was not in
+    the lab at all. The console offers only that list.
+
+    Refused with the case's 409 when the sample's case is read-only (c21,
+    2026-09-24).
+    """
+    sample = _visible_or_404(conn, user, sample_id)
+    _refuse_if_read_only(conn, user, sample, "sample.analyse")
+    svc = _svc(conn)
+    if str(body.analyst_id) not in {
+            a["id"] for a in svc.eligible_assignees(sample_id)}:
+        raise Problem(
+            400, "Invalid request",
+            "a sample can be assigned only to an active malware analyst "
+            "(sample.analyse) who is cleared to see it")
     try:
-        return _out(_svc(conn).assign(sample_id, analyst_id=body.analyst_id,
-                                      actor_id=user.user_id))
+        return _named_one(svc, svc.assign(
+            sample_id, analyst_id=body.analyst_id, actor_id=user.user_id))
+    except SampleCaseReadOnly as exc:
+        raise _read_only_problem(conn, user, sample, "sample.analyse",
+                                 exc) from exc
     except SampleError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+
+
+#: What a recorded analysis can say it was, and how sure an attribution
+#: can be. Mirrored from the service and the `analytic_confidence` type so
+#: a bad value is a sentence rather than a database error.
+_ANALYSIS_KINDS = ("STATIC", "YARA", "MANUAL_RE", "SANDBOX", "VENDOR")
+_CONFIDENCES = ("LOW", "MODERATE", "HIGH")
 
 
 class AnalysisBody(BaseModel):
@@ -938,7 +1139,39 @@ def record_analysis(
 ) -> dict:
     """Findings are machine-readable by construction. A family attribution
     without a confidence is refused: it is an assessment, and one without a
-    confidence is a fact wearing an assessment's clothes."""
+    confidence is a fact wearing an assessment's clothes.
+
+    Refused for a sample the caller cannot see, with the 404 `detail`
+    gives (2026-09-23): an analysis is a write against the sample, and it
+    was taken by uuid alone. Each extracted selector must name its type and
+    value, because an entry without a type can never be proposed into the
+    case (`propose_extracted_selector`).
+
+    Refused with the case's 409 when the sample's case is read-only: an
+    attribution dated after `closed_at` on a closed case's sample is the
+    post-closure material the rule keeps out (c7, 2026-09-24)."""
+    sample = _visible_or_404(conn, user, sample_id)
+    _refuse_if_read_only(conn, user, sample, "sample.analyse")
+    if body.kind not in _ANALYSIS_KINDS:
+        raise Problem(400, "Invalid request",
+                      f"kind must be one of {', '.join(_ANALYSIS_KINDS)}")
+    if body.confidence is not None and body.confidence not in _CONFIDENCES:
+        raise Problem(400, "Invalid request",
+                      f"confidence must be one of {', '.join(_CONFIDENCES)}")
+    from noctornal_ontology.definition import SELECTOR_TYPES
+    known = {s.key for s in SELECTOR_TYPES}
+    for i, entry in enumerate(body.extracted_selectors):
+        kind = (str(entry.get("selector_type") or entry.get("type") or "")
+                .strip().upper() if isinstance(entry, dict) else "")
+        if not (kind and str(entry.get("value") or "").strip()):
+            raise Problem(
+                400, "Invalid request",
+                f"extracted selector {i + 1} needs a selector_type and a value")
+        if kind not in known:
+            raise Problem(
+                400, "Invalid request",
+                f"extracted selector {i + 1} names an unknown selector type "
+                f"{kind!r}")
     try:
         analysis_id = _svc(conn).record_analysis(
             sample_id, analyst_id=user.user_id, kind=body.kind,
@@ -947,9 +1180,59 @@ def record_analysis(
             family_assessment=body.family_assessment, confidence=body.confidence,
             narrative=body.narrative, tool=body.tool,
             tool_version=body.tool_version)
+    except SampleCaseReadOnly as exc:
+        raise _read_only_problem(conn, user, sample, "sample.analyse",
+                                 exc) from exc
     except SampleError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(analysis_id)}
+
+
+class ProposeBody(BaseModel):
+    #: Which entry of the analysis's `extracted_selectors`, from 0. The
+    #: caller names the entry and nothing else: the proposal is derived
+    #: from what the analysis recorded.
+    index: int = Field(ge=0)
+
+
+@router.post("/{sample_id}/analyses/{analysis_id}/propose",
+             response_model=dict, status_code=202,
+             dependencies=[Depends(rate_limit("capture"))])
+def propose_selector(
+    sample_id: UUID, analysis_id: UUID, body: ProposeBody,
+    user: CurrentUser = Depends(require_global("sample.analyse")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Propose one extracted selector into the sample's case triage queue.
+
+    docs/11's "findings flow back as assertions", through the normal
+    proposal path: nothing reaches the graph until one of the case's
+    analysts accepts it in Triage, where the assertion is written as
+    theirs and graded as an inference (ux13-lab:no-assign-or-record-
+    analysis, 2026-09-23). The lab analyst needs no case access for this,
+    and gets none: the answer is 202 and `{"sent": true, "label"}` whether
+    a proposal was queued, one already existed or the case already holds
+    the entity, and it names no case code. Anything more let a role barred
+    from case content probe the case graph with values it typed itself
+    (the verifier's existence oracle, 2026-09-23). 202, not 201, because
+    nothing the caller may look at was created. Metered like capture,
+    because a loop here floods a queue somebody has to work.
+    """
+    sample = _visible_or_404(conn, user, sample_id)
+    # The gate's refusal rather than only the service's: titled so the
+    # console knows it, and audited (c7, 2026-09-24).
+    _refuse_if_read_only(conn, user, sample, "sample.analyse")
+    try:
+        out = SampleService(conn).propose_extracted_selector(
+            sample, analysis_id, body.index, actor_id=user.user_id)
+    except SampleCaseReadOnly as exc:
+        raise _read_only_problem(conn, user, sample, "sample.analyse",
+                                 exc) from exc
+    except SampleError as exc:
+        if "no such analysis" in str(exc):
+            raise Problem(404, "Not found", "no such analysis") from exc
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return out
 
 
 class DetonationBody(BaseModel):
@@ -973,17 +1256,32 @@ def request_detonation(
     Anything other than a private instance needs a named authoriser and a
     note, because submitting to a vendor or public sandbox exposes the
     sample AND your interest in it, and operators watch public sandboxes
-    for their own samples.
+    for their own samples. The authoriser is somebody `GET
+    /samples/{id}/people` lists, never the caller (the service refuses
+    anybody else), and the answer names them so the console can say who
+    signed it off (ux13-lab:detonation-authoriser-uuid, 2026-09-23).
+    Refused for a sample the caller cannot see, with the 404 `detail`
+    gives, and for one whose case is read-only, with the case's 409 (c21,
+    2026-09-24).
     """
+    sample = _visible_or_404(conn, user, sample_id)
+    _refuse_if_read_only(conn, user, sample, "sample.detonate")
     try:
         det_id = _svc(conn).request_detonation(
             sample_id, requested_by=user.user_id, target=body.target,
             exposure_level=body.exposure_level,
             authorised_by=body.authorised_by, note=body.note)
+    except SampleCaseReadOnly as exc:
+        raise _read_only_problem(conn, user, sample, "sample.detonate",
+                                 exc) from exc
     except SampleError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    named = (_svc(conn).people([body.authorised_by]).get(str(body.authorised_by))
+             if body.authorised_by else None)
     return {"id": str(det_id),
             "submitted": False,
+            "authorised_by_name": (named or {}).get("name"),
+            "authorised_by_email": (named or {}).get("email"),
             "notice": "Recorded only. No sandbox integration exists; nothing "
                       "has been sent anywhere."}
 
@@ -1005,12 +1303,50 @@ class PreservationAuthoriseBody(BaseModel):
 
 def _visible_or_404(conn: psycopg.Connection, user: CurrentUser,
                     sample_id: UUID) -> Sample:
+    """The sample, or the 404 `detail` gives. No storage: a question about
+    labels must not fail over bucket credentials it never uses."""
     clearance, compartments = user_ceiling(conn, user.user_id)
-    sample = _svc(conn).visible(sample_id, clearance=clearance.name,
-                                compartments=compartments)
+    sample = SampleService(conn).visible(sample_id, clearance=clearance.name,
+                                         compartments=compartments)
     if sample is None:
         raise Problem(404, "Not found", "no such sample")
     return sample
+
+
+def _refuse_if_read_only(conn: psycopg.Connection, user: CurrentUser,
+                         sample: Sample, permission_key: str) -> None:
+    """The case's read-only rule, for a Lab write on an existing sample:
+    assign, record an analysis, propose a selector, request a detonation
+    and reject (c7/c21, 2026-09-24).
+
+    A sample attached to a case is that case's content (`cases.
+    CONTENT_READ_ONLY_STATES`), and these routes gate on global lab verbs
+    that never reach `authorize_object`, so a CLOSED or ARCHIVED case's
+    sample took new attributions and state changes after `closed_at`, and
+    under the `destroy` disposition could be destroyed by one analyst. The
+    rule is the gate's own, called by hand as ingest record triage calls
+    it: one 409 titled `CASE_READ_ONLY_TITLE`, which the console knows,
+    and one audit row.
+
+    Called AFTER the label check, so a caller who cannot see the sample
+    gets the 404 and learns nothing. A Lab analyst who can see the sample
+    but not open its case learns the case's state, never its code: the
+    least that explains why the work is refused, and what the propose
+    path already said. Preserved-retrieval authorisation and the download
+    are not routed here: they are governance and reads."""
+    if sample.case_id is not None:
+        refuse_if_case_read_only(conn, user, sample.case_id, permission_key)
+
+
+def _read_only_problem(conn: psycopg.Connection, user: CurrentUser,
+                       sample: Sample, permission_key: str,
+                       exc: SampleCaseReadOnly) -> Problem:
+    """The service's own read-only refusal (`SampleCaseReadOnly`), which
+    fires when the case was closed after `_refuse_if_read_only` looked,
+    answered and audited as the gate answers it. The gate raises; the
+    Problem returned is for a case reopened again in between."""
+    _refuse_if_read_only(conn, user, sample, permission_key)
+    return Problem(409, CASE_READ_ONLY_TITLE, safe_detail(exc))
 
 
 @router.post("/{sample_id}/preserved/authorisations", response_model=dict,
@@ -1079,7 +1415,10 @@ def mint_retrieval_ticket(
     sample bytes, invariant 10 puts them on the separate origin, and the
     process there serves the download path and nothing else
     (`app._allowed_on_sample_origin`). A second byte-serving route would be
-    a second door on the one process the split keeps narrow. The ticket
+    a second door on the one process the split keeps narrow. (The one other
+    path it answers, since 2026-09-24, produces an EXHIBIT of attacker
+    markup: case-scoped bytes from the evidence store under
+    `evidence.export`, which no sample route could have carried.) The ticket
     carries its purpose, so the redemption re-reads
     `sample.preserved.retrieve` rather than `sample.download`, reads the
     preservation store, and checks the live authorisation again.

@@ -130,12 +130,16 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.readiness import blocking_failures
+from noctornal_api.security.access import AccessResolutionError, evaluate
+from noctornal_api.stores import PgAccessResolver
 
 router = APIRouter(prefix="/collection", tags=["collection"])
 
-#: Repeated on every route that can put a persona in front of a site.
+#: Repeated on every route that can put a persona in front of a site. The
+#: legal-review item by its register number, not a design document's path
+#: (ux19-copy developer-speak-in-copy, 2026-09-23).
 L3_NOTICE = (
-    "docs/16 L3 is BLOCKING and unresolved: authority to operate a covert "
+    "Legal review item L3 is still open: authority to operate a covert "
     "persona is per-jurisdiction, and passive collection (reading a public "
     "forum) may be authorised separately from active collection (posting, "
     "messaging, purchasing). This software records the distinction; it "
@@ -161,8 +165,54 @@ def due_sources(
     due = CollectionService(conn).due_sources(clearance=clearance.name)
     return {"due": [{**d, "id": str(d["id"])} for d in due],
             "count": len(due),
+            "run": _run_readiness(conn, user),
             "notice": ("Nothing polls itself. Call /sources/{id}/run to "
                        "poll one source once. " + L3_NOTICE)}
+
+
+#: The four blocking readiness checks in words, for the Feeds pane's Poll
+#: now. The keys are `readiness.BLOCKING_CHECKS`; a key missing here is
+#: shown as itself rather than dropped, so a fifth check added there still
+#: disables the button.
+_BLOCKING_WORDS = {
+    "prohibited_content_policy":
+        "no prohibited-content policy or escalation contact is recorded",
+    "sample_origin_configured": "no sample origin is configured",
+    "retention_rules_confirmed":
+        "retention periods are still on their seeded placeholders",
+    "security_officer_present": "no security officer account exists",
+}
+
+
+def _run_readiness(conn: psycopg.Connection, user: CurrentUser) -> dict:
+    """Whether THIS caller's Poll now would be refused, and why, before
+    they press it (ux12-feeds:poll-now-one-click-and-blocked, 2026-09-23).
+
+    The pane offered an enabled Poll now on every due source while the
+    route refused every poll with a 409 naming the blocking checks, and to
+    anyone without `collection.run`, which is every role but COLLECTOR,
+    with a 403. The analyst learnt either from an error banner after the
+    click. `allowed` is the verb, asked of the gate without writing an
+    AUTHZ_DENIED row (a question on a listing is not an attempt); the
+    blocking checks are named only to a caller who holds it, because they
+    are the refusal that caller would get, and nobody else is refused for
+    them. The poll route still decides: this is the button's state.
+    """
+    try:
+        ctx = PgAccessResolver(conn).resolve_global(
+            user_id=user.user_id, permission_key="collection.run",
+            object_classification="CLEAR", object_compartments=frozenset(),
+            mfa_satisfied_at=user.session_mfa_at)
+        allowed = evaluate(ctx).allowed
+    except AccessResolutionError:
+        allowed = False
+    if not allowed:
+        return {"allowed": False, "ready": None, "blocking": []}
+    failing = blocking_failures(conn)
+    return {"allowed": True, "ready": not failing,
+            "blocking": [{"check": name,
+                          "text": _BLOCKING_WORDS.get(name, name)}
+                         for name in failing]}
 
 
 @router.get("/sources/unhealthy", response_model=dict)

@@ -181,7 +181,34 @@ model it from the start.
   reject reuse. Frequently omitted, trivially exploitable.
 - Recovery codes: 10, single-use, Argon2id-hashed, regenerated as a set
 - Passwords: Argon2id (t=3, m=64 MiB, p=4), breach-list checked at set
-  time, no rotation policy, no composition rules
+  time, no rotation policy, no composition rules. A chosen password is at
+  least 12 characters, is not the one it replaces and is not the account's
+  own email address; length is the only strength rule. (No breach list is
+  bundled yet, so that check is not made.)
+- Password reset is administrator issued, with no email path (decided
+  2026-09-23). An administrator resets a colleague's password from Admin,
+  Accounts (`POST /admin/users/{id}/password`: `user.manage`, step-up,
+  audited as `PASSWORD_RESET`, refused for oneself); `scripts/bootstrap.py
+  reset-password` does the same for the last administrator. The reset
+  generates a one-time password, shows it once, revokes every live session,
+  clears the lockout and sets `must_change_password` (0066). Sign-in with
+  that password mints no session: it answers 403
+  `urn:noctornal:problem:password-change-required`, and the same sign-in
+  carrying `new_password` and a fresh code stores the chosen password and
+  signs in. A recovery code sent with a refused sign-in is checked and not
+  spent: it is spent only by the sign-in that opens a session. An account
+  an administrator creates from Admin (`POST /admin/users`) gets the same
+  flag, because its issued password is shown with the TOTP secret beside
+  it. First run, which makes the operator's own account, does not set it,
+  and nor does `bootstrap.py create-user` on an empty database, which is
+  how the installer makes that same account. Run while any account
+  exists, as the installers advise for a Security Officer, `create-user`
+  sets it: that account is for someone else. "Last password sign-in" on the Admin card is
+  written only when a password sign-in opens a session. A person changes
+  their own password from Account
+  (`POST /auth/password`), with the current password and a code in the
+  request; a wrong current password counts toward the lockout, and every
+  other session is signed out.
 
 **Step-up authentication** for sensitive operations, identity merge,
 evidence export, persona reveal, user management, case deletion. Session
@@ -223,11 +250,14 @@ How that is held in `break_glass.py` and `stores.py` (final review,
   change to a node or edge. Reading an entity is not counted, and the
   invoke notice says exactly this. On a case classified above the
   invoker's clearance every request on it passes the case's gate only
-  through the grant, so every request counts. The capture and message
-  reads count once there; the exhibit routes, the capture screenshot and
-  the entity writes pass a second gate at the item's labels and count
-  twice. Ending that double count needs a `count_use` passthrough on
-  `deps.authorize_object`.
+  through the grant, so every request counts, and counts once. A request
+  that passes a second gate after the case's (an exhibit route, a capture
+  screenshot, an entity write, a tag on a node, an approval, a proposal
+  accepted onto an entity) is counted only by whichever gate needed the
+  grant first: `deps.authorize_object(..., after_case_gate=True)` passes
+  `count_use` through and counts only when the case's own gate did not.
+  Until 2026-09-23 those requests counted twice
+  (sec-breakglass-double-count).
 - **A case grant raises that case's content, not the deployment's.**
   Collected documents and sources belong to no case, so the names an
   assertion carries for them are filtered at the invoker's case-less

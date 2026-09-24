@@ -3,8 +3,10 @@
 Every route here is gated on `user.manage`, which the seed grants to
 SYS_ADMIN alone and marks step-up — `require_global` enforces both, so a
 stale session cannot mint accounts. The one exception is `GET /access`,
-which reads nothing but which of two verbs the CALLER holds, so the
-console knows whether to offer the way in (2026-09-22).
+which reads which of two verbs the CALLER holds, so the console knows
+whether to offer the way in (2026-09-22), and, for an administrator, the
+names of the failing blocking checks, so it can say on the way in that
+something is refusing work (2026-09-23).
 
 Credentials appear ONCE, in the response that generated them, and no
 route returns an existing secret. The response says so, because an
@@ -42,6 +44,10 @@ class CreateBody(BaseModel):
     display_name: str = Field(min_length=1)
     clearance: str = "AMBER"
     roles: list[str] = Field(default_factory=lambda: ["ANALYST"])
+    # Read-ins at creation, in the account's own transaction
+    # (ux16-admin:no-compartment-readins-in-ui, 2026-09-23). Optional, so
+    # every existing client creates exactly what it did before.
+    compartments: list[str] = Field(default_factory=list)
 
 
 class ClearanceBody(BaseModel):
@@ -68,16 +74,22 @@ def _refuse(exc: AdminError) -> Problem:
     return Problem(409, "Conflict", detail)
 
 
-def _credentials(c: OneTimeCredentials) -> dict:
+_SHOWN_ONCE = ("Shown once. Neither the password nor the TOTP secret is "
+               "stored in a recoverable form, and no endpoint returns them "
+               "again. Hand them over now or re-enrol.")
+
+
+def _credentials(c: OneTimeCredentials, notice: str = _SHOWN_ONCE) -> dict:
+    """The one-time credentials card's payload. `totp_secret` and
+    `otpauth_uri` are null for a password reset, which issues no second
+    factor: the console draws only what arrived."""
     return {
         "user_id": str(c.user_id),
         "email": c.email,
         "password": c.password or None,
-        "totp_secret": c.totp_secret,
-        "otpauth_uri": c.otpauth_uri,
-        "notice": ("Shown once. Neither the password nor the TOTP secret "
-                   "is stored in a recoverable form, and no endpoint "
-                   "returns them again. Hand them over now or re-enrol."),
+        "totp_secret": c.totp_secret or None,
+        "otpauth_uri": c.otpauth_uri or None,
+        "notice": notice,
     }
 
 
@@ -112,8 +124,28 @@ def access(
             WHERE ur.user_id = %s AND u.is_active
               AND rp.permission_key IN ('user.manage', 'break_glass.review')""",
         (user.user_id,)).fetchall()}
-    return {"user_manage": "user.manage" in held,
-            "break_glass_review": "break_glass.review" in held}
+    manage = "user.manage" in held
+    # The failing BLOCKING checks, for an account that administers the
+    # deployment (ux16-admin:blocking-banner-buried-under-account-list,
+    # 2026-09-23). Nothing outside the Admin pane said that four checks
+    # were refusing work, so the console now badges the way in with this.
+    # `blocking_failures` runs only the four cheap probes, never the object
+    # store or Redis, which is why this is safe on every case-list render.
+    # Not behind the step-up freshness the register itself sits behind:
+    # these NAMES are already told to a collector, who holds no
+    # user.manage at all, in the poll route's 409, so they are not a secret
+    # to withhold from an administrator between two sign-ins.
+    # `readiness_caveats` names the blocking checks that PASS with a
+    # caveat, from the same run (2026-09-23,
+    # ux16-admin:security-officer-false-green): a lone officer who can
+    # invoke break-glass passes and has no emergency access, and the
+    # passing rows are folded away, so the Readiness section is marked.
+    state = (readiness_register.blocking_state(conn) if manage
+             else {"failures": [], "caveats": []})
+    return {"user_manage": manage,
+            "break_glass_review": "break_glass.review" in held,
+            "blocking_failures": state["failures"],
+            "readiness_caveats": state["caveats"]}
 
 
 @router.get("/users", response_model=dict)
@@ -142,10 +174,15 @@ def create_user(
         creds = IamAdminService(conn).create_analyst(
             email=body.email, display_name=body.display_name,
             clearance=body.clearance, roles=body.roles,
-            actor_id=user.user_id)
+            actor_id=user.user_id, compartments=body.compartments)
     except AdminError as exc:
         raise _refuse(exc) from exc
-    return _credentials(creds)
+    # The password is the administrator's as much as the account's, so it
+    # opens no session: the account replaces it at its first sign-in
+    # (final review c8, 2026-09-24). Said on the card that shows it.
+    return _credentials(creds, notice=(
+        _SHOWN_ONCE + " The password signs in once: at their first sign-in "
+        "they must choose their own, so this one never opens a session."))
 
 
 @router.post("/users/{user_id}/deactivate", response_model=dict)
@@ -236,6 +273,30 @@ def reenrol_totp(
     except AdminError as exc:
         raise _refuse(exc) from exc
     return _credentials(creds)
+
+
+# gap-password-reset (2026-09-23). The same meter as provisioning and
+# re-enrolment: all three mint a credential an impatient operator will
+# click for twice. `require_global` carries the step-up freshness that
+# `user.manage` is seeded with, so a session somebody walked away from
+# cannot hand out a password; the service refuses the caller's own account.
+@router.post("/users/{user_id}/password", response_model=dict,
+             dependencies=[Depends(rate_limit("admin.credentials"))])
+def reset_password(
+    user_id: UUID,
+    user: CurrentUser = Depends(require_global("user.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    try:
+        creds = IamAdminService(conn).reset_password(user_id,
+                                                     actor_id=user.user_id)
+    except AdminError as exc:
+        raise _refuse(exc) from exc
+    return _credentials(creds, notice=(
+        "Shown once, and never stored in a recoverable form. It signs in "
+        "once: at that sign-in they must choose their own password, so "
+        "this one never opens a session. Their authenticator is unchanged, "
+        "and every session they had is signed out."))
 
 
 @router.post("/users/{user_id}/unlock", response_model=dict)

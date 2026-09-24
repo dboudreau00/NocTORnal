@@ -71,11 +71,32 @@ usually means the analyst found another way, and the emergency was not one.
 > gate at the case's labels, and the fix round of 2026-09-23 corrected an
 > invoke notice that said otherwise. On a case classified above the
 > invoker's clearance every request on it passes the case's gate only
-> through the grant, so every request counts. The deception capture and
-> message reads then skip their second gate, so they count once; the
-> exhibit routes, the screenshot and the entity writes still pass a second
-> gate at the item's labels and count twice. Stopping that needs a
-> `count_use` passthrough on `deps.authorize_object`.
+> through the grant, so every request counts, once. A request that then
+> passes a second gate (the exhibit routes, a capture, screenshot or
+> message opened, an entity write, a tag or set change on a node, an
+> approval raised or decided, a proposal accepted onto an entity, a
+> PURGED transition) used to be counted there again, so one exhibit
+> opened read as two accesses. `deps.authorize_object` now passes
+> `count_use` through to the resolver, and a second gate is marked
+> `after_case_gate=True`: it counts only when the case's gate did not
+> (sec-breakglass-double-count, 2026-09-23). On a case within the
+> invoker's clearance nothing changes, because the case's gate never
+> counted there and the item's gate still counts an item above it.
+>
+> **What the one row says.** Each use writes one `BREAK_GLASS_ACTION`
+> audit row, naming the verb of the gate that counted it. Where the two
+> gates ask different verbs, that is the case's: an approval raised or
+> decided reads `case.read`, a PURGED transition `case.close`, a capture
+> filed `evidence.upload`, where before the fix a second row also named
+> the operation's own. Nothing is lost by it. What the request then did
+> is its own audit event, by the same actor on the same case
+> (`APPROVAL_REQUESTED`, `APPROVAL_GRANTED` or `APPROVAL_REFUSED` on the
+> request, which names the operation; `CASE_STATUS_CHANGED` to PURGED;
+> `CAPTURE_RECORDED`), and
+> `audit.event` is append-only, so the second gate cannot add its verb to
+> the first's row, and a row of its own would be the double count again
+> (the ledger and `action_count` agree, row for use;
+> `test_breakglass_count_once_pg.py` holds both).
 
 **5. Review is mandatory and its absence is visible.** `unreviewed()` is
 the queue. An expired grant with no review is an open item forever; it does

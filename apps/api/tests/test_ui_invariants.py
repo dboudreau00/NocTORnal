@@ -653,8 +653,10 @@ def test_the_ingest_quarantine_latches_only_on_a_permission_refusal():
     assert "if (!stepUp) state.quarantineVisible = false;" not in body, (
         "the old catch-all predicate is back: every transient failure "
         "latches the pane off for the session")
-    # A transient failure must say the queue is UNKNOWN, not empty.
-    assert "not known to be" in body, (
+    # A transient failure must say the queue is UNKNOWN, not empty. Through
+    # the shared notice since 2026-09-23 (ux17-failure:sticky-error-text-in-
+    # empty-slot): written into the empty line, it outlived the failure.
+    assert "showLoadFailure('ing-quarantine-empty'" in body, (
         "a failed read leaves the section reading as 'nothing unattached', "
         "which is a claim about the data")
 
@@ -699,7 +701,10 @@ def test_a_refused_trend_is_not_reported_as_an_empty_one():
     its own wording, and neither borrows the other's."""
     body = _history_js()
     assert "err.status === 403" in body, "the refusal is not distinguished"
-    assert "refusalText(" in body, "the refusal is not named"
+    # refusedWords names a 403/404 through refusalText and gives a 400 the
+    # server's own reason (ux17-failure:sticky-error-text-in-empty-slot,
+    # 2026-09-23, test_ui_failure_states.py).
+    assert "refusedWords(" in body, "the refusal is not named"
     js = _js()
     start = js.index("function renderMetricHistory(")
     render = js[start:js.index("\nfunction histRow(", start)]
@@ -735,7 +740,7 @@ def test_an_unrenderable_value_is_not_drawn_as_a_position():
     assert "pen = false" in body, (
         "an unrenderable value would be drawn at some position anyway")
     html = _html()
-    start = html.index("Trend: one actor across past runs")
+    start = html.index("Trend: one entity across past runs")
     # Whitespace-normalised: the source wraps prose at 72 columns, so any
     # phrase long enough to be worth asserting on is split by a newline and
     # an indent. A test that cannot survive re-wrapping is a test that gets
@@ -821,10 +826,13 @@ def test_the_admin_pane_offers_exactly_the_roles_the_server_grants():
         f"app.js and iam_admin.py disagree: only in JS {ui - server}, "
         f"only in Python {server - ui}")
 
+    # The create form's roles are checkboxes since 2026-09-23 (ux16-admin
+    # create-roles-multiselect): a native multi-select dropped the
+    # pre-chosen ANALYST on a plain click. Their VALUES are the keys.
     html = _html()
     start = html.index('id="adm-roles"')
-    picker = html[start:html.index("</select>", start)]
-    form = set(re.findall(r"<option[^>]*>([A-Z_]+)</option>", picker))
+    picker = html[start:html.index("</fieldset>", start)]
+    form = set(re.findall(r'<input type="checkbox" value="([A-Z_]+)"', picker))
     assert form == server, (
         f"the create form's picker disagrees with the server: only in HTML "
         f"{form - server}, only in Python {server - form}")

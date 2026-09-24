@@ -171,7 +171,7 @@ def test_a_leading_type_label_names_the_type():
     assert _forms("ASN: AS13335")["ASN"] == "13335"
     assert _forms("Discord ID 123456789012345678")["DISCORD_ID"] == "123456789012345678"
     assert _forms("Telegram numeric ID: -1001234567890")["TELEGRAM_ID"] == "c:1234567890"
-    assert _forms("XMPP ember@nightmarket.im")["JABBER"] == "ember@nightmarket.im"
+    assert _forms("XMPP ember@nightmarket.example")["JABBER"] == "ember@nightmarket.example"
     # The value keeps its own printed-form rule.
     assert "ICQ" not in _forms("ICQ: -123456789")
     assert "PHONE" not in _forms("Phone: 10.0.0.1")

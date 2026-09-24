@@ -133,9 +133,11 @@ def test_a_dead_lettered_credential_dump_keeps_no_values(conn, svc):
     """The whole of F15(d) in one test.
 
     `categorise` sends anything with top-level email + password to
-    CREDENTIAL_DUMP, only STEALER_LOG is gated for a compartment at key
-    issue, so a routine feed could dead-letter victim credentials verbatim
-    into a table with no classification, no compartments and no retention.
+    CREDENTIAL_DUMP, and a compartment is required at key issue only for
+    the category the key DECLARES (STEALER_LOG then; CREDENTIAL_DUMP and
+    DATABASE_LEAK too since 2026-09-23), so a routine feed declared
+    UNKNOWN could dead-letter victim credentials verbatim into a table
+    with no classification, no compartments and no retention.
     """
     owner = _user(conn)
     key = _key(svc, owner)

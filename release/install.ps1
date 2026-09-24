@@ -11,8 +11,9 @@
     Every step is idempotent and reports what it found rather than
     assuming. Re-running this is safe.
 
-    READ README.md FIRST. Four legal decisions gate any use of this
-    software against real material.
+    READ THE README.md AT THE PROJECT ROOT FIRST, section "Five blocking
+    items". Five legal decisions, L1 to L5, gate any use of this software
+    against real material.
 
 .PARAMETER Port
     Port for the API. Default 8000.
@@ -22,7 +23,7 @@
     to review .env.local before the first run.
 
 .EXAMPLE
-    .\install.ps1
+    powershell -ExecutionPolicy Bypass -File .\release\install.ps1
 #>
 [CmdletBinding()]
 param(
@@ -105,10 +106,15 @@ function Stop-With {
 Write-Host ''
 Write-Host '  NocTORnal - Alpha Release' -ForegroundColor White
 Write-Host '  -------------------------' -ForegroundColor DarkGray
-Write-Host '  Alpha software. Not audited. Four legal decisions gate any' -ForegroundColor Yellow
-Write-Host '  use against real material - see README.md, section "LEGAL' -ForegroundColor Yellow
-Write-Host '  STATUS". Installing is fine; pointing it at a real case is' -ForegroundColor Yellow
-Write-Host '  not, until those are settled.' -ForegroundColor Yellow
+# Five, L1 to L5, as the root README's table has them, and a heading that
+# exists there. The banner said four and pointed at a "LEGAL STATUS"
+# section only release/README.md has. It names the README at the project
+# root in full because release/README.md is the one beside this script
+# and has no such heading (Alpha 6 pre-release check, 2026-09-23).
+Write-Host '  Alpha software. Not audited. Five legal decisions (L1 to L5)' -ForegroundColor Yellow
+Write-Host '  gate any use against real material: see "Five blocking items"' -ForegroundColor Yellow
+Write-Host '  in the README.md at the project root. Installing is fine;' -ForegroundColor Yellow
+Write-Host '  pointing it at a real case is not, until those are settled.' -ForegroundColor Yellow
 
 if (-not $RepoRoot) {
     Stop-With 'this does not look like a complete NocTORnal package.' @'
@@ -116,7 +122,7 @@ install.ps1 expects to live in the `release/` directory of the project,
 so that its parent contains alembic.ini. That parent has no alembic.ini.
 
 The usual cause is copying release/ out on its own. It is documentation
-and installers only -- there is no application source in it. Download or
+and installers only, with no application source in it. Download or
 clone the whole repository and run:
 
     powershell -ExecutionPolicy Bypass -File .\release\install.ps1
@@ -240,11 +246,25 @@ if ((Test-Path $VenvPython) -and (Test-Path $VenvPip)) {
 }
 
 Write-Detail 'installing dependencies'
+# Every install below is held to constraints.txt, the exact versions the
+# release's suite passed on (sec-pin-dependencies, 2026-09-23). Without it
+# each `>=` in the pyproject files resolved to whatever was newest that day,
+# and the clean VM of the Alpha 6 check ran a newer stack than the one
+# tested. Checked for here, so a missing file is named as that and not as
+# "dependency installation failed" with pip's error scrolled past.
+$Constraints = Join-Path $RepoRoot 'constraints.txt'
+if (-not (Test-Path -LiteralPath $Constraints)) {
+    Stop-With "constraints.txt is missing from $RepoRoot." @'
+It pins every Python dependency to the version this release was tested
+on, and it ships with the release. Unpack the release again, or check out
+the whole repository, and run this again.
+'@
+}
 & $VenvPython -m pip install --upgrade pip --quiet
 # Editable, and BOTH packages: the ontology package is the single source of
 # the selector normalisers, and the API imports it. Installing only the API
 # produces an ImportError at the first comms request rather than at install.
-& $VenvPython -m pip install --quiet -e (Join-Path $RepoRoot 'packages\ontology') -e (Join-Path $RepoRoot 'apps\api')
+& $VenvPython -m pip install --quiet -c $Constraints -e (Join-Path $RepoRoot 'packages\ontology') -e (Join-Path $RepoRoot 'apps\api')
 if ($LASTEXITCODE -ne 0) {
     Stop-With 'dependency installation failed.' @'
 The output above says why. The commonest causes are no network access, or
@@ -257,7 +277,7 @@ a corporate proxy that needs pip configured for it.
 # PowerShell, and pip would silently install the package without the
 # extras rather than error, which is the worst of both.
 $devTarget = (Join-Path $RepoRoot 'apps\api') + '[dev]'
-$null = Invoke-Capture $VenvPython @('-m', 'pip', 'install', '--quiet', '-e', $devTarget)
+$null = Invoke-Capture $VenvPython @('-m', 'pip', 'install', '--quiet', '-c', $Constraints, '-e', $devTarget)
 if ($LASTEXITCODE -eq 0) { Write-Good 'dependencies installed (with dev extras)' }
 else { Write-Good 'dependencies installed'; Write-Detail 'dev extras skipped' }
 
@@ -318,20 +338,36 @@ if (Test-Path $EnvLocal) {
     # R11: the three SMTP values are here so the advertised Mailpit demo
     # actually captures mail. The default SMTP_PORT in transports.py is
     # 587 and Mailpit listens on 1025, and plaintext needs asking for.
+    #
+    # 127.0.0.1, not localhost, in every address below. The dev stack
+    # publishes its ports on 127.0.0.1 only, so nothing answers on ::1,
+    # and Windows by default resolves localhost to ::1 first: each new
+    # connection then waited about two seconds for the refused attempt
+    # before trying IPv4 (Alpha 6 pre-release check, 2026-09-23). The
+    # header names everything the two secrets protect, from
+    # security/sealed.py's SEALED_COLUMNS and ingest.py's HMAC; it named
+    # only authenticators and ingest keys.
     @(
         '# Generated by install.ps1. Machine-local; never commit this file.',
-        '# Rotating either secret invalidates what it protects: the TOTP KEK',
-        '# makes every enrolled authenticator unreadable, and the pepper',
-        '# invalidates every issued ingest key.',
+        '# BACK IT UP: nothing can recover these two secrets.',
+        '# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted:',
+        '# enrolled authenticators, collection persona credentials, stored victim',
+        '# credentials and each sample''s data key. Lost, or replaced other than by',
+        '# the key rotation security/envelope.py describes, none of them opens',
+        '# again: every user re-enrols an authenticator, and no stored sample,',
+        '# preserved ones included, can be decrypted. NOCTORNAL_INGEST_PEPPER keys',
+        '# the HMAC of every issued ingest key and every victim-credential',
+        '# fingerprint: lost or changed, every ingest key must be reissued, and',
+        '# stored fingerprints no longer match new ones for the same value.',
         "NOCTORNAL_TOTP_KEK=$kek",
         "NOCTORNAL_INGEST_PEPPER=$pepper",
         '',
         '# Local development stack (infra/docker-compose.yml). Change these',
         '# to point at a real deployment; they are read by the API, by',
         '# scripts/launch.ps1 and by scripts/bootstrap.py.',
-        'DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal',
-        'REDIS_URL=redis://localhost:6379/0',
-        'MINIO_ENDPOINT=localhost:9000',
+        'DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal',
+        'REDIS_URL=redis://127.0.0.1:6379/0',
+        'MINIO_ENDPOINT=127.0.0.1:9000',
         'MINIO_ACCESS_KEY=noctornal',
         'MINIO_SECRET_KEY=dev_only_change_me',
         'EVIDENCE_BUCKET=noctornal-evidence',
@@ -364,7 +400,7 @@ if (Test-Path $EnvLocal) {
         '# Mailpit, on the dev stack only. SMTP_ALLOW_PLAINTEXT is required',
         '# explicitly: sending case material over an unencrypted connection',
         '# is a decision, not a default.',
-        'SMTP_HOST=localhost',
+        'SMTP_HOST=127.0.0.1',
         'SMTP_PORT=1025',
         'SMTP_ALLOW_PLAINTEXT=1'
     # ASCII, NOT `-Encoding UTF8`.
@@ -381,7 +417,9 @@ if (Test-Path $EnvLocal) {
     # this loses nothing and cannot introduce a BOM.
     ) | Set-Content -LiteralPath $EnvLocal -Encoding ascii
     Write-Good 'wrote .env.local with fresh random keys'
-    Write-Note 'Back this file up. Losing the TOTP key locks every account out.'
+    Write-Note 'Back this file up. Without it every user must re-enrol their'
+    Write-Note 'authenticator, and no stored credential or sample can be decrypted'
+    Write-Note 'again. Its header lists what each secret protects.'
 }
 
 # ---------------------------------------------------------------------------

@@ -100,7 +100,13 @@ def suite(
         raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
 
 
-@router.get("/latest", response_model=dict)
+# The three reads below compute nothing and write nothing, but each one
+# PROJECTS the caller's graph to compare hashes, which is the work
+# `GET /graph` does on every sociogram refresh. So they share that route's
+# meter, `graph.view`, rather than the analytics meters that ration igraph
+# runs (2026-09-23).
+@router.get("/latest", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
 def latest(
     case_id: UUID,
     preset: str = Query("all"),
@@ -118,32 +124,97 @@ def latest(
     What the pane shows on opening. Takes the same projection parameters
     as the suite -- with the same defaults -- because they are what name
     the projection row: a `latest` that could only say `preset` would
-    never find a run made with a non-default confidence floor. Computes
-    nothing and writes nothing, so it carries no analytics meter; the
-    blanket ceiling applies.
+    never find a run made with a non-default confidence floor.
 
-    THIS ENDPOINT NEVER VERIFIES THE GRAPH HASH, so it always answers
-    `current: null` -- "not checked" -- and a client must not present its
-    answer as up to date. `cached: true` here says only that the bytes
-    came out of `analytics.metric_run`; on `GET /analytics` the same
-    `cached: true` additionally means the hash matched, which is a
-    currency claim this endpoint cannot make. Until 2026-09-02 there was
-    no `current` and the two were indistinguishable on the wire, so the
-    pane that opens on this endpoint would have told an analyst the case
-    graph was unchanged while it had moved. `computed_at` says WHEN the
-    run happened, never WHETHER it still holds. To ask whether it holds,
-    call `GET /cases/{case_id}/analytics` -- its hash lookup is the only
-    thing in the service that answers that question.
+    `current` is a checked verdict since 2026-09-23: true when the
+    caller's graph, projected now, hashes as it did when the run was
+    computed, false when it has moved. Until then this endpoint never
+    compared hashes and answered `current: null`, so the pane could only
+    say "not recomputed" and an analyst had to spend a metered run to find
+    out whether the numbers still held. `cached: true` says only that the
+    bytes came out of `analytics.metric_run`; `computed_at` says WHEN the
+    run happened, `current` says WHETHER it still describes the graph.
     """
     p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, leiden_resolution)
-    found = _svc(conn, user, case_id).latest(p, params)
+    try:
+        found = _svc(conn, user, case_id).latest(p, params)
+    except ProjectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     if found is None:
         raise Problem(404, "Not found",
                       "no completed analytics run for this projection at your "
                       "clearance yet; run the suite first "
                       "(GET /cases/{case_id}/analytics)")
     return found.as_response()
+
+
+@router.get("/key-player/latest", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
+def key_player_latest(
+    case_id: UUID,
+    n: int = Query(3, ge=1, le=KPP_MAX_REMOVE,
+                   description="Size of the removal set"),
+    preset: str = Query("all"),
+    include_inferred: bool = Query(False),
+    min_confidence: str = Query("LOW"),
+    as_of: datetime | None = Query(None),
+    decay_half_life_months: float | None = Query(None),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The most recent completed key-player run for this projection and
+    removal-set size, with `computed_at` and a checked `current`; 404 when
+    there is none. What the pane shows under "Key player" when it opens on
+    a stored suite, instead of an empty heading."""
+    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
+    params = _params(decay_half_life_months, 1.0)
+    try:
+        found = _svc(conn, user, case_id).latest_key_player(p, params, n_remove=n)
+    except ProjectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    if found is None:
+        raise Problem(404, "Not found",
+                      "no completed key-player run of this size for this "
+                      "projection at your clearance yet")
+    return found.as_response()
+
+
+@router.get("/runs/{run_id}/current", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view"))])
+def run_current(
+    case_id: UUID,
+    run_id: UUID,
+    preset: str = Query("all"),
+    include_inferred: bool = Query(False),
+    min_confidence: str = Query("LOW"),
+    as_of: datetime | None = Query(None),
+    decay_half_life_months: float | None = Query(None),
+    leiden_resolution: float = Query(1.0, gt=0, le=10),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Whether one stored run still describes the caller's graph:
+    `{run_id, algorithm, computed_at, current}`. The projection parameters
+    are the ones the run was computed under; a run of another projection
+    is a 422, and a run the caller cannot see is a 404.
+
+    The pane asks this after the graph under it changes, so it can mark
+    its numbers stale, or leave them unmarked, from the answer rather
+    than from a guess."""
+    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
+    params = _params(decay_half_life_months, leiden_resolution)
+    try:
+        found = _svc(conn, user, case_id).currency(p, params, run_id)
+    except ProjectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    except AnalyticsError as exc:
+        raise Problem(422, "Cannot compare", safe_detail(exc)) from exc
+    if found is None:
+        raise Problem(404, "Not found",
+                      "no completed run with that id in this case at your "
+                      "clearance")
+    return found
 
 
 @router.get("/key-player", response_model=dict,

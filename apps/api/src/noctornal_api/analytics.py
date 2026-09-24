@@ -41,8 +41,10 @@ decisions from these numbers and are entitled to know the error bars exist.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
+import statistics
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -283,19 +285,41 @@ def graph_hash(sub: Subgraph, p: Projection, params: AnalyticsParams) -> bytes:
     cannot see.
     """
     h = hashlib.sha256()
-    h.update(b"noctornal-analytics-v1\x00")
+    # v2 since 2026-09-23: the rows below carry each tie's review state and
+    # whether an exhibit backs it. The suite now reports that coverage
+    # beside the numbers (ux10-analytics:metrics-hide-review-and-evidence-
+    # state), so a run whose ties have since been reviewed or evidenced is
+    # a different answer and must not be served, or called current, as if
+    # it were the same one.
+    #
+    # v3 since the release review (c16, 2026-09-24): each node's label and
+    # type go in beside its id. The payload NAMES people (the table, the
+    # broker card, the removal set, cut vertices and bridges), and with ids
+    # alone a renamed entity kept its old name on a cache hit, on `latest`
+    # and under "nothing it was computed from has changed", with no way in
+    # the console to recompute short of an unrelated edit to the graph. A
+    # label corrected because it named the wrong person or held personal
+    # data kept printing. The type is in because the payload carries it too
+    # and the console colours the name by it. The bump retires every run
+    # stored under v2: a cache miss, and `current` false until run again.
+    h.update(b"noctornal-analytics-v3\x00")
     for key, value in sorted(p.describe().items()):
         h.update(f"{key}={value}\x00".encode())
     for key, value in sorted(params.describe().items()):
         h.update(f"{key}={value}\x00".encode())
     h.update(b"nodes\x00")
-    for nid in sorted(str(n["id"]) for n in sub.nodes):
-        h.update(nid.encode())
+    # A label is anybody's text and may hold any separator, so each row is
+    # written unambiguously (JSON quotes and escapes it): no label can be
+    # worded to make two different node sets hash alike.
+    for row in sorted((str(n["id"]), str(n.get("label") or ""),
+                       str(n.get("node_type") or "")) for n in sub.nodes):
+        h.update(json.dumps(row).encode())
         h.update(b"\x00")
     h.update(b"edges\x00")
     rows = sorted(
         (str(e["src_node_id"]), str(e["dst_node_id"]), str(e["sign"]),
-         format(float(e["weight"]), ".6f"), str(e["valid_from"]), str(e["valid_to"]))
+         format(float(e["weight"]), ".6f"), str(e["valid_from"]), str(e["valid_to"]),
+         str(e.get("review")), str(bool(e.get("has_evidence"))))
         for e in sub.edges
     )
     for row in rows:
@@ -589,9 +613,21 @@ def cohesion(m: Materialised, params: AnalyticsParams) -> dict:
     cut = sorted(g.articulation_points())
     bridge_edges = g.bridges()
 
+    # ux10-analytics:communities-anonymous-table-unsortable (2026-09-23):
+    # the pane printed "4 communities" and a bare integer per actor, so
+    # "how big is each cell" meant counting rows by eye. The sizes travel
+    # with the answer, largest first, each with the id the rows carry.
+    sizes: dict[int, int] = {}
+    for c in membership:
+        sizes[c] = sizes.get(c, 0) + 1
+
     return {
         "membership": membership,
         "community_count": len(set(membership)),
+        "community_sizes": [
+            {"community": c, "size": s}
+            for c, s in sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
         "modularity": _clean(partition.modularity),
         "components": len(comps),
         "component_sizes": sorted((len(c) for c in comps), reverse=True),
@@ -863,10 +899,18 @@ def run_suite(sub: Subgraph, p: Projection,
     # Constraint is ranked ASCENDING: low constraint is the interesting end,
     # because it means the actor spans a structural hole. Rank 1 = least
     # constrained = the broker.
-    c_vals = [v if v is not None else float("inf") for v in holes["constraint"]]
-    c_ranks, _ = _rank_and_percentile([-v for v in c_vals])
-    _, c_pct = _rank_and_percentile([v if v is not None else float("-inf")
-                                     for v in holes["constraint"]])
+    #
+    # The percentile runs the SAME way since 2026-09-23 (ux10-analytics:
+    # rank-percentile-opposite-directions). It was taken over the raw
+    # values, so the least constrained actor read "1st of 30 · p2" beside a
+    # betweenness column where 1st is p98, and "p2" reads as "bottom 2%" to
+    # anyone who is not a statistician: the table's own best broker looked
+    # like the one to dismiss. Now p98 is the least constrained, as rank 1
+    # is, and `constraint_order` says so on the payload so a stored run
+    # computed the old way can be told apart and brought up to date
+    # (`analytics_runs.upgrade_stored`). An isolate's undefined constraint
+    # sorts to the constrained end, as it always did.
+    c_ranks, c_pct = _rank_and_percentile(_least_constrained_first(holes["constraint"]))
 
     nodes = []
     for i, nid in enumerate(m.node_ids):
@@ -897,16 +941,16 @@ def run_suite(sub: Subgraph, p: Projection,
             "is_cut_vertex": any(
                 cv["node_id"] == str(nid) for cv in coh["cut_vertices"]
             ),
-            "broker_signature": _broker_signature(
-                degree[i], cent["betweenness"][i], holes["constraint"][i],
-                ranked["betweenness"][1][i],
-            ),
         })
     nodes.sort(key=lambda r: (-r["betweenness"], r["label"]))
+    leads = assign_broker_leads(nodes)
 
     return {
         "projection": p.describe(),
         "params": params.describe(),
+        "constraint_order": CONSTRAINT_ORDER,
+        "broker_rule": leads,
+        "review_coverage": review_coverage(sub),
         # A metric over a CUT-OFF node set is not a metric over the case.
         # Degree survives truncation; betweenness, modularity and
         # fragmentation do not, because they depend on paths that may run
@@ -1008,24 +1052,157 @@ def _mode_warning(node_types: list[str], degrees: list[int]) -> str | None:
     return None
 
 
-def _broker_signature(degree: int, betweenness: float,
-                      constraint: float | None, btw_pct: float) -> str | None:
-    """The pattern docs/03 wants the UI to teach rather than merely print:
-    "high betweenness with low degree is the classic broker signature. Few
-    connections, but they are the only connections between clusters."
+#: What `constraint_rank` and `constraint_percentile` mean on a payload that
+#: says so: rank 1 and the highest percentile are the LEAST constrained
+#: actor. A stored payload without this key was computed before 2026-09-23,
+#: when the percentile ran the other way.
+CONSTRAINT_ORDER = "least_constrained_first"
 
-    Returned as a sentence rather than a flag so the interface explains the
-    finding instead of showing a badge whose meaning an analyst has to
-    remember.
+#: The broker leads' thresholds, as percentiles among the actors that have
+#: at least one tie (see `assign_broker_leads`).
+FEW_TIES_BETWEENNESS_PCT = 80.0
+FEW_TIES_MAX_DEGREE = 3
+HOLE_BETWEENNESS_PCT = 75.0
+HOLE_CONSTRAINT_PCT = 75.0
+
+_LEAD_TEXT = {
+    "few_ties": (
+        "Broker signature: few ties but high brokerage. These may be the "
+        "only connections between clusters, which usually matters more than "
+        "the loudest poster."),
+    "structural_hole": (
+        "Spans a structural hole: among the least constrained and the most "
+        "brokering actors here. Burt's reading is that this actor's contacts "
+        "are poorly connected to each other, so what passes between them "
+        "tends to pass through this actor."),
+}
+
+
+def _least_constrained_first(values: list[float | None]) -> list[float]:
+    """Constraint turned so that `_rank_and_percentile`'s "highest first"
+    puts the least constrained actor at rank 1 and at the top percentile.
+    Undefined (an isolate) sorts to the constrained end."""
+    return [-v if v is not None else float("-inf") for v in values]
+
+
+def assign_broker_leads(nodes: list[dict]) -> dict:
+    """Mark the actors the pane offers as "Brokers worth a look", on the
+    node rows themselves (`broker_kind`, `broker_signature`), and return the
+    rule that chose them.
+
+    The pattern docs/03 wants the UI to teach rather than merely print:
+    "high betweenness with low degree is the classic broker signature. Few
+    connections, but they are the only connections between clusters." A
+    sentence rather than a flag, so the interface explains the finding
+    instead of showing a badge whose meaning an analyst has to remember.
+
+    RELATIVE since 2026-09-23 (ux10-analytics:broker-lead-card-overclaims).
+    The structural-hole lead fired on an ABSOLUTE constraint below 0.4 with
+    betweenness in the top 30%. In OP-CORVID-26, 29 of 30 actors are below
+    0.4, so the rule was "top 30% by betweenness": it tagged nine actors,
+    among them two of the most constrained in the case, and the card then
+    told an analyst that the busiest actors "profit from the gap between
+    otherwise disconnected groups" in a network with one component. That
+    sentence ends up in reports about people. Both leads now rank the actor
+    against the others:
+
+    - few ties: three ties or fewer (few by any standard, and the old
+      rule's cut), or fewer than the median actor; and betweenness in the
+      top fifth. "At or below the median" was tried first and, on
+      OP-NIGHTJAR-26, called actors with exactly the median nine ties
+      "few ties";
+    - structural hole: in the least constrained quarter AND the top quarter
+      for betweenness.
+
+    The population is the actors with at least one tie. An isolate has no
+    brokerage and no defined constraint, and counting isolates would move
+    every percentile when an unconnected entity is added to the case,
+    promoting actors whose position had not changed. The sentence says
+    what Burt says about the position, not about components, because a
+    structural hole is a gap between an actor's own contacts and exists in
+    a network of one component.
+
+    Runs over node ROWS (degree, betweenness, constraint) rather than the
+    igraph build, so a stored run computed under the old rule can be
+    brought up to date from its own numbers (`analytics_runs`).
     """
-    if betweenness <= 0:
-        return None
-    if degree <= 3 and btw_pct >= 80:
-        return ("Broker signature: few ties but high brokerage. These may be "
-                "the only connections between clusters, which usually matters "
-                "more than the loudest poster.")
-    if constraint is not None and constraint < 0.4 and btw_pct >= 70:
-        return ("Spans a structural hole: low constraint with high brokerage. "
-                "Burt's reading is an actor who profits from the gap between "
-                "otherwise disconnected groups.")
-    return None
+    for n in nodes:
+        n["broker_kind"] = None
+        n["broker_signature"] = None
+    tied = [n for n in nodes if (n.get("degree") or 0) > 0]
+    rule = {
+        "population": "actors with at least one tie",
+        "connected_count": len(tied),
+        "median_degree": None,
+        "few_ties_max_degree": FEW_TIES_MAX_DEGREE,
+        "few_ties_betweenness_percentile": FEW_TIES_BETWEENNESS_PCT,
+        "structural_hole_betweenness_percentile": HOLE_BETWEENNESS_PCT,
+        "structural_hole_constraint_percentile": HOLE_CONSTRAINT_PCT,
+    }
+    if not tied:
+        return rule
+    _, btw_pct = _rank_and_percentile(
+        [float(n.get("betweenness") or 0.0) for n in tied])
+    _, loose_pct = _rank_and_percentile(
+        _least_constrained_first([n.get("constraint") for n in tied]))
+    median = statistics.median(n["degree"] for n in tied)
+    rule["median_degree"] = median
+    for n, bp, cp in zip(tied, btw_pct, loose_pct, strict=True):
+        if not n.get("betweenness") or n["betweenness"] <= 0:
+            continue
+        few = n["degree"] <= FEW_TIES_MAX_DEGREE or n["degree"] < median
+        if few and bp >= FEW_TIES_BETWEENNESS_PCT:
+            kind = "few_ties"
+        elif (n.get("constraint") is not None and cp >= HOLE_CONSTRAINT_PCT
+              and bp >= HOLE_BETWEENNESS_PCT):
+            kind = "structural_hole"
+        else:
+            continue
+        n["broker_kind"] = kind
+        n["broker_signature"] = _LEAD_TEXT[kind]
+    return rule
+
+
+def review_coverage(sub: Subgraph) -> dict:
+    """How much of what the numbers rest on an analyst has reviewed, and how
+    much an exhibit backs.
+
+    ux10-analytics:metrics-hide-review-and-evidence-state (2026-09-23).
+    Machines propose, analysts dispose, and every claim traces to graded
+    evidence: the Graph pane rings unreviewed proposals and counts the
+    elements an exhibit backs. The Analysis pane, which is the one that
+    turns ties into claims about people ("Brokers worth a look", "Removal
+    set"), said neither, so a removal set computed entirely from
+    unreviewed machine proposals with no exhibit read exactly like one
+    computed from reviewed, evidenced ties.
+
+    Counted over the projection's ties, the same population as
+    `edge_count`. Nothing here filters: whether to compute over reviewed
+    ties only is the projection's question, and this is the answer to
+    "what did these numbers rest on".
+
+    DISPUTED is counted since the release review (c11, 2026-09-24). Tie
+    review (`graph.REVIEW_STATES`) can set ACCEPTED, DISPUTED or PROPOSED
+    and refuses REJECTED, so DISPUTED is the one doubt a reviewer can
+    record, and it had no bucket here: five disputed ties at a hub read
+    "reviewed 58 of 58" and "All 58 ties ... have been reviewed" as a calm
+    note, while those ties still drove the brokers and the removal set.
+    REJECTED stays for rows written before tie review refused it.
+    """
+    out = {"ties": len(sub.edges), "proposed": 0, "accepted": 0,
+           "disputed": 0, "rejected": 0, "evidenced": 0, "inferred": 0}
+    for e in sub.edges:
+        state = e.get("review")
+        if state == "PROPOSED":
+            out["proposed"] += 1
+        elif state == "ACCEPTED":
+            out["accepted"] += 1
+        elif state == "DISPUTED":
+            out["disputed"] += 1
+        elif state == "REJECTED":
+            out["rejected"] += 1
+        if e.get("has_evidence"):
+            out["evidenced"] += 1
+        if e.get("is_inferred"):
+            out["inferred"] += 1
+    return out

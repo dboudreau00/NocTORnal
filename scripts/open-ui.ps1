@@ -10,7 +10,7 @@
   development defaults, and hands the URL to your browser.
 
   It does NOT start anything. If the stack or the API is down, run
-  scripts/launch.ps1 instead -- that starts Docker, applies migrations and
+  scripts/launch.ps1 instead: that starts Docker, applies migrations and
   serves the API, and this is the "I already have it running" shortcut.
 
   The token travels in the URL fragment, so it is never sent to the server
@@ -48,7 +48,9 @@ $EnvLocal = Join-Path $RepoRoot '.env.local'
 $Python   = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 
 if (-not (Test-Path -LiteralPath $Python)) {
-    Write-Error "No virtualenv at .venv. Run scripts\launch.ps1 first -- it creates one."
+    # A colon where two hyphens stood in for a dash, as in every other
+    # printed line (Alpha 6 pre-release check, 2026-09-23).
+    Write-Error "No virtualenv at .venv. Run scripts\launch.ps1 first: it creates one."
     exit 1
 }
 
@@ -70,12 +72,15 @@ if (Test-Path -LiteralPath $EnvLocal) {
     }
 }
 
-# The same dev-only default launch.ps1 uses. It only ever addresses a
-# container on localhost; a real deployment supplies this from the
-# environment or Vault.
+# The same dev-only default launch.ps1 uses, 127.0.0.1 for the same reason:
+# the compose file publishes on 127.0.0.1 only, and Windows tries ::1 first
+# for localhost and waits about two seconds for the refusal (Alpha 6
+# pre-release check, 2026-09-23). It only ever addresses a container on
+# this machine; a real deployment supplies this from the environment or
+# Vault.
 if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
     $env:DATABASE_URL =
-        'postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal'
+        'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'
 }
 
 if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {

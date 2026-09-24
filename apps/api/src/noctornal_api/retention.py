@@ -142,6 +142,15 @@ class RetentionError(Exception):
     pass
 
 
+#: The clock an ingest record gets when its category has NO rule at all.
+#: `ingest.py:_retain_until` stamps it; the retention panel names it, so a
+#: category running on a period nobody chose is on screen beside the rules
+#: somebody did (ux15-report:unruled-categories-invisible, 2026-09-23).
+#: Until then the fallback was a literal in ingest.py and no screen said
+#: IOC_FEED and RANSOM_LEAK_POST material was on it.
+UNRULED_RETAIN_DAYS = 365
+
+
 @dataclass(frozen=True)
 class Rule:
     category: str
@@ -172,6 +181,11 @@ class DueItem:
     rule: str | None
     held: bool = False
     hold_reason: str | None = None
+    #: The ingest or document category whose rule set the deadline. The
+    #: due list printed "ingest_record, id 3f2a91bc", which told nobody
+    #: what was about to go (ux15-report:due-list-no-forward-view-no-names,
+    #: 2026-09-23). Exhibits carry none: their deadline is the case's.
+    category: str | None = None
 
 
 @dataclass
@@ -332,7 +346,8 @@ class RetentionService:
                     object_type="document", object_id=row[0], case_id=None,
                     deadline=row[1], rule=f"retention_rule[{row[3]}]",
                     held=bool(row[2]),
-                    hold_reason="document-level legal hold" if row[2] else None))
+                    hold_reason="document-level legal hold" if row[2] else None,
+                    category=row[3]))
 
         # Ingest. docs/17 F17(a): `ingest.record.retain_until` has carried a
         # clock since migration 0033 and `ingest.dead_letter.retain_until`
@@ -361,7 +376,8 @@ class RetentionService:
                 object_type="ingest_record", object_id=row[0], case_id=row[1],
                 deadline=row[2], rule=f"retention_rule[{row[3]}]",
                 held=bool(row[4]),
-                hold_reason="case-level legal hold" if row[4] else None))
+                hold_reason="case-level legal hold" if row[4] else None,
+                category=row[3]))
 
         # Dead letters have no case, so no case hold can reach them. They
         # are scoped out entirely when a case_id is named rather than
@@ -407,8 +423,9 @@ class RetentionService:
             if rule.is_placeholder:
                 result.warnings.append(
                     f"retention for {category} is running on the placeholder "
-                    f"shipped by migration 0032 ({rule.retain_days} days) and "
-                    f"has never been confirmed by a human. See docs/16 D3.")
+                    f"period this software shipped with ({rule.retain_days} "
+                    f"days) and has never been confirmed by a human. Confirm "
+                    f"it on the Records pane, under Retention.")
 
         # THE DOCUMENT SWEEP IS STRUCTURALLY DEAD, and a purge that reports
         # `documents_purged: 0` without saying so is reporting a gap in the
@@ -506,8 +523,9 @@ class RetentionService:
                         f"deleted. The retention schedule says destroy; the "
                         f"object store disagrees. Those rows are NOT marked "
                         f"purged and stay due, so the sweep after the lock "
-                        f"expires finishes the job. See docs/16 C2 before "
-                        f"telling anybody the bytes are gone.")
+                        f"expires finishes the job. Check the lock's expiry "
+                        f"on the object store before telling anybody the "
+                        f"bytes are gone.")
                 if storage.failed:
                     # Distinct from LOCKED on purpose: a lock is a lawful
                     # refusal that will expire, a failure is a store that
@@ -647,7 +665,7 @@ class RetentionService:
             # does not also burn somebody's signature.
             raise RetentionError(
                 f"{held} of the selected exhibits are under legal hold. A "
-                f"hold overrides all deletion, everywhere (docs/08). Lift "
+                f"hold overrides all deletion, everywhere. Lift "
                 f"the hold first, with its own authority.")
 
         payload = {"case_id": str(case_id),

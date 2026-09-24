@@ -67,24 +67,32 @@ a constraint that is either wrong or unenforceable.
   source's own jittered `next_due_at` still decides when it is polled. A
   runner that imposed its own cadence would be the timer this bullet
   refuses.
-- **No SSRF protection yet.** Watch targets are user-supplied URLs, which is
-  exactly the SSRF surface docs/09 names. `fetch()` refuses non-HTTP schemes
-  and private address literals, which is a floor and not a solution -- DNS
-  rebinding is not addressed. Recorded in docs/16.
+- **No egress proxy.** Watch targets are user-supplied URLs, which is
+  exactly the SSRF surface docs/09 names, and `fetch()` now closes it at
+  the connect: each hop's name is resolved ONCE, every answer is classified
+  by what the address is, and the socket is opened to the address that was
+  checked, so a resolver answering public for the check and private for
+  the connect (DNS rebinding) has nothing left to rebind
+  (sec-ssrf-rebinding, 2026-09-23). What is still not built is persona
+  traffic leaving through its egress profile's proxy (docs/04): `fetch()`
+  opens its own connections and consults no proxy setting, because a
+  forward proxy resolves the name again and would reopen exactly this
+  gap. That proxy has to enforce the same policy itself (docs/17).
 """
 from __future__ import annotations
 
 import base64
 import contextvars
 import hashlib
+import http.client
 import ipaddress
 import random
 import re
 import socket
+import ssl
+import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -94,6 +102,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.security import envelope
+from noctornal_api.wording import count_of
 
 #: docs/04's persona lifecycle. A burnt persona never returns to HEALTHY:
 #: reusing one that a forum admin has already flagged is how you burn the
@@ -113,8 +122,9 @@ TRIAGE_STATES = ("NEW", "TRIAGED", "LINKED", "DISCARDED")
 #: status route applies, for the same reason.
 MIN_SUPPRESS_REASON_LENGTH = 5
 
-#: Private ranges an outbound fetch must never reach. A floor, not a
-#: solution -- see the module docstring and docs/16.
+#: Private ranges an outbound fetch must never reach. Since
+#: sec-ssrf-rebinding (2026-09-23) the address judged here is the address
+#: connected to, so this list guards the socket and not just the lookup.
 #:
 #: docs/17 F15(f): the enumerated list missed `::ffff:127.0.0.1` (the
 #: IPv4-mapped form of loopback, which `ip_address` parses as IPv6 and
@@ -168,6 +178,22 @@ MAX_REDIRECTS = 5
 #: path whose memory use is chosen by a monitored source.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
+#: The whole of one `fetch`, by the wall clock: every hop, every connect
+#: attempt, the TLS handshake, the headers and the body, together.
+#:
+#: c2 (2026-09-24): `timeout` was the only limit, and it is a limit on ONE
+#: socket operation. A server that answers `Content-Length: 16000000` and
+#: then sends a byte every ten seconds keeps every single recv inside it,
+#: so the read ran for as long as the far end liked, and the far end is by
+#: this module's own account the people under investigation. One such
+#: source held its poll lock and its RUNNING run row for ever, stopped the
+#: pass it was in, and in the production cron loop stopped the
+#: notification drain queued behind that pass. A minute is generous for
+#: anything a feed legitimately is, and it makes one slow source cost a
+#: pass a minute rather than the whole pass; scripts/collection_poll.py
+#: keeps a clock of its own for the pass.
+MAX_FETCH_SECONDS = 60.0
+
 
 def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Ask the address what it is, then check the ranges the stdlib misses.
@@ -193,8 +219,28 @@ def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return any(address in network for network in _BLOCKED_NETWORKS)
 
 
-def _resolve_and_check(url: str) -> str:
-    """Validate ONE hop. Returns the host, raises if it must not be reached.
+@dataclass(frozen=True)
+class _Hop:
+    """One checked hop: the name a request is addressed to, and the only
+    addresses it may be sent to.
+
+    `addresses` is `(family, type, proto, sockaddr)` straight from the ONE
+    lookup `_resolve_and_check` made, every entry already judged by
+    `_is_blocked`. `_dial` connects to these and to nothing else, which is
+    the whole of the rebinding fix: the answer that was checked is the
+    answer that is used (sec-ssrf-rebinding, 2026-09-23).
+    """
+
+    scheme: str
+    host: str
+    port: int
+    selector: str
+    addresses: tuple[tuple[int, int, int, tuple], ...]
+
+
+def _resolve_and_check(url: str) -> _Hop:
+    """Validate ONE hop and pin it. Returns the addresses the connection
+    may use; raises if the hop must not be reached.
 
     Split out of `fetch` because it has to run on every redirect target as
     well as the first URL -- docs/17 F15(f). `urlopen` follows redirects
@@ -202,8 +248,18 @@ def _resolve_and_check(url: str) -> str:
     public host returning `302 -> http://127.0.0.1/` fetched the internal
     page, which is the whole SSRF this function exists to stop, arrived at
     by the one route nobody looked at.
+
+    sec-ssrf-rebinding (2026-09-23): this used to return the host alone,
+    and `urlopen` then resolved the name a second time inside
+    `socket.create_connection`. Two lookups are two answers, and a zone
+    whose owner answers a public address to the first and 127.0.0.1 to
+    the second (DNS rebinding: a zero TTL is all it takes) walked straight
+    through the check to the internal page. The lookup now happens here,
+    once per hop, and its answers travel in the `_Hop` to `_dial`, which
+    connects to them by number. There is no second lookup for an answer
+    to change in.
     """
-    parsed = urllib.parse.urlparse(url)
+    parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
         raise CollectionError(
             f"refusing scheme {parsed.scheme!r}: only http and https are "
@@ -212,38 +268,334 @@ def _resolve_and_check(url: str) -> str:
     host = parsed.hostname
     if not host:
         raise CollectionError("no host in URL")
+    if parsed.username is not None or parsed.password is not None:
+        # urlopen never sent these either: it took `user:pass@host` whole
+        # for the host name and failed to resolve it. Refused by name now,
+        # because a credential in a URL is outside the vault invariant 7
+        # keeps them in, and a URL is stored, logged and shown.
+        raise CollectionError(
+            "a watch target URL may not carry a user name or password: "
+            "credentials belong in the persona vault, and a URL is stored, "
+            "logged and shown")
     if host.lower().rstrip(".") in _METADATA_HOSTS:
         raise CollectionError(
             f"{host} is a cloud metadata endpoint. Reaching it from a "
             f"collector steals our own credentials, which is worse than the "
             f"SSRF this check is usually about")
     try:
-        resolved = {info[4][0] for info in socket.getaddrinfo(host, None)}
-    except OSError as exc:
+        port = parsed.port
+    except ValueError as exc:
+        raise CollectionError("the port in the URL is not a port") from exc
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    try:
+        # Resolved WITH the port and for TCP, so each answer is a complete
+        # sockaddr `_dial` can connect to without asking anybody again.
+        answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as exc:
         raise CollectionError(f"cannot resolve {host}") from exc
-    if not resolved:
-        raise CollectionError(f"cannot resolve {host}")
-    for address in resolved:
-        # A host with ONE internal answer is refused even if it also has
-        # public ones: which answer the connect() uses is not ours to
-        # choose, and a mixed answer is the classic rebinding setup.
-        if _is_blocked(ipaddress.ip_address(address.split("%")[0])):
+    addresses: list[tuple[int, int, int, tuple]] = []
+    for family, kind, proto, _canonical, sockaddr in answers:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            # Nothing but IPv4 and IPv6 can be classified, and an address
+            # that cannot be classified cannot be connected to.
+            raise CollectionError(
+                f"{host} resolves to an address this check cannot classify")
+        # A host with ONE internal answer is refused even though only the
+        # public ones would now be dialled: a name answering both is a
+        # rebinding setup or a misconfiguration, and a watch target that
+        # is either wants an analyst's eyes, not a quiet partial connect.
+        if _is_blocked(ipaddress.ip_address(str(sockaddr[0]).split("%")[0])):
             raise CollectionError(
                 f"{host} resolves into private address space, which a watch "
-                f"target must not: that is the SSRF shape docs/09 names")
-    return host
+                f"target must not: fetching it would reach this "
+                f"deployment's own internal network")
+        entry = (family, kind, proto, sockaddr)
+        if entry not in addresses:
+            addresses.append(entry)
+    if not addresses:
+        raise CollectionError(f"cannot resolve {host}")
+    selector = parsed.path or "/"
+    if parsed.query:
+        selector += "?" + parsed.query
+    return _Hop(parsed.scheme, host, port, selector, tuple(addresses))
 
 
-class _NoAutoRedirect(urllib.request.HTTPRedirectHandler):
-    """Turns a redirect into an HTTPError so the caller can re-validate.
+def _cut(sock: socket.socket) -> None:
+    """Shut a socket down under whoever is blocked reading it.
 
-    Returning None from `redirect_request` makes urllib raise instead of
-    following, which is exactly what is wanted: the decision to follow has
-    to be ours, because following is what crosses the boundary.
+    The base class's `shutdown`, called directly, so an `SSLSocket` has its
+    descriptor shut and its TLS state left alone: `SSLSocket.shutdown`
+    clears `_sslobj`, and doing that from this thread while the reading
+    thread is inside `_sslobj.read` would be a race of our own making. A
+    socket already closed, or detached by `wrap_socket`, answers OSError,
+    and there is nothing left to cut.
+    """
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+class _Deadline:
+    """One wall-clock allowance for a whole `fetch`, and the watchdog that
+    holds a fetch to it (c2, 2026-09-24).
+
+    Checking the clock between operations is not enough, because the slow
+    operations are the ones that never come back to be checked:
+    `BufferedReader.read(n)` loops on recv until it has n bytes and header
+    parsing loops on `readline`, each recv getting a fresh `timeout`, over
+    TLS as much as over plain TCP. So a timer shuts the socket down
+    under the reader when the allowance runs out, which ends a blocked read
+    wherever it is, and the reader then finds the allowance `spent()` and
+    reports the budget rather than whatever the cut looked like from
+    inside (an EOF, a reset, a short body that would otherwise have passed
+    as the whole one).
+
+    `left()` is checked before each lookup and each connect attempt, and
+    caps each connect, so neither a name with many answers nor a chain of
+    redirects can spend more than the allowance either. A lookup itself
+    cannot be interrupted from here: the system resolver's own timeout
+    bounds it.
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        self._at = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._timer: threading.Timer | None = None
+        self.expired = False
+
+    def exceeded(self) -> CollectionError:
+        return CollectionError(
+            f"the fetch took longer than its {self.seconds:g} second budget "
+            f"and was abandoned. A source that answers this slowly is either "
+            f"struggling or holding the collector on purpose, and either way "
+            f"it does not get to hold the rest of the pass")
+
+    def left(self) -> float:
+        """Seconds remaining; raises once there are none."""
+        remaining = self._at - time.monotonic()
+        if self.expired or remaining <= 0:
+            raise self.exceeded()
+        return remaining
+
+    def spent(self) -> bool:
+        """True once the allowance has run out, whether or not the timer
+        has fired yet. A socket timeout capped at what was left ends at
+        the same instant the timer does, and which of the two wakes first
+        must not decide what the error says."""
+        return self.expired or time.monotonic() >= self._at
+
+    def watch(self, sock: socket.socket | None) -> None:
+        """Put `sock` where the watchdog can cut it, or None to stand it
+        down. Cut at once if the allowance already ran out, which closes
+        the gap between `wrap_socket` detaching the plain socket and the
+        TLS one being handed over."""
+        with self._lock:
+            self._sock = sock
+            if self.expired and sock is not None:
+                _cut(sock)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            if self._sock is not None:
+                _cut(self._sock)
+
+    def __enter__(self) -> _Deadline:
+        self._timer = threading.Timer(
+            max(0.0, self._at - time.monotonic()), self._expire)
+        # A daemon, so an interpreter shutting down mid fetch is not held
+        # open for the rest of the allowance by a timer with nothing to do.
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        self.watch(None)
+
+
+def _dial(hop: _Hop, timeout: float, deadline: _Deadline) -> socket.socket:
+    """A TCP connection to one of the hop's CHECKED addresses.
+
+    Tries them in the resolver's order, the fallback
+    `socket.create_connection` gives, without its lookup: nothing here
+    takes a name, so there is no step at which a different answer could
+    arrive (sec-ssrf-rebinding, 2026-09-23).
+
+    Each attempt gets `timeout` or what is left of the fetch's allowance,
+    whichever is less, and none starts once the allowance is gone (c2,
+    2026-09-24): a name answering eight unreachable addresses used to cost
+    eight full timeouts per hop, on every hop.
+    """
+    failure: OSError | None = None
+    for family, kind, proto, sockaddr in hop.addresses:
+        attempt = min(timeout, deadline.left())
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(attempt)
+            sock.connect(sockaddr)
+        except OSError as exc:
+            sock.close()
+            failure = exc
+            continue
+        return sock
+    raise failure or OSError(f"no address to connect to for {hop.host}")
+
+
+class _PinnedConnection(http.client.HTTPConnection):
+    """An `HTTPConnection` whose socket goes to the checked address.
+
+    Everything above the socket is the stdlib's and unchanged: the request
+    line, the `Host` header (built from `host`, which is the NAME), chunked
+    decoding. Only `connect` differs, and it is the reason this class
+    exists: the stock `connect` hands the name to `create_connection`,
+    which is the second lookup rebinding needs.
+
+    For https the socket is wrapped with `server_hostname` set to the
+    NAME, so SNI carries the name and the certificate is verified against
+    the name, never against the number that was dialled. Pinning the
+    address must not turn into accepting whatever certificate that address
+    presents.
+    """
+
+    def __init__(self, hop: _Hop, *, timeout: float,
+                 tls: ssl.SSLContext | None, deadline: _Deadline):
+        super().__init__(hop.host, hop.port, timeout=timeout)
+        # `putrequest` leaves the port out of `Host` when it equals this,
+        # which is what a server expects for 443 as much as for 80.
+        self.default_port = 443 if tls is not None else 80
+        self._hop = hop
+        self._dial_timeout = timeout
+        self._tls = tls
+        self._deadline = deadline
+
+    def connect(self):
+        sock = _dial(self._hop, self._dial_timeout, self._deadline)
+        self._deadline.watch(sock)
+        if self._tls is not None:
+            try:
+                # The handshake is run by hand rather than inside
+                # `wrap_socket`, so the TLS socket is in the watchdog's
+                # reach before the first handshake byte is awaited. CPython
+                # happens to run a whole handshake under one socket
+                # timeout, which `_dial` has already capped at what is
+                # left; the allowance should not depend on that detail of
+                # `_ssl` staying true, when the reads after the handshake
+                # show what a fresh timeout per call costs (c2,
+                # 2026-09-24).
+                sock = self._tls.wrap_socket(
+                    sock, server_hostname=self._hop.host,
+                    do_handshake_on_connect=False)
+                self._deadline.watch(sock)
+                sock.do_handshake()
+            except BaseException:
+                sock.close()
+                raise
+        self.sock = sock
+
+
+def _refuse_unverifying(context: ssl.SSLContext) -> None:
+    """A caller's own TLS context (a private CA, a test's) is accepted only
+    if it still verifies the certificate AND checks it against the name.
+    Without both, TLS proves nothing about who answered, and the address
+    pin would be the only thing left standing (sec-ssrf-rebinding,
+    2026-09-23)."""
+    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
+        raise CollectionError(
+            "refusing a TLS context that does not verify the certificate "
+            "against the host name: without that check TLS proves nothing "
+            "about who answered")
+
+
+#: The statuses `fetch` follows, each hop re-checked. urllib's own set.
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+
+def _get(hop: _Hop, *, etag: str | None, timeout: float, max_bytes: int,
+         tls: ssl.SSLContext | None, deadline: _Deadline):
+    """One GET on one pinned hop: `(status, headers, body)`.
+
+    The body is read only for a 2xx; a redirect or an error is decided on
+    its status and headers, and reading a body chosen by the far end to
+    decide that would be memory spent for nothing.
+
+    Every step runs inside `deadline`, whose watchdog shuts the socket
+    down under a read that outlives the fetch's allowance. Whatever the
+    cut looks like from here, an EOF, a reset or a body that simply
+    stopped, `deadline.spent()` is what decides the answer (c2,
+    2026-09-24).
+    """
+    connection = None
+    try:
+        connection = _PinnedConnection(hop, timeout=timeout, tls=tls,
+                                       deadline=deadline)
+        connection.request("GET", hop.selector, headers={
+            # Honest about being a collector. A user-agent that impersonates
+            # a browser is a decision with a legal dimension (docs/16 L3),
+            # not a default.
+            "User-Agent": "NocTORnal-collector/1",
+            # One request per connection, as urlopen sent it: a kept-alive
+            # socket would outlive the hop it was checked for.
+            "Connection": "close",
+            **({"If-None-Match": etag} if etag else {}),
+        })
+        response = connection.getresponse()
+        body = b""
+        if 200 <= response.status < 300:
+            # Capped, and read one byte past the cap so the difference
+            # between "exactly at the limit" and "more coming" is
+            # knowable. `timeout` is a PER-SOCKET-OPERATION timeout, not a
+            # transfer budget: a server drip-feeding one chunk every few
+            # seconds keeps an uncapped `read()` alive indefinitely while
+            # the buffer grows. Everything reached through here is
+            # attacker-adjacent by this module's own definition ("a
+            # document written by the people under investigation"), and
+            # the host holding every persona credential is the one doing
+            # the reading. The cap bounds the MEMORY; the time is bounded
+            # by `deadline`, whose watchdog ends this read wherever it has
+            # got to (c2, 2026-09-24).
+            body = response.read(max_bytes + 1)
+            if deadline.spent():
+                raise deadline.exceeded()
+            if len(body) > max_bytes:
+                raise CollectionError(
+                    f"response exceeded {max_bytes} bytes and was "
+                    f"abandoned. A feed larger than this is either a "
+                    f"misconfiguration or something aimed at the "
+                    f"collector; raise max_bytes deliberately if it is "
+                    f"the first.")
+            if response.length:
+                # `HTTPResponse.read(n)` returns a short body without
+                # complaint when the connection ends before the declared
+                # Content-Length, and that is also exactly what a read cut
+                # by the watchdog looks like. A partial feed is not the
+                # feed, so it is refused rather than stored as a document
+                # the source never sent (c2, 2026-09-24).
+                raise CollectionError(
+                    f"the response ended "
+                    f"{count_of(response.length, 'byte', 'bytes')} short of "
+                    f"the length it declared and was abandoned")
+        return response.status, response.headers, body
+    except ssl.SSLCertVerificationError as exc:
+        raise CollectionError(
+            f"certificate check failed for {hop.host}: "
+            f"{redact(exc.verify_message or str(exc))}") from exc
+    except (http.client.HTTPException, OSError, UnicodeError) as exc:
+        if deadline.spent():
+            # The watchdog cut the socket, and this is how the cut looked
+            # from inside the read. The budget is the reason, so the
+            # budget is what is reported.
+            raise deadline.exceeded() from exc
+        raise CollectionError(f"unreachable: {redact(str(exc))}") from exc
+    finally:
+        deadline.watch(None)
+        if connection is not None:
+            connection.close()
 
 
 class CollectionError(Exception):
@@ -454,7 +806,7 @@ class PersonaVault:
         if row[3] and row[3] > datetime.now(timezone.utc):
             raise PersonaUnavailable(
                 f"this persona is cooling down until {row[3].isoformat()}; a "
-                f"persona active 24/7 is a bot and reads as one (docs/04)")
+                f"persona active 24/7 is a bot and reads as one")
         if not row[0]:
             raise CollectionError("this persona has no stored credential")
 
@@ -824,83 +1176,92 @@ def parse_rss(body: bytes) -> list[Item]:
 def fetch(url: str, *, etag: str | None = None,
           timeout: float = 15.0,
           max_redirects: int = MAX_REDIRECTS,
-          max_bytes: int = MAX_RESPONSE_BYTES
+          max_bytes: int = MAX_RESPONSE_BYTES,
+          tls_context: ssl.SSLContext | None = None,
+          max_seconds: float = MAX_FETCH_SECONDS,
           ) -> tuple[bytes, int, str | None, str | None]:
-    """An outbound HTTP GET with the floor of SSRF protection.
+    """An outbound HTTP GET that connects only to addresses it has checked.
 
-    Refuses non-HTTP schemes and addresses that resolve into private space,
-    and re-validates **every redirect hop** rather than the first URL only.
+    Refuses non-HTTP schemes, credentials in the URL and any name that
+    resolves into private space, and does it on **every redirect hop**
+    rather than the first URL only. `tls_context` is for a private CA; it
+    must still verify certificates against the name, and None means the
+    platform trust store, as before.
 
-    **This is a floor, not a solution**: DNS rebinding defeats a
-    resolve-then-connect check -- the name is resolved once here and again
-    by the socket layer, and nothing stops those two answers differing. The
-    real fix is a proxy that enforces the policy at connect time. Recorded
-    in docs/16 rather than implied by its presence.
+    `timeout` bounds each socket operation and `max_seconds` bounds the
+    whole call, every hop included (c2, 2026-09-24). The second is the one
+    a hostile source cannot stretch: it is enforced by a watchdog that
+    shuts the socket down under a read still going when it runs out, so a
+    body or a header drip-fed one byte at a time ends on time instead of
+    when the far end chooses. See `_Deadline`.
 
-    What it is no longer missing (docs/17 F15(f)): redirects. `urlopen`
-    followed them internally, so hops 2..N were reached with no check at
-    all and a public host answering `302 -> http://127.0.0.1/` fetched the
-    internal page. The module docstring named DNS rebinding as the known
-    gap and did not mention this one, so the stated floor was not the
-    actual floor.
+    ## The check and the connect are one lookup (sec-ssrf-rebinding)
+
+    Until 2026-09-23 this docstring called itself a floor and said why: the
+    name was resolved once by the check and again by the socket layer
+    inside `urlopen`, and nothing stopped the two answers differing. That
+    is DNS rebinding, and it needs no more than a zone with a zero TTL
+    answering a public address first and an internal one second.
+
+    Now `_resolve_and_check` resolves each hop's name ONCE and returns the
+    answers it judged, and `_PinnedConnection` connects to those by number.
+    The name still goes everywhere a name belongs: the `Host` header, TLS
+    SNI and the certificate check, so a pinned address serves only the
+    host the URL names.
+
+    No proxy is consulted. `urlopen` read `HTTP_PROXY`, `HTTPS_PROXY` and,
+    on Windows, the system proxy setting, and a forward proxy resolves the
+    name itself, so a check made here would say nothing about where the
+    proxy connected. Persona traffic through an egress proxy is docs/04
+    work, and that proxy will have to enforce this policy itself (docs/17).
+
+    Redirects (docs/17 F15(f)) are followed here, hop by hop, never inside
+    the HTTP library: `urlopen` used to follow them internally, so hops
+    2..N were reached with no check at all and a public host answering
+    `302 -> http://127.0.0.1/` fetched the internal page.
     """
-    opener = urllib.request.build_opener(_NoAutoRedirect)
+    if tls_context is not None:
+        _refuse_unverifying(tls_context)
+    context = tls_context
     seen = [url]
-    for hop in range(max_redirects + 1):
-        current = seen[-1]
-        _resolve_and_check(current)
-        request = urllib.request.Request(current, headers={
-            # Honest about being a collector. A user-agent that impersonates
-            # a browser is a decision with a legal dimension (docs/16 L3),
-            # not a default.
-            "User-Agent": "NocTORnal-collector/1",
-            **({"If-None-Match": etag} if etag else {}),
-        })
-        try:
-            with opener.open(request, timeout=timeout) as response:
-                # Capped, and read one byte past the cap so the difference
-                # between "exactly at the limit" and "more coming" is
-                # knowable. `timeout` is urllib's PER-SOCKET-OPERATION
-                # timeout, not a transfer budget: a server drip-feeding one
-                # chunk every few seconds keeps an uncapped `read()` alive
-                # indefinitely while the buffer grows. Everything reached
-                # through here is attacker-adjacent by this module's own
-                # definition -- "a document written by the people under
-                # investigation" -- and the host holding every persona
-                # credential is the one doing the reading.
-                body = response.read(max_bytes + 1)
-                if len(body) > max_bytes:
-                    raise CollectionError(
-                        f"response exceeded {max_bytes} bytes and was "
-                        f"abandoned. A feed larger than this is either a "
-                        f"misconfiguration or something aimed at the "
-                        f"collector; raise max_bytes deliberately if it is "
-                        f"the first.")
-                return (body, response.status,
-                        response.headers.get("ETag"),
-                        response.headers.get("Last-Modified"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 304:
+    with _Deadline(max_seconds) as deadline:
+        for hop_index in range(max_redirects + 1):
+            current = seen[-1]
+            # Before the lookup, which is the one step the watchdog cannot
+            # interrupt: a chain of redirects is not a way to buy time.
+            deadline.left()
+            hop = _resolve_and_check(current)
+            if hop.scheme == "https" and context is None:
+                # The platform trust store with hostname checking: what
+                # urlopen used, created only once an https hop needs it.
+                context = ssl.create_default_context()
+            status, headers, body = _get(
+                hop, etag=etag, timeout=timeout, max_bytes=max_bytes,
+                tls=context if hop.scheme == "https" else None,
+                deadline=deadline)
+            if status == 304:
                 return b"", 304, etag, None
-            if exc.code not in {301, 302, 303, 307, 308}:
-                raise CollectionError(f"HTTP {exc.code}") from exc
-            location = exc.headers.get("Location")
-            if not location:
-                raise CollectionError(
-                    f"HTTP {exc.code} with no Location header") from exc
-            # Relative targets are legal and common; resolve against the
-            # hop we are ON, not against the original URL.
-            target = urllib.parse.urljoin(current, location)
-            if target in seen:
-                # Agreed, not a bracketed plural (README screenshot set
-                # review, 2026-09-23): the count is known when the line is
-                # written.
-                raise CollectionError(
-                    f"redirect loop at {hop + 1} "
-                    f"{'hop' if hop == 0 else 'hops'}") from exc
-            seen.append(target)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise CollectionError(f"unreachable: {redact(str(exc))}") from exc
+            if status in _REDIRECT_CODES:
+                location = headers.get("Location")
+                if not location:
+                    raise CollectionError(
+                        f"HTTP {status} with no Location header")
+                # Relative targets are legal and common; resolve against
+                # the hop we are ON, not against the original URL.
+                target = urllib.parse.urljoin(current, location)
+                if target in seen:
+                    # Agreed, not a bracketed plural (README screenshot set
+                    # review, 2026-09-23): the count is known when the line
+                    # is written.
+                    raise CollectionError(
+                        f"redirect loop at {hop_index + 1} "
+                        f"{'hop' if hop_index == 0 else 'hops'}")
+                seen.append(target)
+                continue
+            if not 200 <= status < 300:
+                raise CollectionError(f"HTTP {status}")
+            return (body, status, headers.get("ETag"),
+                    headers.get("Last-Modified"))
     raise CollectionError(
         f"more than {max_redirects} redirects. A chain this long is a loop "
         f"or an attempt to exhaust the validator, and neither is a feed")

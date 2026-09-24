@@ -4,7 +4,7 @@
 
 The other seeders each demonstrate one subsystem with a handful of rows.
 This one exists for the different question "what does it look like with a
-real case load in it" — six cases at different classifications and
+real case load in it": six cases at different classifications and
 lifecycle states, and a flagship network big enough that the sociogram and
 the analytics have something to say.
 
@@ -12,13 +12,13 @@ the analytics have something to say.
 
 A uniformly random graph is the wrong demo. It renders as a hairball, every
 centrality comes out flat, community detection finds nothing, and the
-key-player set is indistinguishable from the top-n by degree — which is
+key-player set is indistinguishable from the top-n by degree, which is
 precisely the claim docs/03 says this tool beats. So the generator builds:
 
 - **six crews** of unequal size, densely tied inside (`VOUCHED_FOR`,
   `MEMBER_OF`) and sparsely between;
 - **brokers** that hold few ties but hold them ACROSS crews, so betweenness
-  and Burt's constraint disagree with degree — the broker signature;
+  and Burt's constraint disagree with degree: the broker signature;
 - **a redundant pair** of brokers bridging the same two crews, so the
   optimal removal set is NOT simply the top two by betweenness;
 - **negative ties** (`ACCUSED_SCAM`, `RIVAL_OF`, `DISPUTED_WITH`) placed to
@@ -30,7 +30,7 @@ precisely the claim docs/03 says this tool beats. So the generator builds:
 
 `GraphWriteService` writes every node and edge, so each one carries its
 assertion in the same transaction (invariant 1). Nothing here INSERTs into
-`core.node` or `core.edge` directly — a seeder that did would be creating
+`core.node` or `core.edge` directly. A seeder that did would be creating
 exactly the unfounded graph the model exists to prevent, and it would be
 the first thing a reader copied.
 
@@ -178,7 +178,8 @@ def main() -> int:
         admin.register_compartment(key=key, label=f"{key} (demo seed)",
                                    actor_id=owner)
     if new_keys:
-        print(f"  REGISTERED compartment(s) {', '.join(new_keys)} — this "
+        noun = "compartment" if len(new_keys) == 1 else "compartments"
+        print(f"  REGISTERED {noun} {', '.join(new_keys)}. This "
               f"widens the vocabulary every case and read-in is checked "
               f"against, and is audited as COMPARTMENT_REGISTERED.")
 
@@ -196,7 +197,7 @@ def main() -> int:
         conn.execute(
             "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
             (sorted(set(have) | set(missing)), owner))
-        print(f"  READ {args.owner_email} INTO {', '.join(missing)} — this "
+        print(f"  READ {args.owner_email} INTO {', '.join(missing)}. This "
               f"widens that account's access and is why the compartmented "
               f"case can exist at all.")
 
@@ -212,7 +213,7 @@ def main() -> int:
          "crews that buy from them.", "AMBER", "ACTIVE", []),
         ("OP-KESTREL-26", "Operation Kestrel",
          "Imitator using NIGHTJAR's builder. Separate operator or the same "
-         "hand — the ACH matrix is on this one.", "GREEN", "ACTIVE", []),
+         "hand? The ACH matrix is on this one.", "GREEN", "ACTIVE", []),
         ("OP-HALCYON-25", "Operation Halcyon",
          "Prior year. Dormant pending a disclosure decision.",
          "RED", "DORMANT", DEMO_COMPARTMENTS),
@@ -319,7 +320,7 @@ def build_network(g, sel, *, case_id, ids: dict, owner, make_assertion,
                 assertion=assertion(f"handle {h} posting in {crew_name} "
                                     f"threads"))
             sel.record(case_id=case_id, selector_type="JABBER",
-                       raw_value=f"{h}@nightmarket.im", node_id=n)
+                       raw_value=f"{h}@nightmarket.example", node_id=n)
             if i % 3 == 0:
                 sel.record(case_id=case_id, selector_type="BTC_ADDR",
                            raw_value="bc1q" + "".join(

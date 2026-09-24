@@ -214,13 +214,25 @@ def test_an_admin_can_provision_and_manage_an_analyst(conn, client):
     # this response no longer has -- asserted here rather than left as a
     # bare status, because a 204 is also what a handler that authenticated
     # nobody would return if the cookie were ever dropped.
+    #
+    # The issued password is the administrator's as much as the account's,
+    # so its first use asks for a new one and opens nothing (final review
+    # c8, 2026-09-24); the sign-in that carries the new password is the one
+    # that proves the provisioned credentials work.
     from noctornal_api.http.deps import SESSION_COOKIE
     from noctornal_api.security import totp as totp_mod
+    secret = client.post(base + "/totp", headers=_auth(token)).json()["totp_secret"]
     r = client.post("/api/v1/auth/login", json={
         "email": created["email"], "password": created["password"],
-        "totp_code": totp_mod.code_at(
-            client.post(base + "/totp", headers=_auth(token)).json()["totp_secret"],
-            int(time.time()))})
+        "totp_code": totp_mod.code_at(secret, int(time.time()))})
+    assert r.status_code == 403, r.text
+    assert r.json()["type"] == "urn:noctornal:problem:password-change-required"
+    conn.execute("UPDATE iam.app_user SET totp_last_counter = NULL WHERE id = %s",
+                 (uid,))
+    r = client.post("/api/v1/auth/login", json={
+        "email": created["email"], "password": created["password"],
+        "totp_code": totp_mod.code_at(secret, int(time.time())),
+        "new_password": "a passphrase of their own"})
     assert r.status_code == 204, (
         "an account provisioned through the panel cannot sign in: "
         + r.text)

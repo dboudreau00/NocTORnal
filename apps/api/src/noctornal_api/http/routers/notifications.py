@@ -28,6 +28,7 @@ from noctornal_api.notifications import (
     Notification,
     NotificationError,
     NotificationService,
+    escalates_at,
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -47,9 +48,17 @@ class NotificationOut(BaseModel):
     created_at: datetime
     read_at: datetime | None
     acknowledged_at: datetime | None
+    #: When the drain escalates this unless it is acknowledged first, for
+    #: an unacknowledged priority-1 row; None otherwise
+    #: (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23).
+    escalates_at: datetime | None = None
+    #: The case CODE, so a card about another case can say which one it
+    #: opens (ux08-triage:open-approvals-wrong-case, 2026-09-23). The
+    #: subject already carries it; this is the same fact as a field.
+    case_code: str | None = None
 
 
-def _out(n: Notification) -> NotificationOut:
+def _out(n: Notification, codes: dict | None = None) -> NotificationOut:
     return NotificationOut(
         id=str(n.id), case_id=str(n.case_id) if n.case_id else None,
         kind=n.kind, priority=n.priority, subject=n.subject, summary=n.summary,
@@ -58,6 +67,8 @@ def _out(n: Notification) -> NotificationOut:
         object_id=str(n.object_id) if n.object_id else None,
         created_at=n.created_at, read_at=n.read_at,
         acknowledged_at=n.acknowledged_at,
+        escalates_at=escalates_at(n),
+        case_code=(codes or {}).get(n.case_id),
     )
 
 
@@ -65,16 +76,25 @@ def _out(n: Notification) -> NotificationOut:
             dependencies=[Depends(rate_limit("request"))])
 def inbox(
     unread_only: bool = Query(False),
+    needs_action: bool = Query(False),
     case_id: UUID | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
+    """`needs_action` is the console's default filter: unread, or urgent
+    and not yet acknowledged, which is what still escalates."""
     svc = NotificationService(conn)
     rows = svc.inbox(user.user_id, unread_only=unread_only, limit=limit,
-                     case_id=case_id)
-    return {"notifications": [_out(n).model_dump(mode="json") for n in rows],
-            "unread": svc.unread_count(user.user_id)}
+                     case_id=case_id, needs_action=needs_action)
+    case_ids = list({n.case_id for n in rows if n.case_id})
+    codes = {r[0]: r[1] for r in conn.execute(
+        'SELECT id, code FROM core."case" WHERE id = ANY(%s)',
+        (case_ids,)).fetchall()} if case_ids else {}
+    return {"notifications": [_out(n, codes).model_dump(mode="json")
+                              for n in rows],
+            "unread": svc.unread_count(user.user_id),
+            "urgent_unacknowledged": svc.urgent_unacknowledged(user.user_id)}
 
 
 @router.get("/unread-count", response_model=dict,
@@ -83,9 +103,46 @@ def unread(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The badge. Polled, so it is deliberately one indexed COUNT and
-    nothing else."""
-    return {"unread": NotificationService(conn).unread_count(user.user_id)}
+    """The badge. Polled, so it is deliberately two indexed COUNTs and
+    nothing else: unread, and urgent-but-unacknowledged, which the badge
+    marks apart because reading an alarm does not stop it escalating
+    (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23)."""
+    svc = NotificationService(conn)
+    return {"unread": svc.unread_count(user.user_id),
+            "urgent_unacknowledged": svc.urgent_unacknowledged(user.user_id)}
+
+
+@router.get("/waiting", response_model=dict,
+            dependencies=[Depends(rate_limit("request"))])
+def waiting(
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """What is waiting for this person, per case: proposals in the triage
+    queue, and approval requests they could sign.
+
+    ux08-triage:no-work-waiting-at-sign-in (2026-09-23). The case list
+    showed code, title, status and classification, and the first question
+    after sign-in ("what needs me now") was answered by opening each case
+    to read its badges; a request whose notification had been read left
+    no trace on any badge. Here, not under a case, because the case list
+    is where it is read. Counts only, and only over cases the person may
+    read (see `ProposalStore.waiting_by_case` and
+    `ApprovalService.awaiting_signature`)."""
+    from noctornal_api.approvals import ApprovalService
+    from noctornal_api.http.deps import user_ceiling
+    from noctornal_api.proposals import ProposalStore
+
+    clearance, held = user_ceiling(conn, user.user_id)
+    triage = ProposalStore(conn).waiting_by_case(
+        user.user_id, clearance=clearance.name, compartments=held)
+    sign = ApprovalService(conn).awaiting_signature(
+        user.user_id, clearance=clearance.name, compartments=held)
+    cases = {}
+    for cid in set(triage) | set(sign):
+        cases[cid] = {"triage": triage.get(cid, 0),
+                      "signatures": sign.get(cid, 0)}
+    return {"cases": cases}
 
 
 @router.post("/{notification_id}/read", status_code=204)

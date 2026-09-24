@@ -113,12 +113,36 @@ def test_every_blocking_name_is_a_check_that_exists():
         "that is a decision about what the product refuses to do")
 
 
+def test_the_production_readme_counts_the_register_as_it_is():
+    """infra/production/README.md said "Sixteen checks" and "Four of the
+    sixteen"; the register grew to eighteen on 2026-09-23 (sec-dev-secrets-
+    in-production, sec-redis-isolation) and a count in prose goes stale
+    silently. Spelt the way the README spells it."""
+    words = {16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen",
+             20: "twenty", 21: "twenty-one", 22: "twenty-two"}
+    blockers = {3: "Three", 4: "Four", 5: "Five"}
+    total = words[len(readiness.CHECK_NAMES)]
+    text = " ".join((_TESTS.parents[2] / "infra" / "production" / "README.md")
+                    .read_text(encoding="utf-8").split())
+    assert f"{total.capitalize()} checks, each with the evidence" in text, total
+    assert (f"{blockers[len(readiness.BLOCKING_CHECKS)]} of the {total} are "
+            f"**blocking**") in text
+
+
 def test_the_register_names_are_unique_and_in_register_order():
     """`CHECK_NAMES` is what the router test and the console's ordering
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    assert len(readiness.CHECK_NAMES) == 16, readiness.CHECK_NAMES
+    assert len(readiness.CHECK_NAMES) == 18, readiness.CHECK_NAMES
+    # 2026-09-23: `credentials_not_published` (sec-dev-secrets-in-
+    # production) and `redis_limiter_isolated` (sec-redis-isolation), both
+    # NOT blocking: the first is red on every development machine by
+    # design, and a shared limiter Redis endangers the limits rather than
+    # the material a poll collects.
+    for added in ("credentials_not_published", "redis_limiter_isolated"):
+        assert added in readiness.CHECK_NAMES
+        assert added not in readiness.BLOCKING_CHECKS
     # 2026-09-22 (docs/17 F2, F24): the preservation bucket, proven
     # write-once the same way as the evidence bucket, and NOT blocking.
     # Adding a blocker is a decision about what the product refuses to do,
@@ -150,7 +174,13 @@ def test_the_wire_carries_the_tier_on_every_check():
     two-internally-consistent-halves defect this file exists to prevent.
     """
     keys = set(readiness.Check("x", True, "e").as_dict())
-    assert keys == {"check", "ok", "evidence", "action", "blocking"}, keys
+    # `consequence` and `ui_target` joined 2026-09-23: what a failing
+    # blocker refuses, for the banner's headline, and where the console
+    # settles it (ux16-admin blocking-headline-understates-impact,
+    # readiness-actions-speak-api). `caveat` the same day: what a PASSING
+    # row needs the operator to see (security-officer-false-green).
+    assert keys == {"check", "ok", "evidence", "action", "blocking",
+                    "consequence", "ui_target", "caveat"}, keys
     assert readiness.Check("x", True, "e").as_dict()["blocking"] is False, (
         "blocking must default to False: a check added without a tier is "
         "not a blocker, and the safe default for 'may this refuse?' is no")
@@ -252,10 +282,17 @@ def test_the_collection_run_route_refuses_while_a_blocker_fails():
         "the refusal does not say where the evidence and the action for "
         "each failing check can be read")
 
-    # Exactly one call site: the register is not a gate on the read
+    # Exactly one call site REFUSES: the register is not a gate on the read
     # paths, and a refusal quietly added to a listing route would change
-    # what a RED source's absence means.
-    assert src.count("blocking_failures(conn)") == 1, (
+    # what a RED source's absence means. The due list also READS it since
+    # 2026-09-23, through `_run_readiness`, so the Feeds pane can draw
+    # Poll now as disabled before it is pressed (ux12-feeds:poll-now-one-
+    # click-and-blocked); that helper reports and never raises.
+    start = src.index("def _run_readiness(")
+    helper = src[start:src.index("\n\n\n", start)]
+    assert "raise" not in helper and "Problem(" not in helper, (
+        "the due list's readiness report became a refusal")
+    assert src.replace(helper, "").count("blocking_failures(conn)") == 1, (
         "another route in this file now refuses on readiness; only the "
         "poll was meant to")
 

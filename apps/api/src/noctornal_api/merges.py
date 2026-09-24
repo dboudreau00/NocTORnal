@@ -452,7 +452,7 @@ class MergeService:
                 "a persona cannot be merged into a person. Saying a handle "
                 "IS a human is an attribution, not a merge: record it as an "
                 "ATTRIBUTED_TO edge, which carries a confidence and can be "
-                "withdrawn without rewriting the graph (invariant 2)")
+                "withdrawn without rewriting the graph")
         if src_type != dst_type:
             raise MergeError(
                 f"cannot merge a {src_type} into a {dst_type}: a merge "

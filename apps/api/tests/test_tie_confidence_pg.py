@@ -127,7 +127,11 @@ def _case(client, token) -> str:
 
 def _node(client, token, case_id, label) -> str:
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
-                    json={"node_type": "IDENTITY", "label": label})
+                    json={"node_type": "IDENTITY", "label": label,
+                          # What the API's defaults gave an entity before
+                          # its grading became required (2026-09-23).
+                          "assertion": _graded("LOW", reliability="F",
+                                               credibility="6")})
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
@@ -213,9 +217,12 @@ def test_a_top_level_confidence_is_refused_rather_than_dropped(conn, client):
     declared so a client that sends it there is told where it belongs."""
     token = _owner(conn)
     case_id, a, b = _pair(client, token)
+    # Graded in full, so the request reaches the refusal under test rather
+    # than the 422 a missing grading earns (gap-api-grade-required).
     r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token),
                     json={"edge_type": "VOUCHED_FOR", "src_node_id": a,
-                          "dst_node_id": b, "confidence": "HIGH"})
+                          "dst_node_id": b, "confidence": "HIGH",
+                          "assertion": _graded("HIGH")})
     assert r.status_code == 400, r.text
     assert "assertion.confidence" in r.text
     assert conn.execute("SELECT count(*) FROM core.edge WHERE case_id = %s",
@@ -395,8 +402,19 @@ def test_writing_the_column_directly_is_refused_not_silently_replaced(
 # =======================================================================
 
 def _patch(client, token, case_id, edge_id, body):
+    """A correction, its claim graded where the test leaves grading out.
+
+    The API grades nothing for the caller since gap-api-grade-required
+    (2026-09-23). The fill is what its defaults used to apply (F / 6 /
+    DIRECT_OBSERVATION) and, for a re-grade, the confidence it asks for,
+    which is what the service then graded the claim at. So these tests
+    exercise what they did before; the one about what the console sends
+    states its grading in full."""
+    claim = {"basis": "DIRECT_OBSERVATION", "reliability": "F",
+             "credibility": "6", "confidence": body.get("confidence", "LOW")}
+    claim.update(body.get("assertion") or {})
     return client.patch(f"/api/v1/cases/{case_id}/graph/edges/{edge_id}",
-                        headers=_auth(token), json=body)
+                        headers=_auth(token), json={**body, "assertion": claim})
 
 
 def test_a_correction_raises_the_tie_and_its_own_assertion_agrees(conn, client):
@@ -406,23 +424,34 @@ def test_a_correction_raises_the_tie_and_its_own_assertion_agrees(conn, client):
     case_id, a, b = _pair(client, token)
     tie = _tie(client, token, case_id, a, b, confidence="LOW")
 
-    # Exactly what the console's Correct... dialogue sends: the new value
-    # and a rationale, nothing graded on the analyst's behalf.
+    # Exactly what the console's Correct form sends since 2026-09-23
+    # (gap-api-grade-required): the new value, and the claim graded in full
+    # by the analyst, with the re-grade as its confidence. The Correct...
+    # prompt sent a rationale alone and the API graded the rest.
     r = _patch(client, token, case_id, tie,
-               {"confidence": "HIGH", "assertion": {"rationale": "second vouch"}})
+               {"confidence": "HIGH",
+                "assertion": {"basis": "THIRD_PARTY_REPORT", "reliability": "C",
+                              "credibility": "3", "confidence": "HIGH",
+                              "rationale": "second vouch"}})
     assert r.status_code == 200, r.text
     assert r.json()["confidence"] == "HIGH"
     assert _listed(client, token, case_id, tie) == "HIGH"
     cards = client.get(f"/api/v1/cases/{case_id}/edges/{tie}/assertions",
                        headers=_auth(token)).json()
     assert sorted(c["confidence"] for c in cards) == ["HIGH", "LOW"]
-    newest = cards[0]
-    assert newest["rationale"] == "second vouch"
+    # Found by its rationale rather than as cards[0] (fix round,
+    # 2026-09-23): the list is newest first by recorded_at, and this test
+    # is about the correction's grade, not about two rows recorded
+    # milliseconds apart sorting one way on a busy shared server.
+    corrections = [c for c in cards if c["rationale"] == "second vouch"]
+    assert len(corrections) == 1, cards
+    newest = corrections[0]
     assert newest["confidence"] == "HIGH", (
         "the correction's own grade must be the value it states, or the "
         "header and the card disagree again")
-    # Nothing ELSE was graded upward on the analyst's behalf.
-    assert (newest["reliability"], newest["credibility"]) == ("F", "6")
+    # Recorded as the analyst graded it, and nothing graded for them.
+    assert (newest["basis"], newest["reliability"], newest["credibility"]) == (
+        "THIRD_PARTY_REPORT", "C", "3")
 
 
 def test_a_correction_cannot_lower_a_tie_past_a_live_claim(conn, client):

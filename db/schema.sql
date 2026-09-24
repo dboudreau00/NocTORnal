@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0065.
+-- GENERATED MIRROR of the schema at Alembic revision 0068.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0065
+-- Alembic revision: 0068
 -- =====================================================================
 
 --
@@ -2337,7 +2337,8 @@ CREATE TABLE iam.app_user (
     password_changed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     deactivated_at timestamp with time zone,
-    totp_last_counter bigint
+    totp_last_counter bigint,
+    must_change_password boolean DEFAULT false NOT NULL
 );
 
 --
@@ -2345,6 +2346,12 @@ CREATE TABLE iam.app_user (
 --
 
 COMMENT ON COLUMN iam.app_user.totp_last_counter IS 'Last accepted RFC 6238 TOTP step counter; a code with counter <= this is a replay.';
+
+--
+-- Name: COLUMN app_user.must_change_password; Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON COLUMN iam.app_user.must_change_password IS 'Set when an administrator issues a one-time password; sign-in refuses to mint a session until the account chooses its own (0066).';
 
 --
 -- Name: break_glass; Type: TABLE; Schema: iam; Owner: -
@@ -2737,7 +2744,7 @@ CREATE TABLE lab.detonation (
 CREATE TABLE lab.download_ticket (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     token_hash bytea NOT NULL,
-    sample_id uuid NOT NULL,
+    sample_id uuid,
     user_id uuid NOT NULL,
     session_id uuid,
     issued_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -2745,15 +2752,18 @@ CREATE TABLE lab.download_ticket (
     redeemed_at timestamp with time zone,
     ip_hash bytea,
     purpose text DEFAULT 'download'::text NOT NULL,
+    evidence_id uuid,
     CONSTRAINT download_ticket_expiry_after_issue CHECK ((expires_at > issued_at)),
-    CONSTRAINT download_ticket_purpose_known CHECK ((purpose = ANY (ARRAY['download'::text, 'preserved_retrieval'::text])))
+    CONSTRAINT download_ticket_names_one_object CHECK ((num_nonnulls(sample_id, evidence_id) = 1)),
+    CONSTRAINT download_ticket_purpose_known CHECK ((purpose = ANY (ARRAY['download'::text, 'preserved_retrieval'::text, 'exhibit_production'::text]))),
+    CONSTRAINT download_ticket_purpose_matches_object CHECK (((purpose = 'exhibit_production'::text) = (evidence_id IS NOT NULL)))
 );
 
 --
 -- Name: TABLE download_ticket; Type: COMMENT; Schema: lab; Owner: -
 --
 
-COMMENT ON TABLE lab.download_ticket IS 'One-shot, sixty-second authority to download ONE sample from the sample origin, minted on the application origin under a cookie session. Exhausted state, not a ledger: lab.sample_access is the custody record and audit.event carries the issue and the redemption.';
+COMMENT ON TABLE lab.download_ticket IS 'One-shot, sixty-second authority to download ONE sample, or to produce ONE exhibit of attacker markup, from the sample origin, minted on the application origin under a cookie session. Exhausted state, not a ledger: lab.sample_access and core.evidence_custody are the custody records and audit.event carries the issue and the redemption.';
 
 --
 -- Name: preservation_authorisation; Type: TABLE; Schema: lab; Owner: -
@@ -4530,6 +4540,12 @@ CREATE INDEX victim_credential_service_idx ON ingest.victim_credential USING btr
 CREATE INDEX detonation_sample_idx ON lab.detonation USING btree (sample_id, requested_at DESC);
 
 --
+-- Name: download_ticket_evidence_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX download_ticket_evidence_idx ON lab.download_ticket USING btree (evidence_id, issued_at DESC) WHERE (evidence_id IS NOT NULL);
+
+--
 -- Name: download_ticket_live_idx; Type: INDEX; Schema: lab; Owner: -
 --
 
@@ -6224,6 +6240,13 @@ ALTER TABLE ONLY lab.detonation
 
 ALTER TABLE ONLY lab.detonation
     ADD CONSTRAINT detonation_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
+
+--
+-- Name: download_ticket download_ticket_evidence_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.download_ticket
+    ADD CONSTRAINT download_ticket_evidence_id_fkey FOREIGN KEY (evidence_id) REFERENCES core.evidence(id);
 
 --
 -- Name: download_ticket download_ticket_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -

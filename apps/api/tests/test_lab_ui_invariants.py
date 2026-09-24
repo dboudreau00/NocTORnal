@@ -104,8 +104,16 @@ def test_the_lab_resets_on_a_case_switch_and_drops_stale_reads():
     assert "onCaseSwitch(() => {" in lab
     reset = lab[lab.index("onCaseSwitch(() => {"):]
     reset = reset[:reset.index("});")]
-    for cleared in ("smp-list", "smp-detail", "samples-badge", "smpAllCases"):
+    for cleared in ("smp-list", "samples-badge", "smpAllCases"):
         assert cleared in reset, f"a case switch leaves {cleared} standing"
+    # The card is closed through the one path that also parks it out of
+    # the list before the list is emptied (ux13-lab:detail-opens-offscreen,
+    # 2026-09-23): it can sit under its row, inside the list.
+    assert "smpCloseDetail(" in reset, "a case switch leaves smp-detail standing"
+    assert reset.index("smpCloseDetail(") < reset.index("clear($('smp-list'))"), (
+        "the list is emptied with the card still inside it")
+    close = _fn("smpCloseDetail")
+    assert "show(box, false)" in close and "clear($('smp-detail-body'))" in close
     for name in ("loadSamples", "openSample", "refreshSampleBadge"):
         body = _fn(name)
         assert "caseToken()" in body and "caseChanged(token)" in body, name
@@ -189,9 +197,14 @@ def test_a_preserved_sample_says_how_it_comes_back():
     assert "'/preserved/retrieval-ticket'" in panel
     assert "downloadSample(s, msg," in panel
     assert "preserved:" in _object("DISPOSITION_TEXT")
-    assert _js().count("fetchFromSampleOrigin(") == 1, (
-        "a second cross-origin fetch appeared; the retrieval must reuse "
-        "downloadSample's one call")
+    # The Lab's one cross-origin call is downloadSample's, and the
+    # retrieval reuses it. The console's only other one is an exhibit's
+    # production (x-hostile-export, 2026-09-24), which
+    # test_sample_origin_http_pg names and counts.
+    assert "fetchFromSampleOrigin(" not in panel, (
+        "the retrieval must reuse downloadSample's one call")
+    assert "fetchFromSampleOrigin(" in _fn("downloadSample")
+    assert _js().count("fetchFromSampleOrigin(") == 2
 
 
 def test_the_lab_writes_no_dashes_a_reader_can_see():

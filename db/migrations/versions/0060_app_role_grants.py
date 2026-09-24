@@ -39,10 +39,23 @@ not a no-op -- it is `ERROR: role "noctornal_app" does not exist`, and it would
 break every one of those. Hence one `DO` block per direction, guarded on
 `pg_roles`, doing nothing at all when the role is absent.
 
-The guard is also the upgrade path: an existing deployment adds the role by
-initialising a fresh volume with the password set (initdb scripts never re-run
-on an existing cluster), then re-running `alembic upgrade head`, which finds the
-role this time and grants it.
+The guard also decides the upgrade path, and the order is what matters. A
+role that exists when `alembic upgrade head` takes a database past this
+revision is granted during that run. A role created afterwards is not, and
+running `alembic upgrade head` again does not help: Alembic never re-runs a
+revision it has recorded, so the second run finds nothing to do and the role
+holds no privilege at all (Alpha 6 pre-release check, 2026-09-23: an Alpha
+5.2 database upgraded to 0065 and then given the role). So on an existing
+database, create the role (as a superuser) BEFORE upgrading it past 0060. To
+grant a role that arrived later, run `UPGRADE_SQL` below by hand as the
+schema owner, then 0063's `REVOKE DELETE ON lab.preservation_authorisation`,
+which 0063 skipped for the same reason.
+`release/alpha6-upgrade/app-role-grants.sql` is those two, taken from the
+migrations and held to them by `test_alpha6_upgrade_contract.py`; measured
+the same day, it left the role holding exactly what it holds where it
+existed before the upgrade, privilege for privilege. A fresh volume
+initialised with the password set creates the role before any migration
+runs, so a database built on it from nothing is granted in order.
 
 ## What is granted, and which parts are load-bearing
 

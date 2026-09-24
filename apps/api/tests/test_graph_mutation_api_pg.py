@@ -194,11 +194,33 @@ def _create_case(client, token) -> str:
     return r.json()["id"]
 
 
+#: The grading every claim written here carries where a test does not
+#: state its own. The API grades nothing for the caller since
+#: gap-api-grade-required (2026-09-23); these are the values its old
+#: defaults applied silently, so every test below exercises what it did
+#: before, now stated. test_api_grade_required_pg.py holds the refusal.
+UNGRADED = {"basis": "DIRECT_OBSERVATION", "reliability": "F",
+            "credibility": "6", "confidence": "LOW"}
+
+
+def _graded(body: dict) -> dict:
+    """`body` with its assertion graded where the test left grading out.
+    A re-grade grades its claim at the confidence it asks for, as the
+    console does: the server refuses the two disagreeing."""
+    out = dict(body)
+    claim = dict(UNGRADED)
+    if "confidence" in out:
+        claim["confidence"] = out["confidence"]
+    claim.update(out.get("assertion") or {})
+    out["assertion"] = claim
+    return out
+
+
 def _new_node(client, token, case_id, label, **kw) -> str:
     body = {"node_type": "IDENTITY", "label": label}
     body.update(kw)
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
-                    json=body)
+                    json=_graded(body))
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
@@ -208,14 +230,14 @@ def _new_edge(client, token, case_id, src, dst, edge_type="VOUCHED_FOR",
     body = {"edge_type": edge_type, "src_node_id": src, "dst_node_id": dst}
     body.update(kw)
     r = client.post(f"/api/v1/cases/{case_id}/edges", headers=_auth(token),
-                    json=body)
+                    json=_graded(body))
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
 
 def _patch(client, token, case_id, kind, oid, body):
     return client.patch(f"/api/v1/cases/{case_id}/graph/{kind}/{oid}",
-                        headers=_auth(token), json=body)
+                        headers=_auth(token), json=_graded(body))
 
 
 def _retire(client, token, case_id, kind, oid, reason="duplicate of another entity"):

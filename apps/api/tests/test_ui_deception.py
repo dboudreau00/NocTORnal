@@ -267,8 +267,10 @@ def test_a_refusal_does_not_become_the_next_cases_empty_state():
     js = _js()
     for kind, empty in (("cap", "dcp-cap-empty"), ("eml", "dcp-eml-empty"),
                         ("call", "dcp-call-empty")):
-        text = re.search(r'<p id="' + empty + r'" class="empty">([^<]*)</p>',
-                         html)
+        # `hidden` since ux17-failure:loading-shows-empty-claims
+        # (2026-09-23): the line is shown only after a read has answered.
+        text = re.search(r'<p id="' + empty
+                         + r'" class="empty" hidden>([^<]*)</p>', html)
         assert text, f"#{empty} changed shape"
         blank = re.search(kind + r": \{ list: '[^']*', empty: '" + empty
                           + r"',\s*counts: '[^']*', blank: '([^']*)'", js)

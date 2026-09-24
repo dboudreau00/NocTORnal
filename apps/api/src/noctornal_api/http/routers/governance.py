@@ -65,11 +65,18 @@ from noctornal_api.http.deps import (
     effective_labels,
     get_conn,
     require_global,
+    user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.evidence import EvidenceError, EvidenceStorage
-from noctornal_api.retention import PurgeResult, RetentionError, RetentionService
+from noctornal_api.retention import (
+    UNRULED_RETAIN_DAYS,
+    PurgeResult,
+    RetentionError,
+    RetentionService,
+)
+from noctornal_api.http.routers.search import _allowed_on_case
 from noctornal_api.security.access import (
     AccessResolutionError,
     evaluate,
@@ -196,6 +203,8 @@ def rules(
                              if rule.confirmed_at else None),
         })
     unconfirmed = [r["category"] for r in out if r["is_placeholder"]]
+    in_use = _categories_in_use(conn, user, {c: r for c, r in found})
+    unruled = [c["category"] for c in in_use if not c["has_rule"]]
     # The console prints this notice as it stands, so it says "rules" or
     # "rule" and names no design document: "6 rule(s) ... (docs/16 D3)"
     # was on screen in the Lifecycle pane (README screenshot review,
@@ -204,6 +213,10 @@ def rules(
     return {
         "rules": out,
         "unconfirmed": unconfirmed,
+        "in_use": in_use,
+        "unruled": unruled,
+        "fallback_days": UNRULED_RETAIN_DAYS,
+        "unruled_notice": _unruled_notice(unruled),
         "notice": (
             f"{n} {'rule still holds' if n == 1 else 'rules still hold'} a "
             f"placeholder period nobody has confirmed. Retention periods are "
@@ -211,6 +224,69 @@ def rules(
             f"has to." if unconfirmed else
             "Every rule has been confirmed, with a rationale and a name."),
     }
+
+
+def _categories_in_use(conn: psycopg.Connection, user: CurrentUser,
+                       rules: dict) -> list[dict]:
+    """Every ingest category with live records on the caller's cases, with
+    the clock it actually runs on.
+
+    ux15-report:unruled-categories-invisible (2026-09-23). The Rules list
+    and the confirm form were filled from `core.retention_rule` alone, so a
+    category with no rule at all was on no screen: NIGHTJAR's IOC_FEED and
+    RANSOM_LEAK_POST records ran on `UNRULED_RETAIN_DAYS`, a period nobody
+    chose, while the notice implied that confirming the six listed rules
+    closed the question. RANSOM_LEAK_POST is the category most likely to be
+    full of victims' personal data.
+
+    Counted over the cases where the caller holds `retention.read`, by the
+    same rule as `/due` and the confirmation's count: a deployment-wide
+    tally would be a volume report on cases they have no relationship to.
+    Asked of the gate as a question (`_allowed_on_case`), not through
+    `_authorised_cases`: the rules are read every time the Lifecycle pane
+    opens, and a break-glass grant's use count must not climb because
+    somebody looked at a list of category names.
+    """
+    assigned = conn.execute(
+        "SELECT case_id FROM iam.case_assignment WHERE user_id = %s "
+        "ORDER BY case_id", (user.user_id,)).fetchall()
+    scope = [r[0] for r in assigned
+             if _allowed_on_case(conn, user, r[0], "retention.read")]
+    if not scope:
+        return []
+    rows = conn.execute(
+        """SELECT category, count(*), min(retain_until)
+             FROM ingest.record
+            WHERE purged_at IS NULL AND case_id = ANY(%s)
+            GROUP BY category ORDER BY category""", (scope,)).fetchall()
+    out = []
+    for category, live, soonest in rows:
+        rule = rules.get(category)
+        out.append({
+            "category": category,
+            "live_records": live,
+            "has_rule": rule is not None,
+            "retain_days": rule.retain_days if rule else UNRULED_RETAIN_DAYS,
+            "is_placeholder": rule.is_placeholder if rule else None,
+            "soonest_deadline": soonest.isoformat() if soonest else None,
+        })
+    return out
+
+
+def _unruled_notice(unruled: list[str]) -> str | None:
+    """The sentence the console prints above the rules when a category in
+    use has no rule, or None when every one has."""
+    if not unruled:
+        return None
+    n = len(unruled)
+    names = (unruled[0] if n == 1
+             else ", ".join(unruled[:-1]) + " and " + unruled[-1])
+    return (f"{names} {agree(n, 'has', 'have')} live records on your cases "
+            f"and no rule, so {agree(n, 'it runs', 'they run')} on the "
+            f"{UNRULED_RETAIN_DAYS}-day fallback, a period nobody chose. "
+            f"Confirm a rule for "
+            f"{agree(n, 'it', 'each')} below: it applies to material "
+            f"ingested from then on.")
 
 
 class ConfirmRuleBody(BaseModel):
@@ -303,13 +379,25 @@ def due(
     user: CurrentUser = Depends(require_global("retention.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """What has passed its deadline. Destroys nothing.
+    """What has passed its deadline, or will by `as_of`. Destroys nothing.
 
     A preview exists so that "what would this purge" is a question you can
     ask before it is a thing you have done. Held items come back FLAGGED
     rather than filtered out: "nothing is due" and "eleven things are due
     and all of them are frozen by a court order" are different answers,
     and an operator needs the second one.
+
+    ## Forward, and by name (ux15-report:due-list-no-forward-view-no-names,
+    ## 2026-09-23)
+
+    The console only ever asked for what had ALREADY expired, so the first
+    time an item appeared here was the moment it became destroyable, and
+    "Nothing is due." read as "no deadlines" on a case whose stealer logs
+    expired in 85 days. A future `as_of` is the forward window; each row
+    says whether it is `past_deadline` now, so "due in 30 days" and "due
+    now" are never confused. Rows name what they are: an exhibit's title
+    (only when the caller could open that exhibit: `evidence.read` on the
+    case and its labels within their ceiling) and a record's category.
     """
     if case_id is not None:
         _case_scoped(conn, user, case_id, "retention.read")
@@ -325,17 +413,15 @@ def due(
         items.extend(svc.due(case_id=cid, as_of=as_of, limit=limit))
     items = items[:limit]
     held = [i for i in items if i.held]
+    rows = _due_rows(conn, user, items)
     return {
-        "due": [
-            {"object_type": i.object_type, "object_id": str(i.object_id),
-             "case_id": str(i.case_id) if i.case_id else None,
-             "deadline": i.deadline.isoformat(), "rule": i.rule,
-             "legal_hold": i.held, "hold_reason": i.hold_reason}
-            for i in items],
+        "due": rows,
         "count": len(items),
         "on_legal_hold": len(held),
+        "past_deadline": sum(1 for r in rows if r["past_deadline"]),
+        "as_of": (as_of or datetime.now(timezone.utc)).isoformat(),
         "notice": ("Nothing has been destroyed. Legal hold overrides "
-                   "deletion everywhere (docs/08), so held items are "
+                   "deletion everywhere, so held items are "
                    "listed and flagged rather than quietly omitted."),
     }
 
@@ -356,6 +442,54 @@ class PurgeBody(BaseModel):
     #: real run is refused unless what is due is still exactly what that
     #: dry run counted. See `_preview_digest`.
     preview: str | None = Field(None, max_length=128)
+
+
+def _due_rows(conn: psycopg.Connection, user: CurrentUser,
+              items: list[DueItem]) -> list[dict]:
+    """Due items as rows a person can recognise.
+
+    `title` is an exhibit's own title, and ONLY when this caller could open
+    the exhibit: `retention.read` (which gates this list) is held by roles
+    that do not hold `evidence.read`, and an exhibit can be labelled above
+    its case. Otherwise the row says the title is withheld rather than
+    pretending the exhibit has none. `category` is the ingest or document
+    category whose rule set the deadline. `past_deadline` compares with
+    now, so a forward window's rows can say "due in 30 days".
+    """
+    now = datetime.now(timezone.utc)
+    by_case: dict[UUID, list[UUID]] = {}
+    for i in items:
+        if i.object_type == "evidence" and i.case_id is not None:
+            by_case.setdefault(i.case_id, []).append(i.object_id)
+    titles: dict[UUID, str] = {}
+    for cid, ids in by_case.items():
+        # A question, not an access: `_allowed_on_case` neither audits a
+        # denial nor counts a break-glass use for a title lookup.
+        if not _allowed_on_case(conn, user, cid, "evidence.read"):
+            continue
+        clearance, held = user_ceiling(conn, user.user_id, case_id=cid)
+        rows = conn.execute(
+            """SELECT id, title, classification, compartments
+                 FROM core.evidence WHERE case_id = %s AND id = ANY(%s)""",
+            (cid, ids)).fetchall()
+        for eid, title, cls, comps in rows:
+            if (tlp_from_name(str(cls)) <= clearance
+                    and frozenset(comps or []) <= held):
+                titles[eid] = title
+    out = []
+    for i in items:
+        exhibit = i.object_type == "evidence"
+        out.append({
+            "object_type": i.object_type, "object_id": str(i.object_id),
+            "case_id": str(i.case_id) if i.case_id else None,
+            "deadline": i.deadline.isoformat(), "rule": i.rule,
+            "legal_hold": i.held, "hold_reason": i.hold_reason,
+            "past_deadline": i.deadline <= now,
+            "category": i.category,
+            "title": titles.get(i.object_id) if exhibit else None,
+            "title_withheld": exhibit and i.object_id not in titles,
+        })
+    return out
 
 
 def _preview_digest(case_id: UUID, authority: str,
@@ -479,6 +613,13 @@ def purge(
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     out = _purge_response(result, dry_run=body.dry_run)
+    if body.dry_run:
+        # WHAT would go, not only how many: a dry run that counts "3
+        # exhibits" cannot tell anyone whether the exhibit their accepted
+        # assertion rests on is one of them (ux15-report:due-list-no-
+        # forward-view-no-names, 2026-09-23). The same rows `/due` returns,
+        # read at the same instant as the digest.
+        out["items"] = _due_rows(conn, user, items)
     # The check above and the service's own read of what is due are two
     # statements, not one snapshot. The counts are compared afterwards so
     # that a change landing between them is SAID rather than papered over:

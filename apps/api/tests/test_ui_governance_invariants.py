@@ -427,13 +427,19 @@ def test_an_approval_is_titled_with_the_entities_it_merges():
     """ux19: the card's title was the catalogue key and its body was two
     UUIDs, so the approver could not see what they were signing."""
     title = _fn("approvalTitle")
-    assert "labelOf(p.source_node_id)" in title
-    assert "labelOf(p.target_node_id)" in title
+    # Named by the SERVER since ux08-triage:approval-row-uuids-no-requester
+    # (2026-09-23): `labelOf` knew only what the projection drew, so a
+    # merge outside it was still two UUIDs. The behaviour is run in
+    # test_ui_triage_inbox.py.
+    assert "approvalEntity(s.source, p.source_node_id)" in title
+    assert "approvalEntity(s.target, p.target_node_id)" in title
     row = _fn("approvalRow")
     assert "approvalTitle(a)" in row and "requested_by_name" in row
-    assert "Requested by ' + asker" in row, "the Approve prompt names them"
+    assert "Requested by ' + asker" in _fn("approvalActions"), (
+        "the Approve prompt names them")
     apr = (SRC / "http" / "routers" / "approvals.py").read_text(encoding="utf-8")
     assert '"requested_by_name"' in apr and '"decided_by_name"' in apr
+    assert 'item["subjects"]' in apr
 
 
 # The assertion line's author and exhibit names (the other half of ux19)

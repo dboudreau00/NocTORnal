@@ -8,7 +8,7 @@ completion percentages. Each was true the day it was typed and copied
 forward by hand until it was not, and each was found by a reader rather
 than by CI.
 
-`test_doc_invariants.py` started checking them on 2026-09-09 -- with a
+`test_doc_invariants.py` started checking them on 2026-09-09, with a
 five per cent tolerance on the test total, because a hand-maintained
 number cannot track a tree that gains tests every commit. Five per cent
 of sixteen hundred is eighty tests of drift, and the very release that
@@ -27,7 +27,7 @@ file is checked in, a tool regenerates it, and CI fails on a diff.
 
 Only the regions listed in `CHECKED` below, and inside them only the
 shapes in `SUBSTITUTIONS`. `ROADMAP-REMAINING.md` is mostly a stack of
-DATED records -- "**State (2026-08-10):** ... 1890 passing" -- which are
+DATED records ("**State (2026-08-10):** ... 1890 passing"), which are
 history and must never be rewritten, so only the text above its second
 `**State (` heading is live. The changelog is entirely dated records and
 is not read at all.
@@ -61,7 +61,7 @@ def test_function_count() -> int:
         for path in sorted(root.rglob("test_*.py")):
             n += len(_TEST_DEF.findall(path.read_text(encoding="utf-8")))
     if n < 500:
-        raise SystemExit(f"only counted {n} test functions -- wrong root?")
+        raise SystemExit(f"only counted {n} test functions. Is this the wrong root?")
     return n
 
 
@@ -72,7 +72,7 @@ def revision_files() -> list[Path]:
 def revision_count() -> int:
     n = len(revision_files())
     if n < 50:
-        raise SystemExit(f"only {n} migration version files -- wrong root?")
+        raise SystemExit(f"only {n} migration version files. Is this the wrong root?")
     return n
 
 
@@ -231,7 +231,13 @@ def refresh(check: bool = False) -> int:
     total_seen = 0
     for name, marker in CHECKED.items():
         path = ROOT / name
-        raw = path.read_text(encoding="utf-8", newline="")
+        # Bytes, decoded: the text exactly as stored, CRLF included, so the
+        # write below can keep each file's line endings. It was
+        # `read_text(encoding="utf-8", newline="")`, and Path.read_text has
+        # no `newline` until Python 3.13, so on 3.12, the documented
+        # minimum, this raised TypeError before reading anything (Alpha 6
+        # pre-release check, 2026-09-23).
+        raw = path.read_bytes().decode("utf-8")
         crlf = "\r\n" in raw
         text = raw.replace("\r\n", "\n")
         cut = _live_region(text, marker)
@@ -254,7 +260,7 @@ def refresh(check: bool = False) -> int:
                 path.write_text(out.replace("\n", "\r\n") if crlf else out,
                                 encoding="utf-8", newline="")
     if total_seen < 10:
-        print(f"only {total_seen} counter claims found -- the shapes moved "
+        print(f"only {total_seen} counter claims found: the shapes moved "
               f"and this tool is checking nothing", file=sys.stderr)
         return 1
     if stale:

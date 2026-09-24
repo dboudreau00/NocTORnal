@@ -1,7 +1,7 @@
 # NocTORnal: analyst manual
 
-> Alpha software. See [README.md](README.md) for the legal status; four
-> decisions gate any use against real material.
+> Alpha software. See [README.md](README.md) for the legal status; five
+> decisions, L1 to L5, gate any use against real material.
 
 This is not a feature tour. It explains what each screen is *for*, what
 the numbers mean, and the places where the tool will refuse you on
@@ -177,11 +177,48 @@ Read the warnings above the matrix. They are not decoration:
 
 - **An untested hypothesis is excluded from the ranking** and named. It has
   not survived; it has not competed.
-- **A row scored against fewer than two hypotheses shows ", ", not 0.00.**
-  Its diagnosticity is *unknown*, not zero, and finishing that row is
-  usually the cheapest useful work on the screen.
-- **A row consistent with everything is dimmed.** It feels like strong
-  evidence and discriminates nothing.
+- **A row with a blank cell that agrees with itself so far reads
+  *unfinished*, not 0.00.** Its diagnosticity is *unknown*, not zero, the
+  blanks it still needs are outlined, and finishing that row is usually the
+  cheapest useful work on the screen. The *next test* line names the row
+  and the hypotheses it lacks, and **Score it now** opens the first blank.
+- **A row that says the same thing about every hypothesis is dimmed** and
+  left out of every score. It feels like strong evidence and discriminates
+  nothing.
+
+Reading the numbers:
+
+- **H1, H2 and so on number the hypotheses in the order they were
+  written.** A number never moves when the ranking does, and a ruled-out
+  hypothesis keeps its number.
+- **Every score is stance times weight.** Each row shows its Admiralty
+  grade and the weight every cell in it counts at: 1.00 for A1, 0.49 for
+  C3, 0.04 for F6, and an ungraded source counts as F6. A ranking card
+  prints the result as *against 0.49*.
+- **Each row says what its evidence claims**: the entity, or both ends of
+  a tie, and the rationale. The name opens it in the graph.
+
+Working the matrix:
+
+- **A cell keeps its note.** The chooser opens with it and says who wrote
+  it and when, a save keeps it unless you change it, and a replaced note
+  stays listed as an earlier note and in the audit trail. The report prints
+  each note beside the stance it explains.
+- **Clear** puts a cell back to not assessed, which *neutral* is not.
+- **Status…** accepts, disputes, rejects or supersedes a hypothesis, or
+  puts it back in play. Rejecting needs the reason, and so does taking a
+  rejection back. Rejected and superseded hypotheses leave the ranking;
+  tick *Include ruled out* to list them after it. A rejected one stays in
+  the report with its status and the reason given for it. A superseded one
+  leaves the report.
+- **Reword…** corrects a hypothesis while nothing has been scored against
+  it. After that, write the new wording as a new hypothesis and mark the
+  old one superseded.
+
+The **Assumptions** tab lists what the analysis takes for granted.
+Refuting one needs the reason, and so does confirming or reopening one that
+was refuted. Withdrawing is permanent and says the row was entered in
+error; Cancel leaves it as it was.
 
 ### Report: build, then release
 
@@ -201,7 +238,7 @@ Every figure in a redacted report is labelled as computed over the redacted
 graph, because a number carried across a classification boundary without
 that label is a number that will be quoted without it.
 
-### Lifecycle: retention, destruction, break-glass
+### Records: retention, destruction, break-glass
 
 - **Retention rules** govern data about people who are not under
   investigation. A rule nobody has confirmed is a number somebody typed,
@@ -244,9 +281,19 @@ by design.
   that puts working malware on a disk. The archive password `infected` is
   an interlock against a double-click and a mail gateway, **not**
   confidentiality. It is public and the encryption is broken by design.
-- **A legal hold beats a rejection.** Rejecting destroys the bytes and the
-  key. If the sample is held, that is refused: preservation and destruction
-  can both be legal obligations and software does not get to choose.
+- **A rejection preserves the sample.** Rejecting moves the encrypted
+  bytes into the object-locked `noctornal-preserved` store under a legal
+  hold and keeps the data key (migration 0063). Getting them back out
+  takes two people: a Security Officer authorises one named Lead
+  investigator for that one sample, and that investigator retrieves it.
+  Nobody can authorise their own retrieval.
+- **Destruction is a deployment's declared choice, and a legal hold beats
+  it.** A rejection destroys the bytes and the key only where the
+  deployment has declared `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy`.
+  If the sample or its case is under a legal hold, that is refused:
+  preservation and destruction can both be legal obligations and software
+  does not get to choose. `GET /samples/policy` says which disposition is
+  in force.
 
 **Detonation / VM.** Records an authorisation; **submits nothing**. There is
 no sandbox integration in this build. The exposure level is the decision

@@ -47,10 +47,14 @@ closes permanently the moment the first account exists; every later
 account is created from **Admin** in the rail, or with `bootstrap.py`.
 
 Once you are in, the **Admin** tab (rail, bottom group) creates further
-analysts, grants and revokes global roles, sets clearance, unlocks
-accounts after failed logins, and re-issues a TOTP secret for an analyst
-whose phone is gone. It needs `user.manage`. SYS_ADMIN holds it, and it
-is step-up, so a stale session is re-challenged.
+analysts (each replaces the password they were given at their first sign-in),
+grants and revokes global roles, sets clearance and compartment
+read-ins, unlocks accounts after failed logins, re-issues a TOTP secret for
+an analyst whose phone is gone, and resets a forgotten password: the
+analyst gets a one-time password and chooses their own at their next
+sign-in. It needs `user.manage`. SYS_ADMIN holds it, and it is step-up, so
+a stale session is re-challenged. Everyone changes their own password from
+**Account** (your name, top right).
 
 **The shell way** (works even with accounts present), in a second
 terminal from the repo root:
@@ -137,6 +141,11 @@ docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d
   something different, the entry is wrong.
 - **`locked`**: five failures locks the account for 15 minutes. Clear it
   with `bootstrap.py unlock --email you@example.com`.
+- **`bad_password`, and the password is forgotten**: an administrator
+  resets it from **Admin**. When nobody can (you are the last
+  administrator), `bootstrap.py reset-password --email you@example.com`
+  prints a one-time password; signing in with it asks you to choose a new
+  one, with a fresh code from your authenticator.
 - **`bad_totp` on codes you are sure of**. Ask the server which is wrong,
   the secret or the clock. Enter the six digits your app is showing:
   `bootstrap.py totp-diagnose --email you@example.com --code 123456`. It

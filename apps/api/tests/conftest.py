@@ -27,6 +27,12 @@ os.environ.setdefault(
 # and does not depend on this. Must run before the first import of
 # `noctornal_api.evidence`, which is why it sits up here with the KEK.
 os.environ.setdefault("EVIDENCE_RETENTION_DAYS", "1")
+# Since 2026-09-24 a lodging locks to the CASE's retention date when that
+# is later (x-lock-extension), up to `evidence.LOCK_HORIZON`, and test
+# cases are retained to 2027 and 2028: without this every ingest against
+# the dev bucket would lock its object for years. One day, as above; the
+# tests about the horizon set their own.
+os.environ.setdefault("EVIDENCE_LOCK_HORIZON_DAYS", "1")
 
 from noctornal_api.security.auth import AuthUser, UserStore
 from noctornal_api.security.sessions import SessionRecord, SessionStore

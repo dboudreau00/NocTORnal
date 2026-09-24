@@ -88,3 +88,24 @@ def test_the_app_reports_the_same_version():
     from noctornal_api.http.app import create_app
 
     assert create_app().version == _pyproject_version()
+
+
+PRODUCTION_COMPOSE = API_ROOT.parents[1] / "infra" / "production" / "compose.yml"
+
+
+def test_the_production_image_is_tagged_with_the_version():
+    """The fourth reporter: `infra/production/compose.yml` tags the image it
+    builds. Nothing held that tag to pyproject, and the Alpha 6 pre-release
+    check (2026-09-23) found the release preparation bumping pyproject
+    alone, which would have gone on tagging Alpha 6 images
+    `noctornal-api:0.5.2`. Equality, not a particular version: this holds
+    at 0.5.2 before the release commit and at 0.6.0 after it, and fails
+    on a commit that moves one without the other. Read as text: the tag is
+    one line, and parsing YAML for it would add a dependency this pure
+    test does not otherwise need."""
+    text = PRODUCTION_COMPOSE.read_text(encoding="utf-8")
+    tags = re.findall(r"^\s*image:\s*noctornal-api:(\S+)\s*$", text, re.M)
+    assert tags, "infra/production/compose.yml builds no noctornal-api image"
+    assert set(tags) == {_pyproject_version()}, (
+        f"infra/production/compose.yml tags noctornal-api as {sorted(set(tags))} "
+        f"but pyproject.toml declares {_pyproject_version()!r}")

@@ -53,8 +53,13 @@ EXPECTED_CHECKS = (
     "totp_kek_set",
     "kek_ring_opens_stored_secrets",
     "ingest_pepper_set",
+    # 2026-09-23, sec-dev-secrets-in-production: a credential some file in
+    # this repository (or MinIO) publishes, on any process.
+    "credentials_not_published",
     "rate_limiting_enabled",
     "redis_limiter_store",
+    # 2026-09-23, sec-redis-isolation: docs/16 C8's other half.
+    "redis_limiter_isolated",
     "evidence_bucket_object_lock",
     # 2026-09-22, docs/17 F2: the store rejected samples are preserved in.
     "preservation_bucket_object_lock",
@@ -190,7 +195,8 @@ def test_every_check_is_listed_with_evidence_and_a_verdict(conn, client):
     assert names == list(EXPECTED_CHECKS), names
     for check in body["checks"]:
         assert set(check) == {"check", "ok", "evidence", "action",
-                              "blocking"}, check
+                              "blocking", "consequence", "ui_target",
+                              "caveat"}, check
         assert isinstance(check["ok"], bool), check
         assert isinstance(check["evidence"], str) and check["evidence"].strip(), (
             f"{check['check']} reported no evidence; a verdict without "

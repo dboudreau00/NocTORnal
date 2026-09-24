@@ -18,17 +18,19 @@
 #     connects as. The test suite still needs the owner (ten *_pg files run
 #     ALTER TABLE ... DISABLE TRIGGER, which only an owner may do), so this
 #     split exists here and nowhere else.
-#   * Redis runs `noeviction`. Dev runs `allkeys-lru`, and the readiness
-#     register reports that as NOT ready for a reason: an evicted GCRA
-#     meter admits the subject it was refusing, with a full burst.
+#   * Redis runs `noeviction`, as dev does since the Alpha 6 pre-release
+#     check (2026-09-23), and here it also needs a password and is
+#     reachable only from the compose network. The readiness register
+#     reports any evicting policy as NOT ready for a reason: an evicted
+#     GCRA meter admits the subject it was refusing, with a full burst.
 #   * The evidence bucket gets a COMPLIANCE default retention. Dev keeps
 #     GOVERNANCE 365d because COMPLIANCE cannot be lifted by anyone,
 #     including the root credential, so a dev bucket would become
 #     resettable only by destroying the volume -- which takes the dev
 #     database with it.
 #   * NOTHING is published except Caddy's 80 and 443. Dev publishes six
-#     ports; here Postgres, Redis, MinIO and both application processes are
-#     reachable only from the compose network.
+#     ports, on 127.0.0.1 only; here Postgres, Redis, MinIO and both
+#     application processes are reachable only from the compose network.
 #
 # ## What this deployment does NOT give you
 #
@@ -86,7 +88,7 @@ x-noctornal-app: &noctornal-app
   build:
     context: ../..
     dockerfile: Dockerfile
-  image: noctornal-api:0.5.2
+  image: noctornal-api:0.6.0
   env_file: [secrets.env]
   networks: [noctornal]
   restart: unless-stopped
@@ -197,8 +199,10 @@ services:
   # ------------------------------------------------------------------------
   # The rate limiter's meter store, and NOT a cache that may be evicted.
   #
-  # `--maxmemory-policy noeviction` is the whole difference from dev, and
-  # readiness._redis_limiter_store fails the register on any evicting
+  # `--maxmemory-policy noeviction`, the same policy dev runs since the
+  # Alpha 6 pre-release check (2026-09-23); the differences from dev are the
+  # password below and that nothing outside the compose network can reach
+  # it. readiness._redis_limiter_store fails the register on any evicting
   # policy: a GCRA meter deleted under memory pressure admits the subject it
   # was refusing with a full burst, which is the login-guessing brake
   # disappearing exactly when the box is loaded.
@@ -247,10 +251,12 @@ services:
   # 9001 inside the network, so an operator who needs it forwards a port for
   # the length of one session rather than leaving it exposed.
   #
-  # `:latest` matches the dev file. For a deployment you intend to keep,
-  # pin a dated MinIO release tag here: object storage is the one component
-  # where an unattended major upgrade can change how a bucket behaves, and
-  # this file cannot honestly pick a version it has not been tested against.
+  # The image is pinned to the same RELEASE tag as the dev file, not
+  # `:latest` (the note on the service below says why; this line still
+  # said `:latest` until the Alpha 6 pre-release check, 2026-09-23). Object
+  # storage is the one component where an upgrade can change how a bucket
+  # behaves, so move the tag deliberately, in both files, and only to a
+  # release you have tested.
   #
   # ## TLS, and why this hop is encrypted at all
   #
@@ -740,8 +746,10 @@ services:
   #
   # It does not have to be trusted to serve only downloads, either: the
   # application refuses everything else when it is configured as the sample
-  # origin (`_allowed_on_sample_origin` in http/app.py allows the download,
-  # its preflight, /healthz and the readiness register, and nothing more).
+  # origin (`_allowed_on_sample_origin` in http/app.py allows the Lab's
+  # download and an exhibit of attacker markup's production (migration
+  # 0068), their preflights, /healthz and the readiness register, and
+  # nothing more).
   # So the console, the login form and every case route 404 at the sample
   # hostname whatever Caddy routes there -- the split is a property of the
   # process rather than of a proxy allow-list nobody tests.

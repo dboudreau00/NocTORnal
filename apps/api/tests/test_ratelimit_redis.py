@@ -32,12 +32,34 @@ def backend():
     return RedisBackend(REDIS_URL)
 
 
+def _forget(*patterns: str) -> None:
+    """Delete what a test wrote. `test:` keys are not the limiter's, and
+    since 2026-09-23 the readiness row `redis_limiter_isolated` reports a
+    Redis holding them as SHARED (sec-redis-isolation), so a suite that
+    left them for their TTL (a minute, for `claim_once`) would flip the
+    register it tests in whichever readiness test ran next. Best effort:
+    a Redis that went away mid-test is that test's failure, not this one's."""
+    import redis
+
+    try:
+        client = redis.Redis.from_url(REDIS_URL, socket_connect_timeout=1,
+                                      socket_timeout=1)
+        for pattern in patterns:
+            for name in client.scan_iter(match=pattern, count=1000):
+                client.delete(name)
+        client.close()
+    except Exception:  # noqa: BLE001 - cleanup never decides a verdict
+        pass
+
+
 @pytest.fixture
 def key():
     # A fresh key per test: these run against a shared dev Redis and a
     # leftover meter from a previous run would make the first assertion
     # fail for reasons that have nothing to do with the code.
-    return f"test:rl:{uuid4().hex}"
+    name = f"test:rl:{uuid4().hex}"
+    yield name
+    _forget(name)
 
 
 def test_the_script_allows_the_burst_then_refuses(backend, key):
@@ -202,19 +224,23 @@ def test_the_limiter_end_to_end_over_redis(key):
     from noctornal_api.ratelimit import Limit, RateLimiter, Scope
     from noctornal_api.ratelimit_redis import RedisBackend
 
+    prefix = f"test:{uuid4().hex[:8]}"
     limiter = RateLimiter(
         RedisBackend(REDIS_URL),
         limits={"t": Limit("t", quota=4, per_seconds=4, scope=Scope.USER, burst=2)},
-        key_prefix=f"test:{uuid4().hex[:8]}",
+        key_prefix=prefix,
     )
-    assert limiter.check("t", "u:1").allowed
-    assert limiter.check("t", "u:1").allowed
-    denied = limiter.check("t", "u:1")
-    assert not denied.allowed
-    assert not denied.degraded, "a measured refusal is not a degraded one"
-    assert denied.headers["Retry-After"] == "1"
-    # A different subject is unaffected.
-    assert limiter.check("t", "u:2").allowed
+    try:
+        assert limiter.check("t", "u:1").allowed
+        assert limiter.check("t", "u:1").allowed
+        denied = limiter.check("t", "u:1")
+        assert not denied.allowed
+        assert not denied.degraded, "a measured refusal is not a degraded one"
+        assert denied.headers["Retry-After"] == "1"
+        # A different subject is unaffected.
+        assert limiter.check("t", "u:2").allowed
+    finally:
+        _forget(f"{prefix}:*")
 
 
 def test_peek_does_not_consume_over_redis(backend, key):

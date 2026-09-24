@@ -844,14 +844,22 @@ def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
     _, analyst = _user(conn, roles=("ANALYST",))
     _, admin = _user(conn, roles=("SYS_ADMIN",))
     _, officer = _officer(conn)
+    # `blocking_failures` joined 2026-09-23 (ux16-admin
+    # blocking-banner-buried-under-account-list), and `readiness_caveats`
+    # the same day (security-officer-false-green), for an administrator
+    # alone: an account without user.manage is told nothing about either.
     assert client.get("/api/v1/admin/access", headers=_session(conn, analyst)
                       ).json() == {"user_manage": False,
-                                   "break_glass_review": False}
+                                   "break_glass_review": False,
+                                   "blocking_failures": [],
+                                   "readiness_caveats": []}
     assert client.get("/api/v1/admin/access", headers=_session(conn, admin)
                       ).json()["user_manage"] is True
     assert client.get("/api/v1/admin/access", headers=_session(conn, officer)
                       ).json() == {"user_manage": False,
-                                   "break_glass_review": True}
+                                   "break_glass_review": True,
+                                   "blocking_failures": [],
+                                   "readiness_caveats": []}
     # ...and it opens nothing: the list still wants user.manage.
     assert client.get("/api/v1/admin/users",
                       headers=_session(conn, analyst)).status_code == 403

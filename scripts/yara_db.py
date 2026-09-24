@@ -126,7 +126,8 @@ def cmd_fetch(args) -> int:
     if args.only:
         wanted = set(args.only)
         sources = [s for s in sources if s["name"] in wanted]
-    print("fetching %d source(s) into %s" % (len(sources), VENDOR))
+    print("fetching %d %s into %s" % (
+        len(sources), "source" if len(sources) == 1 else "sources", VENDOR))
     records: list[dict] = []
     with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         for rec in pool.map(fetch_one, sources):

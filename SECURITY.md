@@ -57,9 +57,9 @@ use**. It has never been operated against real targets. That means:
   `NOCTORNAL_SESSION_STRICT_BINDING`. A report that one of them is
   missing is not a finding.
 - **Out of scope:** the development `docker-compose.yml`. It ships
-  `dev_only_change_me` as a password on purpose, publishes ports to
-  localhost, and says "development only" in its first line. It is not a
-  deployment.
+  `dev_only_change_me` as a password on purpose, publishes its ports on
+  127.0.0.1 (IPv4 loopback) only, and says "development only" in its first
+  line. It is not a deployment.
 
 ## What this project treats as a bug even when tests pass
 

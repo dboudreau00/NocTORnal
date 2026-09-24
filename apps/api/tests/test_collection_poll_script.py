@@ -225,6 +225,65 @@ def test_a_source_another_runner_holds_is_counted_not_failed() -> None:
         "source behind it unpolled")
 
 
+def _load_script():
+    """The script as a module, without running `main()`."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("collection_poll_c2", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_pass_that_runs_out_of_time_defers_the_rest(monkeypatch, capsys):
+    """c2 (2026-09-24): a pass had a count and no clock. Each fetch is now
+    held to its own allowance, but a pass of slow sources still ran for as
+    long as they added up to, and the compose loop's notification drain
+    waited behind it. Past `--max-seconds` a pass starts nothing new: the
+    rest are counted `deferred`, not failed, and are never attempted.
+
+    Run for real against stand-ins, with a clock that moves only when a
+    poll does, so the property is observed rather than read off the
+    source."""
+    from types import SimpleNamespace
+
+    module = _load_script()
+    clock = [1000.0]
+    polled: list[str] = []
+
+    class Service:
+        def __init__(self, _conn):
+            pass
+
+        def due_sources(self):
+            return [{"id": f"source-{n}", "due_at": None, "health": "OK",
+                     "consecutive_failures": 0} for n in range(4)]
+
+        def run_once(self, source_id, *, actor_id):
+            polled.append(source_id)
+            clock[0] += 100.0
+            return SimpleNamespace(items_seen=1, items_new=0, watch_hits=0,
+                                   warnings=[], error=None, run_id=None)
+
+    monkeypatch.setattr(module, "connect",
+                        lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(module, "blocking_failures", lambda _conn: [])
+    monkeypatch.setattr(module, "CollectionService", Service)
+    monkeypatch.setattr(module, "time",
+                        SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr("sys.argv", ["collection_poll.py",
+                                     "--max-seconds", "150"])
+
+    code = module.main()
+    out = capsys.readouterr().out
+
+    # 0 s: first poll starts; 100 s: second starts; 200 s: past 150, so
+    # the third and fourth are deferred without being touched.
+    assert polled == ["source-0", "source-1"]
+    assert "selected=4 polled=2 skipped=0 deferred=2 failed=0" in out, out
+    assert code == 0, "running out of time is not a failure"
+
+
 def test_the_runner_owns_no_sql_and_asks_what_is_due() -> None:
     """Hazard (b), enforced structurally rather than by comment.
 

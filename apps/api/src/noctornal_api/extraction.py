@@ -47,7 +47,8 @@ from uuid import UUID
 
 import psycopg
 
-from noctornal_api.proposals import KIND_NODE, ProposalStore
+from noctornal_api.proposals import KIND_NODE, TLP_ORDER, ProposalStore, strictest
+from noctornal_api.wording import agree
 from noctornal_ontology.normalisers import normalise
 
 EXTRACTOR = "paste_selector_regex"
@@ -108,6 +109,11 @@ class ExtractionError(Exception):
     pass
 
 
+class CaptureRefused(ExtractionError):
+    """A capture this case cannot hold as things stand. The route answers
+    409 (a state of the case, not a malformed request)."""
+
+
 @dataclass(frozen=True)
 class Hit:
     selector_type: str
@@ -126,6 +132,14 @@ class CaptureResult:
     hits: list[Hit] = field(default_factory=list)
     proposal_ids: list[UUID] = field(default_factory=list)
     skipped_existing: int = 0
+    #: The label this capture's proposals carry: never below the case, nor
+    #: below an earlier capture of the same text. The triage notice is
+    #: labelled with it (final review u12, 2026-09-24).
+    classification: str | None = None
+    #: The label the document is stored at. A fresh capture's is the same
+    #: as `classification`; a re-paste's is the earlier capture's, which a
+    #: re-paste never changes (c15 follow-up, 2026-09-24).
+    document_classification: str | None = None
 
     def summary(self) -> dict:
         by_type: dict[str, int] = {}
@@ -138,6 +152,8 @@ class CaptureResult:
             "by_type": by_type,
             "proposals_created": len(self.proposal_ids),
             "already_known": self.skipped_existing,
+            "classification": self.classification,
+            "document_classification": self.document_classification,
         }
 
 
@@ -255,6 +271,58 @@ class CaptureService:
             (kind, name),
         ).fetchone()[0]
 
+    def stored_label(self, case_id: UUID, requested: str) -> str:
+        """The label a capture into this case is stored at: the one asked
+        for, never below the case's own.
+
+        Final review c15 (2026-09-24). `collect.document` hangs off a
+        source, not a case: it has no case_id, no compartments and no
+        floor trigger, and `/collection/documents` and the combined search
+        filter it by its own label alone for every holder of
+        `collection.read`. The capture form defaulted to AMBER on every
+        case, so a stealer-log thread pasted into RED OP-HALCYON-25 was
+        stored at AMBER, and every AMBER collection reader in the
+        deployment could list its title, URL and an excerpt. The proposals
+        were already raised to the case; the document was not.
+
+        A compartmented case is refused outright. A document cannot carry
+        compartments until the schema gives it some, so any label it is
+        stored at is readable outside them: the RED document would still
+        be listed to RED readers who are not in STEALER-2026. An exhibit
+        is read under its case's compartments, so that is where such
+        material goes for now."""
+        if requested not in TLP_ORDER:
+            raise ExtractionError(f"unknown classification {requested!r}")
+        row = self._c.execute(
+            'SELECT classification FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        if row is None:
+            raise ExtractionError("no such case")
+        refused = self.refusal(case_id)
+        if refused:
+            raise CaptureRefused(f"{refused} Nothing was captured.")
+        return strictest(requested, row[0]) or requested
+
+    def refusal(self, case_id: UUID) -> str | None:
+        """Why this case takes no capture, in the words the console shows
+        on its capture form, or None when it takes one. The case record
+        does not carry its compartments to the console, so the triage
+        queue sends this instead (c15, 2026-09-24)."""
+        row = self._c.execute(
+            'SELECT compartments FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        held = sorted((row[0] if row else None) or [])
+        if not held:
+            return None
+        return (f"Capture is off on this case. It is kept in "
+                f"{agree(len(held), 'compartment', 'compartments')} "
+                f"{', '.join(held)}, and a captured document cannot carry "
+                f"compartments yet: stored, its text would be listed and "
+                f"searchable in the collection by readers outside "
+                f"{agree(len(held), 'it', 'them')}. Upload the material as "
+                f"evidence instead: an exhibit is only ever read under the "
+                f"case's own compartments.")
+
     def capture(
         self,
         *,
@@ -270,6 +338,9 @@ class CaptureService:
         """Land the text, extract, and raise proposals for what was found."""
         if not text or not text.strip():
             raise ExtractionError("nothing to capture")
+        # Never below the case, and never into a compartmented one (c15,
+        # 2026-09-24): see `stored_label`.
+        classification = self.stored_label(case_id, classification)
 
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         source = self.source_id()
@@ -279,7 +350,7 @@ class CaptureService:
         # must not manufacture a second document and a second set of
         # proposals for the same observation.
         existing = self._c.execute(
-            """SELECT id FROM collect.document
+            """SELECT id, classification FROM collect.document
                 WHERE source_id = %s AND content_sha256 = %s""",
             (source, digest),
         ).fetchone()
@@ -291,11 +362,32 @@ class CaptureService:
             # case must still raise proposals THERE, or the second analyst
             # silently gets nothing. Proposals are deduped separately, by
             # value, inside _propose.
-            result = CaptureResult(existing[0], deduplicated=True)
+            #
+            # The stricter of the stored document's label and this
+            # paste's: the text is the same, and whichever analyst judged
+            # it more sensitive is the one to believe, so the proposals
+            # raised HERE carry it.
+            #
+            # The shared document keeps its own label (c15 follow-up,
+            # 2026-09-24). Raising it on a stricter re-paste was tried in
+            # this pass and protected nothing: the same text was already
+            # stored, and readable, at the lower label, and a document
+            # records no case, so the stricter case's interest never
+            # reaches it. What the raise did reach was every OTHER case
+            # citing the document. A proposal is read at the stricter of
+            # its own and its document's label, so an AMBER case's pending
+            # proposals and its Open source view vanished from that case's
+            # own AMBER reviewers, and the vanishing told them somebody
+            # above their clearance had pasted the same thread.
+            label = strictest(existing[1], classification) or classification
+            result = CaptureResult(existing[0], deduplicated=True,
+                                   classification=label,
+                                   document_classification=existing[1])
             if propose:
                 result.hits = find_selectors(text)
                 result.proposal_ids, result.skipped_existing = self._propose(
-                    case_id, existing[0], text, result.hits)
+                    case_id, existing[0], text, result.hits,
+                    classification=label)
             return result
 
         with self._c.transaction():
@@ -323,21 +415,44 @@ class CaptureService:
                      h.score),
                 )
 
-        result = CaptureResult(document_id, deduplicated=False, hits=hits)
+        result = CaptureResult(document_id, deduplicated=False, hits=hits,
+                               classification=classification,
+                               document_classification=classification)
         if propose:
             result.proposal_ids, result.skipped_existing = self._propose(
-                case_id, document_id, text, hits)
+                case_id, document_id, text, hits,
+                classification=classification)
         return result
 
     def _propose(self, case_id: UUID, document_id: UUID, text: str,
-                 hits: list[Hit]) -> tuple[list[UUID], int]:
+                 hits: list[Hit], *,
+                 classification: str) -> tuple[list[UUID], int]:
         """One proposal per NEW selector value.
 
         A selector already recorded in this case is not proposed again --
         the observation is worth storing as an extraction, but asking an
         analyst to re-triage a handle they accepted last week is how a
         triage queue becomes something people stop opening.
+
+        Each proposal carries the capture's `classification`, and Accept
+        writes its element at that label unless the reviewer raises it
+        (ux08-triage:accept-downgrades-classification and the owner's
+        gap-capture-classification, 2026-09-23). The capture form asked
+        for a classification, stored it on the document, and the payload
+        never carried it, so a RED capture's selectors were accepted at
+        AMBER.
+
+        One transaction for the batch: all of a capture's proposals land
+        together or none do, and the live channel folds their
+        announcements into one event rather than one per selector.
         """
+        with self._c.transaction():
+            return self._propose_each(case_id, document_id, text, hits,
+                                      classification)
+
+    def _propose_each(self, case_id: UUID, document_id: UUID, text: str,
+                      hits: list[Hit],
+                      classification: str) -> tuple[list[UUID], int]:
         made: list[UUID] = []
         skipped = 0
         seen: set[tuple[str, str]] = set()
@@ -376,6 +491,7 @@ class CaptureService:
                 payload={
                     "node_type": "SELECTOR",
                     "label": h.norm_value,
+                    "classification": classification,
                     "attrs": {
                         "selector_type": h.selector_type,
                         "raw_value": h.raw_value,

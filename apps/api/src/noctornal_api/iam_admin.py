@@ -36,6 +36,26 @@ Lowering a user's clearance below a case they OWN is refused for the same
 reason `cases.py` refuses to raise a case above its owner: both create an
 owner who cannot read their own case, and there is no route back.
 
+## Passwords (gap-password-reset, 2026-09-23)
+
+There was no password reset anywhere, so a forgotten password had no way
+back. The owner decided it is ADMINISTRATOR ISSUED, with no email path:
+`reset_password` sets a generated one-time password, returns it once (the
+same one-time credentials the create route returns), revokes every live
+session and sets `must_change_password` (0066). Sign-in then refuses to
+mint a session until the person chooses their own (`routers/auth.py`), so
+the password the administrator saw never opens a session. It is refused
+for oneself: a person changes their own password through
+`change_password`, which asks for the current one and a code, because an
+administrator resetting their own password would be a way round that.
+`scripts/bootstrap.py reset-password` is the same call for the last
+administrator, who has nobody to ask.
+
+The password `create_analyst` issues with a new account is administrator
+issued too, with the TOTP secret beside it, and since 2026-09-24 it sets
+the same flag (final review c8). First run does not: its operator is
+creating their own account.
+
 ## Compartments (0057)
 
 The registry lesson cited by the role allowlist below was, until
@@ -56,7 +76,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
-from noctornal_api.security import totp
+from noctornal_api.security import passwords, totp
 from noctornal_api.security.envelope import _load_kek
 from noctornal_api.stores import PgSessionStore, PgUserStore
 from noctornal_api.wording import agree
@@ -96,6 +116,85 @@ _TLP = ("CLEAR", "GREEN", "AMBER", "RED")
 #: byte-for-byte by the access gate, so case and whitespace variants are
 #: not "the same compartment"; they are a second one that nobody holds.
 COMPARTMENT_KEY = re.compile(r"^[A-Z0-9_-]{2,32}$")
+
+#: docs/05 sets "no rotation policy, no composition rules", so length is
+#: the whole of the rule for a password a person chooses. Twelve rather
+#: than eight because every account here reads case material and the
+#: second factor is the only other thing in front of it. The ceiling is
+#: not a strength rule: it stops one request buying an unbounded Argon2id
+#: input.
+MIN_PASSWORD_LENGTH = 12
+MAX_PASSWORD_LENGTH = 1024
+
+
+def new_password_problem(new: str, *, email: str,
+                         current: str | None = None) -> str | None:
+    """Why `new` cannot be a person's password, or None when it can.
+
+    Checked BEFORE any credential is verified, by every path that takes a
+    chosen password (gap-password-reset, 2026-09-23): a rule failure then
+    costs no lockout attempt and spends no authenticator code, and nothing
+    here depends on the account, so it tells a caller nothing about one.
+    `current` is the password the same request proves, so "the same as the
+    one being replaced" is a string comparison and never a second hash.
+    """
+    if len(new) < MIN_PASSWORD_LENGTH:
+        return (f"a new password needs at least {MIN_PASSWORD_LENGTH} "
+                f"characters. Length is the only rule: a long phrase is "
+                f"better than a short mix of symbols")
+    if len(new) > MAX_PASSWORD_LENGTH:
+        return (f"a new password can be at most {MAX_PASSWORD_LENGTH} "
+                f"characters")
+    if current is not None and new == current:
+        return ("the new password is the one being replaced; choose a "
+                "different one")
+    address = (email or "").strip().casefold()
+    if address and new.strip().casefold() in {address, address.split("@")[0]}:
+        return ("a password that is the account's own email address is the "
+                "first one anybody tries; choose a different one")
+    return None
+
+
+def change_password(conn: psycopg.Connection, user_id: UUID, new_password: str,
+                    *, keep_session: UUID | None, via: str) -> int:
+    """Store a password its owner chose, and sign out everywhere else.
+
+    The caller has already proved the current password and a second factor
+    (`routers/auth.py`, both the Account form and the sign-in that follows
+    a reset) and has already checked `new_password_problem`. Clears
+    `must_change_password` in the same statement that stores the hash, so
+    there is no moment at which the account holds a chosen password and
+    still demands a change, or the reverse.
+
+    Every OTHER session is revoked: a password is changed because it may be
+    known to someone else, and a session that someone else opened with it
+    carries its own token and never re-presents the password. The session
+    making the change is kept, or the person would be signed out by their
+    own success. Returns how many were revoked, for the audit row and the
+    notice.
+    """
+    from datetime import datetime, timezone
+    with conn.transaction():
+        conn.execute(
+            """UPDATE iam.app_user
+                  SET password_hash = %s, must_change_password = false,
+                      password_changed_at = now()
+                WHERE id = %s""",
+            (passwords.hash_password(new_password), user_id))
+        revoked = conn.execute(
+            """UPDATE iam.session
+                  SET revoked_at = %s, revoke_reason = 'password changed'
+                WHERE user_id = %s AND revoked_at IS NULL
+                  AND (%s::uuid IS NULL OR id <> %s::uuid)""",
+            (datetime.now(timezone.utc), user_id, keep_session,
+             keep_session)).rowcount
+        conn.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, object_id,
+                    detail)
+               VALUES (%s, 'USER', 'PASSWORD_CHANGED', 'app_user', %s, %s)""",
+            (user_id, user_id, Json({"via": via, "sessions_revoked": revoked})))
+    return revoked
 
 
 @dataclass(frozen=True)
@@ -140,13 +239,30 @@ class IamAdminService:
     # -- read --------------------------------------------------------------
 
     def list_users(self) -> list[dict]:
+        """Every account, with what the admin pane needs to read it right.
+
+        Three fields joined 2026-09-23. `compartments`: a user's read-ins
+        were invisible on the card, so "why can't Alice open OP-CORVID-26?"
+        was answered from her clearance and role and got the wrong cause
+        (ux16-admin:no-compartment-readins-in-ui). `last_active_at`: the
+        latest use of any of the account's sessions. `last_login_at` is
+        written only by a password sign-in, so a person working all day
+        through a `bootstrap.py session` link read as "never" signed in
+        and looked dormant (ux16-admin:last-login-never-misleads).
+        `must_change_password`: an administrator-issued password still
+        waiting to be replaced (0066).
+        """
         rows = self._c.execute(
             """SELECT u.id, u.email, u.display_name, u.tlp_clearance::text,
                       u.is_active, u.totp_enrolled_at IS NOT NULL,
                       u.failed_logins, u.locked_until, u.last_login_at,
                       u.created_at,
                       coalesce(array_agg(ur.role_key ORDER BY ur.role_key)
-                               FILTER (WHERE ur.role_key IS NOT NULL), '{}')
+                               FILTER (WHERE ur.role_key IS NOT NULL), '{}'),
+                      u.compartments, u.must_change_password,
+                      u.password_changed_at,
+                      (SELECT max(s.last_seen_at) FROM iam.session s
+                        WHERE s.user_id = u.id)
                  FROM iam.app_user u
                  LEFT JOIN iam.user_role ur ON ur.user_id = u.id
                 GROUP BY u.id
@@ -159,13 +275,33 @@ class IamAdminService:
             "last_login_at": r[8].isoformat() if r[8] else None,
             "created_at": r[9].isoformat() if r[9] else None,
             "roles": list(r[10]),
+            "compartments": sorted(r[11] or []),
+            "must_change_password": bool(r[12]),
+            "password_changed_at": r[13].isoformat() if r[13] else None,
+            "last_active_at": r[14].isoformat() if r[14] else None,
         } for r in rows]
 
     # -- create ------------------------------------------------------------
 
     def create_analyst(self, *, email: str, display_name: str,
                        clearance: str, roles: list[str],
-                       actor_id: UUID | None) -> OneTimeCredentials:
+                       actor_id: UUID | None,
+                       compartments: list[str] | None = None,
+                       must_change_password: bool = True,
+                       ) -> OneTimeCredentials:
+        """A new account and its one-time credentials.
+
+        `must_change_password` is True unless the caller is making its own
+        account (final review c8, 2026-09-24). The password generated here
+        is shown to the administrator with the TOTP secret beside it, so
+        whoever saw that card held both factors of a live account, and
+        until then could sign in as the new analyst for as long as they
+        left the password alone, every action audited under the analyst's
+        id. It is the same rule the reset follows: an administrator-issued
+        password opens no session (`routers/auth.py` `_password_change_due`).
+        The one caller passing False is `create_first_admin`, whose
+        operator creates, and proves on the same card, their own account.
+        """
         email = (email or "").strip()
         display_name = (display_name or "").strip()
         if not email or "@" not in email:
@@ -178,6 +314,19 @@ class IamAdminService:
             raise AdminError("at least one global role is required: a user "
                              "with no role can see nothing and fix nothing")
         self._check_roles(roles)
+        # Read-ins at creation (ux16-admin:no-compartment-readins-in-ui,
+        # 2026-09-23), in the same transaction as the account, so an
+        # analyst created for a compartmented case never exists for a
+        # moment without the read-in the administrator chose. An unknown
+        # key is refused by name before anything is written, exactly as
+        # `set_compartments` refuses it.
+        compartments = list(dict.fromkeys(
+            k.strip() for k in (compartments or []) if k and k.strip()))
+        unknown = self._unknown_compartments(compartments)
+        if unknown:
+            raise AdminError(
+                f"{agree(len(unknown), 'compartment', 'compartments')} not "
+                f"registered: {', '.join(unknown)}. Nothing was created")
         require_kek()
 
         password = secrets.token_urlsafe(24)
@@ -191,8 +340,10 @@ class IamAdminService:
             with self._c.transaction():
                 user_id = store.create_user(email, display_name, password)
                 self._c.execute(
-                    "UPDATE iam.app_user SET tlp_clearance = %s WHERE id = %s",
-                    (clearance, user_id))
+                    """UPDATE iam.app_user SET tlp_clearance = %s,
+                              compartments = %s,
+                              must_change_password = %s WHERE id = %s""",
+                    (clearance, compartments, must_change_password, user_id))
                 for role in roles:
                     self._c.execute(
                         """INSERT INTO iam.user_role (user_id, role_key)
@@ -201,7 +352,9 @@ class IamAdminService:
                 store.enroll_totp(user_id, secret)
                 self._audit(actor_id, "USER_CREATED", user_id, {
                     "email": email, "roles": roles,
-                    "tlp_clearance": clearance})
+                    "tlp_clearance": clearance,
+                    "compartments": compartments,
+                    "must_change_password": must_change_password})
         except psycopg.errors.UniqueViolation as exc:
             raise AdminError(
                 f"a user with email {email} already exists. Nothing was "
@@ -363,6 +516,57 @@ class IamAdminService:
         return OneTimeCredentials(
             user_id=user_id, email=row[0], password="",
             totp_secret=secret, otpauth_uri=_otpauth_uri(row[0], secret))
+
+    def reset_password(self, user_id: UUID, *,
+                       actor_id: UUID | None) -> OneTimeCredentials:
+        """A generated one-time password, which the account must replace at
+        its next sign-in (gap-password-reset, 2026-09-23).
+
+        Refused for oneself: the person asking is signed in, so they can
+        change their own password from Account, which asks for the current
+        one and a code. An administrator who could reset their own would
+        have a way to replace a password without ever proving they knew it.
+        `actor_id=None` is `bootstrap.py reset-password`, the shell path for
+        the last administrator, and is audited as the system.
+
+        In one transaction: the new hash with `must_change_password` set,
+        every live session revoked (the reset is usually because the old
+        password is lost or known to someone else, and a session opened
+        with it carries its own token), and the lockout cleared, because
+        the failures that locked the account were against a password that
+        no longer exists and the person now has to sign in to change it.
+        The authenticator is untouched: re-enrolling it is its own action.
+        """
+        if actor_id is not None and user_id == actor_id:
+            raise AdminError(
+                "you cannot reset your own password here. Change it from "
+                "Account (your name, top right), which asks for the current "
+                "one and a code from your authenticator")
+        row = self._c.execute(
+            """SELECT email, locked_until, failed_logins
+                 FROM iam.app_user WHERE id = %s""", (user_id,)).fetchone()
+        if row is None:
+            raise AdminError("no such user")
+        password = secrets.token_urlsafe(24)
+        from datetime import datetime, timezone
+        with self._c.transaction():
+            self._c.execute(
+                """UPDATE iam.app_user
+                      SET password_hash = %s, must_change_password = true,
+                          password_changed_at = now(),
+                          failed_logins = 0, locked_until = NULL
+                    WHERE id = %s""",
+                (passwords.hash_password(password), user_id))
+            revoked = PgSessionStore(self._c).revoke_all_for_user(
+                user_id, "password reset", datetime.now(timezone.utc))
+            self._audit(actor_id, "PASSWORD_RESET", user_id, {
+                "email": row[0], "sessions_revoked": revoked,
+                "was_locked_until": row[1].isoformat() if row[1] else None,
+                "failed_logins": row[2],
+                "via": "admin" if actor_id else "bootstrap.py"})
+        return OneTimeCredentials(
+            user_id=user_id, email=row[0], password=password,
+            totp_secret="", otpauth_uri="")
 
     def unlock(self, user_id: UUID, *, actor_id: UUID) -> None:
         row = self._c.execute(
@@ -744,7 +948,10 @@ def create_first_admin(conn: psycopg.Connection, *, email: str,
         svc = IamAdminService(conn)
         # SECURITY_OFFICER included: break-glass cannot grant until one
         # exists, and a fresh single-operator install IS that operator.
+        # Not asked to replace the password: the operator is creating
+        # their own account and proves it by signing in on the same card
+        # (final review c8, 2026-09-24, which flags every other creation).
         return svc.create_analyst(
             email=email, display_name=display_name, clearance="RED",
             roles=["SYS_ADMIN", "SECURITY_OFFICER", "CASE_OWNER", "ANALYST"],
-            actor_id=None)
+            actor_id=None, must_change_password=False)

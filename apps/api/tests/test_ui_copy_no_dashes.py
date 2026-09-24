@@ -308,7 +308,9 @@ def test_the_lexer_accounts_for_every_dash_in_app_js():
     assert in_lits + in_comments == len(re.findall("[\u2013\u2014]", src))
     # And it read to the end in step, not just the first thousand lines.
     texts = {t for _, t in lits}
-    for known in ("Degree (activity, visibility)",
+    # The first: a literal near the top of app.js (the size metric's
+    # gloss since the option labels were shortened, 2026-09-23).
+    for known in ("how many others it is tied to: activity, visibility",
                   "Connecting to the live channel\u2026"):
         assert known in texts, f"the lexer never reached {known!r}"
 
@@ -488,8 +490,10 @@ def test_the_canvas_hint_names_the_palette_key_for_this_platform():
     canvas said the Mac key on every platform, beside a header chip that
     said Ctrl K. It now starts as Ctrl K and is set where the chip is."""
     html = _html()
-    assert 'id="canvas-keys-palette">Ctrl K</span> palette' in html
-    assert "⌘K</span> palette" not in html
+    # The word beside the key is the header control's own, "Jump to"
+    # (ux19-copy one-concept-many-names, 2026-09-23).
+    assert 'id="canvas-keys-palette">Ctrl K</span> jump to' in html
+    assert "⌘K</span> jump to" not in html
     assert "$('canvas-keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';" in _js()
     head = html[html.index("<thead>", html.index('id="an-hist-chart"')):]
     head = head[:head.index("</thead>")]

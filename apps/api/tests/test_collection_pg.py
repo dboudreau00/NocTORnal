@@ -658,15 +658,22 @@ def test_a_private_address_is_refused():
         fetch("http://127.0.0.1:8000/healthz")
 
 
-def test_the_ssrf_floor_is_documented_as_a_floor():
-    """DNS rebinding defeats a resolve-then-connect check, and pretending
-    otherwise is worse than saying so."""
+def test_fetch_says_what_its_ssrf_protection_is():
+    """This held the docstring to calling itself a floor, because DNS
+    rebinding defeated a resolve-then-connect check and pretending
+    otherwise was worse than saying so. Since sec-ssrf-rebinding
+    (2026-09-23) the check and the connect are one lookup, which
+    test_collection_ssrf_rebinding.py proves against a rebinding resolver,
+    so the docstring must now say that instead, and must still name the
+    proxy it does not consult: that is the part left undone."""
     import inspect
 
     from noctornal_api import collection
     source = inspect.getsource(collection.fetch)
-    assert "floor, not a solution" in source
+    assert "floor, not a solution" not in source
     assert "rebinding" in source
+    assert "one lookup" in source
+    assert "No proxy is consulted" in source
 
 
 # --- the adapter contract -----------------------------------------------

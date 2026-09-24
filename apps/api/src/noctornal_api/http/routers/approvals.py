@@ -34,6 +34,7 @@ from noctornal_api.http.deps import (
     get_conn,
     require,
     require_step_up,
+    user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 
@@ -71,9 +72,11 @@ class ApprovalOut(BaseModel):
     #: PENDING but past its expiry. Derived, never stored -- see migration
     #: 0028 on why there is no EXPIRED state and no sweeper.
     is_expired: bool
-    #: N1 (2026-09-02). Populated ONLY on the response to the write that
-    #: produced them (POST "" and POST /decide); on a listing they are None
-    #: because reach is not stored, and None there means "not recorded",
+    #: N1 (2026-09-02). Populated on the response to the write that
+    #: produced them (POST "" and POST /decide). Since 2026-09-23 a listing
+    #: also carries `approvers_notified`, counted from the notifications
+    #: the request raised (ux08-triage:approval-reach-warning-dropped);
+    #: `requester_notified` is still None there, meaning "not recorded",
     #: not "failed". On the write: `approvers_notified` 0 is "nobody could
     #: be told", None is "the notify write failed"; `requester_notified`
     #: False is "suppressed", None is "failed". `warnings` spells each of
@@ -128,12 +131,63 @@ def _decision_reach(r: ApprovalRequest) -> dict:
     return {"requester_notified": r.requester_notified, "warnings": warnings}
 
 
+def _merge_subjects(conn: psycopg.Connection, user: CurrentUser,
+                    case_id: UUID, rows: list[ApprovalRequest]) -> dict:
+    """The two entities of each merge request, by label and type.
+
+    ux08-triage:approval-row-uuids-no-requester (2026-09-23). The card
+    named them through the console's own graph, which holds only what the
+    current projection drew, so a merge of two entities outside it was
+    still signed as two UUIDs. Resolved here instead, for the entities
+    this approver may see; one they may not is None, and the card says so
+    rather than naming it."""
+    wanted: dict[UUID, tuple[str | None, str | None]] = {}
+    ids: set[UUID] = set()
+    for r in rows:
+        if r.operation != "node.merge":
+            continue
+        pair = []
+        for key in ("source_node_id", "target_node_id"):
+            try:
+                pair.append(UUID(str((r.payload or {}).get(key))))
+            except ValueError:
+                pair.append(None)
+        wanted[r.id] = tuple(pair)
+        ids |= {i for i in pair if i}
+    if not ids:
+        return {}
+    clearance, held = user_ceiling(conn, user.user_id, case_id)
+    found = {row[0]: {"label": row[1], "node_type": row[2]}
+             for row in conn.execute(
+                 """SELECT id, label, node_type FROM core.node
+                     WHERE id = ANY(%s) AND case_id = %s
+                       AND classification <= %s::core.tlp
+                       AND compartments <@ %s::text[]""",
+                 (list(ids), case_id, clearance.name, sorted(held)))}
+    return {rid: {"source": found.get(src), "target": found.get(dst)}
+            for rid, (src, dst) in wanted.items()}
+
+
+def _approvers_reached(conn: psycopg.Connection,
+                       rows: list[ApprovalRequest]) -> dict:
+    """How many APPROVAL_REQUESTED notifications each request raised."""
+    ids = [r.id for r in rows]
+    if not ids:
+        return {}
+    return {row[0]: row[1] for row in conn.execute(
+        """SELECT object_id, count(*) FROM notify.notification
+            WHERE kind = 'APPROVAL_REQUESTED'
+              AND object_type = 'approval_request'
+              AND object_id = ANY(%s)
+            GROUP BY object_id""", (ids,))}
+
+
 @router.get("", response_model=dict)
 def list_approvals(
     case_id: UUID,
     state: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
-    _: CurrentUser = Depends(require("case.read")),
+    user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """Every request in the case, decided ones included. A rejected request
@@ -152,9 +206,20 @@ def list_approvals(
     names = {row[0]: row[1] for row in conn.execute(
         "SELECT id, display_name FROM iam.app_user WHERE id = ANY(%s)",
         (list(ids),)).fetchall()} if ids else {}
+    subjects = _merge_subjects(conn, user, case_id, rows)
+    reached = _approvers_reached(conn, rows)
     for item, r in zip(out, rows, strict=True):
         item["requested_by_name"] = names.get(r.requested_by)
         item["decided_by_name"] = names.get(r.decided_by) if r.decided_by else None
+        item["subjects"] = subjects.get(r.id)
+        # ux08-triage:approval-reach-warning-dropped (2026-09-23). Reach
+        # is not stored on the request, but the notifications it raised
+        # are, so a listing can say "nobody was told" for as long as that
+        # stays true, not only in the reply the requester's browser threw
+        # away.
+        item["approvers_notified"] = reached.get(r.id, 0)
+        op = OPERATIONS.get(r.operation)
+        item["operation_description"] = op.description if op else None
     return {"approvals": out,
             "operations": {k: {"permission": v.permission,
                                "description": v.description,
@@ -181,7 +246,7 @@ def raise_request(
                       f"unknown operation {body.operation!r}; one of "
                       f"{', '.join(sorted(OPERATIONS))}")
     authorize_object(conn, user, case_id=case_id,
-                     permission_key=operation.permission)
+                     permission_key=operation.permission, after_case_gate=True)
     try:
         record = ApprovalService(conn).request(
             operation=body.operation, case_id=case_id, payload=body.payload,
@@ -227,8 +292,11 @@ def decide(
         # catalogue. Refuse rather than fall back to a weaker permission.
         raise Problem(409, "Conflict",
                       f"operation {record.operation!r} is no longer registered")
+    # After `case.read` from the dependency, so a break-glass use counts
+    # once (sec-breakglass-double-count, 2026-09-23), here and in
+    # `raise_request`.
     authorize_object(conn, user, case_id=case_id,
-                     permission_key=operation.permission)
+                     permission_key=operation.permission, after_case_gate=True)
     try:
         record = svc.decide(request_id, decided_by=user.user_id,
                             approve=body.approve, note=body.note)
