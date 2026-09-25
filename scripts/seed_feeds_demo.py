@@ -46,12 +46,21 @@ sys.path.insert(0, os.path.join(
     "apps", "api", "src"))
 
 from _env import load_env_local  # noqa: E402
-from noctornal_api.db import connect  # noqa: E402
+from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.iam_admin import IamAdminService  # noqa: E402
 from noctornal_api.ingest import IngestService  # noqa: E402
 from noctornal_api.rawstore import RawBatchStorage, RawStoreError  # noqa: E402
 
 load_env_local()
+
+
+def connect():
+    """Every script connects as the system role (S1, 2026-09-25). A
+    script serves no request and binds no user, so on the request role it
+    would see nothing under row-level security; `db.connect_system` refuses
+    rather than hand it a connection that silently sees part of the data.
+    Named `connect` so the tests that replace it still find it."""
+    return connect_system(SystemPurpose.SCRIPT)
 
 FEED_NAME = "demo partner feed"
 STEALER_FEED = "demo stealer feed"

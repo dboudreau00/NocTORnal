@@ -1,0 +1,22 @@
+{
+ "ip_str": "8.8.8.8",
+ "ports": [
+  53,
+  443
+ ],
+ "hostnames": [
+  "dns.google"
+ ],
+ "domains": [
+  "dns.google"
+ ],
+ "org": "Google LLC",
+ "isp": "Google LLC",
+ "asn": "AS15169",
+ "os": null,
+ "country_code": "US",
+ "last_update": "2026-09-20T10:00:00",
+ "vulns": {
+  "CVE-2020-0001": {}
+ }
+}

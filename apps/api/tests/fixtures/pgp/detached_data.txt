@@ -1,0 +1,3 @@
+Vendor contact block
+TOX: A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1
+Jabber: vendor@mail.fixture-vendor.net

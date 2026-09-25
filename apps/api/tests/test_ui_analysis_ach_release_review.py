@@ -37,6 +37,7 @@ let drawn = 0;
 function renderAnalytics() { drawn += 1; }
 function storedRunStatus() { return 'Showing the run of x.'; }
 function loadKeyPlayer() {}
+function loadConcor() {}
 function loadMetricHistory() {}
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + "\n".join(
     _fn(n) for n in ("countOf", "agree", "closeClause", "analysisFailureText",
@@ -134,6 +135,7 @@ function syncAnalysisSizeOptions() {}
 function renderAnalytics() {}
 function storedRunStatus() { return 'Showing the run of x.'; }
 function loadKeyPlayer() {}
+function loadConcor() {}
 const reread = [];
 function loadMetricHistory(node, label) { reread.push([node, label]); }
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + "\n".join(

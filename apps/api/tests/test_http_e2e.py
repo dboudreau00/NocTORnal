@@ -1118,17 +1118,46 @@ def test_the_merge_executes_the_approved_parameters_not_the_posted_ones(conn, cl
 
 def test_turning_dual_control_off_is_audited(conn, client):
     """When did this case stop requiring two signatures, is a question
-    somebody eventually needs answered."""
-    _, email, secret = _make_user(conn, clearance="RED", global_roles=("CASE_OWNER",))
+    somebody eventually needs answered.
+
+    Rewritten for F9b (2026-09-24): turning the switch OFF takes a
+    second Lead investigator on the case, so the one-signature "off" this
+    test used to make is exactly the behaviour that item removes. The
+    audit assertions are the ones it always made, plus who approved."""
+    uid, email, secret = _make_user(conn, clearance="RED",
+                                    global_roles=("CASE_OWNER",))
+    deputy, deputy_email, _ = _make_user(conn, clearance="RED")
     token = _session(conn, email)
     case_id = _create_case(client, token)
+    conn.execute(
+        """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
+           VALUES (%s, %s, 'CASE_OWNER', %s)""", (case_id, deputy, uid))
     _set_dual_control(client, token, case_id, True)
-    _set_dual_control(client, token, case_id, False)
+    epoch = client.get(f"/api/v1/cases/{case_id}/policy",
+                       headers=_auth(token)).json()["dual_control_merge_epoch"]
+    raised = client.post(
+        f"/api/v1/cases/{case_id}/approvals", headers=_auth(token),
+        json={"operation": "case.policy.relax",
+              "payload": {"setting": "dual_control_merge", "from": True,
+                          "to": False, "epoch": epoch},
+              "justification": "the subject is no longer contested"})
+    assert raised.status_code == 201, raised.text
+    decided = client.post(
+        f"/api/v1/cases/{case_id}/approvals/{raised.json()['id']}/decide",
+        headers=_auth(_session(conn, deputy_email)), json={"approve": True})
+    assert decided.status_code == 200, decided.text
+    r = client.put(f"/api/v1/cases/{case_id}/policy", headers=_auth(token),
+                   json={"dual_control_merge": False,
+                         "approval_request_id": raised.json()["id"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["dual_control_merge"] is False
     rows = conn.execute(
-        """SELECT detail->>'from', detail->>'to' FROM audit.event
+        """SELECT detail->>'from', detail->>'to', detail->>'approved_by'
+             FROM audit.event
             WHERE case_id = %s AND action = 'CASE_POLICY_CHANGED' ORDER BY seq""",
         (case_id,)).fetchall()
     assert [(r[0], r[1]) for r in rows] == [("false", "true"), ("true", "false")]
+    assert rows[1][2] == str(deputy)
 
 
 def test_an_approval_from_another_case_is_refused(conn, client):

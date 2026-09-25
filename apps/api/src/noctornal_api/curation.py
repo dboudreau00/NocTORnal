@@ -351,8 +351,11 @@ _TELEGRAM_BOT_API = re.compile(r"-\d+")
 #: - punycode_lower writes an internationalised label in punycode
 #:   ("bücher.example" is "xn--bcher-kva.example"), and touches only a
 #:   label that is non-ASCII or already punycode;
-#: - url_norm drops a default port and the fragment, and only from a
-#:   string that parses as a URL with a scheme and a host.
+#: - url_norm drops a default port and an anchor, rewrites a legacy MEGA
+#:   or Twitter hashbang link to its current form and drops a MEGA key
+#:   (L5, 2026-09-24; each is the same identifier written another way),
+#:   and only from a string that parses as a URL with a scheme and a
+#:   host.
 #:
 #: What these return is the query in canonical form, never a remnant of
 #: it, so the letters-and-digits tests in `_lossless` do not apply. Held
@@ -738,6 +741,57 @@ _SELECTOR_CTES = """
   )"""
 
 
+#: The live claims one caller may see in one case: the visibility rule for
+#: claims (assertion_page's docstring says why each predicate is there).
+#: Lifted verbatim out of assertion_page into one constant (F6.4,
+#: embeddings, 2026-09-24) so the similarity search over claims reads the
+#: SAME rule, and a later change to it (leftovers L2) reaches both; the
+#: identity is held by test_case_item_embeddings_pg.py. Parameters:
+#: %(case_id)s, %(clearance)s, %(compartments)s.
+LIVE_CLAIMS_SQL = """
+    SELECT a.id, a.node_id, NULL::uuid AS edge_id, n.label AS element_label,
+           NULL::text AS edge_type, NULL::uuid AS src_node_id,
+           n.classification::text AS element_classification,
+           a.rationale, a.external_ref, a.claim_value, a.evidence_id,
+           a.reliability::text || a.credibility::text AS grading,
+           a.confidence::text AS confidence, a.basis::text AS basis,
+           a.recorded_at
+      FROM core.node n
+      JOIN core.assertion a ON a.node_id = n.id
+                           AND a.retracted_at IS NULL AND a.superseded_at IS NULL
+     WHERE n.case_id = %(case_id)s
+       AND n.deleted_at IS NULL AND n.merged_into_id IS NULL
+       AND n.classification <= %(clearance)s::core.tlp
+       AND n.compartments <@ %(compartments)s
+    UNION ALL
+    SELECT a.id, NULL::uuid, e.id, s.label || ' → ' || d.label,
+           e.edge_type, e.src_node_id, e.classification::text,
+           a.rationale, a.external_ref, a.claim_value, a.evidence_id,
+           a.reliability::text || a.credibility::text,
+           a.confidence::text, a.basis::text, a.recorded_at
+      FROM core.edge e
+      JOIN core.node s ON s.id = e.src_node_id
+      JOIN core.node d ON d.id = e.dst_node_id
+      JOIN core.assertion a ON a.edge_id = e.id
+                           AND a.retracted_at IS NULL AND a.superseded_at IS NULL
+     WHERE e.case_id = %(case_id)s AND e.deleted_at IS NULL
+       AND e.classification <= %(clearance)s::core.tlp
+       AND e.compartments <@ %(compartments)s
+       AND s.deleted_at IS NULL AND d.deleted_at IS NULL
+       AND s.classification <= %(clearance)s::core.tlp
+       AND s.compartments <@ %(compartments)s
+       AND d.classification <= %(clearance)s::core.tlp
+       AND d.compartments <@ %(compartments)s
+  """
+
+
+def claim_values_sql(expr: str) -> str:
+    """`_json_values` under a public name, for the similarity text of a
+    claim (F6.4): its values rendered exactly as assertion_page renders
+    them."""
+    return _json_values(expr)
+
+
 def _via(row_type, row_value, row_exact, row_more, row_merged) -> SelectorVia | None:
     if row_type is None:
         return None
@@ -1099,42 +1153,10 @@ SELECT n.id, n.label,
                     clearance=clearance, compartments=compartments)
         p["grading"] = grading_query(query)
         p["may_see_exhibits"] = bool(may_see_exhibits)
+        # The live-claims CTE is LIVE_CLAIMS_SQL, shared with the
+        # similarity search over claims (F6.4, 2026-09-24); same text.
         rows = self._c.execute(
-            """WITH live AS (
-    SELECT a.id, a.node_id, NULL::uuid AS edge_id, n.label AS element_label,
-           NULL::text AS edge_type, NULL::uuid AS src_node_id,
-           n.classification::text AS element_classification,
-           a.rationale, a.external_ref, a.claim_value, a.evidence_id,
-           a.reliability::text || a.credibility::text AS grading,
-           a.confidence::text AS confidence, a.basis::text AS basis,
-           a.recorded_at
-      FROM core.node n
-      JOIN core.assertion a ON a.node_id = n.id
-                           AND a.retracted_at IS NULL AND a.superseded_at IS NULL
-     WHERE n.case_id = %(case_id)s
-       AND n.deleted_at IS NULL AND n.merged_into_id IS NULL
-       AND n.classification <= %(clearance)s::core.tlp
-       AND n.compartments <@ %(compartments)s
-    UNION ALL
-    SELECT a.id, NULL::uuid, e.id, s.label || ' → ' || d.label,
-           e.edge_type, e.src_node_id, e.classification::text,
-           a.rationale, a.external_ref, a.claim_value, a.evidence_id,
-           a.reliability::text || a.credibility::text,
-           a.confidence::text, a.basis::text, a.recorded_at
-      FROM core.edge e
-      JOIN core.node s ON s.id = e.src_node_id
-      JOIN core.node d ON d.id = e.dst_node_id
-      JOIN core.assertion a ON a.edge_id = e.id
-                           AND a.retracted_at IS NULL AND a.superseded_at IS NULL
-     WHERE e.case_id = %(case_id)s AND e.deleted_at IS NULL
-       AND e.classification <= %(clearance)s::core.tlp
-       AND e.compartments <@ %(compartments)s
-       AND s.deleted_at IS NULL AND d.deleted_at IS NULL
-       AND s.classification <= %(clearance)s::core.tlp
-       AND s.compartments <@ %(compartments)s
-       AND d.classification <= %(clearance)s::core.tlp
-       AND d.compartments <@ %(compartments)s
-  ),
+            """WITH live AS (""" + LIVE_CLAIMS_SQL + """),
   seen AS (
     SELECT l.*, ev.title AS exhibit_title,
            left(coalesce(""" + _json_values("l.claim_value") + """, ''), 2000)
@@ -1200,7 +1222,9 @@ SELECT id, node_id, edge_id, element_label, edge_type, src_node_id,
         return hits, (int(rows[0][15]) if rows else 0)
 
     def document_page(self, *, query: str, limit: int = 50,
-                      clearance: str) -> tuple[list[dict], int]:
+                      clearance: str,
+                      compartments: frozenset[str] = frozenset()
+                      ) -> tuple[list[dict], int]:
         """Collected documents by word start over title and body, or by a
         fragment of the author handle: (rows, how many matched).
 
@@ -1210,37 +1234,30 @@ SELECT id, node_id, edge_id, element_label, edge_type, src_node_id,
         never turned up in the one box an analyst types a lead into.
         Filtered exactly as `search_all`'s document half is (read its
         docstring for why the SOURCE's label counts too), because it IS
-        that half: `search_all` calls this."""
+        that half: `search_all` calls this.
+
+        `compartments` is the reader's held set (L1, 2026-09-24). The
+        default is the empty set, which fails closed: only documents that
+        carry no compartment."""
         p = _params(case_id=None, query=query, limit=limit,
-                    clearance=clearance, compartments=frozenset())
+                    clearance=clearance, compartments=compartments)
         return self._document_rows(p)
 
     def _document_rows(self, p: dict) -> tuple[list[dict], int]:
+        # Through `iam.search_document_hits` (0117; S1, 2026-09-25), which
+        # applies exactly the predicates this query applied, and the bound
+        # reader's own ceiling on top: under row-level security full text
+        # and trigram matching are not leakproof, so the same query run as
+        # the request role could use neither index and would read every
+        # collected document in the deployment to answer one search.
         rows = self._c.execute(
             """SELECT id, label, excerpt, source_name, posted_at,
-                      external_url, rank, count(*) OVER () AS total,
-                      classification, author_handle
-                 FROM (
-                   SELECT d.id,
-                          coalesce(nullif(d.title, ''), left(d.body_text, 80)) AS label,
-                          left(d.body_text, 240) AS excerpt, s.name AS source_name,
-                          d.posted_at, d.external_url,
-                          d.classification::text AS classification, d.author_handle,
-                          LEAST(0.99::float8, GREATEST(
-                            coalesce(ts_rank(d.search_tsv,
-                                     to_tsquery('simple', %(tsq)s)), 0)::float8,
-                            coalesce(similarity(d.author_handle, %(q)s), 0)::float8))
-                            AS rank
-                     FROM collect.document d
-                     JOIN collect.source s ON s.id = d.source_id
-                    WHERE d.purged_at IS NULL
-                      AND d.classification <= %(clearance)s::core.tlp
-                      AND s.classification <= %(clearance)s::core.tlp
-                      AND (d.search_tsv @@ to_tsquery('simple', %(tsq)s)
-                           OR d.author_handle ILIKE %(pattern)s)
-                 ) h
-                ORDER BY rank DESC, id
-                LIMIT %(limit)s""",
+                      external_url, rank, total,
+                      classification, author_handle, compartments
+                 FROM iam.search_document_hits(
+                        %(tsq)s, %(q)s, %(pattern)s, %(clearance)s::core.tlp,
+                        %(compartments)s::text[], %(limit)s)
+                ORDER BY rank DESC, id""",
             p,
         ).fetchall()
         out = [{"kind": "document", "id": str(r[0]), "label": r[1] or "",
@@ -1249,7 +1266,7 @@ SELECT id, node_id, edge_id, element_label, edge_type, src_node_id,
                 "external_url": r[5], "rank": float(r[6]), "via": None,
                 "merged_name": None, "attribute": None,
                 "node_type": None, "classification": r[8],
-                "author_handle": r[9]}
+                "author_handle": r[9], "compartments": sorted(r[10] or [])}
                for r in rows]
         return out, (int(rows[0][7]) if rows else 0)
 
@@ -1273,8 +1290,10 @@ SELECT id, node_id, edge_id, element_label, edge_type, src_node_id,
         `collect.document.classification` defaults to AMBER and can be
         higher, so a RED post is invisible to an AMBER analyst rather
         than discoverable-then-403, while a node carrying the same token
-        still appears for them. Documents have no compartments column, so
-        the compartment predicate applies to nodes and evidence only.
+        still appears for them. The compartment predicate applies to all
+        three halves: documents carry compartments since L1 (2026-09-24),
+        a capture taking its case's, and a reader sees a document only
+        when they hold every one of them.
 
         The document half checks the SOURCE's label as well as the
         document's, added 2026-09-02 alongside the same predicate in

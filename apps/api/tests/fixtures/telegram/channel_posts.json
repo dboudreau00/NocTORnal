@@ -1,0 +1,10 @@
+{
+  "note": "A broadcast channel with 250 posts. The channel's number 1300000001 is also a user's number in megagroup_threads.json: the two must stay two ids.",
+  "me": "u:700000001",
+  "chat": {"peer_type": "CHANNEL", "peer_id": 1300000001, "access_hash": 5550001,
+           "username": "examplenews", "title": "Example News", "is_member": false},
+  "generate": {"first": 1, "count": 250, "from": null,
+               "text": "Channel post number {id} about the release.",
+               "start": "2026-09-20T00:00:00+00:00"},
+  "messages": []
+}

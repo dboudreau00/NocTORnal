@@ -97,6 +97,7 @@ from uuid import UUID
 import psycopg
 
 from noctornal_api.assumptions import AssumptionService
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.projections import DISCLOSURE_NONE, GraphService, Projection
 from noctornal_api.security.access import Tlp, tlp_from_name
@@ -368,9 +369,15 @@ class ReportBuilder:
                   AND compartments <@ %s
                 ORDER BY acquired_at, id""",
             (case_id, target.name, sorted(compartments))).fetchall()
-        evidence_total = self._c.execute(
-            "SELECT count(*) FROM core.evidence WHERE case_id = %s",
-            (case_id,)).fetchone()[0]
+        # EVERY exhibit in the case, on a system connection, because the
+        # difference from what was included is the withheld count the report
+        # states; under row-level security the request connection counts only
+        # what the requester may read and the report would say nothing was
+        # withheld (S1, 2026-09-25).
+        with system_connection(SystemPurpose.WITHHELD, reuse=self._c) as counter:
+            evidence_total = counter.execute(
+                "SELECT count(*) FROM core.evidence WHERE case_id = %s",
+                (case_id,)).fetchone()[0]
 
         # The competing hypotheses (final review C2, 2026-09-23). A
         # statement is free text about the case with no label of its own,
@@ -731,12 +738,18 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
 def ach_cells_withheld(conn: psycopg.Connection, case_id: UUID, *,
                        clearance: str, compartments: frozenset[str]) -> int:
     """How many live pieces of matrix evidence `ach_cells` leaves out for
-    this reader. A count only: never which, never where."""
-    return conn.execute(
-        "SELECT count(DISTINCT he.assertion_id)" + _ACH_CELL_FROM
-        + " AND NOT " + _ACH_CELL_VISIBLE,
-        {"case_id": case_id, "clearance": clearance,
-         "compartments": sorted(compartments)}).fetchone()[0]
+    this reader. A count only: never which, never where.
+
+    Counted on a system connection with this reader's ceiling (S1,
+    2026-09-25): the stances it counts are the ones row-level security hides
+    from the reader's own connection, so counted there it would always be
+    zero, and the matrix would say "incomplete: false"."""
+    with system_connection(SystemPurpose.WITHHELD, reuse=conn) as counter:
+        return counter.execute(
+            "SELECT count(DISTINCT he.assertion_id)" + _ACH_CELL_FROM
+            + " AND NOT " + _ACH_CELL_VISIBLE,
+            {"case_id": case_id, "clearance": clearance,
+             "compartments": sorted(compartments)}).fetchone()[0]
 
 
 def check_egress(report: Report, destination: Destination | str,

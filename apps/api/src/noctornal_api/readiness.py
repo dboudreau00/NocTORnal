@@ -125,7 +125,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -301,7 +302,10 @@ def _prohibited_content_policy(conn: psycopg.Connection) -> Check:
         return Check(
             "prohibited_content_policy", True,
             f"NOCTORNAL_PROHIBITED_CONTENT_POLICY={reference}; "
-            f"NOCTORNAL_DESIGNATED_PERSON={person}. {disposition}. This is a "
+            f"NOCTORNAL_DESIGNATED_PERSON={person}. {disposition}. "
+            # F13: one clause from the screening reader, so each fact
+            # keeps one reader; the verdict does not move on it.
+            f"{_screening_clause(conn)} This is a "
             f"declaration the software records, not one it can verify "
             f"(docs/16 L1).")
     policy_set = bool(os.environ.get("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "").strip())
@@ -1965,7 +1969,10 @@ def _preservation_bucket_object_lock(conn: psycopg.Connection) -> Check:
             f"every rejection is refused until it is corrected",
             f"set {DISPOSITION_ENV} to preserve (the default) or destroy, as the "
             f"prohibited-content policy decides (docs/16 L1), and restart")
-    if disposition == "destroy":
+    # F13: a HELD sample that matches a screening list is always
+    # preserved, whatever the disposition, so while a list is active the
+    # bucket is probed under destroy too.
+    if disposition == "destroy" and not _screening_active(conn):
         return Check(
             name, True,
             f"not probed: {DISPOSITION_ENV}=destroy, so a rejected sample is "
@@ -2171,8 +2178,1276 @@ def _smtp_configured(conn: psycopg.Connection) -> Check:
             f"STARTTLS negotiation falls back to sending in the clear",
             "unset SMTP_ALLOW_PLAINTEXT; it is for a development relay only "
             "(docs/07: never plaintext)")
+    # F8 A7 (2026-09-24). Email leaves only through the egress route
+    # "smtp" (docs/00 decision 68); a route that is missing or does not allow the
+    # relay HOLDS every email, so this row says so rather than the drain.
+    from noctornal_api import transports
+    state = transports.route_state(transports.SMTP, conn)
+    if not state.ok:
+        return Check(
+            "smtp_configured", False,
+            f"SMTP_HOST={host}:{port}, and email is held: {state.why}",
+            f"add {host}:{port} to the smtp route in Administration, Egress, or "
+            f"fix SMTP_HOST")
     return Check("smtp_configured", True,
-                 f"SMTP_HOST={host}:{port}; TLS required")
+                 f"SMTP_HOST={host}:{port}; TLS required; "
+                 f"{transports.route_line(state)}")
+
+
+# The compartment registry and the records written under older rules
+# (docs/00 decision 71, L1 and L2, 2026-09-24). Counts and column labels only: the
+# register's reader holds user.manage, not case content.
+
+def _labels(items: list[str]) -> str:
+    return ", ".join(items)
+
+
+def _compartment_bindings_intact(conn: psycopg.Connection) -> Check:
+    """Every bound column this release knows has a readable, enabled
+    binding in the database, and the database binds nothing this release
+    does not know (docs/00 decision 71, 2026-09-24).
+
+    `iam.compartment_in_use` reads the bindings from the catalog and
+    refuses while any cannot be read, and `compartment_lifecycle`'s rename
+    and retire move and count the columns it lists; the two are held to
+    one set by test, and this watches them at runtime, which is how a
+    trigger dropped or disabled by hand in psql is noticed. One reader per
+    fact: `iam.compartment_bindings()` is the registry's own reading."""
+    from noctornal_api.compartment_lifecycle import BOUND_COLUMNS
+    rows = conn.execute(
+        """SELECT schema_name, table_name, column_name, kind, enabled,
+                  problem FROM iam.compartment_bindings()""").fetchall()
+    broken = [(f"{s}.{t}", p) for s, t, _c, _k, _e, p in rows
+              if p is not None]
+    formed = {(s, t, c, k) for s, t, c, k, _e, p in rows if p is None}
+    disabled = sorted(f"{s}.{t}.{c}" for s, t, c, _k, e, p in rows
+                      if p is None and not e)
+    known = set(BOUND_COLUMNS)
+    missing = sorted(f"{s}.{t}.{c}" for s, t, c, _k in known - formed)
+    unknown = sorted(f"{s}.{t}.{c}" for s, t, c, _k in formed - known)
+    if not (broken or disabled or missing or unknown):
+        n = len(formed)
+        return Check("compartment_bindings_intact", True,
+                     f"{count_of(n, 'compartment column is', 'compartment columns are')} "
+                     f"bound to the registry, as this release expects.")
+    said = []
+    if missing:
+        k = len(missing)
+        said.append(
+            f"{count_of(k, 'column this release binds has', 'columns this release binds have')} "
+            f"no binding in the database ({_labels(missing)}), so an "
+            f"unregistered key can be written into "
+            f"{agree(k, 'it', 'them')} and a key "
+            f"{agree(k, 'it carries', 'they carry')} can be dropped.")
+    if unknown:
+        j = len(unknown)
+        said.append(
+            f"{count_of(j, 'column is', 'columns are')} bound in the "
+            f"database and unknown to this release ({_labels(unknown)}): "
+            f"renaming a key {agree(j, 'it carries', 'they carry')} is "
+            f"refused until the release knows {agree(j, 'it', 'them')}.")
+    if disabled:
+        said.append(
+            f"The binding on {_labels(disabled)} "
+            f"{agree(len(disabled), 'is', 'are')} disabled, so an "
+            f"unregistered key can be written there.")
+    for table, problem in broken:
+        said.append(
+            f"The binding on {table} cannot be read ({problem}), so no "
+            f"compartment can be renamed or retired.")
+    return Check(
+        "compartment_bindings_intact", False, " ".join(said),
+        "run alembic upgrade head; if the database is already at head, "
+        "recreate each named binding as the migration that added it did, "
+        "and rename or retire no compartment until this passes")
+
+
+def _captured_documents_compartmented(conn: psycopg.Connection) -> Check:
+    """Captured documents a compartmented case cites that carry no
+    compartment (L1, 2026-09-24): the captures 0071 could not label,
+    because no lock fits every case that cites them. And captures that
+    carry a compartment an ingest feed now uses for victim data. Always
+    passes: nothing here is refused, and the caveat keeps it in view."""
+    from noctornal_api.legacy_records import (
+        unlabelled_captures_count,
+        victim_data_captures_count,
+    )
+    n = unlabelled_captures_count(conn)
+    v = victim_data_captures_count(conn)
+    if n:
+        evidence = (f"{count_of(n, 'captured document', 'captured documents')} "
+                    f"that a compartmented case cites "
+                    f"{agree(n, 'carries', 'carry')} no compartment.")
+    else:
+        evidence = ("Every captured document a compartmented case cites "
+                    "carries a compartment.")
+    caveats = []
+    if n:
+        caveats.append(
+            f"{agree(n, 'It was', 'They were')} captured before this release "
+            f"into cases with no compartment in common, so no lock fits every "
+            f"case that cites {agree(n, 'it', 'them')}, and "
+            f"{agree(n, 'it is', 'they are')} listed in the collection to "
+            f"every reader at {agree(n, 'its', 'their')} TLP. python "
+            f"scripts/legacy_records.py --section captures lists "
+            f"{agree(n, 'it', 'them')}.")
+    if v:
+        caveats.append(
+            f"{count_of(v, 'captured document carries', 'captured documents carry')} "
+            f"a compartment an ingest feed now uses to wall off third-party "
+            f"personal data, so {agree(v, 'its', 'their')} text is in the "
+            f"collection's free-text index. python scripts/legacy_records.py "
+            f"--section victim-captures lists {agree(v, 'it', 'them')}.")
+    return Check("captured_documents_compartmented", True, evidence,
+                 caveat=" ".join(caveats))
+
+
+def _triage_claims_within_labels(conn: psycopg.Connection) -> Check:
+    """ATTRIBUTE claims accepted from Triage before Alpha 6 that the accept
+    would now refuse (L2, 2026-09-24): readable below the label of what
+    they were found in, or attached to an entity in another case. Listed,
+    never moved: a claim's own columns are not written again (invariant 5),
+    and no verb raises an existing entity's label."""
+    from noctornal_api.legacy_records import claim_counts
+    counts = claim_counts(conn)
+    n, k = counts["underlabelled"], counts["underlabelled_cases"]
+    m, shut = counts["other_case"], counts["closed"]
+    if not n and not m:
+        return Check("triage_claims_within_labels", True,
+                     "No claim accepted from Triage is readable below the "
+                     "label of what it was found in.")
+    parts = []
+    if n:
+        parts.append(
+            f"{count_of(n, 'claim', 'claims')} accepted from Triage before "
+            f"Alpha 6 {agree(n, 'is', 'are')} readable below the label of "
+            f"what {agree(n, 'it was', 'they were')} found in, in "
+            f"{count_of(k, 'case', 'cases')}")
+    if m:
+        parts.append(
+            f"{count_of(m, 'claim was', 'claims were')} attached to an "
+            f"entity in another case")
+    evidence = ", and ".join(parts) + ". Nothing moves them automatically."
+    if shut:
+        evidence += (f" {count_of(shut, 'of them is', 'of them are')} in a "
+                     f"closed case, which must be reopened to retract "
+                     f"{agree(shut, 'it', 'them')}.")
+    return Check(
+        "triage_claims_within_labels", False, evidence,
+        "run python scripts/legacy_records.py --section underlabelled on the "
+        "server and give each case's analysts its rows to retract")
+
+
+def _triage_claims_dated(conn: psycopg.Connection) -> Check:
+    """Claims accepted from Triage before Alpha 6 that cite a document and
+    carry no observation date (L2, 2026-09-24). Always passes: a missing
+    date shortens First seen and Last seen and harms nothing else, and the
+    fill waits on the owner's decision about invariant 5."""
+    from noctornal_api.legacy_records import undated_count
+    n = undated_count(conn)
+    if not n:
+        return Check("triage_claims_dated", True,
+                     "Every claim accepted from Triage that cites a document "
+                     "carries its date.")
+    return Check(
+        "triage_claims_dated", True,
+        f"{count_of(n, 'claim', 'claims')} accepted from Triage before "
+        f"Alpha 6 {agree(n, 'has', 'have')} no observation date.",
+        caveat=(f"First seen and Last seen ignore {agree(n, 'it', 'them')}. "
+                f"python scripts/legacy_records.py --section undated lists "
+                f"{agree(n, 'it', 'them')} with the date each document "
+                f"gives; an analyst adds a dated claim where it matters."))
+# The network boundary (docs/20 section 6.4 and docs/00 decision 68,
+# 2026-09-24). Its PROXY branch is the route provider's own verdict, so the
+# egress proxy fills it without a line here.
+_EGRESS_DEV_CAVEAT = (
+    "The network boundary is not in force: outbound traffic leaves from this "
+    "host's own address. That is acceptable in development only.")
+
+
+def _joined(sentences: list[str]) -> str:
+    if len(sentences) <= 1:
+        return "".join(sentences)
+    return ", ".join(sentences[:-1]) + " and " + sentences[-1]
+
+
+def _egress_boundary(conn: psycopg.Connection) -> Check:
+    """Whether outbound connections leave through the egress proxy.
+
+    Not blocking, and with no consequence entry: the failure is reversible
+    configuration and is refused where it matters, at route_for, by name
+    (the reasoning `sys_admin_present` gives for itself). Uses are stated,
+    never named: a readiness report is not the place a source's name or a
+    relay's host is shown to whoever can read it. The collection use is a
+    presence rather than a count, because a count would tell an
+    administrator below a source's label that the source exists
+    (2026-09-24)."""
+    from noctornal_api import egress
+    from noctornal_api.egress_policy import DECISION_REF
+
+    name = "egress_boundary"
+    problem = egress.proxy_problem()
+    if problem is not None:
+        return Check(name, False, problem,
+                     f"set {egress.PROXY_URL_ENV} to http://HOST:PORT, or unset it")
+    settings = egress.proxy_settings()
+    try:
+        provider = egress._route_provider()
+    except egress.RouteUnavailable as exc:
+        # A provider module that does not load or does not match refuses
+        # every route, with or without a proxy, so the row cannot say that
+        # connections are being made directly.
+        return Check(name, False, str(exc),
+                     "install a build whose egress route provider matches this one")
+    if settings is not None:
+        if provider is None:
+            return Check(
+                name, False,
+                f"{egress.PROXY_URL_ENV} is set and no egress route provider is "
+                f"loaded, so every outbound connection that asks for a route is "
+                f"refused.",
+                f"Check that noctornal_api.egress_routes imports (the API log says "
+                f"why it did not), or unset {egress.PROXY_URL_ENV}.")
+        verdict = provider.boundary_probe(conn, settings)
+        # A failed row always says what to do (the register's own rule); a
+        # provider verdict that names no action still gets one.
+        return Check(name, bool(verdict.ok), verdict.evidence,
+                     "" if verdict.ok else (
+                         verdict.action or "Check the egress proxy and its routes."),
+                     caveat=(verdict.caveat or "") if verdict.ok else "")
+    uses = egress.outbound_uses(conn)
+    if not egress._production():
+        evidence = ("No egress proxy is configured: outbound connections are made "
+                    "directly by this process under the in-process policy "
+                    "(egress_policy.py). ")
+        evidence += (f"Configured: {_joined(uses)}." if uses else
+                     "No collection source is polled and no outbound integration "
+                     "is configured.")
+        return Check(name, True, evidence, caveat=_EGRESS_DEV_CAVEAT)
+    if not uses:
+        return Check(name, True,
+                     "No collection source is polled, no outbound integration is "
+                     "configured, and no egress proxy is.")
+    return Check(
+        name, False,
+        f"No egress proxy is configured, and {_joined(uses)}: each of those "
+        f"connections leaves from this host's own address, with no network "
+        f"boundary in force ({DECISION_REF}).",
+        f"Run the egress proxy and set {egress.PROXY_URL_ENV}.")
+# The egress proxy (S2, 2026-09-24). Two rows beside egress_boundary,
+# whose PROXY branch is the route provider's own probe.
+# Neither is blocking: each failure is refused where it matters, at
+# route_for and at the proxy, and none becomes irreversible once material
+# arrives, the bar BLOCKING_CHECKS states. Both state presence or counts of
+# configuration, never a source's name or a count of sources.
+def _egress_routes_cover_sources(conn: psycopg.Connection) -> Check:
+    """Whether every outbound use has a route to leave through: feeds a
+    passive default, persona and persona-less sources a profile that can
+    carry them, and each configured integration its route."""
+    from noctornal_api import egress_routes
+    ok, evidence, action, caveat = egress_routes.cover_sources(conn)
+    return Check("egress_routes_cover_sources", ok, evidence, action, caveat=caveat)
+
+
+def _egress_exits_open(conn: psycopg.Connection) -> Check:
+    """Whether the egress proxy holds the key every sealed exit is sealed
+    under and can open each one (the probe route's headers)."""
+    from noctornal_api import egress_routes
+    ok, evidence, action, caveat = egress_routes.exits_open(conn)
+    return Check("egress_exits_open", ok, evidence, action, caveat=caveat)
+# F1 roles (CONCOR), 2026-09-24. This row fails when role analysis runs
+# without its BLAS cap: numpy's OpenBLAS starts a thread per core, and four
+# worker processes each running a worst case took about
+# 50 s apiece uncapped against 6 s capped. threadpoolctl is not pinned, so
+# `blockmodel` caps through it when installed and otherwise through the
+# OpenBLAS numpy bundles; on a numpy with neither (Apple's Accelerate) the
+# cap does nothing, and this row says so instead of the analysis slowing
+# every worker unexplained.
+def _role_analysis_thread_capped(conn: psycopg.Connection) -> Check:
+    """Reads the cap back from `blockmodel`, which took it on import. Never
+    blocking: an uncapped BLAS is slow, not unsafe."""
+    from noctornal_api import blockmodel
+    capped, evidence = blockmodel.blas_cap_report()
+    if capped:
+        return Check("role_analysis_thread_capped", True, evidence)
+    return Check(
+        "role_analysis_thread_capped", False, evidence,
+        "install threadpoolctl==3.7.0 with -c constraints.txt, or run on a "
+        "numpy build that bundles OpenBLAS (the Linux and Windows wheels do), "
+        "and restart the API")
+# The two-person policy (F9, 2026-09-24).
+def _dual_control_policy_changeable(conn: psycopg.Connection) -> Check:
+    """Whether two DIFFERENT people could change which operations need two
+    people: an active account that may propose a change, and an active
+    account that may countersign one without also being able to propose
+    it. An account holding both roles is one person and is never the
+    second one (2026-09-24), so the first-run account,
+    which holds SYS_ADMIN and SECURITY_OFFICER, cannot countersign what it
+    or anyone else proposes.
+
+    Informative, not blocking, with no CONSEQUENCES entry: a policy nobody
+    can change is frozen in the safe direction, every operation keeping the
+    requirement it has. `dual_control.signers` is the one reader."""
+    from noctornal_api.dual_control import (
+        DualControlPolicyService,
+        readiness_evidence,
+    )
+
+    signers = DualControlPolicyService(conn).signers()
+    evidence = readiness_evidence(signers)
+    if signers["distinct_pair"]:
+        return Check("dual_control_policy_changeable", True,
+                     evidence + ", so two different people can change which "
+                     "operations need two people")
+    return Check(
+        "dual_control_policy_changeable", False, evidence,
+        "grant SECURITY_OFFICER to an active account that is not an "
+        "administrator, in the console under Admin, Accounts (Grant role). "
+        "An account holding SYS_ADMIN proposes changes and never "
+        "countersigns them, so the first-run account, which holds both, "
+        "cannot be the second person. Until then nobody can change which "
+        "operations need two people, which is the safe direction: every "
+        "operation keeps the requirement it has. Over the API: POST "
+        "/admin/users/{user_id}/roles")
+# Comms (F10a and F10c, 2026-09-24). Neither is blocking and neither
+# has a console target: both are settled by configuration and a restart.
+def _pgp_verifier(conn: psycopg.Connection) -> Check:
+    """Whether a signature check made now could produce a verdict. With no
+    gpg, or one below the version floor (pgp.MIN_GPG_VERSIONS), every
+    check records NO_VERIFIER and no binding can be confirmed, and nothing
+    said so: the production image carried gpgv, not gpg."""
+    from noctornal_api import pgp
+    usable, evidence = pgp.verifier_status()
+    if usable:
+        return Check("pgp_verifier", True, evidence)
+    return Check(
+        "pgp_verifier", False, evidence[:1].upper() + evidence[1:],
+        "install GnuPG 2.4.9 or later (or 2.5.14 or later) or set NOCTORNAL_GPG "
+        "to its full path; for a distribution build that carries those fixes "
+        f"under an older version number, set {pgp.PATCHED_AS_ENV} to the "
+        "upstream release it matches; then restart")
+
+
+def _pgp_key_directory(conn: psycopg.Connection) -> Check:
+    """Web Key Directory lookups: off (a pass), on (a pass with the
+    exposure said out loud), or half configured (a fail naming the fix).
+    Whether the network boundary is in force is egress_boundary's row."""
+    from noctornal_api import pgp_keys
+    ceiling = os.environ.get(pgp_keys.WKD_CEILING_ENV, "").strip()
+    policy = pgp_keys.directory_policy(conn)
+    if policy.enabled:
+        domains = ", ".join(d for d, _m in policy.directories)
+        return Check(
+            "pgp_key_directory", True,
+            f"on, at most TLP:{policy.ceiling}, through the integration route "
+            f"wkd. Through the egress proxy only a URL whose host resolves can "
+            f"work, so a directory that uses the direct method is listed as "
+            f"<domain>:443 alone",
+            caveat=(f"Lookups go to {domains}, each approved by a second person. "
+                    f"Each directory's operator sees which address was looked "
+                    f"up, when, and from which address the request came."))
+    if not ceiling and policy.problem == pgp_keys.OFF_PROBLEM:
+        try:
+            pgp_keys._wkd_route(conn)
+        except Exception:  # noqa: BLE001 - no route at all is the off state
+            return Check("pgp_key_directory", True,
+                         "off: vendor keys come from a file or a paste, and "
+                         "nothing is fetched")
+        return Check(
+            "pgp_key_directory", False,
+            "the integration route wkd exists and NOCTORNAL_WKD_CEILING is not "
+            "set, so lookups are off with a route standing ready",
+            "set NOCTORNAL_WKD_CEILING to CLEAR, GREEN or AMBER, or retire the "
+            "route, and restart")
+    if policy.problem == pgp_keys.NO_ROUTE or (
+            policy.problem or "").startswith(pgp_keys.NO_ROUTE):
+        action = ("create the integration route named wkd under "
+                  "Administration, listing openpgpkey.<domain>:443 for the "
+                  "advanced method or <domain>:443 for the direct one (a "
+                  "directory that uses the direct method is listed as "
+                  "<domain>:443 alone), or unset NOCTORNAL_WKD_CEILING")
+    elif policy.problem == pgp_keys.BAD_CEILING:
+        action = "set NOCTORNAL_WKD_CEILING to CLEAR, GREEN or AMBER, and restart"
+    elif policy.problem == pgp_keys.NO_GPG:
+        action = ("install a gpg the pgp_verifier row accepts, or unset "
+                  "NOCTORNAL_WKD_CEILING, and restart")
+    else:
+        action = ("list each directory on the integration route wkd by name, "
+                  "as openpgpkey.<domain>:443 or <domain>:443, under "
+                  "Administration")
+    return Check("pgp_key_directory", False, policy.problem or "lookups are off",
+                 action)
+
+
+# F11 and F12 (2026-09-24). Not blocking; no console target: both are
+# settled by configuration and by scheduling scripts/lab_triage.py.
+
+#: How long the oldest queued run may wait, with nothing finishing, before
+#: the register says nothing is draining the queue. Five cron passes.
+_TRIAGE_STALE_MINUTES = 60
+
+
+def _sample_static_analysis(conn: psycopg.Connection) -> Check:
+    """Whether static triage can run here, under which limits, and whether
+    anything is draining its queue (F11 N).
+
+    Fails on a settings problem, on a child that will not start or whose
+    selftest fails, and when the oldest queued run has waited an hour with
+    no run finishing in that hour ("nothing is running static triage"); a
+    large backfill that is draining does not fail it. Passes with a caveat
+    for what the child can still reach (lab_static's docstring), for
+    platforms that cannot bound its memory, and when YARA is not
+    installed."""
+    from urllib.parse import urlsplit
+
+    from noctornal_api import fuzzyhash, lab_static, lab_triage
+    from noctornal_api.yara_rules import engine_version
+    name = "sample_static_analysis"
+    settings, problem = lab_triage.analysis_settings()
+    if problem:
+        return Check(name, False, problem,
+                     "correct the setting it names and restart")
+    dsn = urlsplit(os.environ.get("DATABASE_URL", "").replace("+psycopg", ""))
+    try:
+        probe = {"host": dsn.hostname, "port": dsn.port or 5432} \
+            if dsn.hostname else {}
+    except ValueError:
+        probe = {}
+    try:
+        out = lab_triage.selftest(settings, probe=probe)
+    except RuntimeError as exc:
+        return Check(name, False, f"the analysis child failed its selftest: {exc}",
+                     "check that this server's Python can run "
+                     "python -m noctornal_api.lab_static, and its log")
+    caps = out.get("capabilities") or {}
+    kind = caps.get("limits") or lab_static.limits_kind()
+    leaked = [k for k in out.get("environment_keys") or []
+              if k.startswith(("NOCTORNAL_", "DATABASE", "MINIO_", "SAMPLE_",
+                               "PRESERVE_", "REDIS", "SMTP_"))]
+    if leaked:
+        return Check(name, False,
+                     f"the analysis child was started with "
+                     f"{count_of(len(leaked), 'secret setting', 'secret settings')} "
+                     f"in its environment",
+                     "report this: the child's environment must hold no "
+                     "credential")
+    depth, oldest, last_done = conn.execute(
+        """SELECT count(*) FILTER (WHERE status = 'QUEUED'),
+                  min(queued_at) FILTER (WHERE status = 'QUEUED'),
+                  max(finished_at) FILTER (WHERE status = 'DONE')
+             FROM lab.static_run""").fetchone()
+    def fmt(t) -> str:
+        return (t.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                if t else "never")
+    yara = engine_version()
+    evidence = (
+        f"pefile {caps.get('pefile') or 'not installed'}; {fuzzyhash.TLSH_IMPLEMENTATION}; "
+        f"{fuzzyhash.SSDEEP_IMPLEMENTATION}; yara-x {yara or 'not installed'}. "
+        f"Limits: {lab_static.LIMITS_WORDS[kind]}. Analysis maximum "
+        f"{settings.max_bytes // (1 << 20)} MiB, fuzzy hashing up to "
+        f"{settings.fuzzy_max_bytes // (1 << 20)} MiB, "
+        f"{settings.timeout_s} seconds per step. Queue: "
+        f"{count_of(depth, 'run', 'runs')} waiting"
+        + (f", the oldest since {fmt(oldest)}" if oldest else "")
+        + f"; last finished run {fmt(last_done)}.")
+    now = datetime.now(timezone.utc)
+    stale = timedelta(minutes=_TRIAGE_STALE_MINUTES)
+    if depth and oldest and now - oldest > stale and (
+            last_done is None or now - last_done > stale):
+        return Check(name, False, evidence,
+                     "nothing is running static triage; schedule "
+                     "scripts/lab_triage.py (docs/11)")
+    caveats = []
+    exposure = out.get("exposure") or {}
+    reach = []
+    if exposure.get("proc_environ_readable"):
+        reach.append("read the environment of processes running as this "
+                     "user, which holds this deployment's secrets")
+    if exposure.get("database_reachable"):
+        reach.append("open a connection to the database host")
+    if reach:
+        # F11 (2026-09-24): worded so the sentence agrees whether one
+        # exposure applies or both.
+        caveats.append(
+            "The analysis child can " + " and ".join(reach) + ", so a "
+            "parser exploit in a hostile sample could do the same. Run the "
+            "analysis in a container with no secrets and no network to "
+            "close this (docs/16).")
+    if kind != "rlimit":
+        caveats.append(f"On this platform the child is bounded by "
+                       f"{lab_static.LIMITS_WORDS[kind]}.")
+    if yara is None:
+        caveats.append("YARA is not installed, so static triage scans with no "
+                       "rules: install noctornal-api[yara].")
+    return Check(name, True, evidence, caveat=" ".join(caveats))
+
+
+def _yara_rules_active(conn: psycopg.Connection) -> Check:
+    """Whether every active YARA rule set has a build this host can load
+    (F12 M). Counts only: readiness has no caller, so it names no set and
+    no person."""
+    from noctornal_api.yara_rules import RulesetService, build_key
+    name = "yara_rules_active"
+    active = conn.execute(
+        """SELECT a.version_id FROM lab.yara_activation a
+            WHERE a.deactivated_at IS NULL""").fetchall()
+    waiting = conn.execute(
+        """SELECT count(*) FROM lab.yara_ruleset_version v
+            WHERE NOT EXISTS (SELECT 1 FROM lab.yara_activation a
+                               WHERE a.version_id = v.id
+                                 AND a.deactivated_at IS NULL)
+              AND NOT EXISTS (SELECT 1 FROM lab.yara_ruleset_version n
+                               WHERE n.ruleset_id = v.ruleset_id
+                                 AND n.version > v.version)""").fetchone()[0]
+    key = build_key()
+    if key is None:
+        return Check(name, True,
+                     f"{count_of(len(active), 'rule set is', 'rule sets are')} "
+                     f"active; {count_of(waiting, 'version awaits', 'versions await')} "
+                     f"activation.",
+                     caveat="The YARA engine (yara-x) is not installed, so no "
+                            "rule set scans anything: install "
+                            "noctornal-api[yara].")
+    svc = RulesetService(conn)
+    built = stuck = 0
+    for (version_id,) in active:
+        found = svc.build_status(version_id, key)
+        if found.get("status") in ("COMPILED", "PARTIAL"):
+            built += 1
+            continue
+        job = conn.execute(
+            """SELECT status, attempts, updated_at FROM lab.yara_compile_job
+                WHERE version_id = %s AND engine = %s AND platform = %s
+                  AND fingerprint = %s""",
+            (version_id, key.engine, key.platform, key.fingerprint)).fetchone()
+        if (found.get("status") == "FAILED" or job is None
+                or job[0] == "FAILED" or job[1] >= 1
+                or datetime.now(timezone.utc) - job[2] > timedelta(minutes=15)):
+            stuck += 1
+    evidence = (f"{count_of(len(active), 'rule set is', 'rule sets are')} "
+                f"active; {built} with a verified build for {key.engine} on "
+                f"{key.platform}; "
+                f"{count_of(waiting, 'version awaits', 'versions await')} "
+                f"activation.")
+    if stuck:
+        return Check(name, False, evidence,
+                     f"{count_of(stuck, 'active rule set has', 'active rule sets have')} "
+                     f"no build this host can load after a full pass: deactivate "
+                     f"{agree(stuck, 'it', 'them')} or upload a version that "
+                     f"compiles, and check that scripts/lab_triage.py runs")
+    if not active:
+        return Check(name, True, evidence,
+                     caveat="No YARA rule set is active, so static triage "
+                            "scans with none.")
+    return Check(name, True, evidence)
+# The collection foundation (docs/00 decision 69, 2026-09-24). Two
+# informative rows, not blocking and with no CONSEQUENCES entry: what each
+# failure stops (a source the collector leaves alone) is said in its
+# evidence and action, and every refusal is enforced where it matters, by
+# the poll. Counts, never names: a readiness report is not the place a
+# source's name is shown to whoever can read it.
+_COLLECTION_IDLE = "No forum or Telegram source is active, so nothing is read from one."
+
+#: cause -> (one, many) for the configured row's evidence.
+_CAUSE_WORDS = {
+    "kind": ("is read by a parser that does not read its kind",
+             "are read by a parser that does not read their kind"),
+    "binding": ("has a binding its parser does not take",
+                "have a binding their parser does not take"),
+    "inactive": ("is deactivated", "are deactivated"),
+    "above_ceiling": ("is labelled above the ceiling declared for its kind",
+                      "are labelled above the ceiling declared for their kind"),
+    "no_egress": ("has no egress profile", "have no egress profile"),
+    "persona": ("is read by a persona that does not fit",
+                "are read by a persona that does not fit"),
+    "adapter": ("is refused by its parser", "are refused by their parser"),
+}
+
+
+def _authority_sources(conn: psycopg.Connection):
+    """(active sources read by an adapter that requires authority, the
+    registry): the sources the two rows are about."""
+    from noctornal_api.collection import (
+        _SOURCE_COLUMNS,
+        _attr,
+        _row_to_source,
+        default_adapters,
+    )
+
+    adapters = default_adapters()
+    rows = conn.execute(
+        f"SELECT {_SOURCE_COLUMNS} FROM collect.source s WHERE s.is_active"
+    ).fetchall()
+    sources = [s for s in (_row_to_source(r) for r in rows)
+               if (a := adapters.get(s.parser_key)) is not None
+               and _attr(a, "requires_authority")]
+    return sources, adapters
+
+
+def _collection_sources_configured(conn: psycopg.Connection) -> Check:
+    """Whether every active forum and Telegram source could be read: a
+    declared ceiling it sits within, an exit or a persona that fits, and a
+    parser that does not refuse it. Passes with a caveat when a parser that
+    keeps raw markup is active and there is nowhere to keep it."""
+    from collections import Counter
+
+    from noctornal_api.collection import CollectionService, _attr
+    from noctornal_api.rawstore import (
+        collect_raw_bucket,
+        document_raw_bucket_exists,
+    )
+    from noctornal_api.wording import agree, count_of
+
+    name = "collection_sources_configured"
+    sources, adapters = _authority_sources(conn)
+    if not sources:
+        return Check(name, True, _COLLECTION_IDLE)
+    svc = CollectionService(conn, adapters)
+    causes: Counter = Counter()
+    unset: Counter = Counter()
+    for source in sources:
+        found = svc.refusal_cause(source, adapters[source.parser_key])
+        if found is None:
+            continue
+        causes[found[0]] += 1
+        if found[0] == CollectionService.CAUSE_NO_CEILING:
+            var = _ceiling_var(source.kind)
+            if var:
+                unset[var] += 1
+    total = len(sources)
+    head = (f"{count_of(total, 'active forum and Telegram source', 'active forum and Telegram sources')}")
+    refused = sum(causes.values())
+    if refused:
+        parts = []
+        if causes.get(CollectionService.CAUSE_NO_CEILING):
+            n = causes[CollectionService.CAUSE_NO_CEILING]
+            variables = ", ".join(sorted(v for v in unset if v))
+            parts.append(f"{n} {agree(n, 'has', 'have')} no ceiling declared"
+                         + (f" ({variables})" if variables else ""))
+        for cause, (one, many) in _CAUSE_WORDS.items():
+            n = causes.get(cause, 0)
+            if n:
+                parts.append(f"{n} {one if n == 1 else many}")
+        return Check(
+            name, False,
+            f"{head}; {refused} {agree(refused, 'is', 'are')} refused before "
+            f"any request: {_joined(parts)}.",
+            "declare the ceiling for each kind and restart, bind an egress "
+            "profile or a persona to each source under Feeds, Sources, or "
+            "deactivate it")
+    caveat = ""
+    if any(_attr(adapters[s.parser_key], "keeps_raw") for s in sources):
+        try:
+            exists = document_raw_bucket_exists()
+        except Exception:  # noqa: BLE001 - a store that does not answer is the caveat
+            exists = False
+        if exists is None:
+            caveat = ("No object storage is configured for collected pages: "
+                      "raw markup is not kept, so collected pages cannot be "
+                      "re-parsed.")
+        elif not exists:
+            caveat = (f"The bucket {collect_raw_bucket()} does not exist or does "
+                      f"not answer: raw markup is not kept, so collected pages "
+                      f"cannot be re-parsed.")
+    return Check(name, True,
+                 f"{head}; {agree(total, 'it', 'each')} could be read once "
+                 f"its authority is confirmed.", caveat=caveat)
+
+
+def _ceiling_var(kind: str) -> str:
+    from noctornal_api.collection_authority import SOURCE_CEILING_ENV
+    return SOURCE_CEILING_ENV.get(kind, "")
+
+
+def _collection_authority_current(conn: psycopg.Connection) -> Check:
+    """Whether every active forum and Telegram source is covered by a
+    confirmed authority, and whether any authority ends soon."""
+    from noctornal_api.collection_authority import CollectionAuthorityService
+    from noctornal_api.wording import agree, count_of
+
+    name = "collection_authority_current"
+    sources, adapters = _authority_sources(conn)
+    if not sources:
+        return Check(name, True, _COLLECTION_IDLE)
+    service = CollectionAuthorityService(conn, adapters)
+    uncovered = len(service.uncovered_map(sources))
+    if uncovered:
+        return Check(
+            name, False,
+            f"{count_of(uncovered, 'active forum and Telegram source', 'active forum and Telegram sources')} "
+            f"{agree(uncovered, 'has', 'have')} no confirmed authority, so the "
+            f"collector leaves {agree(uncovered, 'it', 'them')} alone.",
+            "a collection manager records the authority for each source under "
+            "Feeds, Sources, and a security officer confirms it under Oversight")
+    expiring = service.expiring_count()
+    caveat = (f"{count_of(expiring, 'authority expires', 'authorities expire')} "
+              f"within 14 days." if expiring else "")
+    total = len(sources)
+    return Check(name, True,
+                 f"{count_of(total, 'active forum and Telegram source', 'active forum and Telegram sources')}; "
+                 f"{agree(total, 'it is', 'each is')} covered by a confirmed "
+                 f"authority.", caveat=caveat)
+
+
+# The forum adapters (F3 and F4, 2026-09-24). Not
+# blocking, no CONSEQUENCES entry: the poll enforces every refusal the row
+# describes. Fails while NOCTORNAL_FORUM_ALLOW_DIRECT is set (a forum read
+# with no proxy leaves from this host) or while forum sources are active
+# and the parser is not installed; passes with a caveat while no retention
+# rule covers FORUM_POST or FORUM_MEMBER. Counts, never names.
+def _forum_collection(conn: psycopg.Connection) -> Check:
+    from noctornal_api import forum_adapters
+
+    ok, evidence, action, caveat = forum_adapters.readiness(conn)
+    return Check("forum_collection", ok, evidence, action, caveat=caveat)
+
+
+# ---------------------------------------------------------------------------
+# The similarity indexes (F6.1 and F6.2, 2026-09-24). Not
+# blocking. Neither row carries a count or a proportion: the register is
+# read by user.manage holders, who need not read collected documents, and
+# a deployment-wide count of what is indexed is a volume disclosure.
+# ---------------------------------------------------------------------------
+
+def _utc_words(moment) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _embedding_wording_current(conn: psycopg.Connection) -> Check:
+    """Whether similar wording is built and still reproduces itself: an
+    active index whose built-in model this build carries, whose stored
+    canary equals a fresh local embedding of the canary text (compared in
+    SQL after the vector(768) cast, at distance zero), and no item that
+    has been failing for over an hour."""
+    from noctornal_api import embedders as E
+    from noctornal_api.embeddings import FAILED_STALE, EmbeddingService
+
+    name = "embedding_wording_current"
+    cfg = E.configured()
+    if cfg.wording_setting == "off":
+        return Check(name, True, f"{E.WORDING_ENV} is off.", caveat=(
+            "Similar wording is off by configuration, so reposts, light edits and "
+            "transliterations of a passage cannot be found."))
+    service = EmbeddingService(conn, embedders=cfg, blocking_failures=lambda _c: [])
+    active = service.active(E.ROLE_WORDING)
+    building = service.building(E.ROLE_WORDING)
+    if active is None and building is None and service.ever_registered(E.ROLE_WORDING):
+        # Only the first index registers itself; one an administrator
+        # retired stays retired (2026-09-25).
+        return Check(name, False, "The similar wording index was retired and no new "
+                     "one has been started.",
+                     "rebuild it under Administration, Embeddings")
+    if active is None:
+        return Check(name, False, "No similar wording index exists yet.",
+                     "run scripts/embed_pass.py, or start the embed-pass service")
+    embedder = E.builtin(active.model)
+    if embedder is None:
+        return Check(
+            name, False,
+            f"The similar wording index was built with {active.model}, which this "
+            f"build no longer carries, so it serves no query and receives nothing.",
+            "run scripts/embed_pass.py: it builds the index again with this build's "
+            "model in a free slot (Administration, Embeddings frees one)")
+    canary = embedder.embed_one(E.CANARY_TEXT).vector
+    same = conn.execute(
+        "SELECT (canary <-> %s::vector(768)) = 0 FROM core.embedding_space WHERE id = %s",
+        (E.vector_literal(canary), active.id)).fetchone()[0]
+    if not same:
+        return Check(
+            name, False,
+            "The built-in embedder no longer reproduces its own canary: a code change "
+            "altered vectors without a new version.",
+            "install a build whose built-in model is versioned, or rebuild the "
+            "similar wording index under Administration, Embeddings")
+    stale = any(conn.execute(
+        f"SELECT EXISTS (SELECT 1 FROM {table} WHERE slot = %s AND status = 'FAILED' "
+        f"AND first_failed_at < now() - interval '{FAILED_STALE}')",
+        (active.slot,)).fetchone()[0]
+        for table in ("collect.document_embedding", "core.evidence_embedding",
+                      "core.assertion_embedding"))
+    if stale:
+        return Check(name, False,
+                     "Some items have failed to embed for over an hour.",
+                     "read the embed-pass log")
+    evidence = (f"Model {active.model} in slot {active.slot}, active since "
+                f"{_utc_words(active.activated_at)}.")
+    caveat = ""
+    if building is not None:
+        caveat = ("A rebuild of the similar wording index is in progress; queries use "
+                  "the current index until it completes.")
+    elif active.model != E.BUILTIN_CURRENT and service._free_slot() is None:
+        caveat = ("This build carries a newer built-in model and no slot is free to "
+                  "rebuild the index with it: retire an index under Administration, "
+                  "Embeddings.")
+    return Check(name, True, evidence, caveat=caveat)
+
+
+def _embedding_meaning_endpoint(conn: psycopg.Connection) -> Check:
+    """Whether similar meaning can reach its model endpoint lawfully:
+    settings without problems, a route that reaches it, AUTHORITY for an
+    endpoint outside this host, the model unchanged. The canary is read
+    from the pass's last result and sent again only when that result is
+    over an hour old (a send on every render would be a network call
+    triggered by opening a page), and never while a blocking
+    check fails or without AUTHORITY outside this host."""
+    from noctornal_api import embedders as E
+    from noctornal_api.egress import _production
+    from noctornal_api.embeddings import (
+        CANARY_FRESH_SECONDS,
+        EmbeddingService,
+        EmbedRefused,
+        reason_text,
+    )
+
+    name = "embedding_meaning_endpoint"
+    cfg = E.configured()
+    if not cfg.meaning_url_set:
+        return Check(name, True, (
+            "No model endpoint is configured, so no case text is sent anywhere to be "
+            "embedded. Similar meaning is off."))
+    settings = cfg.meaning_settings
+    if settings is None:
+        problems = [p for p in cfg.problems if E.MEANING_PREFIX in p]
+        return Check(name, False, " ".join(problems),
+                     "correct the settings named above and restart")
+    service = EmbeddingService(conn, embedders=cfg)
+    try:
+        endpoint = service.open(settings, context_kind="check")
+    except EmbedRefused as exc:
+        if exc.code in ("unrouted", "route_refused"):
+            return Check(name, False, f"No egress route reaches the model endpoint: {exc}",
+                         f"create the integration route embeddings under "
+                         f"Administration, Egress, and allow {settings.endpoint} on it")
+        return Check(name, False, "The model endpoint cannot be reached: "
+                     + reason_text(exc.code) + ".",
+                     "check the model server's address in NOCTORNAL_EMBED_MEANING_URL")
+    locality = endpoint.locality
+    evidence = (f"Endpoint {settings.endpoint}, {locality.words}; destination "
+                f"{endpoint.destination.value}; ceiling TLP:{settings.ceiling}; "
+                f"authority {settings.authority or 'not declared'}; message authority "
+                f"{settings.message_authority or 'not declared'}.")
+    if not locality.on_this_host and not settings.authority:
+        return Check(
+            name, False,
+            evidence + " The endpoint is outside this host and no written authority to "
+            "send case text there is declared, so nothing is sent, not even the public "
+            "canary.",
+            "record the decision (docs/16) and set NOCTORNAL_EMBED_MEANING_AUTHORITY to "
+            "its reference, or use a model server on this host")
+    caveats = []
+    if not locality.on_this_host and settings.scheme == "http":
+        if locality.kind == "internet":
+            return Check(name, False, evidence + " It is reached over plain http "
+                         "across the internet.",
+                         "use an https:// address for the model endpoint")
+        caveats.append("The model endpoint is reached over plain http, which anyone "
+                       "on that network can read.")
+    if settings.local_host and _production():
+        caveats.append("NOCTORNAL_EMBED_MEANING_LOCAL_HOST has no effect in production: "
+                       "a model endpoint there is always outside this host.")
+    blocked = service._blocking_failures(conn)
+    if blocked:
+        caveats.append("Sends are paused while blocking readiness checks fail.")
+    active = service.active(E.ROLE_MEANING)
+    if active is None:
+        if (service.building(E.ROLE_MEANING) is None
+                and service.ever_registered(E.ROLE_MEANING)):
+            caveats.append("The similar meaning index was retired, and nothing is sent "
+                           "until an administrator rebuilds it (Administration, "
+                           "Embeddings).")
+        else:
+            caveats.append("No similar meaning index exists yet: the next embedding "
+                           "pass builds it.")
+        return Check(name, True, evidence, caveat=" ".join(caveats))
+    fresh = (active.canary_checked_at is not None
+             and (datetime.now(timezone.utc) - active.canary_checked_at).total_seconds()
+             < CANARY_FRESH_SECONDS)
+    if not fresh and not blocked:
+        try:
+            service._check_canaries(settings, [active], timeout_s=5,
+                                     context_kind="check")
+        except EmbedRefused:
+            pass
+        active = service.space(active.id)
+    if active.model_mismatch_at is not None:
+        return Check(name, False, evidence + " The model behind the endpoint has changed "
+                     "since the index was built.",
+                     "rebuild the similar meaning index under Administration, Embeddings")
+    if active.canary_ok is False:
+        return Check(name, False, evidence + " The last canary sent to the model "
+                     "endpoint failed: " + reason_text(active.canary_problem) + ".",
+                     "check the model server and its route; the embed-pass log names "
+                     "the failure")
+    if active.canary_checked_at is not None:
+        evidence += f" Canary last checked {_utc_words(active.canary_checked_at)}."
+    return Check(name, True, evidence, caveat=" ".join(caveats))
+
+
+# Outbound integrations (F8, F7 and F15.2, 2026-09-24). Not blocking: each
+# refuses at the point of use, and a blocking row would stop collection
+# polls for a feature nobody turned on.
+#: How long a due email or webhook may wait before the outbox row says no
+#: drain is reaching it.
+OUTBOX_OVERDUE_AFTER = timedelta(minutes=30)
+
+
+def _notify_outbox_draining(conn: psycopg.Connection) -> Check:
+    """Is anything draining the outbox? Over the email and webhook channels
+    that can send: Jira's backlog is jira_destination's business, and a
+    held channel (no route) is smtp_configured's and the Integrations
+    card's, so a Jira outage or a missing route is never reported as "no
+    drain is running" (F8 F)."""
+    from noctornal_api import transports
+    from noctornal_api.wording import count_of
+
+    sendable, held = [], []
+    for channel in (transports.SMTP, transports.WEBHOOK):
+        state = transports.route_state(channel, conn)
+        (sendable if state.ok else held).append((channel, state))
+    notes = [f"{'Email' if c == transports.SMTP else 'Webhook'} held: {s.why}"
+             for c, s in held if not (c == transports.WEBHOOK
+                                      and transports.webhook_url() is None)]
+    channels = [c for c, _ in sendable]
+    row = conn.execute(
+        """SELECT count(*), min(deliver_after) FROM notify.delivery
+            WHERE state = 'PENDING' AND deliver_after <= now() - %s
+              AND channel = ANY(%s)""",
+        (OUTBOX_OVERDUE_AFTER, channels)).fetchone()
+    overdue, oldest = int(row[0]), row[1]
+    if overdue:
+        return Check(
+            "notify_outbox_draining", False,
+            f"{count_of(overdue, 'delivery', 'deliveries')} overdue, the oldest due "
+            f"at {oldest:%Y-%m-%d %H:%M} UTC: no drain has run since, or it stops "
+            f"before sending.",
+            "Start the cron service (infra/production/compose.yml, service cron), "
+            "or run python scripts/notify_drain.py every five minutes; Drain now in "
+            "Administration, Integrations runs one pass.")
+    due = conn.execute(
+        """SELECT min(deliver_after) FROM notify.delivery
+            WHERE state = 'PENDING' AND deliver_after <= now() AND channel = ANY(%s)""",
+        (channels,)).fetchone()[0]
+    evidence = "Nothing has waited more than 30 minutes past its due time."
+    if due is not None:
+        evidence += f" The oldest due row has waited since {due:%Y-%m-%d %H:%M} UTC."
+    if notes:
+        evidence += " " + " ".join(notes)
+    return Check("notify_outbox_draining", True, evidence)
+
+
+def _jira_destination(conn: psycopg.Connection) -> Check:
+    """The Jira destination's own verdict (F7): its route, its
+    credential, its health and its backlog."""
+    from noctornal_api import jira
+
+    ok, evidence, action, caveat = jira.readiness_verdict(conn)
+    return Check("jira_destination", ok, evidence, "" if ok else action,
+                 caveat=caveat if ok else "")
+
+
+def _outbound_lookup_providers(conn: psycopg.Connection) -> Check:
+    """The host switch and every enabled provider's key, route and adapter
+    (F15.2)."""
+    from noctornal_api import providers
+
+    ok, evidence, action, caveat = providers.readiness_verdict(conn)
+    return Check("outbound_lookup_providers", ok, evidence, "" if ok else action,
+                 caveat=caveat if ok else "")
+
+
+# Telegram collection (F5.3, 2026-09-24). Not blocking and with no
+# CONSEQUENCES entry: every refusal is enforced where it matters, by the
+# poll and the acts. The library, the enrolled sessions and the machine
+# locks only; the ceiling and the proxy are other rows'.
+def _telegram_collection(conn: psycopg.Connection) -> Check:
+    from noctornal_api import telegram_service
+
+    ok, evidence, action = telegram_service.readiness_verdict(conn)
+    return Check("telegram_collection", ok, evidence, "" if ok else action)
+
+
+# ---------------------------------------------------------------------------
+# Prohibited-content screening (F13, 2026-09-24). Not blocking: holding
+# hash lists may itself be unlawful, so no list loaded must pass.
+# ---------------------------------------------------------------------------
+
+def _screening_active(conn: psycopg.Connection) -> bool:
+    return conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM lab.screening_list "
+        "WHERE retired_at IS NULL)").fetchone()[0]
+
+
+def _screening_clause(conn: psycopg.Connection) -> str:
+    """The policy row's sentence about screening."""
+    from noctornal_api import screening
+    n = len(screening.state(conn).active_lists)
+    if not n:
+        return "Screening: no hash list is loaded."
+    return f"Screening: {count_of(n, 'hash list is', 'hash lists are')} active."
+
+
+def _prohibited_content_screening(conn: psycopg.Connection) -> Check:
+    """Whether the hash lists held are held under a recorded authority,
+    whether every held sample has been screened against the newest, and
+    whether every matched sample's bytes have left the working store.
+
+    No list loaded PASSES with the docs/16 C3 caveat: not holding lists is
+    the lawful default in most deployments, so it must not make the
+    register unreachable. The evidence says WHETHER samples wait or are
+    behind, never how many: this row is read by every holder of
+    user.manage, and the counts span every compartment;
+    the officer's section has the numbers."""
+    from noctornal_api import screening
+    name = "prohibited_content_screening"
+    now = screening.state(conn)
+    authority = (f"{screening.AUTHORITY_ENV} is declared ({now.authority})"
+                 if now.authority else
+                 f"{screening.AUTHORITY_ENV} is not declared")
+    if not now.active_lists:
+        return Check(
+            name, True, f"No prohibited-content hash list is loaded; {authority}.",
+            caveat=("No prohibited-content hash list is loaded, so nothing is "
+                    "compared (docs/16 C3). Import one only if counsel confirms "
+                    "this deployment may hold it."))
+    lists = "; ".join(
+        f"{x['name']} ({count_of(x['entry_count'], 'entry', 'entries')}, "
+        f"{', '.join(x['algorithms'])})" for x in now.active_lists)
+    last = (now.last_pass_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            if now.last_pass_at else "never")
+    # The worker's budget is stated, so an operator can see how long one
+    # pass may hold its loop (2026-09-24).
+    evidence = (f"Active: {lists}. {authority}. Last screening pass {last}; "
+                f"the worker's pass budget {screening.PASS_BUDGET_S} seconds. "
+                f"{screening.EXACT_HASH_SENTENCE} "
+                f"{screening.ARCHIVE_MEMBERS_SENTENCE} Perceptual matching is "
+                f"not built.")
+    if now.authority is None:
+        return Check(name, False,
+                     f"hash lists are held with no recorded authority "
+                     f"({screening.AUTHORITY_ENV}). {evidence}",
+                     "declare the authority counsel gave, or retire the lists "
+                     "with their entries")
+    if now.pending_preservation:
+        return Check(name, False,
+                     f"matched samples still have their bytes in the working "
+                     f"store, where nothing releases them; each screening pass "
+                     f"retries the move. {evidence}",
+                     "check the preservation store (preservation_bucket_"
+                     "object_lock) and run scripts/sample_screen.py")
+    if now.behind:
+        return Check(name, False,
+                     f"samples have not been screened against the newest list. "
+                     f"{evidence}",
+                     "schedule scripts/sample_screen.py (the production "
+                     "compose's lab-cron service runs it)")
+    caveats = []
+    if now.unreviewed_matches:
+        caveats.append("Some matches have no review recorded: the Security "
+                       "Officer's screening section lists them.")
+    if now.bytes_not_found:
+        caveats.append("Some matched samples' bytes were found in neither "
+                       "store and need the Security Officer's review.")
+    return Check(name, True, evidence, caveat=" ".join(caveats))
+
+
+
+# ---------------------------------------------------------------------------
+# The sandbox (F14, 2026-09-24). Not blocking: with no sandbox
+# configured a detonation is recorded and nothing is sent.
+# ---------------------------------------------------------------------------
+
+#: How long a QUEUED detonation may wait before the register says nothing
+#: is sending (the worker runs every few minutes).
+_SANDBOX_STALE_MINUTES = 60
+
+
+def _sandbox_integration(conn: psycopg.Connection) -> Check:
+    """Whether the configured CAPEv2 can be reached through its egress
+    route, takes the token, and refuses every read made without it (its
+    API and its web interface), and whether the worker is sending."""
+    from uuid import uuid4
+
+    from noctornal_api import sandbox
+    from noctornal_api.pinned_http import OutboundError
+    from noctornal_api.sandbox_capev2 import CapeV2Client
+    name = "sandbox_integration"
+    settings, problem = sandbox.sandbox_settings()
+    if settings is None and problem is None:
+        return Check(name, True,
+                     f"no sandbox is configured ({sandbox.PROVIDER_ENV} is "
+                     f"unset): a detonation request is recorded and nothing is "
+                     f"sent anywhere")
+    if settings is None:
+        return Check(name, False, problem,
+                     "correct the setting it names and restart")
+    routes = ", ".join(f"{r} ({c.lower()})" for r, c in settings.routes)
+    evidence = (f"{settings.provider} {settings.name} at {settings.host}; exposure "
+                f"{settings.exposure}, declared by the operator (docs/16 D5); "
+                f"ceiling TLP:{settings.ceiling}; network routes {routes}; the "
+                f"worker's pass budget {settings.pass_budget_s} seconds")
+    client = CapeV2Client(settings, conn=conn)
+    rule_words = (f"{settings.target_host}"
+                  + (f" in {settings.network}" if settings.network else ""))
+    try:
+        route = client.route(f"check:{uuid4()}")
+        reachable = route.permits(settings.host, settings.port)
+    except OutboundError as exc:
+        return Check(name, False, f"{evidence}. No route: {exc}",
+                     f"create the integration route sandbox under "
+                     f"Administration, Egress, with an allowlist entry for "
+                     f"{rule_words}")
+    if not reachable:
+        return Check(name, False, f"{evidence}. The sandbox route does not name "
+                     f"{settings.target_host}",
+                     f"add an allowlist entry for {rule_words} to the sandbox "
+                     f"route under Administration, Egress")
+    probe = client.probe(context=f"check:{uuid4()}")
+    evidence += f"; answered in {probe.latency_ms} ms"
+    if probe.error:
+        return Check(name, False, f"{evidence}. Unreachable: {probe.error}",
+                     "check that the sandbox is running and reachable through "
+                     "the egress route")
+    if not probe.token_accepted:
+        return Check(name, False, f"{evidence}. The token was refused",
+                     f"set {sandbox.TOKEN_ENV} to a token the sandbox accepts")
+    if probe.open_without_token:
+        return Check(name, False,
+                     f"{evidence}. It answers without a token at "
+                     f"{', '.join(probe.open_paths)}, so anyone who can reach it "
+                     f"can read every report and fetch every sample sent there",
+                     "set token_auth_enabled = yes in CAPE's api.conf and "
+                     "enabled = yes under [web_auth] in its web.conf, or do not "
+                     "serve the web interface on the allowlisted host and port")
+    stale, orphan, sent = conn.execute(
+        """SELECT count(*) FILTER (WHERE status = 'QUEUED'
+                                     AND requested_at < now() - %s),
+                  count(*) FILTER (WHERE status IN ('AWAITING_SIGNOFF',
+                                                    'QUEUED', 'SUBMITTED')
+                                     AND target_key IS DISTINCT FROM %s),
+                  count(*) FILTER (WHERE submitted_at IS NOT NULL)
+             FROM lab.detonation WHERE mode = 'SUBMIT'""",
+        (timedelta(minutes=_SANDBOX_STALE_MINUTES), settings.name)).fetchone()
+    if stale:
+        return Check(name, False,
+                     f"{evidence}. Detonations have waited over an hour to be "
+                     f"sent", "schedule scripts/sandbox_dispatch.py (the "
+                     "production compose's lab-cron service runs it)")
+    if orphan:
+        return Check(name, False,
+                     f"{evidence}. Requests in flight name a sandbox that is no "
+                     f"longer configured",
+                     "restore the sandbox's name, or cancel those requests")
+    caveats = []
+    if any(c == sandbox.LIVE for _r, c in settings.routes) or any(
+            c == sandbox.LIVE for _m, c in settings.machines):
+        caveats.append("A live network route or machine is offered: a sample "
+                       "sent on it can reach its operators, and each such send "
+                       "needs a second person's sign-off.")
+    if settings.exposure != "NONE":
+        caveats.append(f"The target's exposure is {settings.exposure}: every "
+                       f"send needs a sign-off and a sample screened against "
+                       f"every active hash list.")
+    holders = conn.execute(
+        """SELECT count(DISTINCT ur.user_id) FROM iam.role_permission rp
+             JOIN iam.user_role ur ON ur.role_key = rp.role_key
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE rp.permission_key = 'sample.detonate' AND u.is_active""").fetchone()[0]
+    if not holders:
+        caveats.append("No active account holds sample.detonate, so nobody can "
+                       "ask for a send.")
+    if not sent:
+        caveats.append("Nothing has been sent to it yet.")
+    return Check(name, True, evidence + ".", caveat=" ".join(caveats))
+
+
+# ---------------------------------------------------------------------------
+# Row-level security (S1, 2026-09-25). Not blocking, no console target,
+# and EXPECTED to fail on every developer machine and in the main CI suite
+# for app_db_role_not_owner's reason: they connect as the owner, which row
+# security never filters.
+# ---------------------------------------------------------------------------
+
+_RLS_ACTION = (
+    "point DATABASE_URL at `noctornal_app` and NOCTORNAL_WORKER_DATABASE_URL at "
+    "`noctornal_worker` (infra/production/compose.yml), keep the sample origin "
+    "without the worker DSN, and if either role was created after its migration "
+    "ran, run `python scripts/runtime_roles.py ensure --production` as a "
+    "superuser; then `alembic upgrade head` as the owner")
+
+
+def _row_level_security_enforced(conn: psycopg.Connection) -> Check:
+    """Is row-level security actually the second line here?
+
+    Four facts, all required: every table the registry puts under policy
+    (`rls_registry.POLICY`) has row security enabled and at least one
+    policy, and there are at least `POLICY_FLOOR` of them, so a database
+    with no policies at all is not vacuously "enforced"; THIS connection is
+    subject to it (the request role, not the owner, not a BYPASSRLS role);
+    the IAM plane is read-only to this connection's role (0109), without
+    which a forged session row would rebind it; and a system connection
+    opens, is exempt, and is neither a superuser nor the owner, because the
+    work that must see every row has to have somewhere to run.
+    """
+    from noctornal_api import rls_registry
+    from noctornal_api.db import (
+        _EXEMPT_SQL,
+        SystemContextUnavailable,
+        SystemPurpose,
+        connect_system,
+        is_exempt,
+    )
+
+    name = "row_level_security_enforced"
+    wanted = sorted(rls_registry.POLICY)
+    rows = conn.execute(
+        """SELECT n.nspname || '.' || c.relname, c.relrowsecurity,
+                  (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid)
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname || '.' || c.relname = ANY(%s)""",
+        (wanted,)).fetchall()
+    enforced = {r[0] for r in rows if r[1] and r[2] > 0}
+    missing = [t for t in wanted if t not in enforced]
+    who = conn.execute("SELECT current_user").fetchone()[0]
+    problems: list[str] = []
+    if missing or len(enforced) < rls_registry.POLICY_FLOOR:
+        problems.append(
+            f"{count_of(len(missing), 'table', 'tables')} the registry puts under "
+            f"policy {'has' if len(missing) == 1 else 'have'} no row security: "
+            f"{', '.join(missing)}")
+    if is_exempt(conn):
+        problems.append(
+            f"connected as {who}, which row-level security does not filter "
+            f"(the owner, a superuser or a BYPASSRLS role)")
+    iam_writable = conn.execute(
+        "SELECT has_table_privilege(current_user, 'iam.session', 'INSERT')"
+    ).fetchone()[0]
+    if iam_writable:
+        problems.append(
+            f"{who} may write the IAM plane, so an injected statement could "
+            f"forge the session that binds it (0109)")
+    try:
+        system = connect_system(SystemPurpose.READINESS)
+    except (SystemContextUnavailable, psycopg.Error) as exc:
+        problems.append(f"no system connection: {exc}")
+    else:
+        try:
+            _exempt, superuser, owner = system.execute(_EXEMPT_SQL).fetchone()
+            system_role = system.execute("SELECT current_user").fetchone()[0]
+        finally:
+            system.close()
+        if superuser or owner:
+            problems.append(
+                f"system connections use {system_role}, which is "
+                f"{'a superuser' if superuser else 'the schema owner'}, not a "
+                f"role that owns nothing")
+    if problems:
+        return Check(name, False, "; ".join(problems) + ".", _RLS_ACTION)
+    return Check(
+        name, True,
+        f"connected as {who}, which row-level security filters; "
+        f"{count_of(len(enforced), 'table carries', 'tables carry')} policies; "
+        f"the IAM plane is read-only to {who}; system connections use "
+        f"{system_role}, which owns nothing.")
 
 
 # ---------------------------------------------------------------------------
@@ -2235,8 +3510,82 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("app_db_role_not_owner", _app_db_role_not_owner,
      "the catalogue could not be read; the connected role should be "
      "`noctornal_app` (DATABASE_URL), never the schema owner `noctornal`"),
+    # S1, 2026-09-25. Beside its sibling rather than last: the two rows
+    # answer "what can this connection do to the data". Not blocking, no
+    # console target.
+    ("row_level_security_enforced", _row_level_security_enforced,
+     "the catalogue could not be read; run alembic upgrade head as the owner"),
     ("smtp_configured", _smtp_configured,
      "set SMTP_HOST to a relay that speaks TLS (docs/07)"),
+    # The compartment registry, L1 and L2 (2026-09-24). Not blocking, no
+    # console target.
+    ("compartment_bindings_intact", _compartment_bindings_intact,
+     "the catalogue could not be read; run alembic upgrade head"),
+    ("captured_documents_compartmented", _captured_documents_compartmented,
+     "the collection tables could not be read; run alembic upgrade head"),
+    ("triage_claims_within_labels", _triage_claims_within_labels,
+     "the claim tables could not be read; run alembic upgrade head"),
+    ("triage_claims_dated", _triage_claims_dated,
+     "the claim tables could not be read; run alembic upgrade head"),
+    # The network boundary (docs/00 decision 68, 2026-09-24). Not blocking.
+    ("egress_boundary", _egress_boundary,
+     "the collection tables could not be read; run alembic upgrade head"),
+    # F1 roles, 2026-09-24.
+    ("role_analysis_thread_capped", _role_analysis_thread_capped,
+     "numpy or the role analysis module could not be loaded; reinstall with "
+     "-c constraints.txt and restart the API"),
+    # The two-person policy (F9, 2026-09-24).
+    ("dual_control_policy_changeable", _dual_control_policy_changeable,
+     "the role table could not be read; once it can, grant SECURITY_OFFICER "
+     "to an active account that is not an administrator"),
+    # F11 and F12 (2026-09-24). Not blocking, no console target.
+    ("sample_static_analysis", _sample_static_analysis,
+     "the static triage tables could not be read; run alembic upgrade head"),
+    ("yara_rules_active", _yara_rules_active,
+     "the YARA rule set tables could not be read; run alembic upgrade head"),
+    # The collection foundation (docs/00 decision 69, 2026-09-24). Not
+    # blocking.
+    ("collection_sources_configured", _collection_sources_configured,
+     "the collection tables could not be read; run alembic upgrade head"),
+    ("collection_authority_current", _collection_authority_current,
+     "the collection tables could not be read; run alembic upgrade head"),
+    # The egress proxy (S2, 2026-09-24). Not blocking.
+    ("egress_routes_cover_sources", _egress_routes_cover_sources,
+     "the egress tables could not be read; run alembic upgrade head"),
+    ("egress_exits_open", _egress_exits_open,
+     "the egress tables could not be read; run alembic upgrade head"),
+    # Comms (F10a and F10c, 2026-09-24). Not blocking, no console target.
+    ("pgp_verifier", _pgp_verifier,
+     "the gpg binary could not be run; install GnuPG 2.4.9 or later, or set "
+     "NOCTORNAL_GPG to its full path, and restart"),
+    ("pgp_key_directory", _pgp_key_directory,
+     "the key lookup settings could not be read; check NOCTORNAL_WKD_CEILING "
+     "and the integration route wkd"),
+    # The similarity indexes (F6.1 and F6.2, 2026-09-24). Not blocking.
+    ("embedding_wording_current", _embedding_wording_current,
+     "the similarity tables could not be read; run alembic upgrade head"),
+    ("embedding_meaning_endpoint", _embedding_meaning_endpoint,
+     "the similarity tables could not be read, or the model endpoint check "
+     "failed; run alembic upgrade head and read the API log"),
+    # Outbound integrations (F8, F7 and F15.2, 2026-09-24). Not blocking.
+    ("notify_outbox_draining", _notify_outbox_draining,
+     "the delivery table could not be read; run alembic upgrade head"),
+    ("jira_destination", _jira_destination,
+     "the Jira tables could not be read; run alembic upgrade head"),
+    ("outbound_lookup_providers", _outbound_lookup_providers,
+     "the provider table could not be read; run alembic upgrade head"),
+    # Screening (F13, 2026-09-24). Not blocking, no console target.
+    ("prohibited_content_screening", _prohibited_content_screening,
+     "the screening tables could not be read; run alembic upgrade head"),
+    # The sandbox (F14, 2026-09-24). Not blocking, no console target.
+    ("sandbox_integration", _sandbox_integration,
+     "the detonation table could not be read; run alembic upgrade head"),
+    # The forum adapters (F3 and F4, 2026-09-24). Not blocking.
+    ("forum_collection", _forum_collection,
+     "the forum sources could not be read; run alembic upgrade head"),
+    # Telegram collection (F5.3, 2026-09-24). Not blocking.
+    ("telegram_collection", _telegram_collection,
+     "the collection tables could not be read; run alembic upgrade head"),
 )
 
 #: The names, in the order the report lists them. Public so the router
@@ -2347,6 +3696,26 @@ UI_TARGETS: dict[str, str] = {
     "retention_rules_confirmed": "governance/retention",
     "security_officer_present": "admin/accounts",
     "sys_admin_present": "admin/accounts",
+    # The two-person policy (F9, 2026-09-24).
+    "dual_control_policy_changeable": "admin/accounts",
+    # The collection foundation (docs/00 decision 69, 2026-09-24).
+    "collection_sources_configured": "feeds/sources",
+    "collection_authority_current": "feeds/sources",
+    # Settled under Administration, Egress (S2, 2026-09-24).
+    "egress_boundary": "admin/egress",
+    "egress_routes_cover_sources": "admin/egress",
+    "egress_exits_open": "admin/egress",
+    # The similarity indexes (F6.1 and F6.2, 2026-09-24).
+    "embedding_wording_current": "admin/embeddings",
+    "embedding_meaning_endpoint": "admin/embeddings",
+    # Outbound integrations (F8, F7 and F15.2, 2026-09-24).
+    "notify_outbox_draining": "admin/integrations",
+    "jira_destination": "admin/integrations",
+    "outbound_lookup_providers": "admin/providers",
+    # The forum adapters (F3 and F4, 2026-09-24).
+    "forum_collection": "feeds/sources",
+    # Telegram collection (F5.3, 2026-09-24).
+    "telegram_collection": "feeds/sources",
 }
 
 
@@ -2369,6 +3738,56 @@ def _register_facts(name: str, check: Check) -> Check:
                    caveat=caveat)
 
 
+#: The probes whose question is about the REQUEST connection itself: which
+#: role it is and whether row security filters it. Every other probe counts
+#: or reads across the deployment, and runs on a system connection (S1,
+#: 2026-09-25): taken as the request role under row-level security, a count
+#: of captured documents, claims, static runs or deliveries would describe
+#: only what the administrator reading the register may read, and a row
+#: would report health for everything they may not.
+_REQUEST_CONNECTION_CHECKS = frozenset({"app_db_role_not_owner",
+                                        "row_level_security_enforced"})
+
+
+class _NoSystemConnection:
+    """Stands in for the system connection a probe needed and could not
+    have: its first query raises, so `_guarded` turns that probe into a
+    failed row naming why. Never a quiet fallback to the request
+    connection, whose counts would read low."""
+
+    def __init__(self, exc: BaseException):
+        self._why = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+    def execute(self, *_args, **_kwargs):
+        from noctornal_api.db import SystemContextUnavailable
+        raise SystemContextUnavailable(
+            f"this check counts across the deployment and needs a system "
+            f"connection, which could not be opened ({self._why})")
+
+    def __getattr__(self, _name):
+        return self.execute
+
+
+@contextmanager
+def _probe_connections(conn: psycopg.Connection
+                       ) -> Iterator[Callable[[str], psycopg.Connection]]:
+    """(check name -> the connection its probe runs on). In development
+    and the test suite the request connection is the exempt owner and the
+    system connection IS it, so nothing changes there."""
+    from noctornal_api.db import (
+        SystemContextUnavailable,
+        SystemPurpose,
+        system_connection,
+    )
+    with ExitStack() as stack:
+        try:
+            sconn = stack.enter_context(
+                system_connection(SystemPurpose.READINESS, reuse=conn))
+        except (SystemContextUnavailable, psycopg.Error) as exc:
+            sconn = _NoSystemConnection(exc)
+        yield lambda name: conn if name in _REQUEST_CONNECTION_CHECKS else sconn
+
+
 def run_checks(conn: psycopg.Connection) -> list[Check]:
     """Every check, in register order, each one guarded. `conn` is the
     caller's autocommit connection, so a check whose query fails does not
@@ -2380,8 +3799,23 @@ def run_checks(conn: psycopg.Connection) -> list[Check]:
     and the probe never ran at all.
     """
     # `blocking=name in BLOCKING_CHECKS` is spelled inside `_register_facts`.
-    return [_register_facts(name, _guarded(name, action, lambda probe=probe: probe(conn)))
-            for name, probe, action in _CHECKS]
+    with _probe_connections(conn) as on:
+        return [_register_facts(name, _guarded(
+                    name, action, lambda probe=probe, name=name: probe(on(name))))
+                for name, probe, action in _CHECKS]
+
+
+def check(name: str, conn: psycopg.Connection) -> Check:
+    """ONE registered probe, guarded and stamped exactly as the register
+    stamps it, so a page that shows one row (Administration, Integrations)
+    and the register cannot disagree: one reader per fact (F8 E,
+    2026-09-24). KeyError for a name the register does not hold."""
+    for registered, probe, action in _CHECKS:
+        if registered == name:
+            with _probe_connections(conn) as on:
+                return _register_facts(
+                    name, _guarded(name, action, lambda probe=probe: probe(on(name))))
+    raise KeyError(name)
 
 
 def blocking_failures(conn: psycopg.Connection) -> list[str]:

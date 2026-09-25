@@ -78,6 +78,7 @@ from uuid import UUID
 import psycopg
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -86,8 +87,10 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
+from noctornal_api.db import SystemPurpose, bind_ticket, system_connection
 from noctornal_api.http.deps import (
     CASE_READ_ONLY_TITLE,
     SESSION_COOKIE,
@@ -100,6 +103,7 @@ from noctornal_api.http.deps import (
     require_global,
     require_step_up,
     session_token,
+    system_conn,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
@@ -110,12 +114,14 @@ from noctornal_api.http.limits import (
     enforce,
     rate_limit,
 )
+from noctornal_api import fuzzyhash, lab_similarity, lab_triage
 from noctornal_api.config import SAMPLE_CAP_ENV, cap_is_declared
 from noctornal_api.iam_admin import IamAdminService
 from noctornal_api.ratelimit import ip_subject
 from noctornal_api.security.access import tlp_from_name
 from noctornal_api.samples import (
     AUTHORISE_PERMISSION,
+    DERIVED_GAP_STEPS,
     MAX_AUTHORISATION_DAYS,
     MAX_SAMPLE_BYTES,
     PRESERVE,
@@ -126,6 +132,7 @@ from noctornal_api.samples import (
     WORKING_SET,
     AuthorisationRequired,
     PolicyNotDeclared,
+    ProhibitedContentMatch,
     Sample,
     SampleCaseReadOnly,
     SampleError,
@@ -277,6 +284,26 @@ class SampleOut(BaseModel):
     #: lists samples from every case, so the open case's own state cannot
     #: decide it (c21, 2026-09-24). The state itself is not named.
     case_read_only: bool = False
+    #: F11 (2026-09-24): what static triage computed, None until it ran
+    #: (`triage_gaps` says why each is absent). `tlsh` is canonical, with
+    #: no T1 prefix; the console shows and copies it with one.
+    imphash: str | None = None
+    rich_header_hash: str | None = None
+    ssdeep: str | None = None
+    tlsh: str | None = None
+    #: `{common, why}`: an imphash every .NET binary shares says nothing
+    #: about who wrote this one.
+    imphash_common: dict = {"common": False, "why": None}
+    #: The latest static-triage run: status (never, queued, running, done,
+    #: failed, skipped, abandoned), who asked or that it was scheduled,
+    #: its times, why it failed, and the limits it ran under. Never its
+    #: steps or any YARA rule set.
+    static_triage: dict = {"status": "never"}
+    #: F13 (2026-09-24). Whether and when the sample was screened, and
+    #: against how many hash lists its newest screening record consulted.
+    screening_outcome: str = "NOT_SCREENED"
+    screened_at: str | None = None
+    screening_lists_consulted: int | None = None
 
 
 def _out(s: Sample, names: dict | None = None,
@@ -314,6 +341,12 @@ def _out(s: Sample, names: dict | None = None,
         preserved_at=s.preserved_at.isoformat() if s.preserved_at else None,
         legal_hold=s.legal_hold,
         case_read_only=case_read_only,
+        imphash=s.imphash, rich_header_hash=s.rich_header_hash,
+        ssdeep=s.ssdeep, tlsh=s.tlsh,
+        imphash_common={"common": s.imphash in fuzzyhash.COMMON_IMPHASHES,
+                        "why": fuzzyhash.COMMON_IMPHASHES.get(s.imphash or "")},
+        screening_outcome=s.screening_outcome,   # F13
+        screened_at=s.screened_at.isoformat() if s.screened_at else None,
     )
 
 
@@ -326,9 +359,27 @@ def _named(svc: SampleService, samples: list[Sample]) -> list[dict]:
                        + [s.assigned_to for s in samples])
     cases = svc.case_labels([s.case_id for s in samples])
     shut = svc.read_only_cases([s.case_id for s in samples])
-    return [_out(s, names, cases.get(str(s.case_id)),
-                 case_read_only=str(s.case_id) in shut).model_dump(mode="json")
-            for s in samples]
+    # F11-core G and F11 K (2026-09-24): the gaps computed at read time
+    # replace any stored copy of the same step (legacy rows), and each row
+    # carries its latest static-triage run, both for the whole page in one
+    # query each.
+    derived = svc.derived_gaps(samples)
+    runs = svc.static_triage_summaries([s.id for s in samples])
+    # F13. How many lists each row's newest screening consulted.
+    screened = svc.screening_summaries([s.id for s in samples])
+    out = []
+    for s in samples:
+        row = _out(s, names, cases.get(str(s.case_id)),
+                   case_read_only=str(s.case_id) in shut).model_dump(mode="json")
+        row["triage_gaps"] = [
+            g for g in (row["triage_gaps"] or [])
+            if not (isinstance(g, dict) and g.get("step") in DERIVED_GAP_STEPS)
+        ] + derived.get(str(s.id), [])
+        row["static_triage"] = runs.get(str(s.id), {"status": "never"})
+        row["screening_lists_consulted"] = (
+            screened.get(str(s.id), {}).get("lists_consulted"))
+        out.append(row)
+    return out
 
 
 def _named_one(svc: SampleService, sample: Sample) -> SampleOut:
@@ -387,6 +438,10 @@ def policy_status(user: CurrentUser = Depends(current_user),
         "rejected_sample_disposition_problem": disposition_problem,
         "max_sample_bytes_declared": cap_is_declared(SAMPLE_CAP_ENV),
         "counsel_review_required": True,
+        # F13. Counts only, never a list's name.
+        "screening": _screening_policy(conn),
+        # F14. Never the URL, the host or the token.
+        "sandbox": _sandbox_policy(),
         # "before it is used in any absolute sense" was garbled, and the
         # console printed its own copy of the first sentence in front of
         # it, so the Lab banner said it twice (ux13-lab:legal-banner-copy,
@@ -399,6 +454,18 @@ def policy_status(user: CurrentUser = Depends(current_user),
             "it cannot verify one."
         ),
     }
+
+
+def _sandbox_policy() -> dict:
+    """F14. The configured sandbox, as the console may show it."""
+    from noctornal_api.sandbox import policy_block
+    return policy_block()
+
+
+def _screening_policy(conn: psycopg.Connection) -> dict:
+    """F13. The policy block's screening facts (counts only)."""
+    from noctornal_api.screening import policy_block
+    return policy_block(conn)
 
 
 @router.post("", response_model=SampleOut, status_code=201,
@@ -463,22 +530,34 @@ async def submit(
     # precondition.
     data = await file.read()
     clearance, held = user_ceiling(conn, user.user_id)
+    svc = _svc(conn)
     try:
-        return _out(_svc(conn).submit(
-            data, submitted_by=user.user_id, case_id=case_id,
-            # The filename is stored for the record and is NEVER used as a
-            # path component or rendered unescaped.
-            original_filename=file.filename, source_note=source_note,
-            classification=classification, compartments=parsed,
-            # Only for how much the duplicate refusal may say: uploading a
-            # hash you suspect and reading the error back is a cheap probe
-            # for "is anybody else working this intrusion".
-            visible_to_clearance=clearance.name,
-            visible_to_compartments=held))
+        # The submission on a system connection (S1, 2026-09-25): its
+        # duplicate check must find a sample the submitter may not see, or
+        # the upload stores a second copy of live malware (and the unique
+        # hash turns it into a 500). What the refusal may SAY is still
+        # decided by the submitter's own labels, below.
+        with system_connection(SystemPurpose.SAMPLE_INTAKE, reuse=conn) as sconn:
+            submitted = _svc(sconn).submit(
+                data, submitted_by=user.user_id, case_id=case_id,
+                # The filename is stored for the record and is NEVER used as
+                # a path component or rendered unescaped.
+                original_filename=file.filename, source_note=source_note,
+                classification=classification, compartments=parsed,
+                # Only for how much the duplicate refusal may say: uploading
+                # a hash you suspect and reading the error back is a cheap
+                # probe for "is anybody else working this intrusion".
+                visible_to_clearance=clearance.name,
+                visible_to_compartments=held)
+        return _named_one(svc, submitted)
     except PolicyNotDeclared as exc:
         # 451: the refusal is legal, not technical, and a 400 would send
         # somebody looking at their upload.
         raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from exc
+    except ProhibitedContentMatch as exc:
+        # F13. Legal too. The sentence names whom to contact and never
+        # the list or its category; the console shows it and opens no card.
+        raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from None
     except SampleError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
@@ -560,6 +639,338 @@ def preserved_for_authorisation(
             "retrieve_permission": RETRIEVE_PERMISSION}
 
 
+# ---------------------------------------------------------------------------
+# Prohibited-content screening (F13, 2026-09-24). Declared ahead of
+# `/{sample_id}`, beside `/preserved`. None of these is served on the sample
+# origin: its allow-list admits the two download paths and nothing else.
+# ---------------------------------------------------------------------------
+
+_REVIEW_SCREENING = require_global("sample.screening.review")
+_MANAGE_SCREENING = require_global("sample.screening.manage")
+
+
+def _screening_problem(exc: Exception) -> Problem:
+    from noctornal_api.screening import ScreeningConflict, ScreeningRefused
+    if isinstance(exc, ScreeningRefused):
+        return Problem(451, "Unavailable for legal reasons", safe_detail(exc))
+    if isinstance(exc, ScreeningConflict):
+        return Problem(409, "Conflict", safe_detail(exc))
+    return Problem(400, "Invalid request", safe_detail(exc))
+
+
+@router.get("/screening", response_model=dict)
+def screening_overview(
+    unreviewed: bool = Query(default=False),
+    user: CurrentUser = Depends(_REVIEW_SCREENING),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The Security Officer's screening record: the authorities, the lists,
+    and every match, newest first.
+
+    The match list is LABEL-FREE by an explicit owner decision (the docs/00
+    row this build proposes): the officer must see every match whatever its
+    labels, so each row carries only a hash prefix, the time, the list
+    names, the disposition then and now, the alert state and the reviews.
+    `you_may_open` says whether the full record is within the officer's own
+    ceiling; the record itself is gated (`/screening/results/{id}`). No
+    entry of any list is ever returned by any route."""
+    from noctornal_api import screening
+    clearance, held = user_ceiling(conn, user.user_id)
+    svc = screening.ScreeningService(conn)
+    # The match list and the section's counts on a system connection (S1,
+    # 2026-09-25): they are label-free on purpose, and under row-level
+    # security the officer's own view would drop every match above them.
+    # `you_may_open` is still computed against the officer's labels.
+    with system_connection(SystemPurpose.SCREENING, reuse=conn) as sconn:
+        now = screening.state(sconn)
+        matches = screening.ScreeningService(sconn).results(
+            clearance=clearance.name, compartments=held,
+            unreviewed_only=unreviewed)
+    declared, _detail = policy_declared()
+    return {
+        "authority": {"declared": now.authority is not None,
+                      "reference": now.authority,
+                      "problem": now.authority_problem},
+        "policy_declared": declared,
+        "exact_hash_only": True,
+        "sentence": screening.EXACT_HASH_SENTENCE,
+        "archive_sentence": screening.ARCHIVE_MEMBERS_SENTENCE,
+        "lists": svc.lists(),
+        "matches": matches,
+        "counts": {"matches": now.matches, "unreviewed": now.unreviewed_matches,
+                   "pending_preservation": now.pending_preservation,
+                   "bytes_not_found": now.bytes_not_found,
+                   "behind": now.behind, "purges_pending": now.purges_pending},
+        "last_pass_at": now.last_pass_at.isoformat() if now.last_pass_at else None,
+        "categories": list(screening.CATEGORIES),
+        "review_actions": list(screening.REVIEW_ACTIONS),
+        "list_cap_bytes": screening.list_cap(),
+        "you_may_manage": IamAdminService(conn).holds_global_permission(
+            user.user_id, screening.MANAGE_PERMISSION),
+    }
+
+
+@router.get("/screening/results/{result_id}", response_model=dict)
+def screening_result(
+    result_id: UUID,
+    user: CurrentUser = Depends(_REVIEW_SCREENING),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """One match's record, a 404 unless the officer's ceiling reaches the
+    sample's composed labels. Never the filename, source note, rejection
+    reason, analyses or custody. Audited as opened."""
+    from noctornal_api.screening import ScreeningService
+    clearance, held = user_ceiling(conn, user.user_id)
+    out = ScreeningService(conn).open_result(
+        result_id, actor_id=user.user_id, clearance=clearance.name,
+        compartments=held)
+    if out is None:
+        raise Problem(404, "Not found", "no such screening record")
+    return out
+
+
+def _list_cap() -> int:
+    from noctornal_api.screening import list_cap
+    return list_cap()
+
+
+@router.post("/screening/lists", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("screening.import"))])
+@body_cap(_list_cap, what="a hash list imported through the console (a "
+                          "larger one goes through scripts/sample_screen.py "
+                          "import)")
+async def import_screening_list(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    provider: str = Form(...),
+    authority_reference: str = Form(...),
+    category: str = Form(...),
+    user: CurrentUser = Depends(_MANAGE_SCREENING),
+    # On a system connection (S1, 2026-09-25): the in-request pass screens
+    # EVERY held sample against the new list, not the ones the officer
+    # may read.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.SCREENING)),
+) -> dict:
+    """Import a list under both recorded authorities (451 names the one
+    missing), in one transaction, then screen every held sample against it
+    in this request (database work only, budgeted; the worker moves the
+    bytes of any match). 409 for a second active copy of the same file,
+    400 naming the first bad line."""
+    from functools import partial
+
+    from starlette.concurrency import run_in_threadpool
+
+    from noctornal_api.screening import ScreeningError, ScreeningService
+    try:
+        # Off the event loop: the parse, the COPY and the in-request pass
+        # (up to 20 s) are synchronous, and this route is async only for
+        # the upload (the lab_yara precedent, 2026-09-24).
+        return await run_in_threadpool(partial(
+            ScreeningService(sconn).import_list,
+            file.file, name=name, provider=provider,
+            authority_reference=authority_reference, category=category,
+            actor_id=user.user_id, via="console"))
+    except ScreeningError as exc:
+        raise _screening_problem(exc) from None
+
+
+class RetireListBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=2000)
+    purge_entries: bool = False
+
+
+@router.post("/screening/lists/{list_id}/retire", response_model=dict)
+def retire_screening_list(
+    list_id: UUID, body: RetireListBody,
+    user: CurrentUser = Depends(_MANAGE_SCREENING),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Stop comparing against a list. Nothing is deleted here: a sample
+    that matched stays matched, and the entries, if their purge is asked
+    for, are deleted by the worker in batches."""
+    from noctornal_api.screening import ScreeningError, ScreeningService
+    try:
+        return ScreeningService(conn).retire_list(
+            list_id, actor_id=user.user_id, reason=body.reason,
+            purge_entries=body.purge_entries)
+    except ScreeningError as exc:
+        raise _screening_problem(exc) from None
+
+
+@router.post("/screening/lists/{list_id}/purge", response_model=dict)
+def purge_screening_list(
+    list_id: UUID,
+    user: CurrentUser = Depends(_MANAGE_SCREENING),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Ask for a retired list's entries to be deleted, later than its
+    retirement: a licence may require it when it ends."""
+    from noctornal_api.screening import ScreeningError, ScreeningService
+    try:
+        return ScreeningService(conn).request_purge(list_id,
+                                                    actor_id=user.user_id)
+    except ScreeningError as exc:
+        raise _screening_problem(exc) from None
+
+
+@router.post("/screening/rescan", response_model=dict,
+             dependencies=[Depends(rate_limit("screening.rescan"))])
+def start_screening_pass(
+    user: CurrentUser = Depends(_MANAGE_SCREENING),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """A screening pass, now: database work only, budgeted to 20 seconds.
+    The worker finishes anything left and moves matched bytes."""
+    from noctornal_api.screening import ScreeningService
+    # Every held sample, whatever the officer may read (S1, 2026-09-25).
+    with system_connection(SystemPurpose.SCREENING, reuse=conn) as sconn:
+        return ScreeningService(sconn).rescan(trigger="RESCAN",
+                                              actor_id=user.user_id,
+                                              move_bytes=False, budget_seconds=20)
+
+
+class ScreeningReviewBody(BaseModel):
+    action: str
+    reference: str | None = Field(default=None, max_length=500)
+    note: str | None = Field(default=None, max_length=4000)
+
+
+@router.post("/screening/results/{result_id}/reviews", response_model=dict,
+             status_code=201)
+def review_screening_result(
+    result_id: UUID, body: ScreeningReviewBody,
+    user: CurrentUser = Depends(_REVIEW_SCREENING),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Record the officer's review of a match. DISPOSED_OUTSIDE records that
+    counsel directed disposal of the held copy outside the product; it
+    changes nothing here. Not gated on the sample's labels: the officer
+    governs every match (the label-free list's owner decision), and a
+    review reveals nothing of the record."""
+    from noctornal_api.screening import ScreeningError, ScreeningService
+    try:
+        # On a system connection (S1, 2026-09-25): the officer reviews any
+        # match on the label-free list, including one whose sample is above
+        # them, and the review row hangs off a result row security would
+        # otherwise hide from them.
+        with system_connection(SystemPurpose.SCREENING, reuse=conn) as sconn:
+            return ScreeningService(sconn).review(
+                result_id, actor_id=user.user_id, action=body.action,
+                reference=body.reference, note=body.note)
+    except ScreeningError as exc:
+        raise _screening_problem(exc) from None
+
+
+# ---------------------------------------------------------------------------
+# The sandbox sign-off (F14, 2026-09-24). Declared ahead of
+# `/{sample_id}`. Not `require_global("sample.read")`: a lead investigator
+# assigned to the case may hold no global role; the service decides who may
+# act, and answers 404 to everyone else.
+# ---------------------------------------------------------------------------
+
+class SignOffBody(BaseModel):
+    approve: bool
+    note: str | None = Field(default=None, max_length=2000)
+
+
+@router.get("/detonations/awaiting-signoff", response_model=dict)
+def detonations_awaiting_signoff(
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The requests waiting for the CALLER's sign-off, each re-gated by the
+    same eligibility reader the sign-off uses."""
+    from noctornal_api.sandbox import SandboxService
+    rows = SandboxService(conn).awaiting_signoff(user.user_id)
+    return {"detonations": rows, "count": len(rows)}
+
+
+@router.post("/detonations/{detonation_id}/sign-off", response_model=dict,
+             dependencies=[Depends(rate_limit("sample.detonate"))])
+def sign_off_detonation(
+    detonation_id: UUID, body: SignOffBody,
+    user: CurrentUser = Depends(current_user),
+    _fresh: None = Depends(require_step_up),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Approve (QUEUED) or decline (DECLINED) a request naming you. 404
+    unless you are its named, still eligible authoriser and it waits."""
+    from noctornal_api.sandbox import NotYours, SandboxError, SandboxService
+    try:
+        return SandboxService(conn).sign_off(
+            detonation_id, actor_id=user.user_id, approve=body.approve,
+            note=body.note)
+    except NotYours:
+        raise Problem(404, "Not found", "no such detonation request") from None
+    except SandboxError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+
+
+@router.post("/detonations/{detonation_id}/cancel", response_model=dict,
+             dependencies=[Depends(rate_limit("sample.detonate"))])
+def cancel_detonation(
+    detonation_id: UUID,
+    user: CurrentUser = Depends(current_user),
+    _fresh: None = Depends(require_step_up),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Withdraw a request that has not been sent: its requester or its
+    named authoriser."""
+    from noctornal_api.sandbox import NotYours, SandboxError, SandboxService
+    try:
+        return SandboxService(conn).cancel(detonation_id, actor_id=user.user_id)
+    except NotYours:
+        raise Problem(404, "Not found", "no such detonation request") from None
+    except SandboxError as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+
+
+class SimilarByValueBody(BaseModel):
+    """A value search. The value travels here, in the body, and never in
+    the URL, and it is never logged, audited or stored: a hash an analyst
+    pastes can be the thing they are investigating. Unconstrained in the
+    model on purpose: a validation error would echo it back, and the
+    service's own check names the expected form without repeating it."""
+    by: str
+    value: str
+    ssdeep_min: int = lab_similarity.SSDEEP_MIN_DEFAULT
+    tlsh_max: int = lab_similarity.TLSH_MAX_DEFAULT
+    limit: int = lab_similarity.LIMIT_DEFAULT
+    include_rejected: bool = False
+
+
+#: The sample column a searched value is compared with.
+_VALUE_COLUMN = {"imphash": "imphash", "rich_header": "rich_header_hash",
+                 "ssdeep": "ssdeep", "tlsh": "tlsh"}
+
+
+@router.post("/similar", response_model=dict,
+             dependencies=[Depends(rate_limit("sample.similar"))])
+@body_cap(lambda: 1024, what="a similarity query")
+def similar_by_value(
+    body: SimilarByValueBody,
+    user: CurrentUser = Depends(require_global("sample.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Samples you can see whose imphash, Rich header, ssdeep or TLSH is
+    the value given, or near it (F11 J, 2026-09-24). Validated before any
+    work (a 400 names the expected form); metered by its own limit,
+    tighter than search; not audited, as search is not. Declared ahead of
+    `/{sample_id}`, beside `/preserved`."""
+    try:
+        value = lab_similarity.canonical_value(body.by, body.value)
+        clearance, held = user_ceiling(conn, user.user_id)
+        out = lab_similarity.similar(
+            conn, hashes={_VALUE_COLUMN[body.by]: value}, by=body.by,
+            thresholds=lab_similarity.Thresholds(
+                body.ssdeep_min, body.tlsh_max, body.limit,
+                body.include_rejected),
+            clearance=clearance.name, compartments=held)
+    except lab_similarity.SimilarityError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from None
+    return out
+
+
 @router.get("/{sample_id}", response_model=dict)
 def detail(
     sample_id: UUID,
@@ -592,10 +1003,21 @@ def detail(
     # The console said "every look is a row" and no look ever was
     # (ux13-lab:custody-ledger-hides-who-and-what, 2026-09-22).
     svc.record_view(sample_id, actor_id=user.user_id)
+    # The reader's ceiling reaches the findings too (F12 G): a machine YARA
+    # row, or an assessment derived from one, is shown only to a reader who
+    # may see its rule set, and custody says no more about it than that.
+    ceiling = {"clearance": clearance.name, "compartments": compartments}
     out = {"sample": _named(svc, [sample])[0],
-           "analyses": svc.analyses(sample_id),
+           "analyses": svc.analyses(sample_id, **ceiling),
            "detonations": svc.detonations(sample_id),
-           "custody": svc.custody(sample_id),
+           "custody": svc.custody(sample_id, **ceiling),
+           # F11 K: the last five runs, the same fields as the row's summary,
+           # and whether this deployment can run YARA at all.
+           "static_runs": lab_triage.static_runs(conn, sample_id),
+           "yara_engine": _yara_engine(),
+           # F14. Whether this sample may be sent to the configured
+           # sandbox now, and why not: the one eligibility reader.
+           "sandbox": _sandbox_for(conn, sample_id),
            # What this reader may do here, so the card offers the lab's
            # own work (assign, record an analysis, reject, detonate) to the
            # people who can do it and says who can to everybody else.
@@ -614,17 +1036,34 @@ def detail(
     return out
 
 
+def _sandbox_for(conn: psycopg.Connection, sample_id: UUID) -> dict:
+    from noctornal_api.sandbox import eligibility, sandbox_settings
+    settings, problem = sandbox_settings()
+    eligible, reason = eligibility(conn, sample_id, settings)
+    return {"configured": settings is not None, "problem": problem,
+            "eligible": eligible, "reason": reason}
+
+
 def _you_may(conn: psycopg.Connection, user: CurrentUser) -> dict:
     """The lab verbs this caller holds, read the way `require_global`
     reads them but without the step-up clause: this widens nothing, it
     only decides which controls the card draws."""
     iam = IamAdminService(conn)
-    return {"analyse": iam.holds_global_permission(user.user_id,
-                                                   "sample.analyse"),
+    analyse = iam.holds_global_permission(user.user_id, "sample.analyse")
+    return {"analyse": analyse,
             "detonate": iam.holds_global_permission(user.user_id,
                                                     "sample.detonate"),
             "download": iam.holds_global_permission(user.user_id,
-                                                    "sample.download")}
+                                                    "sample.download"),
+            # F11 K: running static triage on demand is the analyst's verb.
+            "static_triage": analyse}
+
+
+def _yara_engine() -> dict:
+    """Whether YARA can run in this deployment, and which engine."""
+    from noctornal_api.yara_rules import engine_version
+    version = engine_version()
+    return {"installed": version is not None, "version": version}
 
 
 @router.get("/{sample_id}/people", response_model=dict)
@@ -736,12 +1175,16 @@ def mint_download_ticket(
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        ticket = _ticket_svc(conn).issue_download_ticket(
-            sample_id, actor_id=user.user_id, clearance=clearance.name,
-            compartments=compartments,
-            # Which session asked, for the audit chain. Recorded, never
-            # re-checked at redemption: see 0061.
-            session_id=user.session_id, ip_hash=_ip_hash(request))
+        # A ticket row binds its holder once spent, so the request role
+        # may not write one (0109, S1 2026-09-25): minted on a system
+        # connection, after the gate above, with the caller's ceiling.
+        with system_connection(SystemPurpose.TICKETS, reuse=conn) as sconn:
+            ticket = _ticket_svc(sconn).issue_download_ticket(
+                sample_id, actor_id=user.user_id, clearance=clearance.name,
+                compartments=compartments,
+                # Which session asked, for the audit chain. Recorded, never
+                # re-checked at redemption: see 0061.
+                session_id=user.session_id, ip_hash=_ip_hash(request))
     except SampleError as exc:
         if "no such sample" in str(exc):
             # 404, and the same 404 `detail()` gives: "this sample exists
@@ -849,7 +1292,7 @@ def _download_actor(request: Request, conn: psycopg.Connection,
     """
     if ticket:
         try:
-            return _ticket_svc(conn).redeem_download_ticket(
+            spent = _ticket_svc(conn).redeem_download_ticket(
                 ticket, sample_id=sample_id, ip_hash=_ip_hash(request))
         except SampleError as exc:
             # 401 and not 403: a ticket is the credential on this path,
@@ -858,6 +1301,11 @@ def _download_actor(request: Request, conn: psycopg.Connection,
             # redeemed" would tell the holder of a stolen ticket that it
             # was real and that somebody else got there first.
             raise Problem(401, "Unauthenticated", safe_detail(exc)) from exc
+        # The sample origin runs no session, so under row-level
+        # security this connection is bound to the spent ticket's holder
+        # before anything is read for them (S1, 2026-09-25).
+        bind_ticket(conn, ticket)
+        return spent
     raw = session_token(request, request.headers.get("authorization"))
     user = current_user(request, raw, conn)
     _REQUIRE_DOWNLOAD(user, conn)
@@ -1129,6 +1577,10 @@ class AnalysisBody(BaseModel):
     narrative: str | None = None
     tool: str | None = None
     tool_version: str | None = None
+    #: The YARA rule set version this assessment was taken from, when the
+    #: card's "Use as family assessment" made it (F12 G): the row is then
+    #: read through that set's labels too, never below its source.
+    derived_from_version_id: UUID | None = None
 
 
 @router.post("/{sample_id}/analysis", response_model=dict, status_code=201)
@@ -1172,6 +1624,8 @@ def record_analysis(
                 400, "Invalid request",
                 f"extracted selector {i + 1} names an unknown selector type "
                 f"{kind!r}")
+    if body.derived_from_version_id is not None:
+        _check_derived_from(conn, user, sample_id, body.derived_from_version_id)
     try:
         analysis_id = _svc(conn).record_analysis(
             sample_id, analyst_id=user.user_id, kind=body.kind,
@@ -1179,13 +1633,34 @@ def record_analysis(
             yara_hits=body.yara_hits or None,
             family_assessment=body.family_assessment, confidence=body.confidence,
             narrative=body.narrative, tool=body.tool,
-            tool_version=body.tool_version)
+            tool_version=body.tool_version,
+            derived_from_version_id=body.derived_from_version_id)
     except SampleCaseReadOnly as exc:
         raise _read_only_problem(conn, user, sample, "sample.analyse",
                                  exc) from exc
     except SampleError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"id": str(analysis_id)}
+
+
+def _check_derived_from(conn: psycopg.Connection, user: CurrentUser,
+                        sample_id: UUID, version_id: UUID) -> None:
+    """An assessment says it came from a rule set version: 404 unless the
+    caller may see that version's set, 400 unless a machine YARA row of
+    that version exists on this sample (F12 G)."""
+    from noctornal_api.yara_rules import RulesetService
+    clearance, held = user_ceiling(conn, user.user_id)
+    if RulesetService(conn).visible_version(
+            version_id, clearance=clearance.name, compartments=held) is None:
+        raise Problem(404, "Not found", "no such rule set version")
+    if conn.execute(
+            """SELECT 1 FROM lab.sample_analysis
+                WHERE sample_id = %s AND origin = 'machine' AND kind = 'YARA'
+                  AND yara_ruleset_version_id = %s LIMIT 1""",
+            (sample_id, version_id)).fetchone() is None:
+        raise Problem(400, "Invalid request",
+                      "an assessment can be taken only from a scan of this "
+                      "sample by that rule set version")
 
 
 class ProposeBody(BaseModel):
@@ -1222,9 +1697,18 @@ def propose_selector(
     # The gate's refusal rather than only the service's: titled so the
     # console knows it, and audited (c7, 2026-09-24).
     _refuse_if_read_only(conn, user, sample, "sample.analyse")
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
-        out = SampleService(conn).propose_extracted_selector(
-            sample, analysis_id, body.index, actor_id=user.user_id)
+        # Under the caller's ceiling (F11-core H): a finding the caller
+        # cannot see is "no such analysis", however they learned its id.
+        # The Lab proposes into a case its analyst is not on, and
+        # "already in the graph" must be judged against the whole case, so
+        # the proposal runs on a system connection; the caller's ceiling
+        # still decides which analysis they may use (S1, 2026-09-25).
+        with system_connection(SystemPurpose.LAB_PROPOSE, reuse=conn) as sconn:
+            out = SampleService(sconn).propose_extracted_selector(
+                sample, analysis_id, body.index, actor_id=user.user_id,
+                clearance=clearance.name, compartments=held)
     except SampleCaseReadOnly as exc:
         raise _read_only_problem(conn, user, sample, "sample.analyse",
                                  exc) from exc
@@ -1235,14 +1719,131 @@ def propose_selector(
     return out
 
 
+def _refuse_triage(conn: psycopg.Connection, user: CurrentUser,
+                   sample_id: UUID, status: int, title: str, reason: str,
+                   message: str) -> Problem:
+    """An on-demand refusal, audited with its reason code."""
+    conn.execute(
+        """INSERT INTO audit.event (actor_id, actor_kind, action, object_type,
+                                    object_id, outcome, detail)
+           VALUES (%s, 'USER', 'SAMPLE_STATIC_TRIAGE_REFUSED', 'sample', %s,
+                   'DENIED', %s)""",
+        (user.user_id, sample_id, Json({"reason": reason})))
+    return Problem(status, title, message)
+
+
+@router.post("/{sample_id}/static-triage", response_model=dict,
+             status_code=202,
+             dependencies=[Depends(rate_limit("sample.triage"))])
+def run_static_triage(
+    sample_id: UUID,
+    background: BackgroundTasks,
+    user: CurrentUser = Depends(require_global("sample.analyse")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Queue static triage of one sample now (F11 K, 2026-09-24).
+
+    The request never waits for a child: it enqueues (merging into a run
+    already queued for the sample, which then names this caller too) and
+    answers 202, and a background task starts the run after the response
+    when a slot is free (`will_run: now`), or the next cron pass takes it
+    (`next_pass`). 404 for a sample the caller may not see; the case's 409
+    for a closed case; 451 while no prohibited-content policy is declared;
+    409 for a rejected sample, one above the analysis maximum (naming the
+    setting) or one whose triage is running now. Every refusal is audited.
+    """
+    sample = _visible_or_404(conn, user, sample_id)
+    _refuse_if_read_only(conn, user, sample, "sample.analyse")
+    declared, detail = policy_declared()
+    if not declared:
+        raise _refuse_triage(conn, user, sample_id, 451,
+                             "Unavailable for legal reasons", "policy", detail)
+    if sample.state == "REJECTED":
+        raise _refuse_triage(conn, user, sample_id, 409, "Conflict", "rejected",
+                             "a rejected sample is never analysed")
+    settings = lab_triage.settings_or_default()
+    if sample.byte_size > settings.max_bytes:
+        raise _refuse_triage(
+            conn, user, sample_id, 409, "Conflict", "too_large",
+            f"this sample is larger than {lab_triage.MAX_BYTES_ENV} allows "
+            f"static triage to read")
+    # Sweep first, so a run whose process died cannot leave a permanent
+    # "already running".
+    lab_triage.sweep_abandoned(conn)
+    if lab_triage.running_run(conn, sample_id) is not None:
+        raise _refuse_triage(conn, user, sample_id, 409, "Conflict", "running",
+                             "static triage is already running on this sample")
+    result = lab_triage.enqueue(conn, sample_id, trigger="ON_DEMAND",
+                                requested_by=user.user_id)
+    if result.run_id is None:
+        raise _refuse_triage(conn, user, sample_id, 409, "Conflict", "excluded",
+                             "this sample cannot be analysed")
+    free = lab_triage.slot_free(conn, settings.concurrency)
+    background.add_task(lab_triage.run_queued_detached, result.run_id)
+    run = conn.execute(
+        "SELECT id, status, queued_at FROM lab.static_run WHERE id = %s",
+        (result.run_id,)).fetchone()
+    return {"run": {"id": str(run[0]), "status": run[1].lower(),
+                    "trigger_kind": "requested",
+                    "queued_at": run[2].isoformat()},
+            "merged": result.merged,
+            "will_run": "now" if free else "next_pass",
+            "sample": _named(SampleService(conn), [sample])[0]}
+
+
+@router.get("/{sample_id}/similar", response_model=dict,
+            dependencies=[Depends(rate_limit("sample.similar"))])
+def similar_samples(
+    sample_id: UUID,
+    by: str = Query(default="all"),
+    ssdeep_min: int = Query(default=lab_similarity.SSDEEP_MIN_DEFAULT),
+    tlsh_max: int = Query(default=lab_similarity.TLSH_MAX_DEFAULT),
+    limit: int = Query(default=lab_similarity.LIMIT_DEFAULT),
+    include_rejected: bool = Query(default=False),
+    user: CurrentUser = Depends(require_global("sample.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Samples you can see that are similar to this one (F11 J, F12 G).
+
+    The sample is checked FIRST and the hashes compared are read from the
+    row the caller may see, so a hidden sample's 404 is the same as a
+    random id's. Candidates are found
+    under the Lab's one label gate: a sample you may not see is neither
+    listed nor counted. Metered by `sample.similar`; not audited."""
+    sample = _visible_or_404(conn, user, sample_id)
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        out = lab_similarity.similar(
+            conn, hashes={"imphash": sample.imphash,
+                          "rich_header_hash": sample.rich_header_hash,
+                          "ssdeep": sample.ssdeep, "tlsh": sample.tlsh},
+            by=by, thresholds=lab_similarity.Thresholds(
+                ssdeep_min, tlsh_max, limit, include_rejected),
+            clearance=clearance.name, compartments=held, exclude=sample_id,
+            sample_id=sample_id)
+    except lab_similarity.SimilarityError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from None
+    return {"sample_id": str(sample_id), **out}
+
+
 class DetonationBody(BaseModel):
-    target: str
-    exposure_level: str
+    #: F14 (2026-09-24): "record" keeps exactly the old behaviour and
+    #: is never sent; "submit" asks the sandbox worker to send it. There is
+    #: no free-text CAPE options field.
+    mode: str = Field(default="record", pattern="^(record|submit)$")
+    target: str | None = Field(default=None, max_length=200)
+    exposure_level: str | None = None
     authorised_by: UUID | None = None
-    note: str | None = None
+    note: str | None = Field(default=None, max_length=2000)
+    network_route: str | None = Field(default=None, max_length=64)
+    package: str | None = Field(default=None, pattern="^[a-z0-9_]{1,32}$")
+    timeout_s: int | None = Field(default=None, ge=30, le=1200)
+    platform: str | None = Field(default=None, pattern="^(windows|linux)$")
+    machine: str | None = Field(default=None, pattern="^[A-Za-z0-9_.-]{1,64}$")
 
 
-@router.post("/{sample_id}/detonation", response_model=dict, status_code=201)
+@router.post("/{sample_id}/detonation", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("sample.detonate"))])
 def request_detonation(
     sample_id: UUID, body: DetonationBody,
     user: CurrentUser = Depends(require_global("sample.detonate")),
@@ -1266,6 +1867,24 @@ def request_detonation(
     """
     sample = _visible_or_404(conn, user, sample_id)
     _refuse_if_read_only(conn, user, sample, "sample.detonate")
+    if body.mode == "submit":
+        # F14. Refused with 409 naming the reason; nothing is sent here.
+        from noctornal_api.sandbox import SandboxError, SandboxService
+        try:
+            return SandboxService(conn).request(
+                sample_id, requested_by=user.user_id,
+                network_route=body.network_route,
+                authorised_by=body.authorised_by, note=body.note,
+                package=body.package, timeout_s=body.timeout_s,
+                platform=body.platform, machine=body.machine)
+        except SampleCaseReadOnly as exc:
+            raise _read_only_problem(conn, user, sample, "sample.detonate",
+                                     exc) from exc
+        except (SandboxError, SampleError) as exc:
+            raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    if not body.target or not body.exposure_level:
+        raise Problem(400, "Invalid request",
+                      "a record-only request names the target and its exposure")
     try:
         det_id = _svc(conn).request_detonation(
             sample_id, requested_by=user.user_id, target=body.target,
@@ -1278,12 +1897,13 @@ def request_detonation(
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     named = (_svc(conn).people([body.authorised_by]).get(str(body.authorised_by))
              if body.authorised_by else None)
-    return {"id": str(det_id),
+    return {"id": str(det_id), "mode": "record",
             "submitted": False,
             "authorised_by_name": (named or {}).get("name"),
             "authorised_by_email": (named or {}).get("email"),
-            "notice": "Recorded only. No sandbox integration exists; nothing "
-                      "has been sent anywhere."}
+            # F14. A record-only request is never sent, whether or not
+            # a sandbox is configured.
+            "notice": "Recorded only. This request is never sent anywhere."}
 
 
 # ---------------------------------------------------------------------------
@@ -1428,10 +2048,12 @@ def mint_retrieval_ticket(
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        ticket = _ticket_svc(conn).issue_retrieval_ticket(
-            sample_id, actor_id=user.user_id, clearance=clearance.name,
-            compartments=compartments, session_id=user.session_id,
-            ip_hash=_ip_hash(request))
+        # Minted on a system connection, as the download ticket is (S1).
+        with system_connection(SystemPurpose.TICKETS, reuse=conn) as sconn:
+            ticket = _ticket_svc(sconn).issue_retrieval_ticket(
+                sample_id, actor_id=user.user_id, clearance=clearance.name,
+                compartments=compartments, session_id=user.session_id,
+                ip_hash=_ip_hash(request))
     except AuthorisationRequired as exc:
         raise Problem(451, "Unavailable for legal reasons",
                       safe_detail(exc)) from exc

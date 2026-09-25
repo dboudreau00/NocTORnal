@@ -1503,16 +1503,24 @@ class IngestService:
             # watch it matches is the operator's whole job. Each term is
             # stored with the selector and the watch that earned it, and
             # the router hides a watch the caller cannot read.
-            cache[case_id] = self._c.execute(
-                """SELECT w.id, w.name, w.case_id, s.selector
-                     FROM collect.watch w,
-                          unnest(w.selector_watch) AS s(selector)
-                    WHERE w.is_active AND s.selector IS NOT NULL
-                      AND btrim(s.selector) <> ''
-                      AND (%s::uuid IS NULL OR w.case_id IS NULL
-                           OR w.case_id = %s)
-                    ORDER BY lower(s.selector), w.name""",
-                (case_id, case_id)).fetchall()
+            #
+            # On a system connection (S1, 2026-09-25): a quarantined record
+            # scores against EVERY watch, including those on cases the
+            # operator is not on, and under row-level security the request
+            # role would score it against the operator's cases alone and
+            # store that lower score as the record's.
+            from noctornal_api.db import SystemPurpose, system_connection
+            with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
+                cache[case_id] = sconn.execute(
+                    """SELECT w.id, w.name, w.case_id, s.selector
+                         FROM collect.watch w,
+                              unnest(w.selector_watch) AS s(selector)
+                        WHERE w.is_active AND s.selector IS NOT NULL
+                          AND btrim(s.selector) <> ''
+                          AND (%s::uuid IS NULL OR w.case_id IS NULL
+                               OR w.case_id = %s)
+                        ORDER BY lower(s.selector), w.name""",
+                    (case_id, case_id)).fetchall()
         return cache[case_id]
 
     def _score(self, record_id: UUID, cache: dict) -> tuple[float, int]:

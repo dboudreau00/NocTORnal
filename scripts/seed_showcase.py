@@ -130,11 +130,11 @@ def main() -> int:
     os.environ.setdefault("NOCTORNAL_DESIGNATED_PERSON", "dev operator")
 
     from noctornal_api.cases import CaseService
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.graph import AssertionInput, GraphWriteService
     from noctornal_api.selectors import SelectorStore
 
-    conn = connect()
+    conn = connect_system(SystemPurpose.SCRIPT)
     row = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (args.owner_email,)).fetchone()
     if row is None:

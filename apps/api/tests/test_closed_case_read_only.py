@@ -76,6 +76,13 @@ CONTENT = {
     ("POST", "/cases/{case_id}/comms/pgp/verify"),
     ("POST", "/cases/{case_id}/comms/conversations"),
     ("POST", "/cases/{case_id}/comms/conversations/{conversation_id}/incidental"),
+    # Comms F10b and F10c (2026-09-24): the key registry and the lookups.
+    ("POST", "/cases/{case_id}/comms/pgp/keys"),
+    ("POST", "/cases/{case_id}/comms/pgp/keys/{key_id}/confirm"),
+    ("POST", "/cases/{case_id}/comms/pgp/keys/{key_id}/retire"),
+    ("POST", "/cases/{case_id}/comms/pgp/key-lookups"),
+    ("POST", "/cases/{case_id}/comms/pgp/key-lookups/{lookup_id}/approve"),
+    ("POST", "/cases/{case_id}/comms/pgp/key-lookups/{lookup_id}/decline"),
     ("POST", "/cases/{case_id}/ach/hypotheses"),
     ("POST", "/cases/{case_id}/ach/hypotheses/{hypothesis_id}/status"),
     ("PATCH", "/cases/{case_id}/ach/hypotheses/{hypothesis_id}"),
@@ -100,7 +107,21 @@ CONTENT = {
     ("POST", "/samples/{sample_id}/analyses/{analysis_id}/propose"),
     ("POST", "/samples/{sample_id}/detonation"),
     ("POST", "/samples/{sample_id}/reject"),
+    # F11 K, 2026-09-24. Static triage on demand writes machine
+    # findings onto an attached sample; a closed case takes none.
+    ("POST", "/samples/{sample_id}/static-triage"),
+    # Lookups (F15.3 and F15.4, 2026-09-24): each may send a
+    # case selector out, or files an answer as an exhibit.
+    ("POST", "/cases/{case_id}/lookups"),
+    ("POST", "/cases/{case_id}/lookups/{lookup_id}/sign-off"),
+    ("POST", "/cases/{case_id}/lookups/results/{result_id}/file"),
+    ("POST", "/cases/{case_id}/lookups/batches"),
+    # Keeping a case out of Jira is governance, below.
 }
+
+#: Why a similarity route is a read (F6.3, F6.4, 2026-09-24).
+_SIMILAR_READ = ("a read sent as POST so the query text stays out of the URL; a "
+                 "similar meaning query is audited before it leaves")
 
 #: Unsafe case routes that stay open on a read-only case, and why.
 NOT_CONTENT = {
@@ -148,6 +169,22 @@ NOT_CONTENT = {
         "withdrawing that authorisation",
     ("POST", "/samples/{sample_id}/preserved/retrieval-ticket"):
         "a read under that authorisation",
+    # Similarity reads (F6.3, F6.4, 2026-09-24). They may write a
+    # derived vector row, never case content.
+    ("POST", "/cases/{case_id}/search/documents/similar"): _SIMILAR_READ,
+    ("POST", "/cases/{case_id}/search/evidence/similar"): _SIMILAR_READ,
+    ("POST", "/cases/{case_id}/search/assertions/similar"): _SIMILAR_READ,
+    ("POST", "/cases/{case_id}/evidence/{evidence_id}/similar"): _SIMILAR_READ,
+    ("POST", "/cases/{case_id}/assertions/{assertion_id}/similar"): _SIMILAR_READ,
+    # Lookups and Jira routing (F15.3, F15.4 and F7, 2026-09-24).
+    ("POST", "/cases/{case_id}/lookups/{lookup_id}/cancel"):
+        "withdrawing a request sends nothing",
+    ("POST", "/cases/{case_id}/lookups/plan"):
+        "a read (case.read), sent as POST so the selection stays out of the URL",
+    ("POST", "/cases/{case_id}/lookups/batches/{batch_id}/cancel"):
+        "cancelling queued sends sends nothing",
+    ("PUT", "/cases/{case_id}/notify-routing"):
+        "keeping a case out of Jira: governance, and wanted most on a closed case",
 }
 
 #: Gated on the REQUESTED operation's own verb (`approvals.OPERATIONS`): a
@@ -519,6 +556,13 @@ def test_the_read_only_copy_is_in_house_style():
 #:   palette, a local action) that asks caseReadOnly() first.
 CONSOLE_CONTENT = {
     "saveLayout": [("id", "btn-save-layout", "btn-save-layout")],
+    # Lookups send a case selector out (F15.3 and F15.4, 2026-09-24).
+    "lookupPanel": [("drawn", ".case-write", "lookupPanel", "case-write")],
+    "signoffRow": [("drawn", ".case-write", "signoffRow", "case-write")],
+    # The plan card queues, for both ways in (2026-09-25); a stored answer
+    # is filed as an exhibit.
+    "renderLookupPlan": [("drawn", ".case-write", "renderLookupPlan", "case-write")],
+    "renderLookupResult": [("drawn", ".case-write", "renderLookupResult", "case-write")],
     "clearPins": [("guard", "clearPins")],
     # Clear pins' Undo stores only what clearPins stored (`store`).
     "restorePins": [("guard", "clearPins")],
@@ -591,6 +635,26 @@ CONSOLE_CONTENT = {
     # "Add a hypothesis" opening at full strength on a closed case.
     "addHypothesis": [("id", "ach-add-card", "ach-add")],
     "verifyPgp": [("id", "comms-pgp-form", "comms-pgp-form")],
+    # Comms F10b and F10c (2026-09-24): the key registry's forms, the
+    # drawn Confirm and Retire, and a lookup's Approve and Decline.
+    "importPgpKey": [("id", "comms-pgpkey-form", "comms-pgpkey-form")],
+    "requestKeyLookup": [("id", "comms-pgpkey-wkd-form", "comms-pgpkey-wkd-form")],
+    "confirmPgpKey": [
+        ("drawn", ".case-write", "renderPgpKey",
+         "el('button', 'btn small case-write pgpkey-confirm-btn',"),
+        ("drawn", ".case-write", "openPgpKeyConfirm",
+         "el('div', 'row-detail pgpkey-panel case-write')")],
+    "retirePgpKey": [
+        ("drawn", ".case-write", "renderPgpKey",
+         "el('button', 'btn ghost small case-write pgpkey-retire-btn',"),
+        ("drawn", ".case-write", "openPgpKeyRetire",
+         "el('div', 'row-detail pgpkey-panel case-write')")],
+    "approveKeyLookup": [
+        ("drawn", ".case-write", "renderKeyLookup",
+         "'btn small case-write pgpkey-lookup-approve'")],
+    "declineKeyLookup": [
+        ("drawn", ".case-write", "renderKeyLookup",
+         "'btn ghost small case-write pgpkey-lookup-decline'")],
     # The deception pane's new-record forms and its proposals (g09).
     "saveCapture": [("id", "dcp-cap-new", "dcp-capf-save")],
     "saveEmail": [("id", "dcp-eml-new", "dcp-emlf-save")],
@@ -645,6 +709,20 @@ CONSOLE_GOVERNANCE = {
     # the server recomputes it on a closed case too (u3, 2026-09-24).
     "rescoreRecord": "a derived score, recomputed on a closed case too",
     "rescoreAll": "the same, for every record in the case's queue",
+    # F9b (2026-09-24): the case's merge switch is the approval
+    # policy, which NOT_CONTENT names as governance.
+    "setCaseMergePolicy": "the approval policy: turning merges' second "
+                          "signature on",
+    "raiseRelaxRequest": "asking a second Lead investigator to turn it off",
+    "applyRelaxApproval": "turning it off with that approval",
+    # Similarity reads (F6.3, F6.4, 2026-09-24).
+    "runSimilarSearch": _SIMILAR_READ,
+    "loadSimilarPanel": _SIMILAR_READ,
+    # F7 and F15.3 (2026-09-24).
+    "saveCaseRouting": "keeping a case out of Jira: governance, wanted most "
+                       "on a closed case",
+    "lookupRow": "cancelling a waiting or queued lookup sends nothing",
+    "batchRow": "cancelling a batch's queued sends sends nothing",
 }
 
 
@@ -982,7 +1060,7 @@ def test_the_triage_keys_ask_nothing_on_a_read_only_case(tmp_path):
               + "".join(_fn(n) for n in ("acceptProposal", "rejectProposal",
                                           "deferProposal",
                                           # The prompts name their card
-                                          # (g01, final review c14).
+                                          # (final review c14).
                                           "triageNamed", "triageTitle",
                                           "triageClaimValue")) + r"""
 const calls = [];

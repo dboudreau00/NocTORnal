@@ -658,8 +658,17 @@ def test_every_registered_kind_has_a_sane_priority():
     # exists to do. `notifications.py` says so at the kind itself. This
     # assertion was not updated with it, so the file failed on any
     # database and for a reason that had nothing to do with one.
+    # F13 (2026-09-24): a prohibited-content screening match is the
+    # fourth. It is an event whose handling (report, preserve, tell the
+    # designated person) cannot wait for the morning, and it is coalesced to
+    # one open alert per recipient per hour, so a bulk match stays one.
     assert urgent == {"EVIDENCE_INTEGRITY_ALARM", "BREAK_GLASS_INVOKED",
-                      "ESCALATION"}, (
+                      "ESCALATION",
+                      # A persona credential in use from two
+                      # places at once, to the security officers.
+                      "PERSONA_CREDENTIAL_ALERT",
+                      # F13, a prohibited-content match.
+                      "SAMPLE_SCREENING_MATCH"}, (
         "priority 1 overrides quiet hours; it has to stay a short list")
 
 

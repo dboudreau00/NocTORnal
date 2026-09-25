@@ -113,6 +113,36 @@ Actor × forum, actor × thread, actor × wallet, actor × campaign.
 - Co-affiliation is how you find cells that never communicate directly on
   the record
 
+**Built (2026-09-24) for forums and wallets**, as a projection option of
+the Analysis pane and the analytics routes (`one_mode=forum`,
+`one_mode=wallet`), never as a rewritten preset (decision 33):
+
+- **Forum**: entities who post on the same forum or channel are tied, each
+  shared venue weighted 1 / (size - 1). **Wallet**: entities who control the
+  same wallet are tied the same way, and money moving between wallets
+  becomes a directed tie from the payer's controller to the payee's, one hop
+  only, suppressed where a recorded PAID tie already joins them.
+- A venue's size is taken from every membership the caller can see,
+  including those the confidence floor or the accepted-ties scope then
+  leaves out of the drawing, so filtering never switches a cap off. It is a
+  lower bound, so every weight is an upper bound, and the payload says so.
+- A venue larger than the limit (50 by default) draws nothing and is named.
+  Entities recorded as one identity are never tied to themselves; a link a
+  reviewer has disputed does not suppress anything. Every exclusion is
+  counted, and the coverage is part of the cache key.
+- Derived ties are marked derived and inferred, carry no valence, and are
+  never stored or drawn: the sociogram keeps showing what was recorded.
+- Two memberships tie only if they overlap in time. A membership recorded
+  by several dated rows covers all of them, and a derived tie is dated to
+  the latest period its members share.
+- At most 50,000 derived ties per view, and at most 1,000,000 steps of
+  comparing dated periods, each refused by an upper-bound count before any
+  is built; one-mode reads spend a budget of their own.
+- **Conversations are not projected here** (docs/00 decision 73): over
+  stored edges they would lose the incidental-party exclusion and the room
+  size the Comms pane's co-participation view keeps, so that view remains
+  the conversation projection.
+
 ### Structural equivalence and roles
 
 - **CONCOR** and **blockmodelling**
@@ -122,6 +152,18 @@ Two actors who never interact but occupy the same structural position,
 same pattern of ties to the same kinds of others, are playing the same
 role. This finds the *second* money launderer, the *replacement* developer.
 Genuinely powerful and rarely available outside UCINET.
+
+**CONCOR is built (2026-09-24)**: the Analysis pane's Roles card and
+`GET /cases/{case_id}/analytics/concor`, its own run stored for each depth
+(one to four splits). Profiles are ties sent and received per valence, the
+pair's own entries left out of each correlation (Wasserman and Faust); only
+actors hold positions, and a forum or wallet on a two-mode view shapes the
+profiles without being placed. Ties count as present or absent. The fit
+(R squared between the ties and the block densities) heads the card,
+because CONCOR always splits in two and the number of positions is set by
+the depth, not found in the data. "Alike but not tied" pairs are leads, never
+proposals. Capped at 1,000 entities with ties, 50 rounds per split, one BLAS
+thread per process. REGE is not built.
 
 ### Temporal
 

@@ -26,10 +26,12 @@ from pydantic import BaseModel, Field
 from psycopg.types.json import Json
 
 from noctornal_api import notify_events
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
     check_writable_labels,
+    element_labels,
     get_conn,
     require,
     user_ceiling,
@@ -48,6 +50,8 @@ from noctornal_api.proposals import (
     SourceLabels,
     accepted_classification,
     attribute_label_problem,
+    case_compartments,
+    element_compartments,
     strictest,
 )
 
@@ -96,6 +100,14 @@ class ProposalOut(BaseModel):
     #: Null when the claim may be accepted, or when the reader cannot see
     #: the entity (the card already says so, and its label is not theirs).
     accept_blocked: str | None = None
+    #: The compartments of the captured document the proposal came from
+    #: (L1, 2026-09-24): the queue lists a proposal only to readers who
+    #: hold them, so they are the reader's own keys.
+    document_compartments: list[str] = Field(default_factory=list)
+    #: F15.3 (2026-09-24): the lookup answer this was raised from, its
+    #: provider and when it was fetched, so the card can say "from a lookup
+    #: on PROVIDER" and open the answer. Null for every other source.
+    lookup: dict | None = None
 
 
 class DispositionBody(BaseModel):
@@ -110,7 +122,8 @@ class RequiredNoteBody(BaseModel):
 def _out(p: ProposalRow, *, classification: str | None = None,
          refs: dict | None = None,
          documents: dict | None = None,
-         accept_blocked: str | None = None) -> ProposalOut:
+         accept_blocked: str | None = None,
+         lookups: dict | None = None) -> ProposalOut:
     doc = (documents or {}).get(str(p.document_id)) if p.document_id else None
     return ProposalOut(
         id=str(p.id), kind=p.kind, payload=p.payload, origin=p.origin,
@@ -127,6 +140,8 @@ def _out(p: ProposalRow, *, classification: str | None = None,
         applied_assertion_id=(str(p.applied_assertion_id)
                               if p.applied_assertion_id else None),
         accept_blocked=accept_blocked,
+        document_compartments=doc["compartments"] if doc else [],
+        lookup=(lookups or {}).get(p.id),  # F15.3
     )
 
 
@@ -226,7 +241,11 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
             # A label below the capture's, or one that is no label at all:
             # refused before anything is checked or written.
             raise Problem(409, "Conflict", safe_detail(exc)) from exc
-        check_writable_labels(conn, user, classification=written)
+        # And the compartments it will carry: its material's beyond the
+        # case's (L1, 2026-09-24), the same expression the service writes.
+        extra = element_compartments(labels, case_compartments(conn, case_id))
+        check_writable_labels(conn, user, classification=written,
+                              compartments=frozenset(extra))
         return
     if row.kind != KIND_ATTRIBUTE:
         return  # the service refuses an unknown kind, writing nothing
@@ -236,9 +255,11 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
         raise Problem(409, "Conflict",
                       "this proposal does not name a valid entity to attach "
                       "its claim to; nothing was written") from exc
-    labels = conn.execute(
-        "SELECT case_id, classification, compartments FROM core.node "
-        "WHERE id = %s", (target,)).fetchone()
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    labels = element_labels(conn, "node", target)
     if labels is None or labels[0] != case_id:
         raise Problem(409, "Conflict",
                       "the entity this proposal makes a claim about is not in "
@@ -252,9 +273,12 @@ def _check_accept_labels(conn: psycopg.Connection, user: CurrentUser,
     # RED, compartmented contact block's identifier accepted onto a CLEAR
     # entity was served to every CLEAR reader of it. After the gate above,
     # so only somebody who may see the entity is told its label.
+    # The entity is in this case (checked above), so its case's
+    # compartments are this case's, which every reader of it holds (L1).
     problem = attribute_label_problem(
         row.payload, ProposalStore(conn).source_labels(row.id),
-        labels[1], labels[2])
+        labels[1], labels[2],
+        case_compartments=case_compartments(conn, case_id))
     if problem:
         raise Problem(409, "Conflict",
                       f"{problem} Nothing was written: reject or defer it.")
@@ -297,22 +321,32 @@ def capture(
         ExtractionError,
     )
 
-    # The label the document will actually be stored at, never below the
-    # case, is the one held to the caller's ceiling (final review c15,
-    # 2026-09-24); a compartmented case refuses before anything is read.
+    # The labels the document will actually be stored under, never below
+    # the case and under its compartments, are the ones held to the
+    # caller's ceiling (final review c15 and L1, 2026-09-24); a case
+    # walled off for victim data refuses before anything is read.
     try:
-        stored = CaptureService(conn).stored_label(case_id, body.classification)
+        stored = CaptureService(conn).stored_labels(case_id,
+                                                    body.classification)
     except CaptureRefused as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except ExtractionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
-    check_writable_labels(conn, user, classification=stored)
+    check_writable_labels(conn, user, classification=stored.classification,
+                          compartments=frozenset(stored.compartments))
     try:
-        result = CaptureService(conn).capture(
-            case_id=case_id, text=body.text, title=body.title,
-            external_url=body.external_url, author_handle=body.author_handle,
-            classification=body.classification,
-        )
+        # The capture itself on a system connection (S1, 2026-09-25): it
+        # dedupes against EVERY stored document, and a paste of text an
+        # analyst above this caller already captured must still land on
+        # that document and take its stricter label, not be stored again
+        # at the lower one because row security hid the first. The gate and
+        # the label check above ran on the request connection.
+        with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
+            result = CaptureService(sconn).capture(
+                case_id=case_id, text=body.text, title=body.title,
+                external_url=body.external_url, author_handle=body.author_handle,
+                classification=body.classification,
+            )
     except CaptureRefused as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except ExtractionError as exc:
@@ -358,10 +392,15 @@ def capture(
     # document the collection keeps from them. Null says only that it is
     # above them. The audit row above keeps both, for its own readers.
     reply = result.summary()
-    clearance, _held = _reader_ceiling(conn, user, case_id)
+    clearance, held = _reader_ceiling(conn, user, case_id)
     for key in ("classification", "document_classification"):
         if strictest(reply.get(key), clearance) != clearance:
             reply[key] = None
+    # The compartments are the case's, which the caller holds to pass the
+    # case gate and the writable check above; said only when they do, so
+    # the reply can never name a key its caller is not in (L1).
+    if not set(reply.get("document_compartments") or []) <= set(held):
+        reply["document_compartments"] = None
     return {
         **reply,
         # true = told. false = deliberately not told (no proposals, or the
@@ -406,12 +445,16 @@ def queue(
         named |= _named_ids(p)
     refs = store.node_refs(case_id, named, clearance=clearance,
                            compartments=held)
-    docs = store.documents({p.document_id for p in rows if p.document_id})
+    docs = store.documents({p.document_id for p in rows if p.document_id},
+                           compartments=held)
     labelled = store.source_labels_many([p.id for p in rows])
+    origins = store.lookup_origins([p.id for p in rows if p.lookup_result_id])
     # The labels of the entities ATTRIBUTE claims would land on, for the
     # ones this reader was shown (c1, 2026-09-24): a card whose Accept the
-    # server would refuse says so rather than offering it.
+    # server would refuse says so rather than offering it. Those entities
+    # are in this case, so their case's compartments are this case's (L1).
     targets = store.entity_labels(case_id, set(refs))
+    case = CaptureService(conn).case_labels(case_id)
     out = []
     for p in rows:
         labels = labelled[p.id]
@@ -419,11 +462,13 @@ def queue(
         if p.kind == KIND_ATTRIBUTE:
             target = targets.get(str((p.payload or {}).get("node_id")))
             if target is not None:
-                blocked = attribute_label_problem(p.payload, labels, *target)
+                blocked = attribute_label_problem(
+                    p.payload, labels, *target,
+                    case_compartments=case.compartments)
         out.append(_out(
             p, classification=_display_label(p, labels),
             refs={k: v for k, v in refs.items() if k in _named_ids(p)},
-            documents=docs, accept_blocked=blocked))
+            documents=docs, accept_blocked=blocked, lookups=origins))
     return {
         "state": state,
         "counts": store.counts(case_id, clearance=clearance,
@@ -432,10 +477,15 @@ def queue(
         "pending_by_node": store.pending_by_node(
             case_id, clearance=clearance, compartments=held),
         # Why the capture form above this queue is off, or null (final
-        # review c15, 2026-09-24): a compartmented case refuses captures,
-        # and the case record the console holds does not name its
-        # compartments.
+        # review c15, 2026-09-24): since L1 only a case walled off for
+        # victim data refuses captures, and the case record the console
+        # holds does not name its compartments.
         "capture_refused": CaptureService(conn).refusal(case_id),
+        # What a capture here is stored under at the least, so the form can
+        # say where the text will be listed (L1, 2026-09-24). The reader
+        # passed this case's gate, so holds every key it names.
+        "capture_labels": {"classification": case.classification,
+                           "compartments": list(case.compartments)},
     }
 
 
@@ -474,11 +524,16 @@ def source(
         raise Problem(404, "Not found",
                       "this proposal names no captured document; its "
                       "rationale says where it came from")
+    # The document's compartments against the reader's, in the read itself
+    # (L1, 2026-09-24): `readable` above already holds the proposal to
+    # them, and a read that relied on an earlier check is how a reader of
+    # this route would have been missed by the next change to that check.
     doc = conn.execute(
         """SELECT id, title, body_text, classification, captured_at,
-                  external_url, purged_at
-             FROM collect.document WHERE id = %s""",
-        (row.document_id,)).fetchone()
+                  external_url, purged_at, compartments
+             FROM collect.document
+            WHERE id = %s AND compartments <@ %s::text[]""",
+        (row.document_id, sorted(held))).fetchone()
     if doc is None:
         raise Problem(404, "Not found", "the captured document is gone")
     attrs = (row.payload or {}).get("attrs") or {}
@@ -490,6 +545,7 @@ def source(
         "captured_at": doc[4].isoformat() if doc[4] else None,
         "external_url": doc[5], "purged": doc[6] is not None,
         "length": len(body),
+        "compartments": sorted(doc[7] or []),
     }
     if doc[6] is not None:
         return {**out, "text": "", "offset": 0, "match": None}

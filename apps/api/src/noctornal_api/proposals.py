@@ -133,6 +133,28 @@ def accepted_classification(payload: dict | None, requested: str | None,
     return requested
 
 
+def case_compartments(conn: psycopg.Connection,
+                      case_id: UUID) -> frozenset[str]:
+    """The compartments of a case, read inside the caller's transaction
+    when there is one."""
+    row = conn.execute('SELECT compartments FROM core."case" WHERE id = %s',
+                       (case_id,)).fetchone()
+    return frozenset((row[0] if row else None) or [])
+
+
+def element_compartments(labels: SourceLabels,
+                         case_compartments) -> list[str]:
+    """The compartments an accepted NODE or EDGE carries: its material's,
+    beyond its case's own (L1, 2026-09-24).
+
+    One expression, used by `ProposalReview.accept` to write the element
+    and by the accept route to hold the reviewer to it first, as
+    `accepted_classification` is for the label. The case's own keys are
+    not copied: every read of an element passes its case's gate, and the
+    other elements of a compartmented case carry none of them."""
+    return sorted(labels.compartments - frozenset(case_compartments or ()))
+
+
 def _compartment_words(keys) -> str:
     """"compartment X" or "compartments X, Y", for a refusal that names
     them to somebody already read into them."""
@@ -143,7 +165,8 @@ def _compartment_words(keys) -> str:
 
 def attribute_label_problem(payload: dict | None, labels: SourceLabels,
                             entity_classification: str | None,
-                            entity_compartments=()) -> str | None:
+                            entity_compartments=(), *,
+                            case_compartments=()) -> str | None:
     """Why an ATTRIBUTE claim may not be attached to this entity, or None
     when it may.
 
@@ -160,9 +183,20 @@ def attribute_label_problem(payload: dict | None, labels: SourceLabels,
     raise the entity it lands on, so it is refused instead. One rule, read
     by the accept route, the service and the card, as
     `accepted_classification` is for NODE and EDGE.
+
+    `case_compartments` are the compartments of the case the ENTITY is in
+    (L1, 2026-09-24). Every read of an entity passes its case's gate, so
+    whoever reads the entity already holds its case's keys
+    (security/access.py), and an entity's effective compartments are its
+    own and its case's. Once a capture into a compartmented case carries
+    the case's keys, comparing with the entity's own alone would refuse
+    every claim cited to that case's material onto that case's own
+    entities. The service refuses an entity outside the proposal's case,
+    so this cannot reach one elsewhere.
     """
     need = strictest((payload or {}).get("classification"), labels.source)
-    held = frozenset(entity_compartments or ())
+    held = (frozenset(entity_compartments or ())
+            | frozenset(case_compartments or ()))
     missing = labels.compartments - held
     below = need is not None and _rank(need) > _rank(entity_classification)
     if not below and not missing:
@@ -200,6 +234,9 @@ class ProposalRow:
     #: for an ATTRIBUTE claim, which creates no element to retire
     #: (ux08-triage:triage-keys-fire-on-browser-chords, 2026-09-23).
     applied_assertion_id: UUID | None = None
+    #: The lookup answer this proposal was raised from (F15.3, 2026-09-24;
+    #: migration 0100). None for every other source.
+    lookup_result_id: UUID | None = None
 
 
 def _row(r) -> ProposalRow:
@@ -209,12 +246,14 @@ def _row(r) -> ProposalRow:
         state=r[7], document_id=r[8], reviewed_by=r[9], reviewed_at=r[10],
         review_note=r[11], applied_node_id=r[12], applied_edge_id=r[13],
         created_at=r[14],
+        lookup_result_id=r[15] if len(r) > 15 else None,  # F15.3
     )
 
 
 _SELECT = """SELECT id, case_id, kind, payload, origin, score, rationale,
                     state, document_id, reviewed_by, reviewed_at, review_note,
-                    applied_node_id, applied_edge_id, created_at
+                    applied_node_id, applied_edge_id, created_at,
+                    lookup_result_id
                FROM collect.proposal"""
 
 #: The live channel `http/routers/live.py` LISTENs on (its `CHANNEL`),
@@ -230,23 +269,26 @@ CHANGE_CHANNEL = "noctornal_change"
 #: - the payload's own `classification`, which a capture writes since
 #:   this fix and a hand-built proposal may carry;
 #: - the captured document's (`collect.document.classification`), which
-#:   covers every capture raised before the payload carried it;
+#:   covers every capture raised before the payload carried it, and its
+#:   compartments since L1 (2026-09-24, `_SOURCE_COMPARTMENTS`);
 #: - the contact block's, with its compartments, for an ATTRIBUTE claim
 #:   parsed from one (`comms.contact_block_entry.proposal_id`).
 #:
 #: The queue read `collect.proposal` alone, so a RED capture's rationale,
 #: which quotes 45 characters either side of each match, was shown to any
 #: reader of the case whatever their clearance.
+#:
+#: The document's and the contact block's labels come from
+#: `iam.element_facts` (S1, 2026-09-25), not joins to `collect.document`
+#: and `comms.contact_block`: under row-level security a LEFT JOIN to a
+#: row the reader may not see reads as no row at all, and the
+#: strictest-of below would then LOWER the proposal to what is left.
 _SOURCE_FROM = """
     FROM collect.proposal p
     JOIN core."case" c ON c.id = p.case_id
-    LEFT JOIN collect.document d ON d.id = p.document_id
-    LEFT JOIN LATERAL (
-        SELECT cb.classification, cb.compartments
-          FROM comms.contact_block_entry e
-          JOIN comms.contact_block cb ON cb.id = e.block_id
-         WHERE e.proposal_id = p.id
-         LIMIT 1) b ON true"""
+    LEFT JOIN LATERAL iam.element_facts('document', p.document_id) d ON true
+    LEFT JOIN LATERAL iam.element_facts('proposal_block', p.id) b ON true
+    LEFT JOIN ingest.lookup_result lr ON lr.id = p.lookup_result_id"""
 
 _PAYLOAD_CLS = """CASE WHEN p.payload->>'classification' IN
         ('CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED')
@@ -255,10 +297,21 @@ _PAYLOAD_CLS = """CASE WHEN p.payload->>'classification' IN
 #: The label a READER must dominate: everything the proposal's text could
 #: carry, and the case it sits in.
 _READ_LABEL = (f"greatest({_PAYLOAD_CLS}, d.classification, b.classification, "
-               f"c.classification)")
+               f"lr.classification, c.classification)")  # lr: F15.3
+
+#: The compartments of what a proposal came from: its captured document's
+#: and its contact block's (L1, 2026-09-24). A capture into a compartmented
+#: case now carries the case's keys, and a proposal's rationale quotes the
+#: document, so a reader must hold them to see the proposal at all. One
+#: expression for every read and for `source_labels`, so the queue, the
+#: counts, the source view and the accept default cannot disagree about
+#: them. A later source leg (F15.3) extends THIS expression
+#: and `_SOURCE_FROM`, never a second join.
+_SOURCE_COMPARTMENTS = ("(coalesce(d.compartments, '{}'::text[]) "
+                        "|| coalesce(b.compartments, '{}'::text[]))")
 
 _READABLE = (f"({_READ_LABEL} <= %(clearance)s::core.tlp "
-             f"AND coalesce(b.compartments, '{{}}'::text[]) <@ %(held)s::text[])")
+             f"AND {_SOURCE_COMPARTMENTS} <@ %(held)s::text[])")
 
 
 @dataclass(frozen=True)
@@ -311,6 +364,7 @@ class ProposalStore:
         rationale: str,
         score: float | None = None,
         document_id: UUID | None = None,
+        lookup_result_id: UUID | None = None,  # F15.3
     ) -> UUID:
         """Record a machine's suggestion. Never touches the graph.
 
@@ -335,11 +389,11 @@ class ProposalStore:
             made = self._c.execute(
                 """INSERT INTO collect.proposal
                        (case_id, kind, payload, origin, score, rationale,
-                        document_id, state)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'PROPOSED')
+                        document_id, state, lookup_result_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'PROPOSED', %s)
                    RETURNING id""",
                 (case_id, kind, Json(payload), origin, score,
-                 rationale.strip(), document_id),
+                 rationale.strip(), document_id, lookup_result_id),
             ).fetchone()[0]
         except psycopg.Error as exc:
             raise ProposalError(str(exc)) from exc
@@ -364,7 +418,7 @@ class ProposalStore:
             "SELECT p.id, p.case_id, p.kind, p.payload, p.origin, p.score, "
             "p.rationale, p.state, p.document_id, p.reviewed_by, "
             "p.reviewed_at, p.review_note, p.applied_node_id, "
-            "p.applied_edge_id, p.created_at" + _SOURCE_FROM
+            "p.applied_edge_id, p.created_at, p.lookup_result_id" + _SOURCE_FROM
             + f" WHERE {where} AND p.state = %(state)s::core.review_state"
             " ORDER BY p.score DESC NULLS LAST, p.created_at LIMIT %(limit)s",
             params).fetchall()
@@ -388,8 +442,9 @@ class ProposalStore:
         """The labels of the material behind one proposal, and its case's
         floor: what an accept writes by default and the least it may."""
         row = self._c.execute(
-            "SELECT greatest(d.classification, b.classification), "
-            "c.classification, coalesce(b.compartments, '{}'::text[])"
+            "SELECT greatest(d.classification, b.classification, "
+            "lr.classification), "  # F15.3
+            "c.classification, " + _SOURCE_COMPARTMENTS
             + _SOURCE_FROM + " WHERE p.id = %(id)s", {"id": proposal_id},
         ).fetchone()
         if row is None:
@@ -403,8 +458,9 @@ class ProposalStore:
         if not ids:
             return {}
         rows = self._c.execute(
-            "SELECT p.id, greatest(d.classification, b.classification), "
-            "c.classification, coalesce(b.compartments, '{}'::text[])"
+            "SELECT p.id, greatest(d.classification, b.classification, "
+            "lr.classification), "  # F15.3
+            "c.classification, " + _SOURCE_COMPARTMENTS
             + _SOURCE_FROM + " WHERE p.id = ANY(%(ids)s)", {"ids": list(ids)},
         ).fetchall()
         return {r[0]: SourceLabels(source=r[1], floor=r[2],
@@ -419,6 +475,21 @@ class ProposalStore:
             {"id": proposal_id, "clearance": clearance,
              "held": sorted(compartments)}).fetchone()
         return bool(row and row[0])
+
+    def lookup_origins(self, ids: list[UUID]) -> dict[UUID, dict]:
+        """For proposals raised from a lookup answer (F15.3, 2026-09-24):
+        which answer, from which provider, fetched when. One read for a
+        page of cards."""
+        if not ids:
+            return {}
+        rows = self._c.execute(
+            """SELECT p.id, r.id, pr.display_name, r.fetched_at
+                 FROM collect.proposal p
+                 JOIN ingest.lookup_result r ON r.id = p.lookup_result_id
+                 JOIN ingest.provider pr ON pr.id = r.provider_id
+                WHERE p.id = ANY(%s)""", (list(ids),)).fetchall()
+        return {r[0]: {"result_id": str(r[1]), "provider_name": r[2],
+                       "fetched_at": r[3].isoformat()} for r in rows}
 
     def pending_by_node(self, case_id: UUID, *, clearance: str,
                         compartments: frozenset[str]) -> dict[str, int]:
@@ -478,17 +549,29 @@ class ProposalStore:
             (wanted, case_id, clearance, sorted(compartments))).fetchall()
         return {str(r[0]): {"label": r[1], "node_type": r[2]} for r in rows}
 
-    def documents(self, ids: set[UUID]) -> dict[str, dict]:
-        """Title and label of the captured documents a page names."""
+    def documents(self, ids: set[UUID], *,
+                  compartments: frozenset[str] = frozenset()
+                  ) -> dict[str, dict]:
+        """Title and labels of the captured documents a page names, for the
+        ones whose compartments the reader holds (L1, 2026-09-24). The
+        queue only lists proposals whose source the reader may read, so
+        this is a second lock on the same door, not the first: a bare read
+        by id was how the source view reached a document before. The
+        default is the EMPTY set, which fails closed: a caller that does
+        not say what it holds sees no compartmented document."""
         if not ids:
             return {}
         rows = self._c.execute(
-            """SELECT id, title, classification, captured_at, external_url
-                 FROM collect.document WHERE id = ANY(%s)""",
-            (list(ids),)).fetchall()
+            """SELECT id, title, classification, captured_at, external_url,
+                      compartments
+                 FROM collect.document
+                WHERE id = ANY(%s) AND compartments <@ %s::text[]""",
+            (list(ids), sorted(compartments))).fetchall()
         return {str(r[0]): {"title": r[1], "classification": r[2],
                             "captured_at": r[3].isoformat() if r[3] else None,
-                            "external_url": r[4]} for r in rows}
+                            "external_url": r[4],
+                            "compartments": sorted(r[5] or [])}
+                for r in rows}
 
     def waiting_by_case(self, user_id: UUID, *, clearance: str,
                         compartments: frozenset[str]) -> dict[str, int]:
@@ -595,6 +678,17 @@ class ProposalReview:
         # selector attached to a known actor never moved its last seen,
         # although the document it cites holds both dates.
         observed_at = self._observed_at(row.document_id)
+        # F15.3 (2026-09-24): a claim raised from a lookup answer cites
+        # the provider's anchor source and the stored answer, and is dated
+        # by when the answer was fetched.
+        lookup_source, lookup_result = None, row.lookup_result_id
+        if lookup_result is not None:
+            found = self._c.execute(
+                """SELECT p.source_id, r.fetched_at FROM ingest.lookup_result r
+                     JOIN ingest.provider p ON p.id = r.provider_id
+                    WHERE r.id = %s""", (lookup_result,)).fetchone()
+            if found is not None:
+                lookup_source, observed_at = found[0], found[1]
         assertion = AssertionInput(
             basis="AUTOMATED_INFERENCE",
             created_by=reviewed_by,
@@ -605,6 +699,7 @@ class ProposalReview:
             rationale=f"[{row.origin}] {row.rationale}",
             document_id=row.document_id,
             observed_at=observed_at,
+            source_id=lookup_source, lookup_result_id=lookup_result,  # F15.3
         )
         payload = row.payload or {}
         node_id = edge_id = assertion_id = None
@@ -616,6 +711,15 @@ class ProposalReview:
             written_at = accepted_classification(
                 payload, classification, source=labels.source,
                 floor=labels.floor)
+        #: The compartments an accepted element carries (L1, 2026-09-24):
+        #: those of its material beyond the case's own. Every read of an
+        #: element passes its case's gate, and elements elsewhere in a
+        #: compartmented case carry none of the case's keys, so copying
+        #: them would only make one case's elements disagree. A key the
+        #: material carries that the case does not (a contact block filed
+        #: under a stricter compartment) is the element's own lock. Empty
+        #: for ATTRIBUTE, which writes a claim, not an element.
+        extra: list[str] = []
         try:
             with self._c.transaction():
                 # CR10 (2026-07-26): take the row lock INSIDE the writing
@@ -643,6 +747,9 @@ class ProposalReview:
                     raise ProposalError(
                         f"proposal is {locked[0]}, not {STATE_PROPOSED}; it "
                         "has already been dispositioned")
+                if row.kind in (KIND_NODE, KIND_EDGE):
+                    extra = element_compartments(
+                        labels, self.case_compartments(row.case_id))
                 if row.kind == KIND_NODE:
                     node_id = self._graph.create_node(
                         case_id=row.case_id,
@@ -652,6 +759,7 @@ class ProposalReview:
                         assertion=assertion,
                         attrs=payload.get("attrs") or {},
                         classification=written_at,
+                        compartments=extra,
                     )
                 elif row.kind == KIND_EDGE:
                     edge_id = self._graph.create_edge(
@@ -662,6 +770,7 @@ class ProposalReview:
                         created_by=reviewed_by,
                         assertion=assertion,
                         classification=written_at,
+                        compartments=extra,
                         # Invariant 4: an edge born from a machine's
                         # suggestion is INFERRED, renders dashed and stays
                         # out of metrics unless a projection opts in. It
@@ -685,15 +794,32 @@ class ProposalReview:
                     # found in (final review c1, 2026-09-24). Checked
                     # here as well as on the route because the service
                     # has other callers.
+                    #
+                    # With its case's compartments, and in the proposal's
+                    # case (L1, 2026-09-24): an entity's effective
+                    # compartments include its case's, which is only safe
+                    # to count once the entity is known to be in the case
+                    # whose readers the proposal was raised for. The route
+                    # has refused a foreign entity since C12; the service
+                    # did not, and it is the one every caller shares.
                     entity = self._c.execute(
-                        "SELECT classification, compartments FROM core.node "
-                        "WHERE id = %s FOR SHARE", (target,)).fetchone()
+                        """SELECT n.classification, n.compartments,
+                                  n.case_id, ec.compartments
+                             FROM core.node n
+                             JOIN core."case" ec ON ec.id = n.case_id
+                            WHERE n.id = %s FOR SHARE OF n""",
+                        (target,)).fetchone()
                     if entity is None:
                         raise ProposalError(
                             "the entity this proposal makes a claim about "
                             "does not exist; nothing was written")
+                    if entity[2] != row.case_id:
+                        raise ProposalError(
+                            "the entity this proposal makes a claim about "
+                            "is not in this case; nothing was written")
                     problem = attribute_label_problem(
-                        payload, labels, entity[0], entity[1])
+                        payload, labels, entity[0], entity[1],
+                        case_compartments=entity[3])
                     if problem:
                         raise ProposalError(
                             f"{problem} Nothing was written: reject or "
@@ -709,6 +835,8 @@ class ProposalReview:
                             observed_at=observed_at,
                             claim_path=payload["claim_path"],
                             claim_value=payload["claim_value"],
+                            source_id=lookup_source,  # F15.3
+                            lookup_result_id=lookup_result,
                         ),
                     )
                     node_id = target
@@ -738,7 +866,8 @@ class ProposalReview:
                             {"kind": row.kind, "origin": row.origin,
                              "node_id": str(node_id) if node_id else None,
                              "edge_id": str(edge_id) if edge_id else None,
-                             "classification": written_at})
+                             "classification": written_at,
+                             "compartments": extra})
                 announce(self._c, row.case_id)
         except KeyError as exc:
             raise ProposalError(
@@ -769,6 +898,9 @@ class ProposalReview:
                                  note.strip(), "PROPOSAL_DEFERRED")
 
     # -- internals --------------------------------------------------------
+    def case_compartments(self, case_id: UUID) -> frozenset[str]:
+        return case_compartments(self._c, case_id)
+
     def _observed_at(self, document_id: UUID | None) -> datetime | None:
         """The cited document's posted date, else its capture date; None
         when the proposal cites no document (a contact block parsed

@@ -307,6 +307,12 @@ The same reasoning is why `deception.capture.egress_profile_id` exists.
 Fetching attacker infrastructure from the office egress IP tells the actor
 they are being watched.
 
+It is also why a vendor key lookup (F10c, 2026-09-24) reaches only the Web
+Key Directories an administrator named on the integration route `wkd`, is
+approved by a second person, and sends nothing but the hash: a directory
+on a domain the actor runs would learn that the address was looked up
+(docs/16 L5 and C14).
+
 ---
 
 ## 6) Legal: one new blocking item

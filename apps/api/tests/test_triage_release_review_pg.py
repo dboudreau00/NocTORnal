@@ -383,9 +383,12 @@ def test_a_capture_reply_names_no_label_above_the_caller(conn, client):
             r.json()["document_classification"]) == ("RED", "AMBER")
 
 
-def test_a_compartmented_case_refuses_a_capture(conn, client):
-    """A document cannot carry compartments, so a capture into a
-    compartmented case would be readable outside them at any label."""
+def test_a_compartmented_case_stores_a_capture_under_its_compartments(
+        conn, client):
+    """L1 (2026-09-24): a document carries compartments now, so a capture
+    into a compartmented case is stored under the case's, where c15 had to
+    refuse it. The queue says what the form stores under, and refuses
+    nothing."""
     owner = _user(conn, "RED", [KEY])
     case_id = _case(conn, owner, "RED", [KEY])
     title = f"{PREFIX}{uuid4().hex[:6]}"
@@ -393,28 +396,62 @@ def test_a_compartmented_case_refuses_a_capture(conn, client):
     r = client.post(f"/api/v1/cases/{case_id}/proposals/capture",
                     headers=_auth(conn, owner),
                     json={"text": text, "title": title, "classification": "RED"})
-    assert conn.execute("SELECT count(*) FROM collect.document WHERE title = %s",
-                        (title,)).fetchone()[0] == 0, (
+    assert r.status_code == 201, r.text
+    assert r.json()["document_compartments"] == [KEY]
+    stored = conn.execute(
+        "SELECT classification, compartments FROM collect.document "
+        "WHERE title = %s", (title,)).fetchone()
+    assert stored == ("RED", [KEY]), (
         "a compartmented case's capture was stored where the compartment "
         "does not reach")
-    assert r.status_code == 409, r.text
-    detail = r.json()["detail"]
-    assert "compartment TRR-KEY" in detail and "Nothing was captured" in detail
-    from noctornal_api.extraction import CaptureRefused, CaptureService
-    with pytest.raises(CaptureRefused):
-        CaptureService(conn).capture(case_id=case_id, text=text, title=title,
-                                     classification="RED")
-    assert conn.execute("SELECT count(*) FROM collect.proposal WHERE case_id = %s",
-                        (case_id,)).fetchone()[0] == 0
-    # The queue tells the console why its capture form is off: the case
-    # record it holds does not name the case's compartments.
     q = client.get(f"/api/v1/cases/{case_id}/proposals",
                    headers=_auth(conn, owner)).json()
-    assert "compartment TRR-KEY" in q["capture_refused"]
-    open_case = _case(conn, owner, "RED")
-    q = client.get(f"/api/v1/cases/{open_case}/proposals",
-                   headers=_auth(conn, owner)).json()
     assert q["capture_refused"] is None
+    assert q["capture_labels"] == {"classification": "RED",
+                                   "compartments": [KEY]}
+    assert {p["document_compartments"][0] for p in q["proposals"]} == {KEY}
+
+
+def test_a_case_walled_off_for_victim_data_still_refuses_a_capture(
+        conn, client):
+    """The refusal that stays (L1): a case carrying a compartment an ingest
+    feed forces for third-party personal data. The sentence names only that
+    compartment, and cites no document."""
+    victim = "TRR-VICTIM"
+    owner = _user(conn, "RED", [KEY, victim])
+    key_id = conn.execute(
+        """INSERT INTO ingest.api_key (key_id, secret_hmac, pepper_id, name,
+                                       expires_at, owner_user_id,
+                                       forced_compartment)
+           VALUES (%s, %s, 'env:v1', 'trr victim feed',
+                   now() + interval '1 day', %s, %s) RETURNING id""",
+        (uuid4().hex[:8], os.urandom(32), owner, victim)).fetchone()[0]
+    try:
+        case_id = _case(conn, owner, "RED", [KEY, victim])
+        title = f"{PREFIX}{uuid4().hex[:6]}"
+        text = SAMPLE + f"\n[{uuid4().hex}]"
+        r = client.post(f"/api/v1/cases/{case_id}/proposals/capture",
+                        headers=_auth(conn, owner),
+                        json={"text": text, "title": title,
+                              "classification": "RED"})
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert f"compartment {victim}," in detail, detail
+        assert KEY not in detail, "a compartment that is not the reason was named"
+        assert "Nothing was captured" in detail
+        assert "docs/" not in detail and chr(0x2014) not in detail
+        assert conn.execute(
+            "SELECT count(*) FROM collect.document WHERE title = %s",
+            (title,)).fetchone()[0] == 0
+        from noctornal_api.extraction import CaptureRefused, CaptureService
+        with pytest.raises(CaptureRefused):
+            CaptureService(conn).capture(case_id=case_id, text=text,
+                                         title=title, classification="RED")
+        q = client.get(f"/api/v1/cases/{case_id}/proposals",
+                       headers=_auth(conn, owner)).json()
+        assert f"compartment {victim}," in q["capture_refused"]
+    finally:
+        conn.execute("DELETE FROM ingest.api_key WHERE id = %s", (key_id,))
 
 
 def test_an_unknown_capture_label_is_a_400(conn, client):

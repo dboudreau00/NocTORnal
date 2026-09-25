@@ -57,9 +57,37 @@ false declaration produces a working system and an unlawful deployment.
    US and Canada). They differ.
 4. Who may see a quarantined item and under what authority.
 5. Whether you are authorised to **hold** known-material hash sets at all.
-   In most jurisdictions this requires specific authorisation, which is why
-   no automated screening is built. See C3.
+   In most jurisdictions this requires specific authorisation. Screening is
+   built (2026-09-24) and imports nothing until that authorisation is
+   recorded in `NOCTORNAL_HASH_SET_AUTHORITY` as well as the ingest policy.
+   See C3. A match isolates the sample for good, preserves its bytes under
+   a legal hold, and alerts the Security Officer and the designated
+   person; items 1 to 3 remain yours and counsel's.
 6. How an analyst's exposure is limited, logged and supported.
+7. Static triage (2026-09-24) decrypts and parses every sample after
+   submission, and keeps its fuzzy hashes (imphash, Rich header, ssdeep,
+   TLSH) on the sample's row. Whether the fuzzy hashes of a sample later
+   rejected as prohibited material amount to holding a hash set of such
+   material. The build leaves them on the row, as the SHA-256 already is,
+   and screening keeps a matched sample out of every similarity answer. Triage never runs on a rejected sample and discards
+   its findings when a rejection lands while it runs.
+
+**Residual, static triage:** the analysis child is started without the
+deployment's secrets, but on Linux it can read the environment of other
+processes running as the same user, which hold them, and it shares its
+container's network with the database. A parser exploit in a hostile
+sample could therefore reach this deployment's secrets and its database
+host. The readiness row `sample_static_analysis` reports both facts on the
+host it runs on; a separate container with no secrets and no network is the
+remedy, and is a deployment change.
+
+Outbound lookups (roadmap F15, 2026-09-24) honour this entry too: a hash
+that any sample holds is sent to a lookup provider, whatever subject kind
+carries it (the sample itself, a selector or a typed value), only once
+that sample has been screened with no match against every active list
+(2026-09-25). A matched sample is never named: the lookup is refused with
+the same sentence a restricted value gets. The sandbox reads the same rule
+before it sends a sample to a target whose exposure is not NONE.
 
 ### L2: Stealer logs and third-party personal data at scale
 
@@ -91,6 +119,9 @@ the subjects of the investigation.
    Officer grants, so a reveal is always two different people. That settles
    who presses the button, not whether the value may be held.
 5. Cross-border transfer, if any partner or analyst is in a third country.
+   Outbound lookups refuse personal data toward every provider (by type, by
+   the shape of any span in the value, and social profile URLs) until a
+   transfer authority is recorded; nothing in this build records one yet.
 6. What "minimisation review at closure" must actually produce.
 
 ### L3: Persona operation and computer-misuse exposure
@@ -110,11 +141,20 @@ account into a forum. Whether *you* may is not a software question.
    regardless of intent.
 2. Whether **passive collection** (reading a public forum) and **active
    collection** (posting, messaging, purchasing) are separately authorised.
-   The build distinguishes them (`collection_account.status`, the
-   `ACTIVE_ENGAGEMENT` flag), so the authorisation can be modelled, but the
-   authorisation itself is external.
+   The build refuses every forum and Telegram read that no confirmed
+   collection authority covers (recorded by one person, confirmed by
+   another, scoped PUBLIC_READ or MEMBER_READ), and it has no active scope
+   because nothing in it posts, messages or purchases. Until 2026-09-24
+   this item said the build distinguished the two through an
+   `ACTIVE_ENGAGEMENT` flag; no such flag ever existed, and a reader of an
+   earlier copy of this register or of docs/18 A3 was told of a control
+   that was not there. The authorisation itself is external.
 3. Entrapment and agent-provocateur exposure for any active engagement.
 4. Terms-of-service breach as an independent risk from criminal exposure.
+
+A lookup provider's API account (roadmap F15) is overt and attributable to
+the deployment: it is not a persona, holds no false identity, and its key
+lives in its own vault (`ProviderVault`), not the persona vault.
 
 ### L4: Message content capture
 
@@ -131,6 +171,20 @@ decision 35.
 2. One-party vs two-party consent for the recording of communications.
 3. Whether captured content of **uninvolved third parties** in a group
    channel is retainable, and for how long.
+
+**Telegram (roadmap F5.3, 2026-09-24).** A Telegram chat's provenance
+follows how it is read: OPEN_GROUP when the persona reads it without
+joining, PERSONA_PARTY when it reads as a member. A member chat needs the
+member scope of a collection authority, whose own member-access reference
+is required, which is stricter than `comms._NEEDS_AUTHORITY`, where a
+PERSONA_PARTY conversation needs none. A group chat's messages carry
+thousands of uninvolved people's words and typed account ids: they are
+collected documents under the CHAT_EXPORT retention rule, outside case
+minimisation, and no route or script sweeps collected documents yet
+(docs/17). Adding a chat by its id reads up to 500 entries of the persona's
+own conversation list to find it; everything but the matched chat is
+dropped in memory and never logged or stored. Media is never downloaded
+(L1).
 
 ---
 
@@ -180,6 +234,13 @@ declaration it cannot verify.
 **No credential submission is automated.** There is a column to record
 that a human did it under authority, and no code that does it.
 
+**Key lookups (F10c, 2026-09-24).** A Web Key Directory lookup to a domain
+the people under investigation run is an L5 interaction. The `wkd`
+integration route must list providers only; adding any other domain needs
+the L5 authority first. The build cannot tell a provider's domain from an
+actor's, which is why the route takes named directories only and refuses a
+wildcard.
+
 ---
 
 ## 🟠 DETERMINATION
@@ -189,7 +250,11 @@ that a human did it under authority, and no code that does it.
 Decision 44. docs/05 scopes dual control to "the genuinely irreversible",
 and a merge here is a reversible ledger. The operator may want it on for
 particular cases, or as a standing rule. Per-case switch,
-`PUT /cases/{id}/policy`.
+`PUT /cases/{id}/policy` (Triage, Dual control): one signature turns it on,
+and turning it off takes a second Lead investigator on the case (F9b,
+2026-09-24). Or as a standing rule: Administration, Two-person controls,
+sets merges to need a second signature every time, which an administrator
+proposes and a Security officer countersigns (F9, 2026-09-24).
 
 ### D2: Withheld-material disclosure defaults to PRESENCE
 
@@ -206,6 +271,12 @@ Per-case `retention_until` is mandatory and always has been. Phase 6 adds
 independently, `STEALER_LOG` at 90 days is a placeholder. Somebody has to
 choose the real numbers, and they are jurisdictional.
 
+Vendor keys, their user IDs and key lookups (F10b, F10c, 2026-09-24) are
+kept with the case and are not yet on a retention clock. They are never
+deleted by the application (their tables refuse it), so a legal hold is
+never at odds with them; a future purge must overwrite their content under
+the hold check rather than delete the rows.
+
 ### D4: Purge destroys or preserves
 
 `retention.py` purges on expiry unless `legal_hold` is set. The
@@ -219,6 +290,15 @@ Decision 47. A non-private sandbox submission needs a named authoriser in a
 DB constraint. **Which vendors count as "private"** is an operator
 determination and depends on contracts this build has not seen. Several
 "private" vendor tiers still share hashes with partners.
+
+Since 2026-09-24 a self-hosted CAPEv2 can actually be sent to
+(docs/11). Its exposure is the operator's declaration on the TARGET
+(`NOCTORNAL_SANDBOX_EXPOSURE`, no default), recorded on every request
+and re-checked before a send: a wrong declaration makes a disclosure look
+private. The CAPE network route is a second exposure dimension (a live
+route lets the sample reach its operators), and a live route, like an
+exposed target, needs a second person's sign-off in the product. CAPE
+keeps what it is sent outside this product's labels, holds and retention.
 
 ### D6: Ingest key holders
 
@@ -289,6 +369,82 @@ namespace channel ids and re-key the stored selectors, or (c) carry the
 entity type on the observation so the normaliser can disambiguate. (c) is
 correct and the most work.
 
+### D9: Outbound lookup exposure
+
+Added 2026-09-24 (roadmap F15). **Which lookup providers count as VENDOR or
+PUBLIC is the operator's determination**, recorded per provider with a
+written basis and the name of the administrator who made it. The build
+cannot verify a VENDOR or PUBLIC claim: several vendor tiers share lookups
+with partners, and a community service may publish them. Lowering a
+provider's exposure (PUBLIC to VENDOR, or to NONE) takes a second
+administrator, and the database refuses it otherwise.
+
+NONE (your own instance) is the one level the code checks: its egress
+route must name the private network it answers from, with no public entry
+admitting the same host, and a direct send refuses an answer from outside
+that network. **That proves the first hop only**; where the instance
+forwards queries is not visible to this build.
+
+Nothing is sent until a provider is registered and enabled, its route
+exists, and the host operator has set `NOCTORNAL_OUTBOUND_LOOKUPS=on`. A
+lookup to a VENDOR or PUBLIC provider is also signed off, in the product,
+by a colleague the requester names (docs/00 decision 75); personal data and
+sample hashes are refused outright (L1, L2).
+
+**Determine:** the level of each provider you register, and whether any
+outbound lookup at all needs counsel's sign-off first. If it does, this
+entry moves to BLOCKING and the readiness row `outbound_lookup_providers`
+becomes blocking.
+
+### D10: Egress exit providers
+
+Added 2026-09-24 (S2, the egress proxy). Persona traffic leaves through the
+exit its egress profile names: a residential proxy pool, a VPN, Tor, or
+this host's own address where that is allowed at all. Some residential
+proxy networks route through devices whose owners did not knowingly
+consent, and using one may be unlawful or unethical here. A profile records
+the exit's kind and region only. The build seals each exit for the proxy
+alone, and asks for an audited acknowledgement before a residential or VPN
+exit is used in clear; it cannot tell a network whose device owners
+consented from one whose did not, and it cannot tell whether a Tor exit's
+use is acceptable to your authority.
+
+**Determine,** with counsel: which exit providers may carry persona
+traffic, whether Tor exits may, and on what terms. Relates to L3 (persona
+operation) and L5 (fetching attacker infrastructure).
+
+### D11: Egress ledger retention
+
+Added 2026-09-24 (S2). `collect.egress_connection` records every connection
+the egress proxy made or refused: the route, the destination (for a
+persona route, the site of a source the deployment reads), the resolved
+address, bytes and outcome. It is append-only and hash-chained, and **this
+build never purges it**: no retention rule covers it, and a purge would
+have to keep the chain verifiable.
+
+**Determine:** how long the connection ledger is kept, and whether its
+persona rows, which say what the deployment read and when, follow the
+retention of the sources and cases they concern.
+
+### D12: Case text sent to a model endpoint
+
+Added 2026-09-24 (F6). Similar meaning sends case text (collected
+documents, the titles and descriptions of exhibits, claims) to an
+operator's model server to be embedded. **The default is none:** it is off
+unless `NOCTORNAL_EMBED_MEANING_URL` is set, and similar wording, which runs
+on this host and sends nothing, needs no determination. Any endpoint
+outside this host, which in production is every endpoint, needs a written
+authority in `NOCTORNAL_EMBED_MEANING_AUTHORITY`; it receives nothing above
+its declared ceiling, nothing compartmented, no victim data, nothing from a
+closed case, and no message text unless `NOCTORNAL_EMBED_MEANING_MESSAGE_AUTHORITY`
+names the authority L4 requires. Every batch and query is audited before it
+is sent. What the model server logs and keeps is outside this product's
+labels, holds and retention.
+
+**Determine:** whether any model server may receive case text at all, the
+authority that covers it, its ceiling, whether message text may go (L4),
+and what the server's operator logs and keeps.
+
 ---
 
 ## 🔵 CONFIRM EXTERNALLY
@@ -326,8 +482,9 @@ be deleted before its retention expires *even to satisfy a deletion order*.
 > KES projects are archived and no longer maintained. MinIO does not
 > provide product support, security updates, or security advisories for
 > them, and does not accept or process vulnerability reports concerning
-> them." The Docker Hub images went with it; quay.io still serves the last
-> community builds, which is what this tree now pins.
+> them." The Docker Hub images went with it, and on 2026-09-25 so did
+> quay.io's. This tree pins the last community builds, mirrored byte for byte
+> to this project's GHCR namespace.
 >
 > That is a second question for the same reviewer, and a harder one. The
 > WORM guarantee under every exhibit rests on software that will receive no
@@ -368,13 +525,18 @@ be deleted before its retention expires *even to satisfy a deletion order*.
 
 ### C3: Prohibited-content hash sets
 
-No automated screening is built. The reasoning is that holding known-material
-hash sets requires authorisation this deployment does not have.
+Screening is built (2026-09-24, docs/11) and holds nothing until you say
+so. Holding known-material hash sets requires authorisation; the import is
+refused until it is recorded in `NOCTORNAL_HASH_SET_AUTHORITY` (copied onto
+each list, with the list's own licence reference). A list held in Postgres
+is in every backup and dump, which a licence may forbid; retiring a list
+and purging its entries removes them from the database, not from old
+backups.
 
 **Confirm:** whether you are authorised to hold them, from which provider,
-and under what conditions. If yes, the screening hook exists
-(`samples.triage` records it as a gap with a reason) and is a small piece of
-work.
+and under what conditions, and whether your backups may carry them.
+Screening compares exact hashes only: no match does not mean the material
+is lawful to hold.
 
 ### C4: Tox nospam and the 64-hex public key
 
@@ -484,18 +646,42 @@ lines, so a disputed verification can be re-read rather than re-argued.
    build asserts a narrow thing (this key signed text containing this
    identifier) and refuses to assert control of the identifier by its
    holder, which is an inference on top. A filing should not widen it
-   silently.
+   silently. Since 2026-09-24 (F10a) a signature made by a signing SUBKEY
+   is recorded as a signature by the primary key that subkey is bound
+   under, and both fingerprints are on the row: vendors publish the
+   primary and sign with a subkey. Since the same date (F10b) a binding is
+   confirmed only when a cited contact block lists the signing key's
+   fingerprint as its publisher's own and ties that publisher to the
+   binding; otherwise the check is recorded as UNATTRIBUTED.
 2. **Which gpg build was used, and whether it was current.** The version is
    recorded per verification for exactly this reason. A verification made
    with a build carrying a known signature-validation defect is not
    evidence of anything, and the recorded version is what lets you find
-   those rows later.
-3. **How the vendor's public key was obtained.** The build never fetches
-   keys (`--no-auto-key-locate`, no keyserver) precisely because a key
+   those rows later. Since 2026-09-24 (F10a) a build below the floor is
+   treated as no verifier at all (NO_VERIFIER): 2.4.9 in the 2.4 series,
+   2.5.14 in the 2.5 series, 2.2.51 in the 2.2 series, and no 2.3. The
+   floor carries the fixes for CVE-2022-34903 (a status-line injection
+   that can forge a good signature) and CVE-2025-68973 (a memory error in
+   the armour parser, which every path here feeds with armour an attacker
+   chose). A distribution build that carries the fixes under an older
+   version number counts only when the operator attests it by setting
+   `NOCTORNAL_GPG_PATCHED_AS` to the upstream release it matches; the
+   attestation is written on every verification row and shown in the
+   `pgp_verifier` readiness row. Confirm that the operator's attestation
+   is acceptable evidence of the build, or require a current upstream
+   build.
+3. **How the vendor's public key was obtained.** gpg never fetches keys
+   itself (`--no-auto-key-locate`, no keyserver, no agent) because a key
    fetched mid-verification is a key somebody else chose, and an outbound
-   connection from an evidence check is an operational leak. The
-   provenance of the key is therefore a HUMAN step, and an unrecorded one
-   weakens the whole chain.
+   connection from an evidence check is an operational leak. Since
+   2026-09-24 (F10b) the build records each vendor key it is given: the
+   bytes, where they were obtained, who added them, and who compared the
+   fingerprint with the one the actor published, against which contact
+   block line or which publication. It still does not decide who the actor
+   is: whether the page the fingerprint was compared against is really the
+   actor's remains a judgement, and it is recorded as one person's. A Web
+   Key Directory lookup (F10c, C14) is the one way a key is fetched, off by
+   default and approved by a second person.
 
 The build deliberately has **no `TRUSTED` outcome**: GnuPG's web of trust
 answers "do I trust this key's owner", which is a different question from
@@ -542,16 +728,134 @@ egress gate checks classification, not this flag, so a report built from a
 projection with `include_incidental=true` carries third-party
 relationship inferences under whatever TLP the conversations had.
 
+Extended 2026-09-24 with `apps/api/src/noctornal_api/affiliation.py`: the
+Analysis pane can project forums and wallets to entities, drawing a tie
+between two people because they posted on the same forum or channel,
+controlled the same wallet, or held wallets money moved between. POSTS_ON
+has no incidental flag, so whom an analyst records as a poster decides who
+can be tied, and no collector writes POSTS_ON: every poster is an
+analyst's claim. The option is off by default and chosen per run; derived
+ties are marked derived and inferred, never stored, never drawn on the
+sociogram, and no report reads them (reports build their own projection).
+Conversations are not projected this way; the Comms pane's co-participation
+view above remains their projection, with its defaults.
+
+**Determine** whether a derived tie between third parties may be relied on
+in an analysis that is disclosed, and whether the per-run choice needs a
+recorded justification like the two switches above.
+
+### C14: Third-party YARA rule licensing
+
+Carried from docs/18 C14 (2026-09-24, with F12). Rule sets are stored in
+the deployment's database with the licence their source states. A version
+flagged for review cannot be activated until the activating Security
+Officer, who may not be the person who uploaded or adopted it, writes down
+the clearance they rely on; it is kept on the activation and in the audit
+chain. **The software records a clearance; it cannot give one.** Several
+sources in `yara/sources.json` (signature-base, elastic-protections, the
+community mixes) carry non-permissive or mixed terms. **Confirm** with
+counsel before activating them in a commercial or shared deployment.
+Storing the corpus is not redistribution, but a backup or export handed to
+a partner carries it.
+
+### C15: A key lookup tells the directory's operator which address was looked up
+
+Added 2026-09-24 with the Web Key Directory lookups in
+`apps/api/src/noctornal_api/pgp_keys.py` (F10c).
+
+A lookup sends the hash of the address's local part to the directory for
+its domain. The hash is reversible by an operator who knows its own users,
+so the operator learns which address was looked up, when, and from which
+address the request came. The build keeps lookups off unless
+`NOCTORNAL_WKD_CEILING` is set and an administrator has created the
+integration route `wkd` listing each directory by name; each lookup is
+asked for by one person and approved and sent by another (docs/00 decision 115),
+lapses after 24 hours, carries at most the ceiling's classification and no
+compartment, and is recorded before anything is sent.
+
+**Confirm externally** that the unit may make such requests, from which
+address, and which directories may be listed on the route.
+
+### C16: Lookup provider terms
+
+Added 2026-09-24 (roadmap F15). Each provider's terms decide what this
+build may do with its answers, and none has been read against them.
+
+**Confirm**, for each provider before it is enabled: whether answers may
+be cached and for how long (the per-case cache defaults to seven days);
+whether commercial or investigative use is allowed at your tier (the
+VirusTotal public API excludes commercial use); whether an answer may be
+redistributed in a report that leaves through the egress gate; and what
+filing an answer as a COMPLIANCE-locked exhibit does to the vendor's right
+to ask for its deletion.
+
+### C17: Jira Cloud residency, processing terms and audience
+
+Added 2026-09-25 (roadmap F7). A Jira destination on `*.atlassian.net`
+sends case codes (at SUBJECT and SUMMARY exposure) and one-line summaries
+(at SUMMARY) to Atlassian's infrastructure, in Atlassian's jurisdiction,
+into a project whose audience this build neither controls nor audits.
+Nothing here collects, intercepts or captures, so this is not an L1 to L5
+blocker; it is a disclosure to a processor.
+
+**Confirm**, before a Cloud destination is activated: where Atlassian
+holds the project's data and whether a data processing agreement covers
+it; who can read the target project, today and as its permissions change;
+that the field exposure chosen (STUB carries no case code) matches what
+that audience may see; and that issues outlive this deployment's retention
+and legal holds, since a purge here deletes nothing in Jira and the
+operator closes or deletes them there by hand. A Data Center instance on
+your own network raises the last two only.
+
+### C18: Telegram behaviour the adapter relies on
+
+Added 2026-09-24 (roadmap F5.3 and F5.4). The Telegram adapter is built on
+behaviour Telegram documents loosely or not at all, and changes without
+notice. Each is a place where being wrong is quiet.
+
+**Confirm**, against Telegram's documentation and a test account, before
+Telegram sources are read for a case: that message ids in a basic group
+are per account (the adapter keys basic-group documents by the reading
+account); that fetching a deleted message by id returns nothing (how a
+deletion upstream is seen); that a public megagroup can be read without
+joining; which acts show in a chat's recent actions log (joins, leaves)
+and whether reading does; whether API reads move a persona's last-seen
+time; the published data-centre network list and ports (the client and
+the egress proxy refuse anything outside them, so a new range fails
+closed); the terms for registering an api_id per persona from the
+persona's own account; and whether reading a content-protected
+(noforwards) chat through the API is within Telegram's terms.
+
+### C19: The internal network has no route out
+
+Added 2026-09-24 (S2, the egress proxy). The production deployment's claim
+that the egress proxy is the only way out rests on a Docker network marked
+internal. The readiness row `egress_boundary` checks the process, not the
+host: it passes when the proxy accepted this process's key and refused a
+private destination, and this process has no default route of its own.
+Whether the network truly has no route out depends on the host, its Docker
+version and its firewall, and Docker's embedded resolver forwards names it
+cannot answer to the host's resolvers, so a name can still leave the host
+as a lookup even though no connection can.
+
+**Confirm externally,** once and after every Docker or firewall change,
+with `docker network inspect` and the one-off connect in
+`infra/production/README.md`, Egress, that the application network has no
+route out, and decide whether the names that leave as lookups are
+acceptable.
+
 ## Things this build deliberately does NOT do
 
 Recorded so their absence is not mistaken for an oversight.
 
 | Not built | Why |
 |---|---|
-| Automated prohibited-content screening | C3, needs an authorised hash set |
-| Sandbox detonation | docs/11: integrate, do not build. The authorisation record exists; nothing submits |
+| Perceptual matching of prohibited content | The exact-hash screening is built (C3); a perceptual matcher decodes hostile images and has no wheel for every supported platform |
+| A sandbox of its own | docs/11: integrate, do not build. A self-hosted CAPEv2 can be sent to (D5); nothing else is |
 | Victim notification | L2, an obligation to determine, not a feature to add |
 | Free-text search across victim PII | L2, refused by design; the authorisation path is logged and narrow |
 | Archive expansion in the sample pipeline | Uncapped is a zip bomb; capped is real work and is not done |
 | Deep links with tokens in email | A bearer credential in the least trustworthy channel available |
+| Vendor scans or submissions (VirusTotal, urlscan) | L5: the vendor would fetch attacker infrastructure for you. Lookups are report reads only |
+| Inbound Jira status or comments | An unauthenticated receiver is a write primitive into the platform; Jira is never authoritative |
 | Any legal determination | This file is the inventory of them, not the answer to any |

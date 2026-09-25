@@ -233,6 +233,15 @@ select.select:disabled { color: var(--text-tertiary); cursor: default; }
 .palette .help, .login-card .help { color: var(--text-secondary); }
 .check { display: flex; align-items: center; gap: 6px; font-size: 12px;
          color: var(--text-secondary); cursor: pointer; white-space: nowrap; }
+/* A row of radios with its legend, in the Comms pane's PGP forms
+   (F10a, F10b, 2026-09-24). A fieldset keeps the choice one control for
+   assistive technology; its browser border and padding are not wanted. */
+.pgp-choice { border: 0; margin: 0; padding: 0; min-width: 0;
+              display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.pgp-choice legend { padding: 0; margin-bottom: 4px; }
+/* Without this the radios took the text fields' full width. Scoped to
+   these fieldsets so no other pane's radios change (F10a, 2026-09-24). */
+.pgp-choice input[type="radio"] { width: auto; accent-color: var(--accent-dim); }
 
 .form-error {
   font-size: 12px; color: var(--danger);
@@ -1129,6 +1138,41 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .search-help { margin-top: 8px; max-width: 72ch; }
 .search-scope { margin-top: 12px; font-size: 12px; color: var(--text-secondary);
                 overflow-wrap: anywhere; }
+/* Similarity (F6.3 and F6.4, 2026-09-24). The Match modes
+   beside the query; a band or a position on a hit where a number would be
+   over-trusted; what the two texts share; how much was compared; and the
+   Similar panel an item opens under itself. */
+.search-mode { display: flex; flex-wrap: wrap; align-items: center;
+               gap: var(--s-1) var(--s-3); border: 0; margin: 0;
+               padding: 0 var(--s-2); }
+.search-mode legend { float: left; margin-right: var(--s-2); padding: 0; }
+.search-mode-opt { display: inline-flex; align-items: center; gap: var(--s-1);
+                   font-size: 12px; color: var(--text-secondary);
+                   white-space: nowrap; }
+.band-chip { background: var(--accent-wash); border-color: var(--accent-edge); }
+.shared-terms { font-size: 11px; color: var(--text-secondary);
+                overflow-wrap: anywhere; }
+.coverage-line { font-size: 11px; color: var(--text-tertiary); margin: 4px 0 0; }
+.similar-note { font-size: 11px; margin: 4px 0 0; }
+.similar-control { display: flex; flex-direction: column; gap: var(--s-1);
+                   align-items: flex-start; }
+.similar-panel { border-left: 2px solid var(--hairline-strong);
+                 padding: var(--s-2) 0 var(--s-2) var(--s-3); width: 100%;
+                 display: flex; flex-direction: column; gap: 4px; }
+.similar-panel .h-sm { margin: 0; }
+/* The panel opens in the narrow inspector too: a hit stacks its chips
+   under its text there rather than beside it. */
+.similar-panel .hit { flex-direction: column; }
+.similar-panel .hit-chips { justify-content: flex-start; max-width: none; }
+.similar-switch { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3);
+                  font-size: 12px; }
+/* The Embeddings subpane of Administration: one card per role. */
+.emb-cards { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-3); }
+.emb-space { border-top: 1px solid var(--hairline); padding-top: var(--s-2); }
+.emb-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.emb-gap { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3);
+           font-size: 12px; border-top: 1px solid var(--hairline-soft);
+           padding: var(--s-1) 0; }
 
 /* ── assertion fieldset ────────────────────────────────────────────── */
 .assertion {
@@ -1449,6 +1493,20 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 #an-hist-head:focus { outline: none; }
 #an-hist-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #pane-analytics .chip.small { font-size: 10px; margin-left: 6px; }
+/* Venues projected to entities (F2, 2026-09-24): folded under its summary,
+   and given the whole row when open so the help reads as a paragraph. */
+.an-onemode { margin: 0; }
+.an-onemode[open] { flex: 1 1 100%; }
+.an-onemode > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+.an-onemode-body { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.an-onemode-body .help { flex: 1 1 100%; margin: 0; }
+/* The Roles card's density image (F1, 2026-09-24): a block at or above the
+   relation's density is shaded by its valence AND marked in words, so the
+   image never rests on colour alone (docs/06). */
+.an-image td.on-positive { background: var(--positive-soft); }
+.an-image td.on-negative { background: var(--danger-soft); }
+.an-image td.on-neutral { background: var(--wash-2); }
+.an-image-mark { font-size: 10px; color: var(--text-secondary); }
 
 /* ── the responsive story ───────────────────────────────────────────
    Written against the two axes that actually fail, which are not the two
@@ -1476,6 +1534,7 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
   :root { --insp-w: 300px; }
   .cases-view { grid-template-columns: minmax(0, 1fr); }
   .search-cols { grid-template-columns: 1fr; }
+  .emb-cards { grid-template-columns: 1fr; }
 }
 
 /* Below this the inspector stops being a column and becomes a drawer
@@ -1636,6 +1695,11 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .triage-why { margin: 6px 0 2px; font-size: 12px; line-height: 1.55;
               color: var(--text-secondary); }
 .triage-actions { display: flex; gap: 8px; margin-top: 8px; }
+/* The case's merge switch above the approvals it produces (F9b,
+   2026-09-24): a sentence, one button, and the request form it opens. */
+.apr-policy { margin-bottom: var(--s-3); }
+.apr-policy > p { margin: 0; }
+.apr-policy > * + * { margin-top: var(--s-2); }
 /* What an ATTRIBUTE would attach, as it will be stored, and the capture a
    card came from with a way to read it (ux08-triage:attribute-proposal-
    no-label-no-value and source-document-not-reachable, 2026-09-23). */
@@ -1735,6 +1799,9 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .hint { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; }
 .hint.warn { color: var(--alert); }
 .hint.mono-sm { font-family: var(--mono); font-size: 11px; }
+/* The claim a check will confirm, with its Clear (F10). */
+.pgp-binding { display: flex; align-items: center; gap: 8px;
+               flex-wrap: wrap; color: var(--text-secondary); }
 
 .preview {
   background: var(--surface-2); border: 1px solid var(--hairline);
@@ -1835,6 +1902,22 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 
 .row-card { padding: 10px 12px; margin-bottom: 6px; }
 .row-card.compact { padding: 7px 12px; }
+/* Verify this claim, under a queue card (F10). */
+.unverified-verify { margin-top: 6px; }
+
+/* Administration, Integrations (F8 and F7, 2026-09-24): the
+   channel cards side by side, the Jira kinds and Test steps as lists, and
+   the case record's Jira veto. Tokens only. */
+.int-channels {
+  display: grid; gap: var(--s-3);
+  grid-template-columns: repeat(auto-fit, minmax(16em, 1fr));
+}
+.int-outbox .row-form, .int-jira .row-form { gap: var(--s-2); }
+.jira-kinds { border: 1px solid var(--hairline); border-radius: var(--r-sm);
+              padding: var(--s-2); }
+.jira-steps { margin: var(--s-2) 0; padding-left: var(--s-4); }
+.jira-steps li { margin-bottom: 4px; }
+.case-routing { border-top: 1px solid var(--hairline); padding-top: var(--s-2); }
 /* A folded copy, directly under the record it folds into, so it reads as
    that record's copy rather than as a second item scored the same
    (ux12-feeds:also-sent-by-false-corroboration, 2026-09-23). */
@@ -1855,6 +1938,18 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 #key-issue-box > summary { cursor: pointer; }
 #key-issue-form { margin: 8px 0; }
 #key-issue-form .field.grow { min-width: 16em; }
+/* The Sources forms (2026-09-24), laid out as the Issue
+   form is. A field keeps a readable width and wraps before it squeezes;
+   a source's name and address, a persona's handle and identity, take
+   room; and in the authority form the long fields, the choices and the
+   source list each take a whole line. */
+#src-add-box > summary, #src-persona-box > summary,
+#src-auth-box > summary { cursor: pointer; }
+#src-add-form, #src-persona-form, #src-auth-form { margin: 8px 0; }
+#src-add-form > .field, #src-persona-form > .field,
+#src-auth-form > .field { flex: 1 1 10em; }
+#src-add-form > .field.grow, #src-persona-form > .field.grow { flex: 1 1 16em; }
+#src-auth-form > .field.grow { flex: 1 1 100%; }
 .row-head {
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
 }
@@ -1886,6 +1981,19 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .fact.bad .fact-v { color: var(--danger); }
 .fact.warn .fact-v { color: var(--alert); }
 .fact.muted .fact-v { color: var(--text-tertiary); font-style: italic; }
+/* A vendor key's fingerprint in groups of four, and the live
+   comparison with a published one, group by group (F10b). The
+   comparison is informative: the server decides. */
+.pgpkey-fpr { font-family: var(--mono); font-size: 12px;
+              letter-spacing: 0.02em; overflow-wrap: anywhere; }
+.fpr-compare { display: flex; flex-wrap: wrap; gap: 4px;
+               font-family: var(--mono); font-size: 12px; }
+.fpr-group { padding: 1px 4px; border: 1px solid var(--hairline);
+             border-radius: var(--r-sm); }
+.fpr-group.match { color: var(--sign-positive);
+                   border-color: var(--sign-positive); }
+.fpr-group.miss { color: var(--danger); border-color: var(--danger); }
+.pgpkey-panel { display: flex; flex-direction: column; gap: 6px; }
 /* A reference line under a row: a label and a copyable id, quieter than
    the facts because it is for pasting, not reading. */
 .adm-id, .tomb-ref { display: flex; align-items: center; gap: 6px;
@@ -1911,6 +2019,16 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .adm-danger { padding-top: 8px; border-top: 1px solid var(--hairline); }
 /* The registry section's parts, spaced as one column. */
 .adm-section > * + * { margin-top: var(--s-3); }
+/* Two-person controls (F9, 2026-09-24). Its body is moved between
+   this subpane and the Oversight section, so it spaces itself. */
+#dual-body > h2 { margin-top: var(--s-4); }
+/* An empty list takes no slot in the column, so "No change is waiting"
+   sits under its heading rather than two gaps below it. */
+#dual-body > div:empty { display: none; }
+/* A decision's note field and its buttons on one baseline: stretched, the
+   buttons grew to the labelled field's full height. */
+#dual-body .row-actions { align-items: flex-end; flex-wrap: wrap; }
+#dual-body .row-card + .row-card { margin-top: var(--s-2); }
 .adm-note { margin: 8px 0 0; }
 .adm-comp-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 .adm-comp-list .check { white-space: normal; }
@@ -1933,6 +2051,24 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
             align-content: flex-start; row-gap: 2px; }
 .adm-role-name { color: var(--text-primary); }
 .adm-role-desc { flex-basis: 100%; padding-left: 20px; }
+/* Administration, Egress (S2, 2026-09-24). The proxy's state and its
+   way to Readiness on one line that wraps; a route's destinations one a
+   line with their private-network chip and note; the inline forms of a
+   profile or route card, whose text fields take the room. */
+.egr-status { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; }
+.egr-status-text { margin: 0; flex: 1 1 24em; color: var(--text-secondary); }
+.egr-slot:empty { display: none; }
+.egr-entries { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.egr-entry { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.egr-entry code { font-size: 12px; color: var(--text-primary); overflow-wrap: anywhere; }
+.egr-form { gap: 8px; }
+.egr-form input[type="text"], .egr-form input[type="password"] { flex: 1 1 12em; }
+.egr-kinds { border: 0; margin: 0; padding: 0; min-width: 0; display: flex;
+             gap: 12px; flex-wrap: wrap; }
+.egr-log-controls { align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.egr-when { font-size: 12px; color: var(--text-secondary); }
+.egr-retired > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.egr-retired[open] > summary { margin-bottom: 6px; }
 
 /* The reason a row looks the way it does. A score with no reason is a
    number an analyst learns to ignore. */
@@ -1947,6 +2083,9 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .chip.warn { color: var(--alert); border-color: var(--alert); }
 
 .row-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+/* A key lookup's decline reason sits on the row beside its button
+   (F10c, 2026-09-24); the base input rule's full width pushed it off. */
+.row-actions .pgpkey-lookup-reason { flex: 1 1 220px; width: auto; }
 
 /* A dead-letter fragment. Redacted before it was ever stored, and rendered
    as TEXT — this is the least trustworthy string in the system, and the
@@ -2236,6 +2375,12 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .selector-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
 .selector-row code { font-size: 11px; overflow-wrap: anywhere; }
 .check-list { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+/* 2026-09-24: the Feeds, Sources forms group their radios and
+   the authority's source checklist in a fieldset that must not draw
+   the browser's box inside a row form. */
+.src-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.src-fieldset input[type="radio"] { width: auto; margin: 0;
+  accent-color: var(--accent-dim); }
 .smp-compartments { border: 0; padding: 0; margin: 0; min-width: 0; }
 
 .row-glyph { font-size: 13px; line-height: 1; }
@@ -2267,6 +2412,9 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .source-note-line q { color: var(--text-secondary); overflow-wrap: anywhere; }
 .source-note-line .fact-k { margin-right: 6px; }
 .person { color: var(--text-primary); }
+/* F11-core E. A custody row the product wrote on nobody's request:
+   named as the product, set apart from a person's name. */
+.person.is-automated { color: var(--text-tertiary); font-style: italic; }
 
 /* Entropy as a bar. The number alone means nothing to anybody who does not
    do this daily; the bar puts ~7.9 (packed) and ~4 (text) in immediate
@@ -2316,6 +2464,14 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
   color: var(--danger); border-color: var(--danger);
   background: var(--danger-soft); font-weight: 600;
 }
+/* The provider registry and a case's lookups (F15.2 and
+   F15.3, 2026-09-24) wear the same exposure chips. An open exposure change
+   sits inside its provider's card; a lookup panel under its selector. */
+.prv-card .row-form { gap: var(--s-2); margin-top: var(--s-2); }
+.prv-change { margin-top: var(--s-2); border-left: 2px solid var(--alert); }
+.prv-key { margin-top: var(--s-2); }
+.lookup-panel { margin-top: var(--s-2); }
+.lookup-answer { margin-top: var(--s-2); overflow-wrap: anywhere; }
 
 .banner-legal {
   display: block; border-left: 3px solid var(--alert);
@@ -2496,6 +2652,36 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
   overflow-wrap: anywhere; user-select: all;
 }
 .btn.tiny { padding: 1px 6px; font-size: 10px; }
+/* F11 M and F12 J. Static triage, similar samples and the rule sets.
+   Tokens only; nothing here is set from script. */
+.triage-run { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+              margin: 0 0 6px; font-size: 12px; color: var(--text-secondary); }
+.yara-section { margin-top: 12px; border-top: 1px solid var(--hairline);
+                padding-top: 8px; }
+.yara-rule { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;
+             align-items: baseline; }
+.yara-rule .kv { flex-basis: 100%; }
+.chip.yara-hit { color: var(--alert); border-color: var(--alert); font-weight: 600; }
+.yara-earlier > summary, .similar-panel > summary, .rule-source > summary,
+.compile-report > summary, .ruleset-upload > summary,
+.ruleset-form > summary { cursor: pointer; font-size: 12px;
+                          color: var(--text-secondary); }
+.similar-form { flex-wrap: wrap; gap: 8px; align-items: flex-end;
+                margin: 8px 0; }
+.narrow-num { width: 6em; }
+.similar-results, .smp-hash-search + .rows { margin-top: 6px; }
+.smp-hash-search { flex-wrap: wrap; gap: 8px; align-items: flex-end;
+                   margin: 6px 0 10px; }
+.smp-hash-search .input { flex: 1 1 260px; min-width: 0;
+                          font-family: var(--mono); font-size: 12px; }
+.ruleset-version { margin-top: 8px; }
+.rule-text {
+  max-height: 24em; overflow: auto; margin: 8px 0 0; padding: var(--s-2);
+  background: var(--surface-1); border: 1px solid var(--hairline);
+  border-radius: var(--r-sm); font-family: var(--mono); font-size: 11px;
+  color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.rule-source .btn { margin: 4px 4px 0 0; }
 .btn.tiny.is-ok { color: var(--sign-positive); border-color: var(--sign-positive); }
 .btn.subtle { background: transparent; color: var(--text-tertiary); }
 .btn.subtle:hover { color: var(--text-primary); background: var(--surface-2); }
@@ -2556,6 +2742,15 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 .why.gaps.unscreened { border-left-color: var(--danger); color: var(--danger); }
 .gap-list .gap-unscreened,
 .gap-list .gap-unscreened strong { color: var(--danger); }
+/* F11-core G. Each gap's status in words, and the checks that do not
+   apply, listed apart from those not done. */
+.gap-status {
+  margin-left: 6px; font-size: 11px; color: var(--text-tertiary);
+}
+.gap-status.gap-failed { color: var(--danger); }
+.gap-status.gap-pending { color: var(--alert); }
+.gap-na-head { display: block; margin-top: 8px; }
+.gap-list.gap-na { color: var(--text-tertiary); }
 .selectable { user-select: all; }
 .is-highlighted {
   outline: 1px solid var(--alert); outline-offset: 3px; border-radius: var(--r-sm);

@@ -56,6 +56,10 @@ def _production() -> dict[str, str]:
         "SMTP_HOST": "smtp.example.gov",
         "SMTP_PASSWORD": "Td5mJ1cV",
         "NOCTORNAL_MAX_EVIDENCE_BYTES": "268435456",
+        # The system role's DSN, required on every process but the
+        # sample origin (row-level security, S1 2026-09-25).
+        "NOCTORNAL_WORKER_DATABASE_URL":
+            "postgresql+psycopg://noctornal_worker:Rt8vWq@db:5432/noctornal",
     }
 
 
@@ -339,6 +343,8 @@ _ALL_BROKEN_NAMES = (
     "NOCTORNAL_BASE_URL", "NOCTORNAL_SESSION_STRICT_BINDING",
     "NOCTORNAL_ENABLE_DOCS", "SAMPLE_ACCESS_KEY", "SAMPLE_SECRET_KEY",
     "NOCTORNAL_MAX_EVIDENCE_BYTES",
+    # S1, 2026-09-25.
+    "NOCTORNAL_WORKER_DATABASE_URL",
 )
 
 
@@ -377,6 +383,8 @@ _REFUSED_ON_AN_EMPTY_ENVIRONMENT = (
     "MINIO_SECURE", "SAMPLE_SECURE", "NOCTORNAL_BASE_URL",
     "NOCTORNAL_SESSION_STRICT_BINDING", "SAMPLE_ACCESS_KEY",
     "SAMPLE_SECRET_KEY", "NOCTORNAL_MAX_EVIDENCE_BYTES",
+    # S1, 2026-09-25.
+    "NOCTORNAL_WORKER_DATABASE_URL",
 )
 
 
@@ -385,7 +393,7 @@ def test_bare_production_environment_is_refused_on_every_count():
     -- or never ran them -- would pass every other test in this file by
     returning `[]`, and would be a boot refusal in name only.
 
-    It names the ten rather than asserting a floor, because a floor is
+    It names the eleven rather than asserting a floor, because a floor is
     the weaker half of the same guard: `>= 8` goes on passing after
     somebody deletes a rule, which is the case this test exists for."""
     problems = verify_environment({"NOCTORNAL_ENV": "production"})

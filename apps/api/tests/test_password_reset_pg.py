@@ -439,7 +439,25 @@ def test_the_way_in_tells_an_administrator_what_is_blocking(conn, client):
         ["security_officer_present"] if lone else [])
     body = client.get("/api/v1/admin/access", headers=_auth(analyst_token)).json()
     assert body == {"user_manage": False, "break_glass_review": False,
-                    "blocking_failures": [], "readiness_caveats": []}
+                    "blocking_failures": [], "readiness_caveats": [],
+                    # The two-person policy (F9).
+                    "dual_control_manage": False,
+                    "dual_control_countersign": False,
+                    "dual_control_awaiting": 0,
+                    # F12, the officer's YARA activations.
+                    "sample_yara_activate": False,
+                    # The collection authorities an officer confirms.
+                    "collection_authority_confirm": False,
+                    # S2, the Egress section's way in.
+                    "egress_manage": False,
+                    "egress_log_read": False,
+                    # F6.3, the similarity indexes.
+                    "embedding_manage": False,
+                    # Integrations and Providers.
+                    "integration_manage": False,
+                    # F13, prohibited-content screening.
+                    "sample_screening_review": False,
+                    "sample_screening_manage": False}
 
 
 # --- the shell ---------------------------------------------------------------

@@ -14,7 +14,8 @@ on this for casework. It is short and it is the honest part.
 
 You need:
 
-* A Linux host with Docker Engine and the Compose v2 plugin, and root on it.
+* A Linux host with Docker Engine and the Compose v2 plugin (2.24 or later,
+  for the optional egress env files), and root on it.
 * **Two** DNS names pointing at that host: one for the console, one for
   sample downloads. They must be genuinely separate names. Invariant 10
   puts hostile bytes on an origin that holds no analyst session, and the
@@ -198,7 +199,8 @@ over someone's shoulder.
 ### If `up` fails creating the network
 
 `Pool overlaps with other one on this address space` means another Docker
-network on this host already holds `172.31.243.0/24`. Pick a free /24 and
+network on this host already holds `172.31.243.0/24` (or one of the egress
+networks, `172.31.244.0/24` to `172.31.246.0/24`). Pick a free /24 and
 change it in **two** places in `compose.yml`: the `networks:` block at the
 bottom and the `x-caddy-ip` alias at the top. They must agree. The second
 is the address uvicorn is told to trust for `X-Forwarded-For`.
@@ -249,7 +251,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Eighteen checks, each with the evidence behind it and, when it fails, the
+Forty-three checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -273,7 +275,7 @@ working.
 
 ### What stays red, and what a red check refuses
 
-Four of the eighteen are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the forty-three are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -356,6 +358,114 @@ speaks TLS. That one is configuration rather than a decision, and
 `SMTP_ALLOW_PLAINTEXT` must stay unset. It exists for a development
 Mailpit, and a production deployment carrying it sends case summaries in
 the clear on the day STARTTLS fails.
+
+---
+
+## Egress: the only way out
+
+In this deployment the `noctornal` network is internal. The API, the cron
+loop and the sample origin have no route to the internet. Two services do:
+Caddy, which publishes 80 and 443, and the **egress proxy**, which is how
+everything else leaves. The API and cron reach it at
+`NOCTORNAL_EGRESS_PROXY_URL` (`http://172.31.243.11:3128`). It speaks HTTP
+CONNECT and SOCKS5 on that one address. No port of it is published. It
+decides every connection by route, records each one in
+`collect.egress_connection`, and refuses private address space unless an
+administrator's route names it. There is one proxy and no failover. When it
+is down nothing leaves, which is the safe direction.
+
+There are two kinds of route:
+
+* **persona routes**: an egress profile per persona (a residential pool, a
+  VPN, a Tor sidecar), plus one **passive default** that feeds read through
+  from this host's own address. A persona connection is let out only for a
+  running collection, a live two-person collection authority, or a logout,
+  and only to the site of the source it serves.
+* **integration routes**: `smtp`, `webhook` and the others the build
+  registers, each allowed exactly the host and port entries an
+  administrator added. There is no wildcard.
+
+Both are configured under **Administration, Egress** (or with
+`python scripts/egress_setup.py`, which signs you in with your password and
+a current authenticator code). A fresh install has no route, so nothing
+leaves until you create them.
+
+### Keys and files
+
+The egress keys are **not** in `secrets.env`, which every application
+service and Caddy receive. They are in three files beside it:
+
+| File | Read by | Holds |
+|---|---|---|
+| `egress-proxy.env` | the egress proxy alone | its database URL, the client key, the seal key, the fingerprint key |
+| `egress-client.env` | api and cron | the client key, the fingerprint key, the seal key's public half |
+| `postgres-init.env` | postgres alone | `NOCTORNAL_EGRESS_DB_PASSWORD`, for `db/init/20-egress-role.sh` |
+
+```sh
+python scripts/egress_setup.py keygen     # prints every key, once
+cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
+cp infra/production/egress-client.env.example infra/production/egress-client.env
+cp infra/production/postgres-init.env.example infra/production/postgres-init.env
+python scripts/egress_setup.py preflight  # checks all three before you start
+```
+
+The client key and the fingerprint key must be the same in both env files;
+preflight says so when they are not. **Losing the seal key loses every
+sealed exit**: each must be sealed again. Losing or changing the
+fingerprint key stops every chained exit until each is sealed again, and
+every reseal counts as a widening that voids the collection authorities
+recorded before it. Back all three files up with `secrets.env`.
+
+The three files are optional to compose so that an upgraded tree still
+starts. That needs **Docker Compose 2.24 or later**; an older one refuses
+the whole file. A process that is missing a key then refuses to start and
+names it.
+
+### What a human still has to confirm
+
+The readiness row `egress_boundary` probes the proxy with this process's
+own key and reads this process's routing table. It cannot see the host.
+Confirm once, and after every Docker or firewall change, that an internal
+network really has no route out:
+
+```sh
+docker network inspect noctornal-prod_noctornal --format '{{.Internal}}'   # true
+docker compose -p noctornal-prod -f infra/production/compose.yml exec api \
+  python -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"
+# must FAIL (network unreachable or a timeout); this command connects to
+# 1.1.1.1 and nothing else, and only when you run it.
+```
+
+Docker's embedded resolver answers the containers' DNS queries and forwards
+the ones it cannot answer to the host's resolvers, so a name can still leave
+the host as a lookup even though no connection can. The readiness row says
+so as a standing caveat and sends no query itself.
+
+### Sidecars and local model servers
+
+A Tor or VPN sidecar goes on the `exits` network, and its address in
+`NOCTORNAL_EGRESS_UPSTREAM_ALLOW` (inside `172.31.245.0/24` and nowhere
+else). Only the proxy joins that network, and the proxy hands a sidecar that
+is not Tor a checked address rather than a name, so a site answering with a
+private address cannot reach this host through it. No integration entry
+can name the `exits` network, so no integration can leave through a
+persona's exit. A model server for embeddings goes on the separate `models`
+network (internal, joined by the proxy and the model alone) and is named by
+an `embeddings` route entry with that network, for example
+`model@172.31.246.0/24:8080` where `model` is the service's name. A model on
+the host itself is reached by adding
+`extra_hosts: ["host.docker.internal:host-gateway"]` to `egress-proxy` and
+an entry naming `host.docker.internal` with its network.
+
+### Upgrading an existing deployment
+
+`release/egress-upgrade/README.md` has the order: keys, the three files,
+the role for an existing volume (`python scripts/egress_setup.py role-sql`),
+preflight, `up`, then `python scripts/egress_setup.py adopt`, which proposes
+the passive default and the smtp and webhook routes from your current
+settings and creates them when you confirm. Until adopt has run, feeds and
+deliveries are refused for want of a route, and the readiness row
+`egress_routes_cover_sources` says so.
 
 ---
 

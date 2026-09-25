@@ -1,0 +1,22 @@
+{
+  "note": "Hostile input: a NUL, a lone surrogate, a 100000-character message, a right-to-left override in a display name, a 300-character display name and a peer this build cannot type.",
+  "me": "u:700000001",
+  "chat": {"peer_type": "MEGAGROUP", "peer_id": 1300000007, "access_hash": 5550007,
+           "username": "hostilechat", "title": "Hostile Chat", "is_member": false},
+  "messages": [
+    {"id": 20, "date": "2026-09-23T07:00:00+00:00", "text": "nul \u0000 inside",
+     "from": {"type": "user", "id": 700000020}},
+    {"id": 21, "date": "2026-09-23T07:01:00+00:00", "text": "lone \ud800 surrogate",
+     "from": {"type": "user", "id": 700000021}},
+    {"id": 22, "date": "2026-09-23T07:02:00+00:00", "text_repeat": {"char": "x", "count": 100000},
+     "from": {"type": "user", "id": 700000022}},
+    {"id": 23, "date": "2026-09-23T07:03:00+00:00", "text": "rtl name",
+     "from": {"type": "user", "id": 700000023}, "sender_handle": "evil\u202egnp.exe"},
+    {"id": 24, "date": "2026-09-23T07:04:00+00:00", "text": "long name",
+     "from": {"type": "user", "id": 700000024}, "sender_handle_repeat": {"char": "n", "count": 300}},
+    {"id": 25, "date": "2026-09-23T07:05:00+00:00", "text": "who sent this",
+     "from": {"type": "martian", "id": 5}},
+    {"id": 26, "date": "2026-09-23T07:06:00+00:00", "text": "after the poison",
+     "from": {"type": "user", "id": 700000026}}
+  ]
+}

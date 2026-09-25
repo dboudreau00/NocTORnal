@@ -48,7 +48,11 @@ def conn():
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     convs = f"(SELECT id FROM comms.conversation WHERE case_id IN {csub})"
     with c.transaction():
+        # The ledger refuses DELETE since 0089 (F10b, 2026-09-24): removed
+        # as the owner with its triggers off, inside this transaction.
+        c.execute("ALTER TABLE comms.pgp_verification DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM comms.pgp_verification WHERE case_id IN {csub}")
+        c.execute("ALTER TABLE comms.pgp_verification ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM comms.message WHERE conversation_id IN {convs}")
         c.execute(f"DELETE FROM comms.participant WHERE conversation_id IN {convs}")
         c.execute(f"DELETE FROM comms.conversation WHERE case_id IN {csub}")
@@ -244,12 +248,20 @@ def test_a_verified_signature_confirms_a_binding_over_http(client, analyst):
         json={"platform_key": "TOX",
               "observed": TOX_PUBKEY + "11111111" + "2222"}).json()["id"]
 
+    # Since F10b a binding is confirmed only when a cited contact block
+    # lists the key's fingerprint and the identifier as its publisher's own.
+    block = client.post(
+        f"/api/v1/cases/{case_id}/comms/contact-blocks", headers=_auth(token),
+        json={"raw_text": f"PGP: {VENDOR_FPR}\nTOX: {TOX_PUBKEY}\n",
+              "source_ref": "https://forum/thread/vendor"}).json()["id"]
+
     r = client.post(f"/api/v1/cases/{case_id}/comms/pgp/verify",
                     headers=_auth(token), json={
                         "signed_message": SIGNED_WITH_TOX,
                         "public_key": VENDOR_PUB,
                         "claimed_fingerprint": VENDOR_FPR,
-                        "channel_binding_id": binding})
+                        "channel_binding_id": binding,
+                        "contact_block_id": block})
     assert r.status_code == 201, r.text
     assert r.json()["outcome"] == "VERIFIED"
     assert r.json()["binding_upgraded"] is True

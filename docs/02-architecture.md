@@ -180,7 +180,8 @@ Implementation notes:
 watch fires / run_once called
   → collection_run (which persona, which egress profile, parser version)
   → document row: normalised text + content_sha256, versioned on edit
-    (`supersedes_id`); the `embedding` column exists and nothing fills it yet
+    (`supersedes_id`); queued for the similarity indexes, whose vectors
+    live in `collect.document_embedding` and follow the document's labels
   → dedupe on content_sha256 (an edited post is a version, not a duplicate)
   → extractors → extraction rows (selectors with character offsets)
   → watch matcher → watch_hit → notification (deduped, digested, TLP-gated)

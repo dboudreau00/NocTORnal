@@ -16,7 +16,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Callable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import idna as idna_lib
 
@@ -362,9 +362,176 @@ def asn_norm(v: str) -> str:
     return str(int(d)) if d else d
 
 
+# --- url_norm's fragment rules (L5, 2026-09-24) ----------------------------
+#
+# A MEGA handle: the file or folder id, never the key after it.
+_MEGA_HANDLE = r"[A-Za-z0-9_-]+"
+_MEGA_PATH = re.compile(rf"/(file|folder|embed|chat|collection)/({_MEGA_HANDLE})/?")
+_MEGA_IN_FOLDER = re.compile(rf"[^/]*/(file|folder)/({_MEGA_HANDLE})")
+_MEGA_LEGACY_FILE = re.compile(rf"!({_MEGA_HANDLE})")
+_MEGA_LEGACY_FOLDER = re.compile(
+    rf"F!({_MEGA_HANDLE})(?:!{_MEGA_HANDLE})?(?:([!?])({_MEGA_HANDLE}))?")
+_MEGA_PASSWORD = re.compile(rf"P!({_MEGA_HANDLE})")
+# matrix.to decodes only these escapes, never %25 or %3F, so decoding
+# cannot mint a '%' escape or a '?' and a second pass changes nothing.
+_MATRIX_SAFE = re.compile(r"%(40|3[Aa]|21|24|2[Bb]|23)")
+_MATRIX_CHARS = {"40": "@", "3a": ":", "21": "!", "24": "$", "2b": "+", "23": "#"}
+_MATRIX_VIA = re.compile(r"via=[^&]*(?:&via=[^&]*)*")
+_TWITTER_ROUTE = re.compile(r"!(/[^?#]*)")
+# web.telegram.org's chat shapes: letters, digits and '_' only, so none of
+# them can carry a login token or a start parameter.
+_TG_NAME = r"@[A-Za-z0-9_]{1,64}"
+_TG_CHAT = re.compile(rf"{_TG_NAME}|-?\d{{1,20}}(?:_\d{{1,20}}){{0,2}}")
+_TG_LEGACY_IM = re.compile(rf"/im\?p=(?:{_TG_NAME}|[ucg]\d{{1,20}}(?:_-?\d{{1,20}})?)")
+_TG_ADDR = re.compile(r"\?tgaddr=([^&]+)")
+_TG_RESOLVE = re.compile(
+    r"tg://resolve\?domain=[A-Za-z0-9_]{1,64}(?:&(?:post|thread|comment)=\d{1,20})*")
+
+
+def _mega(path: str, frag: str) -> tuple[str, str]:
+    """A MEGA link in its current form, and never its key.
+
+    The legacy `#!<handle>!<key>` and `#F!<handle>!<key>` forms and the
+    current `/file/<handle>#<key>` name the same file, so they collide; two
+    different files never do, which the fragment-dropping rule broke
+    (every legacy link was `https://mega.nz/`). Handles are read as a
+    PREFIX, so prose punctuation after a link cannot defeat the rule, and
+    a fragment of a shape this does not know is dropped: MEGA's account
+    routes (confirmation, recovery) carry secrets and name no resource."""
+    m = _MEGA_PATH.fullmatch(path)
+    if m:
+        kind, handle = m.groups()
+        kind = "file" if kind == "embed" else kind
+        canon = f"/{kind}/{handle}"
+        if kind == "folder" and frag:
+            sub = _MEGA_IN_FOLDER.match(frag)
+            if sub:
+                return f"{canon}/{sub.group(1)}/{sub.group(2)}", ""
+        return canon, ""
+    if path in ("", "/"):
+        if not frag:
+            return path, ""
+        m = _MEGA_LEGACY_FOLDER.match(frag)
+        if m:
+            base = f"/folder/{m.group(1)}"
+            if m.group(2) == "!":
+                return f"{base}/folder/{m.group(3)}", ""
+            if m.group(2) == "?":
+                return f"{base}/file/{m.group(3)}", ""
+            return base, ""
+        m = _MEGA_LEGACY_FILE.match(frag)
+        if m:
+            return f"/file/{m.group(1)}", ""
+        m = _MEGA_PASSWORD.match(frag)
+        if m:
+            # A password-protected link: the blob IS the encrypted link,
+            # not a key, and is the only thing that names the resource.
+            return "/", f"P!{m.group(1)}"
+        return path, ""
+    return path, ""
+
+
+def _matrix_to(path: str, frag: str) -> tuple[str, str]:
+    """matrix.to names its user or room in the fragment (`#/@alice:x`),
+    with an optional `?via=` routing hint that is not identity."""
+    if not frag.startswith("/") or len(frag) < 2:
+        return path, ""
+    ident, sep, query = frag.partition("?")
+    if sep and not _MATRIX_VIA.fullmatch(query):
+        ident = ident + "?" + query     # a foreign query is kept as written
+    ident = _MATRIX_SAFE.sub(lambda m: _MATRIX_CHARS[m.group(1).lower()], ident)
+    if len(ident) < 2:
+        return path, ""                 # an empty route names nothing
+    return "/", ident
+
+
+def _web_telegram(path: str, frag: str) -> tuple[str, str]:
+    """web.telegram.org names the chat in the fragment, and it also carries
+    secrets there: its login link is `#tgWebAuthToken=<token>&...`, and a
+    `tgaddr` can hold a tg://login token or a bot's start parameter. So the
+    fragment is kept, as written, only in a shape that names a chat and
+    cannot hold a token (L5, 2026-09-24):
+    `@name`, a numeric peer id with at most two numeric suffixes, the old
+    client's `/im?p=<peer>`, and a `?tgaddr=` whose address is a public
+    tg://resolve. Any other fragment is dropped, which at worst misses a
+    distinction and never puts a token into a norm_value."""
+    if _TG_CHAT.fullmatch(frag) or _TG_LEGACY_IM.fullmatch(frag):
+        return path, frag
+    m = _TG_ADDR.fullmatch(frag)
+    if m and _TG_RESOLVE.fullmatch(unquote(m.group(1))):
+        return path, frag
+    return path, ""
+
+
+def _twitter(path: str, frag: str) -> tuple[str, str]:
+    """The legacy hashbang form `twitter.com/#!/name` is `twitter.com/name`
+    written another way. Any other fragment is dropped."""
+    if path in ("", "/"):
+        m = _TWITTER_ROUTE.match(frag)
+        if m and len(m.group(1)) > 1:
+            return m.group(1), ""
+    return path, ""
+
+
+#: Hosts whose fragment can name the resource, after lowercasing, dropping
+#: one trailing '.' and one leading 'www.': host -> (canonical host or None
+#: to keep the host, rule). A registered host's rule always decides the path
+#: and the fragment. Every other host drops its fragment, as url_norm always
+#: did: a single-page app's route can carry a token or a key (a reset link,
+#: a CryptPad pad, a Send link), and a token in a norm_value is a secret in
+#: a selector label on the graph, in search and in reports. A generic
+#: keep-the-route rule does exactly that, so only routes known to be
+#: identities are kept.
+_FRAGMENT_HOSTS: dict[str, tuple[str | None, Callable[[str, str], tuple[str, str]]]] = {
+    "mega.nz": ("mega.nz", _mega),
+    "mega.co.nz": ("mega.nz", _mega),
+    "mega.io": ("mega.nz", _mega),
+    "matrix.to": ("matrix.to", _matrix_to),
+    "web.telegram.org": ("web.telegram.org", _web_telegram),
+    "twitter.com": ("twitter.com", _twitter),
+}
+
+#: Every host under these is MEGA's: its own host is kept, and the MEGA rule
+#: decides the fragment, so no MEGA key survives on any of them.
+_MEGA_DOMAINS = (".mega.nz", ".mega.co.nz", ".mega.io")
+
+
+def _fragment_rule(host: str):
+    key = host[:-1] if host.endswith(".") else host
+    key = key[4:] if key.startswith("www.") else key
+    rule = _FRAGMENT_HOSTS.get(key)
+    if rule is not None:
+        return rule
+    if key.endswith(_MEGA_DOMAINS):
+        return (None, _mega)
+    return None
+
+
 def url_norm(v: str) -> str:
-    """Lowercase scheme+host, strip default port and fragment; path and
-    query stay byte-exact (they are case- and encoding-sensitive)."""
+    """Lowercase scheme+host, strip the default port; path and query stay
+    byte-exact (they are case- and encoding-sensitive). The fragment is
+    dropped unless the host is one whose fragment names the resource
+    (L5, 2026-09-24):
+
+    - MEGA (mega.nz, mega.co.nz, mega.io and their subdomains): the link
+      in its current path form, WITHOUT the decryption key. A legacy
+      `#!<handle>!<key>` link and a current `/file/<handle>#<key>` link to
+      one file collide; two files never do. A key is not identity, and in
+      a norm_value it would be a secret in a selector label.
+    - matrix.to: the user or room, with a `?via=` hint removed and only
+      the escapes that cannot change meaning decoded.
+    - web.telegram.org: the chat (`@name`, a numeric peer id, the old
+      client's `/im?p=` form, a `tgaddr` public resolve), kept as written.
+      Its login token, and any fragment of another shape, is dropped.
+    - twitter.com: the legacy `#!/name` form becomes `/name`.
+
+    Every other fragment (an anchor such as `#post-9`, and any route on an
+    unregistered host) is dropped, as before, so no host outside this list
+    can put a token into a norm_value. The first rule of this module is
+    that two different identifiers never collide; dropping the fragment
+    broke it for every link above, and the registry mends exactly those.
+    norm(norm(x)) == norm(x) holds for every rule, including on hostile
+    input (tested)."""
     s = v.strip()
     try:
         parts = urlsplit(s)
@@ -376,6 +543,12 @@ def url_norm(v: str) -> str:
     host = (parts.hostname or "").lower()
     if not parts.hostname:
         return s
+    path, frag = parts.path, ""
+    rule = _fragment_rule(host)
+    if rule is not None:
+        canon, fn = rule
+        host = canon or (host[:-1] if host.endswith(".") else host)
+        path, frag = fn(parts.path, parts.fragment)
     netloc = host
     try:
         port = parts.port
@@ -386,7 +559,7 @@ def url_norm(v: str) -> str:
     if parts.username:
         cred = parts.username + (f":{parts.password}" if parts.password else "")
         netloc = f"{cred}@{netloc}"
-    return urlunsplit((scheme, netloc, parts.path, parts.query, ""))
+    return urlunsplit((scheme, netloc, path, parts.query, frag))
 
 
 def tox_pubkey(v: str) -> str:

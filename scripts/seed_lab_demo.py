@@ -127,16 +127,22 @@ def main() -> int:
     ap.add_argument("--case", help="case CODE to attach them to (optional)")
     ap.add_argument("--email", default=None,
                     help="submitter; defaults to the first active user")
+    # Off by default (F11, 2026-09-24): a triaged demo sample has SCANNED
+    # custody and a machine finding, which the static-triage migrations
+    # refuse to downgrade past, and the demo estate must round-trip.
+    ap.add_argument("--triage", action="store_true",
+                    help="also run static triage on the seeded samples, "
+                         "from bytes held in memory for this run only")
     args = ap.parse_args()
 
     os.environ.setdefault("NOCTORNAL_PROHIBITED_CONTENT_POLICY",
                           "DEV-POLICY-0 (development seed, not a real policy)")
     os.environ.setdefault("NOCTORNAL_DESIGNATED_PERSON", "dev operator")
 
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.samples import SampleService
 
-    conn = connect()
+    conn = connect_system(SystemPurpose.SCRIPT)
     case_id = None
     if args.case:
         row = conn.execute('SELECT id FROM core."case" WHERE code = %s',
@@ -165,17 +171,26 @@ def main() -> int:
 
         bucket = "noctornal-samples"
 
+        def __init__(self, keep: bool):
+            # Held only for --triage, and only in this process's memory.
+            self.kept: dict[str, bytes] | None = {} if keep else None
+
         def put(self, key, data):
-            pass
+            if self.kept is not None:
+                self.kept[key] = bytes(data)
 
         def get(self, key):
+            if self.kept is not None and key in self.kept:
+                return self.kept[key]
             raise KeyError(key)
 
         def delete(self, key):
             pass
 
-    svc = SampleService(conn, _Store())
+    store = _Store(args.triage)
+    svc = SampleService(conn, store)
     made = 0
+    seeded = []
     for magic, size, alphabet, filename, note, classification, finding in SPEC:
         data = _entropy_bytes(magic, size, alphabet)
         digest = hashlib.sha256(data).digest()
@@ -187,6 +202,7 @@ def main() -> int:
             original_filename=filename, source_note=note,
             classification=classification)
         made += 1
+        seeded.append(sample.id)
         if filename == "keygen.exe":
             # purge_bytes=False: recorded, nothing disposed of. This store
             # writes nothing, so there are no bytes to preserve, and since
@@ -205,6 +221,19 @@ def main() -> int:
                 confidence="MODERATE" if alphabet > 200 else None,
                 narrative=finding, tool="manual", tool_version="0")
     conn.commit()
+    if args.triage:
+        from noctornal_api import lab_triage
+        settings = lab_triage.settings_or_default()
+        ran = 0
+        # Only the samples this run seeded: their bytes are the ones held.
+        while seeded:
+            claimed, _skipped = lab_triage.claim(conn, settings, among=seeded)
+            if claimed is None:
+                break
+            lab_triage.run_claimed(conn, store, claimed, settings)
+            ran += 1
+        print(f"static triage ran on {ran} "
+              f"{'sample' if ran == 1 else 'samples'}")
     print(f"seeded {made} {'sample' if made == 1 else 'samples'}"
           + (f" onto {args.case}" if args.case else " unattached"))
     print("Nothing written here is malware: every payload is a synthetic "

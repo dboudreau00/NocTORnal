@@ -72,6 +72,21 @@ def test_gpg_is_available_to_this_test_run():
         "path in this system and it must not silently go untested.")
 
 
+def test_gpg_meets_the_version_floor_or_is_attested():
+    """The same kind of guard for the version floor (F10a,
+    2026-09-24). Below the floor every check records NO_VERIFIER, so about
+    a hundred PGP tests fail at once; this line says why and what to set.
+    Ubuntu 24.04's gpg (the CI runner and the WSL stack) reports 2.4.4
+    although it carries the fixes, and needs NOCTORNAL_GPG_PATCHED_AS=2.4.9
+    in the environment that runs the suite."""
+    from noctornal_api.pgp import verifier_status
+    usable, why = verifier_status()
+    assert usable, (
+        f"{why} On a distribution build that carries the upstream fixes, "
+        f"set NOCTORNAL_GPG_PATCHED_AS in the test environment "
+        f"(for Ubuntu 24.04's 2.4.4-2ubuntu17.4 or later: 2.4.9).")
+
+
 # ---------------------------------------------------------------------------
 # The happy path
 # ---------------------------------------------------------------------------

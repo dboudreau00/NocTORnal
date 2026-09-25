@@ -61,6 +61,18 @@ Optional, and only for the features that use them:
 | **Node.js** on `PATH` | The test suite's browser-side checks of the console. Without it they skip; the static checks still run. |
 | **Google Chrome** | `scripts/screenshot_ui.py`, a development tool |
 
+**Optional extras.** Two Python extras are installed only when asked
+for: `telegram` (Telethon, for collecting from Telegram) and `yara`
+(yara-x, for YARA scanning of samples). Ask for them with
+`./release/install.sh --with-telegram --with-yara` or
+`.\release\install.ps1 -WithTelegram -WithYara`, and for the image with
+the build argument `--build-arg NOCTORNAL_EXTRAS=telegram,yara`. A switch
+that is given and fails stops the install, where the dev tools above
+fail quietly. Without `telegram` the Telegram collection features refuse
+and say how to install it; without `yara` samples are not YARA-scanned,
+and the readiness register says so. yara-x publishes wheels for macOS 14
+and newer only, so on macOS 13 leave `--with-yara` off.
+
 ---
 
 ## What the installer actually does

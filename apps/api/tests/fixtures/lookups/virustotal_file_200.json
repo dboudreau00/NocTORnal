@@ -1,0 +1,26 @@
+{
+ "data": {
+  "id": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
+  "type": "file",
+  "attributes": {
+   "last_analysis_stats": {
+    "malicious": 60,
+    "suspicious": 0,
+    "undetected": 10,
+    "harmless": 0
+   },
+   "last_analysis_date": 1758700000,
+   "reputation": -5,
+   "tags": [
+    "eicar"
+   ],
+   "meaningful_name": "eicar.com",
+   "type_description": "DOS COM",
+   "size": 68,
+   "first_submission_date": 1148301722,
+   "popular_threat_classification": {
+    "suggested_threat_label": "virus.eicar/test"
+   }
+  }
+ }
+}

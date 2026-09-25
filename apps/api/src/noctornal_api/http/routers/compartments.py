@@ -65,6 +65,7 @@ from noctornal_api.compartment_lifecycle import (
     CompartmentLifecycle,
     NoSuchCompartment,
 )
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     current_user,
@@ -141,8 +142,10 @@ def register_compartment(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        return IamAdminService(conn).register_compartment(
-            key=body.key, label=body.label, actor_id=user.user_id)
+        # An IAM write, so on a system connection (S1, 0109).
+        with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
+            return IamAdminService(sconn).register_compartment(
+                key=body.key, label=body.label, actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
 
@@ -155,8 +158,10 @@ def set_user_compartments(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        held = IamAdminService(conn).set_compartments(
-            user_id, body.compartments, actor_id=user.user_id)
+        # An IAM write, so on a system connection (S1, 0109).
+        with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
+            held = IamAdminService(sconn).set_compartments(
+                user_id, body.compartments, actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "compartments": held}
@@ -192,8 +197,12 @@ def rename_compartment(
     Who holds it and what it locks do not change; see
     `compartment_lifecycle.py`."""
     try:
-        return CompartmentLifecycle(conn).rename(
-            key, body.new_key, label=body.label, actor_id=user.user_id)
+        # A rename must reach EVERY row that carries the key, above the
+        # administrator's own labels too, and writes the registry: a system
+        # purpose (S1, 2026-09-25).
+        with system_connection(SystemPurpose.COMPARTMENTS, reuse=conn) as sconn:
+            return CompartmentLifecycle(sconn).rename(
+                key, body.new_key, label=body.label, actor_id=user.user_id)
     except CompartmentError as exc:
         raise _lifecycle_refusal(exc) from exc
 
@@ -212,6 +221,9 @@ def retire_compartment(
     see: `user.manage` is not a case role, and a case code is not told to
     somebody who cannot open the case (`compartment_lifecycle.py`)."""
     try:
-        return CompartmentLifecycle(conn).retire(key, actor_id=user.user_id)
+        # "nothing carries it" must be true of every row, not of the
+        # rows the administrator may read: a system purpose (S1).
+        with system_connection(SystemPurpose.COMPARTMENTS, reuse=conn) as sconn:
+            return CompartmentLifecycle(sconn).retire(key, actor_id=user.user_id)
     except CompartmentError as exc:
         raise _lifecycle_refusal(exc) from exc

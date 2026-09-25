@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from psycopg.types.json import Json
 from pydantic import BaseModel
 
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     COOKIE_ATTRS,
     CSRF_COOKIE,
@@ -134,6 +135,18 @@ def login(body: LoginBody, request: Request,
     analyst. Targeted guessing against one account is the (decaying)
     account lockout's job.
     """
+    # Sign-in writes the IAM plane (the lockout counter, the TOTP
+    # counter, a recovery code, the new session, the sign-in stamp), which
+    # the request role may only read (0109, S1 2026-09-25). So the whole
+    # sign-in runs on a system connection; in development and the suite that
+    # is this request's own connection.
+    with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
+        return _login(body, request, sconn)
+
+
+def _login(body: LoginBody, request: Request,
+           conn: psycopg.Connection) -> Response:
+    """`login`'s body, on the connection that may write the IAM plane."""
     # A chosen password is judged BEFORE the credentials are, so a rule
     # failure spends no lockout attempt and no authenticator code, and
     # says nothing about the account (it depends on nothing stored).
@@ -486,7 +499,9 @@ def issue_recovery_codes(
         raise Problem(403, "Forbidden",
                       "re-authenticate with your second factor before "
                       "issuing recovery codes")
-    codes = PgUserStore(conn).issue_recovery_codes(user.user_id)
+    # An IAM write, so on a system connection (S1, 0109).
+    with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
+        codes = PgUserStore(sconn).issue_recovery_codes(user.user_id)
     _audit(conn, "RECOVERY_CODES_ISSUED", user.user_id,
            {"count": len(codes)}, request)
     return RecoveryCodesOut(
@@ -542,7 +557,19 @@ def change_own_password(
                                    current=body.current_password)
     if problem:
         raise Problem(422, "Invalid field", problem)
-    result = AuthService(PgUserStore(conn)).authenticate(
+    # The credential check and the change both write the IAM plane
+    # (lockout and TOTP counters, the password, other sessions revoked), so
+    # they run on a system connection (S1, 0109).
+    with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
+        return _change_own_password(body, request, user, conn, sconn, email)
+
+
+def _change_own_password(body: PasswordChangeBody, request: Request,
+                         user: CurrentUser, conn: psycopg.Connection,
+                         sconn: psycopg.Connection, email: str) -> dict:
+    """The rest of `change_own_password`: IAM writes on `sconn`, audits on
+    `conn` as before."""
+    result = AuthService(PgUserStore(sconn)).authenticate(
         email, body.current_password, body.totp_code)
     if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
         _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,
@@ -555,6 +582,6 @@ def change_own_password(
         raise Problem(403, "Forbidden",
                       "the current password or the code is not right. Five "
                       "failures lock the account for 15 minutes.")
-    revoked = change_password(conn, user.user_id, body.new_password,
+    revoked = change_password(sconn, user.user_id, body.new_password,
                               keep_session=user.session_id, via="account")
     return {"changed": True, "other_sessions_signed_out": revoked}

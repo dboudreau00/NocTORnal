@@ -45,6 +45,9 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.types.json import Json
 
+# Imported at module top on purpose (F1, 2026-09-24): an install without
+# numpy fails at boot, not on the first role analysis.
+from noctornal_api import blockmodel
 from noctornal_api.analytics import (
     CONSTRAINT_ORDER,
     AnalyticsError,
@@ -55,12 +58,20 @@ from noctornal_api.analytics import (
     graph_hash,
     key_player,
     materialise,
+    one_mode_block,
+    review_scope_block,
     run_suite,
 )
-from noctornal_api.projections import GraphService, Projection
+from noctornal_api.projections import (
+    REVIEW_SCOPE_ALL,
+    GraphService,
+    Projection,
+    ProjectionTooLarge,
+)
 
 SUITE = "sna_suite"
 KPP_NEG = "kpp_neg"
+CONCOR = "concor"
 
 #: The node-row limit every run projects at. One constant, because the
 #: currency check has to re-project exactly as the run did: a different
@@ -164,6 +175,18 @@ def upgraded_constraint_percentile(node_count: int | None, *, defined: int | Non
         return round(100.0 - stored, 2)
     below = (node_count - defined) + above
     return round(100.0 * (below + 0.5 * equal) / node_count, 2)
+
+
+def _scope_detail(p: Projection) -> dict:
+    """What an analytics audit event adds for the projection options (L3,
+    F2, 2026-09-24): only what is not the default, so every existing audit
+    row keeps its shape and a default run's detail has neither key."""
+    out: dict = {}
+    if p.review_scope != REVIEW_SCOPE_ALL:
+        out["review_scope"] = p.review_scope
+    if p.one_mode.enabled():
+        out["one_mode"] = list(p.one_mode.families)
+    return out
 
 
 # Metrics stored per node in analytics.node_metric. Graph-level results
@@ -279,10 +302,39 @@ class AnalyticsRunService:
                 "node_count": m.n,
                 "edge_count": m.edge_count,
                 "dyad_count": m.dyad_count,
+                # L3 and F2 (2026-09-24): what the view left out and what it
+                # derived, as on the suite; None when not asked for.
+                "review_scope": review_scope_block(p, sub),
+                "one_mode": one_mode_block(sub),
                 "key_player": out,
             }
         return self._run(p, params, KPP_NEG, {"n_remove": n_remove},
                          force=force, compute=compute)
+
+    def concor(self, p: Projection, params: AnalyticsParams, *,
+               depth: int = blockmodel.CONCOR_DEFAULT_DEPTH,
+               force: bool = False) -> RunResult:
+        """CONCOR positions (F1, 2026-09-24). Its own run and cache entry,
+        keyed on the depth, like key player on its size. The refusals that
+        need no matrix are taken before a run is recorded, so a view with
+        fewer than two tied entities leaves no FAILED row and no audit
+        event behind every Run."""
+        return self._run(p, params, CONCOR, {"depth": depth}, force=force,
+                         compute=lambda sub: blockmodel.concor(sub, p, params, depth=depth),
+                         precheck=blockmodel.precheck)
+
+    def latest_concor(self, p: Projection, params: AnalyticsParams, *,
+                      depth: int) -> RunResult | None:
+        """The newest complete role analysis for this projection and depth,
+        checked against the graph as `latest` is. Never upgraded: a stored
+        CONCOR payload is served exactly as it was computed."""
+        row = self._newest(p, params, CONCOR, depth=depth)
+        if row is None:
+            return None
+        run_id, payload, finished_at, digest, _extra = row
+        return RunResult(payload, run_id, cached=True, computed_at=finished_at,
+                         current=self._matches(p, params, {"depth": depth}, digest,
+                                               algorithm=CONCOR))
 
     def latest(self, p: Projection, params: AnalyticsParams) -> RunResult | None:
         """The most recent COMPLETE suite run for this projection, at the
@@ -373,11 +425,88 @@ class AnalyticsRunService:
             raise AnalyticsError(
                 "that run was computed under a different projection; ask "
                 "about it with the parameters it was run with")
-        extra = ({"n_remove": int((run_params or {}).get("n_remove"))}
-                 if algorithm == KPP_NEG else {})
         return {"run_id": str(run_id), "algorithm": algorithm,
                 "computed_at": finished_at.isoformat() if finished_at else None,
-                "current": self._matches(p, params, extra, digest)}
+                "current": self._matches(p, params, self._extra_for(algorithm, run_params),
+                                         digest, algorithm=algorithm)}
+
+    def currency_many(self, p: Projection, params: AnalyticsParams,
+                      run_ids: list[UUID]) -> dict:
+        """Whether each of several stored runs still describes the caller's
+        graph, projecting the graph ONCE (F2, 2026-09-24).
+
+        The pane asked `/runs/{id}/current` once per card after every graph
+        refresh, the suite then the key player: two projections, three with
+        the Roles card, and with venues projected each one also pays the
+        one-mode transform. One call now answers for every card, in the
+        order asked, each run read at the caller's visibility as
+        `currency()` reads one:
+
+        - `{run_id, algorithm, computed_at, current}` for a run of this
+          projection;
+        - `{run_id, current: None, reason: "other_projection"}` for a run
+          computed under another one, which `currency()` refuses;
+        - `{run_id, current: None, reason: "not_found"}` for one the caller
+          cannot see, which `currency()` answers 404.
+
+        The projection is taken lazily, only when some run is comparable,
+        and a view now over the derived-tie limit is `current: false`, as
+        `_matches` says (a stored run exists only for a view within it).
+        """
+        rows = self._c.execute(
+            """SELECT r.id, r.algorithm, r.params, r.graph_hash, r.finished_at, pr.name
+                 FROM analytics.metric_run r
+                 JOIN analytics.projection pr ON pr.id = r.projection_id
+                WHERE r.id = ANY(%s) AND pr.case_id = %s AND r.status = 'COMPLETE'
+                  AND r.visibility_clearance = %s::core.tlp
+                  AND r.visibility_compartments = %s""",
+            (list(run_ids), p.case_id, self._clearance, sorted(self._comp)),
+        ).fetchall()
+        found = {row[0]: row for row in rows}
+        name = self._projection_name(p, params)
+        projected: dict = {}
+
+        def view():
+            if "sub" not in projected:
+                try:
+                    projected["sub"] = self._graph.project(p, limit=PROJECT_LIMIT)
+                except ProjectionTooLarge:
+                    projected["sub"] = None
+            return projected["sub"]
+
+        out = []
+        for run_id in run_ids:
+            row = found.get(run_id)
+            if row is None:
+                out.append({"run_id": str(run_id), "current": None, "reason": "not_found"})
+                continue
+            _, algorithm, run_params, digest, finished_at, run_name = row
+            if run_name != name:
+                out.append({"run_id": str(run_id), "current": None,
+                            "reason": "other_projection"})
+                continue
+            sub = view()
+            current = (sub is not None and digest is not None
+                       and self._cache_key(sub, p, params,
+                                           self._extra_for(algorithm, run_params),
+                                           algorithm) == bytes(digest))
+            out.append({"run_id": str(run_id), "algorithm": algorithm,
+                        "computed_at": finished_at.isoformat() if finished_at else None,
+                        "current": bool(current)})
+        return {"runs": out}
+
+    @staticmethod
+    def _extra_for(algorithm: str, run_params: dict | None) -> dict:
+        """The algorithm parameters a run's cache key was extended by, read
+        back from its stored params: one helper for `currency` and
+        `currency_many`, so a new algorithm cannot be compared without its
+        own (KPP_NEG's size; CONCOR's depth, F1)."""
+        run_params = run_params or {}
+        if algorithm == KPP_NEG:
+            return {"n_remove": int(run_params.get("n_remove"))}
+        if algorithm == CONCOR:
+            return {"depth": int(run_params.get("depth"))}
+        return {}
 
     def history(self, case_id: UUID, node_id: UUID, metric: str,
                 limit: int = 50) -> list[dict]:
@@ -449,10 +578,11 @@ class AnalyticsRunService:
         return out
 
     def _newest(self, p: Projection, params: AnalyticsParams, algorithm: str,
-                *, n_remove: int | None = None):
+                *, n_remove: int | None = None, depth: int | None = None):
         """The newest COMPLETE run of one algorithm for this projection at
         the caller's visibility: (id, result, finished_at, graph_hash,
-        params), or None. The key-player size narrows it when given."""
+        params), or None. The key-player size, or CONCOR's depth (F1),
+        narrows it when given."""
         return self._c.execute(
             """SELECT r.id, r.result, r.finished_at, r.graph_hash, r.params
                  FROM analytics.metric_run r
@@ -462,32 +592,41 @@ class AnalyticsRunService:
                   AND r.visibility_clearance = %s::core.tlp
                   AND r.visibility_compartments = %s
                   AND (%s::int IS NULL OR (r.params ->> 'n_remove')::int = %s)
+                  AND (%s::int IS NULL OR (r.params ->> 'depth')::int = %s)
                 ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
                 LIMIT 1""",
             (p.case_id, self._projection_name(p, params), algorithm,
-             self._clearance, sorted(self._comp), n_remove, n_remove),
+             self._clearance, sorted(self._comp), n_remove, n_remove, depth, depth),
         ).fetchone()
 
     def _matches(self, p: Projection, params: AnalyticsParams, extra: dict,
-                 stored: bytes | None) -> bool:
+                 stored: bytes | None, *, algorithm: str | None = None) -> bool:
         """Does the caller's graph, projected now, hash as a run's did?
 
         The same projection, limit and key derivation `_run` uses, so a
         True here is exactly the condition under which `_lookup` would
-        serve that run again, and a False is exactly a cache miss."""
+        serve that run again, and a False is exactly a cache miss.
+
+        A view now over the one-mode derived-tie limit is False (F2,
+        2026-09-24): a stored run exists only for a view that was within
+        it, so the view has changed, and a stored read answers 200 with
+        `current: false` rather than refusing to show the numbers."""
         if stored is None:
             return False
-        sub = self._graph.project(p, limit=PROJECT_LIMIT)
-        return self._cache_key(sub, p, params, extra) == bytes(stored)
+        try:
+            sub = self._graph.project(p, limit=PROJECT_LIMIT)
+        except ProjectionTooLarge:
+            return False
+        return self._cache_key(sub, p, params, extra, algorithm) == bytes(stored)
 
     # -- internals ---------------------------------------------------------
     def _run(self, p: Projection, params: AnalyticsParams, algorithm: str,
-             extra_params: dict, *, force: bool, compute) -> RunResult:
+             extra_params: dict, *, force: bool, compute, precheck=None) -> RunResult:
         # Project FIRST. This is the clearance-filtered graph, and it is
         # also what the cache key is derived from, so there is no path that
         # serves a cached number without re-deriving the caller's own view.
         sub = self._graph.project(p, limit=PROJECT_LIMIT)
-        digest = self._cache_key(sub, p, params, extra_params)
+        digest = self._cache_key(sub, p, params, extra_params, algorithm)
         projection_id = self._upsert_projection(p, params)
 
         if not force:
@@ -499,8 +638,23 @@ class AnalyticsRunService:
                 # matched `digest` (the hash of the graph just projected
                 # above) against the hash the run was computed under.
                 # `latest` makes the same comparison through `_matches`.
-                return RunResult(upgrade_stored(payload), run_id, cached=True,
-                                 current=True)
+                #
+                # Only a SUITE payload is upgraded (F1, 2026-09-24).
+                # `upgrade_stored` reads any payload with a nodes
+                # list and no constraint_order as an old suite payload, so a
+                # CONCOR hit gained broker_rule, constraint_order and
+                # upgraded on every cache hit while `latest_concor` served
+                # it plain: one run in two shapes, against the byte-identical
+                # guarantee in the module docstring.
+                if algorithm == SUITE:
+                    payload = upgrade_stored(payload)
+                return RunResult(payload, run_id, cached=True, current=True)
+
+        if precheck is not None:
+            # A refusal known without computing (CONCOR's cap and its
+            # two-entity floor) is answered before a run is recorded, as an
+            # unknown preset is: no RUNNING row, no FAILED row, no audit.
+            precheck(sub)
 
         started = time.monotonic()
         run_id = uuid4()
@@ -533,7 +687,7 @@ class AnalyticsRunService:
                  int((time.monotonic() - started) * 1000), run_id),
             )
             self._audit(p.case_id, run_id, algorithm, "ANALYTICS_RUN_FAILED",
-                        {"error_type": type(exc).__name__})
+                        {"error_type": type(exc).__name__, **_scope_detail(p)})
             raise
 
         duration = int((time.monotonic() - started) * 1000)
@@ -574,26 +728,40 @@ class AnalyticsRunService:
                 (f"persist: {type(exc).__name__}: {exc}", duration, run_id),
             )
             self._audit(p.case_id, run_id, algorithm, "ANALYTICS_RUN_FAILED",
-                        {"error_type": type(exc).__name__, "stage": "persist"})
+                        {"error_type": type(exc).__name__, "stage": "persist",
+                         **_scope_detail(p)})
             raise
         self._audit(p.case_id, run_id, algorithm, "ANALYTICS_RUN",
                     {"duration_ms": duration,
                      "node_count": len(sub.nodes),
-                     "is_approximate": bool(payload.get("is_approximate"))})
+                     "is_approximate": bool(payload.get("is_approximate")),
+                     **_scope_detail(p)})
         # Computed from the projection taken at the top of this call, so it
         # describes the graph as it stands now: `current=True` by construction.
         return RunResult(payload, run_id, cached=False, current=True)
 
     def _cache_key(self, sub, p: Projection, params: AnalyticsParams,
-                   extra: dict) -> bytes:
+                   extra: dict, algorithm: str | None = None) -> bytes:
         """The projection digest, extended by any algorithm parameters that
-        change the answer (notably KPP's `n_remove`)."""
+        change the answer (KPP's `n_remove`, CONCOR's `depth`).
+
+        CONCOR's key also folds every tie's ends, type and direction (F1,
+        2026-09-24): `graph_hash` carries no edge type, so
+        swapping an undirected tie for a directed one of the same sign,
+        weight, dates, review and evidence left it unchanged, and CONCOR's
+        relations depend on direction. Only CONCOR's, so the suite and
+        key-player keys are byte-identical to every one stored before."""
         base = graph_hash(sub, p, params)
-        if not extra:
+        if not extra and algorithm != CONCOR:
             return base
         h = hashlib.sha256()
         h.update(base)
         h.update(json.dumps(extra, sort_keys=True).encode())
+        if algorithm == CONCOR:
+            h.update(b"directions\x00")
+            for row in blockmodel.direction_rows(sub):
+                h.update(json.dumps(row).encode())
+                h.update(b"\x00")
         return h.digest()
 
     def _lookup(self, projection_id: UUID, algorithm: str,
@@ -681,9 +849,17 @@ class AnalyticsRunService:
                    ON CONFLICT (metric_run_id, node_id, metric) DO NOTHING""",
                 rows,
             )
+        # A CONCOR row carries its position's block index rather than a
+        # community (F1, 2026-09-24), and goes to the same table keyed by
+        # run: the run's algorithm says which kind a row is, so no new
+        # table or migration is needed.
         communities = [
             (run_id, n["id"], int(n["community"]))
             for n in nodes if n.get("community") is not None
+        ] + [
+            (run_id, n["id"], int(n["block_index"]))
+            for n in nodes
+            if n.get("community") is None and n.get("block_index") is not None
         ]
         if communities:
             self._c.cursor().executemany(

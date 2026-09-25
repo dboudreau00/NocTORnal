@@ -44,6 +44,7 @@ from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
     check_writable_labels,
+    element_labels,
     get_conn,
     require,
     user_ceiling,
@@ -464,13 +465,11 @@ def _element_labels(conn: psycopg.Connection, table: str,
     for everyone, while not being cleared to see it.
     """
     assert table in ("node", "edge")
-    row = conn.execute(
-        f"SELECT case_id, classification, compartments "
-        f"  FROM core.{table} WHERE id = %s", (element_id,)
-    ).fetchone()
-    if row is None:
-        return None
-    return row[0], row[1], frozenset(row[2] or [])
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    return element_labels(conn, table, element_id)
 
 
 def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> IdOut:
@@ -542,18 +541,18 @@ def retract_assertion(
     promise. The superseded half is the final review's U11, 2026-09-23.)
     """
     from fastapi import Response
-    row = conn.execute(
-        "SELECT case_id, node_id, edge_id FROM core.assertion WHERE id = %s",
-        (assertion_id,),
-    ).fetchone()
-    if row is None or row[0] != case_id:
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    subject = element_labels(conn, "assertion", assertion_id)
+    if subject is None or subject[0] != case_id:
         raise Problem(404, "Not found", "no such assertion in this case")
     # CR7: the element's own labels gate the retraction. Retracting the
     # last live assertion dissolves the element from every projection, so
     # this endpoint destroys graph structure — it must not be reachable by
-    # a caller who could not see what they are destroying.
-    subject = _element_labels(conn, "node" if row[1] else "edge",
-                              row[1] or row[2]) if (row[1] or row[2]) else None
+    # a caller who could not see what they are destroying. (The assertion's
+    # facts ARE its subject's labels.)
     if subject is not None:
         authorize_object(conn, user, case_id=case_id,
                          permission_key="assertion.retract", after_case_gate=True,
@@ -657,17 +656,24 @@ def _gate_for_change(
     400 rather than the 409 raised here. That is the right trade.
     """
     assert table in _BEFORE_COLUMNS      # literal, never client input
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    facts = element_labels(conn, table, element_id)
+    if facts is None or facts[0] != case_id:
+        raise Problem(404, "Not found", f"no such {table} in this case")
+    authorize_object(conn, user, case_id=case_id,
+                     permission_key=permission_key, after_case_gate=True,
+                     classification=facts[1], compartments=facts[2])
     row = conn.execute(
         f"SELECT case_id, classification, compartments, deleted_at, "
         f"       {_BEFORE_COLUMNS[table]} "
         f"  FROM core.{table} WHERE id = %s",
         (element_id,),
     ).fetchone()
-    if row is None or row[0] != case_id:
+    if row is None:
         raise Problem(404, "Not found", f"no such {table} in this case")
-    authorize_object(conn, user, case_id=case_id,
-                     permission_key=permission_key, after_case_gate=True,
-                     classification=row[1], compartments=frozenset(row[2] or []))
     if row[3] is not None:
         # 409, not 404: the caller is cleared for this element and it does
         # exist. Saying "already retired" is the useful answer and reveals

@@ -9,14 +9,25 @@ artifact), and builds a validated index under yara/dist/. Files that do not
 compile are routed to a dead-letter list rather than dropped (invariant 12);
 rule-name collisions across sources are reported, not silently merged.
 
-This tool only READS rule text and, if yara-python is installed, COMPILES it
-(parsing, not execution). It never runs a sample. Licences vary per source and
-every 'review' entry in the manifest must be cleared before redistribution.
+This tool only READS rule text and, when yara-x is installed, COMPILES it
+(parsing, not execution) with the product's own two-pass compile
+(`lab_static.yara_compile_step`, F12 2026-09-24), so "compiles" here means
+what it means in the product: a file with any error contributes no rule.
+It never runs a sample. Licences vary per source and every 'review' entry in
+the manifest must be cleared before redistribution.
+
+`import` stores pulled sources in the deployment's database as versions of
+rule sets (created if absent), recorded as imported by this script on this
+host, and NEVER activates one: a lab member must adopt the version in the
+Lab's Rules tab, and then a Security Officer who is neither of them
+activates it, clearing its licence when the source asks for review.
 
 Usage:
   python scripts/yara_db.py fetch [--only NAME ...] [--jobs N]
   python scripts/yara_db.py build
   python scripts/yara_db.py stats
+  python scripts/yara_db.py import --only NAME [NAME ...] \
+      [--classification AMBER] [--compartments KEY,KEY]
 """
 from __future__ import annotations
 
@@ -165,12 +176,33 @@ def _iter_files():
                     yield name, os.path.join(dirpath, fn)
 
 
+def _product() -> None:
+    """Make the product's modules importable from this script."""
+    src = os.path.join(ROOT, "apps", "api", "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+
+
+def _compile_file(path: str, rel: str, text: str) -> tuple[bool, str | None]:
+    """One file through the product's two-pass compile (F12 D): whether it
+    contributes rules, and the first error's code and title when not.
+    Never the error's text, which quotes rule lines."""
+    _product()
+    from noctornal_api.lab_static import yara_compile_step
+    from noctornal_api.yara_rules import canonical_json
+    report, _blob = yara_compile_step(canonical_json([(rel, text)]))
+    entry = (report.get("files") or [{}])[0]
+    if entry.get("status") == "compiled" and report.get("rule_count"):
+        return True, None
+    err = (entry.get("errors") or [{}])[0]
+    return False, f"{err.get('code', '')} {err.get('title', '')}".strip()[:200]
+
+
 def cmd_build(args) -> int:
     try:
-        import yara  # type: ignore
+        import yara_x  # type: ignore  # noqa: F401
         have_yara = True
     except Exception:  # noqa: BLE001
-        yara = None
         have_yara = False
     os.makedirs(DIST, exist_ok=True)
     index, dead, names = [], [], {}
@@ -188,19 +220,18 @@ def cmd_build(args) -> int:
         entry = {"source": source, "file": rel, "bytes": len(text.encode("utf-8")),
                  "rule_count": len(rule_names), "compiles": None, "error": None}
         if have_yara:
-            try:
-                yara.compile(filepath=path)
-                entry["compiles"] = True
-            except Exception as exc:  # noqa: BLE001
-                entry["compiles"] = False
-                entry["error"] = str(exc)[:200]
-                dead.append({"source": source, "file": rel, "stage": "compile", "error": str(exc)[:200]})
+            ok, error = _compile_file(path, rel, text)
+            entry["compiles"] = ok
+            entry["error"] = error
+            if not ok:
+                dead.append({"source": source, "file": rel, "stage": "compile",
+                             "error": error})
         index.append(entry)
         for rn in rule_names:
             names.setdefault(rn, []).append("%s:%s" % (source, rel))
     collisions = {k: v for k, v in names.items() if len(v) > 1}
     total_rules = sum(len(v) for v in names.values())
-    manifest = {"built_at": _now(), "yara_python": have_yara, "files": files,
+    manifest = {"built_at": _now(), "yara_x": have_yara, "files": files,
                 "rules": total_rules, "distinct_rule_names": len(names),
                 "collisions": len(collisions),
                 "compiled_ok": sum(1 for e in index if e["compiles"] is True),
@@ -214,8 +245,8 @@ def cmd_build(args) -> int:
         json.dump(collisions, fh, indent=2)
     print(json.dumps(manifest, indent=2))
     if not have_yara:
-        print("note: yara-python not installed; 'compiles' is null. "
-              "pip install yara-python for compile validation.")
+        print("note: yara-x is not installed; 'compiles' is null. "
+              "Install noctornal-api[yara] for compile validation.")
     return 0
 
 
@@ -240,6 +271,113 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def _source_bundle(name: str):
+    """The pulled .yar/.yara files of one source as a product bundle, under
+    the product's own caps and path checks."""
+    _product()
+    from noctornal_api.yara_rules import (MAX_ENTRY_BYTES, MAX_SOURCE_BYTES,
+                                          BundleError, RuleBundle, _check_path,
+                                          _decode)
+    files = []
+    total = 0
+    for source, path in _iter_files():
+        if source != name:
+            continue
+        base = os.path.join(VENDOR, name)
+        rel = _check_path(os.path.relpath(path, base).replace("\\", "/"))
+        size = os.path.getsize(path)
+        if size > MAX_ENTRY_BYTES:
+            raise BundleError(f"{rel} is larger than a rule file may be")
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_ENTRY_BYTES + 1)
+        total += len(data)
+        if total > MAX_SOURCE_BYTES:
+            raise BundleError(f"{name} is larger than a rule set version may be")
+        files.append(_decode(rel, data))
+    if not any(f.status == "accepted" for f in files):
+        raise BundleError(f"{name} has no pulled rule file; run fetch first")
+    return RuleBundle(files)
+
+
+def cmd_import(args) -> int:
+    """Store pulled sources as rule set versions. Never activates."""
+    _product()
+    import getpass
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from _env import load_env_local
+    load_env_local()
+    from noctornal_api.db import SystemPurpose, connect_system
+    from noctornal_api.yara_rules import (BundleError, RulesetError,
+                                          RulesetService, build_key)
+    lock = {}
+    if os.path.exists(LOCK):
+        with open(LOCK, "r", encoding="utf-8") as fh:
+            lock = {s["name"]: s for s in json.load(fh).get("sources", [])}
+    srcmap = {s["name"]: s for s in load_sources()}
+    try:
+        host_user = getpass.getuser()
+    except Exception:  # noqa: BLE001
+        host_user = None
+    comps = sorted({c.strip() for c in (args.compartments or "").split(",")
+                    if c.strip()})
+    conn = connect_system(SystemPurpose.SCRIPT)
+    failed = 0
+    try:
+        svc = RulesetService(conn)
+        for name in args.only:
+            src = srcmap.get(name)
+            if src is None:
+                print(f"  [FAIL] {name}: not in sources.json")
+                failed += 1
+                continue
+            key = name.lower()
+            # A key is unique only among sets with the same labels (0080),
+            # so the set this import adds to is the one at the labels asked
+            # for; another unit's set with the same key is left alone.
+            row = conn.execute(
+                "SELECT id FROM lab.yara_ruleset WHERE key = %s "
+                "AND classification = %s "
+                "AND lab.yara_label_set(compartments) = %s::text[]",
+                (key, args.classification, comps)).fetchone()
+            try:
+                if row is None:
+                    made = svc.create(key=key, display_name=name,
+                                      description=src.get("category"),
+                                      classification=args.classification,
+                                      compartments=comps, actor_id=None,
+                                      via="yara_db.py", host_user=host_user)
+                    ruleset_id = made["id"]
+                else:
+                    ruleset_id = row[0]
+                pulled = lock.get(name) or {}
+                provenance = {"via": "yara_db.py", "host_user": host_user,
+                              "source_name": name,
+                              "source_url": src.get("homepage") or src.get("repo"),
+                              "source_commit": pulled.get("commit"),
+                              "fetched_at": pulled.get("fetched_at")}
+                out = svc.add_version(
+                    ruleset_id, _source_bundle(name),
+                    licence=src.get("license") or "not stated by the source",
+                    licence_review_required=bool(src.get("review", True)),
+                    provenance=provenance, note=None, uploaded_by=None,
+                    host_user=host_user, key=build_key())
+            except (BundleError, RulesetError) as exc:
+                print(f"  [FAIL] {name}: {exc}")
+                failed += 1
+                continue
+            print(f"  [ok  ] {name}: version {out['version']} stored, "
+                  f"compile {out['compile']}")
+        print("Nothing was activated. A lab member must adopt each imported "
+              "version in the Lab's Rules tab before a Security Officer can "
+              "activate it.")
+    finally:
+        conn.close()
+    return 1 if failed else 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="NocTORnal YARA corpus tool")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -251,6 +389,13 @@ def main() -> int:
     b.set_defaults(func=cmd_build)
     s = sub.add_parser("stats", help="show provenance + counts")
     s.set_defaults(func=cmd_stats)
+    i = sub.add_parser("import", help="store pulled sources as rule set "
+                                      "versions (never activates)")
+    i.add_argument("--only", nargs="+", required=True, help="source names")
+    i.add_argument("--classification", default="AMBER")
+    i.add_argument("--compartments", default="",
+                   help="registered compartment keys, comma separated")
+    i.set_defaults(func=cmd_import)
     args = p.parse_args()
     return args.func(args)
 

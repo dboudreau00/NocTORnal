@@ -186,6 +186,7 @@ function closeClause(t) { return String(t || ''); }
    size control and the key-player card are not what C3 is about. */
 function syncAnalysisSizeOptions() {}
 function loadKeyPlayer(storedOnly) { kppLoads.push(storedOnly); }
+function loadConcor() {}
 """ + consts + "\n" + "".join(_fn(n) for n in (
         "analysisFailureText", "ageText", "currencyText", "storedRunStatus",
         "blankAnalytics", "invalidateAnalytics", "runAnalysis",

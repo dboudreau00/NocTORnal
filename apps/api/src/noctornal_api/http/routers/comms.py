@@ -22,9 +22,10 @@ visible case ids, resolved HERE from `iam.case_assignment`, never from a
 parameter. A caller-supplied case list would be a disclosure oracle: pass
 a guessed id, see whether the count moves.
 
-**Verification is metered.** `comms.verify` exists because this is the
-only route in the system that forks a subprocess, twice, with a timeout
-each.
+**Verification is metered.** `comms.verify` exists because these are the
+only routes in the system that fork gpg: every route that forks it (a
+signature check, a key import) is metered under `comms.verify`, and one
+time budget covers every run a call makes (pgp.py, F10a 2026-09-24).
 
 ## What is deliberately absent
 
@@ -35,13 +36,16 @@ applied through the existing review path with a human `reviewed_by`. A
 """
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime
 from functools import lru_cache
+from typing import Literal
 from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from noctornal_api.comms import CommsService, CommsError, coverage_note, normalise
 from noctornal_api.contact_blocks import ContactBlockError, ContactBlockService
@@ -50,18 +54,30 @@ from noctornal_api.coparticipation import (
     CoParticipationParams,
     CoParticipationService,
 )
+from noctornal_api.db import SystemPurpose
 from noctornal_api.http.deps import (
     CurrentUser,
     check_writable_labels,
     current_user,
+    element_labels,
     get_conn,
     require,
     require_global,
+    system_conn,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
-from noctornal_api.pgp import PgpError, PgpService, verifier_version
+from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
+from noctornal_api.pgp import (
+    MAX_KEY_BYTES,
+    PgpConflict,
+    PgpError,
+    PgpNotFound,
+    PgpService,
+    PgpUnavailable,
+    verifier_version,
+)
+from noctornal_api.pgp_keys import PgpLookupService
 
 
 @lru_cache(maxsize=1)
@@ -75,7 +91,11 @@ def _verifier_version_cached() -> str | None:
     """
     return verifier_version()
 
-router = APIRouter(prefix="/cases/{case_id}/comms", tags=["comms"])
+# `route_class=BodyCappedRoute` makes the `@body_cap` marker on the PGP
+# routes effective (F10a, 2026-09-24); a route without the marker runs as
+# it always did.
+router = APIRouter(prefix="/cases/{case_id}/comms", tags=["comms"],
+                   route_class=BodyCappedRoute)
 #: Not case-scoped: platform reference data and the GLOBAL stoplist.
 global_router = APIRouter(prefix="/comms", tags=["comms"])
 
@@ -483,39 +503,130 @@ def add_case_stoplist_entry(
 # PGP verification
 # ---------------------------------------------------------------------------
 
+def _pgp_problem(exc: Exception) -> Problem:
+    """One mapping for every PGP route (F10-fix, 2026-09-24): an object the
+    caller may not see, in another case or unknown is one 404; a record
+    that refuses is 409; no usable gpg is 503; anything else is 400. A
+    trigger's refusal is its authored first line, as 409."""
+    if isinstance(exc, PgpNotFound):
+        return Problem(404, "Not found", safe_detail(exc))
+    if isinstance(exc, PgpConflict):
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, PgpUnavailable):
+        return Problem(503, "Service unavailable", safe_detail(exc))
+    if isinstance(exc, psycopg.errors.RaiseException):
+        return Problem(409, "Conflict", safe_detail(exc))
+    return Problem(400, "Invalid request", safe_detail(exc))
+
+
+def _b64(value: str, what: str) -> bytes:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise Problem(400, "Invalid request", f"{what} is not base64") from None
+
+
+def _write_ceiling(conn: psycopg.Connection, user: CurrentUser
+                   ) -> tuple[str, frozenset[str]]:
+    """The labels a WRITE is judged under: the caller's own, raised only
+    by a global grant, as check_writable_labels judges them. `user_ceiling`
+    with a case id is for reads; a case-scoped grant used for a write here
+    would count no use on the officer's card
+    (2026-09-24), so a write never reads through one."""
+    clearance, held = user_ceiling(conn, user.user_id)
+    return clearance.name, held
+
+
 class VerifyBody(BaseModel):
-    signed_message: str = Field(min_length=1)
-    public_key: str = Field(min_length=1)
-    claimed_fingerprint: str = Field(min_length=1)
+    """A signature check. With no `form` it is the clearsigned check it
+    always was. DETACHED takes exactly one signature field and exactly one
+    data field (F10a). A registry key (`pgp_key_id`, F10b) or a pasted key
+    (`public_key` with its `claimed_fingerprint`), never both."""
+    form: Literal["CLEARSIGNED", "DETACHED"] = "CLEARSIGNED"
+    signed_message: str | None = Field(None, min_length=1, max_length=1_000_000)
+    signature: str | None = Field(None, min_length=1, max_length=90_000)
+    signature_base64: str | None = Field(None, min_length=1, max_length=90_000)
+    signed_data: str | None = Field(None, min_length=1, max_length=1_000_000)
+    signed_data_base64: str | None = Field(None, min_length=1,
+                                           max_length=1_333_336)
+    public_key: str | None = Field(None, min_length=1, max_length=MAX_KEY_BYTES)
+    pgp_key_id: UUID | None = None
+    claimed_fingerprint: str | None = Field(None, min_length=1, max_length=200)
+    claimed_fingerprint_source_ref: str | None = Field(None, max_length=2000)
     confirms_value: str | None = None
     channel_binding_id: UUID | None = None
     contact_block_id: UUID | None = None
     note: str | None = None
 
+    @model_validator(mode="after")
+    def _one_shape(self):
+        detached = (self.signature, self.signature_base64, self.signed_data,
+                    self.signed_data_base64)
+        if self.form == "CLEARSIGNED":
+            if not self.signed_message:
+                raise ValueError("a clearsigned check needs signed_message")
+            if any(v is not None for v in detached):
+                raise ValueError("a clearsigned check takes no detached fields")
+        else:
+            if self.signed_message is not None:
+                raise ValueError("a detached check takes no signed_message")
+            if (self.signature is None) == (self.signature_base64 is None):
+                raise ValueError("a detached check takes exactly one of "
+                                 "signature or signature_base64")
+            if (self.signed_data is None) == (self.signed_data_base64 is None):
+                raise ValueError("a detached check takes exactly one of "
+                                 "signed_data or signed_data_base64")
+        if (self.pgp_key_id is None) == (self.public_key is None):
+            raise ValueError("name a registry key (pgp_key_id) or paste one "
+                             "(public_key), exactly one")
+        if self.public_key is not None and not self.claimed_fingerprint:
+            raise ValueError("a pasted key needs the claimed_fingerprint it "
+                             "should be")
+        if (self.pgp_key_id is not None
+                and self.claimed_fingerprint_source_ref is not None):
+            raise ValueError("a registry key carries its own provenance, so "
+                             "claimed_fingerprint_source_ref is not sent with it")
+        return self
+
 
 @router.post("/pgp/verify", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("comms.verify"))])
+@body_cap(4 * 1024 * 1024, what="a signature check")
 def verify(
     case_id: UUID, body: VerifyBody,
     user: CurrentUser = Depends(require("comms.bind")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Verify a clearsigned message and record the outcome.
+    """Verify a clearsigned message or a detached signature and record the
+    outcome.
 
     Every outcome is recorded, including the failures and the one that
     means nobody looked. On VERIFIED -- and only then -- the named binding
-    becomes CONFIRMED.
+    becomes CONFIRMED, and only when a cited contact block ties the key to
+    the binding's holder (F10b). The binding, the block and the key are
+    loaded under the caller's labels before gpg is forked (F10-fix).
     """
+    clearance, held = _write_ceiling(conn, user)
+    signature = data = None
+    if body.form == "DETACHED":
+        signature = (body.signature.encode("utf-8") if body.signature is not None
+                     else _b64(body.signature_base64, "signature_base64"))
+        data = (body.signed_data.encode("utf-8") if body.signed_data is not None
+                else _b64(body.signed_data_base64, "signed_data_base64"))
     try:
         return PgpService(conn).verify_and_record(
-            case_id=case_id, signed_message=body.signed_message,
-            public_key=body.public_key,
+            case_id=case_id, created_by=user.user_id, clearance=clearance,
+            compartments=held, form=body.form,
+            signed_message=body.signed_message, signature=signature,
+            signed_data=data, data_was_pasted=body.signed_data is not None,
+            public_key=body.public_key, pgp_key_id=body.pgp_key_id,
             claimed_fingerprint=body.claimed_fingerprint,
-            created_by=user.user_id, confirms_value=body.confirms_value,
+            claimed_fingerprint_source_ref=body.claimed_fingerprint_source_ref,
+            confirms_value=body.confirms_value,
             channel_binding_id=body.channel_binding_id,
             contact_block_id=body.contact_block_id, note=body.note)
-    except PgpError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
 
 
 @router.get("/pgp", response_model=dict)
@@ -554,6 +665,282 @@ def unverified(
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return {"claims": PgpService(conn).unverified_claims(
         case_id, clearance=clearance.name, compartments=compartments)}
+
+
+# ---------------------------------------------------------------------------
+# The case key registry (F10b, 2026-09-24)
+# ---------------------------------------------------------------------------
+
+class KeyImportBody(BaseModel):
+    """A vendor key, pasted (armour) or as a file (base64), and where it
+    was obtained. Its labels are raised to the floor of what it cites."""
+    source: Literal["PASTE", "FILE"]
+    armor: str | None = Field(None, min_length=1, max_length=MAX_KEY_BYTES)
+    data_base64: str | None = Field(None, min_length=1, max_length=1_333_336)
+    filename: str | None = Field(None, min_length=1, max_length=255)
+    source_ref: str = Field(min_length=3, max_length=2000)
+    classification: str | None = None
+    compartments: list[str] = Field(default_factory=list)
+    channel_binding_id: UUID | None = None
+    contact_block_id: UUID | None = None
+    evidence_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if self.source == "PASTE" and (self.armor is None or self.data_base64
+                                       is not None or self.filename is not None):
+            raise ValueError("a pasted key is sent as armor alone")
+        if self.source == "FILE" and (self.data_base64 is None or self.filename
+                                      is None or self.armor is not None):
+            raise ValueError("a key file is sent as data_base64 with its "
+                             "filename")
+        return self
+
+
+@router.post("/pgp/keys", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("comms.verify"))])
+@body_cap(2 * 1024 * 1024, what="a key import")
+def import_pgp_key(
+    case_id: UUID, body: KeyImportBody,
+    user: CurrentUser = Depends(require("comms.bind")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Add a vendor key to the case. Nothing is confirmed: a person
+    compares each fingerprint with the one the actor published, then
+    confirms it. Metered under comms.verify, the one budget for gpg forks."""
+    raw = (body.armor.encode("utf-8") if body.source == "PASTE"
+           else _b64(body.data_base64, "data_base64"))
+    clearance, held = _write_ceiling(conn, user)
+    svc = PgpLookupService(conn)
+    try:
+        labels = svc.plan_labels(
+            case_id, requested_classification=body.classification,
+            requested_compartments=frozenset(body.compartments),
+            channel_binding_id=body.channel_binding_id,
+            contact_block_id=body.contact_block_id,
+            evidence_id=body.evidence_id, clearance=clearance, held=held)
+        # Nobody files what they could not read back.
+        check_writable_labels(conn, user, classification=labels.classification,
+                              compartments=frozenset(labels.compartments))
+        return svc.import_key(
+            case_id=case_id, source=body.source, raw=raw,
+            filename=body.filename if body.source == "FILE" else None,
+            source_ref=body.source_ref, labels=labels, created_by=user.user_id,
+            channel_binding_id=body.channel_binding_id,
+            contact_block_id=body.contact_block_id, evidence_id=body.evidence_id)
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
+
+
+@router.get("/pgp/keys", response_model=dict)
+def pgp_keys(
+    case_id: UUID,
+    include_retired: bool = Query(False),
+    user: CurrentUser = Depends(require("comms.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    return {"keys": PgpLookupService(conn).keys(
+        case_id, clearance=clearance.name, held=held,
+        include_retired=include_retired)}
+
+
+@router.get("/pgp/keys/{key_id}", response_model=dict)
+def pgp_key(
+    case_id: UUID, key_id: UUID,
+    user: CurrentUser = Depends(require("comms.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    try:
+        return PgpLookupService(conn).key(case_id, key_id,
+                                          clearance=clearance.name, held=held)
+    except PgpError as exc:
+        raise _pgp_problem(exc) from exc
+
+
+class KeyConfirmBody(BaseModel):
+    contact_block_entry_id: UUID | None = None
+    published_fingerprint: str | None = Field(None, min_length=1, max_length=200)
+    source_ref: str | None = Field(None, max_length=2000)
+    statement: str | None = Field(None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _one_basis(self):
+        if (self.contact_block_entry_id is None) == (
+                self.published_fingerprint is None):
+            raise ValueError("confirm against a contact block line, or a "
+                             "fingerprint published elsewhere, exactly one")
+        if self.contact_block_entry_id is not None and self.source_ref:
+            raise ValueError("a contact block line is its own source, so no "
+                             "source_ref is sent with it")
+        if self.published_fingerprint is not None and not (
+                self.source_ref and len(self.source_ref.strip()) >= 3):
+            raise ValueError("a fingerprint published elsewhere needs the "
+                             "source_ref where it was published")
+        return self
+
+
+@router.post("/pgp/keys/{key_id}/confirm", response_model=dict,
+             dependencies=[Depends(rate_limit("capture"))])
+def confirm_pgp_key(
+    case_id: UUID, key_id: UUID, body: KeyConfirmBody,
+    user: CurrentUser = Depends(require("comms.bind")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Record that this key's fingerprint is the one the actor published.
+    A refusal (another fingerprint, a key ID, a subkey, a line above the
+    key) is 409 and audited."""
+    clearance, held = _write_ceiling(conn, user)
+    try:
+        return PgpLookupService(conn).confirm(
+            case_id=case_id, key_id=key_id, confirmed_by=user.user_id,
+            clearance=clearance, held=held,
+            contact_block_entry_id=body.contact_block_entry_id,
+            published_fingerprint=body.published_fingerprint,
+            source_ref=body.source_ref, statement=body.statement)
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
+
+
+class KeyRetireBody(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+@router.post("/pgp/keys/{key_id}/retire", response_model=dict)
+def retire_pgp_key(
+    case_id: UUID, key_id: UUID, body: KeyRetireBody,
+    user: CurrentUser = Depends(require("comms.bind")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Retire a key: it stands behind no new check. Nothing is demoted;
+    the reply names the bindings the caller can see that it confirmed."""
+    clearance, held = _write_ceiling(conn, user)
+    try:
+        return PgpLookupService(conn).retire(
+            case_id=case_id, key_id=key_id, reason=body.reason,
+            retired_by=user.user_id, clearance=clearance, held=held)
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
+
+
+@router.get("/pgp/published-fingerprints", response_model=dict)
+def published_fingerprints(
+    case_id: UUID,
+    user: CurrentUser = Depends(require("comms.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    return {"fingerprints": PgpLookupService(conn).published_fingerprints(
+        case_id, clearance=clearance.name, held=held)}
+
+
+@router.get("/pgp/bindings/{binding_id}/attribution-blocks", response_model=dict)
+def attribution_blocks(
+    case_id: UUID, binding_id: UUID,
+    user: CurrentUser = Depends(require("comms.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    try:
+        return {"blocks": PgpLookupService(conn).attribution_blocks(
+            case_id, binding_id, clearance=clearance.name, held=held)}
+    except PgpError as exc:
+        raise _pgp_problem(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# Web Key Directory lookups (F10c, 2026-09-24): one person asks, another
+# approves and sends, through the integration route wkd only (docs/00
+# decisions 68 and 75)
+# ---------------------------------------------------------------------------
+
+@router.get("/pgp/key-directory", response_model=dict)
+def key_directory(
+    case_id: UUID,
+    user: CurrentUser = Depends(require("comms.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    return PgpLookupService(conn).directory_status(case_id)
+
+
+class KeyLookupBody(BaseModel):
+    address: str = Field(min_length=3, max_length=320)
+    reason: str = Field(min_length=10, max_length=2000)
+    classification: str | None = None
+    channel_binding_id: UUID | None = None
+    contact_block_id: UUID | None = None
+
+
+@router.post("/pgp/key-lookups", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("comms.key.lookup"))])
+def request_key_lookup(
+    case_id: UUID, body: KeyLookupBody,
+    user: CurrentUser = Depends(require("comms.key.lookup")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Ask for a vendor key to be looked up. Nothing is sent until a
+    second person approves."""
+    clearance, held = _write_ceiling(conn, user)
+    try:
+        return PgpLookupService(conn).request_lookup(
+            case_id=case_id, address=body.address, reason=body.reason,
+            classification=body.classification,
+            channel_binding_id=body.channel_binding_id,
+            contact_block_id=body.contact_block_id, requested_by=user.user_id,
+            clearance=clearance, held=held,
+            writable=lambda cls, comps: check_writable_labels(
+                conn, user, classification=cls, compartments=comps))
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
+
+
+@router.get("/pgp/key-lookups", response_model=dict)
+def key_lookups(
+    case_id: UUID,
+    user: CurrentUser = Depends(require("comms.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    return {"lookups": PgpLookupService(conn).lookups(
+        case_id, viewer=user.user_id, clearance=clearance.name, held=held)}
+
+
+@router.post("/pgp/key-lookups/{lookup_id}/approve", response_model=dict,
+             dependencies=[Depends(rate_limit("comms.key.lookup"))])
+def approve_key_lookup(
+    case_id: UUID, lookup_id: UUID,
+    user: CurrentUser = Depends(require("comms.key.lookup.approve")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Approve somebody else's request and send it. 200 whatever came
+    back (found, not found, failed): a disclosure was made and recorded."""
+    clearance, held = _write_ceiling(conn, user)
+    try:
+        return PgpLookupService(conn).approve_and_send(
+            case_id=case_id, lookup_id=lookup_id, approver=user.user_id,
+            clearance=clearance, held=held)
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
+
+
+class KeyLookupDeclineBody(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+@router.post("/pgp/key-lookups/{lookup_id}/decline", response_model=dict)
+def decline_key_lookup(
+    case_id: UUID, lookup_id: UUID, body: KeyLookupDeclineBody,
+    user: CurrentUser = Depends(require("comms.key.lookup.approve")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = _write_ceiling(conn, user)
+    try:
+        return PgpLookupService(conn).decline(
+            case_id=case_id, lookup_id=lookup_id, decided_by=user.user_id,
+            reason=body.reason, clearance=clearance, held=held)
+    except (PgpError, psycopg.errors.RaiseException) as exc:
+        raise _pgp_problem(exc) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +1027,11 @@ def mark_incidental(
     case_id: UUID, conversation_id: UUID, body: IncidentalBody,
     user: CurrentUser = Depends(require("comms.bind")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The flag on a system connection (S1, 2026-09-25): minimisation at
+    # closure finds third parties by it, so it must land whatever the
+    # flagger's own labels are; as the request role the UPDATE touched no
+    # row of a conversation above them and still answered as done.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MINIMISATION)),
 ) -> dict:
     """Flag a participant as not a subject.
 
@@ -648,8 +1040,8 @@ def mark_incidental(
     cheap; discovering afterwards that nobody did is not.
     """
     _own_conversation(conn, case_id, conversation_id)
-    CommsService(conn).mark_incidental(conversation_id, body.handle,
-                                       incidental=body.incidental)
+    CommsService(sconn).mark_incidental(conversation_id, body.handle,
+                                        incidental=body.incidental)
     return {"conversation_id": str(conversation_id), "handle": body.handle,
             "is_incidental": body.incidental}
 
@@ -663,6 +1055,10 @@ def minimise(
     case_id: UUID, conversation_id: UUID, body: MinimiseBody,
     user: CurrentUser = Depends(require("comms.minimise")),
     conn: psycopg.Connection = Depends(get_conn),
+    # Minimisation on a system connection (S1, 2026-09-25): it is a legal
+    # obligation (docs/16 L4), and as the request role it would drop only
+    # the bodies the minimiser may read and report that count as done.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MINIMISATION)),
 ) -> dict:
     """Drop message BODIES, keep the metadata graph.
 
@@ -674,7 +1070,7 @@ def minimise(
     """
     _own_conversation(conn, case_id, conversation_id)
     try:
-        dropped = CommsService(conn).minimise(
+        dropped = CommsService(sconn).minimise(
             conversation_id, actor_id=user.user_id, authority=body.authority)
     except CommsError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
@@ -690,10 +1086,11 @@ def _own_conversation(conn: psycopg.Connection, case_id: UUID,
     without this, a conversation id from a DIFFERENT case would be
     accepted and minimised under an authorisation that never covered it.
     """
-    row = conn.execute(
-        "SELECT case_id FROM comms.conversation WHERE id = %s",
-        (conversation_id,)).fetchone()
-    if row is None or row[0] != case_id:
+    # The conversation's case as a fact (S1, 2026-09-25): one above the
+    # caller's labels is still THIS case's, and the gate above has already
+    # decided the caller may act on the case, as it always did.
+    facts = element_labels(conn, "conversation", conversation_id)
+    if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", "no such conversation in this case")
 
 

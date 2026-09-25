@@ -36,7 +36,8 @@ from fastapi import APIRouter, Depends, Query
 
 from noctornal_api.audit_verify import verify_chain
 from noctornal_api.custody_verify import verify_custody_chain
-from noctornal_api.http.deps import CurrentUser, get_conn, require_global
+from noctornal_api.db import SystemPurpose
+from noctornal_api.http.deps import CurrentUser, get_conn, require_global, system_conn
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/audit", tags=["audit"])
@@ -51,6 +52,9 @@ def verify(
                     "whole chain"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
+    # A verifier that sees part of a chain reports breaks that are not
+    # there; it walks every row on a system connection (S1, 2026-09-25).
+    chain: psycopg.Connection = Depends(system_conn(SystemPurpose.AUDIT_VERIFY)),
 ) -> dict:
     """Recompute the hash chain and report every row that does not verify.
 
@@ -65,7 +69,7 @@ def verify(
     tampering, and counting them as breaks made this answer BROKEN on
     untampered history.
     """
-    report = verify_chain(conn, limit=limit)
+    report = verify_chain(chain, limit=limit)
     return {
         "intact": report.intact,
         "checked": report.checked,
@@ -148,6 +152,9 @@ def verify_custody(
                     "checks still run against the whole ledger"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
+    # A verifier that sees part of a chain reports breaks that are not
+    # there; it walks every row on a system connection (S1, 2026-09-25).
+    chain: psycopg.Connection = Depends(system_conn(SystemPurpose.AUDIT_VERIFY)),
 ) -> dict:
     """Recompute the custody hash chain and report every row that does not
     verify.
@@ -175,7 +182,7 @@ def verify_custody(
     is a feature nobody can run, and the only way to keep that honest is
     for each half to say where the other one is.
     """
-    report = verify_custody_chain(conn, evidence_id=evidence_id)
+    report = verify_custody_chain(chain, evidence_id=evidence_id)
     return {
         "intact": report.intact,
         "checked": report.checked,

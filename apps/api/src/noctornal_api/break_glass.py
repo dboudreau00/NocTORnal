@@ -439,11 +439,15 @@ class BreakGlassService:
         usually means the analyst found another way, and the emergency was
         not one.
         """
-        self._c.execute(
-            """UPDATE iam.break_glass
-                  SET used_at = coalesce(used_at, now()),
-                      action_count = action_count + 1
-                WHERE id = %s""", (grant_id,))
+        # Through a definer function (0111, S1 2026-09-25). The gate
+        # counts a use on the REQUEST connection, and the request role may
+        # no longer UPDATE the IAM plane (0109), so the counter moves only
+        # for the bound actor's own live grant and only upwards; the owner
+        # and the system role count exactly as the UPDATE did.
+        counted = self._c.execute(
+            "SELECT iam.rls_record_break_glass_use(%s)", (grant_id,)).fetchone()[0]
+        if not counted:
+            return
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
@@ -540,13 +544,9 @@ class BreakGlassService:
     # -- internals ---------------------------------------------------------
 
     def _security_officers(self) -> list[UUID]:
-        rows = self._c.execute(
-            """SELECT DISTINCT ur.user_id
-                 FROM iam.user_role ur
-                 JOIN iam.app_user u ON u.id = ur.user_id
-                WHERE ur.role_key = 'SECURITY_OFFICER' AND u.is_active"""
-        ).fetchall()
-        return [r[0] for r in rows]
+        # F13, 2026-09-24. The one reader the screening alert shares.
+        from noctornal_api.iam_admin import active_role_holders
+        return active_role_holders(self._c, "SECURITY_OFFICER")
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
                grant_id: UUID, detail: dict) -> None:

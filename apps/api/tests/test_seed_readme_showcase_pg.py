@@ -198,9 +198,15 @@ def estate():
         assert seeder.main(case["argv"]) == 0
     with connect() as conn:
         twice = _fingerprint(conn)
-    return {**case, "seeder": seeder, "before": before, "after": after,
-            "first": first.getvalue(), "second": second.getvalue(),
-            "once": once, "twice": twice}
+    yield {**case, "seeder": seeder, "before": before, "after": after,
+           "first": first.getvalue(), "second": second.getvalue(),
+           "once": once, "twice": twice}
+    # The case stays (its exhibits are locked), but its Lab samples go: the
+    # Lab is gated by labels, not by case, so a GREEN reader in any other
+    # suite would see them (the YARA retrohunt counts; 2026-09-25).
+    from lab_static_fixtures import remove_case_samples
+    with connect() as conn:
+        remove_case_samples(conn, case["case_id"])
 
 
 def _conn():

@@ -971,6 +971,17 @@ def test_the_hold_proof_keeps_to_the_budget():
     assert len(store.calls) <= 3, store.calls
 
 
+
+@pytest.fixture(autouse=True)
+def _no_screening_list(monkeypatch):
+    """These checks are called with conn=None; since F13 the bucket
+    probe and the policy row also ask whether a screening list is active.
+    None is, here (2026-09-25)."""
+    monkeypatch.setattr(readiness, "_screening_active", lambda _conn: False)
+    monkeypatch.setattr(readiness, "_screening_clause",
+                        lambda _conn: "Screening: no hash list is loaded.")
+
+
 def test_a_destroy_deployment_is_not_probed_and_says_so(fake_store, monkeypatch):
     _, stores = fake_store
     monkeypatch.setenv(readiness.DISPOSITION_ENV, "destroy")

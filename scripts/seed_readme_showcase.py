@@ -1189,9 +1189,9 @@ def main(argv: list[str] | None = None) -> int:
                           "DEV-POLICY-0 (development seed, not a real policy)")
     os.environ.setdefault("NOCTORNAL_DESIGNATED_PERSON", "dev operator")
 
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
 
-    conn = connect()
+    conn = connect_system(SystemPurpose.SCRIPT)
     try:
         return _run(conn, args)
     finally:

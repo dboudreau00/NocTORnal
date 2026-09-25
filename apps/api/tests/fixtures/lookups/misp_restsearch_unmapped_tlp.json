@@ -1,0 +1,21 @@
+{
+ "response": {
+  "Attribute": [
+   {
+    "event_id": "9",
+    "category": "x",
+    "type": "domain",
+    "to_ids": false,
+    "Event": {
+     "info": "i",
+     "date": "2026-09-09"
+    },
+    "Tag": [
+     {
+      "name": "tlp:ex:chr"
+     }
+    ]
+   }
+  ]
+ }
+}

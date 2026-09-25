@@ -52,15 +52,9 @@ _WHY_NOTIFY = (
 #: (module path under noctornal_api, exact literal) -> why it may keep
 #: its hedge.
 _ALLOWED: dict[tuple[str, str], str] = {
-    ("notify_events.py", " relationship" + B + ". Sign in to review it."):
-        _WHY_NOTIFY,
-    ("notify_events.py", " relationship" + B + "."): _WHY_NOTIFY,
-    ("notify_events.py", " relationship" + B + " BETWEEN the two were "
-     "destroyed rather than moved: a tie from an entity to itself means "
-     "nothing, so the merge retired it. Reversing the merge brings it "
-     "back."): _WHY_NOTIFY,
-    ("notify_events.py", " relationship" + B + " were restored to their "
-     "original endpoints.\n\nReason given: "): _WHY_NOTIFY,
+    # F7 (2026-09-24): the four merge-notification entries
+    # are gone: the merge summaries agree their counts now, because they
+    # reach Jira as well as email.
 }
 
 

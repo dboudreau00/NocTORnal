@@ -54,7 +54,7 @@ def _legacy_key(path: str | None) -> bytes | None:
 def main() -> int:
     from psycopg.types.json import Json
 
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.security import envelope
     from noctornal_api.security.sealed import inventory, rewrap_all
 
@@ -77,7 +77,7 @@ def main() -> int:
     print(f"ring: active {active}"
           + (f", retired {', '.join(ids[1:])}" if ids[1:] else ", no retired keys"))
 
-    conn = connect()
+    conn = connect_system(SystemPurpose.SCRIPT)
     groups = inventory(conn)
     if not groups:
         print("no sealed rows in any table; nothing to do")

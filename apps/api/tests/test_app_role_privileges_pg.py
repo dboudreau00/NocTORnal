@@ -136,6 +136,31 @@ def _guarded_after_0060() -> dict[str, tuple[str, ...]]:
     return guarded
 
 
+def _runtime_read_only() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """S1 (2026-09-25): the schemas and tables a later migration made
+    read-only to the runtime role, whatever 0060 or a GUARDED_TABLES entry
+    granted. 0109 is the first: the IAM plane and lab.download_ticket, which
+    row-level security reads to decide who a connection is, so a runtime
+    role that could write them could rebind itself. Read from every
+    migration after 0060 the way GUARDED_TABLES is."""
+    schemas: list[str] = []
+    tables: list[str] = []
+    for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if path.name <= MIGRATION.name:
+            continue
+        spec = importlib.util.spec_from_file_location(f"m{path.stem[:4]}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        schemas.extend(getattr(module, "RUNTIME_READ_ONLY_SCHEMAS", ()))
+        tables.extend(getattr(module, "RUNTIME_READ_ONLY_TABLES", ()))
+    return tuple(schemas), tuple(tables)
+
+
+def _read_only(table: str) -> bool:
+    schemas, tables = _runtime_read_only()
+    return table.split(".", 1)[0] in schemas or table in tables
+
+
 def _scalar(conn, sql, params=None):
     # `None` rather than `()`: psycopg only runs its client-side binder when
     # params is not None, and the binder treats `%` as a placeholder marker.
@@ -287,7 +312,9 @@ def test_the_guarded_records_keep_exactly_what_their_migration_declares(conn):
     for table, keeps in guarded.items():
         got = _table_privileges(conn, table)
         held = {p for p, on in got.items() if on}
-        assert held == set(keeps), (table, got)
+        # A read-only table keeps only the reads its entry declared.
+        expected = set(keeps) & {"SELECT"} if _read_only(table) else set(keeps)
+        assert held == expected, (table, got)
 
 
 def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
@@ -387,6 +414,8 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
         got = _table_privileges(conn, table)
         wanted = ("SELECT", "INSERT") if table in ledgers else guarded.get(
             table, ("SELECT", "INSERT", "UPDATE", "DELETE"))
+        if _read_only(table):  # 0109, the IAM plane
+            wanted = ("SELECT",)
         missing = [p for p in wanted if not got[p]]
         if missing:
             unreachable[table] = missing

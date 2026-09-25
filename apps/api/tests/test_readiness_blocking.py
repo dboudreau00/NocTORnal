@@ -118,8 +118,18 @@ def test_the_production_readme_counts_the_register_as_it_is():
     sixteen"; the register grew to eighteen on 2026-09-23 (sec-dev-secrets-
     in-production, sec-redis-isolation) and a count in prose goes stale
     silently. Spelt the way the README spells it."""
-    words = {16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen",
-             20: "twenty", 21: "twenty-one", 22: "twenty-two"}
+    ones = ["zero", "one", "two", "three", "four", "five", "six",
+            "seven", "eight", "nine", "ten", "eleven", "twelve",
+            "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+            "eighteen", "nineteen"]
+    tens = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty"}
+
+    def spelt(k):
+        if k < 20:
+            return ones[k]
+        t, o = divmod(k, 10)
+        return tens[t] + ("-" + ones[o] if o else "")
+    words = {k: spelt(k) for k in range(1, 60)}
     blockers = {3: "Three", 4: "Four", 5: "Five"}
     total = words[len(readiness.CHECK_NAMES)]
     text = " ".join((_TESTS.parents[2] / "infra" / "production" / "README.md")
@@ -134,7 +144,24 @@ def test_the_register_names_are_unique_and_in_register_order():
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    assert len(readiness.CHECK_NAMES) == 18, readiness.CHECK_NAMES
+    assert len(readiness.CHECK_NAMES) == 43, readiness.CHECK_NAMES
+    # Row-level security (S1)
+    # Telegram collection (F5.3)
+    # Forum collection (F3, F4)
+    # Screening and the sandbox (F13, F14)
+    # Outbound integrations (F8, F7, F15.2)
+    # The similarity indexes (F6.1, F6.2)
+    # Comms readiness rows (roadmap F10a, F10c, 2026-09-24).
+    # egress_routes_cover_sources and egress_exits_open (roadmap S2, 2026-09-24).
+    # collection_sources_configured and collection_authority_current (the collection
+    # foundation, 2026-09-24), not blocking.
+    # sample_static_analysis and yara_rules_active (roadmap F11, F12, 2026-09-24), not blocking.
+    # dual_control_policy_changeable (roadmap F9, 2026-09-24), not blocking.
+    # role_analysis_thread_capped (roadmap F1, 2026-09-24), not blocking.
+    # egress_boundary (roadmap S2, 2026-09-24), not blocking.
+    # compartment_bindings_intact, captured_documents_compartmented,
+    # triage_claims_within_labels and triage_claims_dated (the compartment
+    # catalogue and the Alpha 6 leftovers, 2026-09-24), none blocking.
     # 2026-09-23: `credentials_not_published` (sec-dev-secrets-in-
     # production) and `redis_limiter_isolated` (sec-redis-isolation), both
     # NOT blocking: the first is red on every development machine by
@@ -269,16 +296,24 @@ def test_the_collection_run_route_refuses_while_a_blocker_fails():
         "the collection router no longer reads the readiness register")
 
     route = _run_once_source()
-    assert "blocking_failures(conn)" in route, (
+    # The refusal moved, unchanged in wording, into `refuse_unready(conn)`
+    # (2026-09-24), so the Telegram adapter's attended persona acts import
+    # one sentence rather than copy it. The route calls it;
+    # the function carries every property this test held of the route.
+    assert "refuse_unready(conn)" in route, (
         "POST /sources/{id}/run no longer asks whether the deployment is "
         "ready before polling a real target")
-    assert re.search(r"Problem\(\s*409", route), (
+    start = src.index("def refuse_unready(")
+    refusal = src[start:src.index("\n\n\n", start)]
+    assert "blocking_failures(conn)" in refusal, (
+        "refuse_unready no longer reads the readiness register")
+    assert re.search(r"Problem\(\s*409", refusal), (
         "the refusal is not a 409 raised through http/errors.Problem, as "
         "every other refusal in this router is")
-    assert '", ".join(unsettled)' in route, (
+    assert '", ".join(unsettled)' in refusal, (
         "the refusal does not name the failing checks; an operator "
         "cannot act on 'not ready'")
-    assert "/admin/readiness" in route, (
+    assert "/admin/readiness" in refusal, (
         "the refusal does not say where the evidence and the action for "
         "each failing check can be read")
 
@@ -304,7 +339,8 @@ def test_the_refusal_happens_before_anything_is_read_about_the_source():
     arrive after the route had already begun treating the request as one
     it might serve."""
     route = _run_once_source()
-    assert (route.index("blocking_failures(conn)")
+    # Through refuse_unready (2026-09-24), still first.
+    assert (route.index("refuse_unready(conn)")
             < route.index("user_ceiling(conn")), (
         "the readiness gate now runs after the ceiling lookup")
 

@@ -55,7 +55,10 @@ def conn():
         c.execute("ALTER TABLE lab.sample_access DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_access WHERE sample_id IN {ssub}")
         c.execute("ALTER TABLE lab.sample_access ENABLE TRIGGER USER")
+        # 0103 guards lab.detonation against DELETE.
+        c.execute("ALTER TABLE lab.detonation DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.detonation WHERE sample_id IN {ssub}")
+        c.execute("ALTER TABLE lab.detonation ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_analysis WHERE sample_id IN {ssub}")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
@@ -604,17 +607,20 @@ def test_the_database_refuses_an_unauthorised_exposure(conn, svc):
                VALUES (%s, 'ANY_RUN', 'PUBLIC', %s)""", (s.id, alice))
 
 
-def test_nothing_is_actually_submitted_anywhere(conn, svc):
-    """docs/11: do not build a sandbox, integrate with one. What exists is
-    the authorisation RECORD; there is no submission."""
+def test_a_record_only_request_is_never_sent(conn, svc):
+    """docs/11: do not build a sandbox, integrate with one. A request
+    recorded through this path is RECORD_ONLY (F14): the sandbox worker
+    sends SUBMIT rows alone, and 0103's guard refuses any change to this
+    one, so it can never be sent."""
     alice = _user(conn)
     s = svc.submit(_unique("norun"), submitted_by=alice)
     det_id = svc.request_detonation(s.id, requested_by=alice,
                                     target="PRIVATE_CAPE", exposure_level="NONE")
     row = conn.execute(
-        "SELECT submitted_at, external_ref, report FROM lab.detonation "
+        "SELECT submitted_at, external_ref, report, mode FROM lab.detonation "
         "WHERE id = %s", (det_id,)).fetchone()
     assert row[0] is None and row[1] is None and row[2] is None
+    assert row[3] == "RECORD_ONLY"
 
 
 # --- custody ------------------------------------------------------------

@@ -60,6 +60,13 @@ date should be visibly flagged in the case list, not silently rolling on.
 - Documents supporting an accepted assertion are pinned past source
   retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome
+- Outbound lookups (roadmap F15, 2026-09-24): lookups, their answers and
+  batches follow the case clock and the case's legal hold, as exhibits do.
+  A purge empties the value, the notes and the answer's bytes, and keeps
+  every row, its fingerprint and every attempt, with one tombstone per
+  kind; a lookup still waiting or queued is cancelled first, so an emptied
+  row can never be sent. A provider test, which carries no case material,
+  has no case clock and is never selected
 
 ## Subject rights and minimisation
 

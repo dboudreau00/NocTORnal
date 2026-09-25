@@ -90,6 +90,119 @@ TLP and compartments would have layered on top as an application-side
 filter, because they are ordinal/set comparisons rather than relationships,
 which is how the shipped gate treats them too (legs 3 and 4 above).
 
+## Compartments
+
+A compartment is a registered key in `iam.compartment` (0057), and every
+column that stores keys is bound to the registry by trigger (0059): a row
+cannot carry an unregistered key, and the registry refuses to drop or
+rename a key while any bound column carries it. An administrator renames
+or retires a key under Administration, Compartments
+(`compartment_lifecycle.py`): a rename moves the lock in every bound
+column at once and changes no access decision; a key still carried cannot
+be retired, and the refusal counts what carries it.
+
+### Collected documents carry compartments (2026-09-24)
+
+`collect.document` hangs off a source, not a case, and until 2026-09-24 a
+document was listed, searched and cited by its classification alone, so a
+capture into a compartmented case was refused outright. A document now
+carries `compartments` (0070): a capture copies its case's, and a
+collected document carries what its collection path assigns (none, until a
+source carries compartments). **Every read of a document checks both
+labels and the compartments**: the document's and its source's
+classification within the reader's clearance, and `d.compartments <@` the
+reader's own set. That holds on the collection list, document search and
+the combined search, watch hits and their verbs, document triage, the
+inspector's claim card, and every Triage read (the queue, its counts, the
+source view and the waiting badges read `proposals._READABLE`, which
+checks the document's and the contact block's compartments together). A
+proposal raised from a compartmented document is read only by holders,
+and an accepted element carries the material's compartments beyond its
+case's. A capture into a case carrying a compartment an ingest feed uses
+for third-party personal data stays refused (docs/16 L2, decision 52: a
+captured document is in the free-text index). test_document_reads_check_compartments.py
+holds every reader in the code to the predicate; captures made before
+2026-09-24 were labelled from the cases that cite them (0071), and the
+readiness row `captured_documents_compartmented` counts any that no lock
+fits.
+
+### Binding a compartment column
+
+0059's list of bound columns was a released constant, so no later
+migration could extend the registry's guard; three later features would
+each have restated `iam.compartment_in_use` with their own column added,
+and whichever restatement ran last would have dropped the others'. Since
+0069 **the triggers are the registry**: `iam.compartment_bindings()` reads
+every binding from the catalog, and `iam.compartment_in_use` asks each of
+them and refuses while any cannot be read. The contract, for every
+migration that adds a column storing compartment keys (docs/00
+decision 71, 2026-09-24):
+
+1. A column that stores compartment keys, whatever its name and INCLUDING
+   a copy derived from another bound column (a copy deleted whenever its
+   source changes is still a copy), is bound when, and only when, its
+   table carries a trigger of exactly this form:
+   `CREATE TRIGGER <name> BEFORE INSERT OR UPDATE OF <col> ON <schema>."<table>"
+   FOR EACH ROW WHEN (cardinality(NEW.<col>) > 0) EXECUTE FUNCTION
+   iam.refuse_unregistered_compartment('<col>', 'array')`
+   (a scalar: `WHEN (NEW.<col> IS NOT NULL)` and `'scalar'`). `<name>` is
+   `compartments_registered` for the first bound column on a table and
+   `compartments_registered_<col>` for any further one. The column is
+   `text[] NOT NULL DEFAULT '{}'` or `text`.
+2. The migration that adds the column installs that trigger in the same
+   migration, rendering it from a local copy of 0059's `trigger_sql`
+   (never an import), and declares beside it
+   `ADDED_BOUND_COLUMNS = (("<schema>", "<table>", "<col>", "array"),)`.
+   The names `BOUND_COLUMNS` (after 0059) and `BOUND_COLUMNS_ADDED` are
+   refused.
+   2b. A migration that drops or renames a bound column declares
+   `REMOVED_BOUND_COLUMNS` with the tuple it removes (a rename also adds
+   the new one), and the same change removes the line from
+   `compartment_lifecycle.BOUND_COLUMNS`.
+3. The same change appends the tuple to `compartment_lifecycle.BOUND_COLUMNS`
+   and one entry `NOUNS[("<schema>", "<table>")] = ("<one>", "<many>")`.
+   Both are append-only regions; order inside them is not part of the
+   contract.
+4. No later migration creates, replaces, alters or drops
+   `iam.compartment_in_use`, `iam.compartment_bindings` or
+   `iam.refuse_compartment_removal`, except an `ALTER FUNCTION` to
+   `SECURITY DEFINER` or a new owner. Row-level security keeps them
+   INVOKER: their callers run on system connections, and their triggers
+   fire only on `iam.compartment` writes, which the request role cannot
+   make (docs/00 decisions 139 and 142).
+5. A guard trigger on the table (append-only, immutability, custody) lets
+   through the lifecycle's rename: an UPDATE that changes only the bound
+   column, by `array_replace` for an array or by assignment for a scalar.
+   Otherwise a key the table carries can never be renamed. A rename test on
+   the table proves it.
+6. A trigger that maintains a derived copy fires on UPDATE OF the source's
+   compartments as well as its classification, so a rename of the source
+   re-copies (the lifecycle also rewrites the bound copy; either order
+   converges). A trigger that writes a bound column copies only from
+   another bound column, whose keys are registered, or sorts before the
+   binding: BEFORE triggers fire in name order, so one that sorts after
+   `compartments_registered` writes keys the binding never checked.
+7. Reads of the new rows check `<alias>.<col> <@` the reader's held set
+   next to their classification check. A read of `collect.document` that
+   joins `collect.source` also checks the source's compartments once
+   `collect.source` has any, as it already checks the source's
+   classification; the static scan requires it from the migration that
+   binds `collect.source.compartments` on. Whatever change gives a source
+   compartments owns the copy onto its documents, and follows rules 1 to
+   7 for it.
+8. A migration whose downgrade refuses on data the demo estate or the
+   test suite can hold appends one entry to `ROUND_TRIP_STASH` in
+   test_compartment_binding_pg.py, so the 0058 round trip can clear and
+   restore it.
+
+test_compartment_contract_pg.py enforces rules 1 to 4 and holds the
+migrations, `compartment_lifecycle.BOUND_COLUMNS` and the live bindings to
+one set; the readiness row `compartment_bindings_intact` watches the same
+at runtime, which is how a binding dropped or disabled by hand is noticed.
+A malformed binding anywhere stops every rename and retire, and every
+direct DELETE of a key, until it is repaired: if the guard cannot tell
+whether rows there carry a key, dropping it is exactly the unsafe case.
+
 ## Roles
 
 Seeded in Alembic revisions `0017` (the roles) and `0021` (the matrix), and
@@ -100,14 +213,14 @@ use the key, and a rename moves only the name (migration 0062 renamed
 
 | Key | Shown as | Holds, among others | Deliberately does not hold |
 |---|---|---|---|
-| `CASE_OWNER` | **Lead investigator** | Full control of their cases: `case.grant`, `case.close`, `case.delete`, `evidence.export`, `evidence.purge`, `retention.manage`, `proposal.review`, `break_glass.invoke`, `victim_pii.reveal`, `sample.preserved.retrieve` | `victim_pii.authorise`, `sample.preserved.authorise`, `break_glass.review`: the other half of every two-person control below |
-| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise` | **Any case content**, and every permission it authorises or reviews |
-| `SYS_ADMIN` | System administrator | `user.manage`, `role.manage`, `integration.manage`, `ingest.manage`, `retention.manage`, `retention.purge`, `break_glass.invoke` | Case content by default |
-| `ANALYST` | Analyst | Graph, assertion and evidence work on assigned cases, `analytics.run`, `report.generate`, `sample.read`, `sample.submit` | Grants, export, purge, break-glass, any reveal |
-| `REVIEWER` | Reviewer | `proposal.review`, `graph.merge`, `graph.unmerge`, `case.read` | Originating graph content |
+| `CASE_OWNER` | **Lead investigator** | Full control of their cases: `case.grant`, `case.close`, `case.delete`, `evidence.export`, `evidence.purge`, `retention.manage`, `proposal.review`, `break_glass.invoke`, `victim_pii.reveal`, `sample.preserved.retrieve`, `lookup.request`, `lookup.authorise` (step-up: signs off a colleague's lookup to a vendor or the public), `comms.key.lookup` and `comms.key.lookup.approve` (step-up: ask for, or approve and send, a Web Key Directory lookup) | `victim_pii.authorise`, `sample.preserved.authorise`, `break_glass.review`: the other half of every two-person control below |
+| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise`, `dual_control.countersign`, `egress.log.read`, `collection.authority.confirm`, `sample.yara.activate`, `sample.screening.manage`, `sample.screening.review` (each step-up) | **Any case content**, and every permission it authorises or reviews |
+| `SYS_ADMIN` | System administrator | `user.manage`, `role.manage`, `integration.manage` (SMTP, Jira, webhooks and outbound lookup providers), `ingest.manage`, `retention.manage`, `retention.purge`, `break_glass.invoke`, `dual_control.manage`, `egress.manage`, `egress.log.read`, `embedding.manage` | Case content by default |
+| `ANALYST` | Analyst | Graph, assertion and evidence work on assigned cases, `analytics.run`, `report.generate`, `sample.read`, `sample.submit`, `lookup.request` | Grants, export, purge, break-glass, any reveal, signing off a lookup |
+| `REVIEWER` | Reviewer | `proposal.review`, `graph.merge`, `graph.unmerge`, `case.read`, `comms.key.lookup.approve` | Originating graph content |
 | `CONTRIBUTOR` | Contributor | `evidence.upload`, `case.read` | Accepting a proposal |
-| `COLLECTOR` | Collection manager | `collection.run`, `source.manage`, `watch.manage`, `collection_account.manage` | `case.read` |
-| `MALWARE_ANALYST` | Malware analyst | `sample.read`, `sample.analyse`, `sample.download` | Any case access (docs/11) |
+| `COLLECTOR` | Collection manager | `collection.run`, `source.manage`, `watch.manage`, `collection_account.manage`, `collection.authority.record` (step-up), `comms.key.lookup` | `case.read` |
+| `MALWARE_ANALYST` | Malware analyst | `sample.read`, `sample.analyse`, `sample.download`, `sample.yara.manage` (step-up) | Any case access (docs/11) |
 | `READ_ONLY` | Read only | `case.read`, `evidence.read`, `comms.read` | Any write |
 | `LIAISON` | External liaison | Read of one case, time-boxed and TLP-capped | Export |
 | `SERVICE` | Service account | `evidence.upload` | Anything a person does; not grantable from the admin pane |
@@ -123,7 +236,7 @@ independent overseer.
 
 ### Two-person controls, and the guard that keeps them two
 
-Three acts need two different people, and in each the halves sit in
+Each act below needs two different people, and in each the halves sit in
 different roles:
 
 | Act | One person | The other | Decided |
@@ -131,6 +244,7 @@ different roles:
 | Reveal a masked victim credential | `victim_pii.authorise` (Security officer) | `victim_pii.reveal` (Lead investigator) | docs/17 F16 |
 | Emergency access | `break_glass.invoke` (Lead investigator, System administrator) | `break_glass.review` (Security officer) | docs/17 F14 |
 | Retrieve a preserved rejected sample | `sample.preserved.authorise` (Security officer) | `sample.preserved.retrieve` (Lead investigator) | docs/17 F2 |
+| Change which operations need two people | `dual_control.manage` (System administrator) | `dual_control.countersign` (Security officer who is not also an administrator) | F9, 2026-09-24 |
 
 The case gate reads the permission off the caller's ONE role on the case,
 so even a person who holds both roles globally (the first-run operator
@@ -161,12 +275,160 @@ What no request-time check can see is a ROLE DEFINITION that holds both
 halves, which would make every holder of it both people. `iam.separated_duty`
 (migration 0062) lists the pairs above, and a trigger on
 `iam.role_permission` refuses the grant that would bring a pair together in
-one role, naming the role and the pair.
+one role, naming the role and the pair. It separates ROLES, not people:
+one account can hold two roles (the first-run operator holds both halves
+of every pair above), so where the halves are global verbs the service
+keeps them in two people as well. For a change to the two-person policy
+itself, an account holding `dual_control.manage` through any role never
+countersigns, whoever proposed (F9, 2026-09-24).
+
+### Which operations need two people, and how that changes
+
+Administration, Two-person controls shows the whole policy (F9,
+2026-09-24): each operation in `approvals.OPERATIONS` with who asks, who
+signs second, how long a signature lasts, whether it is raised in a case or
+for the deployment, and whether anything enforces it yet; every pair in
+`iam.separated_duty`; the changes waiting; and the history. A Security
+officer who administers nothing reads the same section under Oversight,
+Two-person changes.
+
+- **Modes and floors.** A configurable operation has a deployment mode:
+  `PER_CASE` (a case asks for the second signature with its own switch,
+  decision 44) or `ALWAYS` (every case needs it). There is no NEVER. Only
+  `node.merge` is configurable; every other operation is `ALWAYS` by
+  code. The code sets each floor and the database can only make an
+  operation stricter: a missing row, an unknown value or a value below the
+  floor is read as `ALWAYS`.
+- **Registered is not enforced.** `case.delete`, `role.manage` and
+  `collection_account.reveal` are registered and nothing spends them
+  (marking a case PURGED takes one signature today, nothing edits a role
+  definition, and a persona credential is deliberately not reachable over
+  HTTP, where revealing a Telegram session would hand over the whole
+  account). The screen says "Not enforced yet" with that reason, and
+  `test_approvals_catalogue.py` fails if the catalogue and the code
+  disagree in either direction.
+- **Changing it takes two people.** An administrator proposes
+  (`dual_control.manage`), a Security officer countersigns
+  (`dual_control.countersign`) through `POST /approvals/{id}/decide`, and
+  the administrator applies it. Applying consumes the approval and inserts
+  one row in `iam.dual_control_policy_change` in the same transaction;
+  that insert is the only way either policy table moves (each table's
+  guard accepts only a write that exactly matches a ledger row inserted
+  in the same transaction, so a write from any other trigger, including
+  one the runtime role makes on a temporary table of its own, is refused
+  too), and the database refuses the insert unless the approval was consumed there, for exactly that
+  change, by an active proposer holding `dual_control.manage` and an
+  active countersigner holding `dual_control.countersign` and not
+  `dual_control.manage`. Tightening takes two people as well. A
+  justification is read by a Security officer, who holds no case access,
+  so it carries no case detail, and the notification never quotes it.
+- **An approval is for one version.** Each change names the change it was
+  based on (`based_on`), so a countersigned change that was never applied
+  cannot be spent after later changes moved the policy on.
+- **The seven-day rule.** For seven days after someone else issues, resets
+  or re-enrols an account's credentials, reactivates or unlocks it, or
+  creates it with or grants it a role that countersigns, that account may
+  not countersign; and a countersigner who did any of those to the
+  proposer's account in the seven days before may not countersign that
+  proposer's change. The API refuses with a sentence naming who, what and
+  when (UTC), the database checks it again at apply against a
+  `decided_at` pinned to its own clock, and every refusal is audited
+  (`DUAL_CONTROL_COUNTERSIGN_REFUSED`, `DUAL_CONTROL_APPLY_REFUSED`).
+  Refusing is never blocked. What the rule does not stop is a patient
+  insider who takes an officer's account and waits a week, locking the
+  real officer out meanwhile: that is the joiner and leaver limit 0028
+  states.
+- **The ceiling.** The database refuses a policy write no consumed
+  approval accounts for, and refuses rewriting an approval request after
+  it is raised or decided (migration approval_request_frozen). It cannot
+  tell whether the API process that raised and decided a request was
+  honest: the runtime role must be able to insert requests and record
+  decisions, so a compromised API process can forge both in two names.
+  That is the ceiling of every approval in the product; the hash-chained
+  audit trail records every step it did not forge, and a deployment that
+  connects as the schema owner can disable any trigger
+  (`app_db_role_not_owner` reports that).
+- **Pairs and releases.** An administrator may propose a new pair and the
+  removal of a pair the screen added; a pair installed with the software
+  or by the database owner is removed only the same way. A pair added from
+  the screen makes 0062's trigger stop a later release migration that
+  grants one half to a role holding the other, naming the role and both
+  permissions, so a release that grants a permission first checks
+  `iam.separated_duty_violations()` and the pairs added here. A later
+  migration that must write `iam.separated_duty` or
+  `iam.dual_control_operation` disables the guard trigger by name for its
+  own run.
+- **Readiness.** `dual_control_policy_changeable` says whether two
+  different people could change the policy. It is informative, not
+  blocking: a policy nobody can change is frozen in the safe direction. On
+  a stock install it fails until a Security officer who is not an
+  administrator exists, because the first-run account holds both roles
+  and is one person.
+- **Counts.** The screen says how many cases ask for a second signature
+  on merges only over the cases the viewer is assigned to and cleared for.
+  A pure administrator sees no number, and no deployment-wide total is
+  returned anywhere.
+
+**The case switch takes two people to turn off** (F9b, 2026-09-24). Under
+`PER_CASE`, a Lead investigator turns a case's second signature on merges
+on with one signature, under Triage, Dual control. Turning it off takes a
+second person holding `case.update` on the case (a deputy or a second Lead
+investigator): a `case.policy.relax` request raised against the switch as
+it stands, approved by them, and spent by the one who asked. The database
+refuses the change without one consumed in the same transaction, and the
+switch carries an epoch that moves with every change, so an approval
+cannot be kept across an off and on again. Under `ALWAYS` a case cannot
+turn it off at all.
 
 **LIAISON** is for external sharing. Time-boxed by default (`expires_at`
 required), capped at a TLP level, export disabled, single case. Most
 platforms bolt external sharing on later and it becomes the leak path;
 model it from the start.
+
+### Telegram collection (roadmap F5.2 and F5.3, 2026-09-24)
+
+No new permission. Every route under `/collection/telegram` answers a
+source the caller may not see (its label above the caller's clearance)
+exactly as it answers an id that does not exist, and a persona the caller
+may not see (one bound to a source above the caller) the same way.
+
+| Route | Needs | Step-up | Persona act limit |
+|---|---|---|---|
+| `GET /chats` | `collection.read` | no | no |
+| `POST /chats` (look a chat up and add it) | `source.manage`, `collection.run`, `collection_account.manage` | yes | yes |
+| `POST /chats/{id}/join` | `collection.run` | yes, always | yes |
+| `POST /chats/{id}/persona` (rebind) | `source.manage`, `collection.run`, `collection_account.manage` | yes | yes |
+| `POST /chats/{id}/member` (mark as a member chat) | `source.manage`, `collection.run`, `collection_account.manage` | yes | yes |
+| `POST /chats/{id}/membership` (check, never join) | `source.manage`, `collection.run` | no | yes |
+| `POST /chats/{id}/deactivate`, `/resume` | `source.manage` | no | no: stopping is always allowed |
+| `POST /personas/{id}/window` | `collection_account.manage` | yes | no |
+
+Binding a chat to a persona is the change the collection foundation keeps
+behind `collection_account.manage`, which is step-up, so adding, rebinding
+and marking a chat need it as well; a Telegram route is never a weaker
+door to a binding. Every persona act also runs the persona gate with the
+caller's own clearance, needs a live authority a second person confirmed,
+and is refused while a blocking readiness check fails.
+
+Enrolment is not a route. `scripts/telegram_persona.py` signs the operator
+in with password and a current authenticator code; a recovery code is
+refused (it is verified and left unspent, so it still works at the
+console) and an administrator-issued password that was never replaced is
+refused, both read only after the password verified. The operator must
+hold `collection_account.manage`, and every row the script writes names
+them.
+
+**Never revealed.** `collection_account.reveal` stays unwired: revealing a
+Telegram session would hand over the whole account, the persona's
+messages and its ability to act as it, so it is deliberately not built.
+
+**Presence the deployment accepts.** The egress profile listing says a
+profile is unavailable, with no reason, when a persona the caller may not
+see holds it; the telegram_collection readiness row counts active Telegram
+sources and the personas that read them deployment-wide, for `user.manage`
+holders who may be below those sources' labels. Both are counts or one bit,
+never a name, the same presence disclosure the collection foundation's
+rows make (docs/16 D2).
 
 ## Authentication
 
@@ -218,7 +480,10 @@ walked-away laptop becoming an exfiltration event.
 
 **Dual control** for the genuinely irreversible: case deletion, evidence
 purge, role definition changes, persona credential reveal. Two distinct
-humans, enforced by constraint.
+humans, enforced by constraint. Which of them is enforced today, and how
+the list changes, is "Which operations need two people" above; the
+`iam.permission.requires_dual_control` column that once claimed this was
+never read by anything and was retired (F9c, 2026-09-24).
 
 **Break-glass** exists because refusing emergency access gets the platform
 bypassed entirely. Make it available, loud and short: mandatory
@@ -295,8 +560,17 @@ How that is held in `break_glass.py` and `stores.py` (final review,
 **Data**
 - Postgres TDE or encrypted volumes at rest
 - Field-level envelope encryption for persona credentials, TOTP secrets,
-  egress endpoints, shipped (`security/envelope.py`, AES-256-GCM under
-  `NOCTORNAL_TOTP_KEK`)
+  egress endpoints, the Jira credential and lookup provider keys, shipped
+  (`security/envelope.py`, AES-256-GCM under `NOCTORNAL_TOTP_KEK`; the
+  sealed columns are listed once, in `security/sealed.py`)
+- **Lookup provider keys (2026-09-24, roadmap F15):** `ProviderVault` has
+  PersonaVault's shape. It stores, clears and uses, audits
+  PROVIDER_SECRET_USED before a key is opened, yields it inside
+  `secret_in_scope` so every message is redacted, and has no method that
+  returns a key. A key is bound to the origin and route it was entered
+  with, and changing either destroys it. The same host-compromise caveat
+  as persona credentials applies: a second class of secret in the same
+  blast radius
 - **Persona credentials, invariant 7 as it actually holds (reworded
   2026-09-09):** decrypted only inside `PersonaVault.use()`, which yields
   the plaintext to one block, drops it and audits the use; no
@@ -322,6 +596,11 @@ How that is held in `break_glass.py` and `stores.py` (final review,
 - Database reachable only from the API tier
 - Admin surfaces behind a separate ingress with source restrictions
 - Egress allowlist from the core zone (SMTP relay, Jira, nothing else)
+- Outbound lookups leave only by their own integration route
+  (`lookup-<key>`, docs/00 decision 68), an administrator's step-up, audited
+  allowlist entry, and only while the host switch
+  `NOCTORNAL_OUTBOUND_LOOKUPS` is on; SMTP, the webhook and Jira leave by
+  the routes `smtp`, `webhook` and `jira` the same way
 
 ## Audit
 

@@ -34,6 +34,48 @@ os.environ.setdefault("EVIDENCE_RETENTION_DAYS", "1")
 # tests about the horizon set their own.
 os.environ.setdefault("EVIDENCE_LOCK_HORIZON_DAYS", "1")
 
+#: The tests that take the suite's own database down the migration chain and
+#: back up. They run FIRST: since 2026-09-24 later migrations refuse their
+#: downgrade while append-only history exists (collection authorities 0083,
+#: the egress binding history 0085, the connection ledger 0086), and the
+#: suites for those features write that history by design and cannot delete
+#: it. Alphabetical order put the collection and egress suites ahead of both
+#: round trips, in CI's fresh database as well (2026-09-25). On a
+#: database an earlier run has already written to, these two still stop at
+#: those refusals: run them on a fresh one, as CI does.
+_RUN_FIRST = frozenset({
+    "test_downgrade_to_0058_and_upgrade_to_head_round_trip",
+    "test_downgrade_to_0067_and_upgrade_to_head_round_trip",
+})
+
+
+#: Test modules that import an optional extra at module level. A module-level
+#: `pytest.importorskip` is reported as SKIPPED even when `-m` deselects every
+#: test in it, and CI's no-skip gate refuses a skip; so on the leg that runs
+#: without the extras (`-m extras_absent`, exactly), these modules are not
+#: collected at all. On every other run they are collected as usual, so a
+#: missing extra on the full leg still skips and still fails the gate
+#: (2026-09-25).
+_NEEDS_EXTRA = {
+    "test_telegram_wire.py": "telethon",
+    "test_yara_compile_child.py": "yara_x",
+    "test_yara_db_script.py": "yara_x",
+}
+
+
+def pytest_ignore_collect(collection_path, config):
+    extra = _NEEDS_EXTRA.get(collection_path.name)
+    if extra is None or (config.getoption("markexpr") or "").strip() != "extras_absent":
+        return None
+    import importlib.util
+    return True if importlib.util.find_spec(extra) is None else None
+
+
+def pytest_collection_modifyitems(config, items):
+    first = [item for item in items if item.name in _RUN_FIRST]
+    if first:
+        items[:] = first + [item for item in items if item.name not in _RUN_FIRST]
+
 from noctornal_api.security.auth import AuthUser, UserStore
 from noctornal_api.security.sessions import SessionRecord, SessionStore
 

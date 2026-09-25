@@ -291,11 +291,17 @@ def test_the_ledger_is_behind_integration_manage(conn, client):
 # a channel with no transport cannot be enabled
 # ---------------------------------------------------------------------------
 
-def test_jira_cannot_be_enabled_because_no_transport_exists(conn, monkeypatch):
+def test_jira_cannot_be_enabled_without_an_active_destination(conn, monkeypatch):
+    """F7 (2026-09-24): Jira has a transport now, and needs a live
+    destination; with none, enabling it would queue deliveries suppressed as
+    DESTINATION_OFF. The destination-present half is in
+    test_jira_destination_pg.py."""
+    from noctornal_api import jira
     from noctornal_api.notifications import NotificationError, NotificationService
 
+    monkeypatch.setattr(jira, "routing", lambda conn: None)
     user, _, _ = _make_user(conn)
-    with pytest.raises(NotificationError, match="no transport"):
+    with pytest.raises(NotificationError, match="no Jira destination is active"):
         NotificationService(conn).set_preference(user, "JIRA", enabled=True)
     assert NotificationService(conn).preferences(user)["JIRA"].enabled is False
 
@@ -354,10 +360,13 @@ def test_disabling_an_unconfigured_channel_is_always_allowed(conn, monkeypatch):
     assert pref.enabled is False and pref.min_priority == 1
 
 
-def test_the_refusal_reaches_the_client_as_a_400(conn, client):
+def test_the_refusal_reaches_the_client_as_a_400(conn, client, monkeypatch):
+    from noctornal_api import jira
+
+    monkeypatch.setattr(jira, "routing", lambda conn: None)  # F7
     _, email, secret = _make_user(conn)
     token = _session(conn, email)
     r = client.put("/api/v1/notifications/preferences/JIRA", headers=_auth(token),
                    json={"enabled": True})
     assert r.status_code == 400, r.text
-    assert "no transport" in r.json()["detail"]
+    assert "no Jira destination is active" in r.json()["detail"]

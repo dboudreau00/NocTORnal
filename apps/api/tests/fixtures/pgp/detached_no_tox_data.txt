@@ -1,0 +1,3 @@
+Vendor contact block
+Jabber: vendor@mail.fixture-vendor.net
+No other channels.

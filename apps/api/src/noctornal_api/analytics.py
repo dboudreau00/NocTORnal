@@ -52,7 +52,8 @@ from uuid import UUID
 
 import igraph
 
-from noctornal_api.projections import Projection, Subgraph
+from noctornal_api import affiliation
+from noctornal_api.projections import REVIEW_SCOPE_ALL, Projection, Subgraph
 
 # docs/03 performance bands: "< 5k nodes: exact, everything, synchronous".
 # The ceiling here is deliberately below that, because this runs inside a
@@ -325,7 +326,58 @@ def graph_hash(sub: Subgraph, p: Projection, params: AnalyticsParams) -> bytes:
     for row in rows:
         h.update("|".join(row).encode())
         h.update(b"\x00")
+    # L3 and F2 (2026-09-24): the cache key must cover the new payloads.
+    # Both are folded ONLY when present, so a default
+    # Subgraph hashes exactly as before and no stored run goes stale; no
+    # version bump. The left-out counts are in the payload, so a tie added,
+    # reviewed or superseded under the accepted scope is a different answer.
+    # The one-mode coverage names venues and their sizes that never reach
+    # `nodes`: without it a renamed oversized forum kept its old name on a
+    # cache hit, and a forum raised above the caller's clearance left the
+    # digest unchanged and its label was served back with current: true.
+    if sub.review_left_out is not None:
+        h.update(b"review_left_out\x00")
+        h.update(json.dumps(sub.review_left_out, sort_keys=True).encode())
+        h.update(b"\x00")
+    if sub.one_mode is not None:
+        h.update(b"one_mode\x00")
+        h.update(json.dumps(sub.one_mode, sort_keys=True, default=str).encode())
+        h.update(b"\x00")
     return h.digest()
+
+
+# --------------------------------------------------------------------------
+# What the projection options did (L3, F2)
+# --------------------------------------------------------------------------
+
+REVIEW_SCOPE_NOTE = (
+    "Computed over accepted ties only. Ties that are unreviewed proposals, "
+    "disputed, rejected or superseded were left out and are counted here.")
+
+
+def review_scope_block(p: Projection, sub: Subgraph) -> dict | None:
+    """What the accepted-ties scope left out, for the payload; None under
+    the default scope, so a default payload is unchanged (L3, 2026-09-24).
+    `review_coverage` is deliberately NOT changed: under this scope it
+    truthfully reads "all reviewed" of what the numbers rest on, and this
+    block says what they do not rest on."""
+    if p.review_scope == REVIEW_SCOPE_ALL:
+        return None
+    return {"scope": p.review_scope, "left_out": sub.review_left_out or {"ties": {}},
+            "note": REVIEW_SCOPE_NOTE}
+
+
+def one_mode_block(sub: Subgraph) -> dict | None:
+    """The one-mode coverage with the prose that reads it (F2, 2026-09-24);
+    None when no venue family was projected. The prose is added here and
+    never hashed, so a copy edit never makes a stored run stale."""
+    if sub.one_mode is None:
+        return None
+    families = "+".join(sub.one_mode.get("families") or [])
+    return {**sub.one_mode, "size_note": affiliation.SIZE_NOTE,
+            "reading": affiliation.READING,
+            "method": affiliation.METHOD.format(
+                family=families, weighting=sub.one_mode.get("weighting"))}
 
 
 # --------------------------------------------------------------------------
@@ -855,6 +907,10 @@ def run_suite(sub: Subgraph, p: Projection,
     params = params or AnalyticsParams()
     m = materialise(sub, params)
     if m.n == 0:
+        if sub.one_mode is not None:
+            # Said as what happened: the view had nodes, and they were all
+            # venues (F2, 2026-09-24).
+            raise AnalyticsError("projecting the venues left no entities in this view")
         raise AnalyticsError("this projection contains no visible nodes")
 
     g = m.g
@@ -951,6 +1007,9 @@ def run_suite(sub: Subgraph, p: Projection,
         "constraint_order": CONSTRAINT_ORDER,
         "broker_rule": leads,
         "review_coverage": review_coverage(sub),
+        # L3 and F2 (2026-09-24): None unless the projection asked for them.
+        "review_scope": review_scope_block(p, sub),
+        "one_mode": one_mode_block(sub),
         # A metric over a CUT-OFF node set is not a metric over the case.
         # Degree survives truncation; betweenness, modularity and
         # fragmentation do not, because they depend on paths that may run
@@ -988,7 +1047,10 @@ def run_suite(sub: Subgraph, p: Projection,
         ),
         "eigenvector_meaningful": cent["eigenvector_meaningful"],
         "eigenvector_note": cent["eigenvector_note"],
-        "mode_warning": _mode_warning(m.node_types, degree),
+        "mode_warning": _mode_warning(
+            m.node_types, degree,
+            projectable=tuple(f for f in affiliation.FAMILIES
+                              if f not in p.one_mode.families)),
         "decay": {
             "half_life_months": params.decay_half_life_months,
             "undated_edges": m.undated_edges,
@@ -1007,7 +1069,8 @@ def run_suite(sub: Subgraph, p: Projection,
     }
 
 
-def _mode_warning(node_types: list[str], degrees: list[int]) -> str | None:
+def _mode_warning(node_types: list[str], degrees: list[int],
+                  projectable: tuple[str, ...] = ()) -> str | None:
     """Warn when a projection mixes actors with artefacts or contexts.
 
     docs/03 is blunt that identity plumbing "will wreck centrality if
@@ -1021,8 +1084,15 @@ def _mode_warning(node_types: list[str], degrees: list[int]) -> str | None:
 
     Silently rewriting the presets would change every number the Phase 2
     sociogram already shows, so the honest move is to say so and let the
-    analyst decide. docs/03's proper fix -- bipartite projection to one-mode
-    with Newman weighting -- is a larger change, recorded as an open item.
+    analyst decide. docs/03's proper fix, bipartite projection to one-mode
+    with Newman weighting, is built for forums and wallets as a projection
+    option (`affiliation.py`, F2, 2026-09-24), never as a rewritten preset
+    (decision 33). `projectable` is the families NOT projected in this run:
+    when a tied non-actor type is one of their venues, the two-mode sentence
+    names the option. Both branches stay whatever is projected, because a
+    projected view can still hold an isolated SELECTOR or a tied SERVICE.
+    CONVERSATION is in no family (docs/00 decision 73), so the Communication
+    preset keeps its warning as it was and names no option.
     """
     from noctornal_ontology.definition import NODE_TYPES
 
@@ -1032,13 +1102,21 @@ def _mode_warning(node_types: list[str], degrees: list[int]) -> str | None:
     isolated = sorted({t for t, d in zip(node_types, degrees, strict=False)
                        if category.get(t) != "ACTOR" and d == 0})
     if tied:
-        return (
+        text = (
             "This projection is TWO-MODE: non-actor vertices ({}) carry ties. "
             "Centrality treats them as if they were people, so an artefact "
             "with several controllers scores as a broker. Read brokerage here "
             "as 'central in the actor-artefact graph', not 'central among "
             "actors'."
         ).format(", ".join(tied))
+        options = [affiliation.FAMILIES[f].label.lower() for f in projectable
+                   if f in affiliation.FAMILIES
+                   and set(affiliation.FAMILIES[f].venue_types) & set(tied)]
+        if options:
+            text += (" Projecting " + " or ".join(options) + " to entities, under "
+                     "the Analysis pane's projection options, computes over "
+                     "entities alone.")
+        return text
     if isolated:
         # A different, smaller problem: these do not distort brokerage
         # because they have no ties, but they DO sit in the denominator of

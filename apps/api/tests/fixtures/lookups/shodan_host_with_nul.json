@@ -1,0 +1,1 @@
+{"ports": [22], "hostnames": ["bad\u0000host.example", "lone\udc80.example"], "org": "Org\u0000", "data": [{"banner": "[[[[ not nesting ]]]] \ud800"}]}

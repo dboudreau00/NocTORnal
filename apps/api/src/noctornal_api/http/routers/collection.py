@@ -106,6 +106,7 @@ gives. No route in this file takes no ceiling any more.
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import UUID
 
 import psycopg
@@ -113,15 +114,33 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api.collection import (
+    PERSONA_VISIBLE_SQL,
+    SOURCE_KINDS,
+    Adapter,
     CollectionBusy,
     CollectionError,
     CollectionNotFound,
     CollectionService,
+    PersonaResting,
     PersonaUnavailable,
     PersonaVault,
+    SourceRefused,
+    _attr,
+    active_window,
+    default_adapters,
+    header_text_problem,
 )
+from noctornal_api.collection_authority import (
+    SOURCE_CEILING_ENV,
+    AuthorityError,
+    source_ceiling,
+)
+from noctornal_api import forum_adapters  # F3 and F4 (2026-09-24)
+from noctornal_api import telegram_service  # F5.2 and F5.3
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
+    authorize_global,
     get_conn,
     require,
     require_global,
@@ -137,20 +156,65 @@ router = APIRouter(prefix="/collection", tags=["collection"])
 
 #: Repeated on every route that can put a persona in front of a site. The
 #: legal-review item by its register number, not a design document's path
-#: (ux19-copy developer-speak-in-copy, 2026-09-23).
+#: (ux19-copy developer-speak-in-copy, 2026-09-23). Rewritten 2026-09-24
+#: (docs/00 decision 69): the old wording said the software "records the distinction"
+#: between passive and active collection, and nothing did; it now refuses
+#: every forum and Telegram read no confirmed authority covers, and has no
+#: active scope because nothing in it engages.
 L3_NOTICE = (
-    "Legal review item L3 is still open: authority to operate a covert "
-    "persona is per-jurisdiction, and passive collection (reading a public "
-    "forum) may be authorised separately from active collection (posting, "
-    "messaging, purchasing). This software records the distinction; it "
-    "cannot confer the authority for either."
+    "Legal review item L3 is still open: authority to read a forum or a "
+    "chat, publicly or as a member, is decided per jurisdiction. This "
+    "software refuses every forum and Telegram read that no confirmed "
+    "authority covers, and records who declared and who confirmed it; it "
+    "cannot confer the authority, and nothing in it posts, messages or "
+    "purchases."
 )
+
+
+def get_adapters() -> dict[str, Adapter]:
+    """THE adapter registry for the routes (2026-09-24): an HTTP test
+    registers a stub adapter through app.dependency_overrides instead of
+    patching the module."""
+    return default_adapters()
+
+
+def _holds(conn: psycopg.Connection, user: CurrentUser, permission: str) -> bool:
+    """Whether a global role of the caller carries `permission`, asked
+    without an AUTHZ_DENIED row (a question on a listing is not an attempt)
+    and without the step-up freshness, which the action itself asks for:
+    this decides whether a button is drawn."""
+    return conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                 JOIN iam.app_user u ON u.id = ur.user_id
+                WHERE ur.user_id = %s AND u.is_active
+                  AND rp.permission_key = %s)""",
+        (user.user_id, permission)).fetchone()[0]
+
+
+def refuse_unready(conn: psycopg.Connection) -> None:
+    """409 while any BLOCKING readiness check fails, naming them: one
+    sentence for the run route and the attended persona acts, never a copy
+    (2026-09-24)."""
+    unsettled = blocking_failures(conn)
+    if unsettled:
+        raise Problem(
+            409, "Conflict",
+            "This deployment is not ready to collect. Blocking readiness "
+            "checks failing: " + ", ".join(unsettled) + ". These are the "
+            "ones an operator settles before real material enters the "
+            "system, and a covert poll against a real target must not run "
+            "while they are open; retrying will not close them. GET "
+            "/admin/readiness (user.manage) carries the evidence and the "
+            "action for each. " + L3_NOTICE)
 
 
 @router.get("/sources/due", response_model=dict)
 def due_sources(
     user: CurrentUser = Depends(require_global("collection.read")),
     conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
 ) -> dict:
     """What is ready to poll. Reports; does not act.
 
@@ -162,9 +226,19 @@ def due_sources(
     to this caller; its name and URL are what its label protects.
     """
     clearance, _ = user_ceiling(conn, user.user_id)
-    due = CollectionService(conn).due_sources(clearance=clearance.name)
+    svc = CollectionService(conn, adapters)
+    due = svc.due_sources(clearance=clearance.name)
+    # 2026-09-24: what waits on a person, by reason. A held source is
+    # not polled, not rescheduled and not a failure.
+    held = [{**h, "id": str(h["id"])}
+            for h in svc.held_sources(clearance=clearance.name)]
+    # F5.3 (2026-09-24). A due Telegram chat names its chat and exit.
+    due = telegram_service.attach_due_facts(conn, due)
     return {"due": [{**d, "id": str(d["id"])} for d in due],
             "count": len(due),
+            "refused": [h for h in held if h["reason"] == "REFUSED"],
+            "waiting_on_persona": [h for h in held if h["reason"] == "PERSONA"],
+            "awaiting_authority": [h for h in held if h["reason"] == "AUTHORITY"],
             "run": _run_readiness(conn, user),
             "notice": ("Nothing polls itself. Call /sources/{id}/run to "
                        "poll one source once. " + L3_NOTICE)}
@@ -255,6 +329,7 @@ def run_once(
     source_id: UUID, body: RunBody,
     user: CurrentUser = Depends(require_global("collection.run")),
     conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Poll ONE source, ONCE.
 
@@ -301,22 +376,27 @@ def run_once(
     # below. All three are "you are allowed, something else is not ready";
     # the detail says which, and naming the failing checks is what makes
     # this one distinguishable to a caller who is not reading this file.
-    unsettled = blocking_failures(conn)
-    if unsettled:
-        raise Problem(
-            409, "Conflict",
-            "This deployment is not ready to collect. Blocking readiness "
-            "checks failing: " + ", ".join(unsettled) + ". These are the "
-            "ones an operator settles before real material enters the "
-            "system, and a covert poll against a real target must not run "
-            "while they are open; retrying will not close them. GET "
-            "/admin/readiness (user.manage) carries the evidence and the "
-            "action for each. " + L3_NOTICE)
+    refuse_unready(conn)
     clearance, _ = user_ceiling(conn, user.user_id)
     try:
-        result = CollectionService(conn).run_once(
-            source_id, actor_id=user.user_id, persona_id=body.persona_id,
-            watch_id=body.watch_id, clearance=clearance.name)
+        # The poll on a system connection (S1, 2026-09-25), as the cron's
+        # is: a new item dedupes against every stored version of it and
+        # is matched against every case's watches, and a manual run that
+        # saw only its caller's documents would store duplicates and miss
+        # hits. The caller's ceiling still decides whether the source may
+        # be run at all (run_once's 404 below), exactly as before.
+        with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
+            result = CollectionService(sconn, adapters).run_once(
+                source_id, actor_id=user.user_id, persona_id=body.persona_id,
+                watch_id=body.watch_id, clearance=clearance.name)
+    except (SourceRefused, PersonaResting, AuthorityError) as exc:
+        # ABOVE `except CollectionError`, as CollectionBusy is: each is "you
+        # are allowed, this cannot run", and nothing was done. A refused
+        # source is configuration, a resting persona is outside its hours,
+        # and the confirmer is refused as the runner before any run row;
+        # 400 "Invalid request" would tell the caller to
+        # fix a request with nothing wrong in it.
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except PersonaUnavailable as exc:
         # 409 rather than 403: the caller is allowed, the persona is not
         # usable -- suspended, burnt, or cooling down.
@@ -343,6 +423,12 @@ def run_once(
         "items_new": result.items_new,
         "watch_hits": result.watch_hits,
         "error": result.error,
+        # 2026-09-24: BLOCKED and RATE_LIMITED are not failures, and
+        # a note (a walk that stopped at its budget) is not a warning.
+        "status": result.status,
+        "blocked_reason": result.blocked_reason,
+        "items_deleted": result.items_deleted,
+        "notes": result.notes,
         # What the run could not do while otherwise succeeding. A watch
         # whose regex will not compile matches nothing for ever, and until
         # 2026-08-07 that was swallowed: the run reported OK and the watch
@@ -374,8 +460,12 @@ def personas(
     says how, and why a source-less persona is always shown).
     """
     clearance, _ = user_ceiling(conn, user.user_id)
+    personas = PersonaVault(conn).personas(clearance=clearance.name)
+    # F5.2 (2026-09-24). A Telegram persona row carries its enrolment,
+    # hold and chat count; never a secret column.
+    personas = telegram_service.attach_persona_facts(conn, personas, clearance.name)
     return {
-        "personas": PersonaVault(conn).personas(clearance=clearance.name),
+        "personas": personas,
         "notice": ("Secrets are never returned by any endpoint. " + L3_NOTICE),
     }
 
@@ -383,6 +473,9 @@ def personas(
 class PersonaStatusBody(BaseModel):
     status: str
     reason: str = Field(min_length=5)
+    #: A COOLDOWN says how long: one with no end was usable to one
+    #: reader and resting to another.
+    cooldown_hours: int | None = Field(default=None, ge=1, le=24 * 90)
 
 
 @router.post("/personas/{persona_id}/status", response_model=dict)
@@ -406,15 +499,22 @@ def set_persona_status(
     them, and an unknown id got a 200 for a write that never happened.
     """
     clearance, _ = user_ceiling(conn, user.user_id)
+    cooldown = (timedelta(hours=body.cooldown_hours)
+                if body.cooldown_hours else None)
     try:
-        PersonaVault(conn).set_status(
+        written = PersonaVault(conn).set_status(
             persona_id, body.status, actor_id=user.user_id,
-            reason=body.reason, clearance=clearance.name)
+            reason=body.reason, cooldown=cooldown, clearance=clearance.name)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
-    return {"persona_id": str(persona_id), "status": body.status}
+    answer = {"persona_id": str(persona_id), "status": body.status}
+    # 2026-09-24: HEALTHY under a platform's hold or lock changes the
+    # person's status only, and the answer says the persona stays paused.
+    if written.get("notice"):
+        answer["notice"] = written["notice"]
+    return answer
 
 
 @router.get("/sources/{source_id}/egress", response_model=dict)
@@ -503,14 +603,45 @@ def documents(
     higher, so this filter is doing real work rather than being defensive
     habit.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    # The reader's compartments too (L1, 2026-09-24): a capture
+    # into a compartmented case is stored under the case's keys.
+    clearance, held = user_ceiling(conn, user.user_id)
+    # Document holds (docs/00 decision 74, 2026-09-24). The caller holds
+    # collection.read already (the gate above); placing a document hold
+    # needs retention.manage as well, and only such a caller reads a hold's
+    # reason (2026-09-25).
+    can_hold = _holds(conn, user, "retention.manage")
     docs = CollectionService(conn).documents(
-        clearance=clearance.name, source_id=source_id,
-        triage_state=triage_state, limit=limit)
+        clearance=clearance.name, compartments=held, source_id=source_id,
+        triage_state=triage_state, limit=limit, with_hold_reason=can_hold)
+    # F5.3 (2026-09-24). A Telegram document carries its capture record.
+    docs = telegram_service.attach_message_meta(conn, docs)
     return {"documents": docs, "count": len(docs),
+            "can_hold": can_hold,
             "note": ("Bodies are excerpted to 400 characters; `truncated` "
                      "says which. Purged documents are omitted entirely "
                      "rather than returned with an empty body.")}
+
+
+# F3 and F4 (2026-09-24). What a forum post or member
+# carries beside its text (the signature, the posts it quotes, its
+# reactions; a member's profile), read under the document's label, its
+# source's label and its compartments, exactly as the list reads the
+# document. A document the caller may not see, or one with no forum
+# details, is the same 404 a random id gets.
+@router.get("/documents/{document_id}/forum", response_model=dict)
+def forum_details(
+    document_id: UUID,
+    user: CurrentUser = Depends(require_global("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        return forum_adapters.forum_details(conn, document_id,
+                                            clearance=clearance.name,
+                                            compartments=held)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
 
 
 class TriageBody(BaseModel):
@@ -535,11 +666,11 @@ def triage_document(
     A state outside the four is a 400 carrying the list; a document the
     caller cannot see is a 404, the same 404 a random UUID gets.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(conn).set_document_triage(
             document_id, body.state, actor_id=user.user_id,
-            clearance=clearance.name)
+            clearance=clearance.name, compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -567,9 +698,9 @@ def watch_hits(
     make a watch that is drowning in one recurring thread look like a
     watch that is quiet, and those need opposite responses.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     hits = CollectionService(conn).watch_hits(
-        case_id, clearance=clearance.name,
+        case_id, clearance=clearance.name, compartments=held,
         unacknowledged_only=unacknowledged_only, limit=limit)
     return {"hits": hits, "count": len(hits),
             "unacknowledged": sum(1 for h in hits if not h["acknowledged_at"]),
@@ -594,10 +725,11 @@ def acknowledge_watch_hit(
     because rewriting when somebody FIRST saw a hit destroys the only
     evidence of how long it sat unread.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         result = CollectionService(conn).acknowledge_hit(
-            hit_id, user_id=user.user_id, clearance=clearance.name)
+            hit_id, user_id=user.user_id, clearance=clearance.name,
+            compartments=held)
     except CollectionError as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     return result
@@ -627,11 +759,11 @@ def suppress_watch_hit(
     written under an authorisation that never covered it. A hit that is
     not on this case and a hit that does not exist get the same 404.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(conn).suppress_hit(
             case_id, hit_id, actor_id=user.user_id, reason=body.reason,
-            clearance=clearance.name)
+            clearance=clearance.name, compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -647,9 +779,312 @@ def unsuppress_watch_hit(
 ) -> dict:
     """Put a hit back in the queue. Same gate, same case check, and the
     reason is cleared with it."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(conn).unsuppress_hit(
-            case_id, hit_id, actor_id=user.user_id, clearance=clearance.name)
+            case_id, hit_id, actor_id=user.user_id, clearance=clearance.name,
+            compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Sources, personas and bindings (the collection foundation, 2026-09-24)
+# ---------------------------------------------------------------------------
+#
+# Until now no route created a source or a persona: only SQL, the seeders and
+# the tests did. The console can now add a source, create a persona with NO
+# credential (an operator enrols it on the server), say who reads a source
+# and through which exit, and deactivate one, each gated, rate limited under
+# `collection.config` and audited.
+
+def _adapter_rows(adapters: dict) -> list[dict]:
+    return [{"parser_key": key,
+             "kinds": sorted(_attr(a, "source_kinds") or ()),
+             "requires_authority": bool(_attr(a, "requires_authority")),
+             "persona_platform": _attr(a, "persona_platform"),
+             "persona_http": bool(_attr(a, "persona_http")),
+             "run_seconds": float(_attr(a, "run_seconds")),
+             "max_rps_cap": float(_attr(a, "max_rps_cap")),
+             "min_interval_s": int(_attr(a, "min_interval_s"))}
+            for key, a in sorted(adapters.items())]
+
+
+@router.get("/sources", response_model=dict)
+def list_sources(
+    user: CurrentUser = Depends(require_global("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
+) -> dict:
+    """Every source the caller may see, who reads it and through which
+    exit, its authority state and the refusal it would meet; the parsers
+    this build has; the declared ceilings; and whether the caller may add
+    sources (`can_manage`) or change who reads one (`can_bind`)."""
+    clearance, _ = user_ceiling(conn, user.user_id)
+    rows = CollectionService(conn, adapters).sources(clearance=clearance.name)
+    manage = _holds(conn, user, "source.manage")
+    return {"sources": rows, "count": len(rows),
+            "adapters": _adapter_rows(adapters),
+            "ceilings": {kind: source_ceiling(kind)[0]
+                         for kind in sorted(SOURCE_CEILING_ENV)},
+            "kinds": list(SOURCE_KINDS),
+            "can_manage": manage,
+            "can_bind": manage and _holds(conn, user, "collection_account.manage"),
+            # F3 and F4 (2026-09-24). A forum read leaves from this
+            # server's own address (development, no proxy, the override
+            # set): the Poll now confirmation says so.
+            "forum_reads_direct": forum_adapters.reads_direct(),
+            "notice": L3_NOTICE}
+
+
+class SourceCreate(BaseModel):
+    kind: str = Field(min_length=2, max_length=20)
+    name: str = Field(min_length=3, max_length=200)
+    base_url: str | None = Field(default=None, max_length=2048)
+    parser_key: str = Field(min_length=1, max_length=64)
+    classification: str = Field(min_length=3, max_length=20)
+    default_reliability: str = Field(default="F", pattern="^[A-F]$")
+    poll_interval_s: int = Field(default=900, ge=60, le=7 * 86400)
+    jitter_pct: int = Field(default=25, ge=0, le=90)
+    max_rps: float = Field(default=0.2, gt=0, le=10)
+    parser_config: dict = Field(default_factory=dict)
+    collection_account_id: UUID | None = None
+    egress_profile_id: UUID | None = None
+
+
+@router.post("/sources", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("collection.config"))])
+def create_source(
+    body: SourceCreate,
+    user: CurrentUser = Depends(require_global("source.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
+) -> dict:
+    """A new source. A binding (a persona, or an exit for a persona-less
+    read) also needs collection_account.manage, which is step-up. A forum or
+    Telegram source is created and then waits: nothing is read until its
+    authority is recorded and confirmed by two people."""
+    if body.collection_account_id is not None or body.egress_profile_id is not None:
+        authorize_global(conn, user, "collection_account.manage")
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        source = CollectionService(conn, adapters).create_source(
+            kind=body.kind, name=body.name, base_url=body.base_url,
+            parser_key=body.parser_key, classification=body.classification,
+            default_reliability=body.default_reliability,
+            poll_interval_s=body.poll_interval_s, jitter_pct=body.jitter_pct,
+            max_rps=body.max_rps, parser_config=body.parser_config,
+            collection_account_id=body.collection_account_id,
+            egress_profile_id=body.egress_profile_id, actor_id=user.user_id,
+            clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return {"source": source,
+            "next": ("A collection manager records the authority that covers "
+                     "this source, and a security officer confirms it, before "
+                     "it is polled." if source["requires_authority"] else
+                     "It is due now: the next pass of the collector polls it.")}
+
+
+class ReasonBody(BaseModel):
+    reason: str = Field(min_length=5, max_length=500)
+
+
+def _set_active(source_id: UUID, body: ReasonBody, user: CurrentUser,
+                conn: psycopg.Connection, active: bool) -> dict:
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        return CollectionService(conn).set_source_active(
+            source_id, active=active, reason=body.reason,
+            actor_id=user.user_id, clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
+@router.post("/sources/{source_id}/deactivate", response_model=dict,
+             dependencies=[Depends(rate_limit("collection.config"))])
+def deactivate_source(
+    source_id: UUID, body: ReasonBody,
+    user: CurrentUser = Depends(require_global("source.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Stop reading a source, with a reason; 404 above the caller."""
+    return _set_active(source_id, body, user, conn, False)
+
+
+@router.post("/sources/{source_id}/activate", response_model=dict,
+             dependencies=[Depends(rate_limit("collection.config"))])
+def activate_source(
+    source_id: UUID, body: ReasonBody,
+    user: CurrentUser = Depends(require_global("source.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Read a source again, with a reason; 404 above the caller."""
+    return _set_active(source_id, body, user, conn, True)
+
+
+@router.get("/runs/{run_id}", response_model=dict)
+def run_detail(
+    run_id: UUID,
+    user: CurrentUser = Depends(require_global("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """One poll with its custody log of what it asked for, read under the
+    SOURCE's label: 404 above it, as for an id that is not a run."""
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        return CollectionService(conn).run_detail(run_id,
+                                                  clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+
+
+#: What a new persona's answer says, on every creation: no credential moves
+#: through a browser.
+_NO_CREDENTIAL_NOTICE = (
+    "No credential is stored yet. An operator enrols it on the server, never "
+    "through this console, because a sign-in code and an account password "
+    "must not pass through a browser. ")
+
+
+class PersonaCreate(BaseModel):
+    handle: str = Field(min_length=2, max_length=64)
+    platform: str = Field(min_length=2, max_length=20)
+    egress_profile_id: UUID
+    fingerprint: dict = Field(default_factory=dict)
+    venue_source_id: UUID | None = None
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+def _fingerprint_problems(fingerprint: dict) -> list[str]:
+    """The generic keys of a persona's recorded identity: printable ASCII
+    on one line for the two header values, a UTC window, and at most
+    4 KiB in all."""
+    import json
+
+    problems = []
+    if len(json.dumps(fingerprint, default=str).encode("utf-8")) > 4096:
+        problems.append("A persona's recorded identity is at most 4 KiB.")
+    if "user_agent" in fingerprint:
+        problem = header_text_problem("browser identity",
+                                      fingerprint["user_agent"], low=1, high=400)
+        if problem:
+            problems.append(problem)
+    if "accept_language" in fingerprint:
+        problem = header_text_problem("language", fingerprint["accept_language"],
+                                      low=2, high=64)
+        if problem:
+            problems.append(problem)
+    if "active_window_utc" in fingerprint:
+        try:
+            window = active_window(fingerprint["active_window_utc"])
+        except ValueError:
+            window = None
+        if window is None or window[0] == window[1]:
+            problems.append("Active hours are HH:MM-HH:MM in UTC, and not empty.")
+    return problems
+
+
+@router.post("/personas", response_model=dict, status_code=201,
+             dependencies=[Depends(rate_limit("collection.config"))])
+def create_persona(
+    body: PersonaCreate,
+    user: CurrentUser = Depends(require_global("collection_account.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
+) -> dict:
+    """A persona with no credential, on one platform, through one exit that
+    no other persona holds (docs/04: one persona, one egress profile). The
+    platform must be one a parser in this build reads through."""
+    reader = next((a for a in adapters.values()
+                   if _attr(a, "persona_platform") == body.platform), None)
+    if reader is None:
+        raise Problem(400, "Invalid request",
+                      f"No adapter in this build reads through a "
+                      f"{body.platform} persona.")
+    problems = (_fingerprint_problems(body.fingerprint)
+                + list(_attr(reader, "validate_persona")(dict(body.fingerprint))))
+    if problems:
+        raise Problem(400, "Invalid request", " ".join(problems))
+    clearance, _ = user_ceiling(conn, user.user_id)
+    if body.venue_source_id is not None and conn.execute(
+            """SELECT 1 FROM collect.source WHERE id = %s
+                  AND classification <= %s::core.tlp""",
+            (body.venue_source_id, clearance.name)).fetchone() is None:
+        raise Problem(404, "Not found", "no such source, or it is above your clearance")
+    try:
+        persona = PersonaVault(conn).create(
+            handle=body.handle, platform=body.platform,
+            egress_profile_id=body.egress_profile_id,
+            fingerprint=dict(body.fingerprint), notes=body.notes,
+            venue_source_id=body.venue_source_id, owner_user_id=user.user_id,
+            actor_id=user.user_id)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return {"persona": persona, "notice": _NO_CREDENTIAL_NOTICE + L3_NOTICE}
+
+
+@router.get("/egress-profiles", response_model=dict)
+def egress_profiles(
+    user: CurrentUser = Depends(require_global("collection_account.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """THE listing persona and source forms pick an exit from. Counts of
+    what the caller may see, one boolean for the rest, never the sealed
+    endpoint or its key id. `available` is false when any persona holds the
+    profile: that one bit of presence is the accepted PRESENCE disclosure
+    (docs/05)."""
+    clearance, _ = user_ceiling(conn, user.user_id)
+    rows = PersonaVault(conn).egress_profiles(clearance=clearance.name)
+    return {"egress_profiles": rows, "count": len(rows),
+            "notice": ("One persona, one egress profile: two personas seen "
+                       "from one exit can be linked by any competent site.")}
+
+
+class BindingBody(BaseModel):
+    collection_account_id: UUID | None = None
+    egress_profile_id: UUID | None = None
+    reason: str = Field(min_length=5, max_length=500)
+    reset_cursor: bool = False
+
+
+@router.post("/sources/{source_id}/binding", response_model=dict,
+             dependencies=[Depends(require_global("source.manage")),
+                           Depends(rate_limit("collection.config"))])
+def bind_source(
+    source_id: UUID, body: BindingBody,
+    user: CurrentUser = Depends(require_global("collection_account.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
+) -> dict:
+    """Who reads a source and through which exit. Needs both permissions,
+    and collection_account.manage is step-up. The authority recorded for
+    the old binding stops covering the source at once, and the answer says
+    so."""
+    clearance, _ = user_ceiling(conn, user.user_id)
+    try:
+        return CollectionService(conn, adapters).bind_source(
+            source_id, persona_id=body.collection_account_id,
+            egress_profile_id=body.egress_profile_id, reason=body.reason,
+            reset_cursor=body.reset_cursor, actor_id=user.user_id,
+            clearance=clearance.name)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
+def persona_visible(conn: psycopg.Connection, persona_id: UUID,
+                    clearance: str) -> bool:
+    """For an attended act's route: whether the caller may see the
+    persona (set_status's predicate)."""
+    return conn.execute(
+        f"SELECT 1 FROM collect.collection_account a "
+        f"WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}",
+        {"id": persona_id, "clearance": clearance}).fetchone() is not None

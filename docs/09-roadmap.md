@@ -46,5 +46,6 @@ had to exist before comms (7) captured message content it could leak.
 Deliberately unscheduled, in no order: link prediction and stylometry
 (hypotheses only), a disclosure-pack generator, STIX and MISP export,
 cross-case pivoting that respects compartments, blockchain analytics,
-translation for non-English sources, a mobile read-only view, CONCOR
-blockmodelling, change-point detection on network structure.
+translation for non-English sources, a mobile read-only view,
+change-point detection on network structure. (CONCOR blockmodelling left
+this list when it was built on 2026-09-24.)

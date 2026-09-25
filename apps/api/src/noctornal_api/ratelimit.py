@@ -664,6 +664,151 @@ LIMITS: dict[str, Limit] = {
         "sample.download", quota=120, per_seconds=300, scope=Scope.IP,
         burst=30, on_backend_failure=OnBackendFailure.DENY,
     ),
+    # F2 (2026-09-24). A read with venues projected to entities
+    # re-projects AND transforms: up to about 0.6 s of CPU and 52 MB at
+    # affiliation.MAX_DERIVED_TIES on the measuring host, where a plain read
+    # costs what GET /graph costs. So every one-mode analysis route spends
+    # this BESIDE its own meter (a plain read is charged exactly as before),
+    # and it fails closed with the other cost-bearing limits. Opening the
+    # pane with venues projected spends up to three (the stored suite, key
+    # player and roles); the pane checks currency with one batched call and
+    # at most once in 30 seconds while venues are projected, so background
+    # checks cannot empty the budget an explicit Run needs.
+    "analytics.one_mode": Limit(
+        "analytics.one_mode", quota=60, per_seconds=300, scope=Scope.USER,
+        burst=20, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F1 (2026-09-24). CONCOR positions: 0.6 to 0.7 s typical at 1,000
+    # entities with ties on the first measuring host, 1.7 s worst with
+    # every split at the 50-round cap, 120 MB; the build host measured 1.1
+    # to 1.2 s and a 154 MB peak at 1,000 with memory tracing on. BLAS is
+    # capped to one thread per process (blockmodel.py). Its own bucket,
+    # like key player, so the Roles card cannot spend the suite's.
+    "analytics.concor": Limit(
+        "analytics.concor", quota=10, per_seconds=300, scope=Scope.USER,
+        burst=4, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F11 and F12, 2026-09-24. Running static triage on demand
+    # decrypts a live sample and starts child processes, so it is a
+    # deliberate act on one sample, not something to loop. Similarity
+    # scores candidates in Python and a value search is a probe of what the
+    # lab holds, so it is tighter than search. Rule set writes are rare
+    # governance acts; the file view decompresses stored rule source.
+    "sample.triage": Limit(
+        "sample.triage", quota=12, per_seconds=300, scope=Scope.USER,
+        burst=4, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    "sample.similar": Limit(
+        "sample.similar", quota=30, per_seconds=60, scope=Scope.USER,
+        burst=10, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    "yara.ruleset": Limit(
+        "yara.ruleset", quota=20, per_seconds=3600, scope=Scope.USER,
+        burst=5, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    "yara.source": Limit(
+        "yara.source", quota=60, per_seconds=300, scope=Scope.USER,
+        burst=10, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # The collection foundation (2026-09-24). Creating a source, a persona
+    # or a binding: configuration of what the collector reads and as whom, set
+    # for standing a unit's collection up in one sitting, and closed when
+    # the backend cannot count.
+    "collection.config": Limit(
+        "collection.config", quota=60, per_seconds=3600, scope=Scope.USER,
+        burst=20, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # Collection authorities (docs/00 decision 69, 2026-09-24). Recording,
+    # extending, confirming and stopping a collection authority: each is a
+    # two-person act an officer reads.
+    "collection.authority": Limit(
+        "collection.authority", quota=30, per_seconds=3600, scope=Scope.USER,
+        burst=10, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # S2, the egress proxy (2026-09-24). Every write to the egress
+    # configuration and the dry-run check. Configuration is where a boundary
+    # is quietly widened, and each write is step-up and audited; an
+    # administrator setting up routes makes tens of changes, never hundreds.
+    # DENY on backend failure with the other security-sensitive limits.
+    "admin.egress": Limit(
+        "admin.egress", quota=60, per_seconds=3600, scope=Scope.USER,
+        burst=20, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # Comms F10c (2026-09-24). A Web Key Directory lookup request and
+    # its approval: each approval sends a request outside this deployment,
+    # so the meter fails closed, and twenty an hour is far above any
+    # investigation's need.
+    "comms.key.lookup": Limit(
+        "comms.key.lookup", quota=20, per_seconds=3600, scope=Scope.USER,
+        burst=5, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F6.3 (embeddings, 2026-09-24). Every MEANING send the API makes
+    # (a free-text query in any column, and embedding a stored item on
+    # demand for a /similar call) spends one, BESIDE the 'search' meter every
+    # similarity route spends: a similarity crawl walking the corpus outward
+    # from one seed is a search exfiltration that also discloses to the
+    # model endpoint. Fails closed.
+    "search.meaning": Limit(
+        "search.meaning", quota=60, per_seconds=60, scope=Scope.USER, burst=20,
+        on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # The console's "run a pass now" (Administration, Embeddings). A
+    # pass of up to 2,000 items, bounded to 20 seconds.
+    "embedding.pass": Limit(
+        "embedding.pass", quota=30, per_seconds=3600, scope=Scope.USER, burst=5,
+        on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F8 and F7 (2026-09-24). Requeue, Drain now and every Jira or
+    # provider configuration write: each can send real mail or real case
+    # material out, so they fail closed.
+    "integration.write": Limit(
+        "integration.write", quota=60, per_seconds=3600, scope=Scope.USER,
+        burst=20, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F7 Test and the F15.3 provider test reach a live third party.
+    "integration.test": Limit(
+        "integration.test", quota=20, per_seconds=3600, scope=Scope.USER,
+        burst=5, on_backend_failure=OnBackendFailure.DENY,
+        audit_every_seconds=60,
+    ),
+    # F15.3 (2026-09-24). A lookup, a sign-off and a batch commit each
+    # may send a case selector to a provider.
+    "lookup.request": Limit(
+        "lookup.request", quota=120, per_seconds=3600, scope=Scope.USER,
+        burst=20, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F15.4. A plan resolves up to 501 subjects and runs every gate on
+    # each without sending, so it is metered as the read it is.
+    "lookup.plan": Limit(
+        "lookup.plan", quota=30, per_seconds=3600, scope=Scope.USER,
+        burst=10, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F13 and F14, 2026-09-24. A list import parses, copies and indexes
+    # a file and then screens every held sample; a pass started from the
+    # console runs up to 20 seconds of database work. Both are rare
+    # governance acts. A detonation request, sign-off or cancel decides
+    # whether a live sample leaves for a sandbox, so it is never looped.
+    "screening.import": Limit(
+        "screening.import", quota=10, per_seconds=3600, scope=Scope.USER,
+        burst=3, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    "screening.rescan": Limit(
+        "screening.rescan", quota=6, per_seconds=3600, scope=Scope.USER,
+        burst=2, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    "sample.detonate": Limit(
+        "sample.detonate", quota=20, per_seconds=3600, scope=Scope.USER,
+        burst=5, on_backend_failure=OnBackendFailure.DENY,
+    ),
+    # F5.2 and F5.3 (telegram, 2026-09-24). Every attended act a
+    # persona performs on Telegram (looking a chat up, joining, checking
+    # membership, rebinding): each is seen by Telegram as that account, and
+    # a burst of them is what its anti-abuse systems ban. Stopping a chat
+    # carries none of this: stopping is always allowed.
+    "collection.persona_act": Limit(
+        "collection.persona_act", quota=20, per_seconds=3600, scope=Scope.USER,
+        burst=5, on_backend_failure=OnBackendFailure.DENY,
+    ),
 }
 
 

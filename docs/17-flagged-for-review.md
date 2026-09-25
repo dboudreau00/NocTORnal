@@ -33,18 +33,93 @@ is the section to act on first.**
 | **Contact-block attributions from Russian-language forums** parsed before `8595602` | `comms.contact_block_entry` where `role = 'SELF'` | The third-party label defence was ASCII-only, so `Гарант:` (guarantor) and `Эскроу:` (escrow) were read as the vendor's own. Any proposal raised from one is a misattribution of a forum service to a vendor. | Re-parse the affected blocks. `parser_version` on `comms.contact_block` identifies them. |
 | **Durable values for Discord, ICQ, Signal, Wire, Wickr** written before `8595602` | `comms.channel_binding.durable_value` | Discord and ICQ handles without digits normalised to the empty string, which collides with every other such handle. Signal and Wire promoted phone numbers and handles their own platform seed says are not durable. | Repaired by migration 0038, recomputed from `observed_value`. Verify 0038 ran. |
 | **Tox and Matrix durable values** written before commit `74a055d` | `comms.channel_binding.durable_value` | Repaired by migration 0036, which recomputes from `observed_value`. | Verify 0036 ran. |
+| **`KEY_MISMATCH` verifications** recorded before 2026-09-24 (F10a) | `comms.pgp_verification` where `outcome = 'KEY_MISMATCH'` and the last field of the stored `VALIDSIG` status line equals `claimed_fingerprint` | The parser compared the claim with the key that made the signature, which is a subkey whenever the vendor signs with one, so a genuine signature by the published key's subkey was recorded as a mismatch. It failed safe; the reading was false. | Verify each again. Do not edit the rows: the ledger refuses it. |
+| **`CONFIRMED` bindings** upgraded before migration 0089 (F10b) | `SELECT cb.id FROM comms.channel_binding cb JOIN comms.pgp_verification v ON v.channel_binding_id = cb.id AND v.outcome = 'VERIFIED' AND v.attribution IS NULL WHERE cb.verification = 'CONFIRMED'` | Nothing tied the signing key to the binding's holder, so a guarantor's signed vouch could confirm a vendor's binding. | Verify each again, citing the contact block that ties the key to the holder. |
+| **Verifications made with a gpg below the floor** (F10a, 2026-09-24) | `comms.pgp_verification.verifier_version` below 2.4.9 (2.4 series), 2.5.14, or 2.2.51, or any 2.3 | Those builds carry CVE-2025-68973 (the armour parser) or CVE-2022-34903 (status-line forgery); a distribution build may carry the fixes under an older number. | Confirm the build that made each, or verify again with a current one. Every production verification is `NO_VERIFIER` until the image installs gnupg. |
+| **Records written under older rules** (L1 and L2, 2026-09-24) | Triage claims accepted before Alpha 6 with no `observed_at`; ATTRIBUTE claims readable below the material they came from, or attached across cases; captured documents cited by cases that share no compartment, which migration 0071 could not label | Each was written under a rule this release tightened, and nothing can recompute what was never recorded: an observation date, or the lock every citing case's readers hold. They are counted by the readiness rows `triage_claims_dated`, `triage_claims_within_labels` and `captured_documents_compartmented` | `python scripts/legacy_records.py` lists them per case. An analyst decides each: raise an entity, retract a claim, or file the capture again under the right case. Filling the dates waits on docs/00 open question 11 |
 | **Telegram ids recorded from a bare positive number** before 2026-09-11 | `core.selector` and `comms.channel_binding`, `TELEGRAM_ID` | A bare positive id was assumed to be a user (`u:`), so an MTProto channel observed as a bare number shares a row with a same-numbered user. The normaliser refuses a bare positive now, but nothing can recompute a type that was never observed. | `scripts/telegram_bare_ids.py` lists them per case. Confirm each against its source and re-record typed (`c:<id>`) where a channel is wearing a user's row. |
 
 ---
 
 ## 🔴 CHANGE LIKELY
 
-Nothing is open here as of 2026-09-22. The owner decided F2, F14, F16 and
-F24 that day, and F3 was reclassified as an accepted cost (it was never a
-defect: the register already refuses on it). Each decision, and what was
-built to hold it, is in the next section.
+Nothing the 2026-09-22 review found is open here. The owner decided F2,
+F14, F16 and F24 that day, and F3 was reclassified as an accepted cost (it
+was never a defect: the register already refuses on it). Each decision, and
+what was built to hold it, is in the next section. The entries below were
+added with the features since Alpha 6.
+
+### F35: A persona can be created on a profile that cannot carry persona traffic
+
+Added 2026-09-25 (roadmap F5.2). Creating a persona does not check that its
+egress profile is `persona_capable` (an exit other than this host's own,
+switched on, not retired). Nothing leaves through such a persona: the
+readiness register flags it and the egress proxy refuses every connection
+on it (`persona_needs_exit`, `no_exit`). The cost is a persona an operator
+believes is ready and is not. **Fix:** refuse it at creation, with the same
+sentence.
+
+### F36: A run's warning loses a typed Telegram id
+
+Added 2026-09-25 (roadmap F5.3). A warning a run stores about one item
+names the item by its id, passed through the credential redactor, and the
+redactor masks a namespaced id such as `c:123/45` as if it were a secret.
+The warning is kept and the id is not, so an analyst cannot tell from it
+which message it meant. **Fix:** exempt the typed id shapes, or redact the
+whole sentence and keep the id apart.
+
+### F37: gpg's own fingerprint display does not parse in a contact block
+
+Added 2026-09-24 (roadmap F10). The contact-block parser cuts a value at
+the first run of two spaces, and gpg prints a fingerprint with a double
+space in the middle, so a line copied from gpg keeps its first 20 hex
+characters and reads NOT_A_FINGERPRINT: it can neither confirm a key nor
+attribute a signature. Fingerprints written single-spaced or unspaced work.
+**Fix:** keep whole hex groups on `PGP_FPR` lines. That changes
+`block_fingerprint` for blocks parsed afterwards, so it needs a decision of
+its own.
 
 ---
+
+### F51: Fifteen tables are not under row-level security yet
+
+Added 2026-09-25 (roadmap S1). Row-level security stands on 66 tables
+(docs/00 decisions 137 to 151); these fifteen are listed in
+`rls_registry.DEFERRED`, each with the work it still needs, and on them a
+statement injected into a request reaches every row the request role can:
+
+- `audit.event`: about a hundred readers move first, the audit and custody
+  verification move to their system purpose, and the triage state is
+  copied onto a case-scoped row (decision 151).
+- `collect.telegram_chat`: a chat's duplicate check must see hidden chats,
+  the officers who confirm targets may sit below a source, and the
+  attended acts' updates need row-count checks.
+- `ingest.record`, `ingest.victim_credential`, `ingest.dead_letter` and
+  `ingest.pii_authorisation`: the unauthenticated submit, parse, replay and
+  rescore run as system purposes first, and the granting officer holds no
+  assignment.
+- `ingest.lookup`, `ingest.lookup_attempt`, `ingest.lookup_batch` and
+  `ingest.lookup_result`: the interactive request and sign-off store an
+  answer at the provider's label and raise proposals, which the request
+  role could not return for a requester below that label.
+- `notify.notification`, `notify.delivery`, `notify.case_route_block`,
+  `notify.jira_link` and `notify.jira_event`: a notice is written for
+  someone else and coalesced against their unread rows, inside the caller's
+  transaction, so it needs a definer enqueue function.
+
+**Fix:** convert each family's readers and move it into `POLICY`; the
+registry test and the readiness row follow by themselves.
+
+### F52: The schema owner's password still reaches the runtime services
+
+Added 2026-09-25 (roadmap S1). `POSTGRES_PASSWORD` and the migration
+connection string sit in `secrets.env`, which every application service
+reads, so a process that should hold only the request and system roles
+can also connect as the owner, which row security does not bind and which
+can switch off the append-only triggers. Moving them now would stop every
+existing production deployment at boot until the installers change.
+**Fix:** move both into `postgres-init.env` and a file only the migrate
+job reads, and change the installers with them.
 
 ## Decided by the owner, 2026-09-22
 
@@ -128,8 +203,10 @@ happened, and nobody re-granted them.
 **Found 2026-09-16,** by a CI failure on a commit that changed only
 documentation. `https://dl.min.io` answers 410 Gone: the open-source MinIO
 server, client and KES are archived, unmaintained, and outside security
-support, with vulnerability reports not accepted. quay.io still serves the
-last community builds, and the CI step and both compose files pin those.
+support, with vulnerability reports not accepted. quay.io served the last
+community builds until 2026-09-25; the CI step and both compose files now
+pin the same builds, mirrored byte for byte to this project's GHCR
+namespace, for linux/amd64 only: an ARM host cannot pull them.
 
 **Decided: stay on the pinned build, with the risk accepted in writing** (by
 the owner, 2026-09-22, recorded here). The exposure is bounded by the store
@@ -288,6 +365,122 @@ which stops the cookie travelling on a cross-site upgrade, and an explicit
 scoped to the registrable domain, so a subdomain this deployment does not
 control is inside it, and the `Origin` check is what stands there alone.
 
+### F32: Key lookups take two people and lapse after 24 hours (F10c, 2026-09-24)
+
+A Web Key Directory lookup is asked for by a Lead investigator or a
+Collector and approved and sent by a Lead investigator or a Reviewer who
+is not the person who asked. A request lapses after 24 hours (the schema
+allows up to 72). Only the hash leaves (no `?l=` parameter, so a directory
+that looks keys up by that parameter answers 404), no redirect is followed
+and no User-Agent is sent. A key found this way is not confirmed until a
+person compares its fingerprint with a published one. **Confirm** the
+roles, the lapse and the parameter choice for your deployment.
+
+### F25: Exposure levels other than NONE are the operator's word
+
+Added 2026-09-24 (roadmap F15). A lookup provider's exposure (NONE, VENDOR,
+PUBLIC) decides whether a lookup needs a colleague's sign-off and which
+labels may leave. The build checks NONE as far as the first hop: its route
+must name a private network and a direct send refuses an answer from
+outside it. It cannot check VENDOR or PUBLIC at all: the level is what an
+administrator wrote, with a basis, and a second administrator approved.
+
+**Confirm the judgement:** that a written basis and two administrators are
+enough for a claim the software cannot test, for each provider you
+register. docs/16 D9.
+
+### F26: Quota is counted locally and drifts when a key is shared
+
+Each provider's quota is counted from this deployment's own attempt rows,
+exactly, in calendar windows. A key also used by another tool, or by a
+person in a browser, spends the vendor's quota without this build seeing
+it, and the vendor's 429 is then the first sign. The provider cools down
+for what the vendor asked, and a refused key locks the provider.
+
+**Confirm the judgement:** that a key registered here is used by nothing
+else, or that the quota you enter leaves room for whatever else uses it.
+
+### F29: Eight platforms in the comms catalogue name selector types the ontology does not have
+
+Found 2026-09-24 (roadmap F5.4). `comms.platform.durable_selector_type`
+was seeded by 0034 with nine type keys the ontology does not define, in
+fourteen rows. TELEGRAM was corrected to TELEGRAM_ID (migration
+comms_platform_telegram_type). The other eight are on screen in the Comms
+pane and affect display only: normalisation reads
+`comms.PLATFORM_SELECTOR_TYPE`, which holds the right keys. Seven map to an
+ontology key (TOX_PUBKEY to TOX_PK, JID to JABBER, MXID to MATRIX_MXID,
+BRIAR_PUBKEY to BRIAR_LINK, DISCORD_SNOWFLAKE to DISCORD_ID, ICQ_UIN to
+ICQ, SKYPE_NAME to SKYPE_ID); WICKR_ID has no ontology type and needs one
+first. A follow-up foreign key from the column to `core.selector_type(key)`
+would stop a ninth.
+
+**Confirm the judgement:** the seven mappings, and whether Wickr gets a
+selector type or its platform row loses its durable type.
+
+### F30: No route or script sweeps collected documents
+
+Recorded 2026-09-24 (roadmap F5.3). Telegram documents carry the
+CHAT_EXPORT retention clock, and the purge honours every legal hold on a
+document and on every case that cites it, but only
+`RetentionService.purge_due(case_id=None)` sweeps collected documents: the
+governance purge route is case-scoped and skips them, and no script calls
+the sweep. So a group chat's third-party messages outlive their clock until
+somebody decides how a deployment-wide document sweep is run, by whom, and
+under which authority (docs/16 L4).
+
+**Confirm the judgement:** that holding them past their clock until that
+decision is acceptable, or decide the sweep.
+
+### F38: A logout needs no authority, so the client key opens a few small persona tunnels
+
+Added 2026-09-24 (S2, the egress proxy). A stop (a logout) is always
+allowed, for a persona whose authority was revoked or which is burnt as
+much as any other, because refusing it would leave a session open on the
+platform. So whoever holds the client key can open four stop tunnels an
+hour per persona, each at most 256 KiB and 60 seconds, to that persona's
+own sites or its profile's networks, with no authority behind them. The
+ledger shows each with a Stop chip.
+
+**Confirm the judgement:** that this budget is small enough to leave
+unsupervised, against a logout that sometimes cannot happen at all.
+
+### F39: The second person on a case's merge switch has no seasoning rule
+
+Added 2026-09-24 (roadmap F9b). Turning a case's merge switch off takes a
+second holder of `case.update` on the case, as every case two-person
+control has since 0028. An account holding SYS_ADMIN and CASE_OWNER can
+therefore create a second Lead investigator, assign it to the case, and
+approve its own relax at once. The seven-day rule that protects the
+deployment-wide policy (docs/00 decision 92) is not applied here.
+
+**Confirm the judgement,** or decide docs/00 open question 12: applying
+that rule at the switch, and at node merges, changes behaviour analysts
+have already been reviewed on.
+
+### F40: The screening match list counts across compartments
+
+Added 2026-09-24 (roadmap F13). The Security Officer's match list is
+label-free on purpose (docs/00 decision 126): an officer must see every
+match. The full record opens only within the officer's ceiling, but the
+section's status counts include matches in compartments the officer is not
+read into, and readiness says only whether matched bytes are waiting,
+never how many.
+
+**Confirm the judgement:** that the officer may know how many matches
+exist in compartments they cannot open.
+
+### F41: The object stores are reached outside the egress routes
+
+Added 2026-09-24 (S2). The evidence, raw, collected-markup and sample
+buckets are reached by their own clients on the internal network, not
+through `route_for`, because they are part of the deployment rather than
+outside it. An object store on another host (an off-host `MINIO_ENDPOINT`)
+therefore has no route: in the production topology the application network
+cannot reach it at all.
+
+**Confirm the judgement:** that the object store stays on the deployment's
+own network, or decide how an off-host store is reached and recorded.
+
 ---
 
 ## 🔵 ACCEPTED COST
@@ -314,7 +507,10 @@ output. If gpg is absent the outcome is `NO_VERIFIER` and nothing is
 confirmed: there is no path where a missing verifier produces a confirmation.
 The cost is an external binary in the trust chain and a version-dependent
 status format. The version is recorded on every verification row, so rows made
-with a defective build can be found later.
+with a defective build can be found later. Since 2026-09-24 (F10a) a build
+below the floor counts as no verifier, gpg never starts an agent
+(`--no-autostart`), and every key and detached signature is walked for
+OpenPGP framing before gpg sees it, which refuses secret key material outright.
 
 ### F10: Machines propose and never write the graph
 
@@ -337,6 +533,15 @@ combinatorial cost, and a 5,000-member channel still yields 12.5M near-zero
 pairs. The cap is real data loss, so every excluded room is reported with both
 its true size and how many participants were projectable. A cap that drops
 data silently is worse than no cap, because the output looks complete.
+
+The Analysis pane's forum and wallet projection (2026-09-24,
+`affiliation.py`) follows both rules, with one caveat worth flagging: a
+case records only its own posters and controllers, so a venue's size in the
+case graph is a lower bound (raised by an analyst-recorded member count
+where one exists), and every Newman weight drawn from it is an upper bound.
+Every payload says so. Sizes are taken from every membership the caller can
+see before any filter, so the accepted-ties scope or a confidence floor
+never shrinks a venue under its cap.
 
 ### F13: CI has no typecheck
 
@@ -367,6 +572,134 @@ places, on the very process the split exists to keep sessions away from. And
 nothing sweeps spent ticket rows yet, though the partial index the sweep wants
 exists.
 
+### F27: No lookup adapter has been verified against its live service
+
+Added 2026-09-24 (roadmap F15). The VirusTotal v3, Shodan host and MISP
+restSearch adapters were written from vendor documentation and tested
+against recorded answers only. Each says `live_verified` false, and the
+Providers card and the readiness row say so. A vendor answer the adapter
+cannot read becomes an UNREADABLE answer with the raw bytes kept, never a
+guess. **The cost:** the first live use may find a field that moved.
+
+**A second cost, of the personal-data refusal:** a JABBER address is shaped
+like an email address and cannot be told apart from one, so JABBER
+selectors are refused with personal data toward every provider.
+
+### F31: The Telegram adapter has never met Telegram
+
+Recorded 2026-09-24 (roadmap F5.2 and F5.3). Every Telegram test runs
+against a fake transport, and the SOCKS5 path through Telethon is tested
+against the egress contract's stub proxy on loopback, whose dial to a data
+centre the test refuses. Enrolment, a poll, a join and a logout have not
+been run against Telegram through the real egress proxy, and no test yet
+runs a persona's run, act and stop contexts through the real listener. Telethon 1.x is maintained by one
+author, and pyaes, which it uses for AES-IGE, has had no release since
+2017: a flaw in either lands on the host that holds every persona's
+session. The DC network list is Telegram's published one of 2026-09-24,
+and a new range fails closed until it is updated.
+
+### F28: A webhook signature carries no timestamp and no replay window
+
+Added 2026-09-25 (roadmap F8). The webhook is signed with HMAC-SHA256 over
+the exact body (`X-NocTORnal-Signature: sha256=<hex>`), and the body names
+its notification, but the signed string holds no time. A receiver cannot
+tell a delivery captured and posted again from the first one, except by
+remembering the notification ids it has seen. Putting a timestamp into the
+signed string changes what every existing receiver verifies, so it waits
+for a versioned signature scheme that a receiver can opt into.
+
+**The cost:** a receiver that does not de-duplicate on `notification_id`
+can be made to act twice on one notification by anyone who captured it,
+which TLS to the receiver makes unlikely but does not rule out.
+
+### F42: Parse and analysis children are bounded, not isolated
+
+Added 2026-09-24 (roadmap F3, F4 and F11). Hostile bytes are parsed in
+child processes: each static-triage step, and every forum page (lexbor's
+tree builder is quadratic on markup a hostile board can serve). A child
+starts without the deployment's secrets and is bounded by a wall clock
+everywhere, and by rlimits on CPU, memory and file writes on Linux. It is
+not isolated: on Linux it can read the environment of other processes
+running as the same user, which hold those secrets, and it shares its
+container's network with the database. `RLIMIT_FSIZE=0` stops writes but
+still lets a child create an empty file, and on Windows development hosts
+the wall clock is the only bound. The readiness row
+`sample_static_analysis` reports both facts on the host it runs on.
+
+**The cost:** a parser exploit in a hostile sample or page is a compromise
+of the deployment. A separate container with no secrets and no network is
+the remedy, and is a deployment change not made (docs/16 L1).
+
+### F43: Collected documents carry no compartments unless captured
+
+Added 2026-09-24. A document an adapter collects (a feed item, a forum
+post, a Telegram message) is labelled by its source and carries no
+compartments, because a source cannot carry them yet; only a capture into a
+compartmented case does (docs/00 decision 78). Compartmented and
+above-ceiling work is collected by hand, through capture.
+
+**The cost:** a unit that needs a forum read under a compartment has to
+capture it rather than poll it.
+
+### F44: A retention rule confirmed later does not reach documents collected before it
+
+Added 2026-09-24. A collected document's clock is set when it is stored,
+from the category rule in force then. No FORUM_POST or FORUM_MEMBER rule is
+seeded, so forum documents collected before an operator confirms one stay
+unclocked, and a rule confirmed later reaches only what is collected after
+it. Readiness says so while no forum rule exists. Setting clocks on
+documents already held is a destruction decision, and is not made by a
+migration.
+
+### F45: There is no source-wide legal hold
+
+Added 2026-09-24. A hold is placed on a document, with every earlier
+version, or on a case, which holds every document it cites. Nothing holds
+everything a source has collected in one act.
+
+### F46: A raw markup object can be left unreferenced
+
+Added 2026-09-24. Raw markup is written to its bucket before the document
+row that names it. When storing the row fails and the compensating delete
+of the object fails too, the object stays in the bucket with nothing
+naming it, outside every retention clock and hold.
+
+**The cost:** rare, and found only by listing the bucket against
+`collect.document`.
+
+### F47: Watches match neither forum signatures nor Telegram chats
+
+Added 2026-09-25 (roadmap F3 to F5). A post's signature is kept beside it,
+not in its text, so a watch on a contact address does not fire on a
+signature that carries it. A watch cannot target a Telegram chat as such
+(its target kinds do not include one), though it matches the text of the
+messages collected there.
+
+### F48: One post read by a board source and a thread source is stored twice
+
+Added 2026-09-25 (roadmap F3, F4). Deduplication is per source, so the same
+post collected through a board and through a thread of that board is two
+documents. The per-forum lock keeps the request rate right; the analyst sees
+the post twice.
+
+### F49: What the forum parsers do not read
+
+Added 2026-09-25 (roadmap F3, F4). An empty MyBB board is recognised only by
+its English "no threads in this forum" text, so an empty board in another
+language reads as parser drift. XenForo reactions give only the names the
+reaction bar shows, and its "and N others" count is read in English only.
+MyBB reactions are not parsed. Many boards require sign-in for member
+profiles, and those pages are skipped with a warning. An ambiguous MyBB time
+inside a daylight-saving change is taken as its first occurrence.
+
+### F50: That a claim is not in a similarity index stays visible
+
+Added 2026-09-25 (roadmap F6). A claim's similarity reason is told only as
+its reader may know it: the stored reason when the reader can read
+everything the claim cites, and otherwise what their own readable facts
+give, or that it cannot be compared. Whether a claim is in an index at all
+is still visible, because the claim gate includes the material it cites.
+
 ---
 
 ## Deferred security items
@@ -376,8 +709,7 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 | Item | Consequence today |
 |---|---|
 | Session binding enforcement | Every session records the address and client it was minted from (0058) and `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a mismatch with an audit row. The production compose sets it; it is off by default everywhere else, so until an operator sets it a stolen token is portable |
-| RLS under the non-owner role | The production deployment connects as `noctornal_app`, which is not the table owner and cannot disable the append-only triggers. Row-level security on top of that is not written, so a SQL injection inside a request still reaches every row the API can |
-| SSRF through an egress proxy | `collection.fetch()` resolves each hop's name once, refuses the hop if any answer is internal and connects to the address it checked, so DNS rebinding is closed (below). It consults no proxy setting, because a forward proxy resolves the name again. Persona traffic through its egress profile (docs/04) is not built; when it is, that proxy has to enforce the same policy at its own connect |
+| Row-level security on fifteen tables | Row-level security stands on 66 tables (docs/00 decisions 137 to 151). Fifteen are not under it yet (F51); on those, a statement injected into a request still reaches every row the request role can |
 | WebAuthn | TOTP only. A deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding |
 
 ---
@@ -390,6 +722,9 @@ behind each closure is in `release/CHANGELOG.md` under its date.
 
 | | What it was | Closed |
 |---|---|---|
+| **F33** | The production compose file did not run the similarity pass, although readiness said to start one | 2026-09-25: an `embed-pass` service runs it in a loop of its own |
+| **F34** | The production image carried no gpg, so every PGP check recorded NO_VERIFIER | 2026-09-25: the image installs the distribution's gnupg; a deployment attests it with `NOCTORNAL_GPG_PATCHED_AS` after checking its changelog, as CI does |
+| **SSRF through an egress proxy** | Persona traffic had no egress proxy, and a forward proxy resolves a name again, so the collector could not simply consult one | 2026-09-24: the egress proxy is built and is the only way out of production (docs/00 decision 68, docs/20). It resolves each name once and dials only the admitted answers, with the same `egress_policy` functions the pinned client applies in development, and a chained exit receives the name, never an address this platform resolved |
 | **SSRF rebinding** | `collection.fetch()` checked one DNS answer and connected with another, so a name answering public and then internal reached the internal address | 2026-09-23: each hop's name is resolved once and the socket goes to the address that was checked, while `Host`, TLS SNI and the certificate check stay on the name. `test_collection_ssrf_rebinding.py` proves it against a resolver that answers public, then internal |
 | **F2** | `REJECTED` samples were destroyed by default | 2026-09-22, decided by the owner: preserved under a legal hold in their own object-locked store, two people to retrieve, destroyed only by declaration and never under a hold (section above) |
 | **F14** | Which roles may invoke break-glass was a guess | 2026-09-22, decided by the owner: invoke with CASE_OWNER and SYS_ADMIN, review with SECURITY_OFFICER only; migration 0062 keeps the two apart |

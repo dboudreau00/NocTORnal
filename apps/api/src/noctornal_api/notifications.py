@@ -191,17 +191,78 @@ KINDS: dict[str, Kind] = {
     "ESCALATION": Kind(
         "ESCALATION", URGENT,
         "An urgent notification went unacknowledged and was escalated to you"),
+    # Collection personas (docs/00 decision 69, 2026-09-24). A platform
+    # refused a persona's credential, so collection through it is paused.
+    # NORMAL: work for a collection manager, not an alarm. Raised by
+    # notify_events.persona_suspended.
+    "PERSONA_SUSPENDED": Kind(
+        "PERSONA_SUSPENDED", NORMAL,
+        "A collection persona was suspended by its platform"),
+    # Collection personas (2026-09-24). One persona credential in use from
+    # two places at once is how a copied credential shows itself: URGENT, to
+    # the security officers, naming no handle.
+    "PERSONA_CREDENTIAL_ALERT": Kind(
+        "PERSONA_CREDENTIAL_ALERT", URGENT,
+        "A collection persona's credential may have been copied"),
+    # Collection authorities (docs/00 decision 69, 2026-09-24). Nothing is
+    # read under a collection authority until a second person confirms it,
+    # so an unconfirmed one nobody is told about is collection that silently
+    # never starts.
+    "COLLECTION_AUTHORITY_PENDING": Kind(
+        "COLLECTION_AUTHORITY_PENDING", NORMAL,
+        "A collection authority waits for your confirmation"),
+    # Lookups, F15.2 and F15.3 (2026-09-24). Lowering a lookup
+    # provider's exposure takes a second administrator, and a lookup that
+    # sends case material to a vendor or the public takes a named second
+    # person's sign-off (docs/00 decision 75); nobody is told otherwise. None
+    # is ever routed to Jira (jira.JIRA_NEVER_KINDS).
+    "PROVIDER_CHANGE_REQUESTED": Kind(
+        "PROVIDER_CHANGE_REQUESTED", NORMAL,
+        "An administrator asks you to approve lowering a lookup provider's exposure"),
+    "LOOKUP_SIGNOFF_REQUESTED": Kind(
+        "LOOKUP_SIGNOFF_REQUESTED", NORMAL,
+        "A colleague asks you to sign off a lookup that sends case material out"),
+    "LOOKUP_SIGNOFF_DECIDED": Kind(
+        "LOOKUP_SIGNOFF_DECIDED", NORMAL,
+        "Your lookup was signed off, declined, refused or lapsed"),
+    # Screening (F13, 2026-09-24). A sample matched a prohibited-content
+    # hash list: the Security Officers and the designated person,
+    # content-free, GREEN and caseless like the break-glass alert, coalesced
+    # to one open alert per recipient per hour.
+    "SAMPLE_SCREENING_MATCH": Kind(
+        "SAMPLE_SCREENING_MATCH", URGENT,
+        "A sample matched a prohibited-content hash list"),
+    # Screening (F13): the case owner, at the sample's own labels.
+    "SAMPLE_WITHDRAWN": Kind(
+        "SAMPLE_WITHDRAWN", NORMAL,
+        "A sample attached to your case was withdrawn by screening"),
+    # The sandbox sign-off and its result (F14, 2026-09-24).
+    "DETONATION_SIGNOFF_REQUESTED": Kind(
+        "DETONATION_SIGNOFF_REQUESTED", NORMAL,
+        "A detonation needs your sign-off"),
+    "DETONATION_SIGNOFF_DECIDED": Kind(
+        "DETONATION_SIGNOFF_DECIDED", NORMAL,
+        "Your detonation request was signed off or declined"),
+    "SANDBOX_RESULT": Kind(
+        "SANDBOX_RESULT", NORMAL, "A sandbox run you requested ended"),
 }
 
 # Channel defaults when a user has no preference row. IN_APP takes
 # everything; email only takes what would justify an interruption. A new
 # user who has never opened the settings page still gets the urgent things.
+#
+# JIRA takes LOW (F7, 2026-09-24): the destination's routed kinds are
+# the real filter, and a work item is not an interruption.
 _DEFAULTS = {
     IN_APP: {"enabled": True, "min_priority": LOW, "digest": False},
     SMTP: {"enabled": True, "min_priority": NORMAL, "digest": False},
     WEBHOOK: {"enabled": False, "min_priority": URGENT, "digest": False},
-    JIRA: {"enabled": False, "min_priority": URGENT, "digest": False},
+    JIRA: {"enabled": False, "min_priority": LOW, "digest": False},
 }
+
+#: Channels whose every enable and disable is audited (F8 H): the ones
+#: that leave the building.
+OUTBOUND_CHANNELS = (SMTP, WEBHOOK, JIRA)
 
 
 @dataclass(frozen=True)
@@ -251,8 +312,14 @@ class NotificationService:
                priority: int | None = None,
                element_classification: str | None = None,
                element_compartments: frozenset[str] = frozenset(),
+               event_id: UUID | None = None,
                ) -> Notification | None:
         """Raise one notification and queue its deliveries.
+
+        `event_id` groups the rows one event fans out to (F8, 2026-09-24):
+        a caller notifying several people about ONE thing passes one id,
+        and Jira then posts that event once however many recipients it
+        reaches. Left out, every call is its own event.
 
         `classification` / `compartments` are the CASE's. When the
         notification is about a specific element that carries its own labels
@@ -308,12 +375,13 @@ class NotificationService:
             """INSERT INTO notify.notification
                    (recipient_id, case_id, kind, priority, subject, summary,
                     body, classification, compartments, object_type, object_id,
-                    actor_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    actor_id, event_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       coalesce(%s, gen_random_uuid()))
                RETURNING """ + _COLUMNS,
             (recipient_id, case_id, kind, priority or spec.default_priority,
              subject.strip(), summary.strip(), body, classification,
-             sorted(compartments), object_type, object_id, actor_id),
+             sorted(compartments), object_type, object_id, actor_id, event_id),
         ).fetchone()
         record = _record(row)
         self._queue_deliveries(record)
@@ -482,7 +550,27 @@ class NotificationService:
         # which already promised that editing an already-enabled channel is
         # not the moment to discover the URL was unset.
         if fields.get("enabled") is True and not current.enabled:
-            _require_transport(channel)
+            _require_transport(channel, self._c)
+        if channel == JIRA:
+            # F7 (2026-09-24). On the PAYLOAD, never the merged row:
+            # the console used to save every field of every channel, so a
+            # JIRA row stored earlier with a digest or a window must still
+            # be enableable.
+            if fields.get("address") is not None:
+                raise NotificationError(
+                    "Jira issues go to the project an administrator configured. "
+                    "There is no personal Jira address.")
+            if fields.get("digest") is True or fields.get("quiet_from") is not None \
+                    or fields.get("quiet_to") is not None:
+                raise NotificationError(
+                    "Jira issues are work items, not interruptions: quiet hours "
+                    "and the digest do not apply to them.")
+            if fields.get("enabled") is True:
+                # Enabling writes what Jira takes: no digest, no window, and
+                # every priority, so a row stored with the old "urgent only"
+                # default does not silently filter every routed kind.
+                fields.update(digest=False, quiet_from=None, quiet_to=None,
+                              min_priority=LOW)
         if "address" in fields and fields["address"] != current.address:
             self._check_address(user_id, channel, fields["address"],
                                 current.address)
@@ -516,6 +604,22 @@ class NotificationService:
             (user_id, channel, merged["enabled"], merged["min_priority"],
              merged["digest"], merged["quiet_from"], merged["quiet_to"],
              merged["timezone"], merged["address"]))
+        # F8 H (2026-09-24): switching an outbound channel on or off
+        # is audited, both ways. One analyst's opt-in widens the audience
+        # of every routed event on their cases (Jira above all), and a
+        # change of audience that left no trace is the gap the address
+        # audit below was written for.
+        if channel in OUTBOUND_CHANNELS and merged["enabled"] != current.enabled:
+            self._c.execute(
+                """INSERT INTO audit.event
+                       (actor_id, actor_kind, action, object_type, object_id,
+                        outcome, detail)
+                   VALUES (%s, 'USER', %s, 'app_user', %s, 'SUCCESS', %s)""",
+                (user_id,
+                 "NOTIFY_CHANNEL_ENABLED" if merged["enabled"]
+                 else "NOTIFY_CHANNEL_DISABLED", user_id,
+                 Json({"channel": channel, "from": current.enabled,
+                       "to": merged["enabled"]})))
         return self.preferences(user_id)[channel]
 
     def _check_address(self, user_id: UUID, channel: str,
@@ -641,29 +745,72 @@ class NotificationService:
             if not pref.enabled:
                 self._insert_delivery(
                     n.id, channel, SUPPRESSED, now,
-                    detail="channel disabled by the recipient")
+                    detail="channel disabled by the recipient",
+                    cause="RECIPIENT_DISABLED")
                 continue
             if n.priority > pref.min_priority:
                 self._insert_delivery(
                     n.id, channel, SUPPRESSED, now,
                     detail=f"priority {n.priority} is below the "
-                           f"recipient's threshold for {channel}")
+                           f"recipient's threshold for {channel}",
+                    cause="BELOW_THRESHOLD")
+                continue
+            if channel == JIRA:
+                self._queue_jira(n, now)
                 continue
             self._insert_delivery(
                 n.id, channel, PENDING, deliver_after(n.priority, pref, now))
 
+    def _queue_jira(self, n: Notification, now: datetime) -> None:
+        """Jira's queue-time rules (F7, 2026-09-24), after the
+        recipient's own two: a case-less notification is never routed
+        (policy countersignatures, officer escalations, screening alerts);
+        nothing goes while no destination is live; a kind nobody routed is
+        never routable (jira.JIRA_TASKS is an allowlist); a case its owner
+        keeps out stays out. Otherwise PENDING at the database's now():
+        quiet hours and the digest do not apply to a work item."""
+        from noctornal_api import jira  # jira imports transports, which imports this
+
+        if n.case_id is None:
+            self._insert_delivery(
+                n.id, JIRA, SUPPRESSED, now,
+                detail="Jira takes work items about a case, and this "
+                       "notification concerns none", cause="CASELESS")
+            return
+        routing = jira.routing(self._c)
+        if routing is None:
+            self._insert_delivery(n.id, JIRA, SUPPRESSED, now,
+                                  detail="no Jira destination is active",
+                                  cause="DESTINATION_OFF")
+            return
+        if not jira.routable(n.kind) or n.kind not in routing.kinds:
+            self._insert_delivery(
+                n.id, JIRA, SUPPRESSED, now,
+                detail=f"an administrator has not routed {n.kind} to Jira",
+                cause="KIND_NOT_ROUTED")
+            return
+        if jira.case_blocked(self._c, n.case_id):
+            self._insert_delivery(
+                n.id, JIRA, SUPPRESSED, now,
+                detail="the case owner keeps this case's notifications out of Jira",
+                cause="CASE_NOT_ROUTED")
+            return
+        self._insert_delivery(n.id, JIRA, PENDING, now)
+
     def _insert_delivery(self, notification_id: UUID, channel: str, state: str,
                          after: datetime, *, sent_at: datetime | None = None,
-                         detail: str | None = None) -> None:
+                         detail: str | None = None,
+                         cause: str | None = None) -> None:
         self._c.execute(
             """INSERT INTO notify.delivery
-                   (notification_id, channel, state, deliver_after, sent_at, detail)
-               VALUES (%s, %s, %s, %s, %s, %s)
+                   (notification_id, channel, state, deliver_after, sent_at,
+                    detail, cause)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (notification_id, channel) DO NOTHING""",
-            (notification_id, channel, state, after, sent_at, detail))
+            (notification_id, channel, state, after, sent_at, detail, cause))
 
 
-def _require_transport(channel: str) -> None:
+def _require_transport(channel: str, conn: psycopg.Connection | None = None) -> None:
     """Refuse to switch on a channel nothing can deliver to.
 
     N4 (2026-09-02). JIRA has no transport in this build at all, and
@@ -682,12 +829,20 @@ def _require_transport(channel: str) -> None:
     the URL was unset. Between N4 and 2026-09-02 the caller tested only
     `fields["enabled"] is True`, so this promise was made here and not kept
     there; see the comment at the call site.
+
+    JIRA (F7, 2026-09-24) has a transport now, and needs a live (ACTIVE
+    or PAUSED) destination: enabling it with none would queue deliveries
+    that are suppressed at queue time as DESTINATION_OFF, which is the
+    user being told nothing at the moment they ask.
     """
     if channel == JIRA:
-        raise NotificationError(
-            "JIRA cannot be enabled: no transport for it exists in this "
-            "build. Enabling it would queue deliveries that fail on every "
-            "drain and are recorded as failures.")
+        from noctornal_api import jira
+
+        if conn is None or jira.routing(conn) is None:
+            raise NotificationError(
+                "Jira cannot be enabled: no Jira destination is active. An "
+                "administrator sets one up in Administration, Integrations.")
+        return
     if channel == WEBHOOK and not os.environ.get("NOCTORNAL_WEBHOOK_URL"):
         raise NotificationError(
             "WEBHOOK cannot be enabled: NOCTORNAL_WEBHOOK_URL is not "

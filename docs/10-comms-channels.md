@@ -218,3 +218,43 @@ not *inactive*.
    only provenance class you will ever populate?
 4. Live monitoring of channels our personas sit in, or periodic export?
    Live is far more useful and far more operationally risky.
+
+## PGP: detached signatures, a key registry, attribution and key lookups (2026-09-24)
+
+**Detached signatures (F10a).** A check is CLEARSIGNED (as before) or
+DETACHED: a signature file beside the data it signs. The data is best
+uploaded as the file itself; a pasted copy can lose Windows line endings,
+and a signature over the file's exact bytes (class 00) then fails, which
+the check says rather than reading it as forged. A text-mode signature
+(class 01) is over canonical text and survives the change. The digest on a
+VERIFIED detached row is of the data as supplied, before gpg's line-ending
+canonicalisation. Exactly one signature packet over a document is accepted;
+a signature followed by data of its own, or a signed message offered in the
+detached slot, is refused before gpg runs. A signature made by a signing
+subkey confirms a claim of the published primary, and both fingerprints
+are on the row.
+
+**The key registry (F10b).** A vendor key is added to the case by paste or
+file with where it was obtained. It is filed at the floor of what it
+cites. Nothing is confirmed when it is added: a person compares its
+fingerprint with a published one, a contact block's PGP line or a
+publication named by reference, and the comparison is recorded with their
+name. A key ID, a subkey's fingerprint or a different fingerprint is
+refused with its reason. A confirmed key can then stand behind a check
+(basis CONFIRMED_KEY) instead of a key pasted for one check (basis STATED).
+
+**Attribution (F10b).** A binding is confirmed only when a cited contact
+block lists the signing key's fingerprint as its publisher's own and ties
+that publisher to the binding: the same block lists the identifier as its
+own (SAME_BLOCK), or the block's publisher is the binding's identity
+(SAME_IDENTITY), and the two are never different entities. Otherwise the
+check is UNATTRIBUTED: a good signature by the claimed key over text
+naming the identifier, with the link to the holder missing. A key
+confirmed against a publication elsewhere needs that publication recorded
+as a contact block before it can confirm a binding. Labels run block <=
+key <= binding.
+
+**Key lookups (F10c).** A Web Key Directory lookup is off by default,
+asked for by one person, approved and sent by another, through the
+integration route `wkd` only, to a directory an administrator listed on
+it. See docs/16 C14 and L5.

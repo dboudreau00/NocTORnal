@@ -1,0 +1,17 @@
+{
+  "note": "Three stored messages rechecked: 1 was edited, 2 was deleted, 3 is unchanged.",
+  "me": "u:700000001",
+  "chat": {"peer_type": "CHANNEL", "peer_id": 1300000005, "access_hash": 5550005,
+           "username": "editednews", "title": "Edited News", "is_member": false},
+  "messages": [
+    {"id": 1, "date": "2026-09-23T10:00:00+00:00", "text": "first version"},
+    {"id": 2, "date": "2026-09-23T10:01:00+00:00", "text": "will be deleted"},
+    {"id": 3, "date": "2026-09-23T10:02:00+00:00", "text": "stays as it is"}
+  ],
+  "recheck": {
+    "1": {"id": 1, "date": "2026-09-23T10:00:00+00:00", "edit_date": "2026-09-23T11:00:00+00:00",
+          "text": "second version"},
+    "2": null,
+    "3": {"id": 3, "date": "2026-09-23T10:02:00+00:00", "text": "stays as it is"}
+  }
+}

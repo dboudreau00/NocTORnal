@@ -1,6 +1,7 @@
-# The image every NocTORnal process runs from. ONE image, four commands:
-# the API, the sample origin, the Alembic migration job and the cron loop
-# are the same code started differently (infra/production/compose.yml).
+# The image every NocTORnal process runs from. ONE image, five commands:
+# the API, the sample origin, the Alembic migration job, the cron loop and
+# the egress proxy (`python -m noctornal_api.egress_proxy`) are the same
+# code started differently (infra/production/compose.yml).
 #
 # That is not a packaging convenience, it is the architecture. CONVENTIONS
 # says "one process" and decision 30 says there is no worker: the sample
@@ -27,10 +28,23 @@ FROM python:3.13-slim
 # ever starts compiling, that is the signal that a dependency stopped
 # shipping a wheel for this platform -- fix that upstream or add the
 # toolchain deliberately, rather than discovering it as a five-minute build.
+# Two known cases, both in opt-in extras (2026-09-24): pyaes, which
+# the telegram extra's Telethon needs, is published only as a pure-Python
+# sdist, so pip builds its wheel with setuptools and no compiler; and
+# yara-x needs glibc 2.28, which this bookworm base (glibc 2.36) has.
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# gnupg for PGP verification (Comms, F10a, 2026-09-25). The distribution's
+# build reports a version below the floor the verifier enforces, so a
+# deployment attests it with NOCTORNAL_GPG_PATCHED_AS once it has checked
+# the changelog carries the fixes; until then every check records
+# NO_VERIFIER and pgp_verifier says why. No recommends: no agent, no pinentry.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 # PYTHONUNBUFFERED: the cron loop's only channel back to its operator is
 # stdout (scripts/notify_drain.py prints its counters and exits non-zero on
@@ -91,7 +105,20 @@ COPY . /app
 # different stacks, neither of them the tested one. It is a constraints file
 # and not a second dependency list: it pins what the pyproject files ask
 # for and adds nothing, which is the drift the note above rules out.
-RUN pip install --no-cache-dir -c constraints.txt -e packages/ontology -e apps/api
+#
+# NOCTORNAL_EXTRAS (2026-09-24): the opt-in extras for this image,
+# "telegram", "yara" or "telegram,yara". The default is none, so the image
+# matches what the installers install unless a switch asks for more. Any
+# other value is refused before pip runs: a typo such as "socks" would
+# otherwise build an image without the extra and say nothing, and a value
+# is interpolated into a pip argument, which only a closed list may be.
+ARG NOCTORNAL_EXTRAS=""
+RUN case "$NOCTORNAL_EXTRAS" in \
+      ""|telegram|yara|telegram,yara|yara,telegram) ;; \
+      *) echo "NOCTORNAL_EXTRAS may name telegram and yara only" >&2; exit 1 ;; \
+    esac \
+    && pip install --no-cache-dir -c constraints.txt -e packages/ontology \
+       -e "apps/api${NOCTORNAL_EXTRAS:+[$NOCTORNAL_EXTRAS]}"
 
 # An unprivileged account: no login shell, and no home directory of its own
 # to write to.

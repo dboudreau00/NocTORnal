@@ -955,3 +955,18 @@ def create_first_admin(conn: psycopg.Connection, *, email: str,
             email=email, display_name=display_name, clearance="RED",
             roles=["SYS_ADMIN", "SECURITY_OFFICER", "CASE_OWNER", "ANALYST"],
             actor_id=None, must_change_password=False)
+
+
+# F13, 2026-09-24. One reader of "who holds this role now", for the
+# officer alerts: break-glass and prohibited-content screening both alert
+# every active Security Officer, and two copies of the query could drift.
+def active_role_holders(conn: psycopg.Connection, role_key: str) -> list[UUID]:
+    """Every ACTIVE account holding `role_key` through a global role, once
+    each, in a stable order."""
+    rows = conn.execute(
+        """SELECT DISTINCT ur.user_id
+             FROM iam.user_role ur
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.role_key = %s AND u.is_active
+            ORDER BY ur.user_id""", (role_key,)).fetchall()
+    return [r[0] for r in rows]

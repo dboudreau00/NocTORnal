@@ -130,7 +130,11 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 
 # uvicorn and the two editable packages are what the last step actually needs.
-$probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg')
+# numpy, selectolax and pefile are hard dependencies since 2026-09-24: a
+# venv built before then is told to reinstall here, not at the first CONCOR
+# run or forum poll. The optional extras (telegram, yara) are not probed;
+# their absence is a readiness gap.
+$probe = Invoke-Capture $Python @('-c', 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile')
 if ($probe.Code -ne 0) {
     Write-Indented $probe.Text
     Stop-With 'the virtual environment is missing packages the API needs' @(
@@ -349,9 +353,12 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
         $header = @(
             '# NocTORnal local key store. Created by scripts/launch.ps1.',
             '#',
-            '# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted:',
+            '# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted,',
+            '# except the egress exits, which are sealed to the egress proxy''s own key:',
             '# enrolled authenticators, collection persona credentials, stored victim',
-            '# credentials and each sample''s data key. LOSING THIS FILE LOSES ALL OF',
+            '# credentials, each sample''s data key, and the credentials of the outbound',
+            '# integrations an administrator configures (Jira and lookup provider',
+            '# credentials). LOSING THIS FILE LOSES ALL OF',
             '# THEM: every user must re-enrol their authenticator, and no stored',
             '# credential or sample, preserved samples included, can be decrypted',
             '# again. If NOCTORNAL_INGEST_PEPPER is kept here too, losing it means',
@@ -377,9 +384,10 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
     Write-Host '' -ForegroundColor Yellow
     Write-Host '    That file is now your key store. The key seals every secret the' -ForegroundColor Yellow
     Write-Host '    database stores encrypted: authenticators, persona and victim' -ForegroundColor Yellow
-    Write-Host '    credentials, and the keys of stored samples. If you lose it, every' -ForegroundColor Yellow
-    Write-Host '    user has to re-enrol their authenticator app, and none of the rest' -ForegroundColor Yellow
-    Write-Host '    can be decrypted again. There is no recovery and no default key.' -ForegroundColor Yellow
+    Write-Host '    credentials, Jira and lookup provider credentials, and the keys of' -ForegroundColor Yellow
+    Write-Host '    stored samples. If you lose it, every user has to re-enrol their' -ForegroundColor Yellow
+    Write-Host '    authenticator app, and none of the rest can be decrypted again.' -ForegroundColor Yellow
+    Write-Host '    There is no recovery and no default key.' -ForegroundColor Yellow
     Write-Host '    Keep a backup. It is git-ignored, so it will never be committed.' -ForegroundColor Yellow
     Write-Host '    ------------------------------------------------------------' -ForegroundColor Yellow
     Write-Host ''
@@ -422,6 +430,9 @@ $defaults = [ordered]@{
     # `mc mb --ignore-existing local/noctornal-raw` -- note the absent
     # `--with-lock`, which is the difference that matters.
     INGEST_BUCKET    = 'noctornal-raw'
+    # 2026-09-24: raw markup of collected forum pages, again without
+    # object lock, because it is deleted with its document.
+    COLLECT_RAW_BUCKET = 'noctornal-collect-raw'
 }
 
 foreach ($name in $defaults.Keys) {

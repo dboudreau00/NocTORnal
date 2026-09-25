@@ -176,7 +176,7 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
     assert "Dev publishes six ports, on 127.0.0.1 only" in notes
     # "pinned to the same RELEASE tag as the dev file".
     assert "same RELEASE tag as the dev file" in notes
-    minio = "quay.io/minio/minio"
+    minio = "ghcr.io/dboudreau00/minio"
     assert _image(prod, minio) == _image(dev, minio)
     assert ":latest" not in _image(prod, minio)
     # And both Redis services run the policy the notes say they share.
@@ -196,6 +196,8 @@ _SEALED_WORDS = {
     "ingest.victim_credential": "victim",
     "lab.sample": "sample",
     "collect.egress_profile": None,
+    "notify.jira_destination": "jira",  # F7
+    "ingest.provider": "lookup provider",  # F15.2
 }
 
 

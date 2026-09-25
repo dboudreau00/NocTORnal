@@ -194,20 +194,27 @@ def _audits(conn, action, field, value) -> list[dict]:
 # The column list
 # ---------------------------------------------------------------------------
 
-def test_the_service_moves_exactly_the_columns_0059_binds(conn):
+def test_the_service_moves_exactly_the_bound_columns(conn):
     """A column the service does not know would be left behind by a rename
     (the final drop would then refuse, and nothing would change), so the
-    list is held to the migration that installed the triggers and to the
-    triggers themselves."""
+    list is held to the migrations that installed the triggers (0059's
+    eighteen and every later ADDED_BOUND_COLUMNS, docs/00 decision 71,
+    2026-09-24) and to the triggers themselves, read by name prefix so a
+    second bound column on one table counts."""
     from noctornal_api.compartment_lifecycle import BOUND_COLUMNS, NOUNS
-    assert BOUND_COLUMNS == _m0059().BOUND_COLUMNS
+    from test_compartment_contract_pg import bound_columns_at_head
+    assert set(BOUND_COLUMNS) == set(bound_columns_at_head())
+    assert len(BOUND_COLUMNS) == len(set(BOUND_COLUMNS))
+    assert set(_m0059().BOUND_COLUMNS) <= set(BOUND_COLUMNS)
     live = set()
     for schema, table, args in conn.execute(
             """SELECT n.nspname, k.relname, t.tgargs
                  FROM pg_trigger t
                  JOIN pg_class k ON k.oid = t.tgrelid
                  JOIN pg_namespace n ON n.oid = k.relnamespace
-                WHERE t.tgname = 'compartments_registered'
+                WHERE (t.tgname = 'compartments_registered'
+                       OR starts_with(t.tgname::text,
+                                      'compartments_registered_'))
                   AND NOT t.tgisinternal""").fetchall():
         column, kind = bytes(args).split(b"\x00")[:2]
         live.add((schema, table, column.decode(), kind.decode()))

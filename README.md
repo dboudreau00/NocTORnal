@@ -58,7 +58,7 @@ sit above its case, which is why a few read GREEN or AMBER.</sub>
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
 | **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and (separately) that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
 
-Plus **eight operator determinations** and **thirteen factual claims that
+Plus **twelve operator determinations** and **nineteen factual claims that
 came from documentation or reasoning rather than an authoritative source**,
 including platform identifier mappings, which change, and where a stale
 mapping produces *confident false attribution* rather than a visible
@@ -176,13 +176,18 @@ sociogram is for.
 ### What it is *not*
 
 - **Not an OSINT collection suite.** It ingests; it is not a scraper farm.
-  Collection adapters exist for RSS and the ingest API, and the rest is
-  deliberately your problem. See the legal items above.
+  Collection adapters exist for RSS, public XenForo and MyBB forums, Telegram
+  and the ingest API, and every forum and Telegram read needs a written
+  authority recorded by one person and confirmed by another, and leaves
+  through an exit that is not your own address. Whether you may collect at
+  all is the legal items above.
 - **Not an attribution oracle.** There is no "is this the same person?"
   button. There is a model that makes your reasoning explicit and
   reversible.
-- **Not a malware sandbox.** The lab holds samples safely and records
-  detonation *requests*; nothing in this build detonates anything.
+- **Not a malware sandbox.** The lab holds samples safely, triages them
+  statically in bounded child processes, and can send one to a self-hosted
+  CAPEv2 you run, after a second person signs it off where that matters;
+  nothing in this build executes a sample itself.
 - **Not deployable against real material today.** Five legal decisions
   gate that, and no amount of code closes them.
 
@@ -215,7 +220,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 68 Alembic migrations (Alembic head 0068)
+6. applies all 124 Alembic migrations (Alembic head 0124)
 7. offers to create your first account, printing the password **once** with a QR code to scan (on Windows it prints the `create-user` command to run instead)
 8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
 
@@ -240,7 +245,9 @@ published on 127.0.0.1 only, and 8000 for the API. A collision on any of
 the first six fails the Compose start; 5432 is the usual offender if you
 already run Postgres locally. On 8000 the installer stops before starting
 the API and says so. Nothing needs internet access after install, except
-the optional YARA rule fetch.
+the optional YARA rule fetch and whatever collection or integration an
+operator turns on; in production all of it leaves through the egress proxy
+([`docs/20`](docs/20-outbound-connections.md)).
 
 ---
 
@@ -305,10 +312,11 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **3448 tests** (`def test_`
-functions across both pytest roots; 2259 collected items once
-parametrised; a snapshot taken 2026-09-09, the live figure is `pytest
---co -q`). **Without `DATABASE_URL` roughly half the suite skips
+With the containers up, expect **no failures** across **6095 tests** (`def test_`
+functions across both pytest roots, maintained by
+`scripts/refresh_counters.py`; each parametrises to one or more collected
+items, and the collected total for a given release is in
+`release/CHANGELOG.md`). **Without `DATABASE_URL` roughly half the suite skips
 instead**. It is database-gated by design. That is a correct result,
 not a broken install. Some still skip on an install the installers made:
 the least-privilege role test, whose role only a production-shaped
@@ -350,7 +358,10 @@ here keeps only one of the three, and prints the top three by betweenness
 beside it with the fragmentation each reaches, so the difference is on
 screen rather than taken on trust. Above them, one actor's betweenness
 across past runs, each with the date it describes and its preset, because
-a rising betweenness is a claim about a person.
+a rising betweenness is a claim about a person. Roles (CONCOR) find
+entities in the same position whether or not they are tied; forums and
+wallets can be projected to ties between the entities they link, marked
+derived and never drawn; and any run can count accepted ties only.
 
 ### Evidence and chain of custody
 ![Evidence](docs/images/03-evidence.png)
@@ -401,7 +412,11 @@ detonation requests land in an append-only access ledger. Samples are
 encrypted at rest and downloadable only from a **separate origin**.
 Detonation requests that would send anything outside the boundary require
 a named authoriser and a written reason, a database `CHECK`, not a code
-review.
+review. After submission, static triage computes imphash, Rich header,
+ssdeep and TLSH and scans with the YARA rule sets a Security Officer has
+activated, in child processes that never hold the data key; every sample is
+screened by exact hash against the prohibited-content lists the deployment
+imported, and a match leaves the Lab for good.
 
 ### Channels and contact blocks
 ![Comms](docs/images/08-comms.png)
@@ -411,7 +426,10 @@ key because the nospam rotates at will, so the same key under a different
 nospam still finds its binding; Telegram indexes the numeric id,
 namespaced by id space, because usernames are recycled. A pasted vendor
 contact block is parsed with the escrow's identifier flagged as a **third
-party's**, not attributed to the vendor.
+party's**, not attributed to the vendor. Signatures are checked
+clearsigned or detached, a vendor key is kept with where it came from, and
+a binding is confirmed only when a contact block ties the signing key to
+its holder.
 
 ### Lifecycle and governance
 ![Governance](docs/images/12-governance.png)
@@ -465,7 +483,10 @@ element is *invisible* rather than discoverable-then-403. Names,
 selectors, attributes and exhibit titles all match, and an entity found
 through a selector or an attribute says which one; collected documents,
 claims and deception records are searched too. Each result group loads
-independently: one failing does not blank the others.
+independently: one failing does not blank the others. A Match choice finds
+similar wording (reposts, light edits, transliterations, computed on this
+host) and, where an operator configures a model server, similar meaning,
+each shown as a band rather than a score.
 
 ### Feeds and ingest
 ![Feeds and ingest](docs/images/09-feeds.png)
@@ -541,7 +562,7 @@ flowchart TB
     G --> RPT["Report builder"]
     RPT --> EG{"TLP egress gate"}
     EG -->|"AMBER_STRICT / RED"| STOP["refused + audited"]
-    EG -->|cleared| OUT["export · SMTP · webhook"]
+    EG -->|cleared| OUT["export · SMTP · webhook · Jira · lookups"]
 ```
 
 The shape that matters: **machines only ever reach the proposal queue.**
@@ -612,8 +633,8 @@ test named after it.
 | 4 | **Inferred edges stay distinct**, dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
 | 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion`; a retraction is a one-time stamp on the row, never a rewrite |
 | 6 | **The audit log is append-only** | row *and* statement triggers; `TRUNCATE` refused |
-| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process (there is no separate collector) so this bounds the shape of the code, not the blast radius of a compromised host |
-| 8 | **TLP gates egress** | one `can_egress`, called by all four outbound paths |
+| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process (there is no separate collector), so this bounds the shape of the code, not the blast radius of a compromised host. `ProviderVault` holds lookup provider keys the same way, each bound to its origin and route, and exposure approvals are bound to origin and network. Every outbound path is operator-configured, labelled, audited and capped by a ceiling, and in production the egress proxy is the only way out |
+| 8 | **TLP gates egress** | one `can_egress`, called by every outbound path (export, SMTP, webhook, Jira, outbound lookups, key lookups, the model server, the sandbox, collection targets); a destination with no gate record is refused |
 | 9 | **Durable identifiers, not displayed ones** | per-type normalisers; `durable_selector_type` |
 | 10 | **Samples never render, never execute** | separate origin, encryption at rest, `is_hostile_markup` |
 | 11 | **Ingest keys are write-only** | a `CHECK` constraint saying so |
@@ -632,7 +653,8 @@ test named after it.
 | **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** (pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain**) Louvain can produce internally disconnected communities. |
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
-| **Migrations** | Alembic | 68 revisions (Alembic head 0068), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
+| **Migrations** | Alembic | 124 revisions (Alembic head 0124), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -652,7 +674,7 @@ enforces it.
 
 ### Testing
 
-**3448 tests** (`def test_` functions across two pytest roots, maintained by
+**6095 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -672,14 +694,15 @@ noctornal/
 │       ├── evidence.py        WORM ingest, custody, integrity
 │       ├── analytics.py       igraph / leidenalg
 │       ├── deception.py       phishing, BEC, vishing   (docs/19)
-│       └── samples.py         the malware lab          (docs/11)
+│       ├── samples.py         the malware lab          (docs/11)
+│       └── egress_proxy.py    the only way out         (docs/20)
 ├── packages/ontology/         THE source of node/edge/selector types
 │   ├── src/…/definition.py    edit here, regenerate, ship a migration
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   68 Alembic revisions
-├── docs/                      00-19, the reasoning
+│   └── migrations/versions/   124 Alembic revisions
+├── docs/                      00-20, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
 └── infra/docker-compose.yml   Postgres, Redis, MinIO, Mailpit
@@ -699,6 +722,7 @@ noctornal/
 | [`docs/03-graph-analytics.md`](docs/03-graph-analytics.md) | the SNA methodology, and its limits |
 | [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model |
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
+| [`docs/20-outbound-connections.md`](docs/20-outbound-connections.md) | how anything leaves: the address policy, the one client, routes and the egress proxy |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
@@ -710,16 +734,21 @@ noctornal/
 **Alpha. Unaudited. Not certified for evidential use.**
 
 Working end to end: cases; the graph and assertion layer; evidence with
-WORM and custody; the five-part access gate; SNA analytics; proposals and
-triage; entity merge; comms and contact blocks; collection and ingest;
-retention, legal hold and break-glass; ACH; reporting with a TLP egress
-gate; the malware lab; the deception subsystem; live change push; and the
-analyst console over all of it.
+WORM and custody; the five-part access gate; SNA analytics, with roles and
+forum and wallet projection; proposals and triage; entity merge and the
+two-person policy; comms, contact blocks, PGP verification and vendor keys;
+collection from feeds, forums and Telegram under a two-person authority,
+and ingest; similarity search; retention, legal hold and break-glass; ACH;
+reporting with a TLP egress gate; the malware lab, with static triage,
+YARA, prohibited-content screening and a self-hosted sandbox; Jira, the
+delivery ledger and outbound lookups; the egress proxy; the deception
+subsystem; live change push; and the analyst console over all of it.
 
 Deliberately absent, with reasons in [`docs/17`](docs/17-flagged-for-review.md):
-WebAuthn (password + TOTP today), session IP/UA binding, row-level
-security under a non-owner database role, a Jira integration, CONCOR
-blockmodelling, and **any form of live interception**.
+WebAuthn (password + TOTP today), session IP/UA binding by default,
+row-level security on fifteen of its tables (docs/17 F51), perceptual matching of prohibited content, archive
+expansion, an authenticated forum reader, and **any form of live
+interception**.
 
 ### Findings that carry forward
 

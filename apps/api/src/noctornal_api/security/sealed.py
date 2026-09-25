@@ -39,6 +39,10 @@ SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("ingest.victim_credential", "value_ciphertext", "value_key_id"),
     ("lab.sample", "data_key_ciphertext", "data_key_id"),
     ("collect.egress_profile", "endpoint_ciphertext", "key_id"),
+    # The Jira service credential (F7) and the lookup provider keys
+    # (F15.2), 2026-09-24. Both are zero bytes or NULL once destroyed.
+    ("notify.jira_destination", "credential_ciphertext", "credential_key_id"),
+    ("ingest.provider", "secret_ciphertext", "secret_key_id"),
 )
 
 #: How many rows of one (table, key id) group the readiness check opens:

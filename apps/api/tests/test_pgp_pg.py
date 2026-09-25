@@ -51,17 +51,10 @@ def conn():
     from noctornal_api.db import connect
     c = connect()
     yield c
-    sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'pgp-%@noctornal.test')"
-    csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
-    with c.transaction():
-        c.execute(f"DELETE FROM comms.pgp_verification WHERE case_id IN {csub}")
-        c.execute(f"DELETE FROM comms.channel_binding WHERE case_id IN {csub}")
-        c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
-        c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
-        c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
-        c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
-        c.execute("DELETE FROM iam.app_user WHERE email LIKE 'pgp-%@noctornal.test'")
+    # The ledger refuses DELETE since 0089 (F10b, 2026-09-24), so rows are
+    # removed as the owner with its triggers off inside one transaction.
+    from pgp_support import teardown
+    teardown(c, "pgp-%@noctornal.test")
     c.close()
 
 
@@ -84,8 +77,17 @@ def _case(conn, owner):
 
 @pytest.fixture
 def svc(conn):
-    from noctornal_api.pgp import PgpService
-    return PgpService(conn)
+    # Every check now names the reader's ceiling (F10-fix, 2026-09-24): the
+    # wrapper passes RED and no compartments, as these tests always read.
+    from pgp_support import Svc
+    return Svc(conn)
+
+
+def _vendor_block(conn, case_id, actor):
+    """The contact block that ties the vendor's key to the Tox ID: since
+    F10b a binding is confirmed only when a cited block does."""
+    from pgp_support import block
+    return block(conn, case_id, actor)["id"]
 
 
 def _tox_binding(conn, case_id, actor):
@@ -107,7 +109,8 @@ def test_a_signature_over_the_identifier_upgrades_the_binding(conn, svc):
     out = svc.verify_and_record(
         case_id=case_id, signed_message=SIGNED_WITH_TOX,
         public_key=VENDOR_PUB, claimed_fingerprint=VENDOR_FPR,
-        created_by=uid, channel_binding_id=binding)
+        created_by=uid, channel_binding_id=binding,
+        contact_block_id=_vendor_block(conn, case_id, uid))
 
     assert out["outcome"] == "VERIFIED"
     assert out["binding_upgraded"] is True
@@ -242,7 +245,8 @@ def test_the_verification_is_audited(conn, svc):
     svc.verify_and_record(
         case_id=case_id, signed_message=SIGNED_WITH_TOX,
         public_key=VENDOR_PUB, claimed_fingerprint=VENDOR_FPR,
-        created_by=uid, channel_binding_id=binding)
+        created_by=uid, channel_binding_id=binding,
+        contact_block_id=_vendor_block(conn, case_id, uid))
     detail = conn.execute(
         """SELECT detail FROM audit.event
             WHERE case_id = %s AND action = 'PGP_VERIFICATION'""",

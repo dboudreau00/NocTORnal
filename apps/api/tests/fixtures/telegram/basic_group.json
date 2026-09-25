@@ -1,0 +1,11 @@
+{
+  "note": "A basic group g:4000001 seen via u:700000001. Message ids in a basic group are per account.",
+  "me": "u:700000001",
+  "chat": {"peer_type": "CHAT", "peer_id": 4000001, "title": "Small Group", "is_member": true},
+  "messages": [
+    {"id": 101, "date": "2026-09-22T12:00:00+00:00", "text": "hello group",
+     "from": {"type": "user", "id": 700000002}, "sender_handle": "@carol"},
+    {"id": 102, "date": "2026-09-22T12:01:00+00:00", "text": "second message",
+     "from": {"type": "user", "id": 700000001}, "sender_handle": "@persona"}
+  ]
+}

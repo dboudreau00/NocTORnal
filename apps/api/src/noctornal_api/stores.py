@@ -436,14 +436,20 @@ class PgSessionStore(SessionStore):
         # 22P02 at login. `normalise_ip` is what makes that decision, so
         # the row and the validator's comparison agree on what counts.
         ip = normalise_ip(record.ip)
+        # `rls_binding_hash` (S1, 2026-09-25, migration 0110) is what
+        # binds a request's connection to this session under row-level
+        # security. The request role cannot INSERT here (0109): a session
+        # is minted on a system connection, so a forged row cannot exist.
         self._c.execute(
             """INSERT INTO iam.session
                    (id, user_id, token_hash, issued_at, expires_at,
-                    last_seen_at, mfa_satisfied_at, ip, user_agent)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    last_seen_at, mfa_satisfied_at, ip, user_agent,
+                    rls_binding_hash)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (record.id, record.user_id, record.token_hash, record.issued_at,
              record.expires_at, record.last_seen_at, record.mfa_satisfied_at,
-             ipaddress.ip_address(ip) if ip else None, record.user_agent),
+             ipaddress.ip_address(ip) if ip else None, record.user_agent,
+             record.rls_binding_hash),
         )
 
     def get_by_token_hash(self, token_hash: bytes) -> SessionRecord | None:

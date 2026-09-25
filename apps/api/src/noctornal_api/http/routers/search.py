@@ -31,7 +31,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from noctornal_api.curation import SearchService
 from noctornal_api.http.deps import (
@@ -323,6 +323,9 @@ class DocumentHitOut(BaseModel):
     posted_at: str | None = None
     author_handle: str | None = None
     classification: str | None = None
+    #: The document's compartments (L1, 2026-09-24): only a reader holding
+    #: every one of them is shown the hit, so they are the reader's keys.
+    compartments: list[str] = Field(default_factory=list)
     rank: float
 
 
@@ -373,15 +376,18 @@ def search_documents(
                           + " role, held across the deployment, and your "
                           "account holds none of them. An administrator "
                           "grants it."))
-    clearance, _ = user_ceiling(conn, user.user_id)
+    # And the reader's compartments, case-less as the clearance is (L1,
+    # 2026-09-24): a capture into a compartmented case carries its keys.
+    clearance, held = user_ceiling(conn, user.user_id)
     rows, total = SearchService(conn).document_page(
-        query=q, limit=limit, clearance=clearance.name)
+        query=q, limit=limit, clearance=clearance.name, compartments=held)
     return DocumentPage(
         hits=[DocumentHitOut(
             id=r["id"], label=r["label"], excerpt=r["excerpt"],
             source_name=r["source_name"], posted_at=r["posted_at"],
             author_handle=r["author_handle"],
-            classification=r["classification"], rank=r["rank"])
+            classification=r["classification"],
+            compartments=r["compartments"], rank=r["rank"])
             for r in rows],
         total=total, limit=limit)
 
