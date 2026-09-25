@@ -985,9 +985,10 @@ def replay(
 #: copies of the whole page are counted in ONE pass (`dup`), and the
 #: lookups run for the page's rows only: the same read takes tens of
 #: milliseconds. The total count comes from the same pass, where it used
-#: to be one scan per returned row. An index on `duplicate_of` would make
-#: that pass a lookup; it needs a migration, and the chain is closed for
-#: this release.
+#: to be one scan per returned row. The pass was still a scan of the whole
+#: table for the page's copies, since nothing indexed `duplicate_of`; it is
+#: an index lookup on `record_duplicate_of_idx` since L4 (2026-09-24,
+#: migration 0072), as is a record's own copies (`_COPIES_SQL`).
 def _queue_sql(where: str, tail: str = "") -> str:
     """The queue projection over the records `where` selects.
 
@@ -1069,6 +1070,20 @@ def _queue_sql(where: str, tail: str = "") -> str:
 
 #: The queue's order, and the page's.
 _PAGE_TAIL = "ORDER BY r.priority DESC, r.created_at DESC LIMIT %(limit)s"
+
+#: A record's readable copies, for its detail view: the query that route
+#: runs, as a constant so test_ingest_duplicate_index_pg.py EXPLAINs this
+#: text rather than a hand copy (L4, 2026-09-24). An index lookup on
+#: `record_duplicate_of_idx` (migration 0072).
+_COPIES_SQL = """SELECT d.id, b.received_at, k.name
+             FROM ingest.record d
+             JOIN ingest.batch b ON b.id = d.batch_id
+             JOIN ingest.api_key k ON k.id = b.api_key_id
+            WHERE d.duplicate_of = %s AND d.purged_at IS NULL
+              AND d.classification <= %s::core.tlp
+              AND d.compartments <@ %s
+              AND (d.case_id = ANY(%s::uuid[]) OR (%s AND d.case_id IS NULL))
+            ORDER BY b.received_at"""
 
 #: The latest triage state of `r`, for the page's filter: the same lookup
 #: the projection's `tri` makes, asked only when a triage filter is on.
@@ -1398,15 +1413,7 @@ def record_detail(
     }
     out["payload_shape"] = redact_structure(batch[11])
     copies = conn.execute(
-        """SELECT d.id, b.received_at, k.name
-             FROM ingest.record d
-             JOIN ingest.batch b ON b.id = d.batch_id
-             JOIN ingest.api_key k ON k.id = b.api_key_id
-            WHERE d.duplicate_of = %s AND d.purged_at IS NULL
-              AND d.classification <= %s::core.tlp
-              AND d.compartments <@ %s
-              AND (d.case_id = ANY(%s::uuid[]) OR (%s AND d.case_id IS NULL))
-            ORDER BY b.received_at""",
+        _COPIES_SQL,
         (record_id, clearance.name, list(compartments),
          [UUID(str(c)) for c in allowed], qok)).fetchall()
     out["copies"] = [{"id": str(c[0]),

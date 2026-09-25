@@ -74,7 +74,10 @@ def conn():
         c.execute("ALTER TABLE lab.sample_access DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_access WHERE sample_id IN {ssub}")
         c.execute("ALTER TABLE lab.sample_access ENABLE TRIGGER USER")
+        # 0103 guards lab.detonation against DELETE.
+        c.execute("ALTER TABLE lab.detonation DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.detonation WHERE sample_id IN {ssub}")
+        c.execute("ALTER TABLE lab.detonation ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_analysis WHERE sample_id IN {ssub}")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")

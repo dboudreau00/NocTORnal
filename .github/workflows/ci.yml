@@ -30,6 +30,21 @@ env:
   # set here with that step gone, the file FAILS rather than skipping, and
   # the failure says the role does not exist.
   NOCTORNAL_APP_DB_ROLE: noctornal_app
+  # S1 (2026-09-25): the system role the row-level security tests
+  # hold equal to the app role but for the IAM-plane writes.
+  NOCTORNAL_WORKER_DB_ROLE: noctornal_worker
+  # The same for the egress proxy's own database role (2026-09-24):
+  # db/init/20-egress-role.sh creates it, a migration grants to it, and a
+  # test checks what it granted, which would skip without these.
+  # Throwaways like every credential here.
+  NOCTORNAL_EGRESS_DB_ROLE: noctornal_egress
+  NOCTORNAL_EGRESS_DB_PASSWORD: dev_only_change_me
+  # The runner's gpg is Ubuntu 24.04's distribution build, which reports
+  # 2.4.4, below the version floor PGP verification enforces (docs/17 F34's
+  # reasoning; comms F10a). Every VERIFIED test would record NO_VERIFIER
+  # without this attestation, which each verification row then records. A
+  # deployment sets it only after checking its own distribution's changelog.
+  NOCTORNAL_GPG_PATCHED_AS: "2.4.9"
   # The rate limiter's Lua runs in Redis, not in Python, so the only way to
   # know the two implementations still agree is to run both. Without this
   # the Redis leg would skip -- and the "No tests were skipped" gate below
@@ -48,6 +63,9 @@ env:
   MINIO_SECRET_KEY: dev_only_change_me
   EVIDENCE_BUCKET: noctornal-evidence
   SAMPLE_BUCKET: noctornal-samples
+  # Raw markup of collected forum pages (the collection framework,
+  # 2026-09-24). No object lock: it is deleted with its document.
+  COLLECT_RAW_BUCKET: noctornal-collect-raw
   # A fixed, throwaway KEK. Real deployments supply this from the
   # environment or Vault and there is no default anywhere in the code --
   # see security/envelope.py.
@@ -111,9 +129,31 @@ jobs:
       - name: Generated files match the definition
         run: python -m noctornal_ontology.generate --check
 
+  # TWO LEGS of one job (2026-09-24). The first installs every
+  # optional extra (telegram, yara) and runs the whole suite except the
+  # tests marked extras_absent, which are written for those libraries NOT
+  # being installed and would fail or skip here. The second is the
+  # configuration most deployments have, no optional extra at all, and
+  # runs exactly the marked tests. A matrix rather than a second job, so
+  # both legs get the same services, extensions, roles, buckets and
+  # migrations from ONE definition: a copy would drift, and the first sign
+  # would be a marked readiness test erroring on a missing table. The first
+  # leg keeps the job's old name, which is the check name branch rules use.
   test:
-    name: Tests and migrations
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Tests and migrations
+            extras: dev,telegram,yara
+            select: not extras_absent
+            full: true
+          - name: Tests without optional extras
+            extras: dev
+            select: extras_absent
+            full: false
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -178,7 +218,12 @@ jobs:
           # httpx by hand here missed `qrcode`, the reference encoder the
           # console's QR test checks against, so that test skipped and this
           # job failed on the skip (2026-09-23).
-          pip install -c constraints.txt -e packages/ontology -e "apps/api[dev]"
+          #
+          # Plus the optional extras on the first leg (2026-09-24):
+          # "dev,telegram,yara" there, "dev" alone on the second. The
+          # extras' suites must RUN on the first leg, never skip, and the
+          # no-skip gate below holds them to it.
+          pip install -c constraints.txt -e packages/ontology -e "apps/api[${{ matrix.extras }}]"
 
       - name: Start MinIO
         run: |
@@ -267,7 +312,28 @@ jobs:
           # ALTER TABLE ... DISABLE TRIGGER -- which is precisely what this
           # role exists to be unable to do.
           NOCTORNAL_APP_DB_PASSWORD: dev_only_change_me
+          # S1 (2026-09-25): the same script creates the system role
+          # noctornal_worker (BYPASSRLS) when this is set, before "Migrate
+          # to head" so migration 0108 grants it; the row-level security
+          # tests reach it with SET ROLE and fail, not skip, without it.
+          NOCTORNAL_WORKER_DB_PASSWORD: dev_only_change_me
         run: sh db/init/10-app-role.sh
+
+      # The egress proxy's role, for the same reasons and in the same place
+      # (2026-09-24): BEFORE "Migrate to head", because the migration
+      # that grants to it declines to grant a role that does not exist yet.
+      # The script is db/init/20-egress-role.sh, the pattern of
+      # 10-app-role.sh; where there is no such file this step does
+      # nothing. The same env as the step above, because that pattern's
+      # psql has no --host of its own and finds the server through PGHOST.
+      - name: Create the egress proxy role
+        env:
+          PGHOST: localhost
+          PGPASSWORD: dev_only_change_me
+          POSTGRES_USER: noctornal
+          POSTGRES_DB: noctornal
+        run: |
+          if [ -f db/init/20-egress-role.sh ]; then sh db/init/20-egress-role.sh; fi
 
       # The evidence bucket needs OBJECT LOCK, which cannot be enabled
       # after creation -- getting it wrong here would make the WORM tests
@@ -312,6 +378,9 @@ jobs:
           # no default retention. test_sample_preservation_pg.py writes held
           # objects to it and needs the lock to be real, not assumed.
           mc mb --ignore-existing --with-lock local/noctornal-preserved
+          # Raw markup of collected forum pages (2026-09-24). NOT
+          # --with-lock: it is deleted with its document.
+          mc mb --ignore-existing local/noctornal-collect-raw
 
       - name: Migrate to head
         run: alembic upgrade head
@@ -333,7 +402,11 @@ jobs:
       # developer's WSL stack run -- rather than whatever client version the
       # runner image happens to ship, so the two sides cannot disagree on
       # pg_dump's own formatting.
+      #
+      # On the first leg only: the schema does not depend on which extras
+      # are installed, and the second leg is there to run the marked tests.
       - name: Schema mirror matches the migrations
+        if: ${{ matrix.full }}
         env:
           NOCTORNAL_PG_DUMP: docker exec ${{ job.services.postgres.id }} pg_dump
         run: python scripts/dump_schema.py --check
@@ -343,13 +416,18 @@ jobs:
       # find the one that silently is not -- and it has caught a real
       # defect already: 0026 originally only applied to an empty table.
       - name: Migration round-trip (head -> base -> head)
+        if: ${{ matrix.full }}
         run: |
           alembic downgrade base
           alembic upgrade head
           alembic current
 
+      # `-m` selects by the extras_absent marker (2026-09-24): the
+      # whole suite less the marked tests on the first leg, the marked
+      # tests alone on the second. A leg that selects nothing fails, which
+      # pytest's own exit status 5 already says.
       - name: Tests
-        run: pytest apps/api/tests packages/ontology/tests -q
+        run: pytest apps/api/tests packages/ontology/tests -q -m "${{ matrix.select }}"
 
       # docs/09 Phase 0 asks for "a chain verification job" and there was
       # none -- the audit chain was written by a trigger and never once
@@ -359,8 +437,10 @@ jobs:
       # It runs AFTER the suite so it verifies a chain with real traffic in
       # it: every audited action the tests performed is in this table.
       # Verifying an empty chain would pass and prove nothing, so the step
-      # fails if nothing was checked.
+      # fails if nothing was checked. First leg only: the second runs too
+      # few tests to leave a chain worth verifying.
       - name: Audit chain verifies
+        if: ${{ matrix.full }}
         run: |
           python - <<'PY'
           import sys
@@ -415,8 +495,9 @@ jobs:
       # where the chain of custody for the chain of custody currently ends.
       #
       # The anchor (`genesis_count`) is checked explicitly because it is the
-      # one removal the relative checks CAN see.
+      # one removal the relative checks CAN see. First leg only, as above.
       - name: Custody chain verifies
+        if: ${{ matrix.full }}
         run: |
           python - <<'PY'
           import sys
@@ -457,7 +538,10 @@ jobs:
           # the thing it is gating is one edit away from being the only
           # run -- and then green would mean nothing.
           set -o pipefail
-          pytest apps/api/tests packages/ontology/tests -q -rs 2>&1 | tee /tmp/out
+          # The same selection as the Tests step, on each leg. Deselected
+          # tests are reported as "N deselected", never as skipped, so the
+          # grep below still reads only real skips.
+          pytest apps/api/tests packages/ontology/tests -q -rs -m "${{ matrix.select }}" 2>&1 | tee /tmp/out
           if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/out; then
             echo "::error::Tests were SKIPPED. The Postgres or MinIO leg is not running."
             exit 1

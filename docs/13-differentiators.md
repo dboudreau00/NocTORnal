@@ -126,12 +126,19 @@ projecting or a 500-member forum manufactures a spurious clique.
 Co-affiliation is how you find cells that never communicate directly on
 the record. UCINET does this; the link-analysis tools mostly do not.
 
+Built for forums and wallets (2026-09-24): an option of the Analysis pane,
+with every venue over the size limit named and every exclusion counted.
+Conversations keep their own projection in the Comms pane.
+
 ### 11. Structural equivalence and blockmodelling
 
 Two actors who never interact but occupy the same structural position are
 playing the same role. **This finds the replacement**, the second
 launderer, the developer who took over. Available in UCINET, absent from
 every investigative platform.
+
+CONCOR is built (2026-09-24): the Analysis pane's Roles card, with the fit
+stated first because CONCOR always splits in two.
 
 ### 12. ACH built into the graph
 
@@ -203,6 +210,14 @@ Sandbox detonation and some enrichment lookups tell the provider (and
 sometimes the world) what you are interested in. Operators watch public
 sandboxes for their own samples. Mark providers with an exposure level and
 say so in the confirmation dialogue, in plain words.
+
+**Built for lookups, 2026-09-24 (roadmap F15).** Every lookup provider
+carries an exposure level (NONE, VENDOR, PUBLIC) with the administrator's
+written basis, and the console says what each level means before anything
+is sent. A lookup to a vendor or the public waits for a named colleague's
+sign-off in the product; lowering a provider's level takes a second
+administrator. **Recorded only for detonation:** the authorisation record
+exists and nothing submits, until the sandbox work lands.
 
 ### 21. Watchlist-driven triage with near-duplicate suppression
 

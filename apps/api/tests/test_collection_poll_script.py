@@ -542,16 +542,19 @@ def test_the_lock_is_released_when_the_poll_unwinds(conn):
     re-raise is the only way an exception leaves the poll, and it is the
     only thing that can strand a session lock.
 
-    Staged with a NUL byte in a post body, the first failure `run_once`'s
-    own comment names ("a NUL byte in a post, a jsonb adaptation error, a
-    dropped connection mid-loop"). Chosen over the dropped connection for
-    a reason, not just because it is easier to stage: psycopg refuses to
-    SEND a NUL, so
-    `_store_document`'s INSERT raises with the connection still healthy,
-    and the unlock in the `finally` is a statement that really runs. A
-    poll killed by a dropped connection would have released the lock by
-    dying -- as that `finally`'s own comment says -- and would leave this
-    assertion passing against no unlock at all.
+    Staged with a REAL database error raised by the adapter's per-run
+    commit hook, which runs inside the persist transaction and outside
+    every item's savepoint (2026-09-24). This used to be a NUL byte
+    in a post body; since 2026-09-24 a NUL in a body is cleaned to U+FFFD and a
+    bad item is skipped inside its own savepoint, so a poison post no
+    longer escapes the poll at all (which is the point of that change),
+    and the unwind needs a failure the framework still re-raises.
+    Chosen over a dropped connection for the old
+    reason: the server refuses the statement with the connection still
+    healthy, so the unlock in the `finally` is a statement that really
+    runs. A poll killed by a dropped connection would have released the
+    lock by dying -- as that `finally`'s own comment says -- and would
+    leave this assertion passing against no unlock at all.
 
     A REAL failure rather than an injected one, which is the difference
     from `test_collection_pg`'s
@@ -573,18 +576,23 @@ def test_the_lock_is_released_when_the_poll_unwinds(conn):
     )
     from noctornal_api.db import connect
 
-    class NulByteAdapter:
+    class FailingCommitAdapter:
         """`test_collection_pg.StubAdapter`'s shape, kept local. Importing
         a helper across test modules would tie two files together and give
-        neither of them a reason to move with the other."""
+        neither of them a reason to move with the other. Its commit hook
+        asks the server to divide by zero: a real DataError, raised by the
+        database, inside the persist transaction."""
 
         key, version = "rss", "test"
 
         def fetch(self, **kw):
             return FetchResult(items=[Item(external_id="nul-1", body="a\x00b")])
 
+        def commit(self, conn, **kw):
+            conn.execute("SELECT 1 / 0")
+
     source_id = _source(conn)
-    svc = CollectionService(conn, adapters={"rss": NulByteAdapter()})
+    svc = CollectionService(conn, adapters={"rss": FailingCommitAdapter()})
     with pytest.raises(psycopg.DataError):
         svc.run_once(source_id, actor_id=uuid4())
 

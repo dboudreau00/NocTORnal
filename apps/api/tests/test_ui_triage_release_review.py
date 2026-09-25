@@ -255,15 +255,26 @@ def test_the_case_switch_and_every_load_fit_the_capture_form():
     load = _fn("loadTriage")
     assert "syncCaptureForm(state.caseRec);" in load
     assert "state.captureRefused = data.capture_refused || '';" in load
-    assert "syncCaptureForm(state.caseRec, state.captureRefused);" in load
+    # L1 (2026-09-24): the queue also says what a capture is stored under.
+    assert "state.captureLabels = data.capture_labels || null;" in load
+    assert ("syncCaptureForm(state.caseRec, state.captureRefused, "
+            "state.captureLabels);") in load
     assert "$('cap-class').value = 'AMBER';" not in js
     run = _fn("runCapture")
-    assert "if (state.captureRefused) {" in run, "a compartmented case still captures"
+    assert "if (state.captureRefused) {" in run, (
+        "a case walled off for victim data still captures")
     assert "captureLabelWords(out)" in run
+    sync = _fn("syncCaptureForm")
+    assert "classList.toggle('warn'" in sync, (
+        "the note is a warning only when it refuses")
+    assert "compartmentWords(keys)" in sync and "agree(keys.length" in sync
+    assert ".style" not in sync and "style=" not in sync
     html = _html()
-    assert 'id="cap-scope"' in html
+    assert 'id="cap-scope" class="msg" ' in html, (
+        "the note may not be a warning before anything is refused")
     flat = " ".join(_visible(html).split())
     assert "never below the case's own" in flat
+    assert "under the same compartments is not stored twice" in flat
     assert "keeps the label it was first stored at" in flat
 
 

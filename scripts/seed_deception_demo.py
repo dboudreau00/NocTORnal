@@ -78,11 +78,11 @@ def main() -> int:
                         help="case CODE to seed into")
     args = parser.parse_args()
 
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.deception import DeceptionService, parse_eml
     from noctornal_api.evidence import EvidenceService, EvidenceStorage
 
-    conn = connect()
+    conn = connect_system(SystemPurpose.SCRIPT)
     # The case's own label is fetched because the exhibit must carry AT
     # LEAST it. `core.enforce_tlp_floor()` fires on core.evidence and
     # refuses anything below the case floor -- an element is protected by

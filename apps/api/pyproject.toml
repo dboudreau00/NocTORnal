@@ -15,7 +15,10 @@ description = "NocTORnal API: the FastAPI service. One process serving the REST 
 requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi>=23.1",   # Argon2id password + recovery-code hashing
-    "cryptography>=42.0",  # AES-256-GCM envelope for TOTP secrets at rest
+    # AES-256-GCM envelope for TOTP secrets at rest. 47 or later since the
+    # 2026-09 roadmap build: the egress proxy seals its exits with the hpke
+    # module, first shipped in 47.0.0 (2026-09-24).
+    "cryptography>=47.0",
     "psycopg[binary]>=3.1",
     "minio>=7.2",          # WORM object storage for evidence (object lock)
     "blake3>=0.4",         # second independent integrity anchor for evidence
@@ -71,6 +74,21 @@ dependencies = [
     # migrations, so the thing that applies them is a dependency.
     "alembic>=1.13",
     "SQLAlchemy>=2.0",     # alembic's own requirement, pinned explicitly
+    # The 2026-09 roadmap build (2026-09-24). Each ships wheels for
+    # CPython 3.12 to 3.14 on Linux, Windows and macOS (or is pure Python),
+    # re-checked that day, so each is a hard dependency rather than an
+    # extra whose absence the product would have to show as a gap.
+    "numpy>=2.3",          # CONCOR positional analysis (analytics F1)
+    # Forum HTML, the lexbor backend only. Capped below 0.5, which may move
+    # the lexbor API the forum adapters are written against.
+    "selectolax>=0.4.12,<0.5",
+    "pefile>=2024.8.26",   # static triage of PE samples (F11)
+    # Imported directly (the sample stores, readiness's object-store probe)
+    # and until now inherited only through minio: a dependency the code
+    # imports is declared, not borrowed.
+    "urllib3>=2.2",
+    "certifi>=2024.2",
+    "idna>=3.6",           # egress_policy's UTS-46 host normalisation
     # noctornal-ontology is a sibling package in this monorepo (the ONE
     # source of selector normalisers). Install it editable alongside:
     #   pip install -e packages/ontology -e apps/api
@@ -83,6 +101,22 @@ dev = [
     "qrcode>=7.4",         # scannable TOTP enrolment in scripts/bootstrap.py
     "ruff==0.6.9",         # lint; PINNED so CI and a laptop cannot
                            # disagree about what "clean" means
+    # The egress wire-contract cases prove python-socks authenticates to the
+    # proxy on both of its protocols, which is the contract Telethon uses.
+    "python-socks>=3.1",
+]
+# Opt-in, only if you collect from Telegram. pyaes, which telethon needs,
+# is published only as a pure-Python sdist (pip builds it with setuptools
+# and no compiler). Without the extra, the telegram_collection readiness
+# row says so and every Telegram act refuses with the install line.
+telegram = [
+    "telethon>=1.45,<2",
+    "python-socks>=3.1",   # Telethon's SOCKS5 client to the egress proxy
+]
+# Opt-in: YARA scanning of samples with yara-x, whose macOS wheels need
+# macOS 14 or newer. Without it, the samples readiness caveat names the gap.
+yara = [
+    "yara-x>=1.20",
 ]
 
 [tool.setuptools.packages.find]
@@ -90,3 +124,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "extras_absent: runs in the CI job that installs no optional extra",
+]
+# A marked test is written for the telegram and yara extras NOT being
+# installed, so it fails wherever they are: deselected by default, and run
+# by the CI leg that installs no extra, whose own `-m extras_absent`
+# replaces this one (2026-09-24).
+addopts = "-m 'not extras_absent'"

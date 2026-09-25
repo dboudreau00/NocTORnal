@@ -241,7 +241,10 @@ def test_the_gate_needs_a_real_classification(conn):
     from noctornal_api.http.routers import live
     body = inspect.getsource(live._may_read)
     assert "object_classification=None" not in body
-    assert 'FROM core."case"' in body
+    # The case's labels as lock facts since row-level security (S1,
+    # 2026-09-25): the re-check runs unbound, and a plain read of
+    # core."case" would find no row there.
+    assert "iam.case_facts" in body
 
 
 # --- what reaches which subscriber --------------------------------------

@@ -1142,6 +1142,11 @@ class EvidenceService:
         from noctornal_api.stores import PgAccessResolver
 
         digest = hash_token(presented or "")
+        # The exhibit's case through `iam.element_facts` (S1,
+        # 2026-09-25). The sample origin spends the ticket BEFORE anybody is
+        # bound, and an unbound connection sees no exhibit under row-level
+        # security, so an EXISTS on core.evidence here refused every valid
+        # ticket.
         row = self._c.execute(
             """UPDATE lab.download_ticket
                   SET redeemed_at = now()
@@ -1150,8 +1155,8 @@ class EvidenceService:
                   AND purpose = %s
                   AND redeemed_at IS NULL
                   AND expires_at > now()
-                  AND EXISTS (SELECT 1 FROM core.evidence e
-                               WHERE e.id = %s AND e.case_id = %s)
+                  AND (SELECT f.case_id FROM iam.element_facts('evidence', %s) f)
+                      = %s
             RETURNING id, user_id, session_id, token_hash, issued_at""",
             (digest, evidence_id, TICKET_PRODUCTION, evidence_id, case_id),
         ).fetchone()
@@ -1182,12 +1187,14 @@ class EvidenceService:
         failed: list[str]
         # The effective labels, composed as `deps.effective_labels` does
         # (stricter classification, union of compartments), read live.
+        # As lock facts (`iam.element_facts`, `iam.case_facts`), because
+        # this connection is not bound yet and must still decide (S1).
         labels = self._c.execute(
             """SELECT e.classification, e.compartments,
                       c.classification, c.compartments
-                 FROM core.evidence e
-                 JOIN core."case" c ON c.id = e.case_id
-                WHERE e.id = %s""", (evidence_id,)).fetchone()
+                 FROM iam.element_facts('evidence', %s) e
+                 CROSS JOIN LATERAL iam.case_facts(e.case_id) c""",
+            (evidence_id,)).fetchone()
         try:
             eff_cls = max(tlp_from_name(labels[0]), tlp_from_name(labels[2])).name
             eff_comp = frozenset(labels[1] or []) | frozenset(labels[3] or [])
@@ -1217,11 +1224,12 @@ class EvidenceService:
         """Why a presentation matched nothing, for the audit row only: the
         reason, the holder, and the (exhibit, case) the row is filed under,
         which is the ticket's own exhibit when it names one."""
+        # The exhibit's case as a fact (S1): unbound here, see above.
         row = self._c.execute(
             """SELECT t.user_id, t.evidence_id, t.redeemed_at,
-                      t.expires_at <= now(), e.case_id
+                      t.expires_at <= now(),
+                      (SELECT f.case_id FROM iam.element_facts('evidence', t.evidence_id) f)
                  FROM lab.download_ticket t
-                 LEFT JOIN core.evidence e ON e.id = t.evidence_id
                 WHERE t.token_hash = %s""",
             (digest,)).fetchone()
         if row is None:

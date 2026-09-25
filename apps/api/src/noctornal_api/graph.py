@@ -21,6 +21,8 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api.db import SystemPurpose, system_connection
+
 
 class GraphWriteError(Exception):
     """A graph write violated the model (bad basis, missing rationale,
@@ -153,6 +155,9 @@ class AssertionInput:
     observed_at: datetime | None = None
     claim_path: str | None = None      # e.g. 'attrs.role' for a node attribute
     claim_value: dict | None = None    # jsonb
+    # The lookup answer an accepted claim rests on (F15.3, 2026-09-24;
+    # migration 0100). AUTOMATED_INFERENCE only, by a CHECK.
+    lookup_result_id: UUID | None = None
 
 
 class GraphWriteService:
@@ -576,14 +581,21 @@ class GraphWriteService:
         whose retirement silently failed to remove half a node's ties is in
         the same position.
         """
-        blocked = self._c.execute(
-            """SELECT count(*) FROM core.edge
-                WHERE case_id = %s AND deleted_at IS NULL
-                  AND (src_node_id = %s OR dst_node_id = %s)
-                  AND NOT (classification <= %s::core.tlp
-                           AND compartments <@ %s)""",
-            (case_id, node_id, node_id, clearance, list(compartments)),
-        ).fetchone()[0]
+        # Counted on a system connection with the caller's ceiling (S1,
+        # 2026-09-25). The ties it looks for are exactly the ones row-level
+        # security hides from the caller's own connection, so counted there
+        # the answer is always zero, the retirement goes ahead, and the
+        # cascade below retires only the visible edges: the outcome this
+        # docstring rejects (the node-retirement anti-join).
+        with system_connection(SystemPurpose.GRAPH_GUARD, reuse=self._c) as counter:
+            blocked = counter.execute(
+                """SELECT count(*) FROM core.edge
+                    WHERE case_id = %s AND deleted_at IS NULL
+                      AND (src_node_id = %s OR dst_node_id = %s)
+                      AND NOT (classification <= %s::core.tlp
+                               AND compartments <@ %s)""",
+                (case_id, node_id, node_id, clearance, list(compartments)),
+            ).fetchone()[0]
         if blocked:
             raise GraphWriteError(
                 "this entity carries ties that are above your clearance or "
@@ -741,12 +753,14 @@ class GraphWriteService:
                    (case_id, node_id, edge_id, claim_path, claim_value,
                     basis, reliability, credibility, confidence,
                     source_id, document_id, evidence_id, external_ref,
-                    rationale, observed_at, created_by)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    rationale, observed_at, created_by, lookup_result_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       %s)
                RETURNING id""",
             (case_id, node_id, edge_id, a.claim_path,
              Json(a.claim_value) if a.claim_value is not None else None,
              a.basis, a.reliability, a.credibility, a.confidence,
              a.source_id, a.document_id, a.evidence_id, a.external_ref,
-             a.rationale, a.observed_at, a.created_by),
+             a.rationale, a.observed_at, a.created_by,
+             a.lookup_result_id),  # F15.3
         ).fetchone()[0]

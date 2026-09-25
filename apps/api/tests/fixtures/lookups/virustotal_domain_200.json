@@ -1,0 +1,33 @@
+{
+ "data": {
+  "id": "example.org",
+  "type": "domain",
+  "attributes": {
+   "last_analysis_stats": {
+    "malicious": 0,
+    "harmless": 70
+   },
+   "registrar": "Example Registrar",
+   "creation_date": 1000000000,
+   "tags": [],
+   "last_dns_records": [
+    {
+     "type": "A",
+     "value": "93.184.216.34"
+    },
+    {
+     "type": "AAAA",
+     "value": "2606:2800:220:1:248:1893:25c8:1946"
+    },
+    {
+     "type": "A",
+     "value": "not-an-address"
+    },
+    {
+     "type": "MX",
+     "value": "mail.example.org"
+    }
+   ]
+  }
+ }
+}

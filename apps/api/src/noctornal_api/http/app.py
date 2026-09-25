@@ -36,19 +36,27 @@ from noctornal_api.http.routers import (
     auth,
     cases,
     collection,
+    collection_authority,  # the two-person collection authority
+    collection_telegram,  # F5.2 and F5.3
     comms,
     compartments,
     curation,
     deception,
+    dual_control,
+    egress,  # Administration, Egress (S2)
     evidence,
     governance,
     graph,
     graphview,
     ingest,
+    lab_yara,
+    integrations,  # F8 and F7
     live,
+    lookups,  # F15.3 and F15.4
     merges,
     notifications,
     proposals,
+    providers,  # F15.2
     read,
     reports,
     roles,
@@ -56,6 +64,9 @@ from noctornal_api.http.routers import (
     search,
     setup,
 )
+# Similarity reads and Administration, Embeddings (F6.3, 2026-09-24).
+from noctornal_api.http.routers import embeddings as embeddings_router
+from noctornal_api.http.routers import similarity
 
 API_PREFIX = "/api/v1"
 
@@ -203,6 +214,12 @@ def create_app() -> FastAPI:
     # inside the factory. That is the right side of the line that matters:
     # nothing has bound a port or touched a secret yet.
     enforce_environment()
+    # The egress proxy (S2, 2026-09-24). What only the database knows:
+    # a production process with outbound uses and no egress proxy refuses
+    # to start (docs/00 decision 68). Opens one connection, and only in
+    # that state.
+    from noctornal_api.egress_routes import enforce_production_egress
+    enforce_production_egress()
 
     # The schema publishes the full route inventory and every request/response
     # shape of a law-enforcement case system, so it is OFF unless explicitly
@@ -312,7 +329,16 @@ def create_app() -> FastAPI:
                    graphview.router, analytics.router,
                    proposals.router, merges.router,
                    approvals.router, approvals.policy_router,
-                   notifications.router, samples.router,
+                   # Deployment-wide approvals and the two-person
+                   # policy (F9, 2026-09-24).
+                   approvals.global_router, dual_control.router,
+                   # F12, 2026-09-24. Before samples.router, so no
+                   # /samples/yara path is ever read as a sample id.
+                   notifications.router, lab_yara.router, samples.router,
+                   # Outbound integrations (F8, F7) and lookup
+                   # providers and lookups (F15.2 to F15.4), 2026-09-24.
+                   integrations.router, integrations.case_router,
+                   providers.router, lookups.router,
                    # The assumptions register (docs/08 Phase 6, 0056):
                    # what the report's findings rest on, listed where
                    # they can be challenged. Nothing until 2026-09-02.
@@ -323,6 +349,11 @@ def create_app() -> FastAPI:
                    # collect.document and collect.watch_hit from the start
                    # and nothing read them until 2026-08-10.
                    collection.router, collection.case_router, ingest.router,
+                   # The two-person collection authority (docs/00
+                   # decision 69).
+                   collection_authority.router,
+                   # Telegram chats and personas (F5.2, F5.3).
+                   collection_telegram.router,
                    # Tags and node sets: schema and service since
                    # 0009, no router until 2026-07-26.
                    curation.router,
@@ -331,7 +362,14 @@ def create_app() -> FastAPI:
                    # The change-hint socket. Carries no case content by
                    # design — see `live.py`; the client refetches through
                    # the gated REST endpoints.
-                   live.router):
+                   live.router,
+                   # Where anything may leave (S2, the egress proxy,
+                   # 2026-09-24): egress profiles, integration routes and
+                   # the connection log.
+                   egress.router,
+                   # Similar wording and meaning (F6.3, F6.4) and their
+                   # administration, 2026-09-24.
+                   similarity.router, embeddings_router.router):
         app.include_router(router, prefix=API_PREFIX)
 
     # The analyst UI: plain HTML/CSS/JS, no build step, same origin as the

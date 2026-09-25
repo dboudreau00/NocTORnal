@@ -73,6 +73,7 @@ from noctornal_api.http.deps import (
     authorize_object,
     check_writable_labels,
     current_user,
+    element_labels,
     get_conn,
     user_ceiling,
 )
@@ -294,9 +295,11 @@ def create_capture(
             exhibit_id = UUID(raw)
         except ValueError as exc:
             raise Problem(422, "Invalid field", f"{field} is not a UUID") from exc
-        found = conn.execute(
-            "SELECT case_id, classification, compartments "
-            "  FROM core.evidence WHERE id = %s", (exhibit_id,)).fetchone()
+        # The element's case and labels as facts (`deps.element_labels`,
+        # S1 2026-09-25), so the gate below still answers an element above the
+        # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+        # row-level security. Content is read only after the gate.
+        found = element_labels(conn, "evidence", exhibit_id)
         # Same answer for "does not exist" and "belongs to a case you
         # cannot see": a status code must not be an existence oracle.
         if found is None or found[0] != case_id:
@@ -304,7 +307,7 @@ def create_capture(
         authorize_object(conn, user, case_id=case_id,
                          permission_key="evidence.read", after_case_gate=True,
                          classification=found[1],
-                         compartments=frozenset(found[2] or []))
+                         compartments=found[2])
     _one_of(body.capture_method, _CAPTURE_METHODS, "capture_method")
     # The table refuses an ACTIVE capture with no egress profile; said
     # here as a sentence, because the console's form now posts to this
@@ -420,12 +423,14 @@ def capture_screenshot(
     if not evidence_id:
         raise Problem(404, "Not found", "this capture has no screenshot")
 
-    row = conn.execute(
-        "SELECT is_hostile_markup, case_id, classification, compartments "
-        "  FROM core.evidence WHERE id = %s",
-        (UUID(evidence_id),)).fetchone()
-    if row is None:
+    # The exhibit's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so an exhibit above the caller's labels still meets
+    # the gate below rather than reading as missing; whether it is hostile
+    # is content, read only after the gate.
+    facts = element_labels(conn, "evidence", UUID(evidence_id))
+    if facts is None:
         raise Problem(404, "Not found", "the screenshot exhibit is missing")
+    row = (None, facts[0], facts[1], facts[2])
 
     # THE EXHIBIT'S OWN CASE, FIRST. Before anything else is revealed about
     # it, including whether it is hostile.
@@ -463,8 +468,13 @@ def capture_screenshot(
                      permission_key="evidence.read", after_case_gate=True,
                      classification=row[2],
                      compartments=frozenset(row[3] or []))
+    hostile = conn.execute(
+        "SELECT is_hostile_markup FROM core.evidence WHERE id = %s",
+        (UUID(evidence_id),)).fetchone()
+    if hostile is None:
+        raise Problem(404, "Not found", "the screenshot exhibit is missing")
 
-    if row[0]:
+    if hostile[0]:
         raise Problem(
             409, "Not renderable",
             "this exhibit is marked as attacker-authored markup and is "

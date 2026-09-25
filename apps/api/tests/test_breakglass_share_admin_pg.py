@@ -852,14 +852,50 @@ def test_the_way_in_is_answered_for_the_caller_alone(conn, client):
                       ).json() == {"user_manage": False,
                                    "break_glass_review": False,
                                    "blocking_failures": [],
-                                   "readiness_caveats": []}
+                                   "readiness_caveats": [],
+                                   # The two-person policy (F9).
+                                   "dual_control_manage": False,
+                                   "dual_control_countersign": False,
+                                   "dual_control_awaiting": 0,
+                                   # F12, the officer's YARA activations.
+                                   "sample_yara_activate": False,
+                                   # The collection authorities an officer confirms.
+                                   "collection_authority_confirm": False,
+                                   # S2, the Egress section's way in.
+                                   "egress_manage": False,
+                                   "egress_log_read": False,
+                                   # F6.3, the similarity indexes.
+                                   "embedding_manage": False,
+                                   # Integrations and Providers.
+                                   "integration_manage": False,
+                                   # F13, prohibited-content screening.
+                                   "sample_screening_review": False,
+                                   "sample_screening_manage": False}
     assert client.get("/api/v1/admin/access", headers=_session(conn, admin)
                       ).json()["user_manage"] is True
     assert client.get("/api/v1/admin/access", headers=_session(conn, officer)
                       ).json() == {"user_manage": False,
                                    "break_glass_review": True,
                                    "blocking_failures": [],
-                                   "readiness_caveats": []}
+                                   "readiness_caveats": [],
+                                   # An officer countersigns (F9).
+                                   "dual_control_manage": False,
+                                   "dual_control_countersign": True,
+                                   "dual_control_awaiting": 0,
+                                   # F12, the officer's YARA activations.
+                                   "sample_yara_activate": True,
+                                   # The collection authorities an officer confirms.
+                                   "collection_authority_confirm": True,
+                                   # S2, an officer reads the connection log.
+                                   "egress_manage": False,
+                                   "egress_log_read": True,
+                                   # F6.3, a system administrator's.
+                                   "embedding_manage": False,
+                                   # Integrations and Providers.
+                                   "integration_manage": False,
+                                   # F13, the officer screens.
+                                   "sample_screening_review": True,
+                                   "sample_screening_manage": True}
     # ...and it opens nothing: the list still wants user.manage.
     assert client.get("/api/v1/admin/users",
                       headers=_session(conn, analyst)).status_code == 403

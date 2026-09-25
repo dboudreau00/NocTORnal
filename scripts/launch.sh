@@ -84,7 +84,11 @@ if [ ! -x "$PYTHON" ]; then
 fi
 
 # uvicorn and the two editable packages are what the last step actually needs.
-if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg' 2>&1)"; then
+# numpy, selectolax and pefile are hard dependencies since 2026-09-24: a
+# venv built before then is told to reinstall here, not at the first CONCOR
+# run or forum poll. The optional
+# extras (telegram, yara) are not probed; their absence is a readiness gap.
+if ! probe="$("$PYTHON" -c 'import uvicorn, alembic, noctornal_api, noctornal_ontology, igraph, leidenalg, numpy, selectolax, pefile' 2>&1)"; then
   printf '%s\n' "$probe" | indent
   fail 'the virtual environment is missing packages the API needs' \
     'Install them, from the repo root:' \
@@ -265,9 +269,12 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
     cat > "$ENV_LOCAL" <<EOF
 # NocTORnal local key store. Created by scripts/launch.sh.
 #
-# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted:
+# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted,
+# except the egress exits, which are sealed to the egress proxy's own key:
 # enrolled authenticators, collection persona credentials, stored victim
-# credentials and each sample's data key. LOSING THIS FILE LOSES ALL OF
+# credentials, each sample's data key, and the credentials of the outbound
+# integrations an administrator configures (Jira and lookup provider
+# credentials). LOSING THIS FILE LOSES ALL OF
 # THEM: every user must re-enrol their authenticator, and no stored
 # credential or sample, preserved samples included, can be decrypted
 # again. If NOCTORNAL_INGEST_PEPPER is kept here too, losing it means
@@ -292,9 +299,10 @@ EOF
   printf '\n'
   printf '    That file is now your key store. The key seals every secret the\n'
   printf '    database stores encrypted: authenticators, persona and victim\n'
-  printf '    credentials, and the keys of stored samples. If you lose it, every\n'
-  printf '    user has to re-enrol their authenticator app, and none of the rest\n'
-  printf '    can be decrypted again. There is no recovery and no default key.\n'
+  printf '    credentials, Jira and lookup provider credentials, and the keys of\n'
+  printf '    stored samples. If you lose it, every user has to re-enrol their\n'
+  printf '    authenticator app, and none of the rest can be decrypted again.\n'
+  printf '    There is no recovery and no default key.\n'
   printf '    Keep a backup. It is git-ignored, so it will never be committed.\n'
   printf '    ------------------------------------------------------------\n'
   printf '\n'
@@ -344,6 +352,9 @@ set_default MINIO_ENDPOINT   '127.0.0.1:9000'
 set_default MINIO_ACCESS_KEY 'noctornal'
 set_default MINIO_SECRET_KEY 'dev_only_change_me'
 set_default EVIDENCE_BUCKET  'noctornal-evidence'
+# Raw markup of collected forum pages (2026-09-24), without object
+# lock, because it is deleted with its document.
+set_default COLLECT_RAW_BUCKET 'noctornal-collect-raw'
 
 # ---------------------------------------------------------------------------
 # Step e: migrations

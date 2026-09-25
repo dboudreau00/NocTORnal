@@ -708,6 +708,230 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
             f"default nobody here decided; declare it (docs/08, exhibit size "
             f"policy).")
 
+    # The egress settings (docs/20 sections 6.3 and 6.5, 2026-09-24),
+    # through the readers the route layer itself uses, so this and
+    # route_for cannot disagree about what a usable value is. Neither
+    # quotes the value.
+    from noctornal_api import egress, egress_policy
+
+    if egress.proxy_problem(env) is not None:
+        problems.append(
+            f"{egress.PROXY_URL_ENV} is not an http:// address with a host and a "
+            f"port and nothing else, so no outbound connection could take a route "
+            f"through the egress proxy ({egress_policy.DECISION_REF}).")
+    try:
+        egress_policy.internal_networks(env, production=True)
+    except ValueError:
+        problems.append(
+            f"{egress_policy.INTERNAL_CIDRS_ENV} is not a comma list of networks, "
+            f"so the deployment's own networks cannot be kept out of every route.")
+    # F11 and F12, 2026-09-24. The static-triage and YARA settings,
+    # through their one reader each, so the runner, readiness and this
+    # cannot disagree about what is usable. Named, never quoted.
+    from noctornal_api.lab_triage import analysis_settings
+    from noctornal_api.yara_rules import yara_settings
+    for reader, what in ((analysis_settings, "static triage"),
+                         (yara_settings, "YARA scanning")):
+        _settings, problem = reader(env)
+        if problem:
+            problems.append(
+                f"{problem}, so {what} would run with limits nobody here "
+                f"decided (the development defaults) or not at all.")
+
+    # Collection ceilings (docs/00 decision 69, 2026-09-24). A ceiling SET
+    # to a label the collector may not read at (invariant 8 caps it at
+    # AMBER). Unset is valid: that collection is off. Through the module
+    # the poll reads, so the two cannot disagree; no value is quoted.
+    from noctornal_api.collection_authority import ceiling_problems
+
+    problems.extend(ceiling_problems(env))
+
+    # S2, the egress proxy (2026-09-24). With a proxy configured, the
+    # keys this process needs to use it, read through the readers that use
+    # them. Skipped for the sample origin, which makes no outbound
+    # connection and holds no egress key. Whether anything goes outbound at
+    # all is the start refusal's (egress_routes.enforce_production_egress,
+    # from egress.outbound_uses): one reader of that. Nothing is quoted.
+    problems.extend(_egress_key_problems(env))
+
+    # Outbound integrations (F8, F7 and F15.2, 2026-09-24). The senders
+    # refuse the same things at send time, because the cron that drains
+    # never runs this check.
+    webhook = env.get("NOCTORNAL_WEBHOOK_URL", "").strip()
+    if webhook and not webhook.lower().startswith("https://"):
+        problems.append(
+            "NOCTORNAL_WEBHOOK_URL is not an https address, so every webhook would "
+            "carry case summaries in the clear.")
+    for flag, what in (("NOCTORNAL_WEBHOOK_ALLOW_HTTP", "a webhook"),
+                       ("NOCTORNAL_JIRA_ALLOW_HTTP", "Jira")):
+        if env.get(flag, "").strip():
+            problems.append(
+                f"{flag} is set, and it lets {what} be reached over plain http; it "
+                f"exists for development and tests only.")
+    ceiling = env.get("NOCTORNAL_JIRA_CEILING", "").strip()
+    if ceiling and ceiling.upper() not in ("CLEAR", "GREEN", "AMBER"):
+        problems.append(
+            "NOCTORNAL_JIRA_CEILING is not CLEAR, GREEN or AMBER, so Jira would "
+            "refuse everything rather than guess what it may hold.")
+    # The Jira network (2026-09-25), parsed by the reader the
+    # Jira route itself uses, so this and the route cannot disagree.
+    from noctornal_api import jira as _jira
+    _net, net_problem = _jira.jira_network(env)
+    if net_problem is not None:
+        problems.append(net_problem)
+    for name in ("NOCTORNAL_JIRA_CA_FILE", "NOCTORNAL_LOOKUP_CA_FILE"):
+        path = env.get(name, "").strip()
+        if path and not (os.path.isfile(path) and os.access(path, os.R_OK)):
+            problems.append(
+                f"{name} names a file that does not exist or cannot be read, so "
+                f"the private certificate authority it should add is missing.")
+    lookups = env.get("NOCTORNAL_OUTBOUND_LOOKUPS", "").strip().lower()
+    if lookups == "on" and egress.proxy_problem(env) is None \
+            and not env.get(egress.PROXY_URL_ENV, "").strip():
+        problems.append(
+            f"NOCTORNAL_OUTBOUND_LOOKUPS is on and {egress.PROXY_URL_ENV} is not set, "
+            f"so case selectors would leave from this host's own address instead of "
+            f"through the egress proxy ({egress_policy.DECISION_REF}).")
+
+    # F13, 2026-09-24. The hash-set authority is a legal declaration
+    # like the two above, and secrets.env.example ships a placeholder in it;
+    # the list cap is a size, read by the one size reader. Named, never
+    # quoted.
+    from noctornal_api.screening import AUTHORITY_ENV, LIST_CAP_ENV
+    if "replace-me" in env.get(AUTHORITY_ENV, "").lower():
+        problems.append(
+            f"{AUTHORITY_ENV} still carries the placeholder "
+            f"infra/production/secrets.env.example ships, so prohibited-content "
+            f"hash lists would be imported under an authority nobody recorded "
+            f"(docs/16 L1 item 5).")
+    with _borrowing(env, LIST_CAP_ENV):
+        list_problem = cap_problem(LIST_CAP_ENV)
+    if list_problem:
+        problems.append(
+            f"{list_problem}, so the hash list import could not state the "
+            f"largest list it takes.")
+    # F14, 2026-09-24. The sandbox's settings, through their one
+    # reader (sandbox.sandbox_settings), so the worker, readiness and this
+    # cannot disagree. Named, never quoted.
+    from noctornal_api.sandbox import production_problems
+    problems.extend(production_problems(env))
+
+    # The similarity settings (F6.1 and F6.2, 2026-09-24), through the
+    # one reader of NOCTORNAL_EMBED_*, so this and the pass cannot disagree
+    # about what a usable value is. No sentence quotes a value.
+    from noctornal_api import embedders
+
+    problems.extend(embedders.configured(env).problems)
+
+    # F3 and F4 (forum adapters, 2026-09-24). The development override
+    # that lets a forum be read with no egress proxy, from this host's own
+    # address, has no place in production. Its value is not quoted.
+    if env.get("NOCTORNAL_FORUM_ALLOW_DIRECT", "").strip():
+        problems.append(
+            "NOCTORNAL_FORUM_ALLOW_DIRECT is set, and it lets a forum be read "
+            "from this server's own address with no egress proxy; it exists for "
+            "development only.")
+
+    # Row-level security (S1, 2026-09-25). Who holds the system role's
+    # DSN, which bypasses row security. Named, never quoted.
+    problems.extend(_row_security_problems(env))
+
+    return problems
+
+
+def _dsn_user(dsn: str) -> str | None:
+    """The role a URL-style DSN names, or None when it names none."""
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(dsn.strip()).username or None
+    except ValueError:
+        return None
+
+
+def _row_security_problems(env: Mapping[str, str]) -> list[str]:
+    """The production refusals row-level security needs (S1).
+
+    The system connection (`db.connect_system`) is what retention, lock
+    extension, legal holds, the withheld counts, merges, sign-in and every
+    script run on, so a process without it cannot do that work, and one
+    with it can read every row. So: required on every process except the
+    sample origin; refused ON the sample origin, which serves hostile bytes
+    and must never hold the bypass (compose sets it to ""); never the same
+    role DATABASE_URL names, or the request role would be the bypass role;
+    the initdb-only password on no runtime process; and the development
+    switch that makes the suite assume the runtime roles never in
+    production. Empty counts as unset everywhere."""
+    from noctornal_api.db import ASSUME_ROLE_ENV, WORKER_DSN_ENV
+    from noctornal_api.samples import origin_split
+
+    problems: list[str] = []
+    worker = env.get(WORKER_DSN_ENV, "").strip()
+    with _borrowing(env, "NOCTORNAL_SAMPLE_ORIGIN", "NOCTORNAL_BASE_URL",
+                    "NOCTORNAL_PUBLIC_ORIGIN"):
+        sample_origin = origin_split().serves_here
+    if sample_origin and worker:
+        problems.append(
+            f"{WORKER_DSN_ENV} is set on the sample origin, the process that "
+            f"serves hostile bytes, and that connection bypasses row-level "
+            f"security; leave it empty there (infra/production/compose.yml).")
+    elif not sample_origin and not worker:
+        problems.append(
+            f"{WORKER_DSN_ENV} is not set, so retention, legal holds, lock "
+            f"extension, merges, sign-in and every script would have no "
+            f"connection that sees every row; point it at noctornal_worker.")
+    request_user = _dsn_user(env.get("DATABASE_URL", ""))
+    if worker and request_user and _dsn_user(worker) == request_user:
+        problems.append(
+            f"{WORKER_DSN_ENV} and DATABASE_URL name the same role, so every "
+            f"request would run as the role that bypasses row-level security.")
+    if env.get("NOCTORNAL_WORKER_DB_PASSWORD", "").strip():
+        problems.append(
+            "NOCTORNAL_WORKER_DB_PASSWORD is set on a runtime process; it is "
+            "read once, by the database at initialisation "
+            "(infra/production/postgres-init.env), and nothing else should "
+            "hold it.")
+    if env.get(ASSUME_ROLE_ENV, "").strip():
+        problems.append(
+            f"{ASSUME_ROLE_ENV} is set, and it makes this process switch roles "
+            f"from the connection it was given; it exists for development and "
+            f"tests only.")
+    return problems
+
+
+def _egress_key_problems(env: Mapping[str, str]) -> list[str]:
+    """The egress client keys a production process with a proxy needs."""
+    from noctornal_api import egress, egress_routes
+    from noctornal_api.pinned_http import RouteUnavailable
+    from noctornal_api.samples import origin_split
+    from noctornal_api.security import egress_seal
+
+    if egress.proxy_problem(env) is not None or egress.proxy_settings(env) is None:
+        return []
+    with _borrowing(env, "NOCTORNAL_SAMPLE_ORIGIN", "NOCTORNAL_BASE_URL",
+                    "NOCTORNAL_PUBLIC_ORIGIN"):
+        if origin_split().serves_here:
+            return []
+    problems = []
+    try:
+        egress_routes.client_key(env)
+    except RouteUnavailable as exc:
+        problems.append(str(exc))
+    try:
+        egress_seal.fingerprint_key(env)
+    except egress_seal.SealError:
+        problems.append(
+            f"{egress_seal.FINGERPRINT_KEY_ENV} is not base64 of 32 bytes, so no egress "
+            f"exit can be sealed and a sealed one cannot be matched with what the "
+            f"proxy opens.")
+    if env.get(egress_seal.SEAL_PUBLIC_ENV, "").strip():
+        try:
+            egress_seal.load_public(env[egress_seal.SEAL_PUBLIC_ENV])
+        except egress_seal.SealError:
+            problems.append(
+                f"{egress_seal.SEAL_PUBLIC_ENV} is not a 32 byte X25519 public key, so "
+                f"no egress exit can be sealed for the proxy.")
+
+
     return problems
 
 

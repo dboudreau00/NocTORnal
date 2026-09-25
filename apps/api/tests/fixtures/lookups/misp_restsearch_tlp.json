@@ -1,0 +1,51 @@
+{
+ "response": {
+  "Attribute": [
+   {
+    "event_id": "1",
+    "category": "Network activity",
+    "type": "domain",
+    "to_ids": true,
+    "Event": {
+     "info": "Campaign one",
+     "date": "2026-09-01"
+    },
+    "Tag": [
+     {
+      "name": "tlp:white"
+     }
+    ]
+   },
+   {
+    "event_id": "2",
+    "category": "Network activity",
+    "type": "domain",
+    "to_ids": false,
+    "Event": {
+     "info": "Campaign two",
+     "date": "2026-09-02"
+    },
+    "Tag": [
+     {
+      "name": "TLP:AMBER+STRICT"
+     }
+    ]
+   },
+   {
+    "event_id": "3",
+    "category": "Network activity",
+    "type": "domain",
+    "to_ids": false,
+    "Event": {
+     "info": "Campaign three",
+     "date": "2026-09-03"
+    },
+    "Tag": [
+     {
+      "name": " tlp:red "
+     }
+    ]
+   }
+  ]
+ }
+}

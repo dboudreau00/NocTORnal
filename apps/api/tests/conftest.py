@@ -34,6 +34,26 @@ os.environ.setdefault("EVIDENCE_RETENTION_DAYS", "1")
 # tests about the horizon set their own.
 os.environ.setdefault("EVIDENCE_LOCK_HORIZON_DAYS", "1")
 
+#: The tests that take the suite's own database down the migration chain and
+#: back up. They run FIRST: since 2026-09-24 later migrations refuse their
+#: downgrade while append-only history exists (collection authorities 0083,
+#: the egress binding history 0085, the connection ledger 0086), and the
+#: suites for those features write that history by design and cannot delete
+#: it. Alphabetical order put the collection and egress suites ahead of both
+#: round trips, in CI's fresh database as well (2026-09-25). On a
+#: database an earlier run has already written to, these two still stop at
+#: those refusals: run them on a fresh one, as CI does.
+_RUN_FIRST = frozenset({
+    "test_downgrade_to_0058_and_upgrade_to_head_round_trip",
+    "test_downgrade_to_0067_and_upgrade_to_head_round_trip",
+})
+
+
+def pytest_collection_modifyitems(config, items):
+    first = [item for item in items if item.name in _RUN_FIRST]
+    if first:
+        items[:] = first + [item for item in items if item.name not in _RUN_FIRST]
+
 from noctornal_api.security.auth import AuthUser, UserStore
 from noctornal_api.security.sessions import SessionRecord, SessionStore
 

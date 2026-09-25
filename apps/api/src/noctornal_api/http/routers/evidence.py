@@ -27,6 +27,7 @@ from noctornal_api.evidence import (
     lock_short_before,
     lock_target,
 )
+from noctornal_api.db import SystemPurpose, bind_ticket, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     audit_auth_event,
@@ -35,6 +36,7 @@ from noctornal_api.http.deps import (
     counted_at_case_gate,
     current_user,
     effective_labels,
+    element_labels,
     get_conn,
     require,
     user_ceiling,
@@ -99,13 +101,14 @@ def _authorize_exhibit(
     case's compartments and takes the stricter classification).
     """
     authorize_object(conn, user, case_id=case_id, permission_key=permission_key)
-    row = conn.execute(
-        """SELECT classification, compartments FROM core.evidence
-            WHERE id = %s AND case_id = %s""",
-        (evidence_id, case_id),
-    ).fetchone()
-    if row is None:
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    facts = element_labels(conn, "evidence", evidence_id)
+    if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", "evidence does not exist in this case")
+    row = (facts[1], facts[2])
     # The second gate: one open is one use of a break-glass grant, not one
     # per gate (sec-breakglass-double-count, 2026-09-23).
     authorize_object(conn, user, case_id=case_id, permission_key=permission_key,
@@ -164,13 +167,14 @@ def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
                          classification=classification, compartments=compartments)
 
     gate()
-    row = conn.execute(
-        """SELECT classification, compartments FROM core.evidence
-            WHERE id = %s AND case_id = %s""",
-        (evidence_id, case_id),
-    ).fetchone()
-    if row is None:
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    facts = element_labels(conn, "evidence", evidence_id)
+    if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", "evidence does not exist in this case")
+    row = (facts[1], facts[2])
     gate(row[0], frozenset(row[1] or []),
          count_use=not counted_at_case_gate(conn, user, case_id))
 
@@ -1095,11 +1099,14 @@ def mint_production_ticket(
     _authorize_export(conn, user, case_id, evidence_id)
     # No store: minting touches no bytes, and must not fail over bucket
     # credentials it never uses (`samples._ticket_svc`'s reason).
-    svc = EvidenceService(conn, storage=None)
     try:
-        ticket = svc.issue_production_ticket(
-            evidence_id, case_id=case_id, actor_id=user.user_id,
-            session_id=user.session_id, ip_hash=_ip_hash(request))
+        # A ticket row binds its holder once spent, so the request role
+        # may not write one (0109, S1 2026-09-25): minted on a system
+        # connection, after the export gate above.
+        with system_connection(SystemPurpose.TICKETS, reuse=conn) as sconn:
+            ticket = EvidenceService(sconn, storage=None).issue_production_ticket(
+                evidence_id, case_id=case_id, actor_id=user.user_id,
+                session_id=user.session_id, ip_hash=_ip_hash(request))
     except NotProducible as exc:
         raise Problem(409, "Not producible", safe_detail(exc)) from exc
     except SampleError as exc:
@@ -1162,6 +1169,10 @@ def produce(
         # 401: a spent or expired ticket is an expired credential, and one
         # answer for every reason (the Lab's rule).
         raise Problem(401, "Unauthenticated", safe_detail(exc)) from exc
+    # Bound to the spent ticket's holder before the exhibit is read or its
+    # custody appended (S1, 2026-09-25). The redemption above ran unbound
+    # on purpose.
+    bind_ticket(conn, ticket)
     try:
         blob, digest = _svc(conn).produce(
             evidence_id, case_id=case_id, actor_id=holder, ticket_id=ticket_id)

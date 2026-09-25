@@ -37,7 +37,12 @@ from fastapi import Depends, Header, Path, Request
 from psycopg.types.json import Json
 
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
-from noctornal_api.db import connect
+from noctornal_api.db import (
+    SystemPurpose,
+    bind_session,
+    connect_request,
+    system_connection,
+)
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import client_ip
 from noctornal_api.security.access import (
@@ -77,11 +82,27 @@ COOKIE_ATTRS: dict = {"path": "/", "secure": True, "samesite": "strict"}
 
 
 def get_conn() -> Iterator[psycopg.Connection]:
-    conn = connect()  # autocommit
+    # The request role in production (S1, 2026-09-25), bound to the
+    # request's user by `current_user`. Autocommit, as before.
+    conn = connect_request()
     try:
         yield conn
     finally:
         conn.close()
+
+
+def system_conn(purpose: SystemPurpose):
+    """A dependency yielding a connection that sees every row, for a
+    route whose work must be complete whatever its caller may read (S1,
+    2026-09-25; `db.SystemPurpose`). The route's gate still runs on the
+    request connection first. In development and the suite this IS the
+    request connection, so behaviour and transactions are unchanged; in
+    production it is the system role, closed after the response."""
+    def _dep(conn: psycopg.Connection = Depends(get_conn),
+             ) -> Iterator[psycopg.Connection]:
+        with system_connection(purpose, reuse=conn) as sconn:
+            yield sconn
+    return _dep
 
 
 @dataclass(frozen=True)
@@ -171,8 +192,33 @@ def current_user(
             conn, s, ip=client_ip(request),
             user_agent=request.headers.get("user-agent"), path="http"):
         raise Problem(401, "Unauthenticated", "invalid or expired session")
+    # Bind the connection to this session's user for row-level
+    # security (S1, 2026-09-25) BEFORE sliding the idle window: the request
+    # role may update only the session its connection is bound to (0112).
+    # On an exempt connection (the owner, in development and the suite)
+    # nothing is compared and nothing changes.
+    refuse_unbindable_session(conn, s, raw)
     s = service.touch(s)
+    # Who a row-level security refusal is audited against, when one
+    # escapes to the error handler (http/errors.py, S1).
+    request.state.noctornal_user_id = s.user_id
     return CurrentUser(s.user_id, s.id, s.mfa_satisfied_at)
+
+
+def refuse_unbindable_session(conn, session, raw: str) -> None:
+    """Bind `conn` to `session` (S1). A connection that is subject to
+    row security and does not come out bound to the session's own user is
+    refused with the same generic 401 as any bad session: a session minted
+    before 0110 carries no binding, and a mismatch means the proof and the
+    row disagree, which is never the presenter's to know. Shared with the
+    websocket handshake in `routers/live.py`."""
+    binding = bind_session(conn, raw)
+    if binding.exempt or binding.actor == session.user_id:
+        return
+    audit_auth_event(conn, "RLS_BINDING_FAILED", session.user_id, None,
+                     {"session_id": str(session.id),
+                      "reason": "unbound" if binding.actor is None else "mismatch"})
+    raise Problem(401, "Unauthenticated", "invalid or expired session")
 
 
 def refuse_unbound_session(conn, session, *, ip: str | None,
@@ -239,9 +285,15 @@ def effective_labels(
     """The labels an access decision must use: the STRICTER classification
     of case and element, and the UNION of their compartments. Raises 404
     only for a case that does not exist (callers gate before revealing
-    element existence)."""
+    element existence).
+
+    Read through `iam.case_facts` (S1, 2026-09-25), because the gate
+    must decide, and audit, on the case's labels whether or not row-level
+    security lets the caller read the case row: an assigned analyst asking
+    for a case above their clearance gets the gate's 403 and its
+    AUTHZ_DENIED row, never a silent 404."""
     row = conn.execute(
-        'SELECT classification, compartments FROM core."case" WHERE id = %s',
+        "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,),
     ).fetchone()
     if row is None:
@@ -289,6 +341,12 @@ CONTENT_WRITE_PERMISSIONS: frozenset[str] = frozenset({
     "curation.manage",
     "sample.submit",
     "ingest.manage", "ingest.replay",
+    # Comms F10c (2026-09-24): asking for and approving a key lookup.
+    "comms.key.lookup", "comms.key.lookup.approve",
+    # Sending a case selector to a provider (F15.3, 2026-09-24). Not
+    # lookup.authorise: withdrawing a request stays possible on a closed
+    # case, and the routes that send under it say content_write=True.
+    "lookup.request",
 })
 
 #: The problem title of the refusal, and the console's way of recognising
@@ -337,8 +395,12 @@ def refuse_if_case_read_only(conn: psycopg.Connection, user: CurrentUser,
     read and that write lets the one write through. Closing that needs a
     trigger on every content table, which is a migration and was left for
     one.
+
+    The status is a lock fact, read through `iam.case_facts` (S1), so
+    a case row hidden by row-level security still refuses a content write
+    rather than letting it through as "not read-only".
     """
-    row = conn.execute('SELECT status FROM core."case" WHERE id = %s',
+    row = conn.execute("SELECT status FROM iam.case_facts(%s)",
                        (case_id,)).fetchone()
     if row is None or row[0] not in CONTENT_READ_ONLY_STATES:
         return
@@ -628,9 +690,119 @@ def counted_at_case_gate(conn: psycopg.Connection, user: CurrentUser,
     before this existed, because `core.tlp` is an ordered enum and the
     two columns are of that type. A case that has gone answers False,
     which counts rather than hides."""
+    # The case's labels through `iam.case_facts` (S1, 2026-09-25): a
+    # case the caller reaches only through a grant is exactly one row
+    # security would have hidden from a plain read.
     row = conn.execute(
         'SELECT c.classification > u.tlp_clearance '
-        '  FROM core."case" c, iam.app_user u '
-        ' WHERE c.id = %s AND u.id = %s',
+        '  FROM iam.case_facts(%s) c, iam.app_user u '
+        ' WHERE u.id = %s',
         (case_id, user.user_id)).fetchone()
     return bool(row and row[0])
+
+
+# The element pre-reads that feed the gate (S1, 2026-09-25). A router
+# that must know an element's case and labels before calling
+# `authorize_object` reads them here, through `iam.element_facts`, so the
+# gate still answers a hidden element with its 403 and its AUTHZ_DENIED row
+# rather than the router answering a silent 404. The fact function covers
+# the kinds under row-level security: node, edge, evidence, assertion.
+ELEMENT_KINDS = frozenset({"node", "edge", "evidence", "assertion",
+                           # S1, 2026-09-25: the kinds 0117 added whose
+                           # pre-reads a router makes.
+                           "document", "sample", "conversation"})
+
+
+def element_labels(conn: psycopg.Connection, kind: str, element_id: UUID,
+                   ) -> tuple[UUID, str, frozenset[str]] | None:
+    """(case_id, classification, compartments) of one element, or None when
+    it does not exist. Labels only: read content after the gate."""
+    if kind not in ELEMENT_KINDS:
+        raise ValueError(f"element_labels: unknown kind {kind!r}")
+    row = conn.execute(
+        "SELECT case_id, classification, compartments "
+        "  FROM iam.element_facts(%s, %s)", (kind, element_id)).fetchone()
+    if row is None:
+        return None
+    return row[0], row[1], frozenset(row[2] or [])
+
+
+# Global gates for the deployment-wide approvals (F9, 2026-09-24), beside
+# `require_global` rather than folded into it. The SQL and the two refusals
+# are the same, word for word, so the console reads them the same way.
+
+def _fresh(user: CurrentUser) -> bool:
+    return (user.session_mfa_at is not None
+            and (datetime.now(user.session_mfa_at.tzinfo)
+                 - user.session_mfa_at) < STEP_UP_FRESHNESS)
+
+
+def authorize_global(conn: psycopg.Connection, user: CurrentUser,
+                     permission_key: str, *, force_step_up: bool = False) -> None:
+    """`require_global`'s check, callable inside a handler whose permission
+    depends on the row it reads (the global decide route: the signer's
+    permission of the request's operation).
+
+    `force_step_up` demands a fresh second factor even when the permission
+    row does not, and refuses a stale one in the global gate's words,
+    "re-authentication required", which the console's `withStepUp`
+    recognises and answers by asking for the sign-in. The case routes'
+    `require_step_up` words it differently, and a countersigner told
+    something the console does not recognise was told nothing useful
+    (2026-09-24)."""
+    row = conn.execute(
+        """SELECT p.requires_step_up
+             FROM iam.user_role ur
+             JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+             JOIN iam.permission p ON p.key = rp.permission_key
+             JOIN iam.app_user u ON u.id = ur.user_id
+            WHERE ur.user_id = %s AND rp.permission_key = %s
+              AND u.is_active
+            LIMIT 1""",
+        (user.user_id, permission_key),
+    ).fetchone()
+    if row is None:
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                         {"permission": permission_key, "scope": "global"})
+        raise Problem(403, "Forbidden",
+                      f"missing global permission {permission_key}")
+    if (row[0] or force_step_up) and not _fresh(user):
+        audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                         {"permission": permission_key, "scope": "global",
+                          "failed_checks": ["step_up_freshness"]})
+        raise Problem(403, "Forbidden", "re-authentication required")
+
+
+def require_global_any(*permission_keys: str):
+    """Gate a route that either side of a two-person act may open: the
+    caller holds at least one of `permission_keys` through a global role on
+    an active account. Step-up is skipped only when some permission the
+    caller holds does not demand it; otherwise a stale sign-in is refused
+    in the global gate's words."""
+    keys = sorted(set(permission_keys))
+
+    def _dep(
+        user: CurrentUser = Depends(current_user),
+        conn: psycopg.Connection = Depends(get_conn),
+    ) -> CurrentUser:
+        rows = conn.execute(
+            """SELECT DISTINCT p.key, p.requires_step_up
+                 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                 JOIN iam.permission p ON p.key = rp.permission_key
+                 JOIN iam.app_user u ON u.id = ur.user_id
+                WHERE ur.user_id = %s AND rp.permission_key = ANY(%s)
+                  AND u.is_active""",
+            (user.user_id, keys)).fetchall()
+        if not rows:
+            audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                             {"permission": keys, "scope": "global"})
+            raise Problem(403, "Forbidden",
+                          f"missing global permission {' or '.join(keys)}")
+        if all(r[1] for r in rows) and not _fresh(user):
+            audit_auth_event(conn, "AUTHZ_DENIED", user.user_id, None,
+                             {"permission": keys, "scope": "global",
+                              "failed_checks": ["step_up_freshness"]})
+            raise Problem(403, "Forbidden", "re-authentication required")
+        return user
+    return _dep

@@ -322,6 +322,7 @@ function anQuery() { const q = new URLSearchParams({ preset: state.proj.preset }
   if (state.proj.as_of) q.set('as_of', state.proj.as_of); return q; }
 function syncAnalysisSizeOptions() {}
 function renderKeyPlayer() {}
+function renderConcor() {}
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + _src(
         "analysisFailureText", "blankAnalytics", "analyticsAfterGraphRefresh",
         "checkAnalysisCurrency", "renderAnalyticsFlags", "reviewCoverageText",
@@ -341,12 +342,14 @@ def test_an_edit_under_the_same_projection_is_checked_not_guessed():
 (async () => {
   onScreen('preset=all');
   analyticsAfterGraphRefresh(); await tick();
-  const ask = take('/analytics/runs/run-1/current?preset=all');
-  ask.resolve({ current: false }); await tick(); await tick();
+  // One batched check for every card on screen (F2, 2026-09-24).
+  const ask = take('/analytics/currency?preset=all&run_id=run-1');
+  ask.resolve({ runs: [{ run_id: 'run-1', current: false }] }); await tick(); await tick();
   out.moved = { flags: text($('an-flags')), status: $('an-status').textContent,
                 kept: !!state.analytics };
   analyticsAfterGraphRefresh(); await tick();
-  take('/analytics/runs/run-1/current').resolve({ current: true }); await tick(); await tick();
+  take('/analytics/currency?preset=all&run_id=run-1').resolve(
+    { runs: [{ run_id: 'run-1', current: true }] }); await tick(); await tick();
   out.undone = { flags: text($('an-flags')), status: $('an-status').textContent };
   console.log(JSON.stringify(out));
 })();
@@ -629,6 +632,7 @@ def _kpp_race_harness() -> str:
 function anQuery() { return new URLSearchParams({ preset: 'all' }); }
 function syncAnalysisSizeOptions() {}
 function renderKeyPlayer() {}
+function loadConcor() {}
 const drawnKpp = [];
 function renderAnalytics() {
   const k = state.analyticsKpp;
@@ -763,6 +767,7 @@ def test_a_failed_rerun_keeps_the_results_and_says_why_in_plain_words():
 function anQuery() { return new URLSearchParams({ preset: 'all' }); }
 function syncAnalysisSizeOptions() {}
 function renderAnalytics() {}
+function loadConcor() {}
 function fmtTime(v) { return String(v); }
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + "\n".join(
         _fn(n) for n in ("countOf", "agree", "closeClause", "analysisFailureText",

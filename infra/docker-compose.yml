@@ -171,6 +171,7 @@ services:
       mc mb --ignore-existing --with-lock local/noctornal-evidence;
       mc mb --ignore-existing local/noctornal-raw;
       mc mb --ignore-existing local/noctornal-samples;
+      mc mb --ignore-existing local/noctornal-collect-raw;
       mc mb --ignore-existing --with-lock local/noctornal-preserved;
       mc retention set --default GOVERNANCE 365d local/noctornal-evidence;
       echo 'buckets ready';

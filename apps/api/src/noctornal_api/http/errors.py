@@ -72,7 +72,40 @@ _CONSTRAINT_MESSAGES = {
     "case_retention_sane": "retention date must be after creation",
     "assertion_inference_needs_rationale":
         "an inference-based assertion requires a rationale",
+    # The two-person policy ledger (F9, 2026-09-24).
+    "dual_control_change_two_people":
+        "a change is proposed and countersigned by two different people",
+    "dual_control_policy_change_approval_request_id_key":
+        "that approval has already been applied",
 }
+
+
+# Row-level security (S1, 2026-09-25). What a refused write is told.
+# The gate should have refused first, so every one of these is a finding:
+# it is audited as RLS_REFUSED.
+RLS_REFUSED_DETAIL = ("The database refused this change because it would write a "
+                      "row you could not read back.")
+#: The server's text for a WITH CHECK refusal, in the C locale the runtime
+#: role pins (db/init/10-app-role.sh). A permission error on a missing GRANT
+#: shares SQLSTATE 42501 and must stay a 500: it is a deployment defect.
+_RLS_PREFIX = "new row violates row-level security policy"
+SYSTEM_UNAVAILABLE_DETAIL = (
+    "This operation needs the system database connection, and this deployment "
+    "has not configured a usable one (NOCTORNAL_WORKER_DATABASE_URL). The "
+    "readiness register says what to set.")
+
+
+def is_rls_refusal(exc: BaseException) -> bool:
+    """True for a row-level security WITH CHECK refusal on a policied table,
+    and for nothing else that carries SQLSTATE 42501."""
+    if getattr(exc, "sqlstate", None) != "42501":
+        return False
+    text = str(exc)
+    if not text.startswith(_RLS_PREFIX):
+        return False
+    from noctornal_api.rls_registry import POLICY
+    names = {t.split(".", 1)[1] for t in POLICY}
+    return any(f'table "{name}"' in text for name in names)
 
 
 def _db_cause(exc: Exception, depth: int = 8) -> psycopg.Error | None:
@@ -144,6 +177,8 @@ def safe_detail(exc: Exception) -> str:
     sqlstate = getattr(cause, "sqlstate", None)
     if sqlstate in _SQLSTATE_MESSAGES:
         return f"{_SQLSTATE_MESSAGES[sqlstate]} (ref {cid})"
+    if is_rls_refusal(cause):  # S1: row-level security
+        return f"{RLS_REFUSED_DETAIL} (ref {cid})"
     # A plpgsql RAISE (e.g. the ontology/TLP/invariant triggers) carries an
     # authored first line; take only that, never DETAIL/CONTEXT.
     if sqlstate == "P0001" or sqlstate == "23514":
@@ -191,6 +226,28 @@ def install_error_handlers(app) -> None:
         # Fail closed: an unresolvable context is a denial, not a 500.
         return problem_response(403, "Forbidden", "access could not be resolved")
 
+    # Row-level security (S1, 2026-09-25).
+    from noctornal_api.db import SystemContextUnavailable
+
+    @app.exception_handler(psycopg.errors.InsufficientPrivilege)
+    async def _insufficient_privilege(request: Request, exc: Exception):
+        """A WITH CHECK refusal is a 403 and an RLS_REFUSED row, written on a
+        connection of its own because the request's transaction is aborted.
+        Any other 42501 (a missing GRANT) is the 500 it always was."""
+        cid = uuid.uuid4().hex[:12]
+        if not is_rls_refusal(exc):
+            log.exception("unhandled error %s", cid)
+            return problem_response(500, "Internal error",
+                                    f"unexpected failure (ref {cid})")
+        log.warning("row-level security refused a write %s: %s", cid, exc)
+        _audit_rls_refused(request, exc, cid)
+        return problem_response(403, "Forbidden", f"{RLS_REFUSED_DETAIL} (ref {cid})")
+
+    @app.exception_handler(SystemContextUnavailable)
+    async def _no_system_connection(_: Request, exc: Exception):
+        log.error("system connection unavailable: %s", exc)
+        return problem_response(503, "Service unavailable", SYSTEM_UNAVAILABLE_DETAIL)
+
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception):
         """Catch-all so an unexpected failure is still problem+json with no
@@ -225,3 +282,25 @@ def install_error_handlers(app) -> None:
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
         return response
+
+
+def _audit_rls_refused(request: Request, exc: BaseException, cid: str) -> None:
+    """The RLS_REFUSED row (S1). Out of band, on a fresh request-role
+    connection; never raises, because the answer is already decided."""
+    from psycopg.types.json import Json
+
+    from noctornal_api.db import connect_request
+    actor = getattr(request.state, "noctornal_user_id", None)
+    try:
+        with connect_request() as side:
+            side.execute(
+                """INSERT INTO audit.event
+                       (actor_id, actor_kind, action, object_type, object_id,
+                        case_id, outcome, detail)
+                   VALUES (%s, %s, 'RLS_REFUSED', 'auth', NULL, NULL, 'DENIED', %s)""",
+                (actor, "USER" if actor else "SYSTEM",
+                 Json({"ref": cid, "path": request.url.path,
+                       "method": request.method,
+                       "message": str(exc).splitlines()[0][:200]})))
+    except psycopg.Error:
+        log.exception("could not audit the row-level security refusal %s", cid)

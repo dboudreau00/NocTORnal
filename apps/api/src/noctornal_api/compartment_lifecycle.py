@@ -6,7 +6,7 @@ compartment column to it by trigger, in both directions: a row cannot
 carry an unregistered key, and the registry refuses to DROP or RENAME a
 key while any row carries it, naming the columns that do. That binding
 is right, and it left an administrator with no way to correct a key
-short of a hand-written UPDATE on each of eighteen columns, in the right
+short of a hand-written UPDATE on each bound column, in the right
 order, inside one transaction they had to remember to open. A key typed
 as `OP-KESTRAL` and filed under for a week was permanent, and a key
 registered by mistake could not be taken out of the list.
@@ -110,12 +110,19 @@ from noctornal_api.cases import CaseService
 from noctornal_api.iam_admin import COMPARTMENT_KEY, AdminError, IamAdminService
 from noctornal_api.wording import agree, count_of
 
-#: Every column that carries a compartment key: (schema, table, column,
-#: kind). The same eighteen as migration 0059's `BOUND_COLUMNS`, which
-#: installed the triggers; `test_compartment_lifecycle_pg.py` holds this
-#: tuple equal to that one and to the live triggers, so a column bound by
-#: a later migration and missing here fails a test, and would also fail
-#: the rename itself at the final drop rather than leaving rows behind.
+#: Every bound column: (schema, table, column, kind). 0059's eighteen and
+#: every later migration's `ADDED_BOUND_COLUMNS` (docs/05, "Binding a
+#: compartment column"; docs/00 decision 71, 2026-09-24).
+#: test_compartment_contract_pg.py holds this tuple, the migrations and the
+#: live bindings (`iam.compartment_bindings()`) to one set, so a column
+#: bound by a later migration and missing here fails a test, fails the
+#: readiness row `compartment_bindings_intact`, and would also fail the
+#: rename itself at the final drop rather than leaving rows behind.
+#:
+#: APPEND-ONLY: a migration that binds a column adds one line per column
+#: below the last, with a comment naming its roadmap item, in the same
+#: change as the migration that installs its trigger. Order is not part
+#: of the contract; the tests compare sets.
 BOUND_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("iam", "app_user", "compartments", "array"),
     ("core", "case", "compartments", "array"),
@@ -135,10 +142,19 @@ BOUND_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("deception", "email_message", "compartments", "array"),
     ("deception", "call_record", "compartments", "array"),
     ("ingest", "api_key", "forced_compartment", "scalar"),
+    # Captured documents carry their case's compartments (L1, 0070).
+    ("collect", "document", "compartments", "array"),
+    # YARA rule sets are labelled (F12, 0080).
+    ("lab", "yara_ruleset", "compartments", "array"),
+    # Vendor key acquisitions carry their labels (F10b, 0088).
+    ("comms", "pgp_key_acquisition", "compartments", "array"),
+    # A document's similarity vectors carry its keys (F6.1, 2026-09-24).
+    ("collect", "document_embedding", "read_compartments", "array"),
 )
 
 #: What an administrator calls the rows of each table, (one, many), for
 #: the retire refusal and the rename's result. Keyed by table.
+#: APPEND-ONLY with BOUND_COLUMNS: one entry per bound table.
 NOUNS: dict[tuple[str, str], tuple[str, str]] = {
     ("iam", "app_user"): ("account read in", "accounts read in"),
     ("core", "case"): ("case", "cases"),
@@ -158,6 +174,15 @@ NOUNS: dict[tuple[str, str], tuple[str, str]] = {
     ("deception", "email_message"): ("email", "emails"),
     ("deception", "call_record"): ("call record", "call records"),
     ("ingest", "api_key"): ("ingest key", "ingest keys"),
+    # L1, 0070.
+    ("collect", "document"): ("document", "documents"),
+    # F12, 0080.
+    ("lab", "yara_ruleset"): ("YARA rule set", "YARA rule sets"),
+    # F10b, 0088.
+    ("comms", "pgp_key_acquisition"): ("imported vendor key", "imported vendor keys"),
+    # F6.1.
+    ("collect", "document_embedding"): ("similarity index row",
+                                        "similarity index rows"),
 }
 
 #: The column that names a row to a person, where there is one, so the
@@ -255,10 +280,19 @@ def _table(schema: str, table: str) -> sql.Composed:
 
 
 def _carries(column: str, kind: str) -> sql.Composed:
-    """`WHERE` predicate: this row carries the key given as the parameter."""
+    """`WHERE` predicate: this row carries the key given as the parameter.
+
+    The array form is containment behind a cardinality test
+    (2026-09-24): the same rows as `%s = ANY(col)` for a non-NULL key, and
+    the shape a partial GIN index whose predicate is `cardinality(col) >
+    0` can answer, which `collect.document` has (0070). A rename holds
+    every bound table locked while it runs, so scanning the table of
+    forum bodies for a key would hold every writer that long."""
+    col = sql.Identifier(column)
     if kind == "array":
-        return sql.SQL("%s = ANY({})").format(sql.Identifier(column))
-    return sql.SQL("{} = %s").format(sql.Identifier(column))
+        return sql.SQL("cardinality({c}) > 0 AND {c} @> ARRAY[%s]::text[]"
+                       ).format(c=col)
+    return sql.SQL("{} = %s").format(col)
 
 
 class CompartmentLifecycle:
@@ -440,7 +474,8 @@ class CompartmentLifecycle:
         if kind == "array":
             stmt = sql.SQL(
                 "UPDATE {t} SET {c} = array_replace({c}, %s, %s) "
-                "WHERE %s = ANY({c})").format(t=_table(schema, table), c=col)
+                "WHERE {w}").format(t=_table(schema, table), c=col,
+                                    w=_carries(column, kind))
             params = (key, new_key, key)
         else:
             stmt = sql.SQL("UPDATE {t} SET {c} = %s WHERE {c} = %s").format(

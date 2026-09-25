@@ -120,7 +120,18 @@ sources it did not reach are counted `deferred` and are, exactly as
 above, the most overdue on the next pass. A poll already under way is
 never abandoned by this: it ends inside its own fetch allowance.
 
-## The one write `--dry-run` cannot avoid
+Since 2026-09-24 the clock also RESERVES a long poll's budget: a
+forum or Telegram poll may take its adapter's whole `run_seconds`
+(`CollectionService.poll_seconds`), so a poll is not started when the time
+the pass has run plus that budget would pass `--max-seconds`, except the
+first poll of a pass, which always starts when it fits alone. A source whose
+budget alone is longer than `--max-seconds` is never started and is counted
+`too_long`, on its own line with the seconds it needs, and the pass exits 1:
+an operator who set the clock below an adapter's budget is told, rather than
+the source being deferred for ever. RSS polls reserve nothing, so their
+passes are clocked exactly as before. `--max-seconds 0` is still no limit.
+
+## The two writes `--dry-run` cannot avoid
 
 It polls nothing: no fetch, no `collection_run` row, no reschedule of
 anything it lists. But `due_sources()` itself persists a `next_due_at` for
@@ -131,12 +142,26 @@ or not, and it is what makes such a source due in the first place. Saying
 "touches nothing" would be a lie in exactly the case an operator reaches
 for a dry run: a newly added source that has not been collected from.
 
+The second (2026-09-24): a source held only because its persona is
+outside its active hours has its `next_due_at` moved to the window's
+opening plus a jitter of its own, so the polls after a night's rest do not
+all fire on the first pass after the opening, at the same time every day.
+
+## What waits on a person is not polled
+
+`due_sources()` leaves out a source that would be refused before any
+request (no ceiling declared, no exit bound), whose persona cannot be used
+now, or that no confirmed collection authority covers. Such a source is not
+polled and not rescheduled, so it cannot fill this pass's `--limit`; it is
+counted `held` and never makes the exit non-zero, because nothing failed:
+somebody has to act, and the Feeds pane lists what and why.
+
 ## What it prints, and what it will not print
 
 One counters line, `due=7 selected=7 polled=6 ...`, in `notify_drain.py`'s
 shape. `due` is what was ready, `selected` is what `--limit` left of it,
-and on a pass that actually polls,
-`polled + skipped + deferred + failed == selected`, so a quiet pass
+and on a pass that actually polls, `polled + skipped + deferred + failed +
+blocked + rate_limited + too_long == selected`, so a quiet pass
 (`due=0`) is distinguishable at a glance from one that was locked out
 (`skipped=selected`), one that ran out of time (`deferred` above zero) or
 one that is failing. A `--dry-run`
@@ -162,8 +187,11 @@ all, and therefore has nowhere else to be read.
 
 ## The exit code
 
-1 when a poll FAILED in this pass, or when the pass was REFUSED on the
-readiness register, 0 otherwise. The exit code is the one channel a cron
+1 when a poll FAILED in this pass, when a poll was BLOCKED (a person is
+needed: an authority to confirm, an exit to bind, a suspended persona to
+replace), when a source is too long for the pass, or when the pass was
+REFUSED on the readiness register, 0 otherwise. A RATE_LIMITED poll leaves
+the exit alone: the site asked for a wait and got one. The exit code is the one channel a cron
 job has back to its operator, and a pass that failed every source and
 exited 0 would be a failure reported as nothing at all.
 
@@ -210,7 +238,6 @@ import argparse
 import os
 import sys
 import time
-from uuid import UUID
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "apps", "api", "src"))
@@ -226,11 +253,22 @@ from noctornal_api.collection import (  # noqa: E402
     CollectionBusy,
     CollectionError,
     CollectionService,
+    PersonaResting,
+    SourceRefused,
 )
-from noctornal_api.db import connect  # noqa: E402
+from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.readiness import blocking_failures  # noqa: E402
 
 load_env_local()
+
+
+def connect():
+    """Every script connects as the system role (S1, 2026-09-25). A
+    script serves no request and binds no user, so on the request role it
+    would see nothing under row-level security; `db.connect_system` refuses
+    rather than hand it a connection that silently sees part of the data.
+    Named `connect` so the tests that replace it still find it."""
+    return connect_system(SystemPurpose.COLLECTION)
 
 #: Sources polled in one pass. Small on purpose: what is being bounded is
 #: outbound requests from personas to third-party sites, not rows in this
@@ -245,18 +283,13 @@ DEFAULT_LIMIT = 25
 #: (c2, 2026-09-24).
 DEFAULT_MAX_SECONDS = 240
 
-#: `run_once` requires an `actor_id` and does not read it: a poll writes
-#: `collection_run`, `document` and `watch_hit` rows and no `audit.event`,
-#: so nothing this pass writes carries an actor at all. The nil UUID is
-#: therefore deliberate rather than a placeholder -- there is no human
-#: behind a cron entry, and naming a real user here would put that user's
-#: id on work they did not ask for.
-#:
-#: If a poll ever DOES start auditing, this is the line that has to change
-#: first: `audit.event.actor_kind` already defaults to 'USER', so a nil
-#: actor would be recorded as a user who does not exist rather than as the
-#: system.
-_NO_ACTOR = UUID(int=0)
+#: The pass polls as the SYSTEM (2026-09-24). A poll now audits
+#: persona use and records who asked for it on the run, and `actor_id=None`
+#: is how both say "the system": the run's `requested_by` is NULL and every
+#: audit row it causes has actor_kind SYSTEM. A nil UUID recorded as a USER
+#: would be a person who does not exist; naming a real user would put that
+#: user on work they did not ask for.
+SYSTEM_ACTOR = None
 
 
 def main() -> int:
@@ -281,6 +314,10 @@ def main() -> int:
              f"are counted deferred, stay due and are first on the next "
              f"pass.")
     args = parser.parse_args()
+    # S2, the egress proxy (2026-09-24). A production cron with
+    # outbound uses and no egress proxy stops here, as the API does.
+    from noctornal_api.egress_routes import enforce_production_egress
+    enforce_production_egress()
     # Read before anything else, so the pass's clock includes the
     # readiness probes and the listing, which are part of how long the
     # compose loop waits for this process.
@@ -295,8 +332,11 @@ def main() -> int:
         # reading it as "no limit" is the guess that brings the hang back.
         parser.error("--max-seconds cannot be negative (0 means no limit)")
 
+    # The first six in the order they always were, so the line an operator
+    # greps still reads `selected=4 polled=2 skipped=0 deferred=2 failed=0`.
     counters = {"due": 0, "selected": 0, "polled": 0, "skipped": 0,
-                "deferred": 0, "failed": 0, "items_seen": 0, "items_new": 0,
+                "deferred": 0, "failed": 0, "blocked": 0, "rate_limited": 0,
+                "held": 0, "too_long": 0, "items_seen": 0, "items_new": 0,
                 "watch_hits": 0, "warnings": 0}
     conn = connect()
     try:
@@ -327,11 +367,23 @@ def main() -> int:
         # filter: a collector has no user, and a NULL ceiling read as "see
         # nothing" would be a runner that polls nothing and reports no
         # error. Nothing below prints what that privilege lets it see.
-        due = service.due_sources()
+        # Held sources were left out of `due` and are counted, not polled.
+        # Both from ONE reading of the schedule (2026-09-25):
+        # the first reading moves a source resting outside its persona's
+        # hours, so a second one no longer counted it held.
+        schedule = getattr(service, "due_and_held", None)
+        if schedule is not None:
+            due, held = schedule()
+            counters["held"] = len(held)
+        else:
+            due = service.due_sources()
+            counters["held"] = getattr(service, "held_count", lambda: 0)()
         counters["due"] = len(due)
         if args.limit > 0:
             due = due[:args.limit]
         counters["selected"] = len(due)
+        budget = getattr(service, "poll_seconds", lambda _id: 0)
+        started = 0
 
         for source in due:
             if args.dry_run:
@@ -342,20 +394,41 @@ def main() -> int:
                       f"health {source['health']}  "
                       f"failures {source['consecutive_failures']}")
                 continue
-            if args.max_seconds and time.monotonic() - began >= args.max_seconds:
+            needs = float(budget(source["id"]) or 0)
+            if args.max_seconds and needs > args.max_seconds:
+                # Longer than a whole pass: never started, even first, and
+                # said with the seconds it needs, because deferring it would
+                # defer it for ever.
+                counters["too_long"] += 1
+                print(f"too_long {source['id']}  needs {needs:g} seconds, "
+                      f"more than --max-seconds {args.max_seconds:g}")
+                continue
+            elapsed = time.monotonic() - began
+            if args.max_seconds and (elapsed >= args.max_seconds or (
+                    started and elapsed + needs > args.max_seconds)):
                 # Out of time for this pass. Nothing is attempted, so
                 # nothing failed: the source keeps its overdue
                 # `next_due_at` and sorts first next time (c2, 2026-09-24).
+                # A long poll's budget is reserved, except for the first
+                # poll of a pass, which starts when it fits alone.
                 counters["deferred"] += 1
                 print(f"deferred {source['id']}  the pass ran out of time")
                 continue
+            started += 1
             try:
-                result = service.run_once(source["id"], actor_id=_NO_ACTOR)
+                result = service.run_once(source["id"], actor_id=SYSTEM_ACTOR)
             except CollectionBusy:
                 # Another runner holds this source's lock. Not a failure:
                 # the work is being done, just not by this process.
                 counters["skipped"] += 1
                 print(f"skipped {source['id']}  held by another runner")
+                continue
+            except (PersonaResting, SourceRefused):
+                # Nothing was done: a persona outside its hours, or a
+                # source refused before any request between the listing
+                # and the poll. Not a failure.
+                counters["skipped"] += 1
+                print(f"skipped {source['id']}  waits on a person or its hours")
                 continue
             except CollectionError as exc:
                 # A source with no adapter for its `parser_key`, or one
@@ -384,7 +457,17 @@ def main() -> int:
             counters["items_new"] += result.items_new
             counters["watch_hits"] += result.watch_hits
             counters["warnings"] += len(result.warnings)
-            if result.error:
+            status = getattr(result, "status", None)
+            if status == "BLOCKED":
+                # A person is needed; the reason is on the run, behind the
+                # API's ceiling, and the run id is what goes in the log.
+                counters["blocked"] += 1
+                print(f"blocked {source['id']}  run {result.run_id}")
+            elif status == "RATE_LIMITED":
+                # The site asked for a wait and got one: not a failure.
+                counters["rate_limited"] += 1
+                print(f"rate_limited {source['id']}  run {result.run_id}")
+            elif result.error:
                 # The fetch failed and `run_once` recorded it. The message
                 # is redacted but still names the host, so the run id is
                 # what goes in the log; read it back through the API under
@@ -407,7 +490,8 @@ def main() -> int:
         # the statement that the invocation did not happen, which a shell
         # that stops on it has stopped for exactly the right reason.
         return 0
-    return 1 if counters["failed"] > 0 else 0
+    return 1 if (counters["failed"] or counters["blocked"]
+                 or counters["too_long"]) else 0
 
 
 if __name__ == "__main__":

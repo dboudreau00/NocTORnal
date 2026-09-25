@@ -196,6 +196,8 @@ _SEALED_WORDS = {
     "ingest.victim_credential": "victim",
     "lab.sample": "sample",
     "collect.egress_profile": None,
+    "notify.jira_destination": "jira",  # F7
+    "ingest.provider": "lookup provider",  # F15.2
 }
 
 

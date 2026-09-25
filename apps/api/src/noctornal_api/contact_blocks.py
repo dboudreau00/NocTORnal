@@ -903,8 +903,8 @@ class ContactBlockService:
         # became a 500 where a valid one gives 201.
         self._require_same_case(case_id, "core.node", "publisher identity",
                                 publisher_identity_node_id)
-        self._require_same_case(case_id, "collect.document", "document",
-                                document_id)
+        self._require_citable_document(case_id, document_id, classification,
+                                       compartments)
         self._require_same_case(case_id, "core.evidence", "exhibit",
                                 evidence_id)
         entries = parse(raw_text)
@@ -935,7 +935,15 @@ class ContactBlockService:
                     """SELECT id FROM comms.contact_block
                         WHERE case_id = %s AND raw_sha256 = %s""",
                     (case_id, digest)).fetchone()
-                return {**self.get(existing[0]), "already_parsed": True}
+                earlier = self.get(existing[0]) if existing else None
+                if earlier is None:
+                    # Parsed already in this case at labels the caller does
+                    # not hold (S1, 2026-09-25): row security hides that
+                    # block, and it is not handed back through this door.
+                    raise ContactBlockError(
+                        "this block has already been parsed in this case, at "
+                        "a label you do not hold")
+                return {**earlier, "already_parsed": True}
             block_id = row[0]
 
             this_publisher = (str(publisher_identity_node_id)
@@ -1008,7 +1016,8 @@ class ContactBlockService:
         """Refuse an id that does not belong to this case.
 
         The table name is interpolated and is never caller-supplied -- the
-        three call sites pass literals.
+        two call sites pass literals. A document is not asked here: it has
+        no case_id (`_require_citable_document`).
         """
         if object_id is None:
             return
@@ -1020,6 +1029,58 @@ class ContactBlockService:
                 f"no such {what} in this case. A contact block may only "
                 f"cite material from the case it belongs to; citing "
                 f"another case's is a disclosure as well as an error.")
+
+    #: One refusal for every document a block may not cite: unknown,
+    #: another case's, purged, or labelled above the block. Telling them
+    #: apart would tell a caller which ids exist and how they are labelled.
+    UNCITABLE_DOCUMENT = (
+        "no document with that id can be cited by this block. A contact "
+        "block may only cite a document this case already cites, readable "
+        "at the block's own classification and compartments.")
+
+    def _require_citable_document(self, case_id: UUID,
+                                  document_id: UUID | None,
+                                  classification: str,
+                                  compartments: frozenset[str]) -> None:
+        """Refuse a document this block may not cite (L1, 2026-09-24).
+
+        This leg used `_require_same_case`, whose SQL selects a `case_id`
+        that `collect.document` does not have, so any block naming a
+        document answered 500 (UndefinedColumn). A document hangs off a
+        source, not a case, so "the same case" means one this case already
+        cites: a proposal, a claim or a contact block of the case names
+        it. That keeps the same-case intent (citing another case's
+        material is a disclosure) and leaves no probe: a holder of
+        comms.bind can name only documents the case already cites, which
+        Triage shows them. The document is held to the block's labels as
+        every document read holds it: unpurged, its own label and its
+        source's within the block's classification, and its compartments
+        within the case's and the block's."""
+        if document_id is None:
+            return
+        row = self._c.execute(
+            """SELECT 1
+                 FROM collect.document d
+                 JOIN collect.source s ON s.id = d.source_id
+                 JOIN core."case" c ON c.id = %(case)s
+                WHERE d.id = %(doc)s
+                  AND d.purged_at IS NULL
+                  AND d.classification <= %(cls)s::core.tlp
+                  AND s.classification <= %(cls)s::core.tlp
+                  AND d.compartments <@ (c.compartments || %(ks)s::text[])
+                  AND (EXISTS (SELECT 1 FROM collect.proposal p
+                                WHERE p.document_id = d.id
+                                  AND p.case_id = c.id)
+                       OR EXISTS (SELECT 1 FROM core.assertion a
+                                   WHERE a.document_id = d.id
+                                     AND a.case_id = c.id)
+                       OR EXISTS (SELECT 1 FROM comms.contact_block b
+                                   WHERE b.document_id = d.id
+                                     AND b.case_id = c.id))""",
+            {"case": case_id, "doc": document_id, "cls": classification,
+             "ks": sorted(compartments or ())}).fetchone()
+        if row is None:
+            raise ContactBlockError(self.UNCITABLE_DOCUMENT)
 
     def _apply_stoplist(self, case_id: UUID, entry: ParsedEntry) -> None:
         hit = self._stoplist_hit(case_id, entry)
@@ -1140,11 +1201,14 @@ class ContactBlockService:
             (block_id, clearance, clearance, list(compartments))).fetchone()
         if row is None:
             return None
+        # The entry id is returned (comms F10b, 2026-09-24): a vendor key's
+        # fingerprint is confirmed against ONE line of a block, and the
+        # console names that line by its id.
         entries = self._c.execute(
             """SELECT line_no, label, platform_key, selector_type,
                       observed_value, durable_value, role, role_reason, score,
                       score_reason, stoplist_id, shared_service_publishers,
-                      proposal_id
+                      proposal_id, id
                  FROM comms.contact_block_entry
                 WHERE block_id = %s ORDER BY line_no""", (block_id,)).fetchall()
         return {
@@ -1159,7 +1223,8 @@ class ContactBlockService:
             "evidence_id": str(row[12]) if row[12] else None,
             "already_parsed": False,
             "entries": [
-                {"line_no": e[0], "label": e[1], "platform_key": e[2],
+                {"id": str(e[13]), "line_no": e[0], "label": e[1],
+                 "platform_key": e[2],
                  "selector_type": e[3], "observed_value": e[4],
                  "durable_value": e[5], "role": e[6], "role_reason": e[7],
                  "score": float(e[8]), "score_reason": e[9],

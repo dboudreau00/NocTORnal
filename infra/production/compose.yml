@@ -38,6 +38,22 @@
 # this machine's disk -- a lost volume is a lost case file. No log
 # aggregation, no metrics, no alerting. docs/16 L1-L5 are unresolved and
 # this file cannot resolve them.
+#
+# ## Egress: the proxy is the only way out (S2, 2026-09-24; docs/00 decision 68)
+#
+# The `noctornal` network is INTERNAL: nothing on it has a route to the
+# internet. Two services have one: caddy (on `edge`, where 80 and 443 are
+# published and ACME works) and egress-proxy (on `edge` too, and alone on
+# `exits` and `models`). api and cron reach the outside world only through
+# the proxy, at NOCTORNAL_EGRESS_PROXY_URL, and the proxy decides every
+# connection by route, logs it in collect.egress_connection and refuses
+# private space unless an administrator's route names it. No port of the
+# proxy is published. There is ONE proxy and no failover. The egress keys
+# live in egress-proxy.env and egress-client.env, never in secrets.env;
+# the proxy's database password in postgres-init.env. All three are
+# optional to compose (Compose 2.24 or later), so an upgrade still starts
+# and the processes then refuse, naming what is missing
+# (infra/production/README.md, Egress; release/egress-upgrade/README.md).
 
 name: noctornal-prod
 
@@ -66,6 +82,13 @@ name: noctornal-prod
 # Caddy, and every request would meter and audit as coming from the proxy.
 # If you change this, change the subnet under `networks:` to contain it.
 x-caddy-ip: &caddy_ip "172.31.243.10"
+
+# The egress proxy's fixed address on the internal network (S2). api
+# and cron are told it in NOCTORNAL_EGRESS_PROXY_URL, and the proxy listens
+# on it and nowhere else (NOCTORNAL_EGRESS_LISTEN). A YAML alias cannot be
+# spliced into a string, so those two values repeat it; a test holds them
+# equal to this declaration.
+x-egress-ip: &egress_ip "172.31.243.11"
 
 # --------------------------------------------------------------------------
 # Everything that runs the application image.
@@ -134,9 +157,12 @@ services:
       # it looks like.
       - caddy-data:/data
       - caddy-config:/config
+    # `edge` carries the published ports and ACME; `noctornal` keeps
+    # the fixed address the application trusts (NOCTORNAL_TRUSTED_PROXY_IP).
     networks:
       noctornal:
         ipv4_address: *caddy_ip
+      edge:
     depends_on: [api, sample-origin]
 
   # ------------------------------------------------------------------------
@@ -146,7 +172,13 @@ services:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     networks: [noctornal]
-    env_file: [secrets.env]
+    # postgres-init.env carries NOCTORNAL_EGRESS_DB_PASSWORD for
+    # db/init/20-egress-role.sh, and only this service reads it: secrets.env
+    # reaches every application service and caddy.
+    env_file:
+      - secrets.env
+      - path: postgres-init.env
+        required: false
     environment:
       POSTGRES_DB: noctornal
       # The OWNER role. Alembic runs as this; nothing at runtime does.
@@ -532,6 +564,10 @@ services:
         mc mb --ignore-existing --with-lock "local/$$EVIDENCE_BUCKET"
         mc mb --ignore-existing "local/$$INGEST_BUCKET"
         mc mb --ignore-existing "local/$$SAMPLE_BUCKET"
+        # Collected raw markup (docs/00 decision 74). NO lock: a retention
+        # clock or a deletion order must be able to remove it, and the
+        # purge does.
+        mc mb --ignore-existing "local/$${COLLECT_RAW_BUCKET:-noctornal-collect-raw}"
         mc retention set --default COMPLIANCE 365d "local/$$EVIDENCE_BUCKET"
         printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::%s"]}]}' "$$SAMPLE_BUCKET" "$$SAMPLE_BUCKET" > /tmp/sample-policy.json
         mc admin user svcacct info local "$$SAMPLE_ACCESS_KEY" >/dev/null 2>&1 \
@@ -688,9 +724,17 @@ services:
   # source of truth stays the read-only mount).
   api:
     <<: *noctornal-app
+    # The egress client keys, optional to compose so an upgrade starts
+    # and the API then refuses by name (config.verify_environment).
+    env_file:
+      - secrets.env
+      - path: egress-client.env
+        required: false
     environment:
       NOCTORNAL_ENV: production
       NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
+      NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -698,6 +742,10 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      # Started, not healthy: the console must come up while the proxy
+      # does not, and say so on the readiness register.
+      egress-proxy:
+        condition: service_started
     command:
       - /bin/sh
       - -c
@@ -764,6 +812,11 @@ services:
     <<: *noctornal-app
     environment:
       NOCTORNAL_ENV: production
+      # S1 (2026-09-25): the system role's DSN bypasses row-level
+      # security, and the process that serves hostile bytes must never hold
+      # it. `environment:` wins over env_file, so this blanks the value
+      # secrets.env carries; the API refuses to start here if it is set.
+      NOCTORNAL_WORKER_DATABASE_URL: ""
       # The same alias the api service carries, for the same reason. It
       # travels through the environment rather than being written into the
       # command because a YAML alias cannot be spliced into a string, and
@@ -839,12 +892,22 @@ services:
     <<: *noctornal-app
     healthcheck:
       disable: true
+    env_file:
+      - secrets.env
+      - path: egress-client.env
+        required: false
     environment:
       NOCTORNAL_ENV: production
+      NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
+        condition: service_healthy
+      # Healthy: a poll or a drain through a proxy that cannot answer would
+      # only fail every source and delivery in the pass.
+      egress-proxy:
         condition: service_healthy
     command:
       - /bin/sh
@@ -860,8 +923,181 @@ services:
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll start"
           python scripts/collection_poll.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll exit=$$rc"
+          # Queued outbound lookups (F15.4, 2026-09-24),
+          # straight after the poll with no sleep of its own, so every job
+          # keeps its five-minute cadence. The cadence is a resolution, not
+          # a rate: pacing comes from the provider windows.
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain start"
+          python scripts/lookup_drain.py; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain exit=$$rc"
           sleep 150
         done
+
+  # F11 and F12 (2026-09-24). Static triage and YARA compiles in a loop
+  # of their own: a pass finishes the run it started, and one run can take
+  # each child its full time limit, so it must not share the loop that keeps
+  # the notification drain at most a pass behind. It reads samples from the
+  # object store (the CA bundle, as cron) and sends nothing out. A deployment
+  # that must share a loop can pass --budget SECONDS instead.
+  #
+  # Healthcheck disabled: no HTTP server here (see the Dockerfile).
+  lab-triage:
+    <<: *noctornal-app
+    healthcheck:
+      disable: true
+    env_file:
+      - secrets.env
+    environment:
+      NOCTORNAL_ENV: production
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        while true; do
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lab_triage start"
+          python scripts/lab_triage.py; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lab_triage exit=$$rc"
+          sleep 300
+        done
+
+  # The Lab's workers (F13 and F14, 2026-09-24): prohibited-content screening
+  # and the sandbox dispatch, in a loop of their OWN. A screening pass may
+  # take its 240 seconds and a sandbox pass its budget plus one upload, and
+  # sharing the loop above would hold back email delivery and the
+  # escalation of urgent alerts behind them. Both are guarded by advisory
+  # locks, so an overlapping run does nothing. Each exits 1 when something
+  # needs an operator (matched bytes not yet preserved, samples behind the
+  # newest list, a send that failed); the exit code is logged and the loop
+  # goes on. sandbox_dispatch.py exits 0 at once when no sandbox is set.
+  #
+  # It sends to the sandbox, so it takes cron's egress settings and waits
+  # for the proxy, as cron does.
+  lab-cron:
+    <<: *noctornal-app
+    healthcheck:
+      disable: true
+    env_file:
+      - secrets.env
+      - path: egress-client.env
+        required: false
+    environment:
+      NOCTORNAL_ENV: production
+      NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        while true; do
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sample_screen start"
+          python scripts/sample_screen.py; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sample_screen exit=$$rc"
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sandbox_dispatch start"
+          python scripts/sandbox_dispatch.py; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sandbox_dispatch exit=$$rc"
+          sleep 300
+        done
+
+  # The similarity pass (F6, 2026-09-25): fills and refreshes the similar
+  # wording and similar meaning indexes, 240 seconds of work a pass, in a
+  # loop of its own so a long pass never holds back the notification drain.
+  # Similar meaning, when an operator configures it, leaves through the
+  # egress proxy's embeddings route, so this takes cron's egress settings.
+  #
+  # Healthcheck disabled: no HTTP server here (see the Dockerfile).
+  embed-pass:
+    <<: *noctornal-app
+    healthcheck:
+      disable: true
+    env_file:
+      - secrets.env
+      - path: egress-client.env
+        required: false
+    environment:
+      NOCTORNAL_ENV: production
+      NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      egress-proxy:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        while true; do
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] embed_pass start"
+          python scripts/embed_pass.py --max-seconds 240; rc=$$?
+          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] embed_pass exit=$$rc"
+          sleep 60
+        done
+
+  # ------------------------------------------------------------------------
+  # The egress proxy (S2, 2026-09-24; docs/00 decision 68). The only
+  # way out for api and cron: HTTP CONNECT and SOCKS5 on one listener at
+  # its fixed internal address, never published and never on a wildcard.
+  #
+  # It takes egress-proxy.env and NOT secrets.env: it talks to the internet
+  # and holds none of the platform's keys, DSNs or store credentials, and it
+  # refuses to start if it finds one. It connects to Postgres as
+  # noctornal_egress (db/init/20-egress-role.sh, migration 0109), which can
+  # read the routes and append to the connection ledger and nothing more.
+  # No MinIO certificate: it never reaches the object store.
+  #
+  # `exits` is where a Tor or VPN sidecar goes and `models` where a local
+  # model server goes; only the proxy joins them, so no application service
+  # can reach a sidecar's port and leave around it. No integration route can
+  # name `exits`; the model on `models` is reached through an embeddings
+  # route entry naming that network (model@172.31.246.0/24:PORT). A model
+  # endpoint on the host itself is reached with extra_hosts
+  # (host.docker.internal:host-gateway) on this service and an embeddings
+  # route naming it.
+  #
+  # One instance, no failover: when it is down nothing leaves, which is the
+  # safe direction.
+  egress-proxy:
+    <<: *noctornal-app
+    env_file:
+      - path: egress-proxy.env
+        required: false
+    volumes: []
+    environment:
+      NOCTORNAL_ENV: production
+      NOCTORNAL_EGRESS_LISTEN: "172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+    networks:
+      noctornal:
+        ipv4_address: *egress_ip
+      edge:
+      exits:
+      models:
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "noctornal_api.egress_proxy"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "noctornal_api.egress_proxy", "--check"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
 
 # --------------------------------------------------------------------------
 # One user-defined bridge, with a fixed subnet so Caddy can hold a fixed
@@ -872,12 +1108,40 @@ services:
 # symptom is `up` failing at network creation with "Pool overlaps with other
 # one on this address space", not a subtle one -- pick another /24 here and
 # in x-caddy-ip if that happens.
+#
+# S2 (2026-09-24): `noctornal` is INTERNAL, so nothing on it reaches
+# the internet except through the egress proxy. `edge` is the one plain
+# bridge with a route out, joined by caddy and the proxy alone; its subnet
+# is fixed so the deployment's own networks (NOCTORNAL_EGRESS_INTERNAL_CIDRS,
+# egress_policy.DEFAULT_INTERNAL_NETWORKS) are known and no route can reach
+# them. `exits` holds Tor or VPN sidecars and `models` a local model server;
+# the proxy is their only other member. Whether an internal network really
+# has no route out depends on the host's Docker and firewall, which the
+# readiness register cannot see: infra/production/README.md, Egress, has the
+# check for a human to make.
 networks:
   noctornal:
     driver: bridge
+    internal: true
     ipam:
       config:
         - subnet: 172.31.243.0/24
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.244.0/24
+  exits:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.245.0/24
+  models:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.246.0/24
 
 # --------------------------------------------------------------------------
 # There is no backup here beyond these volumes. prod-pgdata is the case

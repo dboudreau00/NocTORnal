@@ -1,0 +1,23 @@
+{
+  "note": "A public forum megagroup: topics, a reply, an anonymous admin post, a forward from a channel, a hidden forward with a name only, and a user whose number equals channel_posts.json's channel.",
+  "me": "u:700000001",
+  "chat": {"peer_type": "MEGAGROUP", "peer_id": 1300000003, "access_hash": 5550003,
+           "username": "examplechat", "title": "Example Chat", "is_member": false,
+           "is_forum": true},
+  "messages": [
+    {"id": 10, "date": "2026-09-21T09:00:00+00:00", "text": "Topic opened: releases",
+     "from": {"type": "user", "id": 1300000001}, "sender_handle": "@alice", "topic": 10},
+    {"id": 11, "date": "2026-09-21T09:01:00+00:00", "text": "Reply in the topic",
+     "from": {"type": "user", "id": 1300000004}, "sender_handle": "Bob Example",
+     "reply_to": 10, "topic": 10},
+    {"id": 12, "date": "2026-09-21T09:02:00+00:00", "text": "Announcement from the admins",
+     "from": {"type": "channel", "id": 1300000003}, "post_author": "Admin Team"},
+    {"id": 13, "date": "2026-09-21T09:03:00+00:00", "text": "Forwarded from the news channel",
+     "from": {"type": "user", "id": 1300000001}, "sender_handle": "@alice",
+     "fwd": {"from": {"type": "channel", "id": 1300000002}, "channel_post": 44},
+     "via_bot": 93372553},
+    {"id": 14, "date": "2026-09-21T09:04:00+00:00", "text": "A hidden forward",
+     "from": {"type": "user", "id": 1300000004},
+     "fwd": {"from": null, "name": "Someone Hidden"}, "media": "photo"}
+  ]
+}

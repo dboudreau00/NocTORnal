@@ -26,6 +26,9 @@ from uuid import UUID
 
 import psycopg
 
+from noctornal_api import affiliation
+from noctornal_api.db import SystemPurpose, system_connection
+
 # docs/03: "Ship four presets: Communication, Trust, Financial, All ties."
 # Edge-type membership comes from the seeded ontology, not from guesswork:
 # TRUST is the signed trust layer, COMMUNICATION the interaction layer,
@@ -215,6 +218,27 @@ class ProjectionError(Exception):
     pass
 
 
+class ProjectionTooLarge(ProjectionError):
+    """The view is within every filter but too large to transform (F2's
+    derived-tie limit, 2026-09-24). A ProjectionError, so no route can
+    answer it with a 500; the analysis routes map it to 422 before the 400
+    every other ProjectionError gets."""
+
+
+# L3 (2026-09-24): which ties a projection computes over by review state.
+# "all" is today's behaviour; "accepted" keeps only the ties a reviewer has
+# accepted and counts every tie it left out, by state.
+REVIEW_SCOPE_ALL = "all"
+REVIEW_SCOPE_ACCEPTED = "accepted"
+REVIEW_SCOPES = (REVIEW_SCOPE_ALL, REVIEW_SCOPE_ACCEPTED)
+#: The buckets a left-out tie is counted under, worded as review_coverage
+#: words its states. Every non-ACCEPTED state the enum holds has one,
+#: SUPERSEDED included: nothing in the database stops a tie carrying it,
+#: and "nothing is filtered silently" cannot rest on a convention. "other"
+#: catches a value outside the enum rather than dropping it.
+LEFT_OUT_KEYS = ("proposed", "disputed", "rejected", "superseded", "other")
+
+
 @dataclass(frozen=True)
 class Projection:
     """The parameters that make a number reproducible. Shown next to every
@@ -226,6 +250,14 @@ class Projection:
     min_confidence: str = "LOW"
     as_of: datetime | None = None      # world-time: the graph as it stood then
     edge_types: list[str] | None = None
+    #: L3. Last, and described only when it is not the default, so every
+    #: projection name and cache digest computed before it existed is
+    #: unchanged (both are test-pinned).
+    review_scope: str = REVIEW_SCOPE_ALL
+    #: F2: the venue families projected to entities. Described only when a
+    #: family is listed, for the same reason. Only the analytics router
+    #: sets it: the sociogram keeps drawing what was recorded.
+    one_mode: affiliation.OneModeParams = field(default_factory=affiliation.OneModeParams)
 
     def resolved_edge_types(self) -> list[str] | None:
         if self.edge_types is not None:
@@ -233,7 +265,7 @@ class Projection:
         return PRESETS[self.preset]["edge_types"]
 
     def describe(self) -> dict:
-        return {
+        out = {
             "preset": self.preset,
             "label": PRESETS[self.preset]["label"],
             "include_inferred": self.include_inferred,
@@ -241,6 +273,99 @@ class Projection:
             "as_of": self.as_of.isoformat() if self.as_of else None,
             "edge_types": self.resolved_edge_types(),
         }
+        if self.review_scope != REVIEW_SCOPE_ALL:
+            out["review_scope"] = self.review_scope
+        if self.one_mode.enabled():
+            out["one_mode"] = self.one_mode.describe()
+        return out
+
+
+def validate_projection(p: Projection) -> None:
+    """Refuse a projection no query can honour, in one place, before
+    anything is fetched or looked up. The analytics routes call it through
+    their shared dependency, so `/latest` answers 400 to an unknown
+    confidence floor instead of 404 from a name lookup that could never
+    match (L3, 2026-09-24); `project()` calls it too."""
+    if p.preset not in PRESETS:
+        raise ProjectionError(f"unknown preset {p.preset!r}; one of "
+                              f"{', '.join(sorted(PRESETS))}")
+    if p.min_confidence not in _CONFIDENCE_ORDER:
+        raise ProjectionError(f"unknown confidence {p.min_confidence!r}; one of "
+                              f"{', '.join(_CONFIDENCE_ORDER)}")
+    if p.review_scope not in REVIEW_SCOPES:
+        raise ProjectionError(f"unknown review_scope {p.review_scope!r}; one of "
+                              f"{', '.join(REVIEW_SCOPES)}")
+    try:
+        p.one_mode.validate()
+    except affiliation.OneModeError as exc:
+        raise ProjectionError(str(exc)) from exc
+
+
+def _review_split(rows: list[dict]) -> tuple[list[dict], dict]:
+    """The rows a reviewer has accepted, and a count by state of the rest.
+
+    Every non-ACCEPTED row is counted under its lower-cased state, or under
+    "other" for a value outside the enum, so the counts always add up to
+    what was left out (L3, 2026-09-24)."""
+    kept: list[dict] = []
+    left = dict.fromkeys(LEFT_OUT_KEYS, 0)
+    for row in rows:
+        state = row.get("review")
+        if state == "ACCEPTED":
+            kept.append(row)
+            continue
+        key = str(state).lower() if state is not None else "other"
+        left[key if key in left else "other"] += 1
+    return kept, left
+
+
+def _edge_row(r) -> dict:
+    """One fetched edge row as `project()` returns it (the column order of
+    its SELECT)."""
+    return {"id": r[0], "edge_type": r[1], "src_node_id": r[2],
+            "dst_node_id": r[3], "sign": r[4], "weight": float(r[5]),
+            "confidence": r[6], "is_inferred": r[7], "review": r[8],
+            "classification": r[9], "valid_from": r[10], "valid_to": r[11],
+            "has_evidence": r[13]}
+
+
+def one_mode_subgraph(p: Projection, node_out: list[dict],
+                      rows: list[tuple[dict, bool]], truncated: bool = False) -> Subgraph:
+    """F2's path through `project()` (2026-09-24), from the fetched rows,
+    each paired with whether the preset holds it. Pure, so the unit tests
+    drive the same code the database path does.
+
+    Venue SIZES are taken from every visible live consumable row, before
+    the confidence floor and the review scope, and only the rows that pass
+    them DRAW ties (filtering first let the accepted scope switch the
+    venue caps off). The inferred filter stays in SQL: it
+    is the analyst's choice of what exists."""
+    min_rank = _CONFIDENCE_ORDER[p.min_confidence]
+    keep = {c for c in ("LOW", "MODERATE", "HIGH") if _CONFIDENCE_ORDER[c] >= min_rank}
+    in_preset = [e for e, member in rows if member]
+    material = [e for e, member in rows if not member]
+    consumable, ties, links = affiliation.classify(node_out, in_preset, material,
+                                                   p.one_mode)
+    ties = [e for e in ties if e["confidence"] in keep]
+    drawing = [e for e in consumable if e["confidence"] in keep]
+    links = [e for e in links if e["confidence"] in keep]
+    not_drawing = {"confidence": len(consumable) - len(drawing), "review": 0}
+    left_out = None
+    if p.review_scope == REVIEW_SCOPE_ACCEPTED:
+        # Two buckets: the ties of the view, and the affiliations that would
+        # have been consumed. Identity links are not
+        # split: they only ever remove a derived tie.
+        ties, left_ties = _review_split(ties)
+        drawing, left_aff = _review_split(drawing)
+        not_drawing["review"] = sum(left_aff.values())
+        left_out = {"ties": left_ties, "affiliations": left_aff}
+    try:
+        nodes, edges, cov = affiliation.to_one_mode(
+            node_out, ties, consumable, links, p.one_mode,
+            drawing=drawing, not_drawing=not_drawing)
+    except affiliation.OneModeTooLarge as exc:
+        raise ProjectionTooLarge(str(exc)) from exc
+    return Subgraph(nodes, edges, p.describe(), truncated, left_out, cov)
 
 
 @dataclass
@@ -249,6 +374,15 @@ class Subgraph:
     edges: list[dict] = field(default_factory=list)
     projection: dict = field(default_factory=dict)
     truncated: bool = False
+    #: L3: {"ties": {state: n}} under the accepted scope, plus
+    #: "affiliations" when venues were projected; None otherwise. Data only,
+    #: folded into the cache key when present.
+    review_left_out: dict | None = None
+    #: F2: the one-mode coverage (what was projected, what was excluded and
+    #: why); None when no family was projected. Data only, folded into the
+    #: cache key when present, because venue names and sizes never reach
+    #: `nodes`.
+    one_mode: dict | None = None
 
     def node_ids(self) -> set[UUID]:
         return {n["id"] for n in self.nodes}
@@ -305,11 +439,14 @@ class GraphService:
     # -- projection --------------------------------------------------------
     def project(self, p: Projection, *, limit: int = 2000) -> Subgraph:
         """The projected subgraph: visible nodes, and edges whose endpoints
-        are BOTH visible and which pass the projection's filters."""
-        if p.preset not in PRESETS:
-            raise ProjectionError(f"unknown preset {p.preset!r}")
-        if p.min_confidence not in _CONFIDENCE_ORDER:
-            raise ProjectionError(f"unknown confidence {p.min_confidence!r}")
+        are BOTH visible and which pass the projection's filters.
+
+        With the accepted scope (L3) only accepted ties are kept and every
+        other one is counted by state; with venue families listed (F2) the
+        venues are replaced by derived ties between entities. Neither ever
+        filters a node, and neither adds a key to a stored edge's row, so
+        `/graph`, which serialises the rows as they are, is untouched."""
+        validate_projection(p)
 
         nodes = self._c.execute(
             """SELECT id, node_type, label, classification, attrs,
@@ -362,9 +499,15 @@ class GraphService:
         ]
         ids = [n["id"] for n in node_out]
         edge_out: list[dict] = []
+        types = p.resolved_edge_types()
+        min_rank = _CONFIDENCE_ORDER[p.min_confidence]
+        keep = {c for c in ("LOW", "MODERATE", "HIGH") if _CONFIDENCE_ORDER[c] >= min_rank}
+        # F2: the affiliation types and identity links the listed families
+        # need beyond the preset. Empty when none is listed, which matches
+        # nothing, so the rows fetched are exactly today's.
+        material = affiliation.material_edge_types(p.one_mode.families)
+        rows: list = []
         if ids:
-            types = p.resolved_edge_types()
-            min_rank = _CONFIDENCE_ORDER[p.min_confidence]
             rows = self._c.execute(
                 """SELECT e.id, e.edge_type, e.src_node_id, e.dst_node_id, e.sign,
                           e.weight, e.confidence, e.is_inferred, e.review,
@@ -386,26 +529,38 @@ class GraphService:
                                      AND a.retracted_at IS NULL
                                      AND a.superseded_at IS NULL)
                       -- NULL types means "the preset is everything social".
-                      AND (%s::text[] IS NULL AND et.is_social_tie
-                           OR e.edge_type = ANY(%s))
+                      -- The third leg is the F2 material (an empty array
+                      -- matches nothing).
+                      AND ((%s::text[] IS NULL AND et.is_social_tie)
+                           OR e.edge_type = ANY(%s)
+                           OR e.edge_type = ANY(%s::text[]))
                       AND (%s::timestamptz IS NULL
                            OR (e.valid_from IS NULL OR e.valid_from <= %s)
                            AND (e.valid_to IS NULL OR e.valid_to >= %s))""",
                 (self._clearance, self._comp,
                  p.case_id, ids, ids, self._clearance, self._comp,
-                 p.include_inferred, types, types, p.as_of, p.as_of, p.as_of),
+                 p.include_inferred, types, types, material,
+                 p.as_of, p.as_of, p.as_of),
             ).fetchall()
-            keep = {"LOW", "MODERATE", "HIGH"}
-            keep = {c for c in keep if _CONFIDENCE_ORDER[c] >= min_rank}
-            edge_out = [
-                {"id": r[0], "edge_type": r[1], "src_node_id": r[2],
-                 "dst_node_id": r[3], "sign": r[4], "weight": float(r[5]),
-                 "confidence": r[6], "is_inferred": r[7], "review": r[8],
-                 "classification": r[9], "valid_from": r[10], "valid_to": r[11],
-                 "has_evidence": r[13]}
-                for r in rows if r[6] in keep
-            ]
-        return Subgraph(node_out, edge_out, p.describe(), truncated)
+
+        if not p.one_mode.enabled():
+            edge_out = [_edge_row(r) for r in rows if r[6] in keep]
+            left_out = None
+            if p.review_scope == REVIEW_SCOPE_ACCEPTED:
+                # After the label and confidence filters, over ties the
+                # caller already sees: a count never reaches past them.
+                edge_out, left = _review_split(edge_out)
+                left_out = {"ties": left}
+            return Subgraph(node_out, edge_out, p.describe(), truncated, left_out)
+        # Whether a row is in the preset is worked out from the already
+        # selected `et.is_social_tie` (r[12]) and never stored on the row,
+        # so no row gains a key and `/graph` serialises exactly today's rows.
+        type_set = set(types or ())
+        return one_mode_subgraph(
+            p, node_out,
+            [(_edge_row(r), bool(r[12]) if types is None else r[1] in type_set)
+             for r in rows],
+            truncated)
 
     # -- what the caller is not being shown (docs/14 U2) -------------------
     def withheld(self, p: Projection) -> Withheld:
@@ -418,15 +573,30 @@ class GraphService:
         extra aggregates each time, to answer a question nobody asked.
 
         The counts apply every OTHER filter the projection applies -- preset,
-        inferred, confidence, as-of, live provenance, soft deletion. Without
-        that they would be meaningless: "1,990 elements withheld" when 1,988
-        of them were excluded by the preset is not information, it is alarm.
+        inferred, confidence, as-of, live provenance, soft deletion, and the
+        review scope (L3, 2026-09-24; no route passes it here yet, but the
+        promise holds). Without that they would be meaningless: "1,990
+        elements withheld" when 1,988 of them were excluded by the preset is
+        not information, it is alarm.
+
+        The one-mode transform (F2) is ignored: derived ties are not stored
+        elements, so none of them can be withheld.
         """
         mode = self._disclosure_mode(p.case_id)
         if mode == DISCLOSURE_NONE:
             return Withheld(mode)
+        # These counts exist to tell a reader what they CANNOT see
+        # (docs/14 U2), which under row-level security is exactly what the
+        # request connection cannot count: every count would be zero and the
+        # notice would say nothing was withheld. So they run on a system
+        # connection, with this reader's ceiling as before, and only the two
+        # numbers come back (S1, 2026-09-25).
+        with system_connection(SystemPurpose.WITHHELD, reuse=self._c) as counter:
+            return self._hidden_counts(p, mode, counter)
 
-        hidden_nodes = self._c.execute(
+    def _hidden_counts(self, p: Projection, mode: str, counter) -> Withheld:
+        """`withheld`'s two counts, run on `counter`."""
+        hidden_nodes = counter.execute(
             """SELECT count(*) FROM core.node n
                 WHERE case_id = %s AND deleted_at IS NULL
                   AND merged_into_id IS NULL
@@ -448,7 +618,7 @@ class GraphService:
         # its OWN labels or because an endpoint is invisible -- and the
         # second is the commoner one, since a tie is only ever returned when
         # both ends are. Both count.
-        hidden_edges = self._c.execute(
+        hidden_edges = counter.execute(
             """SELECT count(*) FROM core.edge e
                  JOIN core.edge_type et ON et.key = e.edge_type
                 WHERE e.case_id = %s AND e.deleted_at IS NULL
@@ -456,6 +626,7 @@ class GraphService:
                   AND (%s::text[] IS NULL AND et.is_social_tie
                        OR e.edge_type = ANY(%s))
                   AND e.confidence::text = ANY(%s)
+                  AND (%s::text = 'all' OR e.review = 'ACCEPTED'::core.review_state)
                   AND EXISTS (SELECT 1 FROM core.assertion a
                                WHERE a.edge_id = e.id AND a.retracted_at IS NULL
                                  AND a.superseded_at IS NULL)
@@ -477,7 +648,7 @@ class GraphService:
                                    AND dn.merged_into_id IS NULL
                                    AND dn.classification <= %s::core.tlp
                                    AND dn.compartments <@ %s))""",
-            (p.case_id, p.include_inferred, types, types, keep,
+            (p.case_id, p.include_inferred, types, types, keep, p.review_scope,
              p.as_of, p.as_of, p.as_of,
              self._clearance, self._comp,
              self._clearance, self._comp,
@@ -487,8 +658,9 @@ class GraphService:
                         nodes=hidden_nodes, edges=hidden_edges)
 
     def _disclosure_mode(self, case_id: UUID) -> str:
+        # A case setting, read as a lock fact (`iam.case_facts`, S1).
         row = self._c.execute(
-            'SELECT withheld_disclosure FROM core."case" WHERE id = %s',
+            "SELECT withheld_disclosure FROM iam.case_facts(%s)",
             (case_id,)).fetchone()
         # A case that has vanished discloses nothing. Failing closed here
         # costs an analyst a banner; failing open costs a disclosure.

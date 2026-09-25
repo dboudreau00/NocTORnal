@@ -29,6 +29,7 @@ import psycopg
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import get_conn
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
@@ -57,8 +58,11 @@ def first_admin(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        creds = create_first_admin(conn, email=body.email,
-                                   display_name=body.display_name)
+        # Creating an account is an IAM write, which the request role
+        # may only read (0109, S1 2026-09-25): on a system connection.
+        with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
+            creds = create_first_admin(sconn, email=body.email,
+                                       display_name=body.display_name)
     except AdminError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {

@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0068.
+-- GENERATED MIRROR of the schema at Alembic revision 0124.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0068
+-- Alembic revision: 0124
 -- =====================================================================
 
 --
@@ -336,6 +336,92 @@ BEGIN
 END $$;
 
 --
+-- Name: authority_target_fits(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.authority_target_fits() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  src record;
+  auth record;
+BEGIN
+  SELECT classification, collection_account_id, base_url, egress_profile_id
+    INTO src FROM collect.source WHERE id = NEW.source_id;
+  SELECT classification, collection_account_id
+    INTO auth FROM collect.collection_authority WHERE id = NEW.authority_id;
+  IF src.classification > auth.classification THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'an authority is never labelled below a source it covers: raise its classification first';
+  END IF;
+  IF src.collection_account_id IS DISTINCT FROM auth.collection_account_id THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'this source is read through a different binding than the one this authority covers';
+  END IF;
+  NEW.target_base_url := src.base_url;
+  NEW.target_egress_profile_id :=
+    CASE WHEN auth.collection_account_id IS NULL
+         THEN src.egress_profile_id ELSE NULL END;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: document_embedding_labels(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.document_embedding_labels() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  d_cls core.tlp;
+  d_comp text[];
+  d_purged timestamptz;
+  s_cls core.tlp;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    -- The compartment lifecycle's rename replaces a key in place and
+    -- changes nothing else (docs/05, rule 5); anything else is refused.
+    IF NEW.document_id IS DISTINCT FROM OLD.document_id
+       OR NEW.read_classification IS DISTINCT FROM OLD.read_classification
+       OR cardinality(NEW.read_compartments)
+          IS DISTINCT FROM cardinality(OLD.read_compartments) THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+        'a vector row keeps the document and labels it was written with: a '
+        'change to its document deletes it instead';
+    END IF;
+    RETURN NEW;
+  END IF;
+  SELECT d.classification, d.compartments, d.purged_at, s.classification
+    INTO d_cls, d_comp, d_purged, s_cls
+    FROM collect.document d JOIN collect.source s ON s.id = d.source_id
+   WHERE d.id = NEW.document_id
+     FOR SHARE OF d, s;
+  IF NOT FOUND OR d_purged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a vector row follows its document, and this document is missing or purged';
+  END IF;
+  NEW.read_classification := greatest(d_cls, s_cls);
+  NEW.read_compartments := coalesce(
+    (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(d_comp) AS x),
+    '{}'::text[]);
+  RETURN NEW;
+END $$;
+
+--
+-- Name: document_embedding_queued(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.document_embedding_queued() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM core.embedding_enqueue('document', NEW.id);
+  RETURN NULL;
+END $$;
+
+--
 -- Name: document_tsv_update(); Type: FUNCTION; Schema: collect; Owner: -
 --
 
@@ -343,6 +429,12 @@ CREATE FUNCTION collect.document_tsv_update() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+  -- A purged document keeps its row and loses its content; its vector
+  -- goes too, rather than being rebuilt from what is left (L1, 2026-09-24).
+  IF NEW.purged_at IS NOT NULL THEN
+    NEW.search_tsv := NULL;
+    RETURN NEW;
+  END IF;
   NEW.search_tsv :=
       setweight(to_tsvector('simple', coalesce(NEW.title,'')), 'A')
    || setweight(to_tsvector('simple', coalesce(NEW.author_handle,'')), 'B')
@@ -353,11 +445,778 @@ BEGIN
 END $$;
 
 --
+-- Name: document_vectors_follow(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.document_vectors_follow() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+BEGIN
+  DELETE FROM collect.document_embedding WHERE document_id = NEW.id;
+  IF NEW.purged_at IS NULL THEN
+    PERFORM core.embedding_enqueue('document', NEW.id);
+  ELSE
+    DELETE FROM core.embedding_pending
+     WHERE kind = 'document' AND item_id = NEW.id;
+  END IF;
+  RETURN NULL;
+END $$;
+
+--
+-- Name: egress_binding_block(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.egress_binding_block() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'collect.egress_binding is append-only: it is the history the egress proxy compares collection authorities with';
+END $$;
+
+--
+-- Name: egress_connection_block(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.egress_connection_block() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'collect.egress_connection is append-only: it is the record of what left this deployment';
+END $$;
+
+--
+-- Name: egress_connection_chain(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.egress_connection_chain() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_catalog'
+    AS $$
+DECLARE prev bytea;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('collect.egress_connection.chain', 0));
+  NEW.seq := nextval('collect.egress_connection_seq');
+  SELECT row_hash INTO prev FROM collect.egress_connection ORDER BY seq DESC LIMIT 1;
+  NEW.prev_hash := prev;
+  NEW.row_hash := public.digest(convert_to(concat_ws(chr(31),
+  coalesce(encode(prev,'hex'),'GENESIS'),
+  NEW.seq::text,
+  to_char(NEW.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+  NEW.event,
+  coalesce(NEW.connection_id::text,'-'),
+  coalesce(NEW.protocol,'-'),
+  coalesce(NEW.route_kind,'-'),
+  NEW.route_id,
+  coalesce(NEW.peer_address::text,'-'),
+  coalesce(NEW.egress_profile_id::text,'-'),
+  coalesce(NEW.integration_route_id::text,'-'),
+  coalesce(NEW.collection_run_id::text,'-'),
+  coalesce(NEW.source_id::text,'-'),
+  coalesce(NEW.collection_account_id::text,'-'),
+  coalesce(NEW.authority_id::text,'-'),
+  coalesce(NEW.context_kind,'-'),
+  coalesce(NEW.context_id::text,'-'),
+  coalesce(NEW.dest_host,'-'),
+  coalesce(encode(NEW.dest_digest,'hex'),'-'),
+  coalesce(NEW.dest_port::text,'-'),
+  coalesce(NEW.resolved_address::text,'-'),
+  coalesce(NEW.exit_kind,'-'),
+  NEW.reason,
+  coalesce(NEW.item_count::text,'-'),
+  coalesce(NEW.bytes_up::text,'-'),
+  coalesce(NEW.bytes_down::text,'-'),
+  coalesce(NEW.duration_ms::text,'-'),
+  NEW.classification::text,
+  NEW.source_compartmented::text
+), 'UTF8'), 'sha256');
+  RETURN NEW;
+END $$;
+
+--
+-- Name: egress_profile_reach(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.egress_profile_reach() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.retired_at IS NOT NULL AND NEW.retired_at IS DISTINCT FROM OLD.retired_at THEN
+    RAISE EXCEPTION 'a retired egress profile stays retired';
+  END IF;
+  NEW.updated_at := clock_timestamp();
+  IF NEW.exit_kind IS DISTINCT FROM OLD.exit_kind
+     OR NEW.exit_fingerprint IS DISTINCT FROM OLD.exit_fingerprint
+     OR NEW.kind IS DISTINCT FROM OLD.kind
+     OR NEW.ceiling > OLD.ceiling
+     OR NOT (NEW.allowed_ports <@ OLD.allowed_ports)
+     OR (NEW.any_public_host AND NOT OLD.any_public_host)
+     OR NOT (NEW.allowed_host_suffixes <@ OLD.allowed_host_suffixes)
+     OR NOT (NEW.allowed_cidrs <@ OLD.allowed_cidrs)
+     OR (NEW.allow_onion AND NOT OLD.allow_onion)
+     OR (NEW.is_active AND NOT OLD.is_active) THEN
+    NEW.reach_changed_at := clock_timestamp();
+  ELSE
+    NEW.reach_changed_at := OLD.reach_changed_at;
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: egress_route_terminal(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.egress_route_terminal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.retired_at IS NOT NULL AND NEW.retired_at IS DISTINCT FROM OLD.retired_at THEN
+    RAISE EXCEPTION 'a retired egress route or destination stays retired';
+  END IF;
+  IF TG_TABLE_NAME = 'egress_integration_route' THEN
+    IF NEW.name IS DISTINCT FROM OLD.name THEN
+      RAISE EXCEPTION 'an egress route keeps its name: retire it and create another';
+    END IF;
+    NEW.updated_at := clock_timestamp();
+  ELSIF NEW.entry IS DISTINCT FROM OLD.entry OR NEW.route_id IS DISTINCT FROM OLD.route_id THEN
+    RAISE EXCEPTION 'an egress destination keeps its entry: retire it and add another';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_collection_authority(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_collection_authority() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'collect.collection_authority is never deleted: it is the record of who allowed collection (revoke it instead)';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.collection_account_id IS DISTINCT FROM OLD.collection_account_id
+     OR NEW.scope IS DISTINCT FROM OLD.scope
+     OR NEW.authority_ref IS DISTINCT FROM OLD.authority_ref
+     OR NEW.issued_by IS DISTINCT FROM OLD.issued_by
+     OR NEW.jurisdiction IS DISTINCT FROM OLD.jurisdiction
+     OR NEW.legal_basis IS DISTINCT FROM OLD.legal_basis
+     OR NEW.member_authority_ref IS DISTINCT FROM OLD.member_authority_ref
+     OR NEW.target_description IS DISTINCT FROM OLD.target_description
+     OR NEW.valid_from IS DISTINCT FROM OLD.valid_from
+     OR NEW.valid_until IS DISTINCT FROM OLD.valid_until
+     OR NEW.recorded_by IS DISTINCT FROM OLD.recorded_by
+     OR NEW.recorded_at IS DISTINCT FROM OLD.recorded_at THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a collection authority cannot be rewritten: revoke it and record another';
+  END IF;
+  IF NEW.classification < OLD.classification THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a collection authority''s classification only rises';
+  END IF;
+  IF OLD.confirmed_at IS NOT NULL
+     AND (NEW.confirmed_at IS DISTINCT FROM OLD.confirmed_at
+          OR NEW.confirmed_by IS DISTINCT FROM OLD.confirmed_by
+          OR NEW.confirm_note IS DISTINCT FROM OLD.confirm_note) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a confirmed collection authority stays confirmed as it was';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL
+     AND NEW.confirmed_at IS DISTINCT FROM OLD.confirmed_at THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a revoked collection authority cannot then be confirmed';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL
+     AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
+          OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by
+          OR NEW.revoke_reason IS DISTINCT FROM OLD.revoke_reason) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a revoked collection authority stays revoked';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_collection_authority_target(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_collection_authority_target() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'collect.collection_authority_target is never deleted: it is the record of which source an authority covered (revoke it instead)';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.authority_id IS DISTINCT FROM OLD.authority_id
+     OR NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.added_by IS DISTINCT FROM OLD.added_by
+     OR NEW.added_at IS DISTINCT FROM OLD.added_at
+     OR NEW.target_base_url IS DISTINCT FROM OLD.target_base_url
+     OR NEW.target_egress_profile_id IS DISTINCT FROM OLD.target_egress_profile_id THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a source under a collection authority cannot be rewritten: revoke it and add it again';
+  END IF;
+  IF OLD.confirmed_at IS NOT NULL
+     AND (NEW.confirmed_at IS DISTINCT FROM OLD.confirmed_at
+          OR NEW.confirmed_by IS DISTINCT FROM OLD.confirmed_by) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a confirmed source under a collection authority stays confirmed as it was';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL
+     AND NEW.confirmed_at IS DISTINCT FROM OLD.confirmed_at THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a revoked source under a collection authority cannot then be confirmed';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL
+     AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
+          OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by
+          OR NEW.revoke_reason IS DISTINCT FROM OLD.revoke_reason) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a revoked source under a collection authority stays revoked';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_persona_holds(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_persona_holds() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.platform IS NOT NULL THEN
+      RAISE EXCEPTION USING MESSAGE =
+        'a persona bound to a platform account is never deleted: burn it instead';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.machine_hold_until IS NOT NULL
+     AND OLD.machine_hold_until > clock_timestamp()
+     AND (NEW.machine_hold_until IS NULL
+          OR NEW.machine_hold_until < OLD.machine_hold_until) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a platform''s wait on a persona is never shortened: it ends when the platform said';
+  END IF;
+  IF OLD.machine_lock_code IS NOT NULL AND NEW.machine_lock_code IS NULL
+     AND NOT (NEW.secret_ciphertext IS DISTINCT FROM OLD.secret_ciphertext
+              AND coalesce(octet_length(NEW.secret_ciphertext), 0) > 0
+              AND coalesce(NEW.secret_rotated_at > OLD.machine_lock_at, false)) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a persona locked over its credential comes back only with a new credential enrolled after the lock';
+  END IF;
+  IF OLD.machine_lock_code IS NOT NULL AND NEW.machine_lock_code IS NOT NULL
+     AND NEW.machine_lock_at IS DISTINCT FROM OLD.machine_lock_at
+     AND NOT coalesce(NEW.machine_lock_at > OLD.machine_lock_at, false) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'the time a persona was locked moves only forward, with a later lock';
+  END IF;
+  IF NEW.secret_rotated_at IS DISTINCT FROM OLD.secret_rotated_at
+     AND NEW.secret_ciphertext IS NOT DISTINCT FROM OLD.secret_ciphertext THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a credential''s rotation time moves only when a new credential is stored';
+  END IF;
+  IF (OLD.platform IS NOT NULL AND NEW.platform IS DISTINCT FROM OLD.platform)
+     OR (OLD.platform_uid IS NOT NULL
+         AND NEW.platform_uid IS DISTINCT FROM OLD.platform_uid) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a persona is one account on one platform for life';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_run_requests(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_run_requests() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.requests = '[]'::jsonb AND OLD.status = 'RUNNING'
+     AND NEW.status <> 'RUNNING' THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION USING MESSAGE =
+    'a poll''s request log is written once, when the run finishes, and never '
+    || 'rewritten: it is custody';
+END
+$$;
+
+--
+-- Name: guard_telegram_chat(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_telegram_chat() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a Telegram chat source is never deleted: stop reading it';
+  END IF;
+  IF NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.peer_type IS DISTINCT FROM OLD.peer_type
+     OR NEW.peer_id IS DISTINCT FROM OLD.peer_id
+     OR NEW.durable_id IS DISTINCT FROM OLD.durable_id
+     OR NEW.username_at_resolve IS DISTINCT FROM OLD.username_at_resolve
+     OR NEW.title_at_resolve IS DISTINCT FROM OLD.title_at_resolve
+     OR NEW.resolved_at IS DISTINCT FROM OLD.resolved_at
+     OR NEW.resolved_by IS DISTINCT FROM OLD.resolved_by
+     OR (OLD.migrated_to IS NOT NULL
+         AND NEW.migrated_to IS DISTINCT FROM OLD.migrated_to) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a chat source''s identity is fixed: add the new chat as a new source, so a confirmed authority target never silently changes chat';
+  END IF;
+  IF (NEW.access_mode IS DISTINCT FROM OLD.access_mode
+      OR NEW.provenance_class IS DISTINCT FROM OLD.provenance_class)
+     AND NOT (OLD.access_mode = 'PUBLIC_READ' AND OLD.provenance_class = 'OPEN_GROUP'
+              AND NEW.access_mode = 'MEMBER'
+              AND NEW.provenance_class = 'PERSONA_PARTY') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a chat read in public can become a member chat, and never back';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_telegram_message(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_telegram_message() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a Telegram message''s capture record is never deleted';
+  END IF;
+  IF (NEW.document_id, NEW.source_id, NEW.chat_durable_id, NEW.message_id,
+      NEW.seen_via_uid, NEW.fwd_from_message_id, NEW.reply_to_message_id,
+      NEW.topic_id, NEW.grouped_id, NEW.is_service, NEW.service_action,
+      NEW.is_self, NEW.media_kind, NEW.noforwards, NEW.edit_date,
+      NEW.views_at_capture, NEW.forwards_at_capture, NEW.captured_at)
+     IS DISTINCT FROM
+     (OLD.document_id, OLD.source_id, OLD.chat_durable_id, OLD.message_id,
+      OLD.seen_via_uid, OLD.fwd_from_message_id, OLD.reply_to_message_id,
+      OLD.topic_id, OLD.grouped_id, OLD.is_service, OLD.service_action,
+      OLD.is_self, OLD.media_kind, OLD.noforwards, OLD.edit_date,
+      OLD.views_at_capture, OLD.forwards_at_capture, OLD.captured_at)
+     OR (OLD.deleted_seen_at IS NOT NULL
+         AND NEW.deleted_seen_at IS DISTINCT FROM OLD.deleted_seen_at) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a Telegram message''s capture record is fixed; only the purge clears its identifiers';
+  END IF;
+  IF (NEW.sender_uid, NEW.sender_handle_at_capture, NEW.post_author,
+      NEW.fwd_from_uid, NEW.fwd_from_name, NEW.via_bot_uid)
+     IS DISTINCT FROM
+     (OLD.sender_uid, OLD.sender_handle_at_capture, OLD.post_author,
+      OLD.fwd_from_uid, OLD.fwd_from_name, OLD.via_bot_uid) THEN
+    IF NOT EXISTS (SELECT 1 FROM collect.document d
+                    WHERE d.id = NEW.document_id AND d.purged_at IS NOT NULL)
+       OR NEW.sender_uid IS NOT NULL OR NEW.sender_handle_at_capture IS NOT NULL
+       OR NEW.post_author IS NOT NULL OR NEW.fwd_from_uid IS NOT NULL
+       OR NEW.fwd_from_name IS NOT NULL OR NEW.via_bot_uid IS NOT NULL THEN
+      RAISE EXCEPTION USING MESSAGE =
+        'a Telegram message''s capture record is fixed; only the purge clears its identifiers';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_telegram_persona(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_telegram_persona() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.platform = 'TELEGRAM'
+     AND NEW.egress_profile_id IS DISTINCT FROM OLD.egress_profile_id THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a Telegram persona keeps its egress profile for life';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: raise_authority_labels(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.raise_authority_labels() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.classification > OLD.classification THEN
+    UPDATE collect.collection_authority a
+       SET classification = NEW.classification
+     WHERE a.classification < NEW.classification
+       AND a.id IN (SELECT t.authority_id
+                      FROM collect.collection_authority_target t
+                     WHERE t.source_id = NEW.id);
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+--
+-- Name: record_egress_binding(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.record_egress_binding() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog'
+    AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'collection_account' THEN
+    INSERT INTO collect.egress_binding (collection_account_id, egress_profile_id)
+    VALUES (NEW.id, NEW.egress_profile_id);
+  ELSE
+    INSERT INTO collect.egress_binding (source_id, egress_profile_id)
+    VALUES (NEW.id, NEW.egress_profile_id);
+  END IF;
+  RETURN NULL;
+END $$;
+
+--
+-- Name: source_vectors_follow(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.source_vectors_follow() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+BEGIN
+  DELETE FROM collect.document_embedding e
+   USING collect.document d
+   WHERE e.document_id = d.id AND d.source_id = NEW.id;
+  INSERT INTO core.embedding_pending (slot, kind, item_id)
+  SELECT s.slot, 'document', d.id
+    FROM collect.document d CROSS JOIN core.embedding_space s
+   WHERE d.source_id = NEW.id AND d.purged_at IS NULL
+     AND s.state IN ('BUILDING', 'ACTIVE')
+  ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END $$;
+
+--
+-- Name: guard_pgp_key(); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.guard_pgp_key() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  entry_case uuid;
+  entry_type text;
+  entry_value text;
+  block_cls core.tlp;
+  block_comp text[];
+  acq_cls core.tlp;
+  acq_comp text[];
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a vendor key record is never deleted: retire it';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.confirmed_at IS NOT NULL OR NEW.confirmed_fingerprint IS NOT NULL
+       OR NEW.retired_at IS NOT NULL THEN
+      RAISE EXCEPTION 'a key is never born confirmed or retired';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF (NEW.id, NEW.case_id, NEW.acquisition_id, NEW.primary_fingerprint,
+      NEW.algorithm, NEW.curve, NEW.key_bits, NEW.key_created_at,
+      NEW.key_expires_at, NEW.revoked, NEW.capabilities, NEW.subkeys,
+      NEW.user_ids, NEW.material, NEW.material_sha256, NEW.created_at)
+     IS DISTINCT FROM
+     (OLD.id, OLD.case_id, OLD.acquisition_id, OLD.primary_fingerprint,
+      OLD.algorithm, OLD.curve, OLD.key_bits, OLD.key_created_at,
+      OLD.key_expires_at, OLD.revoked, OLD.capabilities, OLD.subkeys,
+      OLD.user_ids, OLD.material, OLD.material_sha256, OLD.created_at) THEN
+    RAISE EXCEPTION 'what gpg read from a key is fixed';
+  END IF;
+  IF OLD.retired_at IS NOT NULL
+     AND (NEW.retired_at, NEW.retired_by, NEW.retired_reason)
+         IS DISTINCT FROM (OLD.retired_at, OLD.retired_by, OLD.retired_reason) THEN
+    RAISE EXCEPTION 'a retired key stays retired';
+  END IF;
+  IF (NEW.confirmed_fingerprint, NEW.confirmed_against,
+      NEW.confirmed_contact_block_entry_id, NEW.confirmed_source_ref,
+      NEW.confirmation_statement, NEW.confirmed_by, NEW.confirmed_at)
+     IS NOT DISTINCT FROM
+     (OLD.confirmed_fingerprint, OLD.confirmed_against,
+      OLD.confirmed_contact_block_entry_id, OLD.confirmed_source_ref,
+      OLD.confirmation_statement, OLD.confirmed_by, OLD.confirmed_at) THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.confirmed_at IS NOT NULL THEN
+    RAISE EXCEPTION 'a key''s confirmation is made once and never changed';
+  END IF;
+  IF OLD.retired_at IS NOT NULL THEN
+    RAISE EXCEPTION 'a retired key is not confirmed';
+  END IF;
+  IF NEW.confirmed_contact_block_entry_id IS NOT NULL THEN
+    SELECT b.case_id, e.selector_type, e.durable_value,
+           b.classification, b.compartments
+      INTO entry_case, entry_type, entry_value, block_cls, block_comp
+      FROM comms.contact_block_entry e
+      JOIN comms.contact_block b ON b.id = e.block_id
+     WHERE e.id = NEW.confirmed_contact_block_entry_id;
+    IF entry_case IS DISTINCT FROM NEW.case_id THEN
+      RAISE EXCEPTION 'the contact block line belongs to another case';
+    END IF;
+    IF entry_type IS DISTINCT FROM 'PGP_FPR' THEN
+      RAISE EXCEPTION 'the contact block line is not a PGP fingerprint';
+    END IF;
+    IF comms.pgp_fingerprint_norm(entry_value) <> NEW.primary_fingerprint THEN
+      RAISE EXCEPTION 'the contact block line lists a different fingerprint than this key''s';
+    END IF;
+    SELECT classification, compartments INTO acq_cls, acq_comp
+      FROM comms.pgp_key_acquisition WHERE id = NEW.acquisition_id;
+    IF block_cls > acq_cls OR NOT (block_comp <@ acq_comp) THEN
+      RAISE EXCEPTION 'the contact block line is filed above this key; a confirmation shown with the key cannot rest on material its readers may not see';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_pgp_key_acquisition(); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.guard_pgp_key_acquisition() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  cited_cls core.tlp;
+  cited_comp text[];
+  cited_case uuid;
+  lookup_state text;
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a key acquisition is the record of what was obtained and from where; it is never deleted';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF (NEW.id, NEW.case_id, NEW.source, NEW.raw_bytes, NEW.raw_sha256,
+        NEW.filename, NEW.source_ref, NEW.channel_binding_id,
+        NEW.contact_block_id, NEW.evidence_id, NEW.classification,
+        NEW.requested_by, NEW.requested_at, NEW.lookup_id)
+       IS DISTINCT FROM
+       (OLD.id, OLD.case_id, OLD.source, OLD.raw_bytes, OLD.raw_sha256,
+        OLD.filename, OLD.source_ref, OLD.channel_binding_id,
+        OLD.contact_block_id, OLD.evidence_id, OLD.classification,
+        OLD.requested_by, OLD.requested_at, OLD.lookup_id)
+       OR cardinality(NEW.compartments) <> cardinality(OLD.compartments) THEN
+      RAISE EXCEPTION 'an acquisition''s record and labels are fixed; only a compartment rename may touch them';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NOT (NEW.compartments @> (SELECT compartments FROM core."case"
+                                WHERE id = NEW.case_id)) THEN
+    RAISE EXCEPTION 'an acquisition carries at least its case''s compartments';
+  END IF;
+  IF NEW.source = 'WKD' THEN
+    SELECT state, classification INTO lookup_state, cited_cls
+      FROM comms.pgp_key_lookup WHERE id = NEW.lookup_id;
+    IF lookup_state IS DISTINCT FROM 'SENDING' THEN
+      RAISE EXCEPTION 'a key found by a lookup is filed while its lookup is being answered';
+    END IF;
+    IF NEW.classification <> cited_cls THEN
+      RAISE EXCEPTION 'a key found by a lookup is filed at the lookup''s own labels';
+    END IF;
+  END IF;
+  IF NEW.evidence_id IS NOT NULL THEN
+    SELECT case_id, classification, compartments
+      INTO cited_case, cited_cls, cited_comp
+      FROM core.evidence WHERE id = NEW.evidence_id;
+    IF cited_case IS DISTINCT FROM NEW.case_id THEN
+      RAISE EXCEPTION 'the exhibit belongs to another case';
+    END IF;
+    IF NEW.classification < cited_cls OR NOT (NEW.compartments @> cited_comp) THEN
+      RAISE EXCEPTION 'an acquisition is never filed below the exhibit it cites';
+    END IF;
+  END IF;
+  IF NEW.channel_binding_id IS NOT NULL THEN
+    SELECT classification, compartments INTO cited_cls, cited_comp
+      FROM comms.channel_binding WHERE id = NEW.channel_binding_id;
+    IF NEW.classification < cited_cls OR NOT (NEW.compartments @> cited_comp) THEN
+      RAISE EXCEPTION 'an acquisition is never filed below the channel binding it cites';
+    END IF;
+  END IF;
+  IF NEW.contact_block_id IS NOT NULL THEN
+    SELECT classification, compartments INTO cited_cls, cited_comp
+      FROM comms.contact_block WHERE id = NEW.contact_block_id;
+    IF NEW.classification < cited_cls OR NOT (NEW.compartments @> cited_comp) THEN
+      RAISE EXCEPTION 'an acquisition is never filed below the contact block it cites';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_pgp_key_lookup(); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.guard_pgp_key_lookup() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  case_cls core.tlp;
+  case_comp text[];
+  cited_cls core.tlp;
+  cited_comp text[];
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a key lookup is the record of a request made outside this deployment, or of one refused before it was; it is never deleted';
+  END IF;
+  SELECT classification, compartments INTO case_cls, case_comp
+    FROM core."case" WHERE id = NEW.case_id;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.state <> 'REQUESTED' THEN
+      RAISE EXCEPTION 'a key lookup is born REQUESTED';
+    END IF;
+    IF cardinality(case_comp) > 0 THEN
+      RAISE EXCEPTION 'a compartmented case''s addresses are never looked up outside this deployment';
+    END IF;
+    IF NEW.classification < case_cls THEN
+      RAISE EXCEPTION 'a key lookup is never filed below its case';
+    END IF;
+    IF NEW.channel_binding_id IS NOT NULL THEN
+      SELECT classification, compartments INTO cited_cls, cited_comp
+        FROM comms.channel_binding WHERE id = NEW.channel_binding_id;
+      IF cardinality(cited_comp) > 0 OR NEW.classification < cited_cls THEN
+        RAISE EXCEPTION 'a key lookup is never filed below, or beside a compartment of, the binding it cites';
+      END IF;
+    END IF;
+    IF NEW.contact_block_id IS NOT NULL THEN
+      SELECT classification, compartments INTO cited_cls, cited_comp
+        FROM comms.contact_block WHERE id = NEW.contact_block_id;
+      IF cardinality(cited_comp) > 0 OR NEW.classification < cited_cls THEN
+        RAISE EXCEPTION 'a key lookup is never filed below, or beside a compartment of, the contact block it cites';
+      END IF;
+    END IF;
+    RETURN NEW;
+  END IF;
+  -- UPDATE: what was asked never changes.
+  IF (NEW.id, NEW.case_id, NEW.address, NEW.local_part, NEW.domain,
+      NEW.wkd_hash, NEW.reason, NEW.channel_binding_id, NEW.contact_block_id,
+      NEW.classification, NEW.ceiling, NEW.route_name, NEW.requested_by,
+      NEW.requested_at, NEW.expires_at)
+     IS DISTINCT FROM
+     (OLD.id, OLD.case_id, OLD.address, OLD.local_part, OLD.domain,
+      OLD.wkd_hash, OLD.reason, OLD.channel_binding_id, OLD.contact_block_id,
+      OLD.classification, OLD.ceiling, OLD.route_name, OLD.requested_by,
+      OLD.requested_at, OLD.expires_at) THEN
+    RAISE EXCEPTION 'what a key lookup asked for is fixed when it is asked';
+  END IF;
+  IF OLD.state = 'REQUESTED' THEN
+    IF NEW.state NOT IN ('DECLINED', 'EXPIRED', 'SENDING') THEN
+      RAISE EXCEPTION 'a waiting key lookup is declined, lapses, or is approved and sent';
+    END IF;
+    IF NEW.state = 'SENDING' THEN
+      IF now() >= NEW.expires_at THEN
+        RAISE EXCEPTION 'the key lookup lapsed before it was approved';
+      END IF;
+      IF cardinality(case_comp) > 0 OR case_cls > NEW.classification THEN
+        RAISE EXCEPTION 'the case''s labels changed since the key lookup was asked for, so it is not sent';
+      END IF;
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.state = 'SENDING' THEN
+    IF NEW.state NOT IN ('FOUND', 'NOT_FOUND', 'FAILED') THEN
+      RAISE EXCEPTION 'a key lookup that was sent ends FOUND, NOT_FOUND or FAILED';
+    END IF;
+    IF (NEW.decided_by, NEW.decided_at, NEW.decision_note, NEW.planned_urls,
+        NEW.sent_at)
+       IS DISTINCT FROM
+       (OLD.decided_by, OLD.decided_at, OLD.decision_note, OLD.planned_urls,
+        OLD.sent_at) THEN
+      RAISE EXCEPTION 'the decision and the planned URLs of a sent key lookup are fixed';
+    END IF;
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'a key lookup that has finished is not changed';
+END $$;
+
+--
+-- Name: guard_pgp_verification(); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.guard_pgp_verification() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'a verification is the record behind a confirmation; it is never rewritten or deleted';
+END $$;
+
+--
+-- Name: pgp_fingerprint_norm(text); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.pgp_fingerprint_norm(v text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    RETURN regexp_replace(upper(regexp_replace(COALESCE(v, ''::text), '[[:space:]]'::text, ''::text, 'g'::text)), '^0X'::text, ''::text);
+
+--
+-- Name: FUNCTION pgp_fingerprint_norm(v text); Type: COMMENT; Schema: comms; Owner: -
+--
+
+COMMENT ON FUNCTION comms.pgp_fingerprint_norm(v text) IS 'The one normalisation of a published PGP fingerprint: whitespace out, upper case, a leading 0X dropped (F10b). The service and the triggers both read it, so they cannot disagree.';
+
+--
+-- Name: pgp_verification_cites_a_confirmed_key(); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.pgp_verification_cites_a_confirmed_key() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  confirmed text;
+  retired timestamptz;
+BEGIN
+  IF NEW.pgp_key_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT confirmed_fingerprint, retired_at INTO confirmed, retired
+    FROM comms.pgp_key WHERE id = NEW.pgp_key_id;
+  IF confirmed IS NULL THEN
+    RAISE EXCEPTION 'a check made with a registry key cites a key whose fingerprint was confirmed';
+  END IF;
+  IF retired IS NOT NULL THEN
+    RAISE EXCEPTION 'a retired key is not used for a check';
+  END IF;
+  IF NEW.claimed_fingerprint <> confirmed THEN
+    RAISE EXCEPTION 'a check made with a registry key claims that key''s confirmed fingerprint';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
 -- Name: pgp_verification_confirms_its_binding(); Type: FUNCTION; Schema: comms; Owner: -
 --
 
 CREATE FUNCTION comms.pgp_verification_confirms_its_binding() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
 DECLARE
   bound text;
@@ -378,6 +1237,79 @@ BEGIN
     RAISE EXCEPTION 'invariant: a VERIFIED row must confirm the binding''s '
                     'own identifier -- signature covers %, binding holds %',
                     coalesce(NEW.confirms_value, '(null)'), bound;
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: pgp_verification_is_attributed(); Type: FUNCTION; Schema: comms; Owner: -
+--
+
+CREATE FUNCTION comms.pgp_verification_is_attributed() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  cb_cls core.tlp;
+  cb_comp text[];
+  cb_identity uuid;
+  cb_platform text;
+  cb_durable text;
+  b_cls core.tlp;
+  b_comp text[];
+  b_publisher uuid;
+  a_cls core.tlp;
+  a_comp text[];
+BEGIN
+  IF NEW.outcome <> 'VERIFIED' OR NEW.channel_binding_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.contact_block_id IS NULL OR NEW.attribution IS NULL THEN
+    RAISE EXCEPTION 'a check that confirms a binding cites the contact block that ties the key to the binding''s holder, and says how';
+  END IF;
+  SELECT classification, compartments, identity_node_id, platform_key,
+         durable_value
+    INTO cb_cls, cb_comp, cb_identity, cb_platform, cb_durable
+    FROM comms.channel_binding WHERE id = NEW.channel_binding_id;
+  SELECT classification, compartments, publisher_identity_node_id
+    INTO b_cls, b_comp, b_publisher
+    FROM comms.contact_block WHERE id = NEW.contact_block_id;
+  IF b_cls > cb_cls OR NOT (b_comp <@ cb_comp) THEN
+    RAISE EXCEPTION 'the cited contact block is filed above the binding it would confirm';
+  END IF;
+  IF NEW.pgp_key_id IS NOT NULL THEN
+    SELECT a.classification, a.compartments INTO a_cls, a_comp
+      FROM comms.pgp_key k
+      JOIN comms.pgp_key_acquisition a ON a.id = k.acquisition_id
+     WHERE k.id = NEW.pgp_key_id;
+    IF a_cls > cb_cls OR NOT (a_comp <@ cb_comp) THEN
+      RAISE EXCEPTION 'the key is filed above the binding it would confirm';
+    END IF;
+  END IF;
+  IF NOT EXISTS (
+       SELECT 1 FROM comms.contact_block_entry e
+        WHERE e.block_id = NEW.contact_block_id
+          AND e.role = 'SELF' AND e.selector_type = 'PGP_FPR'
+          AND comms.pgp_fingerprint_norm(e.durable_value)
+              IN (NEW.claimed_fingerprint,
+                  coalesce(NEW.signing_primary_fingerprint,
+                           NEW.claimed_fingerprint))) THEN
+    RAISE EXCEPTION 'the cited contact block does not list the claimed fingerprint as its publisher''s own';
+  END IF;
+  IF b_publisher IS NOT NULL AND cb_identity IS NOT NULL
+     AND b_publisher <> cb_identity THEN
+    RAISE EXCEPTION 'the cited contact block''s publisher and the binding''s identity are different entities';
+  END IF;
+  IF NEW.attribution = 'SAME_IDENTITY' THEN
+    IF b_publisher IS NULL OR cb_identity IS NULL OR b_publisher <> cb_identity THEN
+      RAISE EXCEPTION 'SAME_IDENTITY needs the block''s publisher to be the binding''s identity';
+    END IF;
+  ELSIF NOT EXISTS (
+       SELECT 1 FROM comms.contact_block_entry e
+        WHERE e.block_id = NEW.contact_block_id AND e.role = 'SELF'
+          AND e.platform_key = cb_platform
+          AND lower(e.durable_value) = lower(cb_durable)) THEN
+    RAISE EXCEPTION 'SAME_BLOCK needs the cited contact block to list the binding''s identifier as its publisher''s own';
   END IF;
   RETURN NEW;
 END $$;
@@ -416,8 +1348,8 @@ CREATE FUNCTION core.announce_change() RETURNS trigger
 --
 
 CREATE FUNCTION core.assertion_derives_tie_confidence() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'core', 'public'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'core', 'public', 'pg_temp'
     AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
@@ -438,12 +1370,54 @@ BEGIN
 END $$;
 
 --
+-- Name: assertion_embedding_case(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_embedding_case() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  a_case uuid;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a vector row keeps the claim and case it was written for';
+  END IF;
+  SELECT case_id INTO a_case FROM core.assertion WHERE id = NEW.assertion_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a vector row follows its claim, and this claim is missing';
+  END IF;
+  NEW.case_id := a_case;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: assertion_embedding_queued(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_embedding_queued() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM core.embedding_enqueue('assertion', NEW.id);
+  ELSE
+    -- Retracted or superseded: history, never searched, so never queued.
+    DELETE FROM core.embedding_pending
+     WHERE kind = 'assertion' AND item_id = NEW.id;
+  END IF;
+  RETURN NULL;
+END $$;
+
+--
 -- Name: assertion_protects_element(); Type: FUNCTION; Schema: core; Owner: -
 --
 
 CREATE FUNCTION core.assertion_protects_element() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'core', 'public'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'core', 'public', 'pg_temp'
     AS $$
 BEGIN
   IF OLD.node_id IS NOT NULL
@@ -491,8 +1465,8 @@ END $$;
 --
 
 CREATE FUNCTION core.custody_chain_hash() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'public', 'pg_catalog'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
 DECLARE prev bytea;
 BEGIN
@@ -519,8 +1493,8 @@ END $$;
 --
 
 CREATE FUNCTION core.edge_confidence_is_derived() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'core', 'public'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'core', 'public', 'pg_temp'
     AS $$
 DECLARE
   derived core.analytic_confidence := core.tie_confidence(NEW.id);
@@ -535,11 +1509,67 @@ BEGIN
 END $$;
 
 --
+-- Name: embedding_enqueue(text, uuid); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.embedding_enqueue(p_kind text, p_item uuid) RETURNS void
+    LANGUAGE sql
+    AS $$
+  INSERT INTO core.embedding_pending (slot, kind, item_id)
+  SELECT s.slot, p_kind, p_item FROM core.embedding_space s
+   WHERE s.state IN ('BUILDING', 'ACTIVE')
+  ON CONFLICT DO NOTHING;
+$$;
+
+--
+-- Name: embedding_space_transition(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.embedding_space_transition() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (NEW.id, NEW.role, NEW.slot, NEW.provider, NEW.model, NEW.fingerprint,
+      NEW.fingerprint_sha256, NEW.dims_native, NEW.canary::text,
+      NEW.unicode_version, NEW.registered_endpoint, NEW.created_at,
+      NEW.created_by)
+     IS DISTINCT FROM
+     (OLD.id, OLD.role, OLD.slot, OLD.provider, OLD.model, OLD.fingerprint,
+      OLD.fingerprint_sha256, OLD.dims_native, OLD.canary::text,
+      OLD.unicode_version, OLD.registered_endpoint, OLD.created_at,
+      OLD.created_by) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'an embedding space never changes what it is: register a new space '
+      'for another model or setting';
+  END IF;
+  IF OLD.state = 'RETIRED' THEN
+    IF (to_jsonb(NEW) - 'rows_cleared_at') IS DISTINCT FROM
+       (to_jsonb(OLD) - 'rows_cleared_at')
+       OR (OLD.rows_cleared_at IS NOT NULL
+           AND NEW.rows_cleared_at IS DISTINCT FROM OLD.rows_cleared_at) THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+        'a retired embedding space is final: only the moment its rows were '
+        'cleared is recorded, once';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.state IS DISTINCT FROM OLD.state AND NOT (
+       (OLD.state = 'BUILDING' AND NEW.state IN ('ACTIVE', 'RETIRED'))
+    OR (OLD.state = 'ACTIVE' AND NEW.state = 'RETIRED')) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'an embedding space moves from building to active or retired, or from '
+      'active to retired, and never back';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
 -- Name: enforce_tlp_floor(); Type: FUNCTION; Schema: core; Owner: -
 --
 
 CREATE FUNCTION core.enforce_tlp_floor() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
 DECLARE case_tlp core.tlp;
 BEGIN
@@ -561,6 +1591,44 @@ BEGIN
 END $$;
 
 --
+-- Name: evidence_embedding_case(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.evidence_embedding_case() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  e_case uuid;
+  e_purged timestamptz;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a vector row keeps the exhibit and case it was written for';
+  END IF;
+  SELECT case_id, purged_at INTO e_case, e_purged
+    FROM core.evidence WHERE id = NEW.evidence_id FOR SHARE;
+  IF NOT FOUND OR e_purged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a vector row follows its exhibit, and this exhibit is missing or purged';
+  END IF;
+  NEW.case_id := e_case;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: evidence_embedding_queued(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.evidence_embedding_queued() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM core.embedding_enqueue('evidence', NEW.id);
+  RETURN NULL;
+END $$;
+
+--
 -- Name: evidence_tsv_update(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -579,6 +1647,130 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+
+--
+-- Name: evidence_vectors_follow(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.evidence_vectors_follow() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+BEGIN
+  DELETE FROM core.evidence_embedding WHERE evidence_id = NEW.id;
+  IF NEW.purged_at IS NULL THEN
+    PERFORM core.embedding_enqueue('evidence', NEW.id);
+  ELSE
+    DELETE FROM core.embedding_pending
+     WHERE kind = 'evidence' AND item_id = NEW.id;
+  END IF;
+  RETURN NULL;
+END $$;
+
+--
+-- Name: guard_approval_request(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_approval_request() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  deciding boolean;
+  consuming boolean;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.state IS DISTINCT FROM 'PENDING'
+       OR NEW.decided_by IS NOT NULL OR NEW.decided_at IS NOT NULL
+       OR NEW.decision_note IS NOT NULL OR NEW.consumed_at IS NOT NULL
+       OR NEW.result_ref IS NOT NULL THEN
+      RAISE EXCEPTION 'an approval request is created pending and undecided';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF (NEW.operation, NEW.case_id, NEW.payload, NEW.payload_hash,
+      NEW.justification, NEW.requested_by)
+     IS DISTINCT FROM
+     (OLD.operation, OLD.case_id, OLD.payload, OLD.payload_hash,
+      OLD.justification, OLD.requested_by) THEN
+    RAISE EXCEPTION 'what an approval request asks for is fixed when it is raised: raise a new one';
+  END IF;
+
+  IF NEW.requested_at > OLD.requested_at OR NEW.expires_at > OLD.expires_at THEN
+    RAISE EXCEPTION 'an approval request never gains time: raise a new one';
+  END IF;
+
+  IF NEW.state IS DISTINCT FROM OLD.state AND NOT (
+       (OLD.state = 'PENDING' AND NEW.state IN ('APPROVED', 'REJECTED', 'WITHDRAWN'))
+    OR (OLD.state = 'APPROVED' AND NEW.state = 'CONSUMED')) THEN
+    RAISE EXCEPTION 'an approval request moves from pending to decided or withdrawn, and from approved to consumed, and never back';
+  END IF;
+
+  deciding := OLD.state = 'PENDING' AND NEW.state IN ('APPROVED', 'REJECTED');
+  IF (NEW.decided_by, NEW.decided_at, NEW.decision_note)
+     IS DISTINCT FROM (OLD.decided_by, OLD.decided_at, OLD.decision_note)
+     AND NOT deciding THEN
+    RAISE EXCEPTION 'a decision on an approval request is made once';
+  END IF;
+  IF deciding AND NEW.decided_at IS DISTINCT FROM now() THEN
+    RAISE EXCEPTION 'a decision on an approval request is recorded at the time it is made';
+  END IF;
+
+  consuming := OLD.state = 'APPROVED' AND NEW.state = 'CONSUMED';
+  IF NEW.consumed_at IS DISTINCT FROM OLD.consumed_at AND NOT consuming THEN
+    RAISE EXCEPTION 'an approval is spent once';
+  END IF;
+  IF consuming AND NEW.consumed_at IS DISTINCT FROM now() THEN
+    RAISE EXCEPTION 'an approval is spent at the time it is used';
+  END IF;
+
+  IF NEW.result_ref IS DISTINCT FROM OLD.result_ref
+     AND (OLD.result_ref IS NOT NULL OR NEW.state IS DISTINCT FROM 'CONSUMED') THEN
+    RAISE EXCEPTION 'what an approval produced is recorded once, after it is spent';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_approval_request(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.guard_approval_request() IS 'An approval request is inserted pending, what it asks for never changes, it is decided once at now(), spent once at now(), and never gains time (migration approval_request_frozen, F9 2026-09-24).';
+
+--
+-- Name: guard_case_merge_switch(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_case_merge_switch() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+BEGIN
+  IF OLD.dual_control_merge IS NOT DISTINCT FROM NEW.dual_control_merge THEN
+    IF NEW.dual_control_merge_epoch IS DISTINCT FROM OLD.dual_control_merge_epoch THEN
+      RAISE EXCEPTION 'dual_control_merge_epoch moves only with the merge switch';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.dual_control_merge AND NOT NEW.dual_control_merge
+     AND NOT EXISTS (
+       SELECT 1 FROM core.approval_request r
+        WHERE r.operation = 'case.policy.relax'
+          AND r.case_id = NEW.id
+          AND r.state = 'CONSUMED'
+          AND r.consumed_at = now()
+          AND r.payload->>'setting' = 'dual_control_merge'
+          AND r.payload->>'to' = 'false'
+          AND r.payload->>'epoch' = OLD.dual_control_merge_epoch::text) THEN
+    RAISE EXCEPTION '%', 'case ' || NEW.code || ' requires a second signature'
+      || ' on merges, and turning that off takes a case.policy.relax approval'
+      || ' for the switch as it stands, consumed in the same transaction';
+  END IF;
+  NEW.dual_control_merge_epoch := OLD.dual_control_merge_epoch + 1;
+  RETURN NEW;
+END
+$$;
 
 --
 -- Name: node_tsv_update(); Type: FUNCTION; Schema: core; Owner: -
@@ -607,8 +1799,8 @@ END $$;
 --
 
 CREATE FUNCTION core.require_edge_assertion() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'core', 'public'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'core', 'public', 'pg_temp'
     AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM core.edge WHERE id = NEW.id) THEN
@@ -627,8 +1819,8 @@ END $$;
 --
 
 CREATE FUNCTION core.require_node_assertion() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'core', 'public'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'core', 'public', 'pg_temp'
     AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM core.node WHERE id = NEW.id) THEN
@@ -718,9 +1910,16 @@ CREATE TABLE core.assertion (
     retracted_by uuid,
     retraction_reason text,
     created_by uuid NOT NULL,
+    lookup_result_id uuid,
     CONSTRAINT assertion_inference_needs_rationale CHECK (((basis <> ALL (ARRAY['ANALYST_INFERENCE'::core.assertion_basis, 'AUTOMATED_INFERENCE'::core.assertion_basis])) OR (rationale IS NOT NULL))),
     CONSTRAINT assertion_one_subject CHECK ((num_nonnulls(node_id, edge_id) = 1))
 );
+
+--
+-- Name: COLUMN assertion.lookup_result_id; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.assertion.lookup_result_id IS 'The lookup answer an accepted claim rests on (AUTOMATED_INFERENCE only).';
 
 --
 -- Name: tie_grade(core.assertion); Type: FUNCTION; Schema: core; Owner: -
@@ -750,7 +1949,8 @@ COMMENT ON FUNCTION core.tie_grade(a core.assertion) IS 'What one assertion says
 --
 
 CREATE FUNCTION core.validate_edge_endpoints() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
 DECLARE
   et      RECORD;
@@ -798,56 +1998,336 @@ BEGIN
 END $$;
 
 --
+-- Name: apply_dual_control_change(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.apply_dual_control_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.change = 'OPERATION_MODE' THEN
+    UPDATE iam.dual_control_operation
+       SET mode = NEW.mode_to, changed_at = now(), change_id = NEW.id
+     WHERE operation = NEW.operation;
+  ELSIF NEW.change = 'SEPARATED_DUTY_ADD' THEN
+    -- 0062's separated_duty_not_already_violated still fires, and refuses
+    -- by role name, rolling the consume back with it.
+    INSERT INTO iam.separated_duty
+           (permission_a, permission_b, why, origin, added_at, added_by_change)
+    VALUES (NEW.permission_a, NEW.permission_b, NEW.why, 'policy', now(), NEW.id);
+  ELSE
+    DELETE FROM iam.separated_duty
+     WHERE origin = 'policy'
+       AND (permission_a, permission_b) IN
+           ((NEW.permission_a, NEW.permission_b),
+            (NEW.permission_b, NEW.permission_a));
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+--
+-- Name: case_code(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.case_code(p_case uuid) RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT c.code
+    FROM core."case" c
+   WHERE c.id = p_case
+     AND (iam.rls_caller_exempt()
+          OR EXISTS (SELECT 1 FROM iam.case_assignment a
+                      WHERE a.case_id = c.id AND a.user_id = iam.rls_actor()
+                        AND (a.expires_at IS NULL OR a.expires_at > pg_catalog.now()))
+          OR iam.rls_holds_global('break_glass.review')
+          OR iam.rls_holds_global('sample.read'))
+$$;
+
+--
+-- Name: case_facts(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.case_facts(p_case uuid) RETURNS TABLE(id uuid, code text, status core.case_status, classification core.tlp, compartments text[], owner_user_id uuid, deputy_user_id uuid, legal_hold boolean, withheld_disclosure text, dual_control_merge boolean)
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT c.id, iam.case_code(c.id), c.status, c.classification, c.compartments,
+         c.owner_user_id, c.deputy_user_id, c.legal_hold, c.withheld_disclosure,
+         c.dual_control_merge
+    FROM core."case" c
+   WHERE c.id = p_case
+$$;
+
+--
+-- Name: check_dual_control_change(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.check_dual_control_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r record;
+  p jsonb;
+  blocked record;
+  cur record;
+  latest uuid;
+BEGIN
+  -- Serialises every policy change, so the reads below cannot race.
+  PERFORM pg_advisory_xact_lock(hashtextextended('iam.dual_control_policy', 0));
+  -- Pinned, never taken from the caller: the policy tables' guard accepts
+  -- a write only when the ledger row naming it has applied_at = now(),
+  -- which is what marks the row as inserted by this transaction.
+  NEW.applied_at := now();
+
+  SELECT a.operation, a.case_id, a.state, a.consumed_at, a.requested_by,
+         a.decided_by, a.decided_at, a.payload
+    INTO r FROM core.approval_request a WHERE a.id = NEW.approval_request_id;
+  IF NOT FOUND OR r.operation IS DISTINCT FROM 'dual_control.policy'
+     OR r.case_id IS NOT NULL THEN
+    RAISE EXCEPTION 'a two-person policy change applies only a deployment-wide dual_control.policy approval';
+  END IF;
+  IF r.state IS DISTINCT FROM 'CONSUMED' OR r.consumed_at IS DISTINCT FROM now() THEN
+    RAISE EXCEPTION 'a two-person policy change applies only an approval consumed in the same transaction';
+  END IF;
+  IF r.requested_by IS DISTINCT FROM NEW.requested_by
+     OR r.decided_by IS DISTINCT FROM NEW.countersigned_by THEN
+    RAISE EXCEPTION 'a two-person policy change names the two people on its approval';
+  END IF;
+  p := r.payload;
+  IF p->>'change' IS DISTINCT FROM NEW.change
+     OR p->>'operation' IS DISTINCT FROM NEW.operation
+     OR p->>'from' IS DISTINCT FROM NEW.mode_from
+     OR p->>'to' IS DISTINCT FROM NEW.mode_to
+     OR p->>'permission_a' IS DISTINCT FROM NEW.permission_a
+     OR p->>'permission_b' IS DISTINCT FROM NEW.permission_b
+     OR p->>'why' IS DISTINCT FROM NEW.why
+     OR p->>'based_on' IS DISTINCT FROM NEW.based_on::text THEN
+    RAISE EXCEPTION 'a two-person policy change applies exactly what was countersigned';
+  END IF;
+
+  IF NOT EXISTS (
+      SELECT 1 FROM iam.app_user u
+        JOIN iam.user_role ur ON ur.user_id = u.id
+        JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+       WHERE u.id = NEW.requested_by AND u.is_active
+         AND rp.permission_key = 'dual_control.manage') THEN
+    RAISE EXCEPTION 'the proposer is no longer an active account holding dual_control.manage: propose it again';
+  END IF;
+  IF NOT EXISTS (
+      SELECT 1 FROM iam.app_user u
+        JOIN iam.user_role ur ON ur.user_id = u.id
+        JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+       WHERE u.id = NEW.countersigned_by AND u.is_active
+         AND rp.permission_key = 'dual_control.countersign') THEN
+    RAISE EXCEPTION 'the countersigner is no longer an active account holding dual_control.countersign: propose it again';
+  END IF;
+  -- iam.separated_duty keeps the two halves in different ROLES; this keeps
+  -- them in different PEOPLE (2026-09-24).
+  IF EXISTS (
+      SELECT 1 FROM iam.user_role ur
+        JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+       WHERE ur.user_id = NEW.countersigned_by
+         AND rp.permission_key = 'dual_control.manage') THEN
+    RAISE EXCEPTION 'the countersigner can also propose changes to which operations need two people, so they are not a second person: propose it again for a Security officer who is not an administrator';
+  END IF;
+  SELECT * INTO blocked FROM iam.countersign_blocked_by(
+      NEW.countersigned_by, 'dual_control.countersign', r.decided_at,
+      NEW.requested_by, 'dual_control.manage');
+  IF FOUND THEN
+    IF blocked.subject_id = NEW.countersigned_by THEN
+      RAISE EXCEPTION '%', 'the countersigner''s account '
+        || CASE blocked.action
+             WHEN 'PASSWORD_RESET' THEN 'had its password reset'
+             WHEN 'TOTP_REENROLLED' THEN 'had its authenticator re-enrolled'
+             WHEN 'USER_REACTIVATED' THEN 'was reactivated'
+             WHEN 'USER_UNLOCKED' THEN 'was unlocked'
+             WHEN 'ROLE_GRANTED' THEN 'was given a role that countersigns'
+             ELSE 'was created with a role that countersigns' END
+        || ' by someone else in the seven days before they countersigned: propose it again';
+    END IF;
+    RAISE EXCEPTION '%', 'the countersigner '
+      || CASE blocked.action
+           WHEN 'PASSWORD_RESET' THEN 'reset the proposer''s password'
+           WHEN 'TOTP_REENROLLED' THEN 're-enrolled the proposer''s authenticator'
+           WHEN 'USER_REACTIVATED' THEN 'reactivated the proposer''s account'
+           WHEN 'USER_UNLOCKED' THEN 'unlocked the proposer''s account'
+           WHEN 'ROLE_GRANTED' THEN 'gave the proposer a role that proposes'
+           ELSE 'created the proposer''s account' END
+      || ' in the seven days before they countersigned: propose it again';
+  END IF;
+
+  IF NEW.change = 'OPERATION_MODE' THEN
+    SELECT o.mode, o.change_id INTO cur
+      FROM iam.dual_control_operation o
+     WHERE o.operation = NEW.operation FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'no configurable two-person policy for %', NEW.operation;
+    END IF;
+    IF cur.mode IS DISTINCT FROM NEW.mode_from
+       OR cur.change_id IS DISTINCT FROM NEW.based_on THEN
+      RAISE EXCEPTION '% changed after this was countersigned (it is % now): propose it again',
+        NEW.operation, cur.mode;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  SELECT c.id INTO latest FROM iam.dual_control_policy_change c
+   WHERE c.change IN ('SEPARATED_DUTY_ADD', 'SEPARATED_DUTY_REMOVE')
+     AND c.permission_a = NEW.permission_a AND c.permission_b = NEW.permission_b
+   ORDER BY c.seq DESC LIMIT 1;
+  IF latest IS DISTINCT FROM NEW.based_on THEN
+    RAISE EXCEPTION 'the pair % and % changed after this was countersigned: propose it again',
+      NEW.permission_a, NEW.permission_b;
+  END IF;
+  IF NEW.change = 'SEPARATED_DUTY_ADD' THEN
+    IF (SELECT count(*) FROM iam.permission
+         WHERE key IN (NEW.permission_a, NEW.permission_b)) <> 2 THEN
+      RAISE EXCEPTION 'a separated pair names two permissions that exist';
+    END IF;
+    IF EXISTS (SELECT 1 FROM iam.separated_duty s
+                WHERE (s.permission_a, s.permission_b) IN
+                      ((NEW.permission_a, NEW.permission_b),
+                       (NEW.permission_b, NEW.permission_a))) THEN
+      RAISE EXCEPTION 'the pair % and % is already declared', NEW.permission_a, NEW.permission_b;
+    END IF;
+  ELSIF NOT EXISTS (SELECT 1 FROM iam.separated_duty s
+                     WHERE s.origin = 'policy'
+                       AND (s.permission_a, s.permission_b) IN
+                           ((NEW.permission_a, NEW.permission_b),
+                            (NEW.permission_b, NEW.permission_a))) THEN
+    RAISE EXCEPTION 'the pair % and % was not added by a two-person change, so a two-person change cannot remove it',
+      NEW.permission_a, NEW.permission_b;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: compartment_bindings(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.compartment_bindings() RETURNS TABLE(schema_name text, table_name text, column_name text, kind text, enabled boolean, problem text)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+#variable_conflict use_column
+DECLARE
+  t    record;
+  args text[];
+  att  record;
+BEGIN
+  FOR t IN
+    SELECT tg.tgname::text AS tgname, n.nspname::text AS sch,
+           c.relname::text AS tbl, tg.tgrelid, tg.tgfoid, tg.tgnargs,
+           tg.tgargs, ARRAY(SELECT unnest(tg.tgattr)) AS cols,
+           tg.tgtype::int AS tgtype, tg.tgenabled IN ('O', 'A') AS fires
+      FROM pg_trigger tg
+      JOIN pg_class c ON c.oid = tg.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE NOT tg.tgisinternal
+       AND (tg.tgfoid = 'iam.refuse_unregistered_compartment()'::regprocedure
+            OR tg.tgname = 'compartments_registered'
+            OR starts_with(tg.tgname::text, 'compartments_registered_'))
+     ORDER BY 2, 3, 1
+  LOOP
+    schema_name := t.sch;
+    table_name := t.tbl;
+    enabled := t.fires;
+    column_name := NULL;
+    kind := NULL;
+    problem := NULL;
+    args := string_to_array(encode(t.tgargs, 'escape'), E'\\000');
+    IF t.tgfoid <> 'iam.refuse_unregistered_compartment()'::regprocedure THEN
+      problem := 'it does not call iam.refuse_unregistered_compartment';
+    ELSIF t.tgnargs <> 2 THEN
+      problem := 'it passes ' || t.tgnargs
+                 || CASE WHEN t.tgnargs = 1 THEN ' argument' ELSE ' arguments' END
+                 || ', and a binding passes two: the column and its kind';
+    ELSE
+      column_name := args[1];
+      kind := args[2];
+      SELECT a.attnum, a.atttypid INTO att
+        FROM pg_attribute a
+       WHERE a.attrelid = t.tgrelid AND a.attname = args[1]
+         AND NOT a.attisdropped;
+      IF NOT FOUND THEN
+        problem := 'it names a column the table does not have';
+      ELSIF kind NOT IN ('array', 'scalar') THEN
+        problem := 'its kind is neither array nor scalar';
+      ELSIF (kind = 'array' AND att.atttypid <> 'text[]'::regtype)
+         OR (kind = 'scalar' AND att.atttypid <> 'text'::regtype) THEN
+        problem := 'the column is not of the type its kind says';
+      ELSIF (t.tgtype & 127) <> 23 THEN
+        problem := 'it is not BEFORE INSERT OR UPDATE FOR EACH ROW';
+      ELSIF t.cols IS DISTINCT FROM ARRAY[att.attnum]::int2[] THEN
+        problem := 'it does not fire on UPDATE OF exactly that column';
+      ELSIF t.tgname NOT IN ('compartments_registered',
+                             'compartments_registered_' || args[1]) THEN
+        problem := 'its name does not follow the binding rule';
+      END IF;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END
+$$;
+
+--
+-- Name: FUNCTION compartment_bindings(); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.compartment_bindings() IS 'Every compartment binding: the triggers named compartments_registered (or compartments_registered_<column>), and any trigger that calls iam.refuse_unregistered_compartment, read from the catalog. problem is NULL for a well-formed binding and says what is wrong otherwise. The registry of bound columns IS this list.';
+
+--
 -- Name: compartment_in_use(text); Type: FUNCTION; Schema: iam; Owner: -
 --
 
 CREATE FUNCTION iam.compartment_in_use(key text) RETURNS text[]
-    LANGUAGE sql STABLE
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'pg_temp'
     AS $_$
-  SELECT array_agg(col ORDER BY col) FROM (
-        SELECT 'iam.app_user.compartments' AS col WHERE EXISTS (SELECT 1 FROM iam."app_user" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'core.case.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."case" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'core.node.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."node" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'core.edge.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."edge" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'core.evidence.compartments' AS col WHERE EXISTS (SELECT 1 FROM core."evidence" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'analytics.metric_run.visibility_compartments' AS col WHERE EXISTS (SELECT 1 FROM analytics."metric_run" WHERE $1 = ANY(visibility_compartments))
-        UNION ALL
-        SELECT 'notify.notification.compartments' AS col WHERE EXISTS (SELECT 1 FROM notify."notification" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'lab.sample.compartments' AS col WHERE EXISTS (SELECT 1 FROM lab."sample" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'ingest.record.compartments' AS col WHERE EXISTS (SELECT 1 FROM ingest."record" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'ingest.dead_letter.compartments' AS col WHERE EXISTS (SELECT 1 FROM ingest."dead_letter" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'comms.channel_binding.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."channel_binding" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'comms.conversation.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."conversation" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'comms.message.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."message" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'comms.contact_block.compartments' AS col WHERE EXISTS (SELECT 1 FROM comms."contact_block" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'deception.capture.compartments' AS col WHERE EXISTS (SELECT 1 FROM deception."capture" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'deception.email_message.compartments' AS col WHERE EXISTS (SELECT 1 FROM deception."email_message" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'deception.call_record.compartments' AS col WHERE EXISTS (SELECT 1 FROM deception."call_record" WHERE $1 = ANY(compartments))
-        UNION ALL
-        SELECT 'ingest.api_key.forced_compartment' AS col WHERE EXISTS (SELECT 1 FROM ingest."api_key" WHERE forced_compartment = $1)
-  ) s
+DECLARE
+  b       record;
+  hit     boolean;
+  holders text[] := '{}';
+BEGIN
+  FOR b IN SELECT * FROM iam.compartment_bindings() LOOP
+    IF b.problem IS NOT NULL THEN
+      RAISE EXCEPTION USING MESSAGE =
+        'compartment ' || key || ' was not dropped or renamed: the binding '
+        || 'on ' || b.schema_name || '.' || b.table_name || ' cannot be read ('
+        || b.problem || '), so whether rows there still carry it is unknown. '
+        || 'Recreate that trigger as the migration that added it did, then '
+        || 'try again';
+    END IF;
+    IF b.kind = 'scalar' THEN
+      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.%I WHERE %I = $1)',
+                     b.schema_name, b.table_name, b.column_name)
+        INTO hit USING key;
+    ELSE
+      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.%I WHERE cardinality(%I) > 0 AND %I @> ARRAY[$1]::text[])',
+                     b.schema_name, b.table_name, b.column_name,
+                     b.column_name)
+        INTO hit USING key;
+    END IF;
+    IF hit THEN
+      holders := holders || (b.schema_name || '.' || b.table_name || '.'
+                             || b.column_name);
+    END IF;
+  END LOOP;
+  IF cardinality(holders) = 0 THEN
+    RETURN NULL;
+  END IF;
+  RETURN (SELECT array_agg(h ORDER BY h) FROM unnest(holders) AS h);
+END
 $_$;
 
 --
 -- Name: FUNCTION compartment_in_use(key text); Type: COMMENT; Schema: iam; Owner: -
 --
 
-COMMENT ON FUNCTION iam.compartment_in_use(key text) IS 'The bound columns (schema.table.column) that still carry the key, or NULL. Used by the registry trigger that refuses to drop or rename a key in use.';
+COMMENT ON FUNCTION iam.compartment_in_use(key text) IS 'The bound columns (schema.table.column) that still carry the key, or NULL. Reads the bindings from the catalog through iam.compartment_bindings(), so a column bound by any later migration is covered without restating this function, and refuses while any binding cannot be read.';
 
 --
 -- Name: compartments_registered(text[]); Type: FUNCTION; Schema: iam; Owner: -
@@ -867,6 +2347,193 @@ $$;
 --
 
 COMMENT ON FUNCTION iam.compartments_registered(keys text[]) IS 'True iff every element is a non-NULL key in iam.compartment. A NULL array is vacuously registered; a NULL ELEMENT is not, because it is not a key and can never be held.';
+
+--
+-- Name: countersign_blocked_by(uuid, text, timestamp with time zone, uuid, text, interval); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.countersign_blocked_by(signer uuid, signer_permission text, as_of timestamp with time zone DEFAULT now(), proposer uuid DEFAULT NULL::uuid, proposer_permission text DEFAULT NULL::text, lookback interval DEFAULT NULL::interval) RETURNS TABLE(action text, occurred_at timestamp with time zone, actor_id uuid, subject_id uuid, role_key text)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT e.action, e.occurred_at, e.actor_id, e.object_id,
+         CASE WHEN e.action = 'ROLE_GRANTED' THEN e.detail->>'role' END
+    FROM audit.event e
+   WHERE e.object_type = 'app_user'
+     AND e.object_id IN (signer, proposer)
+     AND e.occurred_at > as_of - coalesce(lookback, iam.countersigner_seasoning())
+     AND e.occurred_at <= as_of
+     AND e.actor_id IS NOT NULL
+     AND e.action IN ('PASSWORD_RESET', 'TOTP_REENROLLED', 'USER_REACTIVATED', 'USER_UNLOCKED', 'ROLE_GRANTED', 'USER_CREATED')
+     AND ((e.object_id = signer AND e.actor_id <> signer
+           AND iam.countersign_event_counts(e.action, e.detail, signer_permission))
+       OR (proposer IS NOT NULL AND e.object_id = proposer
+           AND e.actor_id = signer
+           AND iam.countersign_event_counts(e.action, e.detail, proposer_permission)))
+   ORDER BY e.occurred_at DESC, e.seq DESC
+   LIMIT 1
+$$;
+
+--
+-- Name: countersign_event_counts(text, jsonb, text); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.countersign_event_counts(ev_action text, ev_detail jsonb, wanted text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT CASE
+    WHEN ev_action IN ('PASSWORD_RESET', 'TOTP_REENROLLED', 'USER_REACTIVATED', 'USER_UNLOCKED') THEN true
+    WHEN ev_action = 'ROLE_GRANTED' THEN EXISTS (
+      SELECT 1 FROM iam.role_permission rp
+       WHERE rp.role_key = ev_detail->>'role' AND rp.permission_key = wanted)
+    WHEN ev_action = 'USER_CREATED'
+         AND jsonb_typeof(ev_detail->'roles') = 'array' THEN EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(ev_detail->'roles') AS r(role_key)
+        JOIN iam.role_permission rp ON rp.role_key = r.role_key
+       WHERE rp.permission_key = wanted)
+    ELSE false
+  END
+$$;
+
+--
+-- Name: countersigner_seasoning(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.countersigner_seasoning() RETURNS interval
+    LANGUAGE sql IMMUTABLE
+    AS $$ SELECT interval '7 days' $$;
+
+--
+-- Name: element_facts(text, uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.element_facts(p_kind text, p_id uuid) RETURNS TABLE(case_id uuid, classification core.tlp, compartments text[])
+    LANGUAGE plpgsql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF p_kind = 'node' THEN
+    RETURN QUERY SELECT n.case_id, n.classification, n.compartments
+                   FROM core.node n WHERE n.id = p_id;
+  ELSIF p_kind = 'edge' THEN
+    RETURN QUERY SELECT e.case_id, e.classification, e.compartments
+                   FROM core.edge e WHERE e.id = p_id;
+  ELSIF p_kind = 'evidence' THEN
+    RETURN QUERY SELECT v.case_id, v.classification, v.compartments
+                   FROM core.evidence v WHERE v.id = p_id;
+  ELSIF p_kind = 'assertion' THEN
+    RETURN QUERY
+      SELECT a.case_id, coalesce(n.classification, e.classification),
+             coalesce(n.compartments, e.compartments)
+        FROM core.assertion a
+        LEFT JOIN core.node n ON n.id = a.node_id
+        LEFT JOIN core.edge e ON e.id = a.edge_id
+       WHERE a.id = p_id;
+  ELSIF p_kind = 'document' THEN
+    RETURN QUERY SELECT NULL::uuid, d.classification, d.compartments
+                   FROM collect.document d WHERE d.id = p_id;
+  ELSIF p_kind = 'sample' THEN
+    RETURN QUERY SELECT s.case_id, s.classification, s.compartments
+                   FROM lab.sample s WHERE s.id = p_id;
+  ELSIF p_kind = 'conversation' THEN
+    RETURN QUERY SELECT c.case_id, c.classification, c.compartments
+                   FROM comms.conversation c WHERE c.id = p_id;
+  ELSIF p_kind = 'proposal_block' THEN
+    RETURN QUERY SELECT cb.case_id, cb.classification, cb.compartments
+                   FROM comms.contact_block_entry e
+                   JOIN comms.contact_block cb ON cb.id = e.block_id
+                  WHERE e.proposal_id = p_id
+                  LIMIT 1;
+  ELSE
+    RAISE EXCEPTION 'iam.element_facts: unknown kind %', p_kind
+      USING ERRCODE = '22023';
+  END IF;
+END
+$$;
+
+--
+-- Name: guard_dual_control_ledger(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.guard_dual_control_ledger() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'iam.dual_control_policy_change is append-only: a change is corrected by another change';
+END
+$$;
+
+--
+-- Name: policy_changed_only_by_ledger(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.policy_changed_only_by_ledger() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  bound boolean := false;
+BEGIN
+  IF TG_OP = 'TRUNCATE' THEN
+    RAISE EXCEPTION '%', TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME
+      || ' is never truncated: it changes only through a two-person policy change';
+  END IF;
+  -- Depth 1 is a statement from outside any trigger. The ledger's AFTER
+  -- INSERT trigger writes at depth 2.
+  IF pg_trigger_depth() < 2 THEN
+    RAISE EXCEPTION '%', TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME
+      || ' changes only through a two-person policy change'
+      || ' (iam.dual_control_policy_change); a migration that must write it'
+      || ' disables trigger ' || TG_NAME || ' by name for its own run';
+  END IF;
+  IF TG_OP = 'DELETE' AND TG_TABLE_NAME = 'separated_duty' THEN
+    IF OLD.origin = 'migration' THEN
+      RAISE EXCEPTION 'a pair installed with the software or by the database owner is removed only the same way';
+    END IF;
+  END IF;
+  -- Depth alone accepts a write from ANY trigger, and the runtime role can
+  -- make one (a trigger on a temporary table of its own; PUBLIC holds
+  -- TEMP). So the write must also be exactly what a ledger row inserted in
+  -- THIS transaction says: the ledger pins applied_at to now(), the
+  -- transaction's start, so a row from any earlier transaction never
+  -- matches (F9, 2026-09-24).
+  IF TG_TABLE_NAME = 'dual_control_operation' THEN
+    IF TG_OP = 'UPDATE' THEN
+      bound := NEW.operation = OLD.operation AND EXISTS (
+        SELECT 1 FROM iam.dual_control_policy_change c
+         WHERE c.id = NEW.change_id
+           AND c.applied_at = now()
+           AND c.change = 'OPERATION_MODE'
+           AND c.operation = NEW.operation
+           AND c.mode_from = OLD.mode
+           AND c.mode_to = NEW.mode);
+    END IF;
+  ELSIF TG_OP = 'INSERT' THEN
+    bound := NEW.origin = 'policy' AND EXISTS (
+      SELECT 1 FROM iam.dual_control_policy_change c
+       WHERE c.id = NEW.added_by_change
+         AND c.applied_at = now()
+         AND c.change = 'SEPARATED_DUTY_ADD'
+         AND c.permission_a = NEW.permission_a
+         AND c.permission_b = NEW.permission_b
+         AND c.why IS NOT DISTINCT FROM NEW.why);
+  ELSIF TG_OP = 'DELETE' THEN
+    bound := EXISTS (
+      SELECT 1 FROM iam.dual_control_policy_change c
+       WHERE c.applied_at = now()
+         AND c.change = 'SEPARATED_DUTY_REMOVE'
+         AND c.permission_a = least(OLD.permission_a, OLD.permission_b)
+         AND c.permission_b = greatest(OLD.permission_a, OLD.permission_b));
+  END IF;
+  IF bound IS NOT TRUE THEN
+    RAISE EXCEPTION '%', TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME
+      || ' changes only as a two-person policy change applied in the same'
+      || ' transaction says, and this ' || lower(TG_OP) || ' matches none';
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END
+$$;
 
 --
 -- Name: refuse_compartment_removal(); Type: FUNCTION; Schema: iam; Owner: -
@@ -1003,6 +2670,269 @@ END
 $$;
 
 --
+-- Name: rls_actor(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_actor() RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT coalesce(
+    (SELECT s.user_id
+       FROM iam.session s
+       JOIN iam.app_user u ON u.id = s.user_id
+      WHERE s.rls_binding_hash = pg_catalog.sha256(pg_catalog.convert_to(
+              nullif(pg_catalog.current_setting('noctornal.rls_proof', true), ''),
+              'UTF8'))
+        AND s.revoked_at IS NULL
+        AND s.expires_at > pg_catalog.now()
+        AND u.is_active),
+    (SELECT t.user_id
+       FROM lab.download_ticket t
+       JOIN iam.app_user u ON u.id = t.user_id
+      WHERE t.token_hash = pg_catalog.sha256(pg_catalog.convert_to(
+              nullif(pg_catalog.current_setting('noctornal.rls_ticket', true), ''),
+              'UTF8'))
+        AND t.redeemed_at IS NOT NULL
+        AND t.redeemed_at > pg_catalog.now() - interval '5 minutes'
+        AND u.is_active))
+$$;
+
+--
+-- Name: rls_bind(text); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_bind(p_proof text) RETURNS TABLE(actor uuid, exempt boolean)
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  PERFORM pg_catalog.set_config('noctornal.rls_proof', coalesce(p_proof, ''), false);
+  RETURN QUERY SELECT iam.rls_actor(), iam.rls_caller_exempt();
+END
+$$;
+
+--
+-- Name: rls_bind_ticket(text); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_bind_ticket(p_ticket text) RETURNS TABLE(actor uuid, exempt boolean)
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  PERFORM pg_catalog.set_config('noctornal.rls_ticket', coalesce(p_ticket, ''), false);
+  RETURN QUERY SELECT iam.rls_actor(), iam.rls_caller_exempt();
+END
+$$;
+
+--
+-- Name: rls_caller_exempt(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_caller_exempt() RETURNS boolean
+    LANGUAGE sql STABLE PARALLEL RESTRICTED
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT coalesce(bool_or(r.rolsuper OR r.rolbypassrls
+                          OR pg_catalog.pg_has_role(r.oid, c.relowner, 'USAGE')), false)
+    FROM pg_catalog.pg_roles r, pg_catalog.pg_class c
+   WHERE r.rolname = CASE WHEN pg_catalog.current_setting('role') = 'none'
+                          THEN session_user::text
+                          ELSE pg_catalog.current_setting('role') END
+     AND c.oid = 'core.node'::pg_catalog.regclass
+$$;
+
+--
+-- Name: rls_cases(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_cases() RETURNS uuid[]
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  WITH me AS (
+    SELECT u.id, u.tlp_clearance, coalesce(u.compartments, '{}'::text[]) AS held
+      FROM iam.app_user u
+     WHERE u.id = iam.rls_actor() AND u.is_active
+  ), grants AS (
+    SELECT g.case_id, g.granted_classification
+      FROM iam.break_glass g, me
+     WHERE g.user_id = me.id
+       AND g.revoked_at IS NULL AND g.expires_at > pg_catalog.now()
+       AND g.granted_classification IS NOT NULL
+  )
+  SELECT coalesce(pg_catalog.array_agg(c.id), '{}'::uuid[])
+    FROM me
+    JOIN iam.case_assignment a ON a.user_id = me.id
+    JOIN core."case" c ON c.id = a.case_id
+   WHERE (a.expires_at IS NULL OR a.expires_at > pg_catalog.now())
+     AND coalesce(c.compartments, '{}'::text[]) OPERATOR(pg_catalog.<@) me.held
+     AND c.classification <= GREATEST(
+           me.tlp_clearance,
+           (SELECT max(gr.granted_classification) FROM grants gr
+             WHERE gr.case_id IS NULL OR gr.case_id = c.id))
+$$;
+
+--
+-- Name: rls_cases_in_reach(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_cases_in_reach() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT coalesce(pg_catalog.jsonb_object_agg(c.id::text, true), '{}'::jsonb)
+    FROM core."case" c
+   WHERE c.classification <= iam.rls_clearance()
+     AND coalesce(c.compartments, '{}'::text[])
+         OPERATOR(pg_catalog.<@) iam.rls_compartments()
+$$;
+
+--
+-- Name: rls_ceiling_for(jsonb, uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_ceiling_for(p_ceilings jsonb, p_case uuid) RETURNS core.tlp
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+  SELECT (p_ceilings ->> p_case::text)::core.tlp
+$$;
+
+--
+-- Name: rls_ceilings(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_ceilings() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT coalesce(pg_catalog.jsonb_object_agg(x.case_id::text, x.level), '{}'::jsonb)
+    FROM (SELECT g.case_id, max(g.granted_classification) AS level
+            FROM iam.break_glass g
+           WHERE g.user_id = iam.rls_actor() AND g.case_id IS NOT NULL
+             AND g.revoked_at IS NULL AND g.expires_at > pg_catalog.now()
+             AND g.granted_classification IS NOT NULL
+           GROUP BY g.case_id) x
+   WHERE x.level > iam.rls_clearance()
+$$;
+
+--
+-- Name: rls_clearance(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_clearance() RETURNS core.tlp
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT GREATEST(u.tlp_clearance,
+                  (SELECT max(g.granted_classification)
+                     FROM iam.break_glass g
+                    WHERE g.user_id = u.id AND g.case_id IS NULL
+                      AND g.revoked_at IS NULL AND g.expires_at > pg_catalog.now()
+                      AND g.granted_classification IS NOT NULL))
+    FROM iam.app_user u
+   WHERE u.id = iam.rls_actor() AND u.is_active
+$$;
+
+--
+-- Name: rls_compartments(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_compartments() RETURNS text[]
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT coalesce(u.compartments, '{}'::text[])
+    FROM iam.app_user u
+   WHERE u.id = iam.rls_actor() AND u.is_active
+$$;
+
+--
+-- Name: rls_holds_global(text); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_holds_global(p_permission text) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+      FROM iam.user_role ur
+      JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+      JOIN iam.app_user u ON u.id = ur.user_id
+     WHERE ur.user_id = iam.rls_actor() AND rp.permission_key = p_permission
+       AND u.is_active)
+$$;
+
+--
+-- Name: rls_record_break_glass_use(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.rls_record_break_glass_use(p_grant uuid) RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  WITH counted AS (
+    UPDATE iam.break_glass g
+       SET used_at = coalesce(g.used_at, pg_catalog.now()),
+           action_count = g.action_count + 1
+     WHERE g.id = p_grant
+       AND (iam.rls_caller_exempt()
+            OR (g.user_id = iam.rls_actor()
+                AND g.revoked_at IS NULL AND g.expires_at > pg_catalog.now()))
+    RETURNING 1)
+  SELECT EXISTS (SELECT 1 FROM counted)
+$$;
+
+--
+-- Name: search_document_hits(text, text, text, core.tlp, text[], integer); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.search_document_hits(p_tsq text, p_q text, p_pattern text, p_clearance core.tlp, p_compartments text[], p_limit integer) RETURNS TABLE(id uuid, label text, excerpt text, source_name text, posted_at timestamp with time zone, external_url text, rank double precision, total bigint, classification text, author_handle text, compartments text[])
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL RESTRICTED
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  WITH me AS (
+    SELECT iam.rls_caller_exempt() AS exempt,
+           iam.rls_clearance() AS clr,
+           iam.rls_compartments() AS held
+  )
+  SELECT h.id, h.label, h.excerpt, h.source_name, h.posted_at,
+         h.external_url, h.rank, pg_catalog.count(*) OVER () AS total,
+         h.classification, h.author_handle, h.compartments
+    FROM (
+      SELECT d.id,
+             coalesce(nullif(d.title, ''), pg_catalog.left(d.body_text, 80)) AS label,
+             pg_catalog.left(d.body_text, 240) AS excerpt, s.name AS source_name,
+             d.posted_at, d.external_url,
+             d.classification::text AS classification, d.author_handle,
+             d.compartments,
+             LEAST(0.99::float8, GREATEST(
+               coalesce(pg_catalog.ts_rank(d.search_tsv,
+                        pg_catalog.to_tsquery('simple', p_tsq)), 0)::float8,
+               coalesce(public.similarity(d.author_handle, p_q), 0)::float8))
+               AS rank
+        FROM collect.document d
+        JOIN collect.source s ON s.id = d.source_id
+        CROSS JOIN me
+       WHERE d.purged_at IS NULL
+         AND d.classification <= p_clearance
+         AND s.classification <= p_clearance
+         AND d.compartments OPERATOR(pg_catalog.<@) p_compartments
+         AND (me.exempt
+              OR (me.clr IS NOT NULL
+                  AND d.classification <= me.clr
+                  AND s.classification <= me.clr
+                  AND d.compartments OPERATOR(pg_catalog.<@) me.held))
+         AND (d.search_tsv OPERATOR(pg_catalog.@@) pg_catalog.to_tsquery('simple', p_tsq)
+              OR d.author_handle OPERATOR(pg_catalog.~~*) p_pattern)
+    ) h
+   ORDER BY h.rank DESC, h.id
+   LIMIT LEAST(greatest(p_limit, 0), 200)
+$$;
+
+--
 -- Name: separated_duty_violations(); Type: FUNCTION; Schema: iam; Owner: -
 --
 
@@ -1014,6 +2944,34 @@ CREATE FUNCTION iam.separated_duty_violations() RETURNS TABLE(role_key text, per
     JOIN iam.role_permission a ON a.permission_key = s.permission_a
     JOIN iam.role_permission b ON b.permission_key = s.permission_b
                               AND b.role_key = a.role_key
+$$;
+
+--
+-- Name: session_guard(); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.session_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.rls_binding_hash IS NULL
+     OR OLD.rls_binding_hash IS DISTINCT FROM pg_catalog.sha256(pg_catalog.convert_to(
+          nullif(pg_catalog.current_setting('noctornal.rls_proof', true), ''), 'UTF8')) THEN
+    RAISE EXCEPTION 'iam.session: this connection may change only the session it is bound to'
+      USING ERRCODE = '42501';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL
+     AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
+          OR NEW.revoke_reason IS DISTINCT FROM OLD.revoke_reason) THEN
+    RAISE EXCEPTION 'iam.session: a revoked session stays revoked'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
 $$;
 
 --
@@ -1030,6 +2988,272 @@ CREATE FUNCTION iam.unregistered_compartments(keys text[]) RETURNS text[]
 $$;
 
 --
+-- Name: exposure_rank(text); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.exposure_rank(level text) RETURNS integer
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE level WHEN 'NONE' THEN 0 WHEN 'VENDOR' THEN 1 WHEN 'PUBLIC' THEN 2 END
+$$;
+
+--
+-- Name: guard_exposure_change(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.guard_exposure_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'an exposure change is the record of who lowered a provider''s controls: never deleted';
+  END IF;
+  IF OLD.decision IS NOT NULL THEN
+    RAISE EXCEPTION 'an exposure change is decided once';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.provider_id IS DISTINCT FROM OLD.provider_id
+     OR NEW.from_level IS DISTINCT FROM OLD.from_level
+     OR NEW.to_level IS DISTINCT FROM OLD.to_level
+     OR NEW.origin IS DISTINCT FROM OLD.origin
+     OR NEW.private_cidr IS DISTINCT FROM OLD.private_cidr
+     OR NEW.basis IS DISTINCT FROM OLD.basis
+     OR NEW.requested_by IS DISTINCT FROM OLD.requested_by
+     OR NEW.requested_at IS DISTINCT FROM OLD.requested_at
+     OR NEW.expires_at IS DISTINCT FROM OLD.expires_at THEN
+    RAISE EXCEPTION 'an exposure change request cannot be rewritten, only decided';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_lookup_batch(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.guard_lookup_batch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a lookup batch is the record of an analyst''s plan: retention empties it, nothing deletes it';
+  END IF;
+  IF (to_jsonb(NEW) - ARRAY['cancelled_at', 'cancelled_by', 'cancel_reason', 'note', 'purged_at'])
+     IS DISTINCT FROM
+     (to_jsonb(OLD) - ARRAY['cancelled_at', 'cancelled_by', 'cancel_reason', 'note', 'purged_at']) THEN
+    RAISE EXCEPTION 'a lookup batch''s plan is fixed';
+  END IF;
+  IF OLD.cancelled_at IS NOT NULL AND (NEW.cancelled_at IS DISTINCT FROM OLD.cancelled_at
+       OR NEW.cancelled_by IS DISTINCT FROM OLD.cancelled_by) THEN
+    RAISE EXCEPTION 'a lookup batch is cancelled once';
+  END IF;
+  IF (NEW.note IS DISTINCT FROM OLD.note
+      OR (OLD.cancel_reason IS NOT NULL AND NEW.cancel_reason IS DISTINCT FROM OLD.cancel_reason))
+     AND NOT (OLD.purged_at IS NULL AND NEW.purged_at IS NOT NULL) THEN
+    RAISE EXCEPTION 'a lookup batch''s notes change only when retention empties them';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_lookup_result(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.guard_lookup_result() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a lookup answer is case material: retention empties it, nothing deletes it';
+  END IF;
+  IF (to_jsonb(NEW) - ARRAY['filed_evidence_id', 'raw_body', 'summary', 'interpret_error',
+                            'purged_at', 'findings_total', 'findings_proposed'])
+     IS DISTINCT FROM
+     (to_jsonb(OLD) - ARRAY['filed_evidence_id', 'raw_body', 'summary', 'interpret_error',
+                            'purged_at', 'findings_total', 'findings_proposed']) THEN
+    RAISE EXCEPTION 'a lookup answer is kept as it came back';
+  END IF;
+  -- The finding counts are written once, after the proposals that cite the
+  -- answer exist (F15.3, 2026-09-24).
+  IF (NEW.findings_total IS DISTINCT FROM OLD.findings_total
+      OR NEW.findings_proposed IS DISTINCT FROM OLD.findings_proposed)
+     AND (OLD.findings_total <> 0 OR OLD.findings_proposed <> 0) THEN
+    RAISE EXCEPTION 'a lookup answer''s finding counts are recorded once';
+  END IF;
+  IF OLD.filed_evidence_id IS NOT NULL
+     AND NEW.filed_evidence_id IS DISTINCT FROM OLD.filed_evidence_id THEN
+    RAISE EXCEPTION 'a lookup answer is filed as an exhibit once';
+  END IF;
+  IF (NEW.raw_body IS DISTINCT FROM OLD.raw_body OR NEW.summary IS DISTINCT FROM OLD.summary
+      OR NEW.interpret_error IS DISTINCT FROM OLD.interpret_error)
+     AND NOT (OLD.purged_at IS NULL AND NEW.purged_at IS NOT NULL) THEN
+    RAISE EXCEPTION 'a lookup answer changes only when retention empties it';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_provider(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.guard_provider() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  approved boolean;
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a lookup provider is retired, never deleted: claims cite its source and its exposure history is the record';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.key IS DISTINCT FROM OLD.key
+     OR NEW.adapter IS DISTINCT FROM OLD.adapter
+     OR NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.created_by IS DISTINCT FROM OLD.created_by
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'a lookup provider''s key, adapter, source and creation are fixed: create a new provider instead';
+  END IF;
+  IF OLD.retired_at IS NOT NULL THEN
+    RAISE EXCEPTION 'a retired lookup provider is final';
+  END IF;
+  -- A second administrator determined the exposure of ONE destination. A
+  -- new host or port (read from base_url as well as the origin columns, so
+  -- a write that forgets the columns is caught too), or a NONE provider's
+  -- new private network, is a new determination below PUBLIC
+  -- (2026-09-25).
+  approved := EXISTS (
+      SELECT 1 FROM ingest.provider_exposure_change ch
+       WHERE ch.provider_id = NEW.id AND ch.decision = 'APPROVED'
+         AND ch.to_level = NEW.exposure_level AND ch.decided_at = now()
+         AND ch.origin = 'https://' || NEW.origin_host || ':' || NEW.origin_port
+         AND ch.private_cidr IS NOT DISTINCT FROM NEW.private_cidr);
+  IF ingest.exposure_rank(NEW.exposure_level) < 2 AND NOT approved AND (
+       NEW.origin_host IS DISTINCT FROM OLD.origin_host
+       OR NEW.origin_port IS DISTINCT FROM OLD.origin_port
+       OR substring(NEW.base_url from '^https://([^/]+)')
+          IS DISTINCT FROM substring(OLD.base_url from '^https://([^/]+)')
+       OR (NEW.exposure_level = 'NONE'
+           AND NEW.private_cidr IS DISTINCT FROM OLD.private_cidr)) THEN
+    NEW.needs_exposure_approval := true;
+    NEW.enabled := false;
+  END IF;
+  -- PUBLIC waits for nobody, so a provider raised to it may drop the flag.
+  IF (ingest.exposure_rank(NEW.exposure_level) < ingest.exposure_rank(OLD.exposure_level)
+      OR (OLD.needs_exposure_approval AND NOT NEW.needs_exposure_approval
+          AND ingest.exposure_rank(NEW.exposure_level) < 2))
+     AND NOT approved THEN
+    RAISE EXCEPTION 'lowering a lookup provider''s exposure needs a second administrator''s approval of its current origin in the same transaction';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: lookup_attempt_append_only(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.lookup_attempt_append_only() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'a lookup attempt is what the quota counts: append-only';
+END $$;
+
+--
+-- Name: lookup_is_a_record(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.lookup_is_a_record() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  mutable constant text[] := ARRAY['state', 'not_before', 'attempts', 'sent_at',
+    'finished_at', 'http_status', 'outcome', 'error_class', 'error_detail', 'refusal',
+    'result_id', 'signed_off_by', 'signed_off_at', 'signoff_note', 'query_value',
+    'authorisation_note', 'purged_at'];
+  allowed text[];
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a lookup is the record of what left this host: retention empties it, nothing deletes it';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.state NOT IN ('AWAITING_SIGNOFF', 'QUEUED', 'CACHED')
+       OR NEW.attempts <> 0 OR NEW.sent_at IS NOT NULL
+       OR NEW.signed_off_by IS NOT NULL OR NEW.signed_off_at IS NOT NULL
+       OR NEW.purged_at IS NOT NULL
+       OR (NEW.result_id IS NOT NULL AND NEW.state <> 'CACHED') THEN
+      RAISE EXCEPTION 'a lookup starts waiting, queued or answered from the cache: nothing sent and nothing signed';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF (to_jsonb(NEW) - mutable) IS DISTINCT FROM (to_jsonb(OLD) - mutable) THEN
+    RAISE EXCEPTION 'what a lookup asked, of whom and by whose authority is fixed';
+  END IF;
+  IF NEW.state IS DISTINCT FROM OLD.state THEN
+    allowed := CASE OLD.state
+      WHEN 'AWAITING_SIGNOFF' THEN ARRAY['SENDING', 'DECLINED', 'EXPIRED', 'CANCELLED',
+                                          'REFUSED', 'CACHED']
+      WHEN 'QUEUED' THEN ARRAY['SENDING', 'CACHED', 'REFUSED', 'CANCELLED']
+      WHEN 'SENDING' THEN ARRAY['ANSWERED', 'FAILED', 'QUEUED']
+      ELSE ARRAY[]::text[] END;
+    IF NOT (NEW.state = ANY (allowed)) THEN
+      RAISE EXCEPTION 'a lookup cannot move from % to %', OLD.state, NEW.state;
+    END IF;
+  END IF;
+  IF NEW.attempts < OLD.attempts THEN
+    RAISE EXCEPTION 'a lookup''s attempts only rise';
+  END IF;
+  IF OLD.sent_at IS NOT NULL AND NEW.sent_at IS DISTINCT FROM OLD.sent_at THEN
+    RAISE EXCEPTION 'when a lookup was first sent never changes';
+  END IF;
+  IF OLD.signed_off_by IS NOT NULL AND (NEW.signed_off_by IS DISTINCT FROM OLD.signed_off_by
+       OR NEW.signed_off_at IS DISTINCT FROM OLD.signed_off_at) THEN
+    RAISE EXCEPTION 'a sign-off is recorded once';
+  END IF;
+  IF OLD.result_id IS NOT NULL AND NEW.result_id IS DISTINCT FROM OLD.result_id THEN
+    RAISE EXCEPTION 'a lookup''s answer is recorded once';
+  END IF;
+  IF (NEW.query_value IS DISTINCT FROM OLD.query_value
+      OR NEW.authorisation_note IS DISTINCT FROM OLD.authorisation_note
+      OR (NEW.signoff_note IS DISTINCT FROM OLD.signoff_note AND OLD.signed_off_by IS NOT NULL)) THEN
+    IF NOT (OLD.purged_at IS NULL AND NEW.purged_at IS NOT NULL) THEN
+      RAISE EXCEPTION 'a lookup''s value and notes change only when retention empties them';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: lookup_result_dominates(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.lookup_result_dominates() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE r record;
+BEGIN
+  IF NEW.result_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT case_id, classification INTO r FROM ingest.lookup_result WHERE id = NEW.result_id;
+  IF r.case_id IS DISTINCT FROM NEW.case_id OR r.classification < NEW.classification THEN
+    RAISE EXCEPTION 'a lookup''s answer is in its own case and never labelled below the question';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: provider_starts_unapproved(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.provider_starts_unapproved() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF ingest.exposure_rank(NEW.exposure_level) < 2 THEN
+    NEW.needs_exposure_approval := true;
+  END IF;
+  NEW.enabled := false;
+  RETURN NEW;
+END $$;
+
+--
 -- Name: block_access_mutation(); Type: FUNCTION; Schema: lab; Owner: -
 --
 
@@ -1038,6 +3262,114 @@ CREATE FUNCTION lab.block_access_mutation() RETURNS trigger
     AS $$
 BEGIN
   RAISE EXCEPTION 'lab.sample_access is append-only (docs/11 custody)';
+END $$;
+
+--
+-- Name: block_screening_mutation(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.block_screening_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only: a screening record is history',
+    TG_TABLE_NAME;
+END $$;
+
+--
+-- Name: download_ticket_guard(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.download_ticket_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.redeemed_at IS NOT NULL OR NEW.redeemed_at IS NULL THEN
+    RAISE EXCEPTION 'lab.download_ticket: a ticket may only be spent, once'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_detonation(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_detonation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a detonation is the record of an overt act and is never deleted';
+  END IF;
+  IF OLD.mode = 'RECORD_ONLY' THEN
+    RAISE EXCEPTION 'a record-only detonation request is never changed';
+  END IF;
+  IF (NEW.id, NEW.sample_id, NEW.target, NEW.exposure_level, NEW.authorised_by, NEW.authorisation_note, NEW.requested_by, NEW.requested_at, NEW.mode, NEW.provider, NEW.target_key, NEW.target_host, NEW.target_ceiling, NEW.egress_route, NEW.network_route, NEW.route_class, NEW.machine, NEW.machine_class, NEW.options, NEW.signoff_required, NEW.signoff_expires_at) IS DISTINCT FROM (OLD.id, OLD.sample_id, OLD.target, OLD.exposure_level, OLD.authorised_by, OLD.authorisation_note, OLD.requested_by, OLD.requested_at, OLD.mode, OLD.provider, OLD.target_key, OLD.target_host, OLD.target_ceiling, OLD.egress_route, OLD.network_route, OLD.route_class, OLD.machine, OLD.machine_class, OLD.options, OLD.signoff_required, OLD.signoff_expires_at) THEN
+    RAISE EXCEPTION 'what a detonation request asked for never changes';
+  END IF;
+  IF OLD.status NOT IN ('AWAITING_SIGNOFF', 'QUEUED', 'SUBMITTED') THEN
+    RAISE EXCEPTION 'a detonation that is % is finished and never changes', OLD.status;
+  END IF;
+  IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+       (OLD.status = 'AWAITING_SIGNOFF'
+          AND NEW.status IN ('QUEUED', 'DECLINED', 'CANCELLED', 'REFUSED'))
+    OR (OLD.status = 'QUEUED'
+          AND NEW.status IN ('SUBMITTED', 'REFUSED', 'CANCELLED'))
+    OR (OLD.status = 'SUBMITTED' AND NEW.status IN ('REPORTED', 'FAILED'))) THEN
+    RAISE EXCEPTION 'a detonation cannot move from % to %', OLD.status, NEW.status;
+  END IF;
+  IF OLD.signed_off_by IS NOT NULL AND NEW.signed_off_by IS DISTINCT FROM OLD.signed_off_by THEN
+    RAISE EXCEPTION 'detonation.signed_off_by is set once';
+  END IF;
+  IF OLD.signed_off_at IS NOT NULL AND NEW.signed_off_at IS DISTINCT FROM OLD.signed_off_at THEN
+    RAISE EXCEPTION 'detonation.signed_off_at is set once';
+  END IF;
+  IF OLD.signoff_decision IS NOT NULL AND NEW.signoff_decision IS DISTINCT FROM OLD.signoff_decision THEN
+    RAISE EXCEPTION 'detonation.signoff_decision is set once';
+  END IF;
+  IF OLD.signoff_note IS NOT NULL AND NEW.signoff_note IS DISTINCT FROM OLD.signoff_note THEN
+    RAISE EXCEPTION 'detonation.signoff_note is set once';
+  END IF;
+  IF OLD.external_ref IS NOT NULL AND NEW.external_ref IS DISTINCT FROM OLD.external_ref THEN
+    RAISE EXCEPTION 'detonation.external_ref is set once';
+  END IF;
+  IF OLD.classification_sent IS NOT NULL AND NEW.classification_sent IS DISTINCT FROM OLD.classification_sent THEN
+    RAISE EXCEPTION 'detonation.classification_sent is set once';
+  END IF;
+  IF OLD.submitted_sha256 IS NOT NULL AND NEW.submitted_sha256 IS DISTINCT FROM OLD.submitted_sha256 THEN
+    RAISE EXCEPTION 'detonation.submitted_sha256 is set once';
+  END IF;
+  IF OLD.submit_outcome IS NOT NULL AND NEW.submit_outcome IS DISTINCT FROM OLD.submit_outcome THEN
+    RAISE EXCEPTION 'detonation.submit_outcome is set once';
+  END IF;
+  IF OLD.report_sha256 IS NOT NULL AND NEW.report_sha256 IS DISTINCT FROM OLD.report_sha256 THEN
+    RAISE EXCEPTION 'detonation.report_sha256 is set once';
+  END IF;
+  IF OLD.report_bytes IS NOT NULL AND NEW.report_bytes IS DISTINCT FROM OLD.report_bytes THEN
+    RAISE EXCEPTION 'detonation.report_bytes is set once';
+  END IF;
+  IF OLD.analysis_id IS NOT NULL AND NEW.analysis_id IS DISTINCT FROM OLD.analysis_id THEN
+    RAISE EXCEPTION 'detonation.analysis_id is set once';
+  END IF;
+  IF OLD.cancelled_by IS NOT NULL AND NEW.cancelled_by IS DISTINCT FROM OLD.cancelled_by THEN
+    RAISE EXCEPTION 'detonation.cancelled_by is set once';
+  END IF;
+  IF OLD.submitted_at IS NOT NULL AND NEW.submitted_at IS DISTINCT FROM OLD.submitted_at THEN
+    RAISE EXCEPTION 'detonation.submitted_at is set once';
+  END IF;
+  IF OLD.completed_at IS NOT NULL AND NEW.completed_at IS DISTINCT FROM OLD.completed_at THEN
+    RAISE EXCEPTION 'detonation.completed_at is set once';
+  END IF;
+  IF OLD.report IS NOT NULL AND NEW.report IS DISTINCT FROM OLD.report THEN
+    RAISE EXCEPTION 'detonation.report is set once';
+  END IF;
+  RETURN NEW;
 END $$;
 
 --
@@ -1072,6 +3404,258 @@ BEGIN
 END $$;
 
 --
+-- Name: guard_screening_hash_delete(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_screening_hash_delete() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM gone g
+               JOIN lab.screening_list l ON l.id = g.list_id
+              WHERE l.retired_at IS NULL OR NOT l.purge_requested) THEN
+    RAISE EXCEPTION 'only the entries of a list retired with its purge '
+      'requested may be deleted';
+  END IF;
+  RETURN NULL;
+END $$;
+
+--
+-- Name: guard_screening_list(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_screening_list() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'screening lists are never deleted: retire the list instead';
+  END IF;
+  IF (NEW.id, NEW.seq, NEW.name, NEW.provider, NEW.category,
+      NEW.authority_reference, NEW.deployment_authority, NEW.source_sha256,
+      NEW.entry_count, NEW.algorithms, NEW.imported_by, NEW.imported_via,
+      NEW.imported_at)
+     IS DISTINCT FROM
+     (OLD.id, OLD.seq, OLD.name, OLD.provider, OLD.category,
+      OLD.authority_reference, OLD.deployment_authority, OLD.source_sha256,
+      OLD.entry_count, OLD.algorithms, OLD.imported_by, OLD.imported_via,
+      OLD.imported_at) THEN
+    RAISE EXCEPTION 'a screening list''s import is history and never changes';
+  END IF;
+  IF OLD.retired_at IS NOT NULL
+     AND (NEW.retired_at, NEW.retired_by, NEW.retire_reason)
+         IS DISTINCT FROM (OLD.retired_at, OLD.retired_by, OLD.retire_reason) THEN
+    RAISE EXCEPTION 'a screening list is retired once';
+  END IF;
+  IF OLD.purge_requested
+     AND (NEW.purge_requested, NEW.purge_requested_by)
+         IS DISTINCT FROM (OLD.purge_requested, OLD.purge_requested_by) THEN
+    RAISE EXCEPTION 'a purge is asked for once';
+  END IF;
+  IF OLD.entries_purged_at IS NOT NULL
+     AND NEW.entries_purged_at IS DISTINCT FROM OLD.entries_purged_at THEN
+    RAISE EXCEPTION 'a purge is recorded once';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_screening_outcome(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_screening_outcome() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.screening_outcome = 'MATCH' AND NEW.screening_outcome <> 'MATCH' THEN
+    RAISE EXCEPTION 'a prohibited-content match is permanent: sample % '
+      'cannot be un-matched', OLD.id;
+  END IF;
+  IF OLD.screening_bytes_absent_at IS NOT NULL
+     AND NEW.screening_bytes_absent_at IS DISTINCT FROM OLD.screening_bytes_absent_at THEN
+    RAISE EXCEPTION 'screening_bytes_absent_at is set once';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_yara_activation(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_yara_activation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'an activation is never deleted: it is when a rule set '
+      'was live and who cleared it';
+  END IF;
+  IF OLD.deactivated_at IS NOT NULL
+     OR NEW.id <> OLD.id OR NEW.ruleset_id <> OLD.ruleset_id
+     OR NEW.version_id <> OLD.version_id
+     OR NEW.activated_by <> OLD.activated_by
+     OR NEW.activated_at <> OLD.activated_at
+     OR NEW.licence_acknowledgement IS DISTINCT FROM OLD.licence_acknowledgement
+     OR NEW.deactivated_at IS NULL THEN
+    RAISE EXCEPTION 'an activation may only be closed, once';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_yara_insert_only(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_yara_insert_only() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION '% is insert-only: a build and its rejection are history, '
+    'and a newer row supersedes an older one', TG_TABLE_NAME;
+END $$;
+
+--
+-- Name: guard_yara_ruleset(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_yara_ruleset() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  removed text[];
+  added   text[];
+  old_reg iam.compartment%ROWTYPE;
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a YARA rule set is never deleted: it is the record of '
+      'what the lab hunted with and who cleared it; deactivate its version '
+      'instead';
+  END IF;
+  IF NEW.id <> OLD.id OR NEW.key <> OLD.key
+     OR NEW.created_by IS DISTINCT FROM OLD.created_by
+     OR NEW.created_via <> OLD.created_via
+     OR NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'a YARA rule set''s key and creator never change';
+  END IF;
+  IF NEW.classification < OLD.classification THEN
+    RAISE EXCEPTION 'a YARA rule set''s classification is never lowered: '
+      'findings made under it would be exposed';
+  END IF;
+  removed := ARRAY(SELECT unnest(OLD.compartments)
+                   EXCEPT SELECT unnest(NEW.compartments));
+  added := ARRAY(SELECT unnest(NEW.compartments)
+                 EXCEPT SELECT unnest(OLD.compartments));
+  IF cardinality(removed) > 0 THEN
+    SELECT * INTO old_reg FROM iam.compartment WHERE key = removed[1];
+    IF cardinality(removed) <> 1 OR cardinality(added) <> 1
+       OR old_reg.key IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM iam.compartment c
+          WHERE c.key = added[1]
+            AND c.created_at = old_reg.created_at
+            AND c.created_by IS NOT DISTINCT FROM old_reg.created_by
+            -- Registered in this very transaction, as the lifecycle's
+            -- rename registers it: keys backfilled together share a
+            -- creator and a time, and a swap between two of them is
+            -- not a rename.
+            AND c.xmin::text::bigint
+                = pg_current_xact_id()::text::bigint % 4294967296) THEN
+      RAISE EXCEPTION 'a rule set''s compartments are only added to, or '
+        'renamed through the compartment registry: removing one would '
+        'expose findings made under it';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_yara_ruleset_version(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_yara_ruleset_version() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a YARA rule set version is never deleted: findings '
+      'and licence decisions name it';
+  END IF;
+  IF OLD.adopted_by IS NOT NULL
+     OR NEW.id <> OLD.id OR NEW.ruleset_id <> OLD.ruleset_id
+     OR NEW.version <> OLD.version OR NEW.source_sha256 <> OLD.source_sha256
+     OR NEW.source_gz <> OLD.source_gz OR NEW.source_bytes <> OLD.source_bytes
+     OR NEW.files <> OLD.files OR NEW.file_count <> OLD.file_count
+     OR NEW.licence <> OLD.licence
+     OR NEW.licence_review_required <> OLD.licence_review_required
+     OR NEW.provenance <> OLD.provenance
+     OR NEW.note IS DISTINCT FROM OLD.note
+     OR NEW.uploaded_by IS DISTINCT FROM OLD.uploaded_by
+     OR NEW.uploaded_at <> OLD.uploaded_at THEN
+    RAISE EXCEPTION 'a YARA rule set version is immutable; only its '
+      'adoption is recorded, once';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: refuse_screening_hash_change(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.refuse_screening_hash_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'screening list entries are never % ; retire the list and '
+    'purge its entries instead', lower(TG_OP);
+END $$;
+
+--
+-- Name: yara_activation_rules(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.yara_activation_rules() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  v lab.yara_ruleset_version%ROWTYPE;
+  sponsor uuid;
+BEGIN
+  SELECT * INTO v FROM lab.yara_ruleset_version WHERE id = NEW.version_id;
+  IF v.id IS NULL OR v.ruleset_id <> NEW.ruleset_id THEN
+    RAISE EXCEPTION 'the version does not belong to this rule set';
+  END IF;
+  IF NEW.deactivated_at IS NOT NULL THEN
+    RAISE EXCEPTION 'an activation starts open';
+  END IF;
+  sponsor := coalesce(v.uploaded_by, v.adopted_by);
+  IF sponsor IS NULL THEN
+    RAISE EXCEPTION 'an imported version must be adopted by a lab member '
+      'before it can be activated';
+  END IF;
+  IF NEW.activated_by = sponsor THEN
+    RAISE EXCEPTION 'the person who uploaded or adopted a version cannot '
+      'activate it: somebody else has to';
+  END IF;
+  IF v.licence_review_required AND NEW.licence_acknowledgement IS NULL THEN
+    RAISE EXCEPTION 'this version''s licence needs review: the activator '
+      'must write down the clearance';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: yara_label_set(text[]); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.yara_label_set(text[]) RETURNS text[]
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $_$
+  SELECT coalesce(array_agg(DISTINCT x ORDER BY x), '{}')
+    FROM unnest($1) AS x
+$_$;
+
+--
 -- Name: announce_notification(); Type: FUNCTION; Schema: notify; Owner: -
 --
 
@@ -1095,6 +3679,64 @@ CREATE FUNCTION notify.announce_notification() RETURNS trigger
                               'op', TG_OP)::text);
           RETURN NULL;
         END $$;
+
+--
+-- Name: guard_jira_event(); Type: FUNCTION; Schema: notify; Owner: -
+--
+
+CREATE FUNCTION notify.guard_jira_event() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a Jira event row is the record of what was posted to a third-party system: it is never deleted';
+  END IF;
+  IF NEW.link_id IS DISTINCT FROM OLD.link_id
+     OR NEW.event_id IS DISTINCT FROM OLD.event_id
+     OR NEW.marker IS DISTINCT FROM OLD.marker THEN
+    RAISE EXCEPTION 'a Jira event row cannot be moved to another issue or event';
+  END IF;
+  IF OLD.state = 'POSTED' AND (NEW.state <> 'POSTED'
+       OR NEW.posted_at IS DISTINCT FROM OLD.posted_at
+       OR NEW.posted_as IS DISTINCT FROM OLD.posted_as
+       OR NEW.comment_id IS DISTINCT FROM OLD.comment_id) THEN
+    RAISE EXCEPTION 'a posted Jira event stays posted';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_jira_link(); Type: FUNCTION; Schema: notify; Owner: -
+--
+
+CREATE FUNCTION notify.guard_jira_link() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'a Jira link is the record that case material reached a third-party system: it is closed, never deleted';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.destination_id IS DISTINCT FROM OLD.destination_id
+     OR NEW.case_id IS DISTINCT FROM OLD.case_id
+     OR NEW.work_key IS DISTINCT FROM OLD.work_key
+     OR NEW.ref IS DISTINCT FROM OLD.ref
+     OR NEW.base_url IS DISTINCT FROM OLD.base_url
+     OR NEW.project_key IS DISTINCT FROM OLD.project_key
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'a Jira link names one work item on one destination and cannot be rewritten';
+  END IF;
+  IF OLD.state = 'CLOSED' THEN
+    IF NEW.state <> 'CLOSED'
+       OR NEW.closed_at IS DISTINCT FROM OLD.closed_at
+       OR NEW.closed_reason IS DISTINCT FROM OLD.closed_reason
+       OR (OLD.issue_key IS NOT NULL AND NEW.issue_key IS DISTINCT FROM OLD.issue_key)
+       OR (OLD.issue_id IS NOT NULL AND NEW.issue_id IS DISTINCT FROM OLD.issue_id) THEN
+      RAISE EXCEPTION 'a closed Jira link stays closed; only a missing issue key may still be recorded on it';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
 
 --
 -- Name: community_assignment; Type: TABLE; Schema: analytics; Owner: -
@@ -1239,8 +3881,151 @@ CREATE TABLE collect.collection_account (
     owner_user_id uuid,
     approved_by uuid,
     approved_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    platform collect.source_kind,
+    platform_uid text,
+    last_request_at timestamp with time zone,
+    status_changed_at timestamp with time zone,
+    machine_hold_until timestamp with time zone,
+    machine_hold_reason text,
+    machine_lock_code text,
+    machine_lock_at timestamp with time zone,
+    session_enrolled_at timestamp with time zone,
+    CONSTRAINT collection_account_enrolled_has_secret CHECK (((session_enrolled_at IS NULL) OR (COALESCE(octet_length(secret_ciphertext), 0) > 0))),
+    CONSTRAINT collection_account_enrolled_has_uid CHECK (((session_enrolled_at IS NULL) OR (platform_uid IS NOT NULL))),
+    CONSTRAINT collection_account_machine_hold_known CHECK ((((machine_hold_until IS NULL) = (machine_hold_reason IS NULL)) AND ((machine_hold_reason IS NULL) OR (machine_hold_reason = ANY (ARRAY['RATE_LIMITED'::text, 'ABANDONED'::text]))))),
+    CONSTRAINT collection_account_machine_lock_known CHECK ((((machine_lock_code IS NULL) = (machine_lock_at IS NULL)) AND ((machine_lock_code IS NULL) OR (machine_lock_code = ANY (ARRAY['CREDENTIAL_REVOKED'::text, 'CREDENTIAL_DUPLICATED'::text, 'ACCOUNT_BANNED'::text, 'WRONG_ACCOUNT'::text, 'PLATFORM_REFUSED'::text]))))),
+    CONSTRAINT collection_account_platform_is_persona_kind CHECK (((platform IS NULL) OR (platform = ANY (ARRAY['XENFORO'::collect.source_kind, 'MYBB'::collect.source_kind, 'PHPBB'::collect.source_kind, 'TELEGRAM'::collect.source_kind, 'DISCORD'::collect.source_kind])))),
+    CONSTRAINT collection_account_telegram_fingerprint CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (session_enrolled_at IS NULL) OR (fingerprint_profile ?& ARRAY['device_model'::text, 'system_version'::text, 'app_version'::text, 'lang_code'::text, 'system_lang_code'::text]))),
+    CONSTRAINT collection_account_telegram_has_no_venue CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (source_id IS NULL))),
+    CONSTRAINT collection_account_telegram_needs_egress CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (egress_profile_id IS NOT NULL))),
+    CONSTRAINT collection_account_telegram_uid_typed CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (session_enrolled_at IS NULL) OR (platform_uid ~ '^u:[1-9][0-9]{0,19}$'::text))),
+    CONSTRAINT collection_account_uid_needs_platform CHECK (((platform_uid IS NULL) OR (platform IS NOT NULL))),
+    CONSTRAINT collection_account_uid_typed CHECK (((platform_uid IS NULL) OR (platform_uid ~ '^[a-z]{1,8}:[A-Za-z0-9_.-]{1,128}$'::text)))
 );
+
+--
+-- Name: COLUMN collection_account.platform; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.platform IS 'The source kind this persona reads as (a collect.source_kind). One account on one platform for life.';
+
+--
+-- Name: COLUMN collection_account.platform_uid; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.platform_uid IS 'The persona''s own durable account id on its platform, typed (u:700000001).';
+
+--
+-- Name: COLUMN collection_account.last_request_at; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.last_request_at IS 'The per-persona request clock: the gap between two requests as this account is measured from here.';
+
+--
+-- Name: COLUMN collection_account.status_changed_at; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.status_changed_at IS 'When a person last moved the status. The machine columns have their own times.';
+
+--
+-- Name: COLUMN collection_account.machine_hold_until; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.machine_hold_until IS 'A wait the platform imposed (RATE_LIMITED) or a session that outlived its budget (ABANDONED). Written only by PersonaVault.signal, never shortened.';
+
+--
+-- Name: COLUMN collection_account.machine_lock_code; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.machine_lock_code IS 'The platform refused this persona''s credential. Cleared only by storing a new credential after the lock.';
+
+--
+-- Name: COLUMN collection_account.session_enrolled_at; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.session_enrolled_at IS 'When the sealed Telegram session was enrolled; NULL after a logout.';
+
+--
+-- Name: collection_authority; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.collection_authority (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    collection_account_id uuid,
+    scope text NOT NULL,
+    classification core.tlp NOT NULL,
+    authority_ref text NOT NULL,
+    issued_by text NOT NULL,
+    jurisdiction text NOT NULL,
+    legal_basis text NOT NULL,
+    member_authority_ref text,
+    target_description text NOT NULL,
+    valid_from timestamp with time zone NOT NULL,
+    valid_until timestamp with time zone NOT NULL,
+    recorded_by uuid NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    confirmed_by uuid,
+    confirmed_at timestamp with time zone,
+    confirm_note text,
+    revoked_by uuid,
+    revoked_at timestamp with time zone,
+    revoke_reason text,
+    CONSTRAINT collection_authority_confirm_complete CHECK ((((confirmed_by IS NULL) = (confirmed_at IS NULL)) AND ((confirmed_by IS NULL) = (confirm_note IS NULL)))),
+    CONSTRAINT collection_authority_member_needs_persona CHECK (((scope = 'PUBLIC_READ'::text) OR (collection_account_id IS NOT NULL))),
+    CONSTRAINT collection_authority_member_needs_reference CHECK (((scope <> 'MEMBER_READ'::text) OR (length(btrim(COALESCE(member_authority_ref, ''::text))) > 0))),
+    CONSTRAINT collection_authority_referenced CHECK (((length(btrim(authority_ref)) >= 3) AND (length(btrim(issued_by)) > 0) AND (length(btrim(jurisdiction)) > 1) AND (length(btrim(legal_basis)) > 0) AND (length(btrim(target_description)) > 20))),
+    CONSTRAINT collection_authority_revocation_complete CHECK ((((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL)))),
+    CONSTRAINT collection_authority_scope_known CHECK ((scope = ANY (ARRAY['PUBLIC_READ'::text, 'MEMBER_READ'::text]))),
+    CONSTRAINT collection_authority_two_people CHECK (((confirmed_by IS NULL) OR (confirmed_by <> recorded_by))),
+    CONSTRAINT collection_authority_window CHECK (((valid_until > valid_from) AND (valid_until <= (valid_from + '366 days'::interval))))
+);
+
+--
+-- Name: TABLE collection_authority; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.collection_authority IS 'A written authority to collect, which exists outside this system: who declared it (recorded_by) and who confirmed it (confirmed_by, never the same person). Every forum and Telegram read needs one covering its source. Never deleted and never rewritten: revocation is a column, and the classification only rises.';
+
+--
+-- Name: collection_authority_target; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.collection_authority_target (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    authority_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    added_by uuid NOT NULL,
+    added_at timestamp with time zone DEFAULT now() NOT NULL,
+    target_base_url text,
+    target_egress_profile_id uuid,
+    confirmed_by uuid,
+    confirmed_at timestamp with time zone,
+    revoked_by uuid,
+    revoked_at timestamp with time zone,
+    revoke_reason text,
+    CONSTRAINT authority_target_confirm_complete CHECK (((confirmed_by IS NULL) = (confirmed_at IS NULL))),
+    CONSTRAINT authority_target_revocation_complete CHECK ((((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL)))),
+    CONSTRAINT authority_target_two_people CHECK (((confirmed_by IS NULL) OR (confirmed_by <> added_by)))
+);
+
+--
+-- Name: TABLE collection_authority_target; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.collection_authority_target IS 'One source under a collection authority, added by one person and confirmed by another. Covers its source only while the source''s address equals target_base_url and, for a persona-less authority, its exit equals target_egress_profile_id. Never deleted.';
+
+--
+-- Name: COLUMN collection_authority_target.target_base_url; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_authority_target.target_base_url IS 'The source''s address when the target was added: the address the confirmer was shown. Frozen.';
+
+--
+-- Name: COLUMN collection_authority_target.target_egress_profile_id; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_authority_target.target_egress_profile_id IS 'For a persona-less authority, the exit the source was read through when the target was added. Frozen. NULL for a persona''s target.';
 
 --
 -- Name: collection_run; Type: TABLE; Schema: collect; Owner: -
@@ -1263,8 +4048,49 @@ CREATE TABLE collect.collection_run (
     etag text,
     last_modified text,
     cursor jsonb DEFAULT '{}'::jsonb NOT NULL,
-    parser_version text
+    parser_version text,
+    requests jsonb DEFAULT '[]'::jsonb NOT NULL,
+    requested_by uuid,
+    notes text[] DEFAULT '{}'::text[] NOT NULL,
+    items_deleted integer DEFAULT 0 NOT NULL,
+    authority_id uuid,
+    authority_target_id uuid,
+    CONSTRAINT collection_run_cursor_capped CHECK (((jsonb_typeof(cursor) = 'object'::text) AND (octet_length((cursor)::text) <= 16384))),
+    CONSTRAINT collection_run_items_deleted_non_negative CHECK ((items_deleted >= 0)),
+    CONSTRAINT collection_run_notes_capped CHECK ((cardinality(notes) <= 20)),
+    CONSTRAINT collection_run_requests_capped CHECK (((jsonb_typeof(requests) = 'array'::text) AND (jsonb_array_length(requests) <= 100))),
+    CONSTRAINT collection_run_target_needs_authority CHECK (((authority_target_id IS NULL) OR (authority_id IS NOT NULL)))
 );
+
+--
+-- Name: COLUMN collection_run.requests; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_run.requests IS 'The custody log of what a poll asked for: at most 100 entries of time, path, query, status, bytes and digest. Written once as the run leaves RUNNING and never rewritten. Read under the source''s label.';
+
+--
+-- Name: COLUMN collection_run.requested_by; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_run.requested_by IS 'Who pressed Poll now. NULL is the system (the cron). A plain uuid, as audit.event.actor_id is.';
+
+--
+-- Name: COLUMN collection_run.notes; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_run.notes IS 'What a run wants known that is not a fault: a walk that stopped at its budget, documents with no retention clock, times with no zone.';
+
+--
+-- Name: COLUMN collection_run.items_deleted; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_run.items_deleted IS 'Items the site no longer shows, flagged on their latest version. The bodies are kept: deletions are intelligence.';
+
+--
+-- Name: COLUMN collection_run.authority_id; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_run.authority_id IS 'The confirmed authority this poll of a forum or Telegram source ran under.';
 
 --
 -- Name: document; Type: TABLE; Schema: collect; Owner: -
@@ -1293,12 +4119,217 @@ CREATE TABLE collect.document (
     is_deleted_upstream boolean DEFAULT false NOT NULL,
     classification core.tlp DEFAULT 'AMBER'::core.tlp NOT NULL,
     search_tsv tsvector,
-    embedding public.vector(768),
     triage_state text DEFAULT 'NEW'::text NOT NULL,
     category text DEFAULT 'UNKNOWN'::text NOT NULL,
     retain_until timestamp with time zone,
     legal_hold boolean DEFAULT false NOT NULL,
-    purged_at timestamp with time zone
+    purged_at timestamp with time zone,
+    compartments text[] DEFAULT '{}'::text[] NOT NULL,
+    legal_hold_reason text,
+    legal_hold_by uuid,
+    CONSTRAINT document_hold_has_reason CHECK (((NOT legal_hold) OR (length(btrim(COALESCE(legal_hold_reason, ''::text))) > 0)))
+);
+
+--
+-- Name: COLUMN document.compartments; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.document.compartments IS 'The need-to-know lock a document is read under. A capture copies the compartments of the case it was captured into; a collected document carries what its collection path assigns (none, until a source carries compartments). Every reader checks d.compartments <@ its own. Bound to iam.compartment by the compartments_registered trigger.';
+
+--
+-- Name: COLUMN document.legal_hold_reason; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.document.legal_hold_reason IS 'Why this document, and every earlier version of it, is frozen against deletion. Set and lifted by a person with retention.manage; the purge also honours holds on every case that cites it.';
+
+--
+-- Name: COLUMN document.legal_hold_by; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.document.legal_hold_by IS 'Who last placed or lifted the document-level hold.';
+
+--
+-- Name: document_embedding; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.document_embedding (
+    document_id uuid NOT NULL,
+    slot smallint NOT NULL,
+    space_id uuid NOT NULL,
+    status text NOT NULL,
+    embedding public.vector(768),
+    reason text,
+    read_classification core.tlp NOT NULL,
+    read_compartments text[] DEFAULT '{}'::text[] NOT NULL,
+    sent_classification core.tlp,
+    input_chars integer DEFAULT 0 NOT NULL,
+    truncated_chars integer DEFAULT 0 NOT NULL,
+    attempts smallint DEFAULT 1 NOT NULL,
+    first_failed_at timestamp with time zone,
+    next_attempt_at timestamp with time zone,
+    embedded_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT document_embedding_attempts_check CHECK ((attempts >= 1)),
+    CONSTRAINT document_embedding_failure_dated CHECK (((status = 'FAILED'::text) = (first_failed_at IS NOT NULL))),
+    CONSTRAINT document_embedding_input_chars_check CHECK ((input_chars >= 0)),
+    CONSTRAINT document_embedding_reason_unless_embedded CHECK (((status = 'EMBEDDED'::text) = (reason IS NULL))),
+    CONSTRAINT document_embedding_retry_dated CHECK (((status <> ALL (ARRAY['FAILED'::text, 'WITHHELD'::text])) OR (next_attempt_at IS NOT NULL))),
+    CONSTRAINT document_embedding_sent_only_embedded CHECK (((sent_classification IS NULL) OR (status = 'EMBEDDED'::text))),
+    CONSTRAINT document_embedding_status_check CHECK ((status = ANY (ARRAY['EMBEDDED'::text, 'EMPTY'::text, 'EXCLUDED'::text, 'WITHHELD'::text, 'FAILED'::text]))),
+    CONSTRAINT document_embedding_truncated_chars_check CHECK ((truncated_chars >= 0)),
+    CONSTRAINT document_embedding_vector_iff_embedded CHECK (((status = 'EMBEDDED'::text) = (embedding IS NOT NULL)))
+);
+
+--
+-- Name: TABLE document_embedding; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.document_embedding IS 'One similarity outcome per collected document and slot (F6.1). The labels are set by trigger from the document and its source; a change to either deletes the row. A vector is handled as its text: it never leaves the database through the product.';
+
+--
+-- Name: egress_binding; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.egress_binding (
+    seq bigint NOT NULL,
+    collection_account_id uuid,
+    source_id uuid,
+    egress_profile_id uuid,
+    bound_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT egress_binding_one_subject CHECK (((collection_account_id IS NULL) <> (source_id IS NULL)))
+);
+
+--
+-- Name: TABLE egress_binding; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.egress_binding IS 'When each persona and each persona-less source was bound to an egress profile. Append-only, written only by collect.record_egress_binding(); the egress proxy refuses authorities that predate the latest row.';
+
+--
+-- Name: egress_binding_seq_seq; Type: SEQUENCE; Schema: collect; Owner: -
+--
+
+CREATE SEQUENCE collect.egress_binding_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+--
+-- Name: egress_binding_seq_seq; Type: SEQUENCE OWNED BY; Schema: collect; Owner: -
+--
+
+ALTER SEQUENCE collect.egress_binding_seq_seq OWNED BY collect.egress_binding.seq;
+
+--
+-- Name: egress_connection; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.egress_connection (
+    seq bigint NOT NULL,
+    occurred_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    event text NOT NULL,
+    connection_id uuid,
+    protocol text,
+    route_kind text,
+    route_id text NOT NULL,
+    peer_address inet,
+    egress_profile_id uuid,
+    integration_route_id uuid,
+    collection_run_id uuid,
+    source_id uuid,
+    collection_account_id uuid,
+    authority_id uuid,
+    context_kind text,
+    context_id uuid,
+    dest_host text,
+    dest_digest bytea,
+    dest_port integer,
+    resolved_address inet,
+    exit_kind text,
+    reason text NOT NULL,
+    item_count integer,
+    bytes_up bigint,
+    bytes_down bigint,
+    duration_ms integer,
+    classification core.tlp DEFAULT 'GREEN'::core.tlp NOT NULL,
+    source_compartmented boolean DEFAULT false NOT NULL,
+    prev_hash bytea,
+    row_hash bytea NOT NULL,
+    CONSTRAINT egress_connection_close_shape CHECK (((event <> 'CLOSE'::text) OR ((connection_id IS NOT NULL) AND (duration_ms >= 0) AND (bytes_up >= 0) AND (bytes_down >= 0) AND (dest_host IS NULL) AND (dest_digest IS NULL) AND (dest_port IS NULL) AND (resolved_address IS NULL) AND (item_count IS NULL) AND (reason = ANY (ARRAY['client_closed'::text, 'upstream_closed'::text, 'idle_timeout'::text, 'session_limit'::text, 'proxy_shutdown'::text, 'error'::text, 'authority_revoked'::text, 'run_finished'::text, 'route_withdrawn'::text, 'persona_withdrawn'::text]))))),
+    CONSTRAINT egress_connection_context_known CHECK (((context_kind IS NULL) OR (context_kind = ANY (ARRAY['run'::text, 'act'::text, 'stop'::text, 'delivery'::text, 'lookup'::text, 'detonation'::text, 'embed'::text, 'wkd'::text, 'check'::text])))),
+    CONSTRAINT egress_connection_dest_shape CHECK ((((dest_host IS NULL) OR ((length(dest_host) >= 1) AND (length(dest_host) <= 253))) AND ((dest_port IS NULL) OR ((dest_port >= 1) AND (dest_port <= 65535))))),
+    CONSTRAINT egress_connection_event_known CHECK ((event = ANY (ARRAY['OPEN'::text, 'REFUSED'::text, 'CLOSE'::text, 'PREAUTH'::text, 'REWRAP'::text]))),
+    CONSTRAINT egress_connection_exit_known CHECK (((exit_kind IS NULL) OR (exit_kind = ANY (ARRAY['DIRECT'::text, 'HTTP'::text, 'HTTPS'::text, 'SOCKS5'::text])))),
+    CONSTRAINT egress_connection_open_shape CHECK (((event <> 'OPEN'::text) OR ((connection_id IS NOT NULL) AND (protocol IS NOT NULL) AND (route_kind IS NOT NULL) AND (dest_host IS NOT NULL) AND (dest_port IS NOT NULL) AND (exit_kind IS NOT NULL) AND (reason = 'allowed'::text) AND (bytes_up IS NULL) AND (bytes_down IS NULL) AND (duration_ms IS NULL) AND (item_count IS NULL)))),
+    CONSTRAINT egress_connection_peer_only_preauth CHECK (((peer_address IS NULL) OR (event = 'PREAUTH'::text))),
+    CONSTRAINT egress_connection_preauth_shape CHECK (((event <> 'PREAUTH'::text) OR ((peer_address IS NOT NULL) AND (item_count > 0) AND (route_id = 'proxy'::text) AND (reason = 'preauth_refused'::text) AND (connection_id IS NULL) AND (route_kind IS NULL) AND (context_kind IS NULL) AND (context_id IS NULL) AND (dest_host IS NULL) AND (dest_digest IS NULL) AND (dest_port IS NULL)))),
+    CONSTRAINT egress_connection_profile_is_persona CHECK (((egress_profile_id IS NULL) OR (route_kind = 'persona'::text))),
+    CONSTRAINT egress_connection_protocol_known CHECK (((protocol IS NULL) OR (protocol = ANY (ARRAY['HTTP_CONNECT'::text, 'SOCKS5'::text])))),
+    CONSTRAINT egress_connection_refused_shape CHECK (((event <> 'REFUSED'::text) OR ((connection_id IS NOT NULL) AND (protocol IS NOT NULL) AND (route_kind IS NOT NULL) AND (reason <> 'allowed'::text) AND (bytes_up IS NULL) AND (bytes_down IS NULL) AND (duration_ms IS NULL) AND (item_count IS NULL)))),
+    CONSTRAINT egress_connection_rewrap_shape CHECK (((event <> 'REWRAP'::text) OR ((item_count >= 0) AND (route_id = 'proxy'::text) AND (reason = 'exits_rewrapped'::text) AND (route_kind IS NULL) AND (dest_host IS NULL) AND (dest_port IS NULL)))),
+    CONSTRAINT egress_connection_route_is_integration CHECK (((integration_route_id IS NULL) OR (route_kind = 'integration'::text))),
+    CONSTRAINT egress_connection_route_kind_known CHECK (((route_kind IS NULL) OR (route_kind = ANY (ARRAY['persona'::text, 'integration'::text]))))
+);
+
+--
+-- Name: TABLE egress_connection; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.egress_connection IS 'What left this deployment: one row per egress proxy event (OPEN before any dial, REFUSED, CLOSE, PREAUTH, REWRAP). Append-only and hash-chained; written by noctornal_egress.';
+
+--
+-- Name: egress_connection_seq; Type: SEQUENCE; Schema: collect; Owner: -
+--
+
+CREATE SEQUENCE collect.egress_connection_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+--
+-- Name: egress_destination; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.egress_destination (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    route_id uuid NOT NULL,
+    entry text NOT NULL,
+    note text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by uuid,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    CONSTRAINT egress_destination_no_wildcard CHECK (((POSITION(('*'::text) IN (entry)) = 0) AND ((length(entry) >= 3) AND (length(entry) <= 300)))),
+    CONSTRAINT egress_destination_noted CHECK (((length(btrim(note)) >= 5) AND (length(btrim(note)) <= 500))),
+    CONSTRAINT egress_destination_retirement_complete CHECK (((retired_at IS NULL) = (retired_by IS NULL)))
+);
+
+--
+-- Name: egress_integration_route; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.egress_integration_route (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    idle_timeout_s integer DEFAULT 60 NOT NULL,
+    max_session_s integer DEFAULT 300 NOT NULL,
+    max_concurrent integer DEFAULT 8 NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by uuid,
+    updated_at timestamp with time zone,
+    updated_by uuid,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    retire_reason text,
+    CONSTRAINT egress_integration_route_described CHECK (((length(btrim(description)) >= 5) AND (length(btrim(description)) <= 500))),
+    CONSTRAINT egress_integration_route_limits CHECK ((((idle_timeout_s >= 5) AND (idle_timeout_s <= 3600)) AND ((max_session_s >= 10) AND (max_session_s <= 86400)) AND ((max_concurrent >= 1) AND (max_concurrent <= 64)))),
+    CONSTRAINT egress_integration_route_name CHECK ((name ~ '^[a-z][a-z0-9-]{1,39}$'::text)),
+    CONSTRAINT egress_integration_route_retirement_complete CHECK (((retired_at IS NULL) OR ((NOT is_active) AND (retired_by IS NOT NULL) AND (length(btrim(COALESCE(retire_reason, ''::text))) >= 5))))
 );
 
 --
@@ -1312,8 +4343,64 @@ CREATE TABLE collect.egress_profile (
     endpoint_ciphertext bytea,
     key_id text,
     region text,
-    is_active boolean DEFAULT true NOT NULL
+    is_active boolean DEFAULT true NOT NULL,
+    exit_kind text,
+    exit_sealed bytea,
+    exit_seal_key_id text,
+    exit_fingerprint bytea,
+    exit_sealed_at timestamp with time zone,
+    exit_sealed_by uuid,
+    ceiling core.tlp DEFAULT 'AMBER'::core.tlp NOT NULL,
+    allowed_ports integer[] DEFAULT '{443}'::integer[] NOT NULL,
+    any_public_host boolean DEFAULT false NOT NULL,
+    allowed_host_suffixes text[] DEFAULT '{}'::text[] NOT NULL,
+    allowed_cidrs cidr[] DEFAULT '{}'::cidr[] NOT NULL,
+    allow_onion boolean DEFAULT false NOT NULL,
+    resolve_at_proxy boolean DEFAULT false NOT NULL,
+    cleartext_upstream_ack boolean DEFAULT false NOT NULL,
+    idle_timeout_s integer DEFAULT 120 NOT NULL,
+    max_session_s integer DEFAULT 900 NOT NULL,
+    max_concurrent integer DEFAULT 4 NOT NULL,
+    is_passive_default boolean DEFAULT false NOT NULL,
+    reach_changed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    updated_at timestamp with time zone,
+    updated_by uuid,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    retire_reason text,
+    persona_capable boolean GENERATED ALWAYS AS ((is_active AND (retired_at IS NULL) AND (NOT is_passive_default) AND COALESCE((exit_kind = ANY (ARRAY['HTTP'::text, 'HTTPS'::text, 'SOCKS5'::text])), false))) STORED,
+    CONSTRAINT egress_profile_direct_is_datacentre CHECK (((exit_kind IS DISTINCT FROM 'DIRECT'::text) OR (kind = 'DATACENTRE'::text))),
+    CONSTRAINT egress_profile_endpoint_ciphertext_retired CHECK ((endpoint_ciphertext IS NULL)),
+    CONSTRAINT egress_profile_exit_kind_known CHECK (((exit_kind IS NULL) OR (exit_kind = ANY (ARRAY['DIRECT'::text, 'HTTP'::text, 'HTTPS'::text, 'SOCKS5'::text])))),
+    CONSTRAINT egress_profile_exit_shape CHECK (((COALESCE(exit_kind, ''::text) = ANY (ARRAY['HTTP'::text, 'HTTPS'::text, 'SOCKS5'::text])) = ((exit_sealed IS NOT NULL) AND (exit_seal_key_id IS NOT NULL) AND (exit_fingerprint IS NOT NULL)))),
+    CONSTRAINT egress_profile_limits CHECK ((((idle_timeout_s >= 5) AND (idle_timeout_s <= 3600)) AND ((max_session_s >= 10) AND (max_session_s <= 86400)) AND ((max_concurrent >= 1) AND (max_concurrent <= 64)))),
+    CONSTRAINT egress_profile_onion_only_tor CHECK (((NOT allow_onion) OR (kind = 'TOR'::text))),
+    CONSTRAINT egress_profile_passive_default_active CHECK (((NOT is_passive_default) OR is_active)),
+    CONSTRAINT egress_profile_ports CHECK ((((cardinality(allowed_ports) >= 1) AND (cardinality(allowed_ports) <= 16)) AND (array_position(allowed_ports, NULL::integer) IS NULL) AND (0 < ALL (allowed_ports)) AND (65536 > ALL (allowed_ports)))),
+    CONSTRAINT egress_profile_retirement_complete CHECK (((retired_at IS NULL) OR ((NOT is_active) AND (NOT is_passive_default) AND (retired_by IS NOT NULL) AND (length(btrim(COALESCE(retire_reason, ''::text))) >= 5)))),
+    CONSTRAINT egress_profile_rule_counts CHECK (((cardinality(allowed_host_suffixes) <= 64) AND (cardinality(allowed_cidrs) <= 64) AND (array_position(allowed_host_suffixes, NULL::text) IS NULL) AND (array_position(allowed_cidrs, NULL::cidr) IS NULL))),
+    CONSTRAINT egress_profile_tor_shape CHECK (((kind <> 'TOR'::text) OR ((COALESCE(exit_kind, 'SOCKS5'::text) = 'SOCKS5'::text) AND (NOT resolve_at_proxy))))
 );
+
+--
+-- Name: COLUMN egress_profile.endpoint_ciphertext; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.egress_profile.endpoint_ciphertext IS 'Retired by 0085 and always NULL: superseded by exit_sealed, sealed for the egress proxy under its own key.';
+
+--
+-- Name: COLUMN egress_profile.exit_sealed; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.egress_profile.exit_sealed IS 'The exit endpoint, HPKE-sealed to the egress proxy''s key (security/egress_seal.py): the API seals and cannot open it.';
+
+--
+-- Name: COLUMN egress_profile.reach_changed_at; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.egress_profile.reach_changed_at IS 'When this profile last reached further than before. Set by collect.egress_profile_reach() alone.';
 
 --
 -- Name: extraction; Type: TABLE; Schema: collect; Owner: -
@@ -1334,6 +4421,68 @@ CREATE TABLE collect.extraction (
 );
 
 --
+-- Name: forum_member; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.forum_member (
+    document_id uuid NOT NULL,
+    profile jsonb DEFAULT '{}'::jsonb NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT forum_member_profile_object CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 16384)))
+);
+
+--
+-- Name: TABLE forum_member; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.forum_member IS 'A collected forum member profile''s fields (title, joined, contact and custom fields, counters), one row per member document version (category FORUM_MEMBER). No label of its own: read only joined to its document. Deleted by the retention purge with its document''s text.';
+
+--
+-- Name: forum_post; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.forum_post (
+    document_id uuid NOT NULL,
+    signature_text text,
+    quoted_post_refs text[] DEFAULT '{}'::text[] NOT NULL,
+    reactions jsonb DEFAULT '{}'::jsonb NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT forum_post_quotes_capped CHECK (((cardinality(quoted_post_refs) <= 50) AND (array_position(quoted_post_refs, NULL::text) IS NULL))),
+    CONSTRAINT forum_post_reactions_object CHECK (((jsonb_typeof(reactions) = 'object'::text) AND (octet_length((reactions)::text) <= 8192))),
+    CONSTRAINT forum_post_signature_capped CHECK (((signature_text IS NULL) OR (char_length(signature_text) <= 4000)))
+);
+
+--
+-- Name: TABLE forum_post; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.forum_post IS 'What a collected forum post carries beside its text: its signature, the posts it quotes and its reactions. No label of its own: read only joined to its document, under the document''s and the source''s labels and compartments. Deleted by the retention purge with its document''s text.';
+
+--
+-- Name: COLUMN forum_post.signature_text; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.forum_post.signature_text IS 'The signature printed under the post: repeated on every post its author writes, so it describes the author and is not an observation per post.';
+
+--
+-- Name: COLUMN forum_post.quoted_post_refs; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.forum_post.quoted_post_refs IS 'The posts this post quotes, typed post:<id>. The quoted text itself is never stored as this post''s.';
+
+--
+-- Name: COLUMN forum_post.reactions; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.forum_post.reactions IS 'A count, up to 50 reactor names as the forum shows them, and up to 10 reaction kinds.';
+
+--
+-- Name: COLUMN forum_post.observed_at; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.forum_post.observed_at IS 'When the side row was last written: a signature or reactions that changed without the text refresh it.';
+
+--
 -- Name: proposal; Type: TABLE; Schema: collect; Owner: -
 --
 
@@ -1352,8 +4501,15 @@ CREATE TABLE collect.proposal (
     review_note text,
     applied_node_id uuid,
     applied_edge_id uuid,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    lookup_result_id uuid
 );
+
+--
+-- Name: COLUMN proposal.lookup_result_id; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.proposal.lookup_result_id IS 'The lookup answer this proposal was raised from; its label joins the proposal''s read label.';
 
 --
 -- Name: source; Type: TABLE; Schema: collect; Owner: -
@@ -1378,7 +4534,16 @@ CREATE TABLE collect.source (
     notes text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     next_due_at timestamp with time zone,
-    last_request_at timestamp with time zone
+    last_request_at timestamp with time zone,
+    parser_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    blocked_reason text,
+    blocked_at timestamp with time zone,
+    cursor_reset_at timestamp with time zone,
+    collection_account_id uuid,
+    egress_profile_id uuid,
+    CONSTRAINT source_blocked_complete CHECK (((blocked_reason IS NULL) = (blocked_at IS NULL))),
+    CONSTRAINT source_one_egress_binding CHECK (((collection_account_id IS NULL) OR (egress_profile_id IS NULL))),
+    CONSTRAINT source_parser_config_is_object CHECK (((jsonb_typeof(parser_config) = 'object'::text) AND (octet_length((parser_config)::text) <= 16384)))
 );
 
 --
@@ -1392,6 +4557,142 @@ COMMENT ON COLUMN collect.source.next_due_at IS 'When this source is next due. R
 --
 
 COMMENT ON COLUMN collect.source.last_request_at IS 'Last outbound attempt, successful or not. The per-source max_rps gap is measured from here so it survives the process.';
+
+--
+-- Name: COLUMN source.parser_config; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.source.parser_config IS 'Per-parser settings an adapter validates (a board''s time zone, a page budget). A JSON object of at most 16 KiB.';
+
+--
+-- Name: COLUMN source.blocked_reason; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.source.blocked_reason IS 'Why the last poll could not run at all: no authority, no egress, a suspended persona. Cleared by the next good poll. Configuration, never parser health.';
+
+--
+-- Name: COLUMN source.cursor_reset_at; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.source.cursor_reset_at IS 'Runs started before this are not a resume point: the next poll starts its reading position afresh.';
+
+--
+-- Name: COLUMN source.collection_account_id; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.source.collection_account_id IS 'The persona this source is polled as, one at a time. It reads through that persona''s egress profile.';
+
+--
+-- Name: COLUMN source.egress_profile_id; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.source.egress_profile_id IS 'The exit a persona-less source is read through. Never set beside a persona.';
+
+--
+-- Name: telegram_chat; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.telegram_chat (
+    source_id uuid NOT NULL,
+    peer_type text NOT NULL,
+    peer_id bigint NOT NULL,
+    durable_id text NOT NULL,
+    access_mode text NOT NULL,
+    provenance_class text NOT NULL,
+    username_at_resolve text,
+    title_at_resolve text,
+    resolved_at timestamp with time zone DEFAULT now() NOT NULL,
+    resolved_by uuid NOT NULL,
+    access_hash bigint,
+    access_hash_account_id uuid,
+    member_since_observed timestamp with time zone,
+    joined_by uuid,
+    joined_at timestamp with time zone,
+    is_forum boolean DEFAULT false NOT NULL,
+    noforwards boolean DEFAULT false NOT NULL,
+    migrated_to text,
+    CONSTRAINT telegram_chat_access_known CHECK ((access_mode = ANY (ARRAY['PUBLIC_READ'::text, 'MEMBER'::text]))),
+    CONSTRAINT telegram_chat_basic_groups_are_never_public CHECK (((peer_type <> 'CHAT'::text) OR (access_mode = 'MEMBER'::text))),
+    CONSTRAINT telegram_chat_durable_typed CHECK ((durable_id = (
+CASE
+    WHEN (peer_type = 'CHAT'::text) THEN 'g:'::text
+    ELSE 'c:'::text
+END || (peer_id)::text))),
+    CONSTRAINT telegram_chat_hash_has_owner CHECK (((access_hash IS NULL) = (access_hash_account_id IS NULL))),
+    CONSTRAINT telegram_chat_join_complete CHECK ((((joined_by IS NULL) = (joined_at IS NULL)) AND ((joined_at IS NULL) OR (member_since_observed IS NOT NULL)))),
+    CONSTRAINT telegram_chat_member_reads_as_member CHECK (((member_since_observed IS NULL) OR (access_mode = 'MEMBER'::text))),
+    CONSTRAINT telegram_chat_migrated_typed CHECK (((migrated_to IS NULL) OR (migrated_to ~ '^c:[1-9][0-9]{0,19}$'::text))),
+    CONSTRAINT telegram_chat_names_capped CHECK (((COALESCE(length(username_at_resolve), 0) <= 32) AND (COALESCE(length(title_at_resolve), 0) <= 256))),
+    CONSTRAINT telegram_chat_peer_known CHECK ((peer_type = ANY (ARRAY['CHANNEL'::text, 'MEGAGROUP'::text, 'GIGAGROUP'::text, 'CHAT'::text]))),
+    CONSTRAINT telegram_chat_peer_positive CHECK ((peer_id > 0)),
+    CONSTRAINT telegram_chat_provenance_follows_access CHECK ((((access_mode = 'PUBLIC_READ'::text) AND (provenance_class = 'OPEN_GROUP'::text)) OR ((access_mode = 'MEMBER'::text) AND (provenance_class = 'PERSONA_PARTY'::text))))
+);
+
+--
+-- Name: TABLE telegram_chat; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.telegram_chat IS 'Which Telegram chat a source is, and how it is read. The identity is fixed and the row is never deleted, so a confirmed authority target never silently changes chat.';
+
+--
+-- Name: COLUMN telegram_chat.member_since_observed; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.telegram_chat.member_since_observed IS 'When Telegram last reported the reading persona a member. Only a member chat carries it; cleared when the persona is seen to have left.';
+
+--
+-- Name: telegram_message; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.telegram_message (
+    document_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    chat_durable_id text NOT NULL,
+    message_id bigint NOT NULL,
+    seen_via_uid text NOT NULL,
+    sender_uid text,
+    sender_handle_at_capture text,
+    post_author text,
+    fwd_from_uid text,
+    fwd_from_name text,
+    fwd_from_message_id bigint,
+    reply_to_message_id bigint,
+    topic_id bigint,
+    grouped_id bigint,
+    via_bot_uid text,
+    is_service boolean DEFAULT false NOT NULL,
+    service_action text,
+    is_self boolean DEFAULT false NOT NULL,
+    media_kind text,
+    noforwards boolean DEFAULT false NOT NULL,
+    edit_date timestamp with time zone,
+    views_at_capture integer,
+    forwards_at_capture integer,
+    deleted_seen_at timestamp with time zone,
+    captured_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_message_bot_typed CHECK (((via_bot_uid IS NULL) OR (via_bot_uid ~ '^u:[1-9][0-9]{0,19}$'::text))),
+    CONSTRAINT telegram_message_chat_typed CHECK ((chat_durable_id ~ '^[cg]:[1-9][0-9]{0,19}$'::text)),
+    CONSTRAINT telegram_message_fwd_typed CHECK (((fwd_from_uid IS NULL) OR (fwd_from_uid ~ '^[ucg]:[1-9][0-9]{0,19}$'::text))),
+    CONSTRAINT telegram_message_id_positive CHECK ((message_id > 0)),
+    CONSTRAINT telegram_message_media_known CHECK (((media_kind IS NULL) OR (media_kind ~ '^[a-z_]{1,32}$'::text))),
+    CONSTRAINT telegram_message_names_capped CHECK (((COALESCE(length(sender_handle_at_capture), 0) <= 256) AND (COALESCE(length(post_author), 0) <= 256) AND (COALESCE(length(fwd_from_name), 0) <= 256))),
+    CONSTRAINT telegram_message_sender_typed CHECK (((sender_uid IS NULL) OR (sender_uid ~ '^[ucg]:[1-9][0-9]{0,19}$'::text))),
+    CONSTRAINT telegram_message_service_action_is_a_class_name CHECK (((service_action IS NULL) OR (service_action ~ '^[A-Za-z]{1,64}$'::text))),
+    CONSTRAINT telegram_message_service_named CHECK ((is_service = (service_action IS NOT NULL))),
+    CONSTRAINT telegram_message_via_typed CHECK ((seen_via_uid ~ '^u:[1-9][0-9]{0,19}$'::text))
+);
+
+--
+-- Name: TABLE telegram_message; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.telegram_message IS 'The capture record of one stored Telegram message. It has no label of its own and is read only joined to its document, whose classification, compartments and source''s classification gate it. Media is never downloaded by this adapter (docs/16 L1).';
+
+--
+-- Name: COLUMN telegram_message.service_action; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.telegram_message.service_action IS 'The TL action''s class name for a service message (who joined or left is in the document body), never an id.';
 
 --
 -- Name: watch; Type: TABLE; Schema: collect; Owner: -
@@ -1590,6 +4891,158 @@ CREATE TABLE comms.participant (
 );
 
 --
+-- Name: pgp_key; Type: TABLE; Schema: comms; Owner: -
+--
+
+CREATE TABLE comms.pgp_key (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid NOT NULL,
+    acquisition_id uuid NOT NULL,
+    primary_fingerprint text NOT NULL,
+    algorithm integer NOT NULL,
+    curve text,
+    key_bits integer,
+    key_created_at timestamp with time zone NOT NULL,
+    key_expires_at timestamp with time zone,
+    revoked boolean NOT NULL,
+    capabilities text NOT NULL,
+    subkeys jsonb DEFAULT '[]'::jsonb NOT NULL,
+    user_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+    material text NOT NULL,
+    material_sha256 bytea NOT NULL,
+    confirmed_fingerprint text,
+    confirmed_against text,
+    confirmed_contact_block_entry_id uuid,
+    confirmed_source_ref text,
+    confirmation_statement text,
+    confirmed_by uuid,
+    confirmed_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    retired_reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT pgp_key_against_known CHECK (((confirmed_against IS NULL) OR (confirmed_against = ANY (ARRAY['CONTACT_BLOCK'::text, 'PUBLISHED_ELSEWHERE'::text])))),
+    CONSTRAINT pgp_key_algorithm_range CHECK (((algorithm >= 0) AND (algorithm <= 255))),
+    CONSTRAINT pgp_key_bits_range CHECK (((key_bits IS NULL) OR ((key_bits >= 0) AND (key_bits <= 65536)))),
+    CONSTRAINT pgp_key_capabilities_shape CHECK ((capabilities ~ '^[A-Za-z?]{0,32}$'::text)),
+    CONSTRAINT pgp_key_confirmation_complete CHECK ((((confirmed_fingerprint IS NULL) = (confirmed_against IS NULL)) AND ((confirmed_fingerprint IS NULL) = (confirmed_by IS NULL)) AND ((confirmed_fingerprint IS NULL) = (confirmed_at IS NULL)))),
+    CONSTRAINT pgp_key_confirmation_names_its_basis CHECK (((confirmed_against IS NULL) OR ((confirmed_against = 'CONTACT_BLOCK'::text) AND (confirmed_contact_block_entry_id IS NOT NULL) AND (confirmed_source_ref IS NULL)) OR ((confirmed_against = 'PUBLISHED_ELSEWHERE'::text) AND (confirmed_contact_block_entry_id IS NULL) AND (length(btrim(COALESCE(confirmed_source_ref, ''::text))) >= 3)))),
+    CONSTRAINT pgp_key_confirms_its_own_fingerprint CHECK (((confirmed_fingerprint IS NULL) OR (confirmed_fingerprint = primary_fingerprint))),
+    CONSTRAINT pgp_key_curve_size CHECK (((curve IS NULL) OR (length(curve) <= 64))),
+    CONSTRAINT pgp_key_fp_shape CHECK (((primary_fingerprint ~ '^[0-9A-F]{40}$'::text) OR (primary_fingerprint ~ '^[0-9A-F]{64}$'::text))),
+    CONSTRAINT pgp_key_material_digest_is_sha256 CHECK ((octet_length(material_sha256) = 32)),
+    CONSTRAINT pgp_key_material_size CHECK (((length(material) >= 1) AND (length(material) <= 1000000))),
+    CONSTRAINT pgp_key_retirement_complete CHECK ((((retired_at IS NULL) = (retired_by IS NULL)) AND ((retired_at IS NULL) = (retired_reason IS NULL)) AND ((retired_reason IS NULL) OR (length(btrim(retired_reason)) >= 3)))),
+    CONSTRAINT pgp_key_source_ref_size CHECK (((confirmed_source_ref IS NULL) OR (length(confirmed_source_ref) <= 2000))),
+    CONSTRAINT pgp_key_statement_needs_confirmation CHECK (((confirmation_statement IS NULL) OR (confirmed_at IS NOT NULL))),
+    CONSTRAINT pgp_key_statement_size CHECK (((confirmation_statement IS NULL) OR (length(confirmation_statement) <= 2000)))
+);
+
+--
+-- Name: TABLE pgp_key; Type: COMMENT; Schema: comms; Owner: -
+--
+
+COMMENT ON TABLE comms.pgp_key IS 'One primary key gpg read from an acquisition. A child of the acquisition (its labels). Never born confirmed; confirmed once, against a contact block line or a publication elsewhere; retired, never deleted (F10b).';
+
+--
+-- Name: pgp_key_acquisition; Type: TABLE; Schema: comms; Owner: -
+--
+
+CREATE TABLE comms.pgp_key_acquisition (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid NOT NULL,
+    source text NOT NULL,
+    raw_bytes bytea NOT NULL,
+    raw_sha256 bytea NOT NULL,
+    filename text,
+    source_ref text NOT NULL,
+    channel_binding_id uuid,
+    contact_block_id uuid,
+    evidence_id uuid,
+    classification core.tlp NOT NULL,
+    compartments text[] DEFAULT '{}'::text[] NOT NULL,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    lookup_id uuid,
+    CONSTRAINT pgp_key_acquisition_digest_is_sha256 CHECK ((octet_length(raw_sha256) = 32)),
+    CONSTRAINT pgp_key_acquisition_file_is_named CHECK (((source = 'FILE'::text) = (filename IS NOT NULL))),
+    CONSTRAINT pgp_key_acquisition_filename_size CHECK (((filename IS NULL) OR (length(filename) <= 255))),
+    CONSTRAINT pgp_key_acquisition_raw_size CHECK (((octet_length(raw_bytes) >= 1) AND (octet_length(raw_bytes) <= 1000000))),
+    CONSTRAINT pgp_key_acquisition_source_known CHECK ((source = ANY (ARRAY['PASTE'::text, 'FILE'::text, 'WKD'::text]))),
+    CONSTRAINT pgp_key_acquisition_source_ref_size CHECK (((length(btrim(source_ref)) >= 3) AND (length(btrim(source_ref)) <= 2000))),
+    CONSTRAINT pgp_key_acquisition_wkd_has_its_lookup CHECK (((source = 'WKD'::text) = (lookup_id IS NOT NULL))),
+    CONSTRAINT pgp_key_acquisition_wkd_uncompartmented CHECK (((source <> 'WKD'::text) OR (cardinality(compartments) = 0)))
+);
+
+--
+-- Name: TABLE pgp_key_acquisition; Type: COMMENT; Schema: comms; Owner: -
+--
+
+COMMENT ON TABLE comms.pgp_key_acquisition IS 'What vendor key material was obtained for a case, how and from where. Immutable and never deleted; carries the labels its keys are read under (F10b).';
+
+--
+-- Name: pgp_key_lookup; Type: TABLE; Schema: comms; Owner: -
+--
+
+CREATE TABLE comms.pgp_key_lookup (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid NOT NULL,
+    address text NOT NULL,
+    local_part text NOT NULL,
+    domain text NOT NULL,
+    wkd_hash text NOT NULL,
+    reason text NOT NULL,
+    channel_binding_id uuid,
+    contact_block_id uuid,
+    classification core.tlp NOT NULL,
+    ceiling core.tlp NOT NULL,
+    route_name text NOT NULL,
+    state text DEFAULT 'REQUESTED'::text NOT NULL,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    decided_by uuid,
+    decided_at timestamp with time zone,
+    decision_note text,
+    planned_urls text[],
+    sent_at timestamp with time zone,
+    method_used text,
+    url_used text,
+    http_status integer,
+    response_sha256 bytea,
+    response_bytes integer,
+    detail text DEFAULT ''::text NOT NULL,
+    finished_at timestamp with time zone,
+    CONSTRAINT pgp_key_lookup_address_is_its_parts CHECK ((address = ((local_part || '@'::text) || domain))),
+    CONSTRAINT pgp_key_lookup_ceiling_binds CHECK (((ceiling = ANY (ARRAY['CLEAR'::core.tlp, 'GREEN'::core.tlp, 'AMBER'::core.tlp])) AND (classification <= ceiling))),
+    CONSTRAINT pgp_key_lookup_declined_says_why CHECK (((state <> 'DECLINED'::text) OR ((decided_by IS NOT NULL) AND (decided_at IS NOT NULL) AND (length(btrim(COALESCE(decision_note, ''::text))) >= 3) AND (planned_urls IS NULL) AND (sent_at IS NULL)))),
+    CONSTRAINT pgp_key_lookup_detail_size CHECK ((length(detail) <= 2000)),
+    CONSTRAINT pgp_key_lookup_digest_is_sha256 CHECK (((response_sha256 IS NULL) OR (octet_length(response_sha256) = 32))),
+    CONSTRAINT pgp_key_lookup_domain_shape CHECK (((length(domain) <= 253) AND (domain ~ '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'::text))),
+    CONSTRAINT pgp_key_lookup_expired_is_dated CHECK (((state <> 'EXPIRED'::text) OR ((decided_at IS NOT NULL) AND (planned_urls IS NULL) AND (sent_at IS NULL)))),
+    CONSTRAINT pgp_key_lookup_finished_is_dated CHECK (((state = ANY (ARRAY['FOUND'::text, 'NOT_FOUND'::text, 'FAILED'::text])) = (finished_at IS NOT NULL))),
+    CONSTRAINT pgp_key_lookup_found_is_whole CHECK (((state <> 'FOUND'::text) OR ((http_status = 200) AND (url_used IS NOT NULL) AND (method_used IS NOT NULL) AND (octet_length(response_sha256) = 32)))),
+    CONSTRAINT pgp_key_lookup_hash_only_urls CHECK (((planned_urls IS NULL) OR (planned_urls <@ ARRAY[((((('https://openpgpkey.'::text || domain) || '/.well-known/openpgpkey/'::text) || domain) || '/hu/'::text) || wkd_hash), ((('https://'::text || domain) || '/.well-known/openpgpkey/hu/'::text) || wkd_hash)]))),
+    CONSTRAINT pgp_key_lookup_hash_shape CHECK ((wkd_hash ~ '^[ybndrfg8ejkmcpqxot1uwisza345h769]{32}$'::text)),
+    CONSTRAINT pgp_key_lookup_lapses CHECK (((expires_at > requested_at) AND (expires_at <= (requested_at + '72:00:00'::interval)))),
+    CONSTRAINT pgp_key_lookup_leaves_at_most_amber CHECK ((classification = ANY (ARRAY['CLEAR'::core.tlp, 'GREEN'::core.tlp, 'AMBER'::core.tlp]))),
+    CONSTRAINT pgp_key_lookup_method_known CHECK (((method_used IS NULL) OR (method_used = ANY (ARRAY['ADVANCED'::text, 'DIRECT'::text])))),
+    CONSTRAINT pgp_key_lookup_not_found_is_404 CHECK (((state <> 'NOT_FOUND'::text) OR ((http_status = 404) AND (url_used IS NOT NULL)))),
+    CONSTRAINT pgp_key_lookup_reason_size CHECK (((length(btrim(reason)) >= 10) AND (length(btrim(reason)) <= 2000))),
+    CONSTRAINT pgp_key_lookup_requested_is_undecided CHECK (((state <> 'REQUESTED'::text) OR ((decided_by IS NULL) AND (decided_at IS NULL) AND (decision_note IS NULL) AND (planned_urls IS NULL) AND (sent_at IS NULL)))),
+    CONSTRAINT pgp_key_lookup_route_name_shape CHECK ((route_name ~ '^[a-z][a-z0-9-]{1,39}$'::text)),
+    CONSTRAINT pgp_key_lookup_sent_by_a_second_person CHECK (((state <> ALL (ARRAY['SENDING'::text, 'FOUND'::text, 'NOT_FOUND'::text, 'FAILED'::text])) OR ((decided_by IS NOT NULL) AND (decided_by <> requested_by) AND (decided_at IS NOT NULL) AND (sent_at IS NOT NULL) AND ((cardinality(planned_urls) >= 1) AND (cardinality(planned_urls) <= 2))))),
+    CONSTRAINT pgp_key_lookup_state_known CHECK ((state = ANY (ARRAY['REQUESTED'::text, 'DECLINED'::text, 'EXPIRED'::text, 'SENDING'::text, 'FOUND'::text, 'NOT_FOUND'::text, 'FAILED'::text]))),
+    CONSTRAINT pgp_key_lookup_used_was_planned CHECK (((url_used IS NULL) OR (url_used = ANY (planned_urls))))
+);
+
+--
+-- Name: TABLE pgp_key_lookup; Type: COMMENT; Schema: comms; Owner: -
+--
+
+COMMENT ON TABLE comms.pgp_key_lookup IS 'Every Web Key Directory lookup asked for in a case: who asked, who approved it (always somebody else), what was planned and sent before the first packet, and what came back. Never deleted (F10c, docs/00 decision 75).';
+
+--
 -- Name: pgp_verification; Type: TABLE; Schema: comms; Owner: -
 --
 
@@ -1610,16 +5063,45 @@ CREATE TABLE comms.pgp_verification (
     note text,
     verified_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid NOT NULL,
+    signature_form text DEFAULT 'CLEARSIGNED'::text NOT NULL,
+    signing_primary_fingerprint text,
+    signature_class text,
+    pgp_key_id uuid,
+    claimed_fingerprint_basis text DEFAULT 'STATED'::text NOT NULL,
+    claimed_fingerprint_source_ref text,
+    attribution text,
+    CONSTRAINT pgp_verification_attribution_confirms_a_binding CHECK (((attribution IS NULL) OR ((outcome = 'VERIFIED'::text) AND (channel_binding_id IS NOT NULL)))),
+    CONSTRAINT pgp_verification_attribution_known CHECK (((attribution IS NULL) OR (attribution = ANY (ARRAY['SAME_BLOCK'::text, 'SAME_IDENTITY'::text])))),
+    CONSTRAINT pgp_verification_basis_is_the_key CHECK (((claimed_fingerprint_basis = 'CONFIRMED_KEY'::text) = (pgp_key_id IS NOT NULL))),
+    CONSTRAINT pgp_verification_basis_known CHECK ((claimed_fingerprint_basis = ANY (ARRAY['STATED'::text, 'CONFIRMED_KEY'::text]))),
     CONSTRAINT pgp_verification_claimed_fp_shape CHECK (((claimed_fingerprint ~ '^[0-9A-F]{40}$'::text) OR (claimed_fingerprint ~ '^[0-9A-F]{64}$'::text))),
     CONSTRAINT pgp_verification_digest_is_sha256 CHECK (((signed_payload_sha256 IS NULL) OR (octet_length(signed_payload_sha256) = 32))),
+    CONSTRAINT pgp_verification_form_known CHECK ((signature_form = ANY (ARRAY['CLEARSIGNED'::text, 'DETACHED'::text]))),
+    CONSTRAINT pgp_verification_key_carries_its_provenance CHECK (((pgp_key_id IS NULL) OR (claimed_fingerprint_source_ref IS NULL))),
     CONSTRAINT pgp_verification_no_verifier_verifies_nothing CHECK (((verifier <> 'NONE'::text) OR (outcome = 'NO_VERIFIER'::text))),
-    CONSTRAINT pgp_verification_outcome_known CHECK ((outcome = ANY (ARRAY['VERIFIED'::text, 'BAD_SIGNATURE'::text, 'KEY_MISMATCH'::text, 'VALUE_NOT_IN_PAYLOAD'::text, 'KEY_UNAVAILABLE'::text, 'EXPIRED_KEY'::text, 'REVOKED_KEY'::text, 'EXPIRED_SIGNATURE'::text, 'MALFORMED'::text, 'NO_VERIFIER'::text]))),
+    CONSTRAINT pgp_verification_outcome_known CHECK ((outcome = ANY (ARRAY['VERIFIED'::text, 'BAD_SIGNATURE'::text, 'KEY_MISMATCH'::text, 'VALUE_NOT_IN_PAYLOAD'::text, 'KEY_UNAVAILABLE'::text, 'EXPIRED_KEY'::text, 'REVOKED_KEY'::text, 'EXPIRED_SIGNATURE'::text, 'MALFORMED'::text, 'NO_VERIFIER'::text, 'UNATTRIBUTED'::text]))),
+    CONSTRAINT pgp_verification_primary_fp_shape CHECK (((signing_primary_fingerprint IS NULL) OR (signing_primary_fingerprint ~ '^[0-9A-F]{40}$'::text) OR (signing_primary_fingerprint ~ '^[0-9A-F]{64}$'::text))),
+    CONSTRAINT pgp_verification_sig_class_shape CHECK (((signature_class IS NULL) OR (signature_class ~ '^[0-9a-f]{2}$'::text))),
     CONSTRAINT pgp_verification_signing_fp_shape CHECK (((signing_fingerprint IS NULL) OR (signing_fingerprint ~ '^[0-9A-F]{40}$'::text) OR (signing_fingerprint ~ '^[0-9A-F]{64}$'::text))),
+    CONSTRAINT pgp_verification_source_ref_size CHECK (((claimed_fingerprint_source_ref IS NULL) OR (length(claimed_fingerprint_source_ref) <= 2000))),
+    CONSTRAINT pgp_verification_unattributed_is_otherwise_verified CHECK (((outcome <> 'UNATTRIBUTED'::text) OR ((channel_binding_id IS NOT NULL) AND (confirms_value IS NOT NULL) AND value_in_payload AND (signed_payload_sha256 IS NOT NULL) AND (status_output IS NOT NULL) AND (signing_fingerprint IS NOT NULL) AND ((claimed_fingerprint = signing_fingerprint) OR (NOT (claimed_fingerprint IS DISTINCT FROM signing_primary_fingerprint)))))),
     CONSTRAINT pgp_verification_verified_covers_value CHECK (((outcome <> 'VERIFIED'::text) OR ((confirms_value IS NOT NULL) AND value_in_payload AND (signed_payload_sha256 IS NOT NULL)))),
     CONSTRAINT pgp_verification_verified_is_re_readable CHECK (((outcome <> 'VERIFIED'::text) OR (status_output IS NOT NULL))),
-    CONSTRAINT pgp_verification_verified_matches_claim CHECK (((outcome <> 'VERIFIED'::text) OR ((signing_fingerprint IS NOT NULL) AND (signing_fingerprint = claimed_fingerprint)))),
+    CONSTRAINT pgp_verification_verified_matches_claim CHECK (((outcome <> 'VERIFIED'::text) OR ((signing_fingerprint IS NOT NULL) AND ((claimed_fingerprint = signing_fingerprint) OR (NOT (claimed_fingerprint IS DISTINCT FROM signing_primary_fingerprint)))))),
     CONSTRAINT pgp_verification_verifier_known CHECK ((verifier = ANY (ARRAY['GPG'::text, 'EXTERNAL'::text, 'NONE'::text])))
 );
+
+--
+-- Name: COLUMN pgp_verification.signature_form; Type: COMMENT; Schema: comms; Owner: -
+--
+
+COMMENT ON COLUMN comms.pgp_verification.signature_form IS 'CLEARSIGNED or DETACHED: which form of signature was checked (F10a).';
+
+--
+-- Name: COLUMN pgp_verification.signing_primary_fingerprint; Type: COMMENT; Schema: comms; Owner: -
+--
+
+COMMENT ON COLUMN comms.pgp_verification.signing_primary_fingerprint IS 'The primary key the signing key is bound under (gpg VALIDSIG, last field). A claim may name the signing key or this primary (F10a).';
 
 --
 -- Name: platform; Type: TABLE; Schema: comms; Owner: -
@@ -1691,6 +5173,42 @@ CREATE TABLE core.approval_request (
 );
 
 --
+-- Name: assertion_embedding; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.assertion_embedding (
+    assertion_id uuid NOT NULL,
+    slot smallint NOT NULL,
+    space_id uuid NOT NULL,
+    case_id uuid NOT NULL,
+    status text NOT NULL,
+    embedding public.vector(768),
+    reason text,
+    sent_classification core.tlp,
+    input_chars integer DEFAULT 0 NOT NULL,
+    truncated_chars integer DEFAULT 0 NOT NULL,
+    attempts smallint DEFAULT 1 NOT NULL,
+    first_failed_at timestamp with time zone,
+    next_attempt_at timestamp with time zone,
+    embedded_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT assertion_embedding_attempts_check CHECK ((attempts >= 1)),
+    CONSTRAINT assertion_embedding_failure_dated CHECK (((status = 'FAILED'::text) = (first_failed_at IS NOT NULL))),
+    CONSTRAINT assertion_embedding_input_chars_check CHECK ((input_chars >= 0)),
+    CONSTRAINT assertion_embedding_reason_unless_embedded CHECK (((status = 'EMBEDDED'::text) = (reason IS NULL))),
+    CONSTRAINT assertion_embedding_retry_dated CHECK (((status <> ALL (ARRAY['FAILED'::text, 'WITHHELD'::text])) OR (next_attempt_at IS NOT NULL))),
+    CONSTRAINT assertion_embedding_sent_only_embedded CHECK (((sent_classification IS NULL) OR (status = 'EMBEDDED'::text))),
+    CONSTRAINT assertion_embedding_status_check CHECK ((status = ANY (ARRAY['EMBEDDED'::text, 'EMPTY'::text, 'EXCLUDED'::text, 'WITHHELD'::text, 'FAILED'::text]))),
+    CONSTRAINT assertion_embedding_truncated_chars_check CHECK ((truncated_chars >= 0)),
+    CONSTRAINT assertion_embedding_vector_iff_embedded CHECK (((status = 'EMBEDDED'::text) = (embedding IS NOT NULL)))
+);
+
+--
+-- Name: TABLE assertion_embedding; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.assertion_embedding IS 'One similarity outcome per claim and slot (F6.4): rationale, reference and claimed values. Kept after retraction or supersession as history; search reads live claims only.';
+
+--
 -- Name: assumption; Type: TABLE; Schema: core; Owner: -
 --
 
@@ -1745,10 +5263,17 @@ CREATE TABLE core."case" (
     withheld_disclosure text DEFAULT 'PRESENCE'::text NOT NULL,
     legal_hold boolean DEFAULT false NOT NULL,
     legal_hold_reason text,
+    dual_control_merge_epoch bigint DEFAULT 0 NOT NULL,
     CONSTRAINT case_hold_has_reason CHECK (((NOT legal_hold) OR (legal_hold_reason IS NOT NULL))),
     CONSTRAINT case_retention_sane CHECK ((retention_until > ((created_at AT TIME ZONE 'UTC'::text))::date)),
     CONSTRAINT case_withheld_disclosure_known CHECK ((withheld_disclosure = ANY (ARRAY['NONE'::text, 'PRESENCE'::text, 'COUNT'::text])))
 );
+
+--
+-- Name: COLUMN "case".dual_control_merge_epoch; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core."case".dual_control_merge_epoch IS 'Moves by one with every change of dual_control_merge. A case.policy.relax approval names the epoch it was raised against (migration case_merge_relax_two_people, F9b 2026-09-24).';
 
 --
 -- Name: edge; Type: TABLE; Schema: core; Owner: -
@@ -1798,6 +5323,78 @@ CREATE TABLE core.edge_type (
     is_active boolean DEFAULT true NOT NULL,
     CONSTRAINT edge_type_default_sign_check CHECK ((default_sign = ANY (ARRAY['-1'::integer, 0, 1])))
 );
+
+--
+-- Name: embedding_pending; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.embedding_pending (
+    slot smallint NOT NULL,
+    kind text NOT NULL,
+    item_id uuid NOT NULL,
+    queued_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT embedding_pending_kind_check CHECK ((kind = ANY (ARRAY['document'::text, 'evidence'::text, 'assertion'::text]))),
+    CONSTRAINT embedding_pending_slot_check CHECK (((slot >= 1) AND (slot <= 3)))
+);
+
+--
+-- Name: TABLE embedding_pending; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.embedding_pending IS 'Items that have no vector row yet in a slot (F6.1). Filled by triggers on new and changed items and in bulk when a space registers; drained by scripts/embed_pass.py. No foreign key: one queue serves three kinds, and the pass drops an entry whose item is gone or purged.';
+
+--
+-- Name: embedding_space; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.embedding_space (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    role text NOT NULL,
+    state text NOT NULL,
+    slot smallint NOT NULL,
+    provider text NOT NULL,
+    model text NOT NULL,
+    fingerprint jsonb NOT NULL,
+    fingerprint_sha256 bytea NOT NULL,
+    dims_native integer NOT NULL,
+    canary public.vector(768) NOT NULL,
+    unicode_version text,
+    registered_endpoint text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    activated_at timestamp with time zone,
+    activated_by uuid,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    retire_reason text,
+    model_mismatch_at timestamp with time zone,
+    gate_key bytea,
+    enqueued_at timestamp with time zone,
+    canary_checked_at timestamp with time zone,
+    canary_ok boolean,
+    canary_problem text,
+    rows_cleared_at timestamp with time zone,
+    CONSTRAINT embedding_space_active_dated CHECK (((state <> 'ACTIVE'::text) OR (activated_at IS NOT NULL))),
+    CONSTRAINT embedding_space_cleared_when_retired CHECK (((rows_cleared_at IS NULL) OR (state = 'RETIRED'::text))),
+    CONSTRAINT embedding_space_dims_native_check CHECK (((dims_native >= 1) AND (dims_native <= 768))),
+    CONSTRAINT embedding_space_endpoint_recorded CHECK (((provider = 'endpoint'::text) = (registered_endpoint IS NOT NULL))),
+    CONSTRAINT embedding_space_fingerprint_sha256_check CHECK ((length(fingerprint_sha256) = 32)),
+    CONSTRAINT embedding_space_gate_endpoint_only CHECK (((gate_key IS NULL) OR (provider = 'endpoint'::text))),
+    CONSTRAINT embedding_space_mismatch_endpoint_only CHECK (((model_mismatch_at IS NULL) OR (provider = 'endpoint'::text))),
+    CONSTRAINT embedding_space_model_check CHECK ((btrim(model) <> ''::text)),
+    CONSTRAINT embedding_space_provider_check CHECK ((provider = ANY (ARRAY['builtin'::text, 'endpoint'::text]))),
+    CONSTRAINT embedding_space_retired_dated CHECK (((state <> 'RETIRED'::text) OR ((retired_at IS NOT NULL) AND (retire_reason IS NOT NULL)))),
+    CONSTRAINT embedding_space_role_check CHECK ((role = ANY (ARRAY['WORDING'::text, 'MEANING'::text]))),
+    CONSTRAINT embedding_space_role_provider CHECK (((provider = 'endpoint'::text) = (role = 'MEANING'::text))),
+    CONSTRAINT embedding_space_slot_check CHECK (((slot >= 1) AND (slot <= 3))),
+    CONSTRAINT embedding_space_state_check CHECK ((state = ANY (ARRAY['BUILDING'::text, 'ACTIVE'::text, 'RETIRED'::text])))
+);
+
+--
+-- Name: TABLE embedding_space; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.embedding_space IS 'One similarity space per embedder fingerprint (F6.1). Vectors are compared only inside one space. registered_endpoint is host:port at registration, history only: the live endpoint, ceiling and declarations are read from the environment, never from this row.';
 
 --
 -- Name: evidence; Type: TABLE; Schema: core; Owner: -
@@ -1873,6 +5470,42 @@ CREATE SEQUENCE core.evidence_custody_id_seq
 --
 
 ALTER SEQUENCE core.evidence_custody_id_seq OWNED BY core.evidence_custody.id;
+
+--
+-- Name: evidence_embedding; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.evidence_embedding (
+    evidence_id uuid NOT NULL,
+    slot smallint NOT NULL,
+    space_id uuid NOT NULL,
+    case_id uuid NOT NULL,
+    status text NOT NULL,
+    embedding public.vector(768),
+    reason text,
+    sent_classification core.tlp,
+    input_chars integer DEFAULT 0 NOT NULL,
+    truncated_chars integer DEFAULT 0 NOT NULL,
+    attempts smallint DEFAULT 1 NOT NULL,
+    first_failed_at timestamp with time zone,
+    next_attempt_at timestamp with time zone,
+    embedded_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT evidence_embedding_attempts_check CHECK ((attempts >= 1)),
+    CONSTRAINT evidence_embedding_failure_dated CHECK (((status = 'FAILED'::text) = (first_failed_at IS NOT NULL))),
+    CONSTRAINT evidence_embedding_input_chars_check CHECK ((input_chars >= 0)),
+    CONSTRAINT evidence_embedding_reason_unless_embedded CHECK (((status = 'EMBEDDED'::text) = (reason IS NULL))),
+    CONSTRAINT evidence_embedding_retry_dated CHECK (((status <> ALL (ARRAY['FAILED'::text, 'WITHHELD'::text])) OR (next_attempt_at IS NOT NULL))),
+    CONSTRAINT evidence_embedding_sent_only_embedded CHECK (((sent_classification IS NULL) OR (status = 'EMBEDDED'::text))),
+    CONSTRAINT evidence_embedding_status_check CHECK ((status = ANY (ARRAY['EMBEDDED'::text, 'EMPTY'::text, 'EXCLUDED'::text, 'WITHHELD'::text, 'FAILED'::text]))),
+    CONSTRAINT evidence_embedding_truncated_chars_check CHECK ((truncated_chars >= 0)),
+    CONSTRAINT evidence_embedding_vector_iff_embedded CHECK (((status = 'EMBEDDED'::text) = (embedding IS NOT NULL)))
+);
+
+--
+-- Name: TABLE evidence_embedding; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.evidence_embedding IS 'One similarity outcome per exhibit and slot (F6.4): the title, description and extracted text, never the bytes. case_id is set by trigger from the exhibit.';
 
 --
 -- Name: evidence_link; Type: TABLE; Schema: core; Owner: -
@@ -2410,20 +6043,65 @@ CREATE TABLE iam.compartment (
 COMMENT ON TABLE iam.compartment IS 'The closed vocabulary of compartment keys. cases.py and iam_admin.py refuse any key not in here, naming it, because an unregistered key is a typo and a typo in a need-to-know lock is silent no-access.';
 
 --
--- Name: dual_control_request; Type: TABLE; Schema: iam; Owner: -
+-- Name: dual_control_operation; Type: TABLE; Schema: iam; Owner: -
 --
 
-CREATE TABLE iam.dual_control_request (
+CREATE TABLE iam.dual_control_operation (
+    operation text NOT NULL,
+    mode text NOT NULL,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    change_id uuid,
+    CONSTRAINT dual_control_mode_known CHECK ((mode = ANY (ARRAY['PER_CASE'::text, 'ALWAYS'::text])))
+);
+
+--
+-- Name: TABLE dual_control_operation; Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON TABLE iam.dual_control_operation IS 'The deployment mode (PER_CASE or ALWAYS) of each configurable two-person operation. Changes only through iam.dual_control_policy_change. A later migration that must write it runs ALTER TABLE iam.dual_control_operation DISABLE TRIGGER dual_control_operation_written_by_ledger and ENABLE TRIGGER dual_control_operation_written_by_ledger inside its own run.';
+
+--
+-- Name: dual_control_policy_change; Type: TABLE; Schema: iam; Owner: -
+--
+
+CREATE TABLE iam.dual_control_policy_change (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    action text NOT NULL,
-    payload jsonb NOT NULL,
+    seq bigint NOT NULL,
+    approval_request_id uuid NOT NULL,
+    change text NOT NULL,
+    operation text,
+    mode_from text,
+    mode_to text,
+    permission_a text,
+    permission_b text,
+    why text,
+    based_on uuid,
     requested_by uuid NOT NULL,
-    requested_at timestamp with time zone DEFAULT now() NOT NULL,
-    approved_by uuid,
-    approved_at timestamp with time zone,
-    executed_at timestamp with time zone,
-    state text DEFAULT 'PENDING'::text NOT NULL,
-    CONSTRAINT dual_control_distinct CHECK (((approved_by IS NULL) OR (approved_by <> requested_by)))
+    countersigned_by uuid NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT dual_control_change_known CHECK ((change = ANY (ARRAY['OPERATION_MODE'::text, 'SEPARATED_DUTY_ADD'::text, 'SEPARATED_DUTY_REMOVE'::text]))),
+    CONSTRAINT dual_control_change_pair_says_why CHECK (((change <> 'SEPARATED_DUTY_ADD'::text) OR (length(btrim(why)) >= 10))),
+    CONSTRAINT dual_control_change_shape CHECK ((((change = 'OPERATION_MODE'::text) AND (operation IS NOT NULL) AND (mode_from = ANY (ARRAY['PER_CASE'::text, 'ALWAYS'::text])) AND (mode_to = ANY (ARRAY['PER_CASE'::text, 'ALWAYS'::text])) AND (mode_from <> mode_to) AND (permission_a IS NULL) AND (permission_b IS NULL)) OR ((change <> 'OPERATION_MODE'::text) AND (operation IS NULL) AND (permission_a IS NOT NULL) AND (permission_b IS NOT NULL) AND (permission_a < permission_b)))),
+    CONSTRAINT dual_control_change_two_people CHECK ((requested_by <> countersigned_by))
+);
+
+--
+-- Name: TABLE dual_control_policy_change; Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON TABLE iam.dual_control_policy_change IS 'Append-only ledger of two-person policy changes. Inserting a row is the only way iam.dual_control_operation and iam.separated_duty change, and the insert is refused unless a dual_control.policy approval for exactly that change was consumed in the same transaction (migration dual_control_policy, F9 2026-09-24).';
+
+--
+-- Name: dual_control_policy_change_seq_seq; Type: SEQUENCE; Schema: iam; Owner: -
+--
+
+ALTER TABLE iam.dual_control_policy_change ALTER COLUMN seq ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME iam.dual_control_policy_change_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
 );
 
 --
@@ -2433,8 +6111,7 @@ CREATE TABLE iam.dual_control_request (
 CREATE TABLE iam.permission (
     key text NOT NULL,
     description text NOT NULL,
-    requires_step_up boolean DEFAULT false NOT NULL,
-    requires_dual_control boolean DEFAULT false NOT NULL
+    requires_step_up boolean DEFAULT false NOT NULL
 );
 
 --
@@ -2465,6 +6142,11 @@ CREATE TABLE iam.separated_duty (
     permission_a text NOT NULL,
     permission_b text NOT NULL,
     why text NOT NULL,
+    origin text DEFAULT 'migration'::text NOT NULL,
+    added_at timestamp with time zone,
+    added_by_change uuid,
+    CONSTRAINT separated_duty_origin_known CHECK ((origin = ANY (ARRAY['migration'::text, 'policy'::text]))),
+    CONSTRAINT separated_duty_policy_origin_named CHECK (((origin = 'policy'::text) = (added_by_change IS NOT NULL))),
     CONSTRAINT separated_duty_says_why CHECK ((length(btrim(why)) > 0)),
     CONSTRAINT separated_duty_two_permissions CHECK ((permission_a <> permission_b))
 );
@@ -2473,7 +6155,7 @@ CREATE TABLE iam.separated_duty (
 -- Name: TABLE separated_duty; Type: COMMENT; Schema: iam; Owner: -
 --
 
-COMMENT ON TABLE iam.separated_duty IS 'Pairs of permissions no single role may hold together: the two halves of a two-person control. Enforced on iam.role_permission by trigger role_permission_separated_duty (migration 0062).';
+COMMENT ON TABLE iam.separated_duty IS 'Pairs of permissions no single role may hold together: the two halves of a two-person control. Enforced on iam.role_permission by trigger role_permission_separated_duty (migration 0062). origin says who installed a pair: migration (a release or the database owner) or policy (a two-person change). Changes only through iam.dual_control_policy_change; a later migration that must write it runs ALTER TABLE iam.separated_duty DISABLE TRIGGER separated_duty_written_by_ledger and ENABLE TRIGGER separated_duty_written_by_ledger inside its own run.';
 
 --
 -- Name: session; Type: TABLE; Schema: iam; Owner: -
@@ -2491,7 +6173,8 @@ CREATE TABLE iam.session (
     mfa_satisfied_at timestamp with time zone,
     revoked_at timestamp with time zone,
     revoke_reason text,
-    ip inet
+    ip inet,
+    rls_binding_hash bytea
 );
 
 --
@@ -2505,6 +6188,12 @@ COMMENT ON COLUMN iam.session.user_agent IS 'The User-Agent header presented at 
 --
 
 COMMENT ON COLUMN iam.session.ip IS 'The peer address the session was minted from (the outermost trusted proxy''s view when NOCTORNAL_TRUSTED_PROXY_HOPS is set). NULL when the transport had no address. Compared by validation only under NOCTORNAL_SESSION_STRICT_BINDING.';
+
+--
+-- Name: COLUMN session.rls_binding_hash; Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON COLUMN iam.session.rls_binding_hash IS 'sha256 of the row-security binding proof derived from the raw token (security.tokens.rls_proof). iam.rls_actor() resolves a connection''s user by it. Set once at mint, on a system connection.';
 
 --
 -- Name: user_role; Type: TABLE; Schema: iam; Owner: -
@@ -2639,6 +6328,189 @@ CREATE TABLE ingest.dead_letter (
 COMMENT ON COLUMN ingest.dead_letter.raw_fragment IS 'Redacted unless dead_letter.redacted is false. Verbatim bytes live in the batch raw object, not here -- docs/17 F15(d).';
 
 --
+-- Name: lookup; Type: TABLE; Schema: ingest; Owner: -
+--
+
+CREATE TABLE ingest.lookup (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid,
+    provider_id uuid NOT NULL,
+    operation text NOT NULL,
+    adapter_version text NOT NULL,
+    subject_kind text NOT NULL,
+    selector_id uuid,
+    sample_id uuid,
+    node_id uuid,
+    selector_type text NOT NULL,
+    query_value text NOT NULL,
+    query_fingerprint bytea NOT NULL,
+    classification core.tlp NOT NULL,
+    exposure_level text NOT NULL,
+    exposure_confirmed boolean DEFAULT false NOT NULL,
+    authorised_by uuid,
+    authorisation_note text,
+    signoff_expires_at timestamp with time zone,
+    signed_off_by uuid,
+    signed_off_at timestamp with time zone,
+    signoff_note text,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    state text NOT NULL,
+    not_before timestamp with time zone,
+    attempts smallint DEFAULT 0 NOT NULL,
+    sent_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    http_status integer,
+    outcome text,
+    error_class text,
+    error_detail text,
+    refusal text,
+    result_id uuid,
+    purged_at timestamp with time zone,
+    batch_id uuid,
+    CONSTRAINT lookup_answer_has_result CHECK (
+CASE
+    WHEN (subject_kind = 'CANARY'::text) THEN (result_id IS NULL)
+    ELSE (((state = ANY (ARRAY['ANSWERED'::text, 'CACHED'::text])) OR ((state = 'FAILED'::text) AND (outcome = 'UNREADABLE'::text))) = (result_id IS NOT NULL))
+END),
+    CONSTRAINT lookup_answered_has_outcome CHECK (((state <> 'ANSWERED'::text) OR (outcome = ANY (ARRAY['FOUND'::text, 'NOT_FOUND'::text])))),
+    CONSTRAINT lookup_attempts_range CHECK (((attempts >= 0) AND (attempts <= 3))),
+    CONSTRAINT lookup_awaiting_is_signed_kind CHECK (((state <> 'AWAITING_SIGNOFF'::text) OR (exposure_level <> 'NONE'::text))),
+    CONSTRAINT lookup_canary_is_clear CHECK (((subject_kind <> 'CANARY'::text) OR (classification = 'CLEAR'::core.tlp))),
+    CONSTRAINT lookup_case_unless_canary CHECK (((subject_kind = 'CANARY'::text) = (case_id IS NULL))),
+    CONSTRAINT lookup_closure_says_why CHECK (((state = ANY (ARRAY['REFUSED'::text, 'CANCELLED'::text, 'DECLINED'::text, 'EXPIRED'::text])) = (refusal IS NOT NULL))),
+    CONSTRAINT lookup_error_short CHECK (((error_detail IS NULL) OR (length(error_detail) <= 500))),
+    CONSTRAINT lookup_exposure_known CHECK ((exposure_level = ANY (ARRAY['NONE'::text, 'VENDOR'::text, 'PUBLIC'::text]))),
+    CONSTRAINT lookup_fingerprint_size CHECK ((octet_length(query_fingerprint) = 32)),
+    CONSTRAINT lookup_never_above_amber CHECK ((classification <= 'AMBER'::core.tlp)),
+    CONSTRAINT lookup_one_subject CHECK (
+CASE subject_kind
+    WHEN 'SELECTOR'::text THEN ((selector_id IS NOT NULL) AND (sample_id IS NULL))
+    WHEN 'SAMPLE'::text THEN ((sample_id IS NOT NULL) AND (selector_id IS NULL))
+    WHEN 'CANARY'::text THEN ((selector_id IS NULL) AND (sample_id IS NULL) AND (node_id IS NULL))
+    ELSE ((selector_id IS NULL) AND (sample_id IS NULL))
+END),
+    CONSTRAINT lookup_outcome_known CHECK ((outcome = ANY (ARRAY['FOUND'::text, 'NOT_FOUND'::text, 'UNREADABLE'::text]))),
+    CONSTRAINT lookup_purge_empties CHECK (((purged_at IS NULL) OR ((query_value = ''::text) AND (error_detail IS NULL) AND (COALESCE(authorisation_note, ''::text) = ''::text) AND (COALESCE(signoff_note, ''::text) = ''::text) AND (COALESCE(refusal, ''::text) = ANY (ARRAY[''::text, 'purged'::text]))))),
+    CONSTRAINT lookup_sending_has_time CHECK (((state <> ALL (ARRAY['SENDING'::text, 'ANSWERED'::text])) OR (sent_at IS NOT NULL))),
+    CONSTRAINT lookup_sent_iff_attempted CHECK (((attempts = 0) = (sent_at IS NULL))),
+    CONSTRAINT lookup_sent_only_when_signed_off CHECK (((exposure_level = 'NONE'::text) OR (subject_kind = 'CANARY'::text) OR (state <> ALL (ARRAY['SENDING'::text, 'ANSWERED'::text, 'FAILED'::text])) OR ((signed_off_by = authorised_by) AND (signed_off_at IS NOT NULL) AND (signed_off_at <= signoff_expires_at)))),
+    CONSTRAINT lookup_signed_after_request CHECK (((signed_off_at IS NULL) OR (signed_off_at > requested_at))),
+    CONSTRAINT lookup_signed_is_never_queued CHECK (((exposure_level = 'NONE'::text) OR (subject_kind = 'CANARY'::text) OR (state <> 'QUEUED'::text))),
+    CONSTRAINT lookup_signoff_asks_another CHECK (((exposure_level = 'NONE'::text) OR (subject_kind = 'CANARY'::text) OR (state = ANY (ARRAY['REFUSED'::text, 'CACHED'::text])) OR (purged_at IS NOT NULL) OR ((authorised_by IS NOT NULL) AND (authorised_by <> requested_by) AND (length(btrim(COALESCE(authorisation_note, ''::text))) > 0) AND (signoff_expires_at IS NOT NULL) AND (signoff_expires_at <= (requested_at + '24:00:00'::interval)) AND exposure_confirmed))),
+    CONSTRAINT lookup_signoff_complete CHECK (((signed_off_by IS NULL) = (signed_off_at IS NULL))),
+    CONSTRAINT lookup_state_known CHECK ((state = ANY (ARRAY['AWAITING_SIGNOFF'::text, 'QUEUED'::text, 'SENDING'::text, 'ANSWERED'::text, 'CACHED'::text, 'FAILED'::text, 'REFUSED'::text, 'CANCELLED'::text, 'DECLINED'::text, 'EXPIRED'::text]))),
+    CONSTRAINT lookup_subject_known CHECK ((subject_kind = ANY (ARRAY['SELECTOR'::text, 'SAMPLE'::text, 'VALUE'::text, 'CANARY'::text])))
+);
+
+--
+-- Name: TABLE lookup; Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON TABLE ingest.lookup IS 'One lookup request (docs/12 Part 3). Anything that is not NONE waits for a named second person''s sign-off (docs/00 decision 75). Emptied by retention, never deleted.';
+
+--
+-- Name: lookup_attempt; Type: TABLE; Schema: ingest; Owner: -
+--
+
+CREATE TABLE ingest.lookup_attempt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    lookup_id uuid NOT NULL,
+    provider_id uuid NOT NULL,
+    attempt smallint NOT NULL,
+    interactive boolean NOT NULL,
+    sent_at timestamp with time zone NOT NULL,
+    CONSTRAINT lookup_attempt_range CHECK (((attempt >= 1) AND (attempt <= 3)))
+);
+
+--
+-- Name: TABLE lookup_attempt; Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON TABLE ingest.lookup_attempt IS 'One row per send: what the provider quota counts. Append-only.';
+
+--
+-- Name: lookup_batch; Type: TABLE; Schema: ingest; Owner: -
+--
+
+CREATE TABLE ingest.lookup_batch (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid NOT NULL,
+    provider_id uuid NOT NULL,
+    operation text NOT NULL,
+    exposure_level text NOT NULL,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    note text NOT NULL,
+    plan_digest bytea NOT NULL,
+    planned integer NOT NULL,
+    cached integer DEFAULT 0 NOT NULL,
+    cancelled_at timestamp with time zone,
+    cancelled_by uuid,
+    cancel_reason text,
+    purged_at timestamp with time zone,
+    CONSTRAINT lookup_batch_cached_check CHECK ((cached >= 0)),
+    CONSTRAINT lookup_batch_cancel_complete CHECK ((((cancelled_at IS NULL) = (cancelled_by IS NULL)) AND ((cancelled_at IS NULL) = (cancel_reason IS NULL)))),
+    CONSTRAINT lookup_batch_is_none CHECK ((exposure_level = 'NONE'::text)),
+    CONSTRAINT lookup_batch_justified CHECK (((purged_at IS NOT NULL) OR (length(btrim(note)) > 10))),
+    CONSTRAINT lookup_batch_plan_digest_check CHECK ((octet_length(plan_digest) = 32)),
+    CONSTRAINT lookup_batch_planned_check CHECK (((planned >= 0) AND (planned <= 500))),
+    CONSTRAINT lookup_batch_purge_empties CHECK (((purged_at IS NULL) OR ((note = ''::text) AND (COALESCE(cancel_reason, ''::text) = ''::text))))
+);
+
+--
+-- Name: TABLE lookup_batch; Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON TABLE ingest.lookup_batch IS 'A committed plan of NONE lookups, paced by the provider''s windows. Its totals are never served: progress is derived from the rows a reader can read.';
+
+--
+-- Name: lookup_result; Type: TABLE; Schema: ingest; Owner: -
+--
+
+CREATE TABLE ingest.lookup_result (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    case_id uuid NOT NULL,
+    lookup_id uuid NOT NULL,
+    provider_id uuid NOT NULL,
+    operation text NOT NULL,
+    adapter_version text NOT NULL,
+    selector_type text NOT NULL,
+    query_fingerprint bytea NOT NULL,
+    fetched_at timestamp with time zone NOT NULL,
+    fresh_until timestamp with time zone NOT NULL,
+    http_status integer NOT NULL,
+    outcome text NOT NULL,
+    media_type text NOT NULL,
+    raw_body bytea NOT NULL,
+    raw_sha256 bytea NOT NULL,
+    summary jsonb DEFAULT '{}'::jsonb NOT NULL,
+    findings_total integer DEFAULT 0 NOT NULL,
+    findings_proposed integer DEFAULT 0 NOT NULL,
+    interpret_error text,
+    classification core.tlp NOT NULL,
+    filed_evidence_id uuid,
+    purged_at timestamp with time zone,
+    CONSTRAINT lookup_result_body_cap CHECK ((octet_length(raw_body) <= 16777216)),
+    CONSTRAINT lookup_result_findings_total_check CHECK ((findings_total >= 0)),
+    CONSTRAINT lookup_result_fresh CHECK ((fresh_until >= fetched_at)),
+    CONSTRAINT lookup_result_interpret_error_check CHECK (((interpret_error IS NULL) OR (length(interpret_error) <= 500))),
+    CONSTRAINT lookup_result_outcome_check CHECK ((outcome = ANY (ARRAY['FOUND'::text, 'NOT_FOUND'::text, 'UNREADABLE'::text]))),
+    CONSTRAINT lookup_result_proposed_range CHECK (((findings_proposed >= 0) AND (findings_proposed <= findings_total))),
+    CONSTRAINT lookup_result_purge_empties CHECK (((purged_at IS NULL) OR ((octet_length(raw_body) = 0) AND (summary = '{}'::jsonb) AND (interpret_error IS NULL)))),
+    CONSTRAINT lookup_result_query_fingerprint_check CHECK ((octet_length(query_fingerprint) = 32)),
+    CONSTRAINT lookup_result_raw_sha256_check CHECK ((octet_length(raw_sha256) = 32)),
+    CONSTRAINT lookup_result_unreadable_never_cached CHECK (((outcome <> 'UNREADABLE'::text) OR (fresh_until = fetched_at))),
+    CONSTRAINT lookup_result_unreadable_says_why CHECK (((purged_at IS NOT NULL) OR ((outcome = 'UNREADABLE'::text) = (interpret_error IS NOT NULL))))
+);
+
+--
+-- Name: TABLE lookup_result; Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON TABLE ingest.lookup_result IS 'A provider''s answer, kept as case material and never labelled below the question. Emptied by retention, never deleted.';
+
+--
 -- Name: pii_authorisation; Type: TABLE; Schema: ingest; Owner: -
 --
 
@@ -2657,6 +6529,130 @@ CREATE TABLE ingest.pii_authorisation (
     CONSTRAINT pii_authorisation_justified CHECK (((length(btrim(scope_note)) > 20) AND (length(btrim(legal_basis)) > 0))),
     CONSTRAINT pii_authorisation_two_humans CHECK ((granted_to <> granted_by))
 );
+
+--
+-- Name: provider; Type: TABLE; Schema: ingest; Owner: -
+--
+
+CREATE TABLE ingest.provider (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    key text NOT NULL,
+    display_name text NOT NULL,
+    adapter text NOT NULL,
+    adapter_version text NOT NULL,
+    source_id uuid NOT NULL,
+    base_url text NOT NULL,
+    origin_host text NOT NULL,
+    origin_port integer NOT NULL,
+    egress_route text NOT NULL,
+    exposure_level text NOT NULL,
+    exposure_basis text NOT NULL,
+    exposure_determined_by uuid NOT NULL,
+    exposure_determined_at timestamp with time zone DEFAULT now() NOT NULL,
+    needs_exposure_approval boolean DEFAULT false NOT NULL,
+    classification_ceiling core.tlp DEFAULT 'GREEN'::core.tlp NOT NULL,
+    result_floor core.tlp,
+    use_private_ca boolean DEFAULT false NOT NULL,
+    private_cidr cidr,
+    cache_ttl interval DEFAULT '7 days'::interval NOT NULL,
+    quota_per_minute integer,
+    quota_per_hour integer,
+    quota_per_day integer,
+    quota_per_month integer,
+    queue_reserve_pct smallint DEFAULT 20 NOT NULL,
+    max_response_bytes integer DEFAULT 2097152 NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
+    status text DEFAULT 'HEALTHY'::text NOT NULL,
+    locked_reason text,
+    cooldown_until timestamp with time zone,
+    consecutive_429 smallint DEFAULT 0 NOT NULL,
+    secret_ciphertext bytea,
+    secret_key_id text,
+    secret_origin text,
+    secret_set_at timestamp with time zone,
+    secret_set_by uuid,
+    rotate_by date,
+    last_request_at timestamp with time zone,
+    created_by uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    retired_reason text,
+    CONSTRAINT provider_429_count CHECK ((consecutive_429 >= 0)),
+    CONSTRAINT provider_base_url_shape CHECK ((base_url ~ '^https://[^/@?#[:space:]]+(/[^?#[:space:]]*)?$'::text)),
+    CONSTRAINT provider_cache_ttl_range CHECK (((cache_ttl >= '00:00:00'::interval) AND (cache_ttl <= '90 days'::interval))),
+    CONSTRAINT provider_ceiling_below_floor CHECK ((classification_ceiling = ANY (ARRAY['CLEAR'::core.tlp, 'GREEN'::core.tlp, 'AMBER'::core.tlp]))),
+    CONSTRAINT provider_enabled_needs_approval CHECK (((NOT enabled) OR (NOT needs_exposure_approval))),
+    CONSTRAINT provider_enabled_needs_quota CHECK (((NOT enabled) OR (num_nonnulls(quota_per_minute, quota_per_hour, quota_per_day, quota_per_month) >= 1))),
+    CONSTRAINT provider_enabled_needs_secret CHECK (((NOT enabled) OR (secret_ciphertext IS NOT NULL))),
+    CONSTRAINT provider_exposure_justified CHECK ((length(btrim(exposure_basis)) > 20)),
+    CONSTRAINT provider_exposure_known CHECK ((exposure_level = ANY (ARRAY['NONE'::text, 'VENDOR'::text, 'PUBLIC'::text]))),
+    CONSTRAINT provider_key_shape CHECK ((key ~ '^[a-z][a-z0-9_]{1,32}$'::text)),
+    CONSTRAINT provider_locked_says_why CHECK (((status = 'LOCKED'::text) = (locked_reason IS NOT NULL))),
+    CONSTRAINT provider_name_present CHECK (((length(btrim(display_name)) >= 3) AND (length(btrim(display_name)) <= 80))),
+    CONSTRAINT provider_port_range CHECK (((origin_port >= 1) AND (origin_port <= 65535))),
+    CONSTRAINT provider_private_ca_is_none CHECK (((NOT use_private_ca) OR (exposure_level = 'NONE'::text))),
+    CONSTRAINT provider_private_cidr_is_none CHECK (((private_cidr IS NULL) OR (exposure_level = 'NONE'::text))),
+    CONSTRAINT provider_public_ceiling_clear CHECK (((exposure_level <> 'PUBLIC'::text) OR (classification_ceiling = 'CLEAR'::core.tlp))),
+    CONSTRAINT provider_quota_day CHECK ((quota_per_day > 0)),
+    CONSTRAINT provider_quota_hour CHECK ((quota_per_hour > 0)),
+    CONSTRAINT provider_quota_minute CHECK ((quota_per_minute > 0)),
+    CONSTRAINT provider_quota_month CHECK ((quota_per_month > 0)),
+    CONSTRAINT provider_reserve_range CHECK (((queue_reserve_pct >= 0) AND (queue_reserve_pct <= 90))),
+    CONSTRAINT provider_response_cap CHECK (((max_response_bytes >= 65536) AND (max_response_bytes <= 16777216))),
+    CONSTRAINT provider_retired_is_off CHECK (((retired_at IS NULL) OR ((NOT enabled) AND (secret_ciphertext IS NULL)))),
+    CONSTRAINT provider_retirement_complete CHECK ((((retired_at IS NULL) = (retired_reason IS NULL)) AND ((retired_at IS NULL) = (retired_by IS NULL)))),
+    CONSTRAINT provider_route_shape CHECK ((egress_route ~ '^lookup-[a-z0-9-]{1,33}$'::text)),
+    CONSTRAINT provider_secret_complete CHECK ((((secret_ciphertext IS NULL) = (secret_key_id IS NULL)) AND ((secret_ciphertext IS NULL) = (secret_origin IS NULL)) AND ((secret_ciphertext IS NULL) = (secret_set_at IS NULL)) AND ((secret_ciphertext IS NULL) = (rotate_by IS NULL)))),
+    CONSTRAINT provider_status_known CHECK ((status = ANY (ARRAY['HEALTHY'::text, 'LOCKED'::text]))),
+    CONSTRAINT provider_vendor_ceiling_green CHECK (((exposure_level <> 'VENDOR'::text) OR (classification_ceiling = ANY (ARRAY['CLEAR'::core.tlp, 'GREEN'::core.tlp]))))
+);
+
+--
+-- Name: TABLE provider; Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON TABLE ingest.provider IS 'An outbound lookup provider (docs/12 Part 3). Its key is envelope-sealed and bound to the origin and route it was entered for. Retired, never deleted.';
+
+--
+-- Name: provider_exposure_change; Type: TABLE; Schema: ingest; Owner: -
+--
+
+CREATE TABLE ingest.provider_exposure_change (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    provider_id uuid NOT NULL,
+    from_level text NOT NULL,
+    to_level text NOT NULL,
+    origin text NOT NULL,
+    private_cidr cidr,
+    basis text NOT NULL,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    decision text,
+    decided_by uuid,
+    decided_at timestamp with time zone,
+    decision_note text,
+    CONSTRAINT exposure_change_approved_in_time CHECK (((decision IS DISTINCT FROM 'APPROVED'::text) OR (decided_at <= expires_at))),
+    CONSTRAINT exposure_change_decision_complete CHECK (((decision IS NULL) = (decided_at IS NULL))),
+    CONSTRAINT exposure_change_expires CHECK (((expires_at > requested_at) AND (expires_at <= (requested_at + '72:00:00'::interval)))),
+    CONSTRAINT exposure_change_expiry_has_no_decider CHECK (((decision IS DISTINCT FROM 'EXPIRED'::text) OR (decided_by IS NULL))),
+    CONSTRAINT exposure_change_justified CHECK ((length(btrim(basis)) > 20)),
+    CONSTRAINT exposure_change_lowers CHECK ((ingest.exposure_rank(to_level) < ingest.exposure_rank(from_level))),
+    CONSTRAINT exposure_change_origin_shape CHECK ((origin ~ '^https://.+:[0-9]{1,5}$'::text)),
+    CONSTRAINT exposure_change_two_admins CHECK (((decision IS NULL) OR (decision <> ALL (ARRAY['APPROVED'::text, 'DECLINED'::text])) OR ((decided_by IS NOT NULL) AND (decided_by <> requested_by)))),
+    CONSTRAINT exposure_change_withdrawn_by_requester CHECK (((decision IS DISTINCT FROM 'WITHDRAWN'::text) OR (decided_by = requested_by))),
+    CONSTRAINT provider_exposure_change_decision_check CHECK ((decision = ANY (ARRAY['APPROVED'::text, 'DECLINED'::text, 'WITHDRAWN'::text, 'EXPIRED'::text]))),
+    CONSTRAINT provider_exposure_change_from_level_check CHECK ((from_level = ANY (ARRAY['NONE'::text, 'VENDOR'::text, 'PUBLIC'::text]))),
+    CONSTRAINT provider_exposure_change_to_level_check CHECK ((to_level = ANY (ARRAY['NONE'::text, 'VENDOR'::text, 'PUBLIC'::text])))
+);
+
+--
+-- Name: TABLE provider_exposure_change; Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON TABLE ingest.provider_exposure_change IS 'Lowering a provider''s exposure, requested by one administrator and decided by a different one (docs/12 Part 3). Decided once, never deleted.';
 
 --
 -- Name: record; Type: TABLE; Schema: ingest; Owner: -
@@ -2731,11 +6727,66 @@ CREATE TABLE lab.detonation (
     external_ref text,
     status text DEFAULT 'PENDING'::text NOT NULL,
     report jsonb,
+    mode text DEFAULT 'RECORD_ONLY'::text NOT NULL,
+    provider text,
+    target_key text,
+    target_host text,
+    target_ceiling core.tlp,
+    egress_route text,
+    network_route text,
+    route_class text,
+    machine text,
+    machine_class text,
+    options jsonb DEFAULT '{}'::jsonb NOT NULL,
+    signoff_required boolean DEFAULT false NOT NULL,
+    signoff_expires_at timestamp with time zone,
+    signed_off_by uuid,
+    signed_off_at timestamp with time zone,
+    signoff_decision text,
+    signoff_note text,
+    classification_sent core.tlp,
+    egress_reason text,
+    submitted_sha256 bytea,
+    submit_outcome text,
+    external_status text,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_polled_at timestamp with time zone,
+    last_error text,
+    completed_at timestamp with time zone,
+    report_sha256 bytea,
+    report_bytes bigint,
+    analysis_id uuid,
+    cancelled_by uuid,
+    CONSTRAINT detonation_attempts_non_negative CHECK ((attempts >= 0)),
+    CONSTRAINT detonation_ceiling_leaves CHECK (((target_ceiling IS NULL) OR (target_ceiling = ANY (ARRAY['CLEAR'::core.tlp, 'GREEN'::core.tlp, 'AMBER'::core.tlp])))),
+    CONSTRAINT detonation_confirmed_has_ref CHECK (((mode = 'RECORD_ONLY'::text) OR ((NOT (submit_outcome IS DISTINCT FROM 'CONFIRMED'::text)) = (external_ref IS NOT NULL)))),
+    CONSTRAINT detonation_declined_is_signed CHECK (((status <> 'DECLINED'::text) OR (signoff_decision = 'DECLINED'::text))),
     CONSTRAINT detonation_exposure_known CHECK ((exposure_level = ANY (ARRAY['NONE'::text, 'VENDOR'::text, 'PUBLIC'::text]))),
     CONSTRAINT detonation_exposure_needs_authoriser CHECK (((exposure_level = 'NONE'::text) OR (authorised_by IS NOT NULL))),
     CONSTRAINT detonation_exposure_needs_note CHECK (((exposure_level = 'NONE'::text) OR (authorisation_note IS NOT NULL))),
-    CONSTRAINT detonation_status_known CHECK ((status = ANY (ARRAY['PENDING'::text, 'AUTHORISED'::text, 'SUBMITTED'::text, 'REPORTED'::text, 'REFUSED'::text])))
+    CONSTRAINT detonation_machine_classed CHECK ((((machine IS NULL) = (machine_class IS NULL)) AND ((machine_class IS NULL) OR (machine_class = ANY (ARRAY['ISOLATED'::text, 'LIVE'::text]))))),
+    CONSTRAINT detonation_mode_known CHECK ((mode = ANY (ARRAY['RECORD_ONLY'::text, 'SUBMIT'::text]))),
+    CONSTRAINT detonation_queued_only_when_signed CHECK (((status <> ALL (ARRAY['QUEUED'::text, 'SUBMITTED'::text, 'REPORTED'::text, 'FAILED'::text])) OR (mode = 'RECORD_ONLY'::text) OR (NOT signoff_required) OR (signoff_decision = 'APPROVED'::text))),
+    CONSTRAINT detonation_reported_is_complete CHECK (((status <> 'REPORTED'::text) OR (mode = 'RECORD_ONLY'::text) OR ((submit_outcome = 'CONFIRMED'::text) AND (report_sha256 IS NOT NULL) AND (completed_at IS NOT NULL) AND (analysis_id IS NOT NULL)))),
+    CONSTRAINT detonation_route_class_known CHECK (((route_class IS NULL) OR (route_class = ANY (ARRAY['ISOLATED'::text, 'LIVE'::text])))),
+    CONSTRAINT detonation_sent_is_dated CHECK (((mode = 'RECORD_ONLY'::text) OR (status <> ALL (ARRAY['SUBMITTED'::text, 'REPORTED'::text, 'FAILED'::text])) OR (submitted_at IS NOT NULL))),
+    CONSTRAINT detonation_signoff_by_the_named_authoriser CHECK (((signed_off_by IS NULL) OR (signed_off_by = authorised_by))),
+    CONSTRAINT detonation_signoff_complete CHECK ((((signed_off_at IS NULL) = (signed_off_by IS NULL)) AND ((signed_off_at IS NULL) = (signoff_decision IS NULL)))),
+    CONSTRAINT detonation_signoff_decision_known CHECK (((signoff_decision IS NULL) OR (signoff_decision = ANY (ARRAY['APPROVED'::text, 'DECLINED'::text])))),
+    CONSTRAINT detonation_signoff_names_an_authoriser CHECK (((NOT signoff_required) OR ((authorised_by IS NOT NULL) AND (authorisation_note IS NOT NULL)))),
+    CONSTRAINT detonation_signoff_when_exposed CHECK (((mode = 'RECORD_ONLY'::text) OR (signoff_required = ((exposure_level <> 'NONE'::text) OR (route_class = 'LIVE'::text) OR COALESCE((machine_class = 'LIVE'::text), false))))),
+    CONSTRAINT detonation_signoff_window CHECK ((signoff_required = (signoff_expires_at IS NOT NULL))),
+    CONSTRAINT detonation_status_by_mode CHECK ((((mode = 'RECORD_ONLY'::text) AND (status = ANY (ARRAY['PENDING'::text, 'AUTHORISED'::text, 'SUBMITTED'::text, 'REPORTED'::text, 'REFUSED'::text]))) OR ((mode = 'SUBMIT'::text) AND (status = ANY (ARRAY['AWAITING_SIGNOFF'::text, 'QUEUED'::text, 'SUBMITTED'::text, 'REPORTED'::text, 'FAILED'::text, 'REFUSED'::text, 'DECLINED'::text, 'CANCELLED'::text]))))),
+    CONSTRAINT detonation_submit_names_target CHECK (((mode = 'RECORD_ONLY'::text) OR (num_nulls(provider, target_key, target_host, target_ceiling, egress_route, network_route, route_class) = 0))),
+    CONSTRAINT detonation_submit_outcome_known CHECK (((submit_outcome IS NULL) OR (submit_outcome = ANY (ARRAY['CONFIRMED'::text, 'NOT_SENT'::text, 'REJECTED_BY_TARGET'::text, 'UNCONFIRMED'::text])))),
+    CONSTRAINT detonation_two_people CHECK (((mode = 'RECORD_ONLY'::text) OR (authorised_by IS DISTINCT FROM requested_by)))
 );
+
+--
+-- Name: COLUMN detonation.mode; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.detonation.mode IS 'RECORD_ONLY: a request recorded and never sent (every row before 0103). SUBMIT: sent by scripts/sandbox_dispatch.py to the configured sandbox.';
 
 --
 -- Name: download_ticket; Type: TABLE; Schema: lab; Owner: -
@@ -2832,12 +6883,37 @@ CREATE TABLE lab.sample (
     preserved_key text,
     preserved_version_id text,
     preserved_at timestamp with time zone,
+    ssdeep_tokens text[],
+    tlsh_lvalue smallint,
+    screening_outcome text DEFAULT 'NOT_SCREENED'::text NOT NULL,
+    screened_at timestamp with time zone,
+    screening_list_seq bigint,
+    screening_bytes_absent_at timestamp with time zone,
     CONSTRAINT sample_assignment_complete CHECK (((assigned_to IS NULL) = (assigned_at IS NULL))),
+    CONSTRAINT sample_bytes_absent_only_on_match CHECK (((screening_bytes_absent_at IS NULL) OR (screening_outcome = 'MATCH'::text))),
+    CONSTRAINT sample_match_is_rejected CHECK (((screening_outcome <> 'MATCH'::text) OR (state = 'REJECTED'::lab.sample_state))),
     CONSTRAINT sample_preservation_complete CHECK ((((preserved_key IS NULL) = (preserved_bucket IS NULL)) AND ((preserved_key IS NULL) = (preserved_at IS NULL)) AND ((preserved_key IS NOT NULL) OR (preserved_version_id IS NULL)))),
     CONSTRAINT sample_preserved_keeps_its_key CHECK (((preserved_key IS NULL) OR (octet_length(data_key_ciphertext) > 0))),
     CONSTRAINT sample_preserved_only_when_rejected CHECK (((preserved_key IS NULL) OR (state = 'REJECTED'::lab.sample_state))),
-    CONSTRAINT sample_rejection_has_reason CHECK (((state = 'REJECTED'::lab.sample_state) = (reject_reason IS NOT NULL)))
+    CONSTRAINT sample_rejection_has_reason CHECK (((state = 'REJECTED'::lab.sample_state) = (reject_reason IS NOT NULL))),
+    CONSTRAINT sample_screening_dated CHECK ((((screening_outcome = 'NOT_SCREENED'::text) = (screened_at IS NULL)) AND ((screened_at IS NULL) = (screening_list_seq IS NULL)))),
+    CONSTRAINT sample_screening_outcome_known CHECK ((screening_outcome = ANY (ARRAY['NOT_SCREENED'::text, 'NO_MATCH'::text, 'MATCH'::text]))),
+    CONSTRAINT sample_ssdeep_tokens_with_ssdeep CHECK (((ssdeep IS NOT NULL) OR (ssdeep_tokens IS NULL))),
+    CONSTRAINT sample_tlsh_lvalue_range CHECK (((tlsh_lvalue >= 0) AND (tlsh_lvalue <= 255))),
+    CONSTRAINT sample_tlsh_lvalue_with_tlsh CHECK (((tlsh IS NULL) = (tlsh_lvalue IS NULL)))
 );
+
+--
+-- Name: COLUMN sample.screening_outcome; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.sample.screening_outcome IS 'Prohibited-content screening by exact hash (F13). MATCH is permanent and implies REJECTED; retiring a list never un-matches a sample.';
+
+--
+-- Name: COLUMN sample.screening_bytes_absent_at; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.sample.screening_bytes_absent_at IS 'Set once when a matched sample''s bytes were found in neither store on two passes. Recorded, never acted on: the data key is kept.';
 
 --
 -- Name: sample_access; Type: TABLE; Schema: lab; Owner: -
@@ -2846,13 +6922,23 @@ CREATE TABLE lab.sample (
 CREATE TABLE lab.sample_access (
     id bigint NOT NULL,
     sample_id uuid NOT NULL,
-    actor_id uuid NOT NULL,
+    actor_id uuid,
     action text NOT NULL,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL,
     archive_format text,
     detail jsonb DEFAULT '{}'::jsonb NOT NULL,
-    CONSTRAINT sample_access_action_known CHECK ((action = ANY (ARRAY['VIEWED_META'::text, 'DOWNLOADED'::text, 'SHARED'::text, 'DETONATED'::text, 'REJECTED'::text, 'ASSIGNED'::text, 'ANALYSED'::text])))
+    actor_kind text DEFAULT 'USER'::text NOT NULL,
+    CONSTRAINT sample_access_action_known CHECK ((action = ANY (ARRAY['VIEWED_META'::text, 'DOWNLOADED'::text, 'SHARED'::text, 'DETONATED'::text, 'REJECTED'::text, 'ASSIGNED'::text, 'ANALYSED'::text, 'SCANNED'::text]))),
+    CONSTRAINT sample_access_actor_kind_known CHECK ((actor_kind = ANY (ARRAY['USER'::text, 'SYSTEM'::text]))),
+    CONSTRAINT sample_access_system_actions CHECK (((actor_kind = 'USER'::text) OR (action = ANY (ARRAY['SCANNED'::text, 'VIEWED_META'::text, 'REJECTED'::text, 'ANALYSED'::text])))),
+    CONSTRAINT sample_access_system_names_nobody CHECK (((actor_kind = 'SYSTEM'::text) = (actor_id IS NULL)))
 );
+
+--
+-- Name: COLUMN sample_access.actor_kind; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.sample_access.actor_kind IS 'USER names the person in actor_id; SYSTEM is the product acting on nobody''s request (actor_id NULL), allowed only for reads in memory (SCANNED), integrity alarms, screening isolation and machine findings.';
 
 --
 -- Name: sample_access_id_seq; Type: SEQUENCE; Schema: lab; Owner: -
@@ -2889,9 +6975,332 @@ CREATE TABLE lab.sample_analysis (
     confidence core.analytic_confidence,
     narrative text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    origin text DEFAULT 'analyst'::text NOT NULL,
+    run_id uuid,
+    yara_ruleset_version_id uuid,
     CONSTRAINT sample_analysis_family_needs_confidence CHECK (((family_assessment IS NULL) OR (confidence IS NOT NULL))),
-    CONSTRAINT sample_analysis_kind_known CHECK ((kind = ANY (ARRAY['STATIC'::text, 'YARA'::text, 'MANUAL_RE'::text, 'SANDBOX'::text, 'VENDOR'::text])))
+    CONSTRAINT sample_analysis_kind_known CHECK ((kind = ANY (ARRAY['STATIC'::text, 'YARA'::text, 'MANUAL_RE'::text, 'SANDBOX'::text, 'VENDOR'::text]))),
+    CONSTRAINT sample_analysis_machine_names_no_analyst CHECK (((origin = 'analyst'::text) OR (analyst_id IS NULL))),
+    CONSTRAINT sample_analysis_machine_yara_names_its_rules CHECK (((NOT ((origin = 'machine'::text) AND (kind = 'YARA'::text))) OR ((run_id IS NOT NULL) AND (yara_ruleset_version_id IS NOT NULL)))),
+    CONSTRAINT sample_analysis_origin_known CHECK ((origin = ANY (ARRAY['analyst'::text, 'machine'::text]))),
+    CONSTRAINT sample_analysis_run_only_on_machine_rows CHECK (((run_id IS NULL) OR (origin = 'machine'::text))),
+    CONSTRAINT sample_analysis_static_names_its_run CHECK (((NOT ((origin = 'machine'::text) AND (kind = 'STATIC'::text))) OR (run_id IS NOT NULL)))
 );
+
+--
+-- Name: screening_hash; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.screening_hash (
+    list_id uuid NOT NULL,
+    algorithm text NOT NULL,
+    digest bytea NOT NULL,
+    CONSTRAINT screening_hash_algorithm_known CHECK ((algorithm = ANY (ARRAY['md5'::text, 'sha1'::text, 'sha256'::text]))),
+    CONSTRAINT screening_hash_digest_length CHECK ((octet_length(digest) =
+CASE algorithm
+    WHEN 'md5'::text THEN 16
+    WHEN 'sha1'::text THEN 20
+    ELSE 32
+END))
+);
+
+--
+-- Name: TABLE screening_hash; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON TABLE lab.screening_hash IS 'The entries of the imported lists. Read only by the matcher (screening.screen_digests and the rescan); never returned by any route.';
+
+--
+-- Name: screening_list; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.screening_list (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    seq bigint NOT NULL,
+    name text NOT NULL,
+    provider text NOT NULL,
+    category text NOT NULL,
+    authority_reference text NOT NULL,
+    deployment_authority text NOT NULL,
+    source_sha256 bytea NOT NULL,
+    entry_count integer NOT NULL,
+    algorithms text[] NOT NULL,
+    imported_by uuid NOT NULL,
+    imported_via text NOT NULL,
+    imported_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_at timestamp with time zone,
+    retired_by uuid,
+    retire_reason text,
+    purge_requested boolean DEFAULT false NOT NULL,
+    purge_requested_by uuid,
+    entries_purged_at timestamp with time zone,
+    CONSTRAINT screening_list_algorithms CHECK (((cardinality(algorithms) >= 1) AND (algorithms <@ ARRAY['md5'::text, 'sha1'::text, 'sha256'::text]))),
+    CONSTRAINT screening_list_authority CHECK (((length(btrim(authority_reference)) >= 6) AND (length(btrim(deployment_authority)) >= 6))),
+    CONSTRAINT screening_list_category_known CHECK ((category = ANY (ARRAY['KNOWN_CSAM'::text, 'TERRORIST_CONTENT'::text, 'OTHER_PROHIBITED'::text]))),
+    CONSTRAINT screening_list_named CHECK (((length(btrim(name)) > 0) AND (length(btrim(provider)) > 0))),
+    CONSTRAINT screening_list_not_empty CHECK ((entry_count > 0)),
+    CONSTRAINT screening_list_purge_after_retire CHECK (((NOT purge_requested) OR (retired_at IS NOT NULL))),
+    CONSTRAINT screening_list_purge_names_who CHECK ((purge_requested = (purge_requested_by IS NOT NULL))),
+    CONSTRAINT screening_list_purged_when_asked CHECK (((entries_purged_at IS NULL) OR purge_requested)),
+    CONSTRAINT screening_list_retirement_complete CHECK ((((retired_at IS NULL) = (retired_by IS NULL)) AND ((retired_at IS NULL) = (retire_reason IS NULL)))),
+    CONSTRAINT screening_list_source_digest CHECK ((octet_length(source_sha256) = 32)),
+    CONSTRAINT screening_list_via_known CHECK ((imported_via = ANY (ARRAY['console'::text, 'cli'::text])))
+);
+
+--
+-- Name: TABLE screening_list; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON TABLE lab.screening_list IS 'Prohibited-content hash lists an operator imported under a recorded authority (F13). Never deleted; retirement and purge are stamped once.';
+
+--
+-- Name: screening_list_seq_seq; Type: SEQUENCE; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.screening_list ALTER COLUMN seq ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME lab.screening_list_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+--
+-- Name: screening_result; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.screening_result (
+    id uuid NOT NULL,
+    sample_id uuid NOT NULL,
+    sha256 bytea NOT NULL,
+    screened_at timestamp with time zone DEFAULT now() NOT NULL,
+    trigger text NOT NULL,
+    actor_id uuid,
+    outcome text NOT NULL,
+    lists_consulted uuid[] NOT NULL,
+    list_seq bigint NOT NULL,
+    matched_lists uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    matched_algorithms text[] DEFAULT '{}'::text[] NOT NULL,
+    disposition text,
+    alert_outcome text,
+    officers_notified integer DEFAULT 0 NOT NULL,
+    detail jsonb DEFAULT '{}'::jsonb NOT NULL,
+    CONSTRAINT screening_result_alert_outcome_check CHECK ((alert_outcome = ANY (ARRAY['SENT'::text, 'COALESCED'::text, 'NONE_REACHED'::text, 'FAILED'::text]))),
+    CONSTRAINT screening_result_disposition_check CHECK ((disposition = ANY (ARRAY['PRESERVE'::text, 'NOT_STORED'::text, 'STORE_FAILED'::text, 'ALREADY_PRESERVED'::text, 'NO_BYTES'::text, 'ALREADY_ISOLATED'::text]))),
+    CONSTRAINT screening_result_lists_consulted_check CHECK ((cardinality(lists_consulted) > 0)),
+    CONSTRAINT screening_result_match_is_disposed CHECK ((((outcome = 'MATCH'::text) = (disposition IS NOT NULL)) AND ((outcome = 'MATCH'::text) = (alert_outcome IS NOT NULL)))),
+    CONSTRAINT screening_result_match_is_named CHECK (((outcome = 'MATCH'::text) = (cardinality(matched_lists) > 0))),
+    CONSTRAINT screening_result_no_match_is_a_submission CHECK (((outcome = 'MATCH'::text) OR (trigger = 'SUBMISSION'::text))),
+    CONSTRAINT screening_result_officers_notified_check CHECK ((officers_notified >= 0)),
+    CONSTRAINT screening_result_outcome_check CHECK ((outcome = ANY (ARRAY['NO_MATCH'::text, 'MATCH'::text]))),
+    CONSTRAINT screening_result_sha256_check CHECK ((octet_length(sha256) = 32)),
+    CONSTRAINT screening_result_trigger_check CHECK ((trigger = ANY (ARRAY['SUBMISSION'::text, 'LIST_IMPORT'::text, 'RESCAN'::text])))
+);
+
+--
+-- Name: screening_review; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.screening_review (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    result_id uuid NOT NULL,
+    reviewed_by uuid NOT NULL,
+    reviewed_at timestamp with time zone DEFAULT now() NOT NULL,
+    action text NOT NULL,
+    reference text,
+    note text,
+    CONSTRAINT screening_review_action_check CHECK ((action = ANY (ARRAY['ACKNOWLEDGED'::text, 'REFERRED'::text, 'FALSE_POSITIVE_SUSPECTED'::text, 'DISPOSED_OUTSIDE'::text, 'NOTE'::text]))),
+    CONSTRAINT screening_review_referenced CHECK (((action <> ALL (ARRAY['REFERRED'::text, 'DISPOSED_OUTSIDE'::text])) OR (length(btrim(COALESCE(reference, ''::text))) > 0))),
+    CONSTRAINT screening_review_says_something CHECK (((action = 'ACKNOWLEDGED'::text) OR (length(btrim((COALESCE(reference, ''::text) || COALESCE(note, ''::text)))) > 0)))
+);
+
+--
+-- Name: static_run; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.static_run (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sample_id uuid NOT NULL,
+    trigger text NOT NULL,
+    requested_by uuid,
+    requests jsonb DEFAULT '[]'::jsonb NOT NULL,
+    priority smallint DEFAULT 1 NOT NULL,
+    steps text[] DEFAULT '{pe,fuzzy,yara}'::text[] NOT NULL,
+    yara_version_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    status text DEFAULT 'QUEUED'::text NOT NULL,
+    attempt integer DEFAULT 1 NOT NULL,
+    queued_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    outcome jsonb DEFAULT '{}'::jsonb NOT NULL,
+    failure text,
+    CONSTRAINT static_run_attempt_positive CHECK ((attempt >= 1)),
+    CONSTRAINT static_run_failure_says_why CHECK (((status = ANY (ARRAY['FAILED'::text, 'ABANDONED'::text, 'SKIPPED'::text])) = (failure IS NOT NULL))),
+    CONSTRAINT static_run_finished CHECK (((status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text])) = (finished_at IS NULL))),
+    CONSTRAINT static_run_person_named CHECK (((trigger <> ALL (ARRAY['ON_DEMAND'::text, 'RETROHUNT'::text])) OR (requested_by IS NOT NULL))),
+    CONSTRAINT static_run_priority_known CHECK (((priority >= 0) AND (priority <= 2))),
+    CONSTRAINT static_run_queued_untouched CHECK (((status <> 'QUEUED'::text) OR ((started_at IS NULL) AND (finished_at IS NULL)))),
+    CONSTRAINT static_run_requests_is_a_list CHECK ((jsonb_typeof(requests) = 'array'::text)),
+    CONSTRAINT static_run_started CHECK (((status <> ALL (ARRAY['RUNNING'::text, 'DONE'::text, 'FAILED'::text, 'ABANDONED'::text])) OR (started_at IS NOT NULL))),
+    CONSTRAINT static_run_status_known CHECK ((status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'DONE'::text, 'FAILED'::text, 'ABANDONED'::text, 'SKIPPED'::text]))),
+    CONSTRAINT static_run_steps_known CHECK (((cardinality(steps) > 0) AND (steps <@ ARRAY['pe'::text, 'fuzzy'::text, 'yara'::text]))),
+    CONSTRAINT static_run_trigger_known CHECK ((trigger = ANY (ARRAY['SUBMIT'::text, 'ON_DEMAND'::text, 'RETRY'::text, 'RETROHUNT'::text, 'BACKFILL'::text])))
+);
+
+--
+-- Name: TABLE static_run; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON TABLE lab.static_run IS 'The static-triage queue (F11). A queue, not a ledger: SCANNED custody and the audit chain record what was read and who caused it. requests lists every request merged into the run, so custody can name each requester.';
+
+--
+-- Name: yara_activation; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.yara_activation (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ruleset_id uuid NOT NULL,
+    version_id uuid NOT NULL,
+    activated_by uuid NOT NULL,
+    activated_at timestamp with time zone DEFAULT now() NOT NULL,
+    licence_acknowledgement text,
+    deactivated_by uuid,
+    deactivated_at timestamp with time zone,
+    deactivation_reason text,
+    CONSTRAINT yara_activation_ack_says_something CHECK (((licence_acknowledgement IS NULL) OR (length(btrim(licence_acknowledgement)) > 20))),
+    CONSTRAINT yara_activation_close_complete CHECK ((((deactivated_at IS NULL) = (deactivated_by IS NULL)) AND ((deactivated_at IS NULL) = (deactivation_reason IS NULL)))),
+    CONSTRAINT yara_activation_reason_says_something CHECK (((deactivation_reason IS NULL) OR (length(btrim(deactivation_reason)) >= 10)))
+);
+
+--
+-- Name: yara_compile_job; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.yara_compile_job (
+    version_id uuid NOT NULL,
+    engine text NOT NULL,
+    platform text NOT NULL,
+    fingerprint text NOT NULL,
+    status text DEFAULT 'QUEUED'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT yara_compile_job_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT yara_compile_job_status_check CHECK ((status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'FAILED'::text])))
+);
+
+--
+-- Name: yara_compiled; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.yara_compiled (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    version_id uuid NOT NULL,
+    engine text NOT NULL,
+    platform text NOT NULL,
+    fingerprint text NOT NULL,
+    status text NOT NULL,
+    rule_count integer DEFAULT 0 NOT NULL,
+    warning_count integer DEFAULT 0 NOT NULL,
+    report jsonb NOT NULL,
+    compiled bytea,
+    blob_sha256 bytea,
+    mac_key_id text,
+    mac bytea,
+    compiled_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT yara_compiled_blob_when_built CHECK ((((status = 'FAILED'::text) = (compiled IS NULL)) AND ((compiled IS NULL) = (blob_sha256 IS NULL)) AND ((compiled IS NULL) = (mac IS NULL)) AND ((compiled IS NULL) = (mac_key_id IS NULL)))),
+    CONSTRAINT yara_compiled_status_check CHECK ((status = ANY (ARRAY['COMPILED'::text, 'PARTIAL'::text, 'FAILED'::text])))
+);
+
+--
+-- Name: yara_compiled_rejected; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.yara_compiled_rejected (
+    compiled_id uuid NOT NULL,
+    reason text NOT NULL,
+    rejected_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT yara_compiled_rejected_reason_check CHECK ((reason = ANY (ARRAY['mac_mismatch'::text, 'undecodable'::text])))
+);
+
+--
+-- Name: yara_ruleset; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.yara_ruleset (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    key text NOT NULL,
+    display_name text NOT NULL,
+    description text,
+    classification core.tlp DEFAULT 'AMBER'::core.tlp NOT NULL,
+    compartments text[] DEFAULT '{}'::text[] NOT NULL,
+    created_by uuid,
+    created_via text DEFAULT 'console'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT yara_ruleset_created_via_check CHECK ((created_via = ANY (ARRAY['console'::text, 'yara_db.py'::text]))),
+    CONSTRAINT yara_ruleset_creator_named CHECK (((created_via = 'console'::text) = (created_by IS NOT NULL))),
+    CONSTRAINT yara_ruleset_display_name_check CHECK ((length(btrim(display_name)) > 0)),
+    CONSTRAINT yara_ruleset_key_check CHECK ((key ~ '^[a-z0-9][a-z0-9-]{1,62}$'::text))
+);
+
+--
+-- Name: TABLE yara_ruleset; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON TABLE lab.yara_ruleset IS 'A labelled YARA rule set (F12). Never deleted; labels only rise; compartments change only by the registry''s rename.';
+
+--
+-- Name: yara_ruleset_version; Type: TABLE; Schema: lab; Owner: -
+--
+
+CREATE TABLE lab.yara_ruleset_version (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ruleset_id uuid NOT NULL,
+    version integer NOT NULL,
+    source_sha256 bytea NOT NULL,
+    source_gz bytea NOT NULL,
+    source_bytes bigint NOT NULL,
+    files jsonb NOT NULL,
+    file_count integer NOT NULL,
+    licence text NOT NULL,
+    licence_review_required boolean NOT NULL,
+    provenance jsonb DEFAULT '{}'::jsonb NOT NULL,
+    note text,
+    uploaded_by uuid,
+    uploaded_at timestamp with time zone DEFAULT now() NOT NULL,
+    adopted_by uuid,
+    adopted_at timestamp with time zone,
+    CONSTRAINT yara_ruleset_version_file_count_check CHECK ((file_count >= 0)),
+    CONSTRAINT yara_ruleset_version_licence_check CHECK ((length(btrim(licence)) > 0)),
+    CONSTRAINT yara_ruleset_version_source_bytes_check CHECK ((source_bytes > 0)),
+    CONSTRAINT yara_ruleset_version_source_sha256_check CHECK ((octet_length(source_sha256) = 32)),
+    CONSTRAINT yara_ruleset_version_version_check CHECK ((version >= 1)),
+    CONSTRAINT yara_version_adopted_only_when_imported CHECK (((adopted_by IS NULL) OR (uploaded_by IS NULL))),
+    CONSTRAINT yara_version_adoption_complete CHECK (((adopted_by IS NULL) = (adopted_at IS NULL))),
+    CONSTRAINT yara_version_files_is_a_list CHECK ((jsonb_typeof(files) = 'array'::text)),
+    CONSTRAINT yara_version_uploader_or_script CHECK (((uploaded_by IS NOT NULL) OR ((provenance ->> 'via'::text) = 'yara_db.py'::text)))
+);
+
+--
+-- Name: case_route_block; Type: TABLE; Schema: notify; Owner: -
+--
+
+CREATE TABLE notify.case_route_block (
+    case_id uuid NOT NULL,
+    channel text NOT NULL,
+    reason text NOT NULL,
+    blocked_by uuid NOT NULL,
+    blocked_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT case_route_block_channel_known CHECK ((channel = 'JIRA'::text)),
+    CONSTRAINT case_route_block_reason_present CHECK (((length(btrim(reason)) >= 5) AND (length(btrim(reason)) <= 500)))
+);
+
+--
+-- Name: TABLE case_route_block; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON TABLE notify.case_route_block IS 'A case owner keeps this case out of Jira. The history is in audit.event (NOTIFY_CASE_ROUTING_CHANGED); lifting the veto deletes the row.';
 
 --
 -- Name: delivery; Type: TABLE; Schema: notify; Owner: -
@@ -2909,7 +7318,17 @@ CREATE TABLE notify.delivery (
     detail text,
     redacted boolean DEFAULT false NOT NULL,
     sent_to text,
+    cause text,
+    exposure text,
+    queued_at timestamp with time zone DEFAULT now() NOT NULL,
+    jira_link_id uuid,
+    CONSTRAINT delivery_cause_known CHECK (((cause IS NULL) OR (cause = ANY (ARRAY['RECIPIENT_DISABLED'::text, 'BELOW_THRESHOLD'::text, 'CASELESS'::text, 'DESTINATION_OFF'::text, 'KIND_NOT_ROUTED'::text, 'CASE_NOT_ROUTED'::text, 'WITHDRAWN'::text, 'REVOKED'::text, 'EGRESS_REFUSED'::text, 'TRANSPORT_ERROR'::text, 'RATE_LIMITED'::text, 'GAVE_UP'::text, 'REQUEUED'::text, 'ALREADY_ON_ISSUE'::text, 'LEGACY'::text])))),
     CONSTRAINT delivery_channel_known CHECK ((channel = ANY (ARRAY['IN_APP'::text, 'SMTP'::text, 'WEBHOOK'::text, 'JIRA'::text]))),
+    CONSTRAINT delivery_decided_has_cause CHECK (((state <> ALL (ARRAY['SUPPRESSED'::text, 'REFUSED'::text, 'FAILED'::text])) OR (cause IS NOT NULL))),
+    CONSTRAINT delivery_exposure_known CHECK (((exposure IS NULL) OR (exposure = ANY (ARRAY['STUB'::text, 'SUBJECT'::text, 'SUMMARY'::text])))),
+    CONSTRAINT delivery_in_app_never_leaves CHECK (((channel <> 'IN_APP'::text) OR (exposure IS NULL))),
+    CONSTRAINT delivery_link_is_jira CHECK (((jira_link_id IS NULL) OR (channel = 'JIRA'::text))),
+    CONSTRAINT delivery_on_issue_is_jira CHECK (((cause IS DISTINCT FROM 'ALREADY_ON_ISSUE'::text) OR ((channel = 'JIRA'::text) AND (state = 'SENT'::text)))),
     CONSTRAINT delivery_sent_has_timestamp CHECK (((state = 'SENT'::text) = (sent_at IS NOT NULL))),
     CONSTRAINT delivery_state_known CHECK ((state = ANY (ARRAY['PENDING'::text, 'SENT'::text, 'FAILED'::text, 'REFUSED'::text, 'SUPPRESSED'::text])))
 );
@@ -2918,7 +7337,156 @@ CREATE TABLE notify.delivery (
 -- Name: COLUMN delivery.sent_to; Type: COMMENT; Schema: notify; Owner: -
 --
 
-COMMENT ON COLUMN notify.delivery.sent_to IS 'The address or endpoint this delivery actually resolved to at drain time. NULL on rows written before migration 0044, and on SUPPRESSED rows that never resolved one. Never backfilled: an invented value would make the ledger look complete when it is not.';
+COMMENT ON COLUMN notify.delivery.sent_to IS 'Where the delivery actually went, resolved at drain time (0044). Never backfilled. A webhook address keeps its scheme and host; its path and query are withheld behind a fingerprint because they commonly carry a bearer secret (0096 rewrote the stored ones: withheld, not invented).';
+
+--
+-- Name: COLUMN delivery.cause; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON COLUMN notify.delivery.cause IS 'Why the row is in its state: one stable code (transports.CAUSES). Code matches on this, never on detail, which is the human sentence.';
+
+--
+-- Name: COLUMN delivery.exposure; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON COLUMN notify.delivery.exposure IS 'What left the building on this channel: STUB, SUBJECT or SUMMARY. NULL while nothing left, and always NULL on IN_APP. Backfilled from the code that ran (render_email and webhook_payload only ever sent those).';
+
+--
+-- Name: COLUMN delivery.queued_at; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON COLUMN notify.delivery.queued_at IS 'When the delivery was queued: the notification''s time for rows written before 0095.';
+
+--
+-- Name: jira_destination; Type: TABLE; Schema: notify; Owner: -
+--
+
+CREATE TABLE notify.jira_destination (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    label text NOT NULL,
+    base_url text NOT NULL,
+    host text NOT NULL,
+    port integer NOT NULL,
+    flavour text DEFAULT 'AUTO'::text NOT NULL,
+    auth_kind text NOT NULL,
+    auth_user text,
+    credential_ciphertext bytea NOT NULL,
+    credential_key_id text,
+    credential_set_at timestamp with time zone DEFAULT now() NOT NULL,
+    credential_set_by uuid NOT NULL,
+    project_key text NOT NULL,
+    issue_type text DEFAULT 'Task'::text NOT NULL,
+    issue_type_id text,
+    ceiling core.tlp DEFAULT 'GREEN'::core.tlp NOT NULL,
+    field_exposure text DEFAULT 'SUBJECT'::text NOT NULL,
+    kinds text[] DEFAULT '{APPROVAL_REQUESTED,APPROVAL_DECIDED,PROPOSAL_QUEUED,CASE_REVIEW_DUE}'::text[] NOT NULL,
+    state text DEFAULT 'DRAFT'::text NOT NULL,
+    health text DEFAULT 'UNTESTED'::text NOT NULL,
+    health_detail text,
+    health_changed_at timestamp with time zone,
+    tested_at timestamp with time zone,
+    server_version text,
+    deployment_type text,
+    edit_caveat text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
+    activated_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    CONSTRAINT jira_destination_auth_known CHECK ((auth_kind = ANY (ARRAY['CLOUD_API_TOKEN'::text, 'DC_PAT'::text, 'DC_BASIC'::text]))),
+    CONSTRAINT jira_destination_auth_matches CHECK ((((flavour <> 'CLOUD'::text) OR (auth_kind = 'CLOUD_API_TOKEN'::text)) AND ((flavour <> 'DATA_CENTER'::text) OR (auth_kind = ANY (ARRAY['DC_PAT'::text, 'DC_BASIC'::text]))))),
+    CONSTRAINT jira_destination_auth_user CHECK (((auth_kind = 'DC_PAT'::text) = (auth_user IS NULL))),
+    CONSTRAINT jira_destination_below_floor CHECK ((ceiling = ANY (ARRAY['CLEAR'::core.tlp, 'GREEN'::core.tlp, 'AMBER'::core.tlp]))),
+    CONSTRAINT jira_destination_exposure_known CHECK ((field_exposure = ANY (ARRAY['STUB'::text, 'SUBJECT'::text, 'SUMMARY'::text]))),
+    CONSTRAINT jira_destination_flavour_known CHECK ((flavour = ANY (ARRAY['AUTO'::text, 'CLOUD'::text, 'DATA_CENTER'::text]))),
+    CONSTRAINT jira_destination_health_known CHECK ((health = ANY (ARRAY['UNTESTED'::text, 'OK'::text, 'FAILING'::text, 'BROKEN'::text]))),
+    CONSTRAINT jira_destination_host_shape CHECK (((host = lower(host)) AND (host ~ '^[a-z0-9.:\[\]-]{1,253}$'::text))),
+    CONSTRAINT jira_destination_issue_type_id CHECK (((issue_type_id IS NULL) OR (issue_type_id ~ '^[0-9]{1,18}$'::text))),
+    CONSTRAINT jira_destination_kinds_present CHECK ((COALESCE(array_length(kinds, 1), 0) >= 1)),
+    CONSTRAINT jira_destination_label_present CHECK (((length(btrim(label)) >= 1) AND (length(btrim(label)) <= 80))),
+    CONSTRAINT jira_destination_live_is_resolved CHECK (((state <> ALL (ARRAY['ACTIVE'::text, 'PAUSED'::text])) OR ((flavour <> 'AUTO'::text) AND (issue_type_id IS NOT NULL) AND (activated_at IS NOT NULL) AND (tested_at IS NOT NULL)))),
+    CONSTRAINT jira_destination_port_range CHECK (((port >= 1) AND (port <= 65535))),
+    CONSTRAINT jira_destination_project_key CHECK ((project_key ~ '^[A-Z][A-Z0-9_]{1,19}$'::text)),
+    CONSTRAINT jira_destination_retired_is_shredded CHECK (((state <> 'RETIRED'::text) OR ((octet_length(credential_ciphertext) = 0) AND (credential_key_id IS NULL) AND (retired_at IS NOT NULL)))),
+    CONSTRAINT jira_destination_state_known CHECK ((state = ANY (ARRAY['DRAFT'::text, 'ACTIVE'::text, 'PAUSED'::text, 'RETIRED'::text]))),
+    CONSTRAINT jira_destination_url_shape CHECK (((base_url ~ '^https?://[^/?#@]+(/[^?#]*)?$'::text) AND ("right"(base_url, 1) <> '/'::text)))
+);
+
+--
+-- Name: TABLE jira_destination; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON TABLE notify.jira_destination IS 'The one operator-declared Jira destination (F7). The credential is envelope-sealed and zero bytes after retire; reach is decided by the egress route "jira", never by this row.';
+
+--
+-- Name: jira_event; Type: TABLE; Schema: notify; Owner: -
+--
+
+CREATE TABLE notify.jira_event (
+    link_id uuid NOT NULL,
+    event_id uuid NOT NULL,
+    marker text NOT NULL,
+    state text NOT NULL,
+    classification core.tlp NOT NULL,
+    attempted_at timestamp with time zone NOT NULL,
+    posted_at timestamp with time zone,
+    posted_as text,
+    comment_id text,
+    CONSTRAINT jira_event_comment_shape CHECK (((comment_id IS NULL) OR ((posted_as = 'COMMENT'::text) AND (comment_id ~ '^[0-9]{1,18}$'::text)))),
+    CONSTRAINT jira_event_marker_shape CHECK ((marker ~ '^[0-9a-f]{12}$'::text)),
+    CONSTRAINT jira_event_posted_as_known CHECK (((posted_as IS NULL) OR (posted_as = ANY (ARRAY['CREATE'::text, 'COMMENT'::text])))),
+    CONSTRAINT jira_event_posted_is_complete CHECK (((state = 'POSTED'::text) = ((posted_at IS NOT NULL) AND (posted_as IS NOT NULL)))),
+    CONSTRAINT jira_event_state_known CHECK ((state = ANY (ARRAY['POSTING'::text, 'POSTED'::text])))
+);
+
+--
+-- Name: TABLE jira_event; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON TABLE notify.jira_event IS 'Whether one event is already on its issue: what makes one event one post.';
+
+--
+-- Name: jira_link; Type: TABLE; Schema: notify; Owner: -
+--
+
+CREATE TABLE notify.jira_link (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    destination_id uuid NOT NULL,
+    case_id uuid NOT NULL,
+    work_key uuid NOT NULL,
+    ref text NOT NULL,
+    base_url text NOT NULL,
+    project_key text NOT NULL,
+    state text DEFAULT 'CREATING'::text NOT NULL,
+    issue_key text,
+    issue_id text,
+    classification core.tlp NOT NULL,
+    exposure text NOT NULL,
+    create_attempted_at timestamp with time zone,
+    creator_event_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    linked_at timestamp with time zone,
+    last_synced_at timestamp with time zone,
+    closed_at timestamp with time zone,
+    closed_reason text,
+    CONSTRAINT jira_link_closed_has_time CHECK (((state = 'CLOSED'::text) = (closed_at IS NOT NULL))),
+    CONSTRAINT jira_link_closed_reason_known CHECK (((closed_reason IS NULL) OR (closed_reason = ANY (ARRAY['done in Jira'::text, 'deleted in Jira'::text, 'destination retired'::text, 'destination moved'::text, 'case kept out'::text])))),
+    CONSTRAINT jira_link_create_recorded CHECK (((create_attempted_at IS NULL) = (creator_event_id IS NULL))),
+    CONSTRAINT jira_link_exposure_known CHECK ((exposure = ANY (ARRAY['STUB'::text, 'SUBJECT'::text, 'SUMMARY'::text]))),
+    CONSTRAINT jira_link_id_shape CHECK (((issue_id IS NULL) OR (issue_id ~ '^[0-9]{1,18}$'::text))),
+    CONSTRAINT jira_link_key_shape CHECK (((issue_key IS NULL) OR (issue_key ~ '^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$'::text))),
+    CONSTRAINT jira_link_linked_has_key CHECK (((state <> 'LINKED'::text) OR ((issue_key IS NOT NULL) AND (linked_at IS NOT NULL)))),
+    CONSTRAINT jira_link_linked_was_created CHECK (((state <> 'LINKED'::text) OR (create_attempted_at IS NOT NULL))),
+    CONSTRAINT jira_link_ref_shape CHECK ((ref ~ '^[a-z2-7]{16}$'::text)),
+    CONSTRAINT jira_link_state_known CHECK ((state = ANY (ARRAY['CREATING'::text, 'LINKED'::text, 'CLOSED'::text])))
+);
+
+--
+-- Name: TABLE jira_link; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON TABLE notify.jira_link IS 'One Jira issue per work item. case_id exists so the issues raised about a purged case can be found, and is never shown without being asked for. Closed, never deleted.';
 
 --
 -- Name: notification; Type: TABLE; Schema: notify; Owner: -
@@ -2941,10 +7509,17 @@ CREATE TABLE notify.notification (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     read_at timestamp with time zone,
     acknowledged_at timestamp with time zone,
+    event_id uuid DEFAULT gen_random_uuid(),
     CONSTRAINT notification_ack_implies_read CHECK (((acknowledged_at IS NULL) OR (read_at IS NOT NULL))),
     CONSTRAINT notification_priority_range CHECK (((priority >= 1) AND (priority <= 3))),
     CONSTRAINT notification_subject_present CHECK ((length(btrim(subject)) > 0))
 );
+
+--
+-- Name: COLUMN notification.event_id; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON COLUMN notify.notification.event_id IS 'Shared by every row one event fanned out to. NULL before 0095, where readers take the row''s own id.';
 
 --
 -- Name: preference; Type: TABLE; Schema: notify; Owner: -
@@ -2978,6 +7553,12 @@ CREATE TABLE public.alembic_version (
 --
 
 ALTER TABLE ONLY audit.event ALTER COLUMN seq SET DEFAULT nextval('audit.event_seq_seq'::regclass);
+
+--
+-- Name: egress_binding seq; Type: DEFAULT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_binding ALTER COLUMN seq SET DEFAULT nextval('collect.egress_binding_seq_seq'::regclass);
 
 --
 -- Name: evidence_custody id; Type: DEFAULT; Schema: core; Owner: -
@@ -3041,11 +7622,32 @@ ALTER TABLE ONLY collect.collection_account
     ADD CONSTRAINT collection_account_pkey PRIMARY KEY (id);
 
 --
+-- Name: collection_authority collection_authority_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority
+    ADD CONSTRAINT collection_authority_pkey PRIMARY KEY (id);
+
+--
+-- Name: collection_authority_target collection_authority_target_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_pkey PRIMARY KEY (id);
+
+--
 -- Name: collection_run collection_run_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
 --
 
 ALTER TABLE ONLY collect.collection_run
     ADD CONSTRAINT collection_run_pkey PRIMARY KEY (id);
+
+--
+-- Name: document_embedding document_embedding_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.document_embedding
+    ADD CONSTRAINT document_embedding_pkey PRIMARY KEY (document_id, slot);
 
 --
 -- Name: document document_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
@@ -3060,6 +7662,34 @@ ALTER TABLE ONLY collect.document
 
 ALTER TABLE ONLY collect.document
     ADD CONSTRAINT document_source_id_external_id_version_key UNIQUE (source_id, external_id, version);
+
+--
+-- Name: egress_binding egress_binding_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_binding
+    ADD CONSTRAINT egress_binding_pkey PRIMARY KEY (seq);
+
+--
+-- Name: egress_connection egress_connection_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_connection
+    ADD CONSTRAINT egress_connection_pkey PRIMARY KEY (seq);
+
+--
+-- Name: egress_destination egress_destination_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_destination
+    ADD CONSTRAINT egress_destination_pkey PRIMARY KEY (id);
+
+--
+-- Name: egress_integration_route egress_integration_route_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_integration_route
+    ADD CONSTRAINT egress_integration_route_pkey PRIMARY KEY (id);
 
 --
 -- Name: egress_profile egress_profile_name_key; Type: CONSTRAINT; Schema: collect; Owner: -
@@ -3083,6 +7713,20 @@ ALTER TABLE ONLY collect.extraction
     ADD CONSTRAINT extraction_pkey PRIMARY KEY (id);
 
 --
+-- Name: forum_member forum_member_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_member
+    ADD CONSTRAINT forum_member_pkey PRIMARY KEY (document_id);
+
+--
+-- Name: forum_post forum_post_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_post
+    ADD CONSTRAINT forum_post_pkey PRIMARY KEY (document_id);
+
+--
 -- Name: proposal proposal_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
 --
 
@@ -3095,6 +7739,27 @@ ALTER TABLE ONLY collect.proposal
 
 ALTER TABLE ONLY collect.source
     ADD CONSTRAINT source_pkey PRIMARY KEY (id);
+
+--
+-- Name: telegram_chat telegram_chat_one_source; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_chat
+    ADD CONSTRAINT telegram_chat_one_source UNIQUE (durable_id);
+
+--
+-- Name: telegram_chat telegram_chat_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_chat
+    ADD CONSTRAINT telegram_chat_pkey PRIMARY KEY (source_id);
+
+--
+-- Name: telegram_message telegram_message_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_message
+    ADD CONSTRAINT telegram_message_pkey PRIMARY KEY (document_id);
 
 --
 -- Name: watch_hit watch_hit_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
@@ -3209,6 +7874,55 @@ ALTER TABLE ONLY comms.participant
     ADD CONSTRAINT participant_pkey PRIMARY KEY (conversation_id, observed_handle);
 
 --
+-- Name: pgp_key_acquisition pgp_key_acquisition_id_case_key; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_id_case_key UNIQUE (id, case_id);
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_pkey; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_pkey PRIMARY KEY (id);
+
+--
+-- Name: pgp_key pgp_key_id_case_key; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_id_case_key UNIQUE (id, case_id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_id_case_key; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_id_case_key UNIQUE (id, case_id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_pkey; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_pkey PRIMARY KEY (id);
+
+--
+-- Name: pgp_key pgp_key_once_per_acquisition; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_once_per_acquisition UNIQUE (acquisition_id, primary_fingerprint);
+
+--
+-- Name: pgp_key pgp_key_pkey; Type: CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_pkey PRIMARY KEY (id);
+
+--
 -- Name: pgp_verification pgp_verification_pkey; Type: CONSTRAINT; Schema: comms; Owner: -
 --
 
@@ -3235,6 +7949,20 @@ ALTER TABLE ONLY comms.service_selector
 
 ALTER TABLE ONLY core.approval_request
     ADD CONSTRAINT approval_request_pkey PRIMARY KEY (id);
+
+--
+-- Name: assertion_embedding assertion_embedding_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.assertion_embedding
+    ADD CONSTRAINT assertion_embedding_pkey PRIMARY KEY (assertion_id, slot);
+
+--
+-- Name: assertion assertion_lookup_is_inference; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.assertion
+    ADD CONSTRAINT assertion_lookup_is_inference CHECK (((lookup_result_id IS NULL) OR (basis = 'AUTOMATED_INFERENCE'::core.assertion_basis))) NOT VALID;
 
 --
 -- Name: assertion assertion_pkey; Type: CONSTRAINT; Schema: core; Owner: -
@@ -3279,6 +8007,27 @@ ALTER TABLE ONLY core.edge_type
     ADD CONSTRAINT edge_type_pkey PRIMARY KEY (key);
 
 --
+-- Name: embedding_pending embedding_pending_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_pending
+    ADD CONSTRAINT embedding_pending_pkey PRIMARY KEY (slot, kind, item_id);
+
+--
+-- Name: embedding_space embedding_space_id_slot_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_space
+    ADD CONSTRAINT embedding_space_id_slot_key UNIQUE (id, slot);
+
+--
+-- Name: embedding_space embedding_space_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_space
+    ADD CONSTRAINT embedding_space_pkey PRIMARY KEY (id);
+
+--
 -- Name: evidence evidence_case_id_sha256_key; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -3291,6 +8040,13 @@ ALTER TABLE ONLY core.evidence
 
 ALTER TABLE ONLY core.evidence_custody
     ADD CONSTRAINT evidence_custody_pkey PRIMARY KEY (id);
+
+--
+-- Name: evidence_embedding evidence_embedding_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_embedding
+    ADD CONSTRAINT evidence_embedding_pkey PRIMARY KEY (evidence_id, slot);
 
 --
 -- Name: evidence evidence_pkey; Type: CONSTRAINT; Schema: core; Owner: -
@@ -3489,11 +8245,32 @@ ALTER TABLE ONLY iam.compartment
     ADD CONSTRAINT compartment_pkey PRIMARY KEY (key);
 
 --
--- Name: dual_control_request dual_control_request_pkey; Type: CONSTRAINT; Schema: iam; Owner: -
+-- Name: dual_control_operation dual_control_operation_pkey; Type: CONSTRAINT; Schema: iam; Owner: -
 --
 
-ALTER TABLE ONLY iam.dual_control_request
-    ADD CONSTRAINT dual_control_request_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY iam.dual_control_operation
+    ADD CONSTRAINT dual_control_operation_pkey PRIMARY KEY (operation);
+
+--
+-- Name: dual_control_policy_change dual_control_policy_change_approval_request_id_key; Type: CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_approval_request_id_key UNIQUE (approval_request_id);
+
+--
+-- Name: dual_control_policy_change dual_control_policy_change_pkey; Type: CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_pkey PRIMARY KEY (id);
+
+--
+-- Name: dual_control_policy_change dual_control_policy_change_seq_key; Type: CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_seq_key UNIQUE (seq);
 
 --
 -- Name: permission permission_pkey; Type: CONSTRAINT; Schema: iam; Owner: -
@@ -3601,11 +8378,74 @@ ALTER TABLE ONLY ingest.dead_letter
     ADD CONSTRAINT dead_letter_pkey PRIMARY KEY (id);
 
 --
+-- Name: lookup_attempt lookup_attempt_lookup_id_attempt_key; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_attempt
+    ADD CONSTRAINT lookup_attempt_lookup_id_attempt_key UNIQUE (lookup_id, attempt);
+
+--
+-- Name: lookup_attempt lookup_attempt_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_attempt
+    ADD CONSTRAINT lookup_attempt_pkey PRIMARY KEY (id);
+
+--
+-- Name: lookup_batch lookup_batch_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_batch
+    ADD CONSTRAINT lookup_batch_pkey PRIMARY KEY (id);
+
+--
+-- Name: lookup lookup_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_pkey PRIMARY KEY (id);
+
+--
+-- Name: lookup_result lookup_result_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_result
+    ADD CONSTRAINT lookup_result_pkey PRIMARY KEY (id);
+
+--
 -- Name: pii_authorisation pii_authorisation_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
 --
 
 ALTER TABLE ONLY ingest.pii_authorisation
     ADD CONSTRAINT pii_authorisation_pkey PRIMARY KEY (id);
+
+--
+-- Name: provider_exposure_change provider_exposure_change_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider_exposure_change
+    ADD CONSTRAINT provider_exposure_change_pkey PRIMARY KEY (id);
+
+--
+-- Name: provider provider_key_key; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_key_key UNIQUE (key);
+
+--
+-- Name: provider provider_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_pkey PRIMARY KEY (id);
+
+--
+-- Name: provider provider_source_id_key; Type: CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_source_id_key UNIQUE (source_id);
 
 --
 -- Name: record record_pkey; Type: CONSTRAINT; Schema: ingest; Owner: -
@@ -3678,11 +8518,144 @@ ALTER TABLE ONLY lab.sample
     ADD CONSTRAINT sample_sha256_key UNIQUE (sha256);
 
 --
+-- Name: screening_hash screening_hash_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_hash
+    ADD CONSTRAINT screening_hash_pkey PRIMARY KEY (algorithm, digest, list_id);
+
+--
+-- Name: screening_list screening_list_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_list
+    ADD CONSTRAINT screening_list_pkey PRIMARY KEY (id);
+
+--
+-- Name: screening_list screening_list_seq_key; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_list
+    ADD CONSTRAINT screening_list_seq_key UNIQUE (seq);
+
+--
+-- Name: screening_result screening_result_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_result
+    ADD CONSTRAINT screening_result_pkey PRIMARY KEY (id);
+
+--
+-- Name: screening_review screening_review_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_review
+    ADD CONSTRAINT screening_review_pkey PRIMARY KEY (id);
+
+--
+-- Name: static_run static_run_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.static_run
+    ADD CONSTRAINT static_run_pkey PRIMARY KEY (id);
+
+--
+-- Name: yara_activation yara_activation_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_activation
+    ADD CONSTRAINT yara_activation_pkey PRIMARY KEY (id);
+
+--
+-- Name: yara_compile_job yara_compile_job_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_compile_job
+    ADD CONSTRAINT yara_compile_job_pkey PRIMARY KEY (version_id, engine, platform, fingerprint);
+
+--
+-- Name: yara_compiled yara_compiled_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_compiled
+    ADD CONSTRAINT yara_compiled_pkey PRIMARY KEY (id);
+
+--
+-- Name: yara_compiled_rejected yara_compiled_rejected_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_compiled_rejected
+    ADD CONSTRAINT yara_compiled_rejected_pkey PRIMARY KEY (compiled_id);
+
+--
+-- Name: yara_ruleset yara_ruleset_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset
+    ADD CONSTRAINT yara_ruleset_pkey PRIMARY KEY (id);
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_pkey; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset_version
+    ADD CONSTRAINT yara_ruleset_version_pkey PRIMARY KEY (id);
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_ruleset_id_source_sha256_key; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset_version
+    ADD CONSTRAINT yara_ruleset_version_ruleset_id_source_sha256_key UNIQUE (ruleset_id, source_sha256);
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_ruleset_id_version_key; Type: CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset_version
+    ADD CONSTRAINT yara_ruleset_version_ruleset_id_version_key UNIQUE (ruleset_id, version);
+
+--
+-- Name: case_route_block case_route_block_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.case_route_block
+    ADD CONSTRAINT case_route_block_pkey PRIMARY KEY (case_id, channel);
+
+--
 -- Name: delivery delivery_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
 --
 
 ALTER TABLE ONLY notify.delivery
     ADD CONSTRAINT delivery_pkey PRIMARY KEY (id);
+
+--
+-- Name: jira_destination jira_destination_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_destination
+    ADD CONSTRAINT jira_destination_pkey PRIMARY KEY (id);
+
+--
+-- Name: jira_event jira_event_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_event
+    ADD CONSTRAINT jira_event_pkey PRIMARY KEY (link_id, event_id);
+
+--
+-- Name: jira_link jira_link_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_link
+    ADD CONSTRAINT jira_link_pkey PRIMARY KEY (id);
+
+--
+-- Name: jira_link jira_link_ref_key; Type: CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_link
+    ADD CONSTRAINT jira_link_ref_key UNIQUE (ref);
 
 --
 -- Name: notification notification_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
@@ -3748,10 +8721,58 @@ CREATE INDEX event_object_id_idx ON audit.event USING btree (object_id);
 CREATE INDEX event_occurred_at_idx ON audit.event USING btree (occurred_at DESC);
 
 --
+-- Name: authority_target_once; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX authority_target_once ON collect.collection_authority_target USING btree (authority_id, source_id) WHERE (revoked_at IS NULL);
+
+--
+-- Name: authority_target_source_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX authority_target_source_idx ON collect.collection_authority_target USING btree (source_id) WHERE (revoked_at IS NULL);
+
+--
+-- Name: collection_account_platform_uid_unique; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX collection_account_platform_uid_unique ON collect.collection_account USING btree (platform, platform_uid) WHERE (platform_uid IS NOT NULL);
+
+--
+-- Name: collection_account_telegram_egress_unique; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX collection_account_telegram_egress_unique ON collect.collection_account USING btree (egress_profile_id) WHERE (platform = 'TELEGRAM'::collect.source_kind);
+
+--
+-- Name: collection_authority_live_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX collection_authority_live_idx ON collect.collection_authority USING btree (collection_account_id, valid_until) WHERE ((revoked_at IS NULL) AND (confirmed_at IS NOT NULL));
+
+--
+-- Name: collection_authority_pending_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX collection_authority_pending_idx ON collect.collection_authority USING btree (recorded_at) WHERE ((confirmed_at IS NULL) AND (revoked_at IS NULL));
+
+--
+-- Name: collection_run_resume_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX collection_run_resume_idx ON collect.collection_run USING btree (source_id, started_at DESC NULLS LAST, id DESC) WHERE (status <> 'RUNNING'::collect.run_status);
+
+--
 -- Name: collection_run_source_id_started_at_idx; Type: INDEX; Schema: collect; Owner: -
 --
 
 CREATE INDEX collection_run_source_id_started_at_idx ON collect.collection_run USING btree (source_id, started_at DESC);
+
+--
+-- Name: collection_run_started_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX collection_run_started_idx ON collect.collection_run USING btree (started_at DESC NULLS LAST, id DESC);
 
 --
 -- Name: collection_run_status_idx; Type: INDEX; Schema: collect; Owner: -
@@ -3772,16 +8793,124 @@ CREATE INDEX document_author_handle_idx ON collect.document USING gin (author_ha
 CREATE INDEX document_category_idx ON collect.document USING btree (category);
 
 --
+-- Name: document_compartments_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_compartments_idx ON collect.document USING gin (compartments) WHERE (cardinality(compartments) > 0);
+
+--
 -- Name: document_content_sha256_idx; Type: INDEX; Schema: collect; Owner: -
 --
 
 CREATE INDEX document_content_sha256_idx ON collect.document USING btree (content_sha256);
 
 --
--- Name: document_embedding_idx; Type: INDEX; Schema: collect; Owner: -
+-- Name: document_embedding_compartmented; Type: INDEX; Schema: collect; Owner: -
 --
 
-CREATE INDEX document_embedding_idx ON collect.document USING hnsw (embedding public.vector_cosine_ops);
+CREATE INDEX document_embedding_compartmented ON collect.document_embedding USING gin (read_compartments) WHERE (read_compartments <> '{}'::text[]);
+
+--
+-- Name: document_embedding_due; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_due ON collect.document_embedding USING btree (slot, next_attempt_at) WHERE (status = ANY (ARRAY['FAILED'::text, 'WITHHELD'::text]));
+
+--
+-- Name: document_embedding_s1_amber_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s1_amber_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 1) AND (read_classification = 'AMBER'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s1_amber_strict_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s1_amber_strict_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 1) AND (read_classification = 'AMBER_STRICT'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s1_clear_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s1_clear_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 1) AND (read_classification = 'CLEAR'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s1_green_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s1_green_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 1) AND (read_classification = 'GREEN'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s1_red_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s1_red_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 1) AND (read_classification = 'RED'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s2_amber_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s2_amber_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 2) AND (read_classification = 'AMBER'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s2_amber_strict_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s2_amber_strict_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 2) AND (read_classification = 'AMBER_STRICT'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s2_clear_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s2_clear_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 2) AND (read_classification = 'CLEAR'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s2_green_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s2_green_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 2) AND (read_classification = 'GREEN'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s2_red_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s2_red_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 2) AND (read_classification = 'RED'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s3_amber_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s3_amber_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 3) AND (read_classification = 'AMBER'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s3_amber_strict_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s3_amber_strict_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 3) AND (read_classification = 'AMBER_STRICT'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s3_clear_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s3_clear_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 3) AND (read_classification = 'CLEAR'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s3_green_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s3_green_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 3) AND (read_classification = 'GREEN'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_s3_red_hnsw; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_s3_red_hnsw ON collect.document_embedding USING hnsw (embedding public.vector_cosine_ops) WHERE ((slot = 3) AND (read_classification = 'RED'::core.tlp) AND (read_compartments = '{}'::text[]) AND (embedding IS NOT NULL));
+
+--
+-- Name: document_embedding_space_status; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX document_embedding_space_status ON collect.document_embedding USING btree (space_id, status);
 
 --
 -- Name: document_retention_idx; Type: INDEX; Schema: collect; Owner: -
@@ -3808,6 +8937,84 @@ CREATE INDEX document_source_id_posted_at_idx ON collect.document USING btree (s
 CREATE INDEX document_triage_state_idx ON collect.document USING btree (triage_state) WHERE (triage_state = 'NEW'::text);
 
 --
+-- Name: egress_binding_persona_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_binding_persona_idx ON collect.egress_binding USING btree (collection_account_id, bound_at DESC) WHERE (collection_account_id IS NOT NULL);
+
+--
+-- Name: egress_binding_source_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_binding_source_idx ON collect.egress_binding USING btree (source_id, bound_at DESC) WHERE (source_id IS NOT NULL);
+
+--
+-- Name: egress_connection_connection_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_connection_idx ON collect.egress_connection USING btree (connection_id);
+
+--
+-- Name: egress_connection_preauth_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_preauth_idx ON collect.egress_connection USING btree (peer_address, occurred_at DESC) WHERE (event = 'PREAUTH'::text);
+
+--
+-- Name: egress_connection_profile_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_profile_idx ON collect.egress_connection USING btree (egress_profile_id, occurred_at DESC);
+
+--
+-- Name: egress_connection_refused_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_refused_idx ON collect.egress_connection USING btree (occurred_at DESC) WHERE (event = 'REFUSED'::text);
+
+--
+-- Name: egress_connection_route_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_route_idx ON collect.egress_connection USING btree (integration_route_id, occurred_at DESC);
+
+--
+-- Name: egress_connection_run_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_run_idx ON collect.egress_connection USING btree (collection_run_id);
+
+--
+-- Name: egress_connection_stop_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_stop_idx ON collect.egress_connection USING btree (collection_account_id, occurred_at DESC) WHERE (context_kind = 'stop'::text);
+
+--
+-- Name: egress_connection_time_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX egress_connection_time_idx ON collect.egress_connection USING btree (occurred_at DESC);
+
+--
+-- Name: egress_destination_live_entry; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX egress_destination_live_entry ON collect.egress_destination USING btree (route_id, entry) WHERE (retired_at IS NULL);
+
+--
+-- Name: egress_integration_route_live_name; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX egress_integration_route_live_name ON collect.egress_integration_route USING btree (name) WHERE (retired_at IS NULL);
+
+--
+-- Name: egress_profile_one_passive_default; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX egress_profile_one_passive_default ON collect.egress_profile USING btree ((true)) WHERE is_passive_default;
+
+--
 -- Name: extraction_document_id_idx; Type: INDEX; Schema: collect; Owner: -
 --
 
@@ -3826,16 +9033,70 @@ CREATE INDEX extraction_norm_value_selector_type_idx ON collect.extraction USING
 CREATE INDEX proposal_case_id_state_idx ON collect.proposal USING btree (case_id, state) WHERE (state = 'PROPOSED'::core.review_state);
 
 --
+-- Name: proposal_document_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX proposal_document_idx ON collect.proposal USING btree (document_id);
+
+--
+-- Name: proposal_lookup_result_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX proposal_lookup_result_idx ON collect.proposal USING btree (lookup_result_id) WHERE (lookup_result_id IS NOT NULL);
+
+--
+-- Name: source_collection_account_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX source_collection_account_idx ON collect.source USING btree (collection_account_id) WHERE (collection_account_id IS NOT NULL);
+
+--
 -- Name: source_due_idx; Type: INDEX; Schema: collect; Owner: -
 --
 
 CREATE INDEX source_due_idx ON collect.source USING btree (next_due_at) WHERE is_active;
 
 --
+-- Name: source_egress_profile_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX source_egress_profile_idx ON collect.source USING btree (egress_profile_id) WHERE (egress_profile_id IS NOT NULL);
+
+--
+-- Name: telegram_message_fwd_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX telegram_message_fwd_idx ON collect.telegram_message USING btree (fwd_from_uid) WHERE (fwd_from_uid IS NOT NULL);
+
+--
+-- Name: telegram_message_recheck_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX telegram_message_recheck_idx ON collect.telegram_message USING btree (source_id, captured_at DESC) WHERE ((deleted_seen_at IS NULL) AND (NOT is_service));
+
+--
+-- Name: telegram_message_sender_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX telegram_message_sender_idx ON collect.telegram_message USING btree (sender_uid) WHERE (sender_uid IS NOT NULL);
+
+--
+-- Name: telegram_message_source_msg_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX telegram_message_source_msg_idx ON collect.telegram_message USING btree (source_id, message_id DESC);
+
+--
 -- Name: watch_hit_created_at_idx; Type: INDEX; Schema: collect; Owner: -
 --
 
 CREATE INDEX watch_hit_created_at_idx ON collect.watch_hit USING btree (created_at DESC) WHERE ((notified_at IS NULL) AND (NOT suppressed));
+
+--
+-- Name: watch_hit_document_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX watch_hit_document_idx ON collect.watch_hit USING btree (document_id);
 
 --
 -- Name: channel_binding_case_idx; Type: INDEX; Schema: comms; Owner: -
@@ -3868,6 +9129,12 @@ CREATE INDEX channel_binding_identity_idx ON comms.channel_binding USING btree (
 CREATE INDEX contact_block_case_idx ON comms.contact_block USING btree (case_id, created_at DESC);
 
 --
+-- Name: contact_block_document_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX contact_block_document_idx ON comms.contact_block USING btree (document_id);
+
+--
 -- Name: contact_block_entry_block_idx; Type: INDEX; Schema: comms; Owner: -
 --
 
@@ -3878,6 +9145,12 @@ CREATE INDEX contact_block_entry_block_idx ON comms.contact_block_entry USING bt
 --
 
 CREATE INDEX contact_block_entry_durable_idx ON comms.contact_block_entry USING btree (platform_key, durable_value) WHERE (durable_value IS NOT NULL);
+
+--
+-- Name: contact_block_entry_proposal_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX contact_block_entry_proposal_idx ON comms.contact_block_entry USING btree (proposal_id) WHERE (proposal_id IS NOT NULL);
 
 --
 -- Name: contact_block_fingerprint_idx; Type: INDEX; Schema: comms; Owner: -
@@ -3934,6 +9207,48 @@ CREATE INDEX participant_identity_idx ON comms.participant USING btree (identity
 CREATE INDEX participant_incidental_idx ON comms.participant USING btree (conversation_id) WHERE is_incidental;
 
 --
+-- Name: pgp_key_acquisition_case_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX pgp_key_acquisition_case_idx ON comms.pgp_key_acquisition USING btree (case_id, requested_at DESC);
+
+--
+-- Name: pgp_key_acquisition_once; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE UNIQUE INDEX pgp_key_acquisition_once ON comms.pgp_key_acquisition USING btree (case_id, source, raw_sha256, source_ref, classification, compartments) WHERE (source = ANY (ARRAY['PASTE'::text, 'FILE'::text]));
+
+--
+-- Name: pgp_key_acquisition_one_per_lookup; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE UNIQUE INDEX pgp_key_acquisition_one_per_lookup ON comms.pgp_key_acquisition USING btree (lookup_id) WHERE (lookup_id IS NOT NULL);
+
+--
+-- Name: pgp_key_case_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX pgp_key_case_idx ON comms.pgp_key USING btree (case_id, created_at DESC);
+
+--
+-- Name: pgp_key_fingerprint_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX pgp_key_fingerprint_idx ON comms.pgp_key USING btree (primary_fingerprint);
+
+--
+-- Name: pgp_key_lookup_case_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX pgp_key_lookup_case_idx ON comms.pgp_key_lookup USING btree (case_id, requested_at DESC);
+
+--
+-- Name: pgp_key_lookup_waiting_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX pgp_key_lookup_waiting_idx ON comms.pgp_key_lookup USING btree (case_id) WHERE (state = 'REQUESTED'::text);
+
+--
 -- Name: pgp_verification_binding_idx; Type: INDEX; Schema: comms; Owner: -
 --
 
@@ -3950,6 +9265,12 @@ CREATE INDEX pgp_verification_case_idx ON comms.pgp_verification USING btree (ca
 --
 
 CREATE INDEX pgp_verification_claimed_idx ON comms.pgp_verification USING btree (claimed_fingerprint);
+
+--
+-- Name: pgp_verification_key_idx; Type: INDEX; Schema: comms; Owner: -
+--
+
+CREATE INDEX pgp_verification_key_idx ON comms.pgp_verification USING btree (pgp_key_id) WHERE (pgp_key_id IS NOT NULL);
 
 --
 -- Name: service_selector_case_idx; Type: INDEX; Schema: comms; Owner: -
@@ -3994,6 +9315,12 @@ CREATE INDEX approval_pending_idx ON core.approval_request USING btree (requeste
 CREATE INDEX approval_requester_idx ON core.approval_request USING btree (requested_by, requested_at DESC);
 
 --
+-- Name: assertion_case_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_case_idx ON core.assertion USING btree (case_id);
+
+--
 -- Name: assertion_document_id_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -4004,6 +9331,24 @@ CREATE INDEX assertion_document_id_idx ON core.assertion USING btree (document_i
 --
 
 CREATE INDEX assertion_edge_id_idx ON core.assertion USING btree (edge_id) WHERE ((retracted_at IS NULL) AND (superseded_at IS NULL));
+
+--
+-- Name: assertion_embedding_case; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_embedding_case ON core.assertion_embedding USING btree (case_id, slot);
+
+--
+-- Name: assertion_embedding_due; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_embedding_due ON core.assertion_embedding USING btree (slot, next_attempt_at) WHERE (status = ANY (ARRAY['FAILED'::text, 'WITHHELD'::text]));
+
+--
+-- Name: assertion_embedding_space_status; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_embedding_space_status ON core.assertion_embedding USING btree (space_id, status);
 
 --
 -- Name: assertion_node_id_idx; Type: INDEX; Schema: core; Owner: -
@@ -4066,6 +9411,24 @@ CREATE INDEX edge_src_node_id_idx ON core.edge USING btree (src_node_id) WHERE (
 CREATE UNIQUE INDEX edge_uniq_active ON core.edge USING btree (src_node_id, dst_node_id, edge_type, COALESCE(valid_from, '-infinity'::timestamp with time zone)) WHERE (deleted_at IS NULL);
 
 --
+-- Name: embedding_space_one_active; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX embedding_space_one_active ON core.embedding_space USING btree (role) WHERE (state = 'ACTIVE'::text);
+
+--
+-- Name: embedding_space_one_building; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX embedding_space_one_building ON core.embedding_space USING btree (role) WHERE (state = 'BUILDING'::text);
+
+--
+-- Name: embedding_space_slot_held; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX embedding_space_slot_held ON core.embedding_space USING btree (slot) WHERE (rows_cleared_at IS NULL);
+
+--
 -- Name: evidence_case_id_acquired_at_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -4076,6 +9439,24 @@ CREATE INDEX evidence_case_id_acquired_at_idx ON core.evidence USING btree (case
 --
 
 CREATE INDEX evidence_custody_evidence_id_occurred_at_idx ON core.evidence_custody USING btree (evidence_id, occurred_at);
+
+--
+-- Name: evidence_embedding_case; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX evidence_embedding_case ON core.evidence_embedding USING btree (case_id, slot);
+
+--
+-- Name: evidence_embedding_due; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX evidence_embedding_due ON core.evidence_embedding USING btree (slot, next_attempt_at) WHERE (status = ANY (ARRAY['FAILED'::text, 'WITHHELD'::text]));
+
+--
+-- Name: evidence_embedding_space_status; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX evidence_embedding_space_status ON core.evidence_embedding USING btree (space_id, status);
 
 --
 -- Name: evidence_hostile_idx; Type: INDEX; Schema: core; Owner: -
@@ -4118,6 +9499,12 @@ CREATE INDEX evidence_sha256_idx ON core.evidence USING btree (sha256);
 --
 
 CREATE INDEX evidence_title_trgm_idx ON core.evidence USING gin (title public.gin_trgm_ops);
+
+--
+-- Name: hypothesis_case_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX hypothesis_case_idx ON core.hypothesis USING btree (case_id);
 
 --
 -- Name: node_attrs_idx; Type: INDEX; Schema: core; Owner: -
@@ -4174,6 +9561,12 @@ CREATE INDEX node_merged_into_id_idx ON core.node USING btree (merged_into_id) W
 CREATE INDEX node_search_tsv_idx ON core.node USING gin (search_tsv);
 
 --
+-- Name: node_set_case_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX node_set_case_idx ON core.node_set USING btree (case_id);
+
+--
 -- Name: purge_tombstone_case_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -4208,6 +9601,12 @@ CREATE INDEX selector_raw_value_trgm_idx ON core.selector USING gin (raw_value p
 --
 
 CREATE INDEX selector_selector_type_norm_value_idx ON core.selector USING btree (selector_type, norm_value);
+
+--
+-- Name: tag_assignment_document_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX tag_assignment_document_idx ON core.tag_assignment USING btree (document_id);
 
 --
 -- Name: tag_assignment_node_id_idx; Type: INDEX; Schema: core; Owner: -
@@ -4402,6 +9801,12 @@ CREATE INDEX break_glass_unreviewed_idx ON iam.break_glass USING btree (started_
 CREATE INDEX case_assignment_user_id_expires_at_idx ON iam.case_assignment USING btree (user_id, expires_at);
 
 --
+-- Name: session_rls_binding_hash_key; Type: INDEX; Schema: iam; Owner: -
+--
+
+CREATE UNIQUE INDEX session_rls_binding_hash_key ON iam.session USING btree (rls_binding_hash) WHERE (rls_binding_hash IS NOT NULL);
+
+--
 -- Name: session_user_id_idx; Type: INDEX; Schema: iam; Owner: -
 --
 
@@ -4480,10 +9885,70 @@ CREATE INDEX dead_letter_open_idx ON ingest.dead_letter USING btree (occurred_at
 CREATE INDEX dead_letter_retention_idx ON ingest.dead_letter USING btree (retain_until) WHERE (purged_at IS NULL);
 
 --
+-- Name: exposure_change_one_open; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE UNIQUE INDEX exposure_change_one_open ON ingest.provider_exposure_change USING btree (provider_id) WHERE (decision IS NULL);
+
+--
+-- Name: lookup_attempt_quota_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_attempt_quota_idx ON ingest.lookup_attempt USING btree (provider_id, sent_at);
+
+--
+-- Name: lookup_awaiting_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_awaiting_idx ON ingest.lookup USING btree (authorised_by, signoff_expires_at) WHERE (state = 'AWAITING_SIGNOFF'::text);
+
+--
+-- Name: lookup_batch_case_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_batch_case_idx ON ingest.lookup_batch USING btree (case_id, requested_at DESC);
+
+--
+-- Name: lookup_batch_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_batch_idx ON ingest.lookup USING btree (batch_id) WHERE (batch_id IS NOT NULL);
+
+--
+-- Name: lookup_case_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_case_idx ON ingest.lookup USING btree (case_id, requested_at DESC);
+
+--
+-- Name: lookup_queue_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_queue_idx ON ingest.lookup USING btree (provider_id, not_before NULLS FIRST, requested_at) WHERE (state = 'QUEUED'::text);
+
+--
+-- Name: lookup_result_cache_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_result_cache_idx ON ingest.lookup_result USING btree (case_id, provider_id, operation, query_fingerprint, fetched_at DESC) WHERE ((purged_at IS NULL) AND (outcome <> 'UNREADABLE'::text));
+
+--
+-- Name: lookup_sending_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX lookup_sending_idx ON ingest.lookup USING btree (sent_at) WHERE (state = 'SENDING'::text);
+
+--
 -- Name: pii_authorisation_live_idx; Type: INDEX; Schema: ingest; Owner: -
 --
 
 CREATE INDEX pii_authorisation_live_idx ON ingest.pii_authorisation USING btree (granted_to, expires_at) WHERE (revoked_at IS NULL);
+
+--
+-- Name: provider_origin_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX provider_origin_idx ON ingest.provider USING btree (origin_host, origin_port);
 
 --
 -- Name: record_batch_idx; Type: INDEX; Schema: ingest; Owner: -
@@ -4496,6 +9961,12 @@ CREATE INDEX record_batch_idx ON ingest.record USING btree (batch_id);
 --
 
 CREATE INDEX record_content_idx ON ingest.record USING btree (content_sha256);
+
+--
+-- Name: record_duplicate_of_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX record_duplicate_of_idx ON ingest.record USING btree (duplicate_of) WHERE (duplicate_of IS NOT NULL);
 
 --
 -- Name: record_retention_idx; Type: INDEX; Schema: ingest; Owner: -
@@ -4534,10 +10005,34 @@ CREATE INDEX victim_credential_record_idx ON ingest.victim_credential USING btre
 CREATE INDEX victim_credential_service_idx ON ingest.victim_credential USING btree (service_domain);
 
 --
+-- Name: detonation_analysis_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX detonation_analysis_idx ON lab.detonation USING btree (analysis_id) WHERE (analysis_id IS NOT NULL);
+
+--
+-- Name: detonation_due_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX detonation_due_idx ON lab.detonation USING btree (status, requested_at) WHERE ((mode = 'SUBMIT'::text) AND (status = ANY (ARRAY['AWAITING_SIGNOFF'::text, 'QUEUED'::text, 'SUBMITTED'::text])));
+
+--
+-- Name: detonation_one_in_flight; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE UNIQUE INDEX detonation_one_in_flight ON lab.detonation USING btree (sample_id, target_key) WHERE ((mode = 'SUBMIT'::text) AND (status = ANY (ARRAY['AWAITING_SIGNOFF'::text, 'QUEUED'::text, 'SUBMITTED'::text])));
+
+--
 -- Name: detonation_sample_idx; Type: INDEX; Schema: lab; Owner: -
 --
 
 CREATE INDEX detonation_sample_idx ON lab.detonation USING btree (sample_id, requested_at DESC);
+
+--
+-- Name: detonation_signoff_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX detonation_signoff_idx ON lab.detonation USING btree (authorised_by) WHERE (status = 'AWAITING_SIGNOFF'::text);
 
 --
 -- Name: download_ticket_evidence_idx; Type: INDEX; Schema: lab; Owner: -
@@ -4582,10 +10077,28 @@ CREATE INDEX sample_access_actor_idx ON lab.sample_access USING btree (actor_id,
 CREATE INDEX sample_access_sample_idx ON lab.sample_access USING btree (sample_id, occurred_at DESC);
 
 --
+-- Name: sample_analysis_machine_yara_hits_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_analysis_machine_yara_hits_idx ON lab.sample_analysis USING gin (yara_hits) WHERE ((origin = 'machine'::text) AND (yara_ruleset_version_id IS NOT NULL));
+
+--
+-- Name: sample_analysis_run_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_analysis_run_idx ON lab.sample_analysis USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+--
 -- Name: sample_analysis_sample_idx; Type: INDEX; Schema: lab; Owner: -
 --
 
 CREATE INDEX sample_analysis_sample_idx ON lab.sample_analysis USING btree (sample_id, created_at DESC);
+
+--
+-- Name: sample_analysis_yara_version_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_analysis_yara_version_idx ON lab.sample_analysis USING btree (yara_ruleset_version_id) WHERE (yara_ruleset_version_id IS NOT NULL);
 
 --
 -- Name: sample_assigned_idx; Type: INDEX; Schema: lab; Owner: -
@@ -4606,10 +10119,34 @@ CREATE INDEX sample_case_idx ON lab.sample USING btree (case_id, submitted_at DE
 CREATE INDEX sample_imphash_idx ON lab.sample USING btree (imphash) WHERE (imphash IS NOT NULL);
 
 --
+-- Name: sample_match_pending_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_match_pending_idx ON lab.sample USING btree (screened_at) WHERE ((screening_outcome = 'MATCH'::text) AND (preserved_key IS NULL) AND (octet_length(data_key_ciphertext) > 0) AND (screening_bytes_absent_at IS NULL));
+
+--
 -- Name: sample_queue_idx; Type: INDEX; Schema: lab; Owner: -
 --
 
 CREATE INDEX sample_queue_idx ON lab.sample USING btree (state, submitted_at DESC) WHERE (state = ANY (ARRAY['QUARANTINED'::lab.sample_state, 'TRIAGED'::lab.sample_state, 'ASSIGNED'::lab.sample_state, 'IN_ANALYSIS'::lab.sample_state]));
+
+--
+-- Name: sample_rich_header_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_rich_header_idx ON lab.sample USING btree (rich_header_hash) WHERE (rich_header_hash IS NOT NULL);
+
+--
+-- Name: sample_screening_behind_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_screening_behind_idx ON lab.sample USING btree (screening_list_seq NULLS FIRST, id) WHERE (screening_outcome <> 'MATCH'::text);
+
+--
+-- Name: sample_ssdeep_tokens_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_ssdeep_tokens_idx ON lab.sample USING gin (ssdeep_tokens);
 
 --
 -- Name: sample_tlsh_idx; Type: INDEX; Schema: lab; Owner: -
@@ -4618,16 +10155,130 @@ CREATE INDEX sample_queue_idx ON lab.sample USING btree (state, submitted_at DES
 CREATE INDEX sample_tlsh_idx ON lab.sample USING btree (tlsh) WHERE (tlsh IS NOT NULL);
 
 --
+-- Name: sample_tlsh_lvalue_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_tlsh_lvalue_idx ON lab.sample USING btree (tlsh_lvalue) WHERE (tlsh IS NOT NULL);
+
+--
+-- Name: screening_hash_list_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX screening_hash_list_idx ON lab.screening_hash USING btree (list_id);
+
+--
+-- Name: screening_list_one_active_copy; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE UNIQUE INDEX screening_list_one_active_copy ON lab.screening_list USING btree (source_sha256) WHERE (retired_at IS NULL);
+
+--
+-- Name: screening_result_match_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX screening_result_match_idx ON lab.screening_result USING btree (screened_at DESC) WHERE (outcome = 'MATCH'::text);
+
+--
+-- Name: screening_result_sample_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX screening_result_sample_idx ON lab.screening_result USING btree (sample_id, screened_at DESC);
+
+--
+-- Name: screening_review_result_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX screening_review_result_idx ON lab.screening_review USING btree (result_id, reviewed_at);
+
+--
+-- Name: static_run_one_queued; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE UNIQUE INDEX static_run_one_queued ON lab.static_run USING btree (sample_id) WHERE (status = 'QUEUED'::text);
+
+--
+-- Name: static_run_one_running; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE UNIQUE INDEX static_run_one_running ON lab.static_run USING btree (sample_id) WHERE (status = 'RUNNING'::text);
+
+--
+-- Name: static_run_queue_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX static_run_queue_idx ON lab.static_run USING btree (priority, queued_at) WHERE (status = 'QUEUED'::text);
+
+--
+-- Name: static_run_sample_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX static_run_sample_idx ON lab.static_run USING btree (sample_id, queued_at DESC);
+
+--
+-- Name: yara_activation_one_open; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE UNIQUE INDEX yara_activation_one_open ON lab.yara_activation USING btree (ruleset_id) WHERE (deactivated_at IS NULL);
+
+--
+-- Name: yara_compiled_lookup; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX yara_compiled_lookup ON lab.yara_compiled USING btree (version_id, engine, platform, fingerprint, compiled_at DESC);
+
+--
+-- Name: yara_ruleset_key_per_labels; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE UNIQUE INDEX yara_ruleset_key_per_labels ON lab.yara_ruleset USING btree (key, classification, lab.yara_label_set(compartments));
+
+--
 -- Name: delivery_due_idx; Type: INDEX; Schema: notify; Owner: -
 --
 
 CREATE INDEX delivery_due_idx ON notify.delivery USING btree (deliver_after) WHERE (state = 'PENDING'::text);
 
 --
+-- Name: delivery_jira_link_idx; Type: INDEX; Schema: notify; Owner: -
+--
+
+CREATE INDEX delivery_jira_link_idx ON notify.delivery USING btree (jira_link_id) WHERE (jira_link_id IS NOT NULL);
+
+--
+-- Name: delivery_ledger_idx; Type: INDEX; Schema: notify; Owner: -
+--
+
+CREATE INDEX delivery_ledger_idx ON notify.delivery USING btree (COALESCE(last_attempt_at, sent_at, queued_at) DESC, id DESC);
+
+--
 -- Name: delivery_one_per_channel; Type: INDEX; Schema: notify; Owner: -
 --
 
 CREATE UNIQUE INDEX delivery_one_per_channel ON notify.delivery USING btree (notification_id, channel);
+
+--
+-- Name: jira_destination_one_live; Type: INDEX; Schema: notify; Owner: -
+--
+
+CREATE UNIQUE INDEX jira_destination_one_live ON notify.jira_destination USING btree ((1)) WHERE (state <> 'RETIRED'::text);
+
+--
+-- Name: jira_link_case_idx; Type: INDEX; Schema: notify; Owner: -
+--
+
+CREATE INDEX jira_link_case_idx ON notify.jira_link USING btree (case_id, created_at DESC);
+
+--
+-- Name: jira_link_issue_idx; Type: INDEX; Schema: notify; Owner: -
+--
+
+CREATE INDEX jira_link_issue_idx ON notify.jira_link USING btree (destination_id, issue_key) WHERE (issue_key IS NOT NULL);
+
+--
+-- Name: jira_link_one_open; Type: INDEX; Schema: notify; Owner: -
+--
+
+CREATE UNIQUE INDEX jira_link_one_open ON notify.jira_link USING btree (destination_id, work_key) WHERE (state <> 'CLOSED'::text);
 
 --
 -- Name: notification_case_idx; Type: INDEX; Schema: notify; Owner: -
@@ -4678,10 +10329,202 @@ CREATE TRIGGER event_append_only BEFORE DELETE OR UPDATE ON audit.event FOR EACH
 CREATE TRIGGER event_no_truncate BEFORE TRUNCATE ON audit.event FOR EACH STATEMENT EXECUTE FUNCTION audit.block_mutation();
 
 --
+-- Name: collection_account collection_account_egress_bound; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_account_egress_bound AFTER INSERT ON collect.collection_account FOR EACH ROW WHEN ((new.egress_profile_id IS NOT NULL)) EXECUTE FUNCTION collect.record_egress_binding();
+
+--
+-- Name: collection_account collection_account_egress_rebound; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_account_egress_rebound AFTER UPDATE OF egress_profile_id ON collect.collection_account FOR EACH ROW WHEN ((old.egress_profile_id IS DISTINCT FROM new.egress_profile_id)) EXECUTE FUNCTION collect.record_egress_binding();
+
+--
+-- Name: collection_account collection_account_holds_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_account_holds_guarded BEFORE DELETE OR UPDATE ON collect.collection_account FOR EACH ROW EXECUTE FUNCTION collect.guard_persona_holds();
+
+--
+-- Name: collection_account collection_account_telegram_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_account_telegram_guarded BEFORE UPDATE ON collect.collection_account FOR EACH ROW EXECUTE FUNCTION collect.guard_telegram_persona();
+
+--
+-- Name: collection_authority collection_authority_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_authority_guarded BEFORE DELETE OR UPDATE ON collect.collection_authority FOR EACH ROW EXECUTE FUNCTION collect.guard_collection_authority();
+
+--
+-- Name: collection_authority collection_authority_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_authority_no_truncate BEFORE TRUNCATE ON collect.collection_authority FOR EACH STATEMENT EXECUTE FUNCTION collect.guard_collection_authority();
+
+--
+-- Name: collection_authority_target collection_authority_target_fits; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_authority_target_fits BEFORE INSERT ON collect.collection_authority_target FOR EACH ROW EXECUTE FUNCTION collect.authority_target_fits();
+
+--
+-- Name: collection_authority_target collection_authority_target_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_authority_target_guarded BEFORE DELETE OR UPDATE ON collect.collection_authority_target FOR EACH ROW EXECUTE FUNCTION collect.guard_collection_authority_target();
+
+--
+-- Name: collection_authority_target collection_authority_target_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_authority_target_no_truncate BEFORE TRUNCATE ON collect.collection_authority_target FOR EACH STATEMENT EXECUTE FUNCTION collect.guard_collection_authority_target();
+
+--
+-- Name: collection_run collection_run_requests_once; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER collection_run_requests_once BEFORE UPDATE OF requests ON collect.collection_run FOR EACH ROW EXECUTE FUNCTION collect.guard_run_requests();
+
+--
+-- Name: document compartments_registered; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON collect.document FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: document_embedding compartments_registered; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF read_compartments ON collect.document_embedding FOR EACH ROW WHEN ((cardinality(new.read_compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('read_compartments', 'array');
+
+--
+-- Name: document_embedding document_embedding_labels; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER document_embedding_labels BEFORE INSERT OR UPDATE OF document_id, read_classification, read_compartments ON collect.document_embedding FOR EACH ROW EXECUTE FUNCTION collect.document_embedding_labels();
+
+--
+-- Name: document document_embedding_queued; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER document_embedding_queued AFTER INSERT ON collect.document FOR EACH ROW WHEN ((new.purged_at IS NULL)) EXECUTE FUNCTION collect.document_embedding_queued();
+
+--
 -- Name: document document_tsv; Type: TRIGGER; Schema: collect; Owner: -
 --
 
-CREATE TRIGGER document_tsv BEFORE INSERT OR UPDATE ON collect.document FOR EACH ROW EXECUTE FUNCTION collect.document_tsv_update();
+CREATE TRIGGER document_tsv BEFORE INSERT OR UPDATE OF title, author_handle, body_text, purged_at ON collect.document FOR EACH ROW EXECUTE FUNCTION collect.document_tsv_update();
+
+--
+-- Name: document document_vectors_follow; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER document_vectors_follow AFTER UPDATE OF classification, compartments, category, title, body_text, purged_at ON collect.document FOR EACH ROW WHEN (((old.classification IS DISTINCT FROM new.classification) OR (old.compartments IS DISTINCT FROM new.compartments) OR (old.category IS DISTINCT FROM new.category) OR (old.title IS DISTINCT FROM new.title) OR (old.body_text IS DISTINCT FROM new.body_text) OR (old.purged_at IS DISTINCT FROM new.purged_at))) EXECUTE FUNCTION collect.document_vectors_follow();
+
+--
+-- Name: egress_binding egress_binding_append_only; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_binding_append_only BEFORE DELETE OR UPDATE ON collect.egress_binding FOR EACH ROW EXECUTE FUNCTION collect.egress_binding_block();
+
+--
+-- Name: egress_binding egress_binding_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_binding_no_truncate BEFORE TRUNCATE ON collect.egress_binding FOR EACH STATEMENT EXECUTE FUNCTION collect.egress_binding_block();
+
+--
+-- Name: egress_connection egress_connection_append_only; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_connection_append_only BEFORE DELETE OR UPDATE ON collect.egress_connection FOR EACH ROW EXECUTE FUNCTION collect.egress_connection_block();
+
+--
+-- Name: egress_connection egress_connection_chain; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_connection_chain BEFORE INSERT ON collect.egress_connection FOR EACH ROW EXECUTE FUNCTION collect.egress_connection_chain();
+
+--
+-- Name: egress_connection egress_connection_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_connection_no_truncate BEFORE TRUNCATE ON collect.egress_connection FOR EACH STATEMENT EXECUTE FUNCTION collect.egress_connection_block();
+
+--
+-- Name: egress_destination egress_destination_terminal; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_destination_terminal BEFORE UPDATE ON collect.egress_destination FOR EACH ROW EXECUTE FUNCTION collect.egress_route_terminal();
+
+--
+-- Name: egress_integration_route egress_integration_route_terminal; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_integration_route_terminal BEFORE UPDATE ON collect.egress_integration_route FOR EACH ROW EXECUTE FUNCTION collect.egress_route_terminal();
+
+--
+-- Name: egress_profile egress_profile_reach; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER egress_profile_reach BEFORE UPDATE ON collect.egress_profile FOR EACH ROW EXECUTE FUNCTION collect.egress_profile_reach();
+
+--
+-- Name: source source_egress_bound; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER source_egress_bound AFTER INSERT ON collect.source FOR EACH ROW WHEN ((new.egress_profile_id IS NOT NULL)) EXECUTE FUNCTION collect.record_egress_binding();
+
+--
+-- Name: source source_egress_rebound; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER source_egress_rebound AFTER UPDATE OF egress_profile_id ON collect.source FOR EACH ROW WHEN ((old.egress_profile_id IS DISTINCT FROM new.egress_profile_id)) EXECUTE FUNCTION collect.record_egress_binding();
+
+--
+-- Name: source source_raises_authority_labels; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER source_raises_authority_labels AFTER UPDATE OF classification ON collect.source FOR EACH ROW EXECUTE FUNCTION collect.raise_authority_labels();
+
+--
+-- Name: source source_vectors_follow; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER source_vectors_follow AFTER UPDATE OF classification, kind ON collect.source FOR EACH ROW WHEN (((old.classification IS DISTINCT FROM new.classification) OR (old.kind IS DISTINCT FROM new.kind))) EXECUTE FUNCTION collect.source_vectors_follow();
+
+--
+-- Name: telegram_chat telegram_chat_identity_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER telegram_chat_identity_guarded BEFORE DELETE OR UPDATE ON collect.telegram_chat FOR EACH ROW EXECUTE FUNCTION collect.guard_telegram_chat();
+
+--
+-- Name: telegram_chat telegram_chat_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER telegram_chat_no_truncate BEFORE TRUNCATE ON collect.telegram_chat FOR EACH STATEMENT EXECUTE FUNCTION collect.guard_telegram_chat();
+
+--
+-- Name: telegram_message telegram_message_guarded; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER telegram_message_guarded BEFORE DELETE OR UPDATE ON collect.telegram_message FOR EACH ROW EXECUTE FUNCTION collect.guard_telegram_message();
+
+--
+-- Name: telegram_message telegram_message_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER telegram_message_no_truncate BEFORE TRUNCATE ON collect.telegram_message FOR EACH STATEMENT EXECUTE FUNCTION collect.guard_telegram_message();
+
+--
+-- Name: pgp_key_acquisition acquisition_tlp; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER acquisition_tlp BEFORE INSERT OR UPDATE ON comms.pgp_key_acquisition FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
 
 --
 -- Name: channel_binding compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
@@ -4708,10 +10551,82 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON comms.message FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
+-- Name: pgp_key_acquisition compartments_registered; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON comms.pgp_key_acquisition FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_guarded; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_key_acquisition_guarded BEFORE INSERT OR DELETE OR UPDATE ON comms.pgp_key_acquisition FOR EACH ROW EXECUTE FUNCTION comms.guard_pgp_key_acquisition();
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_no_truncate; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_key_acquisition_no_truncate BEFORE TRUNCATE ON comms.pgp_key_acquisition FOR EACH STATEMENT EXECUTE FUNCTION comms.guard_pgp_key_acquisition();
+
+--
+-- Name: pgp_key pgp_key_guarded; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_key_guarded BEFORE INSERT OR DELETE OR UPDATE ON comms.pgp_key FOR EACH ROW EXECUTE FUNCTION comms.guard_pgp_key();
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_guarded; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_key_lookup_guarded BEFORE INSERT OR DELETE OR UPDATE ON comms.pgp_key_lookup FOR EACH ROW EXECUTE FUNCTION comms.guard_pgp_key_lookup();
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_no_truncate; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_key_lookup_no_truncate BEFORE TRUNCATE ON comms.pgp_key_lookup FOR EACH STATEMENT EXECUTE FUNCTION comms.guard_pgp_key_lookup();
+
+--
+-- Name: pgp_key pgp_key_no_truncate; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_key_no_truncate BEFORE TRUNCATE ON comms.pgp_key FOR EACH STATEMENT EXECUTE FUNCTION comms.guard_pgp_key();
+
+--
+-- Name: pgp_verification pgp_verification_cites_a_confirmed_key; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_verification_cites_a_confirmed_key BEFORE INSERT ON comms.pgp_verification FOR EACH ROW EXECUTE FUNCTION comms.pgp_verification_cites_a_confirmed_key();
+
+--
 -- Name: pgp_verification pgp_verification_confirms_its_binding; Type: TRIGGER; Schema: comms; Owner: -
 --
 
 CREATE TRIGGER pgp_verification_confirms_its_binding BEFORE INSERT OR UPDATE ON comms.pgp_verification FOR EACH ROW EXECUTE FUNCTION comms.pgp_verification_confirms_its_binding();
+
+--
+-- Name: pgp_verification pgp_verification_guarded; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_verification_guarded BEFORE DELETE OR UPDATE ON comms.pgp_verification FOR EACH ROW EXECUTE FUNCTION comms.guard_pgp_verification();
+
+--
+-- Name: pgp_verification pgp_verification_is_attributed; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_verification_is_attributed BEFORE INSERT ON comms.pgp_verification FOR EACH ROW EXECUTE FUNCTION comms.pgp_verification_is_attributed();
+
+--
+-- Name: pgp_verification pgp_verification_no_truncate; Type: TRIGGER; Schema: comms; Owner: -
+--
+
+CREATE TRIGGER pgp_verification_no_truncate BEFORE TRUNCATE ON comms.pgp_verification FOR EACH STATEMENT EXECUTE FUNCTION comms.guard_pgp_verification();
+
+--
+-- Name: approval_request approval_request_frozen; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER approval_request_frozen BEFORE INSERT OR UPDATE ON core.approval_request FOR EACH ROW EXECUTE FUNCTION core.guard_approval_request();
 
 --
 -- Name: assertion assertion_derives_tie_confidence; Type: TRIGGER; Schema: core; Owner: -
@@ -4720,10 +10635,34 @@ CREATE TRIGGER pgp_verification_confirms_its_binding BEFORE INSERT OR UPDATE ON 
 CREATE TRIGGER assertion_derives_tie_confidence AFTER INSERT OR DELETE OR UPDATE OF edge_id, confidence, claim_path, claim_value, retracted_at, superseded_at ON core.assertion FOR EACH ROW EXECUTE FUNCTION core.assertion_derives_tie_confidence();
 
 --
+-- Name: assertion_embedding assertion_embedding_case; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_embedding_case BEFORE INSERT OR UPDATE OF assertion_id, case_id ON core.assertion_embedding FOR EACH ROW EXECUTE FUNCTION core.assertion_embedding_case();
+
+--
+-- Name: assertion assertion_embedding_dequeued; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_embedding_dequeued AFTER UPDATE OF retracted_at, superseded_at ON core.assertion FOR EACH ROW WHEN (((new.retracted_at IS NOT NULL) OR (new.superseded_at IS NOT NULL))) EXECUTE FUNCTION core.assertion_embedding_queued();
+
+--
+-- Name: assertion assertion_embedding_queued; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_embedding_queued AFTER INSERT ON core.assertion FOR EACH ROW WHEN (((new.retracted_at IS NULL) AND (new.superseded_at IS NULL))) EXECUTE FUNCTION core.assertion_embedding_queued();
+
+--
 -- Name: assertion assertion_protects_element; Type: TRIGGER; Schema: core; Owner: -
 --
 
 CREATE CONSTRAINT TRIGGER assertion_protects_element AFTER DELETE OR UPDATE OF node_id, edge_id ON core.assertion DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION core.assertion_protects_element();
+
+--
+-- Name: case case_merge_switch_guarded; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER case_merge_switch_guarded BEFORE UPDATE ON core."case" FOR EACH ROW WHEN (((old.dual_control_merge IS DISTINCT FROM new.dual_control_merge) OR (old.dual_control_merge_epoch IS DISTINCT FROM new.dual_control_merge_epoch))) EXECUTE FUNCTION core.guard_case_merge_switch();
 
 --
 -- Name: case compartments_registered; Type: TRIGGER; Schema: core; Owner: -
@@ -4798,6 +10737,12 @@ CREATE TRIGGER edge_tlp BEFORE INSERT OR UPDATE ON core.edge FOR EACH ROW EXECUT
 CREATE TRIGGER edge_validate BEFORE INSERT OR UPDATE ON core.edge FOR EACH ROW EXECUTE FUNCTION core.validate_edge_endpoints();
 
 --
+-- Name: embedding_space embedding_space_transition; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER embedding_space_transition BEFORE UPDATE ON core.embedding_space FOR EACH ROW EXECUTE FUNCTION core.embedding_space_transition();
+
+--
 -- Name: evidence_custody evidence_custody_append_only; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -4810,6 +10755,18 @@ CREATE TRIGGER evidence_custody_append_only BEFORE DELETE OR UPDATE ON core.evid
 CREATE TRIGGER evidence_custody_no_truncate BEFORE TRUNCATE ON core.evidence_custody FOR EACH STATEMENT EXECUTE FUNCTION core.block_custody_mutation();
 
 --
+-- Name: evidence_embedding evidence_embedding_case; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_embedding_case BEFORE INSERT OR UPDATE OF evidence_id, case_id ON core.evidence_embedding FOR EACH ROW EXECUTE FUNCTION core.evidence_embedding_case();
+
+--
+-- Name: evidence evidence_embedding_queued; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_embedding_queued AFTER INSERT ON core.evidence FOR EACH ROW WHEN ((new.purged_at IS NULL)) EXECUTE FUNCTION core.evidence_embedding_queued();
+
+--
 -- Name: evidence evidence_tlp; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -4820,6 +10777,12 @@ CREATE TRIGGER evidence_tlp BEFORE INSERT OR UPDATE ON core.evidence FOR EACH RO
 --
 
 CREATE TRIGGER evidence_tsv BEFORE INSERT OR UPDATE ON core.evidence FOR EACH ROW EXECUTE FUNCTION core.evidence_tsv_update();
+
+--
+-- Name: evidence evidence_vectors_follow; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_vectors_follow AFTER UPDATE OF title, description, extracted_text, classification, compartments, purged_at ON core.evidence FOR EACH ROW WHEN (((old.title IS DISTINCT FROM new.title) OR (old.description IS DISTINCT FROM new.description) OR (old.extracted_text IS DISTINCT FROM new.extracted_text) OR (old.classification IS DISTINCT FROM new.classification) OR (old.compartments IS DISTINCT FROM new.compartments) OR (old.purged_at IS DISTINCT FROM new.purged_at))) EXECUTE FUNCTION core.evidence_vectors_follow();
 
 --
 -- Name: node node_announce_del; Type: TRIGGER; Schema: core; Owner: -
@@ -4918,16 +10881,70 @@ CREATE TRIGGER compartment_in_use BEFORE DELETE OR UPDATE OF key ON iam.compartm
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON iam.app_user FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
+-- Name: dual_control_policy_change dual_control_change_append_only; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER dual_control_change_append_only BEFORE DELETE OR UPDATE ON iam.dual_control_policy_change FOR EACH ROW EXECUTE FUNCTION iam.guard_dual_control_ledger();
+
+--
+-- Name: dual_control_policy_change dual_control_change_applied; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER dual_control_change_applied AFTER INSERT ON iam.dual_control_policy_change FOR EACH ROW EXECUTE FUNCTION iam.apply_dual_control_change();
+
+--
+-- Name: dual_control_policy_change dual_control_change_checked; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER dual_control_change_checked BEFORE INSERT ON iam.dual_control_policy_change FOR EACH ROW EXECUTE FUNCTION iam.check_dual_control_change();
+
+--
+-- Name: dual_control_policy_change dual_control_change_no_truncate; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER dual_control_change_no_truncate BEFORE TRUNCATE ON iam.dual_control_policy_change FOR EACH STATEMENT EXECUTE FUNCTION iam.guard_dual_control_ledger();
+
+--
+-- Name: dual_control_operation dual_control_operation_no_truncate; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER dual_control_operation_no_truncate BEFORE TRUNCATE ON iam.dual_control_operation FOR EACH STATEMENT EXECUTE FUNCTION iam.policy_changed_only_by_ledger();
+
+--
+-- Name: dual_control_operation dual_control_operation_written_by_ledger; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER dual_control_operation_written_by_ledger BEFORE INSERT OR DELETE OR UPDATE ON iam.dual_control_operation FOR EACH ROW EXECUTE FUNCTION iam.policy_changed_only_by_ledger();
+
+--
 -- Name: role_permission role_permission_separated_duty; Type: TRIGGER; Schema: iam; Owner: -
 --
 
 CREATE TRIGGER role_permission_separated_duty BEFORE INSERT OR UPDATE ON iam.role_permission FOR EACH ROW EXECUTE FUNCTION iam.refuse_separated_duty_grant();
 
 --
+-- Name: separated_duty separated_duty_no_truncate; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER separated_duty_no_truncate BEFORE TRUNCATE ON iam.separated_duty FOR EACH STATEMENT EXECUTE FUNCTION iam.policy_changed_only_by_ledger();
+
+--
 -- Name: separated_duty separated_duty_not_already_violated; Type: TRIGGER; Schema: iam; Owner: -
 --
 
 CREATE TRIGGER separated_duty_not_already_violated BEFORE INSERT OR UPDATE ON iam.separated_duty FOR EACH ROW EXECUTE FUNCTION iam.refuse_violated_separation();
+
+--
+-- Name: separated_duty separated_duty_written_by_ledger; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER separated_duty_written_by_ledger BEFORE INSERT OR DELETE OR UPDATE ON iam.separated_duty FOR EACH ROW EXECUTE FUNCTION iam.policy_changed_only_by_ledger();
+
+--
+-- Name: session session_guard; Type: TRIGGER; Schema: iam; Owner: -
+--
+
+CREATE TRIGGER session_guard BEFORE UPDATE ON iam.session FOR EACH ROW EXECUTE FUNCTION iam.session_guard();
 
 --
 -- Name: api_key compartments_registered; Type: TRIGGER; Schema: ingest; Owner: -
@@ -4948,10 +10965,130 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON ingest.record FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
+-- Name: provider_exposure_change exposure_change_guarded; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER exposure_change_guarded BEFORE DELETE OR UPDATE ON ingest.provider_exposure_change FOR EACH ROW EXECUTE FUNCTION ingest.guard_exposure_change();
+
+--
+-- Name: provider_exposure_change exposure_change_no_truncate; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER exposure_change_no_truncate BEFORE TRUNCATE ON ingest.provider_exposure_change FOR EACH STATEMENT EXECUTE FUNCTION ingest.guard_exposure_change();
+
+--
+-- Name: lookup_attempt lookup_attempt_guarded; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_attempt_guarded BEFORE DELETE OR UPDATE ON ingest.lookup_attempt FOR EACH ROW EXECUTE FUNCTION ingest.lookup_attempt_append_only();
+
+--
+-- Name: lookup_attempt lookup_attempt_no_truncate; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_attempt_no_truncate BEFORE TRUNCATE ON ingest.lookup_attempt FOR EACH STATEMENT EXECUTE FUNCTION ingest.lookup_attempt_append_only();
+
+--
+-- Name: lookup_batch lookup_batch_guarded; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_batch_guarded BEFORE DELETE OR UPDATE ON ingest.lookup_batch FOR EACH ROW EXECUTE FUNCTION ingest.guard_lookup_batch();
+
+--
+-- Name: lookup_batch lookup_batch_no_truncate; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_batch_no_truncate BEFORE TRUNCATE ON ingest.lookup_batch FOR EACH STATEMENT EXECUTE FUNCTION ingest.guard_lookup_batch();
+
+--
+-- Name: lookup lookup_guarded; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_guarded BEFORE INSERT OR DELETE OR UPDATE ON ingest.lookup FOR EACH ROW EXECUTE FUNCTION ingest.lookup_is_a_record();
+
+--
+-- Name: lookup lookup_no_truncate; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_no_truncate BEFORE TRUNCATE ON ingest.lookup FOR EACH STATEMENT EXECUTE FUNCTION ingest.lookup_is_a_record();
+
+--
+-- Name: lookup lookup_result_dominates; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_result_dominates BEFORE INSERT OR UPDATE OF result_id ON ingest.lookup FOR EACH ROW EXECUTE FUNCTION ingest.lookup_result_dominates();
+
+--
+-- Name: lookup_result lookup_result_guarded; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_result_guarded BEFORE DELETE OR UPDATE ON ingest.lookup_result FOR EACH ROW EXECUTE FUNCTION ingest.guard_lookup_result();
+
+--
+-- Name: lookup_result lookup_result_no_truncate; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_result_no_truncate BEFORE TRUNCATE ON ingest.lookup_result FOR EACH STATEMENT EXECUTE FUNCTION ingest.guard_lookup_result();
+
+--
+-- Name: lookup_result lookup_result_tlp; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_result_tlp BEFORE INSERT OR UPDATE ON ingest.lookup_result FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
+
+--
+-- Name: lookup lookup_tlp; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER lookup_tlp BEFORE INSERT OR UPDATE ON ingest.lookup FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
+
+--
+-- Name: provider provider_guarded; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER provider_guarded BEFORE DELETE OR UPDATE ON ingest.provider FOR EACH ROW EXECUTE FUNCTION ingest.guard_provider();
+
+--
+-- Name: provider provider_no_truncate; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER provider_no_truncate BEFORE TRUNCATE ON ingest.provider FOR EACH STATEMENT EXECUTE FUNCTION ingest.guard_provider();
+
+--
+-- Name: provider provider_starts_unapproved; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER provider_starts_unapproved BEFORE INSERT ON ingest.provider FOR EACH ROW EXECUTE FUNCTION ingest.provider_starts_unapproved();
+
+--
 -- Name: sample compartments_registered; Type: TRIGGER; Schema: lab; Owner: -
 --
 
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON lab.sample FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: yara_ruleset compartments_registered; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON lab.yara_ruleset FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: detonation detonation_guard; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER detonation_guard BEFORE DELETE OR UPDATE ON lab.detonation FOR EACH ROW EXECUTE FUNCTION lab.guard_detonation();
+
+--
+-- Name: detonation detonation_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER detonation_no_truncate BEFORE TRUNCATE ON lab.detonation FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_detonation();
+
+--
+-- Name: download_ticket download_ticket_guard; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER download_ticket_guard BEFORE UPDATE ON lab.download_ticket FOR EACH ROW EXECUTE FUNCTION lab.download_ticket_guard();
 
 --
 -- Name: preservation_authorisation preservation_authorisation_guarded; Type: TRIGGER; Schema: lab; Owner: -
@@ -4978,16 +11115,166 @@ CREATE TRIGGER sample_access_append_only BEFORE DELETE OR UPDATE ON lab.sample_a
 CREATE TRIGGER sample_access_no_truncate BEFORE TRUNCATE ON lab.sample_access FOR EACH STATEMENT EXECUTE FUNCTION lab.block_access_mutation();
 
 --
+-- Name: sample sample_match_is_permanent; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER sample_match_is_permanent BEFORE UPDATE OF screening_outcome, screening_bytes_absent_at ON lab.sample FOR EACH ROW EXECUTE FUNCTION lab.guard_screening_outcome();
+
+--
 -- Name: sample sample_tlp; Type: TRIGGER; Schema: lab; Owner: -
 --
 
 CREATE TRIGGER sample_tlp BEFORE INSERT OR UPDATE ON lab.sample FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
 
 --
+-- Name: screening_hash screening_hash_delete_guard; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_hash_delete_guard AFTER DELETE ON lab.screening_hash REFERENCING OLD TABLE AS gone FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_screening_hash_delete();
+
+--
+-- Name: screening_hash screening_hash_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_hash_no_truncate BEFORE TRUNCATE ON lab.screening_hash FOR EACH STATEMENT EXECUTE FUNCTION lab.refuse_screening_hash_change();
+
+--
+-- Name: screening_hash screening_hash_no_update; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_hash_no_update BEFORE UPDATE ON lab.screening_hash FOR EACH STATEMENT EXECUTE FUNCTION lab.refuse_screening_hash_change();
+
+--
+-- Name: screening_list screening_list_guard; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_list_guard BEFORE DELETE OR UPDATE ON lab.screening_list FOR EACH ROW EXECUTE FUNCTION lab.guard_screening_list();
+
+--
+-- Name: screening_list screening_list_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_list_no_truncate BEFORE TRUNCATE ON lab.screening_list FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_screening_list();
+
+--
+-- Name: screening_result screening_result_append_only; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_result_append_only BEFORE DELETE OR UPDATE ON lab.screening_result FOR EACH ROW EXECUTE FUNCTION lab.block_screening_mutation();
+
+--
+-- Name: screening_result screening_result_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_result_no_truncate BEFORE TRUNCATE ON lab.screening_result FOR EACH STATEMENT EXECUTE FUNCTION lab.block_screening_mutation();
+
+--
+-- Name: screening_review screening_review_append_only; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_review_append_only BEFORE DELETE OR UPDATE ON lab.screening_review FOR EACH ROW EXECUTE FUNCTION lab.block_screening_mutation();
+
+--
+-- Name: screening_review screening_review_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER screening_review_no_truncate BEFORE TRUNCATE ON lab.screening_review FOR EACH STATEMENT EXECUTE FUNCTION lab.block_screening_mutation();
+
+--
+-- Name: yara_activation yara_activation_guarded; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_activation_guarded BEFORE DELETE OR UPDATE ON lab.yara_activation FOR EACH ROW EXECUTE FUNCTION lab.guard_yara_activation();
+
+--
+-- Name: yara_activation yara_activation_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_activation_no_truncate BEFORE TRUNCATE ON lab.yara_activation FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_yara_activation();
+
+--
+-- Name: yara_activation yara_activation_rules; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_activation_rules BEFORE INSERT ON lab.yara_activation FOR EACH ROW EXECUTE FUNCTION lab.yara_activation_rules();
+
+--
+-- Name: yara_compiled yara_compiled_insert_only; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_compiled_insert_only BEFORE DELETE OR UPDATE ON lab.yara_compiled FOR EACH ROW EXECUTE FUNCTION lab.guard_yara_insert_only();
+
+--
+-- Name: yara_compiled yara_compiled_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_compiled_no_truncate BEFORE TRUNCATE ON lab.yara_compiled FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_yara_insert_only();
+
+--
+-- Name: yara_compiled_rejected yara_compiled_rejected_insert_only; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_compiled_rejected_insert_only BEFORE DELETE OR UPDATE ON lab.yara_compiled_rejected FOR EACH ROW EXECUTE FUNCTION lab.guard_yara_insert_only();
+
+--
+-- Name: yara_compiled_rejected yara_compiled_rejected_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_compiled_rejected_no_truncate BEFORE TRUNCATE ON lab.yara_compiled_rejected FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_yara_insert_only();
+
+--
+-- Name: yara_ruleset yara_ruleset_guarded; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_ruleset_guarded BEFORE DELETE OR UPDATE ON lab.yara_ruleset FOR EACH ROW EXECUTE FUNCTION lab.guard_yara_ruleset();
+
+--
+-- Name: yara_ruleset yara_ruleset_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_ruleset_no_truncate BEFORE TRUNCATE ON lab.yara_ruleset FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_yara_ruleset();
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_guarded; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_ruleset_version_guarded BEFORE DELETE OR UPDATE ON lab.yara_ruleset_version FOR EACH ROW EXECUTE FUNCTION lab.guard_yara_ruleset_version();
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_no_truncate; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER yara_ruleset_version_no_truncate BEFORE TRUNCATE ON lab.yara_ruleset_version FOR EACH STATEMENT EXECUTE FUNCTION lab.guard_yara_ruleset_version();
+
+--
 -- Name: notification compartments_registered; Type: TRIGGER; Schema: notify; Owner: -
 --
 
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON notify.notification FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
+-- Name: jira_event jira_event_guarded; Type: TRIGGER; Schema: notify; Owner: -
+--
+
+CREATE TRIGGER jira_event_guarded BEFORE DELETE OR UPDATE ON notify.jira_event FOR EACH ROW EXECUTE FUNCTION notify.guard_jira_event();
+
+--
+-- Name: jira_event jira_event_no_truncate; Type: TRIGGER; Schema: notify; Owner: -
+--
+
+CREATE TRIGGER jira_event_no_truncate BEFORE TRUNCATE ON notify.jira_event FOR EACH STATEMENT EXECUTE FUNCTION notify.guard_jira_event();
+
+--
+-- Name: jira_link jira_link_guarded; Type: TRIGGER; Schema: notify; Owner: -
+--
+
+CREATE TRIGGER jira_link_guarded BEFORE DELETE OR UPDATE ON notify.jira_link FOR EACH ROW EXECUTE FUNCTION notify.guard_jira_link();
+
+--
+-- Name: jira_link jira_link_no_truncate; Type: TRIGGER; Schema: notify; Owner: -
+--
+
+CREATE TRIGGER jira_link_no_truncate BEFORE TRUNCATE ON notify.jira_link FOR EACH STATEMENT EXECUTE FUNCTION notify.guard_jira_link();
 
 --
 -- Name: notification notification_announce; Type: TRIGGER; Schema: notify; Owner: -
@@ -5066,6 +11353,90 @@ ALTER TABLE ONLY collect.collection_account
     ADD CONSTRAINT collection_account_source_id_fkey FOREIGN KEY (source_id) REFERENCES collect.source(id);
 
 --
+-- Name: collection_authority collection_authority_collection_account_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority
+    ADD CONSTRAINT collection_authority_collection_account_id_fkey FOREIGN KEY (collection_account_id) REFERENCES collect.collection_account(id);
+
+--
+-- Name: collection_authority collection_authority_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority
+    ADD CONSTRAINT collection_authority_confirmed_by_fkey FOREIGN KEY (confirmed_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: collection_authority collection_authority_recorded_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority
+    ADD CONSTRAINT collection_authority_recorded_by_fkey FOREIGN KEY (recorded_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: collection_authority collection_authority_revoked_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority
+    ADD CONSTRAINT collection_authority_revoked_by_fkey FOREIGN KEY (revoked_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: collection_authority_target collection_authority_target_added_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_added_by_fkey FOREIGN KEY (added_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: collection_authority_target collection_authority_target_authority_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_authority_id_fkey FOREIGN KEY (authority_id) REFERENCES collect.collection_authority(id);
+
+--
+-- Name: collection_authority_target collection_authority_target_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_confirmed_by_fkey FOREIGN KEY (confirmed_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: collection_authority_target collection_authority_target_revoked_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_revoked_by_fkey FOREIGN KEY (revoked_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: collection_authority_target collection_authority_target_source_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_source_id_fkey FOREIGN KEY (source_id) REFERENCES collect.source(id);
+
+--
+-- Name: collection_authority_target collection_authority_target_target_egress_profile_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_authority_target
+    ADD CONSTRAINT collection_authority_target_target_egress_profile_id_fkey FOREIGN KEY (target_egress_profile_id) REFERENCES collect.egress_profile(id);
+
+--
+-- Name: collection_run collection_run_authority_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_run
+    ADD CONSTRAINT collection_run_authority_id_fkey FOREIGN KEY (authority_id) REFERENCES collect.collection_authority(id);
+
+--
+-- Name: collection_run collection_run_authority_target_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collection_run
+    ADD CONSTRAINT collection_run_authority_target_id_fkey FOREIGN KEY (authority_target_id) REFERENCES collect.collection_authority_target(id);
+
+--
 -- Name: collection_run collection_run_collection_account_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
 --
 
@@ -5101,6 +11472,27 @@ ALTER TABLE ONLY collect.document
     ADD CONSTRAINT document_collection_run_id_fkey FOREIGN KEY (collection_run_id) REFERENCES collect.collection_run(id);
 
 --
+-- Name: document_embedding document_embedding_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.document_embedding
+    ADD CONSTRAINT document_embedding_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id) ON DELETE CASCADE;
+
+--
+-- Name: document_embedding document_embedding_space_id_slot_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.document_embedding
+    ADD CONSTRAINT document_embedding_space_id_slot_fkey FOREIGN KEY (space_id, slot) REFERENCES core.embedding_space(id, slot);
+
+--
+-- Name: document document_legal_hold_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.document
+    ADD CONSTRAINT document_legal_hold_by_fkey FOREIGN KEY (legal_hold_by) REFERENCES iam.app_user(id);
+
+--
 -- Name: document document_source_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
 --
 
@@ -5122,6 +11514,76 @@ ALTER TABLE ONLY collect.document
     ADD CONSTRAINT document_watch_id_fkey FOREIGN KEY (watch_id) REFERENCES collect.watch(id);
 
 --
+-- Name: egress_destination egress_destination_created_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_destination
+    ADD CONSTRAINT egress_destination_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_destination egress_destination_retired_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_destination
+    ADD CONSTRAINT egress_destination_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_destination egress_destination_route_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_destination
+    ADD CONSTRAINT egress_destination_route_id_fkey FOREIGN KEY (route_id) REFERENCES collect.egress_integration_route(id);
+
+--
+-- Name: egress_integration_route egress_integration_route_created_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_integration_route
+    ADD CONSTRAINT egress_integration_route_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_integration_route egress_integration_route_retired_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_integration_route
+    ADD CONSTRAINT egress_integration_route_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_integration_route egress_integration_route_updated_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_integration_route
+    ADD CONSTRAINT egress_integration_route_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_profile egress_profile_created_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_profile
+    ADD CONSTRAINT egress_profile_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_profile egress_profile_exit_sealed_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_profile
+    ADD CONSTRAINT egress_profile_exit_sealed_by_fkey FOREIGN KEY (exit_sealed_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_profile egress_profile_retired_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_profile
+    ADD CONSTRAINT egress_profile_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: egress_profile egress_profile_updated_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.egress_profile
+    ADD CONSTRAINT egress_profile_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES iam.app_user(id);
+
+--
 -- Name: extraction extraction_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
 --
 
@@ -5134,6 +11596,20 @@ ALTER TABLE ONLY collect.extraction
 
 ALTER TABLE ONLY collect.extraction
     ADD CONSTRAINT extraction_selector_type_fkey FOREIGN KEY (selector_type) REFERENCES core.selector_type(key);
+
+--
+-- Name: forum_member forum_member_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_member
+    ADD CONSTRAINT forum_member_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id) ON DELETE CASCADE;
+
+--
+-- Name: forum_post forum_post_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_post
+    ADD CONSTRAINT forum_post_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id) ON DELETE CASCADE;
 
 --
 -- Name: proposal proposal_applied_edge_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
@@ -5162,6 +11638,69 @@ ALTER TABLE ONLY collect.proposal
 
 ALTER TABLE ONLY collect.proposal
     ADD CONSTRAINT proposal_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id);
+
+--
+-- Name: proposal proposal_lookup_result_fk; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.proposal
+    ADD CONSTRAINT proposal_lookup_result_fk FOREIGN KEY (lookup_result_id) REFERENCES ingest.lookup_result(id) NOT VALID;
+
+--
+-- Name: source source_collection_account_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.source
+    ADD CONSTRAINT source_collection_account_id_fkey FOREIGN KEY (collection_account_id) REFERENCES collect.collection_account(id);
+
+--
+-- Name: source source_egress_profile_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.source
+    ADD CONSTRAINT source_egress_profile_id_fkey FOREIGN KEY (egress_profile_id) REFERENCES collect.egress_profile(id);
+
+--
+-- Name: telegram_chat telegram_chat_access_hash_account_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_chat
+    ADD CONSTRAINT telegram_chat_access_hash_account_id_fkey FOREIGN KEY (access_hash_account_id) REFERENCES collect.collection_account(id);
+
+--
+-- Name: telegram_chat telegram_chat_joined_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_chat
+    ADD CONSTRAINT telegram_chat_joined_by_fkey FOREIGN KEY (joined_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: telegram_chat telegram_chat_resolved_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_chat
+    ADD CONSTRAINT telegram_chat_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: telegram_chat telegram_chat_source_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_chat
+    ADD CONSTRAINT telegram_chat_source_id_fkey FOREIGN KEY (source_id) REFERENCES collect.source(id);
+
+--
+-- Name: telegram_message telegram_message_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_message
+    ADD CONSTRAINT telegram_message_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id) ON DELETE RESTRICT;
+
+--
+-- Name: telegram_message telegram_message_source_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.telegram_message
+    ADD CONSTRAINT telegram_message_source_id_fkey FOREIGN KEY (source_id) REFERENCES collect.source(id);
 
 --
 -- Name: watch watch_case_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
@@ -5367,6 +11906,111 @@ ALTER TABLE ONLY comms.participant
     ADD CONSTRAINT participant_identity_node_id_fkey FOREIGN KEY (identity_node_id) REFERENCES core.node(id);
 
 --
+-- Name: pgp_key_acquisition pgp_key_acquisition_binding_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_binding_same_case FOREIGN KEY (channel_binding_id, case_id) REFERENCES comms.channel_binding(id, case_id);
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_block_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_block_same_case FOREIGN KEY (contact_block_id, case_id) REFERENCES comms.contact_block(id, case_id);
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_case_id_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_evidence_id_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_evidence_id_fkey FOREIGN KEY (evidence_id) REFERENCES core.evidence(id);
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_lookup_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_lookup_same_case FOREIGN KEY (lookup_id, case_id) REFERENCES comms.pgp_key_lookup(id, case_id);
+
+--
+-- Name: pgp_key_acquisition pgp_key_acquisition_requested_by_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_acquisition
+    ADD CONSTRAINT pgp_key_acquisition_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: pgp_key pgp_key_acquisition_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_acquisition_same_case FOREIGN KEY (acquisition_id, case_id) REFERENCES comms.pgp_key_acquisition(id, case_id);
+
+--
+-- Name: pgp_key pgp_key_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_confirmed_by_fkey FOREIGN KEY (confirmed_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: pgp_key pgp_key_confirmed_contact_block_entry_id_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_confirmed_contact_block_entry_id_fkey FOREIGN KEY (confirmed_contact_block_entry_id) REFERENCES comms.contact_block_entry(id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_binding_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_binding_same_case FOREIGN KEY (channel_binding_id, case_id) REFERENCES comms.channel_binding(id, case_id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_block_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_block_same_case FOREIGN KEY (contact_block_id, case_id) REFERENCES comms.contact_block(id, case_id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_case_id_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_decided_by_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: pgp_key_lookup pgp_key_lookup_requested_by_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key_lookup
+    ADD CONSTRAINT pgp_key_lookup_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: pgp_key pgp_key_retired_by_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_key
+    ADD CONSTRAINT pgp_key_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
 -- Name: pgp_verification pgp_verification_binding_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
 --
 
@@ -5407,6 +12051,13 @@ ALTER TABLE ONLY comms.pgp_verification
 
 ALTER TABLE ONLY comms.pgp_verification
     ADD CONSTRAINT pgp_verification_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: pgp_verification pgp_verification_key_same_case; Type: FK CONSTRAINT; Schema: comms; Owner: -
+--
+
+ALTER TABLE ONLY comms.pgp_verification
+    ADD CONSTRAINT pgp_verification_key_same_case FOREIGN KEY (pgp_key_id, case_id) REFERENCES comms.pgp_key(id, case_id);
 
 --
 -- Name: service_selector service_selector_added_by_fkey; Type: FK CONSTRAINT; Schema: comms; Owner: -
@@ -5486,11 +12137,39 @@ ALTER TABLE ONLY core.assertion
     ADD CONSTRAINT assertion_edge_id_fkey FOREIGN KEY (edge_id) REFERENCES core.edge(id);
 
 --
+-- Name: assertion_embedding assertion_embedding_assertion_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.assertion_embedding
+    ADD CONSTRAINT assertion_embedding_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES core.assertion(id) ON DELETE CASCADE;
+
+--
+-- Name: assertion_embedding assertion_embedding_case_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.assertion_embedding
+    ADD CONSTRAINT assertion_embedding_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id) ON DELETE CASCADE;
+
+--
+-- Name: assertion_embedding assertion_embedding_space_id_slot_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.assertion_embedding
+    ADD CONSTRAINT assertion_embedding_space_id_slot_fkey FOREIGN KEY (space_id, slot) REFERENCES core.embedding_space(id, slot);
+
+--
 -- Name: assertion assertion_evidence_fk; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
 ALTER TABLE ONLY core.assertion
     ADD CONSTRAINT assertion_evidence_fk FOREIGN KEY (evidence_id) REFERENCES core.evidence(id);
+
+--
+-- Name: assertion assertion_lookup_result_fk; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.assertion
+    ADD CONSTRAINT assertion_lookup_result_fk FOREIGN KEY (lookup_result_id) REFERENCES ingest.lookup_result(id) NOT VALID;
 
 --
 -- Name: assertion assertion_node_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
@@ -5584,6 +12263,27 @@ ALTER TABLE ONLY core.edge
     ADD CONSTRAINT edge_src_node_id_fkey FOREIGN KEY (src_node_id) REFERENCES core.node(id);
 
 --
+-- Name: embedding_space embedding_space_activated_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_space
+    ADD CONSTRAINT embedding_space_activated_by_fkey FOREIGN KEY (activated_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: embedding_space embedding_space_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_space
+    ADD CONSTRAINT embedding_space_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: embedding_space embedding_space_retired_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_space
+    ADD CONSTRAINT embedding_space_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
 -- Name: evidence evidence_acquired_by_fk; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -5624,6 +12324,27 @@ ALTER TABLE ONLY core.evidence_custody
 
 ALTER TABLE ONLY core.evidence_custody
     ADD CONSTRAINT evidence_custody_evidence_id_fkey FOREIGN KEY (evidence_id) REFERENCES core.evidence(id);
+
+--
+-- Name: evidence_embedding evidence_embedding_case_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_embedding
+    ADD CONSTRAINT evidence_embedding_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id) ON DELETE CASCADE;
+
+--
+-- Name: evidence_embedding evidence_embedding_evidence_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_embedding
+    ADD CONSTRAINT evidence_embedding_evidence_id_fkey FOREIGN KEY (evidence_id) REFERENCES core.evidence(id) ON DELETE CASCADE;
+
+--
+-- Name: evidence_embedding evidence_embedding_space_id_slot_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_embedding
+    ADD CONSTRAINT evidence_embedding_space_id_slot_fkey FOREIGN KEY (space_id, slot) REFERENCES core.embedding_space(id, slot);
 
 --
 -- Name: evidence_link evidence_link_edge_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
@@ -6060,18 +12781,39 @@ ALTER TABLE ONLY iam.compartment
     ADD CONSTRAINT compartment_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id) ON DELETE SET NULL;
 
 --
--- Name: dual_control_request dual_control_request_approved_by_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
+-- Name: dual_control_operation dual_control_operation_change_id_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
 --
 
-ALTER TABLE ONLY iam.dual_control_request
-    ADD CONSTRAINT dual_control_request_approved_by_fkey FOREIGN KEY (approved_by) REFERENCES iam.app_user(id);
+ALTER TABLE ONLY iam.dual_control_operation
+    ADD CONSTRAINT dual_control_operation_change_id_fkey FOREIGN KEY (change_id) REFERENCES iam.dual_control_policy_change(id);
 
 --
--- Name: dual_control_request dual_control_request_requested_by_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
+-- Name: dual_control_policy_change dual_control_policy_change_approval_request_id_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
 --
 
-ALTER TABLE ONLY iam.dual_control_request
-    ADD CONSTRAINT dual_control_request_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_approval_request_id_fkey FOREIGN KEY (approval_request_id) REFERENCES core.approval_request(id);
+
+--
+-- Name: dual_control_policy_change dual_control_policy_change_based_on_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_based_on_fkey FOREIGN KEY (based_on) REFERENCES iam.dual_control_policy_change(id);
+
+--
+-- Name: dual_control_policy_change dual_control_policy_change_countersigned_by_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_countersigned_by_fkey FOREIGN KEY (countersigned_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: dual_control_policy_change dual_control_policy_change_requested_by_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.dual_control_policy_change
+    ADD CONSTRAINT dual_control_policy_change_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
 
 --
 -- Name: role_permission role_permission_permission_key_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
@@ -6086,6 +12828,13 @@ ALTER TABLE ONLY iam.role_permission
 
 ALTER TABLE ONLY iam.role_permission
     ADD CONSTRAINT role_permission_role_key_fkey FOREIGN KEY (role_key) REFERENCES iam.role(key) ON DELETE CASCADE;
+
+--
+-- Name: separated_duty separated_duty_added_by_change_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
+--
+
+ALTER TABLE ONLY iam.separated_duty
+    ADD CONSTRAINT separated_duty_added_by_change_fkey FOREIGN KEY (added_by_change) REFERENCES iam.dual_control_policy_change(id);
 
 --
 -- Name: session session_user_id_fkey; Type: FK CONSTRAINT; Schema: iam; Owner: -
@@ -6165,6 +12914,160 @@ ALTER TABLE ONLY ingest.dead_letter
     ADD CONSTRAINT dead_letter_replayed_by_fkey FOREIGN KEY (replayed_by) REFERENCES iam.app_user(id);
 
 --
+-- Name: lookup_attempt lookup_attempt_lookup_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_attempt
+    ADD CONSTRAINT lookup_attempt_lookup_id_fkey FOREIGN KEY (lookup_id) REFERENCES ingest.lookup(id);
+
+--
+-- Name: lookup_attempt lookup_attempt_provider_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_attempt
+    ADD CONSTRAINT lookup_attempt_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ingest.provider(id);
+
+--
+-- Name: lookup lookup_authorised_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_authorised_by_fkey FOREIGN KEY (authorised_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: lookup_batch lookup_batch_cancelled_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_batch
+    ADD CONSTRAINT lookup_batch_cancelled_by_fkey FOREIGN KEY (cancelled_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: lookup_batch lookup_batch_case_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_batch
+    ADD CONSTRAINT lookup_batch_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: lookup lookup_batch_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES ingest.lookup_batch(id);
+
+--
+-- Name: lookup_batch lookup_batch_provider_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_batch
+    ADD CONSTRAINT lookup_batch_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ingest.provider(id);
+
+--
+-- Name: lookup_batch lookup_batch_requested_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_batch
+    ADD CONSTRAINT lookup_batch_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: lookup lookup_case_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: lookup lookup_node_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_node_id_fkey FOREIGN KEY (node_id) REFERENCES core.node(id);
+
+--
+-- Name: lookup lookup_provider_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ingest.provider(id);
+
+--
+-- Name: lookup lookup_requested_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: lookup_result lookup_result_case_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_result
+    ADD CONSTRAINT lookup_result_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: lookup_result lookup_result_filed_evidence_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_result
+    ADD CONSTRAINT lookup_result_filed_evidence_id_fkey FOREIGN KEY (filed_evidence_id) REFERENCES core.evidence(id);
+
+--
+-- Name: lookup lookup_result_fk; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_result_fk FOREIGN KEY (result_id) REFERENCES ingest.lookup_result(id);
+
+--
+-- Name: lookup_result lookup_result_lookup_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_result
+    ADD CONSTRAINT lookup_result_lookup_id_fkey FOREIGN KEY (lookup_id) REFERENCES ingest.lookup(id);
+
+--
+-- Name: lookup_result lookup_result_provider_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_result
+    ADD CONSTRAINT lookup_result_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ingest.provider(id);
+
+--
+-- Name: lookup_result lookup_result_selector_type_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup_result
+    ADD CONSTRAINT lookup_result_selector_type_fkey FOREIGN KEY (selector_type) REFERENCES core.selector_type(key);
+
+--
+-- Name: lookup lookup_sample_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
+
+--
+-- Name: lookup lookup_selector_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_selector_id_fkey FOREIGN KEY (selector_id) REFERENCES core.selector(id);
+
+--
+-- Name: lookup lookup_selector_type_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_selector_type_fkey FOREIGN KEY (selector_type) REFERENCES core.selector_type(key);
+
+--
+-- Name: lookup lookup_signed_off_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.lookup
+    ADD CONSTRAINT lookup_signed_off_by_fkey FOREIGN KEY (signed_off_by) REFERENCES iam.app_user(id);
+
+--
 -- Name: pii_authorisation pii_authorisation_case_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
 --
 
@@ -6184,6 +13087,62 @@ ALTER TABLE ONLY ingest.pii_authorisation
 
 ALTER TABLE ONLY ingest.pii_authorisation
     ADD CONSTRAINT pii_authorisation_granted_to_fkey FOREIGN KEY (granted_to) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider provider_created_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider_exposure_change provider_exposure_change_decided_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider_exposure_change
+    ADD CONSTRAINT provider_exposure_change_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider_exposure_change provider_exposure_change_provider_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider_exposure_change
+    ADD CONSTRAINT provider_exposure_change_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ingest.provider(id);
+
+--
+-- Name: provider_exposure_change provider_exposure_change_requested_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider_exposure_change
+    ADD CONSTRAINT provider_exposure_change_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider provider_exposure_determined_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_exposure_determined_by_fkey FOREIGN KEY (exposure_determined_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider provider_retired_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider provider_secret_set_by_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_secret_set_by_fkey FOREIGN KEY (secret_set_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: provider provider_source_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ONLY ingest.provider
+    ADD CONSTRAINT provider_source_id_fkey FOREIGN KEY (source_id) REFERENCES collect.source(id);
 
 --
 -- Name: record record_batch_id_fkey; Type: FK CONSTRAINT; Schema: ingest; Owner: -
@@ -6221,11 +13180,25 @@ ALTER TABLE ONLY ingest.victim_credential
     ADD CONSTRAINT victim_credential_victim_node_id_fkey FOREIGN KEY (victim_node_id) REFERENCES core.node(id);
 
 --
+-- Name: detonation detonation_analysis_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.detonation
+    ADD CONSTRAINT detonation_analysis_id_fkey FOREIGN KEY (analysis_id) REFERENCES lab.sample_analysis(id);
+
+--
 -- Name: detonation detonation_authorised_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
 --
 
 ALTER TABLE ONLY lab.detonation
     ADD CONSTRAINT detonation_authorised_by_fkey FOREIGN KEY (authorised_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: detonation detonation_cancelled_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.detonation
+    ADD CONSTRAINT detonation_cancelled_by_fkey FOREIGN KEY (cancelled_by) REFERENCES iam.app_user(id);
 
 --
 -- Name: detonation detonation_requested_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
@@ -6240,6 +13213,13 @@ ALTER TABLE ONLY lab.detonation
 
 ALTER TABLE ONLY lab.detonation
     ADD CONSTRAINT detonation_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
+
+--
+-- Name: detonation detonation_signed_off_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.detonation
+    ADD CONSTRAINT detonation_signed_off_by_fkey FOREIGN KEY (signed_off_by) REFERENCES iam.app_user(id);
 
 --
 -- Name: download_ticket download_ticket_evidence_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
@@ -6312,11 +13292,25 @@ ALTER TABLE ONLY lab.sample_analysis
     ADD CONSTRAINT sample_analysis_analyst_id_fkey FOREIGN KEY (analyst_id) REFERENCES iam.app_user(id);
 
 --
+-- Name: sample_analysis sample_analysis_run_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.sample_analysis
+    ADD CONSTRAINT sample_analysis_run_id_fkey FOREIGN KEY (run_id) REFERENCES lab.static_run(id);
+
+--
 -- Name: sample_analysis sample_analysis_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
 --
 
 ALTER TABLE ONLY lab.sample_analysis
     ADD CONSTRAINT sample_analysis_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id) ON DELETE CASCADE;
+
+--
+-- Name: sample_analysis sample_analysis_yara_ruleset_version_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.sample_analysis
+    ADD CONSTRAINT sample_analysis_yara_ruleset_version_id_fkey FOREIGN KEY (yara_ruleset_version_id) REFERENCES lab.yara_ruleset_version(id);
 
 --
 -- Name: sample sample_assigned_to_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
@@ -6347,11 +13341,221 @@ ALTER TABLE ONLY lab.sample
     ADD CONSTRAINT sample_submitted_by_fkey FOREIGN KEY (submitted_by) REFERENCES iam.app_user(id);
 
 --
+-- Name: screening_hash screening_hash_list_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_hash
+    ADD CONSTRAINT screening_hash_list_id_fkey FOREIGN KEY (list_id) REFERENCES lab.screening_list(id);
+
+--
+-- Name: screening_list screening_list_imported_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_list
+    ADD CONSTRAINT screening_list_imported_by_fkey FOREIGN KEY (imported_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: screening_list screening_list_purge_requested_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_list
+    ADD CONSTRAINT screening_list_purge_requested_by_fkey FOREIGN KEY (purge_requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: screening_list screening_list_retired_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_list
+    ADD CONSTRAINT screening_list_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: screening_result screening_result_actor_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_result
+    ADD CONSTRAINT screening_result_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES iam.app_user(id);
+
+--
+-- Name: screening_result screening_result_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_result
+    ADD CONSTRAINT screening_result_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id);
+
+--
+-- Name: screening_review screening_review_result_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_review
+    ADD CONSTRAINT screening_review_result_id_fkey FOREIGN KEY (result_id) REFERENCES lab.screening_result(id);
+
+--
+-- Name: screening_review screening_review_reviewed_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.screening_review
+    ADD CONSTRAINT screening_review_reviewed_by_fkey FOREIGN KEY (reviewed_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: static_run static_run_requested_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.static_run
+    ADD CONSTRAINT static_run_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: static_run static_run_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.static_run
+    ADD CONSTRAINT static_run_sample_id_fkey FOREIGN KEY (sample_id) REFERENCES lab.sample(id) ON DELETE CASCADE;
+
+--
+-- Name: yara_activation yara_activation_activated_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_activation
+    ADD CONSTRAINT yara_activation_activated_by_fkey FOREIGN KEY (activated_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: yara_activation yara_activation_deactivated_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_activation
+    ADD CONSTRAINT yara_activation_deactivated_by_fkey FOREIGN KEY (deactivated_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: yara_activation yara_activation_ruleset_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_activation
+    ADD CONSTRAINT yara_activation_ruleset_id_fkey FOREIGN KEY (ruleset_id) REFERENCES lab.yara_ruleset(id);
+
+--
+-- Name: yara_activation yara_activation_version_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_activation
+    ADD CONSTRAINT yara_activation_version_id_fkey FOREIGN KEY (version_id) REFERENCES lab.yara_ruleset_version(id);
+
+--
+-- Name: yara_compile_job yara_compile_job_version_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_compile_job
+    ADD CONSTRAINT yara_compile_job_version_id_fkey FOREIGN KEY (version_id) REFERENCES lab.yara_ruleset_version(id);
+
+--
+-- Name: yara_compiled_rejected yara_compiled_rejected_compiled_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_compiled_rejected
+    ADD CONSTRAINT yara_compiled_rejected_compiled_id_fkey FOREIGN KEY (compiled_id) REFERENCES lab.yara_compiled(id);
+
+--
+-- Name: yara_compiled yara_compiled_version_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_compiled
+    ADD CONSTRAINT yara_compiled_version_id_fkey FOREIGN KEY (version_id) REFERENCES lab.yara_ruleset_version(id);
+
+--
+-- Name: yara_ruleset yara_ruleset_created_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset
+    ADD CONSTRAINT yara_ruleset_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_adopted_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset_version
+    ADD CONSTRAINT yara_ruleset_version_adopted_by_fkey FOREIGN KEY (adopted_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_ruleset_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset_version
+    ADD CONSTRAINT yara_ruleset_version_ruleset_id_fkey FOREIGN KEY (ruleset_id) REFERENCES lab.yara_ruleset(id);
+
+--
+-- Name: yara_ruleset_version yara_ruleset_version_uploaded_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.yara_ruleset_version
+    ADD CONSTRAINT yara_ruleset_version_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: case_route_block case_route_block_blocked_by_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.case_route_block
+    ADD CONSTRAINT case_route_block_blocked_by_fkey FOREIGN KEY (blocked_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: case_route_block case_route_block_case_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.case_route_block
+    ADD CONSTRAINT case_route_block_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: delivery delivery_jira_link_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.delivery
+    ADD CONSTRAINT delivery_jira_link_id_fkey FOREIGN KEY (jira_link_id) REFERENCES notify.jira_link(id);
+
+--
 -- Name: delivery delivery_notification_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
 --
 
 ALTER TABLE ONLY notify.delivery
     ADD CONSTRAINT delivery_notification_id_fkey FOREIGN KEY (notification_id) REFERENCES notify.notification(id) ON DELETE CASCADE;
+
+--
+-- Name: jira_destination jira_destination_created_by_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_destination
+    ADD CONSTRAINT jira_destination_created_by_fkey FOREIGN KEY (created_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: jira_destination jira_destination_credential_set_by_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_destination
+    ADD CONSTRAINT jira_destination_credential_set_by_fkey FOREIGN KEY (credential_set_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: jira_destination jira_destination_updated_by_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_destination
+    ADD CONSTRAINT jira_destination_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: jira_event jira_event_link_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_event
+    ADD CONSTRAINT jira_event_link_id_fkey FOREIGN KEY (link_id) REFERENCES notify.jira_link(id);
+
+--
+-- Name: jira_link jira_link_case_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_link
+    ADD CONSTRAINT jira_link_case_id_fkey FOREIGN KEY (case_id) REFERENCES core."case"(id);
+
+--
+-- Name: jira_link jira_link_destination_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE ONLY notify.jira_link
+    ADD CONSTRAINT jira_link_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES notify.jira_destination(id);
 
 --
 -- Name: notification notification_actor_id_fkey; Type: FK CONSTRAINT; Schema: notify; Owner: -
@@ -6380,6 +13584,1020 @@ ALTER TABLE ONLY notify.notification
 
 ALTER TABLE ONLY notify.preference
     ADD CONSTRAINT preference_user_id_fkey FOREIGN KEY (user_id) REFERENCES iam.app_user(id);
+
+--
+-- Name: community_assignment; Type: ROW SECURITY; Schema: analytics; Owner: -
+--
+
+ALTER TABLE analytics.community_assignment ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: layout_position; Type: ROW SECURITY; Schema: analytics; Owner: -
+--
+
+ALTER TABLE analytics.layout_position ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: metric_run; Type: ROW SECURITY; Schema: analytics; Owner: -
+--
+
+ALTER TABLE analytics.metric_run ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: node_metric; Type: ROW SECURITY; Schema: analytics; Owner: -
+--
+
+ALTER TABLE analytics.node_metric ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: projection; Type: ROW SECURITY; Schema: analytics; Owner: -
+--
+
+ALTER TABLE analytics.projection ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: community_assignment rls_gate; Type: POLICY; Schema: analytics; Owner: -
+--
+
+CREATE POLICY rls_gate ON analytics.community_assignment USING (((EXISTS ( SELECT 1
+   FROM analytics.metric_run p
+  WHERE (p.id = community_assignment.metric_run_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = community_assignment.node_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM analytics.metric_run p
+  WHERE (p.id = community_assignment.metric_run_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = community_assignment.node_id)))));
+
+--
+-- Name: layout_position rls_gate; Type: POLICY; Schema: analytics; Owner: -
+--
+
+CREATE POLICY rls_gate ON analytics.layout_position USING (((EXISTS ( SELECT 1
+   FROM analytics.projection p
+  WHERE (p.id = layout_position.projection_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = layout_position.node_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM analytics.projection p
+  WHERE (p.id = layout_position.projection_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = layout_position.node_id)))));
+
+--
+-- Name: metric_run rls_gate; Type: POLICY; Schema: analytics; Owner: -
+--
+
+CREATE POLICY rls_gate ON analytics.metric_run USING (((EXISTS ( SELECT 1
+   FROM analytics.projection p
+  WHERE ((p.id = metric_run.projection_id) AND ((metric_run.visibility_clearance <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (metric_run.visibility_clearance <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), p.case_id)))))) AND (visibility_compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM analytics.projection p
+  WHERE ((p.id = metric_run.projection_id) AND ((metric_run.visibility_clearance <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (metric_run.visibility_clearance <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), p.case_id)))))) AND (visibility_compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: node_metric rls_gate; Type: POLICY; Schema: analytics; Owner: -
+--
+
+CREATE POLICY rls_gate ON analytics.node_metric USING (((EXISTS ( SELECT 1
+   FROM analytics.metric_run p
+  WHERE (p.id = node_metric.metric_run_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = node_metric.node_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM analytics.metric_run p
+  WHERE (p.id = node_metric.metric_run_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = node_metric.node_id)))));
+
+--
+-- Name: projection rls_gate; Type: POLICY; Schema: analytics; Owner: -
+--
+
+CREATE POLICY rls_gate ON analytics.projection USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: document; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.document ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: document_embedding; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.document_embedding ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: extraction; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.extraction ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: forum_member; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.forum_member ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: forum_post; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.forum_post ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: proposal; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.proposal ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: document rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.document USING (((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: document_embedding rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.document_embedding USING ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = document_embedding.document_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = document_embedding.document_id))));
+
+--
+-- Name: extraction rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.extraction USING ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = extraction.document_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = extraction.document_id))));
+
+--
+-- Name: forum_member rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.forum_member USING ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = forum_member.document_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = forum_member.document_id))));
+
+--
+-- Name: forum_post rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.forum_post USING ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = forum_post.document_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = forum_post.document_id))));
+
+--
+-- Name: proposal rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.proposal USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: telegram_message rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.telegram_message USING ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = telegram_message.document_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = telegram_message.document_id))));
+
+--
+-- Name: watch rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.watch USING ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])))) WITH CHECK ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))));
+
+--
+-- Name: watch_hit rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.watch_hit USING (((EXISTS ( SELECT 1
+   FROM collect.watch p
+  WHERE (p.id = watch_hit.watch_id))) AND (EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = watch_hit.document_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM collect.watch p
+  WHERE (p.id = watch_hit.watch_id))) AND (EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = watch_hit.document_id)))));
+
+--
+-- Name: telegram_message; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.telegram_message ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: watch; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.watch ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: watch_hit; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.watch_hit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: channel_binding; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.channel_binding ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: contact_block; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.contact_block ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: contact_block_entry; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.contact_block_entry ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: conversation; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.conversation ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: device_fingerprint; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.device_fingerprint ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: message; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.message ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: participant; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.participant ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pgp_key; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.pgp_key ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pgp_key_acquisition; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.pgp_key_acquisition ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pgp_key_lookup; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.pgp_key_lookup ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pgp_verification; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.pgp_verification ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: channel_binding rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.channel_binding USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: contact_block rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.contact_block USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: contact_block_entry rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.contact_block_entry USING ((EXISTS ( SELECT 1
+   FROM comms.contact_block p
+  WHERE (p.id = contact_block_entry.block_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM comms.contact_block p
+  WHERE (p.id = contact_block_entry.block_id))));
+
+--
+-- Name: conversation rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.conversation USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: device_fingerprint rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.device_fingerprint USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: message rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.message USING (((EXISTS ( SELECT 1
+   FROM comms.conversation p
+  WHERE ((p.id = message.conversation_id) AND ((message.classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (message.classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), p.case_id)))))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM comms.conversation p
+  WHERE ((p.id = message.conversation_id) AND ((message.classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (message.classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), p.case_id)))))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: participant rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.participant USING ((EXISTS ( SELECT 1
+   FROM comms.conversation p
+  WHERE (p.id = participant.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM comms.conversation p
+  WHERE (p.id = participant.conversation_id))));
+
+--
+-- Name: pgp_key rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.pgp_key USING ((EXISTS ( SELECT 1
+   FROM comms.pgp_key_acquisition p
+  WHERE (p.id = pgp_key.acquisition_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM comms.pgp_key_acquisition p
+  WHERE (p.id = pgp_key.acquisition_id))));
+
+--
+-- Name: pgp_key_acquisition rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.pgp_key_acquisition USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: pgp_key_lookup rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.pgp_key_lookup USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))));
+
+--
+-- Name: pgp_verification rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.pgp_verification USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: service_selector rls_gate; Type: POLICY; Schema: comms; Owner: -
+--
+
+CREATE POLICY rls_gate ON comms.service_selector USING ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])))) WITH CHECK ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))));
+
+--
+-- Name: service_selector; Type: ROW SECURITY; Schema: comms; Owner: -
+--
+
+ALTER TABLE comms.service_selector ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: approval_request; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.approval_request ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: assertion; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.assertion ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: assertion_embedding; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.assertion_embedding ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: assumption; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.assumption ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: case; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core."case" ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: edge; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.edge ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: evidence; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.evidence ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: evidence_custody; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.evidence_custody ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: evidence_embedding; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.evidence_embedding ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: evidence_link; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.evidence_link ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: hypothesis; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.hypothesis ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: hypothesis_evidence; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.hypothesis_evidence ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: node; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.node ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: node_merge; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.node_merge ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: node_merge_edge; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.node_merge_edge ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: node_set; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.node_set ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: node_set_member; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.node_set_member ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: purge_tombstone; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.purge_tombstone ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: evidence_custody rls_append; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_append ON core.evidence_custody FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
+   FROM core.evidence v
+  WHERE (v.id = evidence_custody.evidence_id))));
+
+--
+-- Name: case rls_change; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_change ON core."case" FOR UPDATE USING ((id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK (((id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: approval_request rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.approval_request USING ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])))) WITH CHECK ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))));
+
+--
+-- Name: assertion rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.assertion USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((node_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.node n
+  WHERE (n.id = assertion.node_id)))) AND ((edge_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.edge e
+  WHERE (e.id = assertion.edge_id)))))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((node_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.node n
+  WHERE (n.id = assertion.node_id)))) AND ((edge_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.edge e
+  WHERE (e.id = assertion.edge_id))))));
+
+--
+-- Name: assertion_embedding rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.assertion_embedding USING ((EXISTS ( SELECT 1
+   FROM core.assertion p
+  WHERE (p.id = assertion_embedding.assertion_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM core.assertion p
+  WHERE (p.id = assertion_embedding.assertion_id))));
+
+--
+-- Name: assumption rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.assumption USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: edge rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.edge USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: evidence rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.evidence USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: evidence_embedding rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.evidence_embedding USING ((EXISTS ( SELECT 1
+   FROM core.evidence p
+  WHERE (p.id = evidence_embedding.evidence_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM core.evidence p
+  WHERE (p.id = evidence_embedding.evidence_id))));
+
+--
+-- Name: evidence_link rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.evidence_link USING (((EXISTS ( SELECT 1
+   FROM core.evidence v
+  WHERE (v.id = evidence_link.evidence_id))) AND ((node_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.node n
+  WHERE (n.id = evidence_link.node_id)))) AND ((edge_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.edge e
+  WHERE (e.id = evidence_link.edge_id)))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM core.evidence v
+  WHERE (v.id = evidence_link.evidence_id))) AND ((node_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.node n
+  WHERE (n.id = evidence_link.node_id)))) AND ((edge_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.edge e
+  WHERE (e.id = evidence_link.edge_id))))));
+
+--
+-- Name: hypothesis rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.hypothesis USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: hypothesis_evidence rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.hypothesis_evidence USING (((EXISTS ( SELECT 1
+   FROM core.hypothesis p
+  WHERE (p.id = hypothesis_evidence.hypothesis_id))) AND (EXISTS ( SELECT 1
+   FROM core.assertion p
+  WHERE (p.id = hypothesis_evidence.assertion_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM core.hypothesis p
+  WHERE (p.id = hypothesis_evidence.hypothesis_id))) AND (EXISTS ( SELECT 1
+   FROM core.assertion p
+  WHERE (p.id = hypothesis_evidence.assertion_id)))));
+
+--
+-- Name: node rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.node USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: node_merge rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.node_merge USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: node_merge_edge rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.node_merge_edge USING (((EXISTS ( SELECT 1
+   FROM core.node_merge p
+  WHERE (p.id = node_merge_edge.merge_id))) AND (EXISTS ( SELECT 1
+   FROM core.edge p
+  WHERE (p.id = node_merge_edge.edge_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM core.node_merge p
+  WHERE (p.id = node_merge_edge.merge_id))) AND (EXISTS ( SELECT 1
+   FROM core.edge p
+  WHERE (p.id = node_merge_edge.edge_id)))));
+
+--
+-- Name: node_set rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.node_set USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: node_set_member rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.node_set_member USING (((EXISTS ( SELECT 1
+   FROM core.node_set p
+  WHERE (p.id = node_set_member.set_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = node_set_member.node_id))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM core.node_set p
+  WHERE (p.id = node_set_member.set_id))) AND (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = node_set_member.node_id)))));
+
+--
+-- Name: selector rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.selector USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: tag rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.tag USING ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])))) WITH CHECK ((((case_id IS NULL) AND (( SELECT iam.rls_clearance() AS rls_clearance) IS NOT NULL)) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))));
+
+--
+-- Name: tag_assignment rls_gate; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_gate ON core.tag_assignment USING (((EXISTS ( SELECT 1
+   FROM core.tag p
+  WHERE (p.id = tag_assignment.tag_id))) AND ((node_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = tag_assignment.node_id)))) AND ((edge_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.edge p
+  WHERE (p.id = tag_assignment.edge_id)))) AND ((evidence_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.evidence p
+  WHERE (p.id = tag_assignment.evidence_id)))) AND ((document_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = tag_assignment.document_id)))))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM core.tag p
+  WHERE (p.id = tag_assignment.tag_id))) AND ((node_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.node p
+  WHERE (p.id = tag_assignment.node_id)))) AND ((edge_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.edge p
+  WHERE (p.id = tag_assignment.edge_id)))) AND ((evidence_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM core.evidence p
+  WHERE (p.id = tag_assignment.evidence_id)))) AND ((document_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM collect.document p
+  WHERE (p.id = tag_assignment.document_id))))));
+
+--
+-- Name: case rls_read; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_read ON core."case" FOR SELECT USING ((id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: evidence_custody rls_read; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_read ON core.evidence_custody FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM core.evidence v
+  WHERE (v.id = evidence_custody.evidence_id))));
+
+--
+-- Name: purge_tombstone rls_read; Type: POLICY; Schema: core; Owner: -
+--
+
+CREATE POLICY rls_read ON core.purge_tombstone FOR SELECT USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) OR ((case_id IS NULL) AND ( SELECT iam.rls_holds_global('retention.read'::text) AS rls_holds_global))));
+
+--
+-- Name: selector; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.selector ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: tag; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.tag ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: tag_assignment; Type: ROW SECURITY; Schema: core; Owner: -
+--
+
+ALTER TABLE core.tag_assignment ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: call_record; Type: ROW SECURITY; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.call_record ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: capture; Type: ROW SECURITY; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.capture ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: capture_hop; Type: ROW SECURITY; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.capture_hop ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: email_attachment; Type: ROW SECURITY; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.email_attachment ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: email_hop; Type: ROW SECURITY; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.email_hop ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: email_message; Type: ROW SECURITY; Schema: deception; Owner: -
+--
+
+ALTER TABLE deception.email_message ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: call_record rls_gate; Type: POLICY; Schema: deception; Owner: -
+--
+
+CREATE POLICY rls_gate ON deception.call_record USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: capture rls_gate; Type: POLICY; Schema: deception; Owner: -
+--
+
+CREATE POLICY rls_gate ON deception.capture USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: capture_hop rls_gate; Type: POLICY; Schema: deception; Owner: -
+--
+
+CREATE POLICY rls_gate ON deception.capture_hop USING ((EXISTS ( SELECT 1
+   FROM deception.capture p
+  WHERE (p.id = capture_hop.capture_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM deception.capture p
+  WHERE (p.id = capture_hop.capture_id))));
+
+--
+-- Name: email_attachment rls_gate; Type: POLICY; Schema: deception; Owner: -
+--
+
+CREATE POLICY rls_gate ON deception.email_attachment USING ((EXISTS ( SELECT 1
+   FROM deception.email_message p
+  WHERE (p.id = email_attachment.message_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM deception.email_message p
+  WHERE (p.id = email_attachment.message_id))));
+
+--
+-- Name: email_hop rls_gate; Type: POLICY; Schema: deception; Owner: -
+--
+
+CREATE POLICY rls_gate ON deception.email_hop USING ((EXISTS ( SELECT 1
+   FROM deception.email_message p
+  WHERE (p.id = email_hop.message_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM deception.email_message p
+  WHERE (p.id = email_hop.message_id))));
+
+--
+-- Name: email_message rls_gate; Type: POLICY; Schema: deception; Owner: -
+--
+
+CREATE POLICY rls_gate ON deception.email_message USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: detonation; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.detonation ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: preservation_authorisation; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.preservation_authorisation ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: sample_access rls_append; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_append ON lab.sample_access FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = sample_access.sample_id))));
+
+--
+-- Name: detonation rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.detonation USING ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = detonation.sample_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = detonation.sample_id))));
+
+--
+-- Name: preservation_authorisation rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.preservation_authorisation USING ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = preservation_authorisation.sample_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = preservation_authorisation.sample_id))));
+
+--
+-- Name: sample rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.sample USING (((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND ((case_id IS NULL) OR (( SELECT iam.rls_cases_in_reach() AS rls_cases_in_reach) ? (case_id)::text)))) WITH CHECK (((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND ((case_id IS NULL) OR (( SELECT iam.rls_cases_in_reach() AS rls_cases_in_reach) ? (case_id)::text))));
+
+--
+-- Name: sample_analysis rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.sample_analysis USING ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = sample_analysis.sample_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = sample_analysis.sample_id))));
+
+--
+-- Name: screening_result rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.screening_result USING ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = screening_result.sample_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = screening_result.sample_id))));
+
+--
+-- Name: screening_review rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.screening_review USING ((EXISTS ( SELECT 1
+   FROM lab.screening_result p
+  WHERE (p.id = screening_review.result_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.screening_result p
+  WHERE (p.id = screening_review.result_id))));
+
+--
+-- Name: static_run rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.static_run USING ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = static_run.sample_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = static_run.sample_id))));
+
+--
+-- Name: yara_activation rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.yara_activation USING ((EXISTS ( SELECT 1
+   FROM lab.yara_ruleset p
+  WHERE (p.id = yara_activation.ruleset_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.yara_ruleset p
+  WHERE (p.id = yara_activation.ruleset_id))));
+
+--
+-- Name: yara_compiled rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.yara_compiled USING ((EXISTS ( SELECT 1
+   FROM lab.yara_ruleset_version p
+  WHERE (p.id = yara_compiled.version_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.yara_ruleset_version p
+  WHERE (p.id = yara_compiled.version_id))));
+
+--
+-- Name: yara_compiled_rejected rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.yara_compiled_rejected USING ((EXISTS ( SELECT 1
+   FROM lab.yara_compiled p
+  WHERE (p.id = yara_compiled_rejected.compiled_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.yara_compiled p
+  WHERE (p.id = yara_compiled_rejected.compiled_id))));
+
+--
+-- Name: yara_ruleset rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.yara_ruleset USING (((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
+
+--
+-- Name: yara_ruleset_version rls_gate; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_gate ON lab.yara_ruleset_version USING ((EXISTS ( SELECT 1
+   FROM lab.yara_ruleset p
+  WHERE (p.id = yara_ruleset_version.ruleset_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM lab.yara_ruleset p
+  WHERE (p.id = yara_ruleset_version.ruleset_id))));
+
+--
+-- Name: sample_access rls_read; Type: POLICY; Schema: lab; Owner: -
+--
+
+CREATE POLICY rls_read ON lab.sample_access FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM lab.sample p
+  WHERE (p.id = sample_access.sample_id))));
+
+--
+-- Name: sample; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.sample ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: sample_access; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.sample_access ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: sample_analysis; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.sample_analysis ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: screening_result; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.screening_result ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: screening_review; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.screening_review ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: static_run; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.static_run ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: yara_activation; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.yara_activation ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: yara_compiled; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.yara_compiled ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: yara_compiled_rejected; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.yara_compiled_rejected ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: yara_ruleset; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.yara_ruleset ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: yara_ruleset_version; Type: ROW SECURITY; Schema: lab; Owner: -
+--
+
+ALTER TABLE lab.yara_ruleset_version ENABLE ROW LEVEL SECURITY;
 
 --
 -- PostgreSQL database dump complete

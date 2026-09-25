@@ -81,6 +81,40 @@ Every node, unprojected. Deliberately *not* filtered by the projection: the
 sociogram shows a view, this shows what is in the case. If you are looking
 for something, look here.
 
+#### Looking a selector up
+
+When a lookup provider is enabled for a selector's type, the inspector
+shows **Look up** beside it. The panel names each provider with its
+exposure and says, in plain words, who learns that you asked:
+
+- **NONE**: your own instance. It is asked at once.
+- **VENDOR**: the vendor learns that this deployment asked about the
+  value, under your account.
+- **PUBLIC**: anyone watching the provider can see it was looked up.
+  Assume the subject learns of the interest the same day.
+
+A lookup to a VENDOR or PUBLIC provider is not sent when you press the
+button. You name a colleague who may sign it off (a Lead investigator on
+the case) and say why; nothing leaves until they sign it off under
+Records, Lookups, within 24 hours. The answer is kept as case material,
+never labelled below the question, and what it found arrives as proposals
+in Triage: a lookup never writes the graph.
+
+**Show answer**, on each lookup under Records, Lookups and on a Triage card
+raised from one, reads the stored answer when you press it. If you may
+upload exhibits on the case, **File as exhibit** keeps the answer exactly
+as it came back, locked for the retention period like any exhibit. An
+answer labelled above your clearance says so and shows nothing of itself,
+not even whether it could be read.
+
+**Look up all**, below an entity's selectors, plans a lookup of every one
+of them on your own instance (NONE): a batch never goes to a vendor or the
+public. The plan says how many would go, how many are already answered,
+which are refused and why, and when the sends start and end; nothing is
+queued until you say why and press **Queue them**. Whoever asked for a
+batch, and a Lead investigator, can cancel what is still queued; what was
+sent stays sent.
+
 ### Evidence: exhibits and custody
 
 Exhibits with their SHA-256 and BLAKE3, acquisition method and chain of
@@ -122,6 +156,28 @@ Two warnings the pane repeats and which are worth taking seriously:
 - **Betweenness on a sparse investigative graph is unstable.** Adding one
   edge can reorder the top five. Treat the ranking as a prompt, not a
   finding.
+
+Three options beside Run analysis change what the numbers are computed
+over. Each is part of the run's name, so runs under different options are
+stored, cached and charted apart, and changing one clears the pane.
+
+- **Ties: Accepted ties only** computes over the ties a reviewer has
+  accepted. Unreviewed proposals, disputed, rejected and superseded ties
+  are left out and counted by state under the results. Every entity stays,
+  as an isolate if all its ties were left out.
+- **Project venues to entities** replaces forums and channels, or wallets
+  and transactions, with ties between the entities they link: co-posters,
+  co-controllers, and a payer's controller to a payee's. A venue counts
+  for less the more entities share it; one larger than the chosen limit
+  draws nothing and is named. These ties are derived, not observed, and the
+  graph keeps drawing the venues as recorded. Conversations are projected
+  in the Comms pane's co-participation view instead.
+- **Roles** finds entities in the same position: the same pattern of ties
+  to the same others, whether or not they are tied to each other (CONCOR).
+  Choose one to four splits. Read the fit first: CONCOR always splits in
+  two, so a weak fit means the positions are a sorting, not a finding.
+  "Alike but not tied" lists pairs that may fill the same role, one may be
+  the other's replacement, or one person may be behind both.
 
 ### Search
 
@@ -255,6 +311,62 @@ that label is a number that will be quoted without it.
   way, capped at eight hours. It refuses outright if nobody holds
   `SECURITY_OFFICER`, because the mandatory review is the control and a
   grant nobody will review is just access with a better story.
+- **Lookups** lists what this case sent to lookup providers, what waits
+  for your sign-off, and the planned batches. Signing off sends case
+  material out, so it needs a sign-in from the last 15 minutes. A batch
+  goes to your own instance (NONE) only: preview it, and nothing is sent
+  or written until you queue it with a reason.
+
+### Administration: integrations (operators)
+
+Administration, Integrations is for an account holding
+`integration.manage`; one that holds nothing else opens straight onto it.
+It shows every outbound channel (email, webhook, Jira) with the egress
+route it leaves by, the outbox with **Drain now** and a retry of real
+failures, and the delivery ledger, which says for each delivery what
+happened, why, and what left. A channel whose route or setting is missing
+is **held**: its deliveries wait, spend no attempt, and go once it is
+fixed. Create the egress routes `smtp` and `webhook` under
+Administration, Egress before upgrading, or mail and webhooks are held.
+
+**Jira** takes work items only, and only from analysts who turned it on
+for themselves. Declare the one destination (base URL, project, issue
+type, a credential that is sealed and never shown again), run **Test**,
+then **Activate**. The ceiling is GREEN unless you raise it, never above
+AMBER; the field exposure decides whether the case code travels. Give the
+Jira service account Browse, Create, Add Comments and Edit on that one
+project, and put the `labels` field on the issue type's create and edit
+screens. A case owner can keep a case out of Jira from the case's record.
+Issues outlive retention here: a purge warns with their count, and you
+close them in Jira.
+
+### Administration: outbound lookups (operators)
+
+Two acts are needed before anything leaves, and either alone sends
+nothing:
+
+1. **The host switch.** `NOCTORNAL_OUTBOUND_LOOKUPS=on` in secrets.env,
+   read by the api and the cron alike. The lookup drain prints the value it
+   read on its first line, so an api and a cron that disagree show in the
+   cron log. Production refuses to start with it on and no egress proxy.
+2. **An enabled provider**, under Administration, Providers. Register it
+   from the catalogue, write why its exposure is right (it has no
+   default), and enter its key: the key is sealed, never shown again by any
+   route, and destroyed if the provider's host or route changes. Create its
+   egress route `lookup-<key>` under Administration, Egress, admitting the
+   provider's host. A provider below PUBLIC waits for a second
+   administrator to approve its exposure, and so does every later lowering,
+   and so does moving it to another host, port or private network: the
+   approval card names the address being approved. Your own instance
+   (NONE) also names the private network it answers from.
+   Set at least one quota window; a share is kept back from queued work so
+   an analyst's own lookup always has room. Test sends a fixed value that
+   carries no case material and reports the status only.
+
+A provider that refuses its key is locked until somebody replaces the key
+or unlocks it; a provider that answers 429 cools down for as long as it
+asked. The readiness row `outbound_lookup_providers` lists every enabled
+provider with its exposure, ceiling, quota and route.
 
 ### Lab: malware samples
 
@@ -324,6 +436,9 @@ None of these is a bug.
 | **"a hold overrides all deletion"** | Legal hold. Lift it deliberately, with its own authority, or record the outcome without destroying. |
 | **"notifications go to your account email"** | Redirecting your own notification email is refused unless an operator has declared permitted domains. A subject line carries a case code, and a case code is intelligence. |
 | **"no active user holds SECURITY_OFFICER"** | Break-glass will not grant. The review is the control. |
+| **"This value is personal data or looks like it"** | A lookup refuses personal data toward every provider until a transfer authority is recorded (legal item L2). A JABBER address is refused too, because it is shaped like an email address. |
+| **"no sample hash leaves it"** | A hash that any sample holds is not looked up anywhere until prohibited-content screening exists (legal item L1), whether you typed it or picked it. |
+| **"Name a colleague who may sign this off"** | A lookup to a vendor or the public needs a named colleague's sign-off and a reason before anything is sent. |
 
 ---
 
@@ -350,3 +465,4 @@ None of these is a bug.
 | `docs/17-flagged-for-review.md` | Engineering judgement calls, and every defect found by an adversarial pass. |
 | `ARCHITECTURE.md` | How it is built and why. |
 | `docs/00-decisions.md` | The numbered decisions, with their reasoning. |
+| `docs/20-outbound-connections.md` | How anything leaves the deployment: the address policy, the one client, routes and the egress proxy. |

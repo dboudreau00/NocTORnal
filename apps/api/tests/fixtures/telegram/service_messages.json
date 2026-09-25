@@ -1,0 +1,15 @@
+{
+  "note": "Service messages in a megagroup, including the persona's own join.",
+  "me": "u:700000001",
+  "chat": {"peer_type": "MEGAGROUP", "peer_id": 1300000006, "access_hash": 5550006,
+           "username": "joinedchat", "title": "Joined Chat", "is_member": true},
+  "messages": [
+    {"id": 5, "date": "2026-09-23T08:00:00+00:00", "service": "MessageActionChatJoinedByLink",
+     "text": "u:700000009 joined the group by invite link",
+     "from": {"type": "user", "id": 700000009}},
+    {"id": 6, "date": "2026-09-23T08:01:00+00:00", "service": "MessageActionChatAddUser",
+     "text": "u:700000001 joined the group", "from": {"type": "user", "id": 700000001}},
+    {"id": 7, "date": "2026-09-23T08:02:00+00:00", "text": "a normal message",
+     "from": {"type": "user", "id": 700000009}}
+  ]
+}

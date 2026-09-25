@@ -108,8 +108,14 @@ from uuid import UUID
 import psycopg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from noctornal_api.db import connect
-from noctornal_api.http.deps import SESSION_COOKIE, refuse_unbound_session
+# The request role's connections (S1, 2026-09-25), as HTTP's are.
+from noctornal_api.db import connect_request
+from noctornal_api.http.deps import (
+    SESSION_COOKIE,
+    refuse_unbindable_session,
+    refuse_unbound_session,
+)
+from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import client_ip
 from noctornal_api.samples import normalise_origin, origin_split, public_origin
 from noctornal_api.security.access import evaluate
@@ -388,7 +394,7 @@ class _Hub:
 
     async def _run(self) -> None:
         """Hold the one LISTEN connection and fan out what arrives."""
-        listener = await asyncio.to_thread(connect)
+        listener = await asyncio.to_thread(connect_request)
         try:
             await asyncio.to_thread(listener.execute, f"LISTEN {CHANNEL}")
             while not self._stop.is_set():
@@ -925,7 +931,7 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
     itself less alive. Failing the binding check does, and that is why
     only the binding check sits before the touch.
     """
-    conn = connect()
+    conn = connect_request()
     try:
         service = SessionService(PgSessionStore(conn))
         result = service.validate(token, touch=False)
@@ -934,6 +940,11 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
         s = result.session
         if refuse_unbound_session(conn, s, ip=ip, user_agent=user_agent,
                                   path="websocket"):
+            return None
+        # Bound before the touch, as over HTTP (deps.current_user).
+        try:
+            refuse_unbindable_session(conn, s, token)
+        except Problem:
             return None
         s = service.touch(s)
         user_id, mfa_at = s.user_id, s.mfa_satisfied_at
@@ -962,8 +973,11 @@ def _may_read(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
     "no such case" — the same answer an unassigned one gets, so the socket
     is not an existence oracle either.
     """
+    # The case's labels as lock facts (`iam.case_facts`, S1): the
+    # re-check runs on an unbound connection, which row-level security
+    # would show no case row at all.
     row = conn.execute(
-        'SELECT classification, compartments FROM core."case" WHERE id = %s',
+        "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,)).fetchone()
     if row is None:
         return False
@@ -983,7 +997,7 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
     before each delivery so a revoked assignment stops the stream, and on
     a case above the caller's clearance it counted every event on a busy
     case as another use (final review U19 fix round, 2026-09-23, g02)."""
-    conn = connect()
+    conn = connect_request()
     try:
         return _may_read(conn, user_id, case_id, mfa_at, count_use=False)
     finally:
@@ -1002,7 +1016,7 @@ def _session_alive(token: str) -> bool:
     (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23). Asking
     must not keep the session alive, or the idle timeout would never fire
     for a tab that is merely open (final review C20)."""
-    conn = connect()
+    conn = connect_request()
     try:
         return SessionService(PgSessionStore(conn)).validate(
             token, touch=False).ok

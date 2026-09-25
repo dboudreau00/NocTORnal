@@ -15,6 +15,7 @@ the tab.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from uuid import UUID
 
 import psycopg
@@ -31,12 +32,24 @@ from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api import readiness as readiness_register
 from noctornal_api.iam_admin import AdminError, IamAdminService, OneTimeCredentials
+from noctornal_api.db import SystemPurpose, system_connection
 
 # Prefixed at /admin rather than /admin/users since 2026-09-02, so the
 # readiness register can live beside the account routes without a
 # second router to register in app.py. Every account route spells its
 # own /users, so the URLs a client already uses are unchanged.
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@contextmanager
+def _writer(conn: psycopg.Connection):
+    """The administration service on a system connection (S1,
+    2026-09-25). Every write here is to the IAM plane, which the request
+    role may only read (0109); the gate (`require_global`) has already run
+    on the request connection. In development and the suite the system
+    connection is the request's own."""
+    with system_connection(SystemPurpose.IAM_ADMIN, reuse=conn) as sconn:
+        yield IamAdminService(sconn)
 
 
 class CreateBody(BaseModel):
@@ -122,7 +135,21 @@ def access(
              JOIN iam.role_permission rp ON rp.role_key = ur.role_key
              JOIN iam.app_user u ON u.id = ur.user_id
             WHERE ur.user_id = %s AND u.is_active
-              AND rp.permission_key IN ('user.manage', 'break_glass.review')""",
+              AND rp.permission_key IN ('user.manage', 'break_glass.review',
+                                        -- The two-person policy (F9).
+                                        'dual_control.manage',
+                                        'dual_control.countersign',
+                                        -- F12, 2026-09-24.
+                                        'sample.yara.activate',
+                                        -- Administration, Egress (S2).
+                                        'egress.manage', 'egress.log.read',
+                                        -- Similarity indexes (F6.3).
+                                        'embedding.manage',
+                                        -- Integrations and Providers.
+                                        'integration.manage',
+                                        -- F13, 2026-09-24.
+                                        'sample.screening.review',
+                                        'sample.screening.manage')""",
         (user.user_id,)).fetchall()}
     manage = "user.manage" in held
     # The failing BLOCKING checks, for an account that administers the
@@ -142,10 +169,54 @@ def access(
     # passing rows are folded away, so the Readiness section is marked.
     state = (readiness_register.blocking_state(conn) if manage
              else {"failures": [], "caveats": []})
-    return {"user_manage": manage,
-            "break_glass_review": "break_glass.review" in held,
-            "blocking_failures": state["failures"],
-            "readiness_caveats": state["caveats"]}
+    answer = {"user_manage": manage,
+              "break_glass_review": "break_glass.review" in held,
+              "blocking_failures": state["failures"],
+              "readiness_caveats": state["caveats"]}
+    # F9 (2026-09-24): whether the caller may propose a
+    # change to the two-person policy or countersign one, and how many
+    # changes wait for their countersignature, so an officer is shown the
+    # way in and its count. Not a gate: every route still runs its own.
+    from noctornal_api.approvals import ApprovalService
+    countersign = "dual_control.countersign" in held
+    answer["dual_control_manage"] = "dual_control.manage" in held
+    answer["dual_control_countersign"] = countersign
+    answer["dual_control_awaiting"] = (
+        ApprovalService(conn).awaiting_global_signature(user.user_id)
+        if countersign else 0)
+    # F12. The Security Officer's way in to the YARA rule sets
+    # awaiting activation, shown in Oversight as the preserved
+    # samples are.
+    answer["sample_yara_activate"] = "sample.yara.activate" in held
+    # The collection foundation (2026-09-24): whether the caller confirms collection
+    # authorities, the Oversight section's way in. A separate query, so the
+    # list above is not edited; not a gate, every route runs its own.
+    answer["collection_authority_confirm"] = conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                 JOIN iam.app_user u ON u.id = ur.user_id
+                WHERE ur.user_id = %s AND u.is_active
+                  AND rp.permission_key = 'collection.authority.confirm')""",
+        (user.user_id,)).fetchone()[0]
+    # S2, the egress proxy (2026-09-24): whether the caller may change
+    # where anything leaves, or read the connection log, so the Egress
+    # section is offered. Not a gate: every route runs its own.
+    answer["egress_manage"] = "egress.manage" in held
+    answer["egress_log_read"] = "egress.log.read" in held
+    # F6.3 (embeddings, 2026-09-24): whether to show Administration,
+    # Embeddings. Not a gate: every route there runs require_global.
+    answer["embedding_manage"] = "embedding.manage" in held
+    # F8 and F15.2 (2026-09-24): whether the caller configures the
+    # outbound integrations and lookup providers, which gates the
+    # Integrations and Providers sections. Not a gate itself: every route
+    # there runs require_global("integration.manage") with its step-up.
+    answer["integration_manage"] = "integration.manage" in held
+    # F13. The officer's way in to prohibited-content screening, and
+    # whether they may import and retire lists there.
+    answer["sample_screening_review"] = "sample.screening.review" in held
+    answer["sample_screening_manage"] = "sample.screening.manage" in held
+    return answer
 
 
 @router.get("/users", response_model=dict)
@@ -171,10 +242,11 @@ def create_user(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        creds = IamAdminService(conn).create_analyst(
-            email=body.email, display_name=body.display_name,
-            clearance=body.clearance, roles=body.roles,
-            actor_id=user.user_id, compartments=body.compartments)
+        with _writer(conn) as svc:
+            creds = svc.create_analyst(
+                email=body.email, display_name=body.display_name,
+                clearance=body.clearance, roles=body.roles,
+                actor_id=user.user_id, compartments=body.compartments)
     except AdminError as exc:
         raise _refuse(exc) from exc
     # The password is the administrator's as much as the account's, so it
@@ -192,8 +264,9 @@ def deactivate(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        IamAdminService(conn).set_active(user_id, active=False,
-                                         actor_id=user.user_id)
+        with _writer(conn) as svc:
+            svc.set_active(user_id, active=False,
+                                             actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "is_active": False,
@@ -208,8 +281,9 @@ def reactivate(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        IamAdminService(conn).set_active(user_id, active=True,
-                                         actor_id=user.user_id)
+        with _writer(conn) as svc:
+            svc.set_active(user_id, active=True,
+                                             actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "is_active": True}
@@ -222,8 +296,9 @@ def set_clearance(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        IamAdminService(conn).set_clearance(user_id, clearance=body.clearance,
-                                            actor_id=user.user_id)
+        with _writer(conn) as svc:
+            svc.set_clearance(user_id, clearance=body.clearance,
+                                                actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "tlp_clearance": body.clearance}
@@ -236,8 +311,9 @@ def grant_role(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        IamAdminService(conn).grant_role(user_id, role=body.role,
-                                         actor_id=user.user_id)
+        with _writer(conn) as svc:
+            svc.grant_role(user_id, role=body.role,
+                                             actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "granted": body.role.upper()}
@@ -250,8 +326,9 @@ def revoke_role(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        IamAdminService(conn).revoke_role(user_id, role=role,
-                                          actor_id=user.user_id)
+        with _writer(conn) as svc:
+            svc.revoke_role(user_id, role=role,
+                                              actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "revoked": role.upper()}
@@ -268,8 +345,9 @@ def reenrol_totp(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        creds = IamAdminService(conn).reenrol_totp(user_id,
-                                                   actor_id=user.user_id)
+        with _writer(conn) as svc:
+            creds = svc.reenrol_totp(user_id,
+                                                       actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return _credentials(creds)
@@ -288,8 +366,9 @@ def reset_password(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        creds = IamAdminService(conn).reset_password(user_id,
-                                                     actor_id=user.user_id)
+        with _writer(conn) as svc:
+            creds = svc.reset_password(user_id,
+                                                         actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return _credentials(creds, notice=(
@@ -306,7 +385,8 @@ def unlock(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     try:
-        IamAdminService(conn).unlock(user_id, actor_id=user.user_id)
+        with _writer(conn) as svc:
+            svc.unlock(user_id, actor_id=user.user_id)
     except AdminError as exc:
         raise _refuse(exc) from exc
     return {"user_id": str(user_id), "unlocked": True}

@@ -27,7 +27,26 @@ from noctornal_api.egress import (
 )
 
 OUTBOUND = [Destination.EXPORT, Destination.SMTP, Destination.JIRA,
-            Destination.WEBHOOK]
+            Destination.WEBHOOK,
+            Destination.COLLECTION_TARGET,  # a collection adapter's read
+            Destination.KEY_DIRECTORY,  # F10c, a Web Key Directory
+            Destination.MODEL_REMOTE,  # F6.2, a model endpoint outside this host
+            Destination.SANDBOX,  # F14, the self-hosted CAPEv2.
+            ]
+OUTBOUND.append(Destination.LOOKUP)  # F15.3
+
+
+def test_the_sandbox_needs_a_ceiling_and_its_ceiling_binds():
+    """F14 (2026-09-24): a sandbox with no declared ceiling receives
+    nothing, a ceiling lowers what may go, and none raises the floor."""
+    from noctornal_api.egress import DENY_NO_CEILING
+    assert can_egress("GREEN", Destination.SANDBOX).reason == DENY_NO_CEILING
+    assert can_egress("AMBER", Destination.SANDBOX,
+                      destination_ceiling="AMBER").allowed
+    assert can_egress("AMBER", Destination.SANDBOX,
+                      destination_ceiling="GREEN").reason ==         DENY_ABOVE_DESTINATION_CEILING
+    assert can_egress("RED", Destination.SANDBOX,
+                      destination_ceiling="RED").reason == DENY_ABOVE_PLATFORM_FLOOR
 
 
 # --- invariant 8, the hard floor ----------------------------------------

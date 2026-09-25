@@ -103,6 +103,13 @@ _CLEARED_ON_SWITCH = {
     "cap-text", "cap-title", "cap-url", "ev-file", "ev-title",
     "ach-statement", "asm-statement", "asm-basis",
     "smp-file", "smp-note", "smp-case",
+    # Comms, F10a, F10b and F10c (2026-09-24): the detached signature
+    # and its data, the key registry, the lookups and the recorded checks
+    "comms-pgp-sig", "comms-pgp-sig-file", "comms-pgp-data",
+    "comms-pgp-data-file", "comms-pgp-fpr-ref", "comms-pgpkey-list",
+    "comms-pgpkey-lookups", "comms-pgp-ledger", "comms-pgpkey-armor",
+    "comms-pgpkey-file", "comms-pgpkey-source-ref", "comms-pgpkey-wkd-address",
+    "comms-pgpkey-wkd-reason", "comms-pgpkey-msg", "comms-pgpkey-wkd-msg",
 }
 
 
@@ -147,7 +154,12 @@ _GUARDED = ("openCase", "loadCaseGraph", "loadEvidence", "loadAch",
             # landed in the next case's pane (C18, U14)
             "runAnalysis", "loadLatestAnalysis", "loadMetricHistory",
             "loadLayout", "loadPresets", "runCapture", "uploadEvidence",
-            "submitSample")
+            "submitSample",
+            # Comms, F10a, F10b and F10c (2026-09-24)
+            "loadPgpAttribution", "loadPgpLedger", "loadPgpKeys",
+            "confirmPgpKey", "retirePgpKey", "importPgpKey",
+            "loadKeyDirectory", "loadKeyLookups", "requestKeyLookup",
+            "approveKeyLookup", "declineKeyLookup")
 
 
 @pytest.mark.parametrize("name", _GUARDED)

@@ -49,6 +49,7 @@ from noctornal_api.cases import (
     CaseService,
     allowed_transitions,
 )
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     audit_auth_event,
@@ -181,13 +182,19 @@ def create_case(body: CreateCaseBody,
                 user: CurrentUser = Depends(require_global("case.create")),
                 conn: psycopg.Connection = Depends(get_conn)) -> CaseOut:
     svc = CaseService(conn)
-    case_id = svc.create(
-        code=body.code, title=body.title, legal_basis=body.legal_basis,
-        retention_until=body.retention_until, review_due=body.review_due,
-        owner_user_id=user.user_id, created_by=user.user_id,
-        classification=body.classification, compartments=body.compartments,
-        summary=body.summary, authority_ref=body.authority_ref,
-    )
+    # The case and its owner's assignment are written together, and the
+    # assignment is an IAM write the request role may only read (0109, S1
+    # 2026-09-25), so the creation runs on a system connection after the
+    # case.create gate. The read-back is the request's own, under the
+    # policy the new assignment now opens.
+    with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
+        case_id = CaseService(sconn).create(
+            code=body.code, title=body.title, legal_basis=body.legal_basis,
+            retention_until=body.retention_until, review_due=body.review_due,
+            owner_user_id=user.user_id, created_by=user.user_id,
+            classification=body.classification, compartments=body.compartments,
+            summary=body.summary, authority_ref=body.authority_ref,
+        )
     return _with_caller(conn, [svc.get(case_id)], user.user_id)[0]
 
 
@@ -425,17 +432,22 @@ def _extend_exhibit_locks(conn: psycopg.Connection, case_id: UUID,
     from noctornal_api.http.deps import user_ceiling
 
     clearance, compartments = user_ceiling(conn, actor_id, case_id=case_id)
-    live = conn.execute(
-        """SELECT 1 FROM core.evidence
-            WHERE case_id = %s AND purged_at IS NULL AND is_worm_locked
-            LIMIT 1""", (case_id,)).fetchone()
-    try:
-        storage = EvidenceStorage() if live else None
-    except EvidenceError:
-        storage = None
-    return EvidenceService(conn, storage).extend_locks(
-        case_id, retention_until, actor_id,
-        ceiling=(clearance.name, sorted(compartments)))
+    # Every live exhibit's lock follows the case, including exhibits
+    # above the caller's labels, so the lengthening runs on a system
+    # connection (S1, 2026-09-25); the count it reports is still drawn
+    # under the caller's ceiling, as before.
+    with system_connection(SystemPurpose.EVIDENCE_LOCKS, reuse=conn) as sconn:
+        live = sconn.execute(
+            """SELECT 1 FROM core.evidence
+                WHERE case_id = %s AND purged_at IS NULL AND is_worm_locked
+                LIMIT 1""", (case_id,)).fetchone()
+        try:
+            storage = EvidenceStorage() if live else None
+        except EvidenceError:
+            storage = None
+        return EvidenceService(sconn, storage).extend_locks(
+            case_id, retention_until, actor_id,
+            ceiling=(clearance.name, sorted(compartments)))
 
 
 def _assignees_below(conn: psycopg.Connection, case_id: UUID,
@@ -651,10 +663,12 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     ).fetchone()
 
     try:
-        CaseService(conn).assign_user_checked(
-            case_id, target, body.role_key,
-            granted_by=user.user_id, expires_at=body.expires_at,
-        )
+        # An assignment is an IAM write (0109, S1): system connection.
+        with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
+            CaseService(sconn).assign_user_checked(
+                case_id, target, body.role_key,
+                granted_by=user.user_id, expires_at=body.expires_at,
+            )
     except CaseError as exc:
         if body.email is None:
             raise
@@ -878,7 +892,9 @@ def revoke_case_user(case_id: UUID, user_id: UUID,
         (case_id, user_id)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "that person is not on this case")
-    CaseService(conn).revoke_user(case_id, user_id, revoked_by=user.user_id)
+    # Removing an assignment is an IAM write (0109, S1).
+    with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
+        CaseService(sconn).revoke_user(case_id, user_id, revoked_by=user.user_id)
     # `revoked_role_name` for the same reason as the roster's `role_name`
     # (final review U21, 2026-09-23).
     return {"case_id": str(case_id), "user_id": str(user_id),
@@ -914,19 +930,21 @@ def transition(case_id: UUID, body: TransitionBody,
     ## PURGED is not a close
 
     `ARCHIVED -> PURGED` marks a case for destruction. Reaching it through
-    the close verb would let a permission with neither step-up nor dual
-    control set the flag that authorises destroying a case file, while
-    `case.delete` sits in the seed with BOTH (`requires_step_up`,
-    `requires_dual_control`) and nothing calling it. So that one transition
-    re-enters the gate under `case.delete`.
+    the close verb would let a permission with no step-up set the flag
+    that authorises destroying a case file, while `case.delete` is a
+    step-up permission with nothing else calling it. So that one
+    transition re-enters the gate under `case.delete`.
 
     That gets the step-up half enforced — `evaluate()` reads
     `requires_step_up` off the permission row. It does NOT get dual
-    control: that is the approvals subsystem's job and it is not wired to
-    this transition. A single authoriser can still mark a case PURGED. It
-    is a marker of intent (the destruction itself is Phase 6), and the
-    audit row names them, but it is not the two signatures the seed asks
-    for. Flagged rather than left implicit.
+    control: `approvals.OPERATIONS["case.delete"]` registers the operation
+    with no function that spends it, and says so on Administration,
+    Two-person controls ("Not enforced yet"). A single authoriser can still
+    mark a case PURGED. It is a marker of intent (the destruction itself is
+    Phase 6), and the audit row names them, but it is not two signatures.
+    Flagged rather than left implicit. (The seed's `requires_dual_control`
+    column that this docstring once quoted was never read by anything and
+    is retired, F9c 2026-09-24.)
     """
     svc = CaseService(conn)
     if body.status == "PURGED":

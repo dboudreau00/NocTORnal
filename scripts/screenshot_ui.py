@@ -101,8 +101,8 @@ def session_url(email: str, port: int) -> tuple[str, str]:
 
 
 def first_case_id(code: str | None) -> str | None:
-    from noctornal_api.db import connect
-    conn = connect()
+    from noctornal_api.db import SystemPurpose, connect_system
+    conn = connect_system(SystemPurpose.SCRIPT)
     if code:
         row = conn.execute(
             'SELECT id FROM core."case" WHERE code = %s', (code,)).fetchone()

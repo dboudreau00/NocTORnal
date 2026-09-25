@@ -138,7 +138,8 @@ class AssertionOut(BaseModel):
     #: the document unpurged, and BOTH the document's and the source's
     #: labels within the reader's CASE-LESS clearance, which a break-glass
     #: grant on this case does not raise (final review C11, 2026-09-23;
-    #: `_document_ceiling`). None when any leg fails, so
+    #: `_document_ceiling`), and the document's compartments within the
+    #: reader's own (L1, 2026-09-24). None when any leg fails, so
     #: the ids above are all such a reader gets, as before 2026-09-22. A
     #: claim that cites a document names its source only through it.
     document_title: str | None = None
@@ -322,9 +323,11 @@ def node_assertions(
     clearance, compartments = _ceiling(conn, user, case_id)
     if not _visible_node(conn, case_id, node_id, clearance, compartments):
         raise Problem(404, "Not found", "node does not exist in this case")
+    doc_clearance, doc_compartments = _document_ceiling(conn, user)
     return _assertions(conn, "node_id", node_id, include_retracted,
                        clearance, compartments,
-                       doc_clearance=_document_ceiling(conn, user),
+                       doc_clearance=doc_clearance,
+                       doc_compartments=doc_compartments,
                        **_may_name(conn, user, case_id))
 
 
@@ -356,7 +359,7 @@ def node_selectors(
     # actor's activity window IS recorded never reached the inspector.
     rows = conn.execute(
         """SELECT selector_type, raw_value, norm_value, observation_cnt,
-                  first_seen, last_seen
+                  first_seen, last_seen, id
              FROM core.selector WHERE node_id = %s AND case_id = %s
             ORDER BY selector_type""",
         (node_id, case_id),
@@ -364,7 +367,11 @@ def node_selectors(
     return [{"selector_type": r[0], "raw_value": r[1], "norm_value": r[2],
              "observation_cnt": r[3],
              "first_seen": r[4].isoformat() if r[4] else None,
-             "last_seen": r[5].isoformat() if r[5] else None} for r in rows]
+             "last_seen": r[5].isoformat() if r[5] else None,
+             # F15.3 (2026-09-24): the id, so a selector can be looked up;
+             # and the entity, so "Look up all" can plan its selectors
+             # (F15.4, 2026-09-25).
+             "id": str(r[6]), "node_id": str(node_id)} for r in rows]
 
 
 # --- edges --------------------------------------------------------------
@@ -428,9 +435,11 @@ def edge_assertions(
     clearance, compartments = _ceiling(conn, user, case_id)
     if not _visible_edge(conn, case_id, edge_id, clearance, compartments):
         raise Problem(404, "Not found", "edge does not exist in this case")
+    doc_clearance, doc_compartments = _document_ceiling(conn, user)
     return _assertions(conn, "edge_id", edge_id, include_retracted,
                        clearance, compartments,
-                       doc_clearance=_document_ceiling(conn, user),
+                       doc_clearance=doc_clearance,
+                       doc_compartments=doc_compartments,
                        **_may_name(conn, user, case_id))
 
 
@@ -526,10 +535,12 @@ def _may_name(conn, user: CurrentUser, case_id: UUID) -> dict[str, bool]:
             "may_see_documents": _holds_global(conn, user, "collection.read")}
 
 
-def _document_ceiling(conn, user: CurrentUser) -> str:
-    """The clearance a claim's collected document and source are named
-    under: the caller's CASE-LESS ceiling, which only a global break-glass
-    grant raises.
+def _document_ceiling(conn, user: CurrentUser) -> tuple[str, list[str]]:
+    """The clearance and compartments a claim's collected document and
+    source are named under: the caller's CASE-LESS ceiling, which only a
+    global break-glass grant raises, and their own compartments (L1,
+    2026-09-24: a capture into a compartmented case carries the case's
+    keys, and a claim citing it names its title only to a holder).
 
     `collect.document` and `collect.source` have no `case_id`. They hang
     off a source that any number of cases cite, so a grant scoped to the
@@ -540,12 +551,14 @@ def _document_ceiling(conn, user: CurrentUser) -> str:
     grant on case A was told a RED document's title and a RED forum's name
     in the inspector that every collection view still withheld from them,
     and that case B cites as well."""
-    return user_ceiling(conn, user.user_id)[0].name
+    clearance, held = user_ceiling(conn, user.user_id)
+    return clearance.name, sorted(held)
 
 
 def _assertions(conn, column: str, element_id: UUID,
                 include_retracted: bool, clearance: str,
                 compartments: list[str], *, doc_clearance: str,
+                doc_compartments: list[str],
                 may_see_exhibits: bool = False,
                 may_see_documents: bool = False) -> list[AssertionOut]:
     # `column` is a literal chosen by the caller (never client input), so
@@ -557,6 +570,8 @@ def _assertions(conn, column: str, element_id: UUID,
     # binds the document and source legs, which belong to no case (see
     # `_document_ceiling`). Keyword-only with no default, so a new caller
     # cannot quietly hand the raised ceiling to the deployment-wide rows.
+    # `doc_compartments` likewise (L1, 2026-09-24): the document leg is
+    # also held to the reader's own compartments.
     assert column in ("node_id", "edge_id")
     # Each join carries its permission as a bound boolean AND the READER's
     # ceiling, so a claim citing an exhibit or a document the reader may
@@ -590,7 +605,8 @@ def _assertions(conn, column: str, element_id: UUID,
                       WHERE %s AND d.id = a.document_id
                         AND d.purged_at IS NULL
                         AND d.classification <= %s::core.tlp
-                        AND s.classification <= %s::core.tlp) doc ON true
+                        AND s.classification <= %s::core.tlp
+                        AND d.compartments <@ %s::text[]) doc ON true
                 LEFT JOIN collect.source src
                        ON %s AND src.id = a.source_id
                       AND src.classification <= %s::core.tlp
@@ -600,7 +616,7 @@ def _assertions(conn, column: str, element_id: UUID,
     sql += " ORDER BY a.recorded_at DESC"
     rows = conn.execute(sql, (
         may_see_exhibits, clearance, compartments,
-        may_see_documents, doc_clearance, doc_clearance,
+        may_see_documents, doc_clearance, doc_clearance, doc_compartments,
         may_see_documents, doc_clearance,
         element_id)).fetchall()
     return [

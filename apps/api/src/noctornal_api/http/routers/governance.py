@@ -58,13 +58,16 @@ from pydantic import BaseModel, Field
 
 from noctornal_api.break_glass import BreakGlassError, BreakGlassService, Grant
 from noctornal_api.retention import DueItem
+from noctornal_api.db import SystemPurpose
 from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
     current_user,
     effective_labels,
+    element_labels,
     get_conn,
     require_global,
+    system_conn,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
@@ -158,12 +161,13 @@ def _own_evidence(conn: psycopg.Connection, evidence_id: UUID) -> UUID:
     it: gate the case, then confirm the object is IN that case. Without
     it an exhibit id from anywhere was accepted on trust.
     """
-    row = conn.execute(
-        "SELECT case_id FROM core.evidence WHERE id = %s",
-        (evidence_id,)).fetchone()
-    if row is None:
+    # Through `iam.element_facts` (S1, 2026-09-25): which case an
+    # exhibit is in decides the gate, and a legal hold applies whatever the
+    # officer's own labels, so row-level security must not hide the answer.
+    facts = element_labels(conn, "evidence", evidence_id)
+    if facts is None:
         raise Problem(404, "Not found", "no such exhibit")
-    return row[0]
+    return facts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +382,10 @@ def due(
     limit: int = Query(500, ge=1, le=1000),
     user: CurrentUser = Depends(require_global("retention.read")),
     conn: psycopg.Connection = Depends(get_conn),
+    # What falls due is read on a system connection (S1): a deadline
+    # list that silently left out exhibits above the officer's labels would
+    # read as complete. Titles stay the caller's (`_due_rows`).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """What has passed its deadline, or will by `as_of`. Destroys nothing.
 
@@ -407,7 +415,7 @@ def due(
         # not a relationship to a case, and this returns object ids,
         # deadlines and hold reasons.
         scope = _authorised_cases(conn, user, "retention.read")
-    svc = RetentionService(conn)
+    svc = RetentionService(sconn)
     items = []
     for cid in scope:
         items.extend(svc.due(case_id=cid, as_of=as_of, limit=limit))
@@ -572,6 +580,10 @@ def purge(
     body: PurgeBody,
     user: CurrentUser = Depends(require_global("retention.purge")),
     conn: psycopg.Connection = Depends(get_conn),
+    # A purge must reach every expired row of the case, above the
+    # caller's labels too, or it does part of the schedule and reports it
+    # done (S1, 2026-09-25).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Destroy what is expired and not held, under a written authority.
 
@@ -580,7 +592,7 @@ def purge(
     recorded cannot be defended later, and "the job ran" is not one.
     """
     _case_scoped(conn, user, body.case_id, "retention.purge")
-    purger = _purger(conn)
+    purger = _purger(sconn)
     # What is due NOW, read before anything is destroyed: a dry run hands
     # its digest back as `preview`, and a real run must present the digest
     # of a dry run that still matches it (final review U20, 2026-09-23).
@@ -659,6 +671,10 @@ def purge_out_of_schedule(
     body: OutOfScheduleBody,
     user: CurrentUser = Depends(require_global("retention.purge")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The membership check counts every named exhibit and the purge
+    # consumes its approval in the destruction's own transaction, both on
+    # one system connection (S1, 2026-09-25).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Destroy exhibits BEFORE their retention expires.
 
@@ -680,7 +696,7 @@ def purge_out_of_schedule(
     # this case. Counting the foreign ones instead would pass a
     # nonexistent id straight through, because it matches neither side.
     ids = list(dict.fromkeys(body.evidence_ids))
-    present = conn.execute(
+    present = sconn.execute(
         """SELECT count(*) FROM core.evidence
             WHERE id = ANY(%s) AND case_id = %s""",
         (ids, body.case_id)).fetchone()[0]
@@ -694,7 +710,7 @@ def purge_out_of_schedule(
             f"destruction would leave the other case with no record that "
             f"it happened.")
     try:
-        result = _purger(conn).purge_out_of_schedule(
+        result = _purger(sconn).purge_out_of_schedule(
             actor_id=user.user_id, authority=body.authority,
             approval_request_id=body.approval_request_id,
             # `ids`, NOT `body.evidence_ids`. The membership check above
@@ -742,6 +758,11 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         # which names the key it describes; a number printed beside a row
         # count has to be a row count.
         "storage_deleted": result.storage_deleted,
+        # F15.3 and F15.4 (2026-09-24): lookups, their answers and
+        # batches, emptied by the case clock and never deleted.
+        "lookups_purged": result.lookups_purged,
+        "lookup_results_purged": result.lookup_results_purged,
+        "lookup_batches_purged": result.lookup_batches_purged,
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
         "notice": (
@@ -812,6 +833,10 @@ def legal_hold(
     body: LegalHoldBody,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    # A hold is preservation, not a read, so it applies to an exhibit
+    # above the officer's own labels too (S1). The service refuses when no
+    # row changed.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Freeze something against every deletion path, or release it.
 
@@ -827,13 +852,60 @@ def legal_hold(
     case_id = _own_evidence(conn, body.evidence_id)
     _case_scoped(conn, user, case_id, "retention.manage")
     try:
-        RetentionService(conn).set_legal_hold(
+        RetentionService(sconn).set_legal_hold(
             body.evidence_id, actor_id=user.user_id, on=body.on,
             reason=body.reason)
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     return {"evidence_id": str(body.evidence_id),
             "case_id": str(case_id), "legal_hold": body.on}
+
+
+class DocumentHoldBody(BaseModel):
+    on: bool = True
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+# A hold a person places on a collected document and every earlier
+# version of it (2026-09-24; docs/00 decision 74).
+@router.post("/documents/{document_id}/legal-hold", response_model=dict,
+             dependencies=[Depends(rate_limit("retention.destroy"))])
+def document_legal_hold(
+    document_id: UUID, body: DocumentHoldBody,
+    user: CurrentUser = Depends(require_global("retention.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    # The hold on a system connection (S1, 2026-09-25): it must count and
+    # write EVERY version of the document, and a version above the caller
+    # that row security hid would neither refuse the hold (the 409 below)
+    # nor be held, a hold silently narrower than the one reported. The
+    # service applies the caller's own labels itself, as it always has.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
+) -> dict:
+    """Freeze a collected document against every deletion path, or release
+    it, with a reason either way.
+
+    retention.manage (step-up) AND collection.read, both through a global
+    role: an administration-only account holds retention.manage and no
+    content permission, and must neither place nor lift a hold on material
+    it has no relationship to (the lesson of the exhibit route above). A
+    document above the caller's labels, or whose source is, is the same 404
+    a random id gets; a version above them is a 409, because labels gate
+    writes too."""
+    from noctornal_api.http.deps import authorize_global
+    from noctornal_api.retention import RetentionConflict, RetentionNotFound
+
+    authorize_global(conn, user, "collection.read")
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        return RetentionService(sconn).set_document_legal_hold(
+            document_id, actor_id=user.user_id, on=body.on,
+            reason=body.reason, clearance=clearance.name, compartments=held)
+    except RetentionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except RetentionConflict as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except RetentionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +975,9 @@ def invoke(
     body: InvokeBody,
     user: CurrentUser = Depends(require_global("break_glass.invoke")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The grant is an IAM write the request role may only read (0109,
+    # S1 2026-09-25).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.BREAK_GLASS)),
 ) -> dict:
     """Grant yourself emergency access. Deliberately easy.
 
@@ -957,7 +1032,7 @@ def invoke(
                 "you hold no live assignment on that case, so a grant scoped "
                 "to it would open nothing. Break-glass raises your clearance "
                 "on a case you already work; it does not put you on one.")
-    svc = BreakGlassService(conn)
+    svc = BreakGlassService(sconn)
     base = _base_clearance(conn, user.user_id)
     # The caller's other live grants that apply wherever this one will: a
     # global grant applies everywhere, a case grant only on its case. Read
@@ -1002,9 +1077,12 @@ def _assigned_case_code(conn: psycopg.Connection, user_id: UUID,
     alike, so neither the invoke refusal nor `/mine` can be used to learn
     whether a case id is real.
     """
+    # The code through `iam.case_code` (S1, 2026-09-25), not a join on
+    # core."case": break-glass exists to open a case ABOVE the caller's own
+    # clearance, so the case row is exactly one row-level security hides
+    # from them until the grant exists.
     row = conn.execute(
-        """SELECT c.code FROM iam.case_assignment a
-             JOIN core."case" c ON c.id = a.case_id
+        """SELECT iam.case_code(a.case_id) FROM iam.case_assignment a
             WHERE a.case_id = %s AND a.user_id = %s
               AND (a.expires_at IS NULL OR a.expires_at > now())""",
         (case_id, user_id)).fetchone()
@@ -1155,8 +1233,12 @@ def unreviewed(
     grants = BreakGlassService(conn).unreviewed(limit=limit)
     people = _people(conn, {g.user_id for g in grants})
     case_ids = list({g.case_id for g in grants if g.case_id})
+    # Through `iam.case_code`, which answers a holder of
+    # break_glass.review; the officer is normally on none of these cases,
+    # so a plain read of core."case" would come back empty under
+    # row-level security (S1, 2026-09-25).
     codes = {r[0]: r[1] for r in conn.execute(
-        'SELECT id, code FROM core."case" WHERE id = ANY(%s)',
+        "SELECT c.id, iam.case_code(c.id) FROM unnest(%s::uuid[]) AS c(id)",
         (case_ids,)).fetchall()} if case_ids else {}
     # The invoker's clearance AT INVOKE, from the invoke's own audit row
     # (recorded there since 2026-09-23). The card said "raised to RED" for
@@ -1210,6 +1292,8 @@ def review(
     grant_id: UUID, body: ReviewBody,
     user: CurrentUser = Depends(require_global("break_glass.review")),
     conn: psycopg.Connection = Depends(get_conn),
+    # An IAM write (0109, S1).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.BREAK_GLASS)),
 ) -> dict:
     """Record the mandatory post-hoc review.
 
@@ -1224,7 +1308,7 @@ def review(
     the raise ran on (final review U2, 2026-09-23).
     """
     try:
-        grant = BreakGlassService(conn).review(
+        grant = BreakGlassService(sconn).review(
             grant_id, reviewer_id=user.user_id, outcome=body.outcome,
             note=body.note)
     except BreakGlassError as exc:
@@ -1237,6 +1321,8 @@ def revoke(
     grant_id: UUID,
     user: CurrentUser = Depends(require_global("break_glass.review")),
     conn: psycopg.Connection = Depends(get_conn),
+    # An IAM write (0109, S1).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.BREAK_GLASS)),
 ) -> dict:
     """End a live grant early.
 
@@ -1245,7 +1331,7 @@ def revoke(
     reviewed.
     """
     try:
-        return _grant(BreakGlassService(conn).revoke(
+        return _grant(BreakGlassService(sconn).revoke(
             grant_id, actor_id=user.user_id))
     except BreakGlassError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc

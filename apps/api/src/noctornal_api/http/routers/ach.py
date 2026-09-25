@@ -207,8 +207,9 @@ def _withheld(conn: psycopg.Connection, case_id: UUID, clearance: str,
     report's (`ach_cells_withheld`, distinct assertions), taken over the
     whole matrix so it cannot be narrowed to one column by toggling
     "Include rejected"."""
+    # A case setting, read as a lock fact (`iam.case_facts`, S1).
     row = conn.execute(
-        'SELECT withheld_disclosure FROM core."case" WHERE id = %s',
+        "SELECT withheld_disclosure FROM iam.case_facts(%s)",
         (case_id,)).fetchone()
     # A case that has vanished discloses nothing, as the graph's rule does:
     # failing closed costs a sentence, failing open costs a disclosure.

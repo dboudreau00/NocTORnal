@@ -33,9 +33,9 @@ BARE = r"^\s*\+?\d[\d\s]*$"
 
 
 def main() -> int:
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
 
-    conn = connect()
+    conn = connect_system(SystemPurpose.SCRIPT)
     selectors = conn.execute(
         """SELECT s.case_id, c.code, s.raw_value, s.norm_value, s.node_id,
                   s.first_seen, s.observation_cnt

@@ -62,9 +62,11 @@ from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from noctornal_api.curation import CurationError, NodeSetService, TagService
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     authorize_object,
+    element_labels,
     get_conn,
     require,
     user_ceiling,
@@ -188,18 +190,25 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
     a node that was later soft-deleted or merged away must still be
     removable, or the overlay accumulates entries no one can clear.
     """
-    row = conn.execute(
-        """SELECT case_id, classification, compartments, deleted_at, merged_into_id
-             FROM core.node WHERE id = %s""",
-        (node_id,),
-    ).fetchone()
-    if row is None or row[0] != case_id:
+    # The element's case and labels as facts (`deps.element_labels`,
+    # S1 2026-09-25), so the gate below still answers an element above the
+    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
+    # row-level security. Content is read only after the gate.
+    facts = element_labels(conn, "node", node_id)
+    if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", "no such node in this case")
     # A second gate: it counts a break-glass use only if the route's gate
     # at the case's labels did not (sec-breakglass-double-count, 2026-09-23).
     authorize_object(conn, user, case_id=case_id,
                      permission_key="curation.manage", after_case_gate=True,
-                     classification=row[1], compartments=frozenset(row[2] or []))
+                     classification=facts[1], compartments=facts[2])
+    row = conn.execute(
+        """SELECT case_id, classification, compartments, deleted_at, merged_into_id
+             FROM core.node WHERE id = %s""",
+        (node_id,),
+    ).fetchone()
+    if row is None:
+        raise Problem(404, "Not found", "no such node in this case")
     if require_live and row[3] is not None:
         raise Problem(409, "Conflict",
                       "that node is soft-deleted; restore it before curating it")
@@ -731,9 +740,15 @@ def list_members(
     # members' labels are then never read into this process at all, so
     # there is no variable holding a RED label for a later edit to return
     # by accident.
-    total = conn.execute(
-        "SELECT count(*) FROM core.node_set_member WHERE set_id = %s", (set_id,)
-    ).fetchone()[0]
+    #
+    # Counted on a system connection (S1, 2026-09-25). The members this
+    # count exists to own up to are exactly the ones row-level security
+    # hides from the caller's connection, where the count would equal the
+    # visible rows and `withheld` would always read 0.
+    with system_connection(SystemPurpose.WITHHELD, reuse=conn) as counter:
+        total = counter.execute(
+            "SELECT count(*) FROM core.node_set_member WHERE set_id = %s", (set_id,)
+        ).fetchone()[0]
     members = [
         {"node_id": str(r[0]), "label": r[1], "node_type": r[2],
          "classification": r[3], "note": r[4]}

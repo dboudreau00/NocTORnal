@@ -90,6 +90,7 @@ function asSentence(t) { t = String(t || '').trim(); if (!t) return '';
   t = t.charAt(0).toUpperCase() + t.slice(1); return /[.!?]$/.test(t) ? t : t + '.'; }
 const TLP = ['CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED'];
 const MERGE_OPERATION = 'node.merge';
+const RELAX_OPERATION = 'case.policy.relax';   // F9b
 """
 
 

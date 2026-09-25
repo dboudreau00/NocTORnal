@@ -104,10 +104,67 @@ else
 		-- Every SCHEMA-level and TABLE-level grant is in migration 0060. None
 		-- of those objects exist yet.
 		GRANT CONNECT ON DATABASE :"dbname" TO noctornal_app;
+
+		-- S1 (2026-09-25): the request role's own settings, which only
+		-- a superuser may pin. Row-level security binds each request's
+		-- connection with a proof that travels as a bind parameter, and a
+		-- statement slower than log_min_duration_statement is logged WITH its
+		-- parameters by default: keep them out of the log. And a row-security
+		-- refusal is recognised by its message (http/errors.py), so the
+		-- message language is pinned for this role.
+		ALTER ROLE noctornal_app SET log_parameter_max_length = 0;
+		ALTER ROLE noctornal_app SET log_parameter_max_length_on_error = 0;
+		ALTER ROLE noctornal_app SET lc_messages = 'C';
 	EOSQL
 
 	echo "10-app-role: created. It holds nothing until 0060 grants it -- run"
 	echo "10-app-role: 'alembic upgrade head' as the OWNER (${_NOC_SUPERUSER})."
+fi
+
+# The system role (S1, 2026-09-25). Row-level security filters every
+# request to the rows its user may read, and some work must see every row:
+# retention, legal holds, lock extension, merges, the withheld counts,
+# sign-in (the IAM plane is read-only to noctornal_app) and every script.
+# That work connects as noctornal_worker: BYPASSRLS, which only a superuser
+# may grant, and this is the one moment anything here runs as one. It owns
+# nothing and is a member of nothing; migration 0108 grants it exactly what
+# the request role held before 0109. Its password is NOT in secrets.env:
+# postgres-init.env gives it to this service alone, and the sample origin
+# is started without the DSN. Absent, nothing is created and that is said.
+if [ -z "${NOCTORNAL_WORKER_DB_PASSWORD:-}" ]; then
+	echo "10-app-role: NOCTORNAL_WORKER_DB_PASSWORD is not set, so no system"
+	echo "10-app-role: role was created. A development stack connects as the"
+	echo "10-app-role: owner and needs none; a production one does"
+	echo "10-app-role: (infra/production/postgres-init.env), or run"
+	echo "10-app-role: python scripts/runtime_roles.py ensure --production later."
+else
+	echo "10-app-role: creating the system role noctornal_worker."
+
+	psql -v ON_ERROR_STOP=1 --no-psqlrc \
+		--username "${_NOC_SUPERUSER}" \
+		--dbname "${_NOC_DB}" \
+		--set=dbname="${_NOC_DB}" \
+		--set=workerpw="${NOCTORNAL_WORKER_DB_PASSWORD}" <<-'EOSQL'
+		SET log_statement = 'none';
+		SET log_min_duration_statement = -1;
+
+		DO $$
+		BEGIN
+		  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'noctornal_worker') THEN
+		    CREATE ROLE noctornal_worker
+		      LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+		      NOREPLICATION BYPASSRLS;
+		  END IF;
+		END
+		$$;
+
+		ALTER ROLE noctornal_worker WITH PASSWORD :'workerpw';
+		GRANT CONNECT ON DATABASE :"dbname" TO noctornal_worker;
+	EOSQL
+
+	echo "10-app-role: created. Migration 0108 grants it; set"
+	echo "10-app-role: NOCTORNAL_WORKER_DATABASE_URL on every service but the"
+	echo "10-app-role: sample origin."
 fi
 
 unset _NOC_DB _NOC_SUPERUSER

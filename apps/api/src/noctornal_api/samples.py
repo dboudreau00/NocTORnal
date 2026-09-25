@@ -116,19 +116,56 @@ from access control, transport and audit. The password must never be
 allowed to create a false sense of protection, so `archive()` says so in
 the archive comment itself.
 
+## Static triage (F11 and F12, 2026-09-24)
+
+Submission computes the hashes, the file type and the entropy, and queues
+the rest: imphash and the Rich header (pefile), ssdeep and TLSH (in-tree
+ports in `fuzzyhash`), and YARA with the operator's activated rule sets
+(`yara_rules`). Those run afterwards, in bounded child processes, through
+`lab_triage`, and never inside the upload request. What a run could not
+establish is a gap on the row with a status and a reason, because a NULL
+imphash that reads as "this sample has no imports" is worse than an
+absent one that says why. A run writes machine findings (origin
+`machine`), never the graph: a selector reaches a case only when an
+analyst proposes it.
+
 ## What is NOT built, and is not pretended
 
-- **No YARA, no ssdeep, no imphash, no Rich header.** Each needs a
-  dependency (`yara-python`, `ssdeep`, `pefile`) and ssdeep needs a C
-  toolchain. What IS computed is recorded; what is not is recorded as a
-  GAP on the row, because a NULL imphash that reads as "this sample has
-  no imports" is worse than an absent one that says why.
-- **No detonation.** The record exists and the authorisation constraint
-  is real; nothing submits to a sandbox. docs/11 is emphatic that you
-  integrate rather than build one.
-- **No prohibited-content hash screening.** The hook and the REJECTED
-  path exist. The hash sets do not, and in most jurisdictions holding
-  them requires authorisation this deployment does not have.
+- **No archive expansion.** docs/11 asks for it with depth and ratio caps,
+  and an uncapped expander is a zip bomb waiting for someone to send one.
+- **No sandbox of its own.** docs/11 is emphatic that you integrate rather
+  than build one. A request is recorded (RECORD_ONLY) or, where an
+  operator configured a self-hosted CAPEv2, sent by the sandbox worker
+  after its sign-off (`sandbox.py`, F14, 2026-09-24); nothing in a request
+  path sends anything.
+- **No perceptual matching.** Prohibited-content screening (`screening.py`,
+  F13, 2026-09-24) compares exact hashes against the lists this deployment
+  imported under a recorded authority, and says so on every sample: a
+  re-encoded copy does not match, and archive members are not compared.
+
+## Seams the Lab features share (F11-core, 2026-09-24)
+
+Static triage, prohibited-content screening and the sandbox read and
+record through the same seams, each fixed once (docs/00 decision 70). A
+later feature fills a seam by ADDING lines, or by owning a named
+placeholder body; it never changes a seam's signature or re-extracts it.
+
+- The row shape is `SAMPLE_FIELDS`, by name: a new column is one entry
+  and one `Sample` field with a default.
+- Every Lab read goes through `lab_gate()`; what the Lab shows nobody is
+  one line in `LAB_EXCLUSIONS`, which every reader then applies.
+- `_verified_plaintext` is the one path that decrypts for use, verifies
+  and records a tamper alarm that survives the raise;
+  `_adopt_held_copy` keeps its own comparison (its mismatch means "not
+  this sample's copy", not a tamper).
+- Custody names a person (USER) or nobody (SYSTEM, the product acting on
+  nobody's request); a download, share, detonation request or
+  assignment always names a person.
+- `record_machine_analysis`, `MACHINE_PRODUCERS`, `PROPOSAL_ORIGINS` and
+  `_propose_entry` are how a machine records a finding and how an analyst
+  proposes one of its selectors.
+- `DERIVED_GAP_STEPS` and `derived_gaps` compute the gaps that are not
+  stored, from the sample's screening outcome and file type.
 """
 from __future__ import annotations
 
@@ -147,7 +184,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import NamedTuple
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.types.json import Json
@@ -434,6 +471,13 @@ class SampleCaseReadOnly(SampleError):
     not name the case, which a Lab analyst may not be able to open."""
 
 
+class SampleIntegrityError(SampleError):
+    """The decrypted bytes do not hash to the recorded SHA-256: a tamper or
+    a storage fault. Raised by `_verified_plaintext` after the alarm has
+    been committed on its own, so whatever the caller does next, the
+    custody row and the audit row stay (F11-core D, 2026-09-24)."""
+
+
 class AuthorisationRequired(SampleError):
     """A preserved sample was asked for by somebody with no live
     authorisation for it. The router answers 451, as victim PII does: the
@@ -467,6 +511,36 @@ class PreservationUnconfirmed(SampleError):
         super().__init__(message)
         self.bucket = bucket
         self.key = key
+
+
+class NothingToPreserve(SampleError):
+    """F13 (2026-09-24): the working store says the object is ABSENT
+    and the preservation store holds no copy of it, so there is nothing to
+    preserve. `_adopt_held_copy`'s refusal, raised as its own class so the
+    screening path can tell it apart from a store that did not answer; the
+    human path's behaviour and text do not change."""
+
+
+class _StoreFailed(Exception):
+    """The working-store put of a matched submission failed; carries
+    the cause so the second transaction can record it."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class ProhibitedContentMatch(SampleError):
+    """F13 (2026-09-24): a submission matched a prohibited-content hash
+    list. The router answers 451 with `str(exc)`, which never names the
+    list or its category. Carries what the alert reached."""
+
+    def __init__(self, message: str, *, result_id: UUID,
+                 officers_notified: int, alert_outcome: str) -> None:
+        super().__init__(message)
+        self.result_id = result_id
+        self.officers_notified = officers_notified
+        self.alert_outcome = alert_outcome
 
 
 def disposition_setting() -> tuple[str | None, str | None]:
@@ -741,6 +815,77 @@ def download_cors_headers(origin_header: str | None) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# The one Lab gate (F11-core C, 2026-09-24)
+# ---------------------------------------------------------------------------
+
+#: SQL predicates over a sample alias `{s}` that EVERY Lab read applies as
+#: well as the caller's labels: what the Lab shows nobody, whoever asks.
+#: Prohibited-content screening (F13) is one line here, and that single
+#: line keeps a matched sample out of the queue, the
+#: card, the download and its ticket, the preserved retrieval and its
+#: ticket, similarity, retrohunt and the static-triage claim, while the
+#: Security Officer's content-free list (`exclusions=False`) still shows
+#: it. A flag on each reader was the alternative, and a reader that forgot
+#: the flag would have been the leak.
+LAB_EXCLUSIONS: tuple[str, ...] = (
+    # F13, 2026-09-24. A sample that matched a prohibited-content hash
+    # list is gone from the Lab for everyone, for good ("no analyst
+    # viewing", docs/11); only the officer's two readers opt out.
+    "{s}.screening_outcome <> 'MATCH'",
+)
+
+
+def lab_exclusions_sql(s: str = "s") -> str:
+    """The exclusions alone, for the system readers that have no caller
+    and so no labels: the static-triage enqueue and claim."""
+    return " AND ".join(f"({e.format(s=s)})" for e in LAB_EXCLUSIONS) or "TRUE"
+
+
+def lab_gate(*, s: str = "s", c: str = "c", exclusions: bool = True) -> str:
+    """The Lab's label predicate, composed as `deps.effective_labels`
+    composes a node's: the stricter of the sample's classification and its
+    case's, and the union of their compartments, against the caller's
+    clearance and held compartments. The query LEFT JOINs the case's facts
+    as {c} (`LATERAL iam.case_facts({s}.case_id)`, S1: row-level security
+    hides core."case" from Lab analysts, who hold no assignment) and passes
+    `gate_params(...)`.
+
+    It was written out five times, positionally, before 2026-09-24 (queue,
+    visible, the download's and the retrieval's checks, and the officer's
+    list), and every new Lab feature would have added a sixth or a flag to
+    some of them. Rendered at call time so `LAB_EXCLUSIONS` is read when
+    the query is built."""
+    gate = (f"greatest({s}.classification, "
+            f"coalesce({c}.classification, {s}.classification)) "
+            f"<= %(gate_clearance)s::core.tlp "
+            f"AND ({s}.compartments || coalesce({c}.compartments, '{{}}')) "
+            f"<@ %(gate_compartments)s::text[]")
+    if exclusions and LAB_EXCLUSIONS:
+        gate += " AND " + lab_exclusions_sql(s)
+    return gate
+
+
+def gate_params(clearance: str | None, compartments) -> dict:
+    """The named parameters `lab_gate` takes. A None clearance is refused
+    with queue()'s sentence: a gate that defaulted would fail open."""
+    if clearance is None:
+        raise SampleError(
+            "queue() needs the caller's clearance. It used to default to "
+            "RED, so a caller that forgot became maximally privileged in "
+            "silence, which is exactly how download() came to have no "
+            "label check at all.")
+    return {"gate_clearance": clearance,
+            "gate_compartments": sorted(compartments or ())}
+
+
+#: The default-alias renderings, under fixed names. Computed at import
+#: from the literal tuple above; code in this module calls `lab_gate()`
+#: so a test can change the tuple.
+LABEL_GATE_SQL = lab_gate()
+LABEL_PREDICATE_SQL = lab_gate(exclusions=False)
+
+
+# ---------------------------------------------------------------------------
 # Static triage -- pure, no I/O, no execution
 # ---------------------------------------------------------------------------
 
@@ -801,28 +946,62 @@ def file_type_of(data: bytes) -> str:
     return "unknown"
 
 
+#: What a stored or derived gap says about its check (F11-core G,
+#: 2026-09-24). `pending`: static triage will run it; `not_applicable`: it
+#: does not apply to this sample (not a PE, no Rich header); `skipped`: a
+#: limit kept it from running; `failed`: it ran and did not finish;
+#: `unavailable`: this deployment cannot run it.
+GAP_STATUSES = ("pending", "not_applicable", "skipped", "failed",
+                "unavailable")
+#: The checks the static-triage runner settles, in the order they are
+#: listed on a new sample.
+STATIC_STEPS = ("imphash", "rich_header_hash", "ssdeep", "tlsh", "yara")
+PENDING_REASON = "static triage has not run yet; it runs after submission"
+#: Gaps computed when a sample is READ rather than stored: a stored copy of
+#: one would go stale the moment the deployment's answer changed. The
+#: steps are prohibited-content screening's (F13).
+DERIVED_GAP_STEPS = ("prohibited_content_screening",
+                     # F13. Exact hashes only, and containers only.
+                     "prohibited_content_perceptual",
+                     "prohibited_content_archive_members")
+
+#: Who a machine analysis row says produced it, by kind (F11-core F). The
+#: sandbox (F14) is 'SANDBOX'.
+MACHINE_PRODUCERS: dict[str, str] = {
+    "STATIC": "NocTORnal static triage",
+    "YARA": "YARA scan",
+    "SANDBOX": "CAPEv2 sandbox",  # F14, 2026-09-24.
+}
+#: Where a proposal made from an analysis says it came from, by the row's
+#: (origin, machine kind). The sandbox (F14) is ('machine', 'SANDBOX').
+PROPOSAL_ORIGINS: dict[tuple[str, str | None], str] = {
+    ("analyst", None): "lab/analysis",
+    ("machine", "STATIC"): "lab/static-triage",
+    ("machine", "SANDBOX"): "lab/sandbox",  # F14, 2026-09-24.
+}
+#: The two stores a sample's bytes are read from.
+STORE_WORKING = "working"
+STORE_PRESERVATION = "preservation"
+
+
 def triage(data: bytes) -> Triage:
     """Static only. Nothing here executes, parses a container, or
     expands an archive.
 
+    The fuzzy hashes and YARA are PENDING: they run afterwards, in bounded
+    child processes (`lab_triage`), never inside the upload request.
     Archive expansion is deliberately absent: docs/11 asks for it with
     depth and expansion-ratio caps, and an uncapped expander is a zip
     bomb waiting for someone to send one. Building the capped version is
     real work and the honest thing is to record its absence rather than
-    ship the uncapped one.
+    ship the uncapped one. Prohibited-content screening is a derived gap
+    (`derived_gaps`), not a stored one.
     """
-    gaps = [
-        {"step": "imphash", "reason": "pefile is not a dependency"},
-        {"step": "rich_header_hash", "reason": "pefile is not a dependency"},
-        {"step": "ssdeep", "reason": "ssdeep needs a C toolchain"},
-        {"step": "tlsh", "reason": "py-tlsh is not a dependency"},
-        {"step": "yara", "reason": "no rule corpus and no yara-python"},
-        {"step": "archive_expansion",
-         "reason": "not built: an expander without depth and ratio caps is a "
-                   "zip bomb waiting to be sent one"},
-        {"step": "prohibited_content_screening",
-         "reason": "no authorised hash set; the REJECTED path is manual"},
-    ]
+    gaps = [{"step": step, "status": "pending", "reason": PENDING_REASON}
+            for step in STATIC_STEPS]
+    gaps.append({"step": "archive_expansion", "status": "unavailable",
+                 "reason": "not built: an expander without depth and ratio "
+                           "caps is a zip bomb waiting to be sent one"})
     return Triage(
         sha256=hashlib.sha256(data).digest(),
         sha1=hashlib.sha1(data).digest(),
@@ -1301,6 +1480,18 @@ class Sample:
     #: True once the data key has been zeroed (a destroy). Read as a
     #: boolean in SQL so the sealed key itself never enters this object.
     key_destroyed: bool = False
+    #: F11 (2026-09-24): written by static triage, None until it has run
+    #: (the row's `triage_gaps` says why each is absent). `tlsh` is the
+    #: canonical form without the T1 prefix (ontology `tlsh_norm`).
+    imphash: str | None = None
+    rich_header_hash: str | None = None
+    ssdeep: str | None = None
+    tlsh: str | None = None
+    #: F13 (2026-09-24). NOT_SCREENED, NO_MATCH or MATCH, and when;
+    #: and when a matched sample's bytes were found in neither store.
+    screening_outcome: str = "NOT_SCREENED"
+    screened_at: datetime | None = None
+    screening_bytes_absent_at: datetime | None = None
 
     @property
     def bytes_disposition(self) -> str:
@@ -1309,11 +1500,16 @@ class Sample:
         `in_sample_store` for a live sample; for a rejected one,
         `preserved`, `destroyed`, or `kept` (the rejection was recorded
         without disposing of anything, which is what a hold or a missing
-        object leaves)."""
+        object leaves). A screening match whose bytes have not yet moved is
+        `awaiting_preservation`, and one whose bytes were found in neither
+        store `not_found` (F13)."""
         if self.preserved_key:
             return "preserved"
         if self.state != REJECTED:
             return "in_sample_store"
+        if self.screening_outcome == "MATCH" and not self.key_destroyed:
+            return ("not_found" if self.screening_bytes_absent_at
+                    else "awaiting_preservation")
         return "destroyed" if self.key_destroyed else "kept"
 
 
@@ -1429,9 +1625,12 @@ class SampleService:
         # attaches the floor trigger as the backstop for anything that does
         # not come through this method.
         if case_id is not None:
+            # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
+            # hold no case assignment, so under row-level security core."case" is
+            # hidden from them, and its labels and read-only state must still compose.
             case = self._c.execute(
-                'SELECT classification, compartments FROM core."case" '
-                "WHERE id = %s", (case_id,)).fetchone()
+                "SELECT classification, compartments FROM iam.case_facts(%s)",
+                (case_id,)).fetchone()
             if case is None:
                 raise SampleError("no such case")
             classification = max(tlp_from_name(classification),
@@ -1441,14 +1640,38 @@ class SampleService:
         result = triage(data)
         digest_hex = result.sha256.hex()
 
+        # F13, 2026-09-24. Screened once the hashes exist and BEFORE
+        # the duplicate check and any write, so every attempt to bring
+        # listed material in is an event, and before any static triage (it
+        # is queued with the row, below). A hash lookup reads no bytes.
+        from noctornal_api import screening
+        verdict = screening.screen_digests(
+            self._c, sha256=result.sha256, sha1=result.sha1, md5=result.md5)
+        if verdict.outcome == screening.MATCH:
+            self._isolate_submission(
+                data, result, verdict, submitted_by=submitted_by,
+                case_id=case_id, original_filename=original_filename,
+                source_note=source_note, classification=classification,
+                compartments=compartments, policy_reference=detail)
+
         existing = self._c.execute(
             """SELECT s.id, greatest(s.classification,
                                      coalesce(c.classification,
                                               s.classification)),
-                      s.compartments || coalesce(c.compartments, '{}')
+                      s.compartments || coalesce(c.compartments, '{}'),
+                      s.screening_outcome
                  FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
+                 LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
                 WHERE s.sha256 = %s""", (result.sha256,)).fetchone()
+        if existing is not None and existing[3] == screening.MATCH:
+            # A matched row stays matched after its list is retired,
+            # and it is invisible to everyone, so "already held; link the
+            # existing record" followed by a 404 would be the oracle.
+            raise SampleError(
+                "this submission was not accepted. If you believe it is new, "
+                "raise it with the lab. A duplicate of something you may "
+                "not see is refused without saying so, because the refusal "
+                "would otherwise answer a question the access gate does not.")
         if existing is not None:
             # Deduplication on content, exactly like evidence. Two analysts
             # finding the same binary is a finding about the actors, not a
@@ -1507,6 +1730,7 @@ class SampleService:
         # rejects the row", and it is the one an operator can actually
         # detect, because a bucket object whose digest matches no row is a
         # query rather than an archaeology exercise.
+        screened = verdict.outcome == screening.NO_MATCH
         with self._c.transaction():
             row = self._c.execute(
                 """INSERT INTO lab.sample
@@ -1514,21 +1738,43 @@ class SampleService:
                         byte_size, storage_key, storage_bucket,
                         data_key_ciphertext, data_key_id, state, file_type,
                         entropy, triage_gaps, submitted_by, source_note,
-                        classification, compartments)
+                        classification, compartments, screening_outcome,
+                        screened_at, screening_list_seq)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           'QUARANTINED', %s, %s, %s, %s, %s, %s, %s)
+                           'QUARANTINED', %s, %s, %s, %s, %s, %s, %s, %s,
+                           CASE WHEN %s THEN now() END, %s)
                    RETURNING """ + _RETURNING,
                 (case_id, result.sha256, result.sha1, result.md5,
                  original_filename, result.byte_size, storage_key, bucket,
                  key_blob, key_id, result.file_type, result.entropy,
                  Json(result.gaps), submitted_by, source_note, classification,
-                 sorted(compartments)),
+                 sorted(compartments), verdict.outcome, screened,
+                 verdict.list_seq),
             ).fetchone()
             sample = _record(row)
+            if screened:
+                # The one NO_MATCH record a submission writes; a pass
+                # writes only counts, so the results do not grow with
+                # every pass.
+                self._c.execute(
+                    """INSERT INTO lab.screening_result
+                           (id, sample_id, sha256, trigger, actor_id, outcome,
+                            lists_consulted, list_seq)
+                       VALUES (gen_random_uuid(), %s, %s, 'SUBMISSION', %s,
+                               'NO_MATCH', %s::uuid[], %s)""",
+                    (sample.id, result.sha256, submitted_by,
+                     [str(x) for x in verdict.lists_consulted],
+                     verdict.list_seq))
             if self._storage is not None:
                 self._storage.put(storage_key, ciphertext)
             self._access(sample.id, submitted_by, "VIEWED_META",
                          {"event": "submitted", "policy_reference": detail})
+            # Queued in the same transaction as the row (F11, 2026-09-24):
+            # a sample that exists always has its triage coming, and one
+            # rolled back leaves no run behind. The run itself happens
+            # later, outside this request (`lab_triage`).
+            from noctornal_api.lab_triage import enqueue
+            enqueue(self._c, sample.id, trigger="SUBMIT")
         return sample
 
     def reject(self, sample_id: UUID, *, actor_id: UUID, reason: str,
@@ -1670,7 +1916,7 @@ class SampleService:
         row = self._c.execute(
             """SELECT s.legal_hold, coalesce(c.legal_hold, false), s.storage_key
                  FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
+                 LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
                 WHERE s.id = %s""", (sample_id,)).fetchone()
         if row is None:
             raise SampleError("no such sample")
@@ -1687,7 +1933,7 @@ class SampleService:
         about which states are shut."""
         row = self._c.execute(
             """SELECT c.status FROM lab.sample s
-                 JOIN core."case" c ON c.id = s.case_id
+                 JOIN LATERAL iam.case_facts(s.case_id) c ON true
                 WHERE s.id = %s""", (sample_id,)).fetchone()
         if row is not None and row[0] in CONTENT_READ_ONLY_STATES:
             raise SampleCaseReadOnly(
@@ -1703,9 +1949,13 @@ class SampleService:
         wanted = sorted({str(i) for i in case_ids if i})
         if not wanted:
             return frozenset()
+        # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
+        # hold no case assignment, so under row-level security core."case" is
+        # hidden from them, and its labels and read-only state must still compose.
         rows = self._c.execute(
-            'SELECT id FROM core."case" WHERE id = ANY(%s::uuid[]) '
-            "AND status::text = ANY(%s)",
+            "SELECT c.id FROM unnest(%s::uuid[]) AS x(id) "
+            "CROSS JOIN LATERAL iam.case_facts(x.id) c "
+            "WHERE c.status::text = ANY(%s)",
             (wanted, sorted(CONTENT_READ_ONLY_STATES))).fetchall()
         return frozenset(str(r[0]) for r in rows)
 
@@ -1995,8 +2245,8 @@ class SampleService:
             # and no held copy either: a row whose object is not in the
             # store (the demo seed writes none) has nothing to preserve,
             # and saying "preserved" for it would be the false record
-            # `destroy` refuses to write too.
-            raise SampleError(
+            # `destroy` refuses to write too. Its own class (F13), same text.
+            raise NothingToPreserve(
                 f"the sample store has no readable object at {storage_key} "
                 f"({kind}) and the preservation store holds no copy of it, "
                 f"so there is nothing to preserve. Nothing has changed. "
@@ -2140,10 +2390,499 @@ class SampleService:
             f"the rejection could not be completed ({failure}). {said} "
             f"{state} {logged}")
 
+    # -- prohibited-content screening (F13, 2026-09-24) --------------------
+    #
+    # A match only ever REDUCES access: the sample leaves the Lab, is marked
+    # REJECTED and MATCH for good, and its bytes are preserved. So the lock
+    # here refuses nothing but absence, not a REJECTED row and not a closed
+    # case (c7 keeps new CONTENT out of a closed case, and this is not
+    # content). `_lock_unrejected` ends in the read-only refusal, so reusing
+    # it could never preserve a closed case's match.
+
+    def _screening_sentence(self, alert_outcome: str) -> str:
+        """What the submitter is told. Never the list, never its category."""
+        person = (os.environ.get("NOCTORNAL_DESIGNATED_PERSON", "").strip()
+                  or "the designated person")
+        _declared, reference = policy_declared()
+        told = alert_outcome in ("SENT", "COALESCED")
+        return (
+            "This file matched a prohibited-content hash list this deployment "
+            "screens against, so it was not accepted into the Lab and nobody "
+            "here can open it. "
+            + ("The Security Officer has been alerted. " if told else "")
+            + f"Do not open, copy or share your copy of the file. Contact "
+            f"{person} and follow {reference}."
+            + ("" if told else f" No Security Officer account could be "
+               f"alerted, so tell {person} yourself now."))
+
+    def _lock_for_screening(self, sample_id: UUID) -> tuple:
+        """Inside the caller's transaction: lock the row and read what the
+        screening paths decide on. Refuses nothing but a missing row."""
+        self._c.execute("SELECT set_config('lock_timeout', %s, true)",
+                        (REJECT_LOCK_TIMEOUT,))
+        row = self._c.execute(
+            """SELECT state::text, screening_outcome, preserved_key,
+                      octet_length(data_key_ciphertext), case_id,
+                      screening_bytes_absent_at, sha256
+                 FROM lab.sample WHERE id = %s FOR NO KEY UPDATE""",
+            (sample_id,)).fetchone()
+        self._c.execute("SET LOCAL lock_timeout TO DEFAULT")
+        if row is None:
+            raise SampleError("no such sample")
+        return row
+
+    def _refuse_if_screening_match(self, sample_id: UUID) -> None:
+        """The service's belt for a Lab write on a matched sample: the same
+        answer a sample the caller cannot see gets. The routers already 404
+        it through `visible()`."""
+        row = self._c.execute(
+            "SELECT screening_outcome FROM lab.sample WHERE id = %s",
+            (sample_id,)).fetchone()
+        if row is not None and row[0] == "MATCH":
+            raise SampleError("no such sample")
+
+    def _screening_alerts(self, *, result_id: UUID, sample_id: UUID,
+                          case_id: UUID | None, verdict, trigger: str,
+                          disposition: str, detonations_sent: int,
+                          tell_owner: bool) -> tuple[str, int, dict]:
+        """The officers' and the designated person's alert, and the case
+        owner's notice, in a SAVEPOINT: a notification that fails is
+        logged and recorded as FAILED, and never undoes the isolation."""
+        from noctornal_api import notify_events
+        try:
+            with self._c.transaction():
+                reach = notify_events.screening_match(
+                    self._c, result_id=result_id,
+                    list_ids=verdict.matched_lists, trigger=trigger,
+                    disposition=disposition, detonations_sent=detonations_sent)
+                owner = None
+                if tell_owner and case_id is not None:
+                    owner = notify_events.sample_withdrawn(
+                        self._c, sample_id=sample_id, case_id=case_id,
+                        result_id=result_id)
+        except Exception as exc:  # noqa: BLE001 - the isolation stands
+            log.warning("the screening alert for result %s failed", result_id,
+                        exc_info=True)
+            return "FAILED", 0, {"case_owner_told": False,
+                                 "alert_failure": type(exc).__name__}
+        if reach.notified:
+            outcome = "SENT"
+        elif reach.coalesced:
+            outcome = "COALESCED"
+        else:
+            outcome = "NONE_REACHED"
+        told = {"case_owner_told": owner or False,
+                "designated_person_told": reach.designated_person_told}
+        return outcome, reach.notified, told
+
+    def _refuse_waiting_detonations(self, sample_id: UUID) -> dict:
+        """A match refuses every detonation still waiting and names every
+        one already sent, in a SAVEPOINT whose failure never undoes the
+        isolation (F13 and F14: AWAITING_SIGNOFF to REFUSED is an edge
+        0103's guard allows)."""
+        out: dict = {}
+        try:
+            with self._c.transaction():
+                refused = self._c.execute(
+                    """UPDATE lab.detonation
+                          SET status = 'REFUSED',
+                              last_error = 'prohibited-content screening '
+                                           'matched this sample'
+                        WHERE sample_id = %s AND mode = 'SUBMIT'
+                          AND status IN ('AWAITING_SIGNOFF', 'QUEUED')
+                    RETURNING id""", (sample_id,)).fetchall()
+                sent = self._c.execute(
+                    """SELECT target_key, external_ref, submitted_at
+                         FROM lab.detonation
+                        WHERE sample_id = %s AND mode = 'SUBMIT'
+                          AND submitted_at IS NOT NULL
+                          AND submit_outcome IS DISTINCT FROM 'NOT_SENT'""",
+                    (sample_id,)).fetchall()
+        except Exception as exc:  # noqa: BLE001 - the isolation stands
+            log.warning("refusing the detonations of matched sample %s failed",
+                        sample_id, exc_info=True)
+            return {"detonation_refusal_failed": type(exc).__name__}
+        if refused:
+            out["detonations_refused"] = [str(r[0]) for r in refused]
+        if sent:
+            # The material may already be in the sandbox, which nothing here
+            # can recall: the designated person needs to know where.
+            out["detonations_sent"] = [
+                {"target": r[0], "external_ref": r[1],
+                 "submitted_at": r[2].isoformat() if r[2] else None}
+                for r in sent]
+        return out
+
+    def _record_screening_result(self, result_id: UUID, *, sample_id: UUID,
+                                 sha256: bytes, trigger: str,
+                                 actor_id: UUID | None, verdict,
+                                 disposition: str, alert_outcome: str,
+                                 officers_notified: int, detail: dict) -> None:
+        self._c.execute(
+            """INSERT INTO lab.screening_result
+                   (id, sample_id, sha256, trigger, actor_id, outcome,
+                    lists_consulted, list_seq, matched_lists,
+                    matched_algorithms, disposition, alert_outcome,
+                    officers_notified, detail)
+               VALUES (%s, %s, %s, %s, %s, 'MATCH', %s::uuid[], %s,
+                       %s::uuid[], %s, %s, %s, %s, %s)""",
+            (result_id, sample_id, bytes(sha256), trigger, actor_id,
+             [str(x) for x in verdict.lists_consulted], verdict.list_seq,
+             [str(x) for x in verdict.matched_lists],
+             list(verdict.matched_algorithms), disposition, alert_outcome,
+             officers_notified, Json(detail)))
+        self._audit("SAMPLE_SCREENING_MATCH", sample_id=sample_id,
+                    actor_id=actor_id,
+                    outcome="DENIED" if trigger == "SUBMISSION" else "SUCCESS",
+                    detail={"result_id": str(result_id), "trigger": trigger,
+                            "disposition": disposition,
+                            "list_ids": [str(x) for x in verdict.matched_lists],
+                            "alert_outcome": alert_outcome,
+                            "officers_notified": officers_notified})
+
+    def reject_by_screening(self, sample_id: UUID, *, verdict, trigger: str,
+                            actor_id: UUID | None) -> dict:
+        """Isolate a HELD sample that matched: one transaction, no bytes
+        moved (the worker's `preserve_screened` moves them).
+
+        REJECTED and MATCH, a human rejection's own reason kept; custody
+        REJECTED as SYSTEM with the person who started it in the detail;
+        waiting detonations refused and sent ones named; live preservation
+        authorisations void by derivation; the alerts; the result; the
+        audit row last. A sample already matched gets a result saying so
+        and the (coalesced) officer alert, and nothing else changes."""
+        result_id = uuid4()
+        try:
+            with self._c.transaction():
+                (state, outcome, preserved_key, key_len, case_id, _absent,
+                 sha256) = self._lock_for_screening(sample_id)
+                detail: dict = {}
+                if outcome == "MATCH":
+                    disposition = "ALREADY_ISOLATED"
+                else:
+                    from noctornal_api.screening import SCREENING_REJECT_REASON
+                    self._c.execute(
+                        """UPDATE lab.sample
+                              SET state = 'REJECTED',
+                                  reject_reason = coalesce(reject_reason, %s),
+                                  screening_outcome = 'MATCH',
+                                  screened_at = now(), screening_list_seq = %s
+                            WHERE id = %s""",
+                        (SCREENING_REJECT_REASON, verdict.list_seq, sample_id))
+                    disposition = ("ALREADY_PRESERVED" if preserved_key
+                                   else "NO_BYTES" if not key_len
+                                   else "PRESERVE")
+                    detail["prior_state"] = state
+                    self._access(sample_id, None, "REJECTED", {
+                        "by": "screening", "result_id": str(result_id),
+                        "list_ids": [str(x) for x in verdict.matched_lists],
+                        "trigger": trigger,
+                        "triggered_by": str(actor_id) if actor_id else None,
+                        "disposition": disposition.lower()})
+                    detail.update(self._refuse_waiting_detonations(sample_id))
+                    voided = self._c.execute(
+                        """SELECT id FROM lab.preservation_authorisation
+                            WHERE sample_id = %s AND revoked_at IS NULL
+                              AND expires_at > now()""",
+                        (sample_id,)).fetchall()
+                    if voided:
+                        detail["authorisations_voided"] = [str(r[0]) for r in voided]
+                alert, notified, told = self._screening_alerts(
+                    result_id=result_id, sample_id=sample_id, case_id=case_id,
+                    verdict=verdict, trigger=trigger, disposition=disposition,
+                    detonations_sent=len(detail.get("detonations_sent", [])),
+                    tell_owner=disposition != "ALREADY_ISOLATED")
+                detail.update(told)
+                self._record_screening_result(
+                    result_id, sample_id=sample_id, sha256=sha256,
+                    trigger=trigger, actor_id=actor_id, verdict=verdict,
+                    disposition=disposition, alert_outcome=alert,
+                    officers_notified=notified, detail=detail)
+        except psycopg.errors.LockNotAvailable:
+            raise _row_busy() from None
+        return {"result_id": result_id, "disposition": disposition,
+                "alert_outcome": alert, "officers_notified": notified}
+
+    def _isolate_submission(self, data: bytes, result: Triage, verdict, *,
+                            submitted_by: UUID, case_id: UUID | None,
+                            original_filename: str | None,
+                            source_note: str | None, classification: str,
+                            compartments: frozenset[str],
+                            policy_reference: str) -> None:
+        """A submission that matched. Always raises ProhibitedContentMatch.
+
+        An existing row with this sha256 is isolated as a held sample (or,
+        already matched, recorded again and the officer alerted). Otherwise
+        a REJECTED and MATCH row is written, so every result names a sample
+        and every read of one is gated on that row's labels. Under
+        `preserve` the ciphertext goes to the working store exactly as a
+        submission's does (row first) and the byte move follows the commit,
+        or the next worker pass; under `destroy` nothing is stored anywhere
+        (no data key is ever sealed); a case hold forces preserve. No static
+        triage is queued."""
+        from noctornal_api import screening
+        existing = self._c.execute(
+            "SELECT id FROM lab.sample WHERE sha256 = %s",
+            (result.sha256,)).fetchone()
+        if existing is not None:
+            out = self.reject_by_screening(existing[0], verdict=verdict,
+                                           trigger="SUBMISSION",
+                                           actor_id=submitted_by)
+            raise ProhibitedContentMatch(
+                self._screening_sentence(out["alert_outcome"]),
+                result_id=out["result_id"],
+                officers_notified=out["officers_notified"],
+                alert_outcome=out["alert_outcome"])
+
+        disposition, reasons = screening.submission_disposition(
+            self._c, case_id=case_id)
+        preserving = disposition == "preserve"
+        preservation = self._preservation
+        store_detail: dict = {"disposition_reasons": reasons} if reasons else {}
+        if preserving and preservation is None:
+            # Built here, lazily: the upload route builds no preservation
+            # store, and a match must not wait for the worker when the
+            # store is healthy. A failure is recorded
+            # and the move waits for the worker.
+            try:
+                preservation = PreservationStorage()
+            except Exception as exc:  # noqa: BLE001 - recorded, not fatal
+                store_detail["preservation_store"] = (
+                    f"not opened ({type(exc).__name__}); the worker moves the "
+                    f"bytes")
+        digest_hex = result.sha256.hex()
+        storage_key = f"samples/{digest_hex[:2]}/{digest_hex}"
+        bucket = os.environ.get("SAMPLE_BUCKET", "noctornal-samples")
+        result_id = uuid4()
+
+        def write(key_blob: bytes, key_id: str, kind: str,
+                  ciphertext: bytes | None) -> tuple[UUID, str, int]:
+            with self._c.transaction():
+                row = self._c.execute(
+                    """INSERT INTO lab.sample
+                           (case_id, sha256, sha1, md5, original_filename,
+                            byte_size, storage_key, storage_bucket,
+                            data_key_ciphertext, data_key_id, state,
+                            reject_reason, file_type, entropy, triage_gaps,
+                            submitted_by, source_note, classification,
+                            compartments, screening_outcome, screened_at,
+                            screening_list_seq)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                               'REJECTED', %s, %s, %s, %s, %s, %s, %s, %s,
+                               'MATCH', now(), %s)
+                       RETURNING id""",
+                    (case_id, result.sha256, result.sha1, result.md5,
+                     original_filename, result.byte_size, storage_key, bucket,
+                     key_blob, key_id, screening.SCREENING_REJECT_REASON,
+                     result.file_type, result.entropy, Json(result.gaps),
+                     submitted_by, source_note, classification,
+                     sorted(compartments), verdict.list_seq)).fetchone()
+                sample_id = row[0]
+                if ciphertext is not None:
+                    # The row is already REJECTED and MATCH, so no reader
+                    # releases these bytes while they wait for the move.
+                    try:
+                        self._storage.put(storage_key, ciphertext)
+                    except Exception as exc:
+                        raise _StoreFailed(exc) from exc
+                self._access(sample_id, submitted_by, "VIEWED_META",
+                             {"event": "submitted",
+                              "policy_reference": policy_reference})
+                self._access(sample_id, None, "REJECTED", {
+                    "by": "screening", "result_id": str(result_id),
+                    "list_ids": [str(x) for x in verdict.matched_lists],
+                    "trigger": "SUBMISSION",
+                    "triggered_by": str(submitted_by), "disposition": kind})
+                alert, notified, told = self._screening_alerts(
+                    result_id=result_id, sample_id=sample_id, case_id=case_id,
+                    verdict=verdict, trigger="SUBMISSION",
+                    disposition=kind.upper(), detonations_sent=0,
+                    tell_owner=True)
+                self._record_screening_result(
+                    result_id, sample_id=sample_id, sha256=result.sha256,
+                    trigger="SUBMISSION", actor_id=submitted_by,
+                    verdict=verdict, disposition=kind.upper(),
+                    alert_outcome=alert, officers_notified=notified,
+                    detail={**store_detail, **told})
+            return sample_id, alert, notified
+
+        sample_id = None
+        if preserving and self._storage is not None:
+            data_key = os.urandom(32)
+            key_blob, key_id = envelope.encrypt(data_key.hex())
+            try:
+                sample_id, alert, notified = write(
+                    key_blob, key_id, "preserve", _xor_stream(data, data_key))
+            except _StoreFailed as failed:
+                log.warning("a matched submission could not be stored",
+                            exc_info=failed.cause)
+                store_detail["store_failure"] = type(failed.cause).__name__
+                preserving = False
+        if sample_id is None:
+            # Not stored: the deployment destroys rejected material, the
+            # sample store is not configured, or the put failed. Nothing is
+            # held anywhere, so no data key is sealed (the destroy path's
+            # zeroed key, which readers already take as "no key").
+            _blob, key_id = envelope.encrypt(os.urandom(32).hex())
+            kind = ("not_stored" if disposition == "not_stored"
+                    else "store_failed")
+            if self._storage is None and kind == "store_failed":
+                store_detail["store_failure"] = "sample store not configured"
+            sample_id, alert, notified = write(b"", key_id, kind, None)
+        elif preservation is not None:
+            try:
+                SampleService(self._c, self._storage,
+                              preservation).preserve_screened(sample_id)
+            except Exception:  # noqa: BLE001 - pending: the worker retries
+                log.warning("moving matched submission %s into the "
+                            "preservation store failed; the next screening "
+                            "pass retries it", sample_id, exc_info=True)
+        raise ProhibitedContentMatch(self._screening_sentence(alert),
+                                     result_id=result_id,
+                                     officers_notified=notified,
+                                     alert_outcome=alert)
+
+    def preserve_screened(self, sample_id: UUID) -> str:
+        """Move a matched sample's bytes into the preservation store: the
+        worker's half of an isolation, and a preserving submission's.
+
+        The same order and the same failure record a preserving rejection
+        uses (row lock, the held copy or the adoption of an earlier one,
+        the UPDATE, custody, the working delete, the audit row last,
+        `_preservation_incomplete` once a held copy may exist), under the
+        screening lock, which returns without work when the row is no
+        longer waiting. Returns "preserved", "pending" (it will be tried
+        again), "bytes_not_found" (recorded, below) or "not_pending".
+
+        A working store that says the object is ABSENT while the
+        preservation store holds no copy is never trusted on one look: a
+        changed bucket variable, or a database restored ahead of its object
+        store, looks exactly like that. The first look is a custody row; a
+        second, at least `screening.ABSENCE_RECHECK` later, sets
+        `screening_bytes_absent_at` and the row stops waiting. The data key
+        is never touched: the worker destroys nothing, and
+        a review by the officer is what closes the question."""
+        from noctornal_api import screening
+        if self._storage is None or self._preservation is None:
+            return "pending"
+        current = self.get(sample_id)
+        if current is None:
+            return "not_pending"
+        storage_key = self._c.execute(
+            "SELECT storage_key FROM lab.sample WHERE id = %s",
+            (sample_id,)).fetchone()[0]
+        preserved_key = f"preserved/{current.sha256[:2]}/{current.sha256}"
+        copy: PreservedObject | None = None
+        unconfirmed: PreservationUnconfirmed | None = None
+        working_gone = deleting = adopted = False
+        try:
+            with self._c.transaction():
+                (_state, outcome, held_key, key_len, _case, absent,
+                 _sha) = self._lock_for_screening(sample_id)
+                if (outcome != "MATCH" or held_key or not key_len
+                        or absent is not None):
+                    return "not_pending"
+                try:
+                    ciphertext = self._storage.get(storage_key)
+                except Exception as exc:
+                    try:
+                        copy = self._adopt_held_copy(current, preserved_key,
+                                                     storage_key, exc)
+                    except NothingToPreserve:
+                        return self._note_absence(sample_id, screening)
+                    adopted = working_gone = True
+                if not adopted:
+                    try:
+                        copy = self._preservation.preserve(preserved_key,
+                                                           ciphertext)
+                    except PreservationUnverified as exc:
+                        copy = exc.copy
+                        raise
+                    except PreservationUnconfirmed as exc:
+                        unconfirmed = exc
+                        raise
+                detail = {"event": "preserved_after_screening",
+                          "preserved_bucket": copy.bucket,
+                          "preserved_key": copy.key,
+                          "preserved_version_id": copy.version_id,
+                          "preserved_bytes": copy.size}
+                if adopted:
+                    detail["adopted_held_copy"] = True
+                row = self._c.execute(
+                    """UPDATE lab.sample
+                          SET preserved_bucket = %s, preserved_key = %s,
+                              preserved_version_id = %s, preserved_at = now()
+                        WHERE id = %s AND screening_outcome = 'MATCH'
+                          AND preserved_key IS NULL
+                    RETURNING id""",
+                    (copy.bucket, copy.key, copy.version_id,
+                     sample_id)).fetchone()
+                if row is None:
+                    raise SampleError("the sample was preserved by another "
+                                      "pass while it was being copied")
+                self._access(sample_id, None, "VIEWED_META", detail)
+                if not adopted:
+                    deleting = True
+                    self._storage.delete(storage_key)
+                    working_gone = True
+                # LAST: nothing slow may run between this and COMMIT.
+                self._audit("SAMPLE_REJECTED_PRESERVED", actor_id=None,
+                            sample_id=sample_id,
+                            detail={**{k: v for k, v in detail.items()
+                                       if k != "event"},
+                                    "trigger": "screening"})
+        except Exception as exc:  # noqa: BLE001 - pending: the next pass retries
+            if copy is None and unconfirmed is None:
+                log.warning("preserving matched sample %s did not complete; "
+                            "it stays pending", sample_id, exc_info=True)
+                return "pending"
+            self._preservation_incomplete(
+                sample_id, actor_id=None, copy=copy, unconfirmed=unconfirmed,
+                working_gone=working_gone,
+                delete_unconfirmed=deleting and not working_gone, cause=exc)
+            return "pending"
+        return "preserved"
+
+    def _note_absence(self, sample_id: UUID, screening) -> str:
+        """Inside `preserve_screened`'s transaction, under the row lock: the
+        bytes are in neither store. The first look is recorded as custody;
+        a second one at least ABSENCE_RECHECK later records the absence on
+        the row."""
+        first = self._c.execute(
+            """SELECT min(occurred_at) <= now() - %s
+                 FROM lab.sample_access
+                WHERE sample_id = %s AND action = 'VIEWED_META'
+                  AND detail->>'event' = 'screening_bytes_not_found'""",
+            (screening.ABSENCE_RECHECK, sample_id)).fetchone()[0]
+        if first is None:
+            self._access(sample_id, None, "VIEWED_META",
+                         {"event": "screening_bytes_not_found",
+                          "look": "first"})
+            return "pending"
+        if not first:
+            return "pending"
+        self._c.execute(
+            """UPDATE lab.sample SET screening_bytes_absent_at = now()
+                WHERE id = %s AND screening_bytes_absent_at IS NULL""",
+            (sample_id,))
+        self._access(sample_id, None, "VIEWED_META",
+                     {"event": "screening_bytes_absent"})
+        self._audit("SAMPLE_SCREENING_NO_BYTES", actor_id=None,
+                    sample_id=sample_id, outcome="FAILED",
+                    detail={"data_key": "kept"})
+        return "bytes_not_found"
+
+    def screening_summaries(self, ids) -> dict[str, dict]:
+        """How many lists each sample's newest screening record consulted,
+        for a page of samples in one query."""
+        from noctornal_api.screening import ScreeningService
+        return ScreeningService(self._c, self).summaries(ids)
+
     # -- queue -------------------------------------------------------------
 
     def assign(self, sample_id: UUID, *, analyst_id: UUID,
                actor_id: UUID) -> Sample:
+        self._refuse_if_screening_match(sample_id)  # F13
         self._refuse_if_case_read_only(sample_id)
         row = self._c.execute(
             """UPDATE lab.sample
@@ -2166,8 +2905,17 @@ class SampleService:
                         confidence: str | None = None,
                         narrative: str | None = None,
                         tool: str | None = None,
-                        tool_version: str | None = None) -> UUID:
+                        tool_version: str | None = None,
+                        derived_from_version_id: UUID | None = None) -> UUID:
         """Findings are machine-readable by construction.
+
+        `derived_from_version_id` names the YARA rule set version an
+        analyst's assessment was taken from ("Use as family assessment",
+        F12 G): stored on the row so it is read through that set's labels
+        as well as the sample's, and never labelled below the finding it
+        came from. The set's key never goes into free text. The custody
+        row names the analysis by id and, for such a row, not its kind
+        (2026-09-24).
 
         `family_assessment` without a `confidence` is refused by a CHECK
         constraint, because a family attribution is an ASSESSMENT and one
@@ -2180,6 +2928,7 @@ class SampleService:
         after `closed_at` on a closed case's sample is the post-closure
         material the rule exists to keep out (c7, 2026-09-24).
         """
+        self._refuse_if_screening_match(sample_id)  # F13
         self._refuse_if_case_read_only(sample_id)
         if kind not in {"STATIC", "YARA", "MANUAL_RE", "SANDBOX", "VENDOR"}:
             raise SampleError(f"unknown analysis kind {kind!r}")
@@ -2191,17 +2940,179 @@ class SampleService:
             """INSERT INTO lab.sample_analysis
                    (sample_id, kind, analyst_id, tool, tool_version, findings,
                     extracted_selectors, yara_hits, family_assessment,
-                    confidence, narrative)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    confidence, narrative, yara_ruleset_version_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (sample_id, kind, analyst_id, tool, tool_version,
              Json(findings or {}), Json(extracted_selectors or []),
-             yara_hits, family_assessment, confidence, narrative)).fetchone()
+             yara_hits, family_assessment, confidence, narrative,
+             derived_from_version_id)).fetchone()
         self._c.execute(
             "UPDATE lab.sample SET state = 'IN_ANALYSIS' "
             "WHERE id = %s AND state = 'ASSIGNED'", (sample_id,))
-        self._access(sample_id, analyst_id, "ANALYSED", {"kind": kind})
+        detail = {"analysis_id": str(row[0])}
+        if derived_from_version_id is None:
+            detail["kind"] = kind
+        self._access(sample_id, analyst_id, "ANALYSED", detail)
         return row[0]
+
+    def record_machine_analysis(self, sample_id: UUID, *, kind: str,
+                                tool: str, tool_version: str | None,
+                                findings: dict,
+                                extracted_selectors: list | None = None,
+                                yara_hits: list[str] | None = None,
+                                narrative: str | None = None,
+                                run_id: UUID | None = None,
+                                yara_ruleset_version_id: UUID | None = None
+                                ) -> UUID:
+        """A finding the product made, not a person (F11-core F).
+
+        Runs inside the CALLER's transaction. Refuses a rejected sample
+        and one whose case is read-only (c7), like an analyst's record.
+        It never moves the sample's state (triage's move to TRIAGED is the
+        runner's own, conditional statement), never writes custody (the
+        caller wrote SCANNED for the bytes it read), and never writes
+        `core.*` or `collect.*`: a machine proposes nothing on its own."""
+        if kind not in MACHINE_PRODUCERS:
+            raise SampleError(f"unknown machine analysis kind {kind!r}")
+        row = self._c.execute(
+            """SELECT s.state, c.status FROM lab.sample s
+                 LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
+                WHERE s.id = %s""", (sample_id,)).fetchone()
+        if row is None:
+            raise SampleError("no such sample")
+        if row[0] == REJECTED:
+            raise SampleError("a rejected sample takes no new findings")
+        if row[1] in CONTENT_READ_ONLY_STATES:
+            raise SampleCaseReadOnly(
+                "the sample's case is closed, and a closed case takes no new "
+                "content")
+        out = self._c.execute(
+            """INSERT INTO lab.sample_analysis
+                   (sample_id, kind, analyst_id, origin, run_id, tool,
+                    tool_version, findings, extracted_selectors, yara_hits,
+                    narrative, yara_ruleset_version_id)
+               VALUES (%s, %s, NULL, 'machine', %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (sample_id, kind, run_id, tool, tool_version, Json(findings),
+             Json(extracted_selectors or []), yara_hits, narrative,
+             yara_ruleset_version_id)).fetchone()
+        return out[0]
+
+    # -- the one verified-plaintext path (F11-core D, 2026-09-24) -----------
+
+    #: The refusal each store's tamper alarm raises, word for word what the
+    #: download and the retrieval said before they shared this path.
+    _INTEGRITY_REFUSAL = {
+        STORE_WORKING: (
+            "sample integrity check failed: stored bytes do not match the "
+            "recorded sha256. This is a tamper alarm, not a transient error. "
+            "It has been written to the custody ledger and the audit log, "
+            "and the bytes have NOT been served."),
+        STORE_PRESERVATION: (
+            "preserved sample integrity check failed: the held bytes do not "
+            "match the recorded sha256. This is a tamper alarm, not a "
+            "transient error. It has been written to the custody ledger and "
+            "the audit log, and nothing has been served."),
+    }
+
+    def _integrity_alarm(self, sample_id: UUID, *, actor_id: UUID | None,
+                         recorded: bytes, computed: bytes, store: str,
+                         extra: dict | None = None) -> None:
+        """Record a failed integrity check: a custody VIEWED_META row and a
+        SAMPLE_INTEGRITY_ALARM audit row, in their OWN transaction so they
+        survive the raise that follows. An audit row rolled back with the
+        failure it records is not an audit row (F19). SYSTEM when nobody
+        asked for the read (scheduled triage)."""
+        detail = {"event": "integrity_check_failed",
+                  "recorded_sha256": bytes(recorded).hex(),
+                  "computed_sha256": bytes(computed).hex(),
+                  "store": store, **(extra or {})}
+        with self._c.transaction():
+            self._access(sample_id, actor_id, "VIEWED_META", detail)
+            self._audit("SAMPLE_INTEGRITY_ALARM", sample_id=sample_id,
+                        actor_id=actor_id, outcome="DENIED",
+                        detail={k: v for k, v in detail.items()
+                                if k != "event"})
+
+    def _verified_plaintext(self, sample_id: UUID, *, actor_id: UUID | None,
+                            store: str = STORE_WORKING,
+                            max_bytes: int | None = None,
+                            extra: dict | None = None) -> bytes:
+        """The sample's plaintext, decrypted and verified against its
+        recorded SHA-256, or a refusal.
+
+        The one path that decrypts a sample for USE: the download, the
+        preserved retrieval, the static-triage runner and the
+        sandbox dispatch. It makes NO label or state decision: every caller
+        gates first (the download through `_downloadable`, the retrieval
+        through `_retrievable`, the runner through its claim). A mismatch
+        writes the alarm on its own (`_integrity_alarm`) and raises
+        `SampleIntegrityError` with the store's sentence.
+
+        Refuses to run inside an open transaction, because there the
+        alarm's `transaction()` is a SAVEPOINT that rolls back with the
+        raise: the alarm would vanish without a trace, silently, which is
+        worse than any error. Refuses a
+        destroyed data key and, when `max_bytes` is given, a sample larger
+        than that, before anything is fetched.
+
+        `_adopt_held_copy` is the one decryption that does not come here:
+        its mismatch means "this held object is not this sample's copy",
+        which it refuses by name, not a tamper of a known copy.
+        """
+        if self._c.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+            raise RuntimeError("the integrity alarm must commit on its own; "
+                               "call this outside a transaction")
+        if store not in self._INTEGRITY_REFUSAL:
+            raise ValueError(f"unknown store {store!r}")
+        row = self._c.execute(
+            """SELECT storage_key, data_key_ciphertext, data_key_id, sha256,
+                      byte_size, preserved_bucket, preserved_key,
+                      preserved_version_id
+                 FROM lab.sample WHERE id = %s""", (sample_id,)).fetchone()
+        if row is None:
+            raise SampleError("no such sample")
+        (storage_key, key_blob, key_id, recorded, size, bucket, held_key,
+         version) = row
+        if not key_blob:
+            raise SampleError("this sample has no data key; it cannot be read")
+        if max_bytes is not None and size > max_bytes:
+            raise SampleError(
+                f"this sample is {size} bytes, above the {max_bytes} bytes this "
+                f"read allows; nothing was read")
+        if store == STORE_WORKING:
+            if self._storage is None:
+                raise SampleError("sample storage is not configured")
+            where = {"storage_key": storage_key}
+            data_key = bytes.fromhex(envelope.decrypt(bytes(key_blob),
+                                                      key_id=key_id))
+            ciphertext = self._storage.get(storage_key)
+        else:
+            if self._preservation is None:
+                raise SampleError("the preservation store is not configured")
+            if not held_key:
+                raise SampleError("this sample is not in the preservation store")
+            where = {"preserved_key": held_key}
+            data_key = bytes.fromhex(envelope.decrypt(bytes(key_blob),
+                                                      key_id=key_id))
+            ciphertext = self._preservation.get(held_key, version_id=version,
+                                                bucket=bucket)
+        data = _xor_stream(ciphertext, data_key)
+        del ciphertext
+        computed = hashlib.sha256(data).digest()
+        if computed != bytes(recorded):
+            # Re-verified on EVERY read and failing closed, the same
+            # discipline as the evidence read path: a sample whose bytes
+            # changed is a storage fault or a tamper, and neither is a
+            # thing to hand to an analyst or a parser.
+            self._integrity_alarm(sample_id, actor_id=actor_id,
+                                  recorded=bytes(recorded), computed=computed,
+                                  store=store, extra={**where, **(extra or {})})
+            raise SampleIntegrityError(self._INTEGRITY_REFUSAL[store])
+        # The buffer `_xor_stream` filled, not a copy of it: a copy would
+        # double the peak for the largest sample the runner reads.
+        return data
 
     # -- egress ------------------------------------------------------------
 
@@ -2267,53 +3178,15 @@ class SampleService:
             raise SampleError(split.refusal)
         configured = split.sample
 
-        row = self._downloadable(sample_id, clearance=clearance,
-                                 compartments=compartments)
-        if self._storage is None:
-            raise SampleError("sample storage is not configured")
-
-        data_key = bytes.fromhex(envelope.decrypt(row[1], key_id=row[2]))
-        ciphertext = self._storage.get(row[0])
-        data = _xor_stream(ciphertext, data_key)
-
-        digest = hashlib.sha256(data).digest()
-        if digest != bytes(row[3]):
-            # Same discipline as the evidence read path: re-verify on EVERY
-            # read and fail closed. A sample whose bytes changed is either a
-            # storage fault or a tamper, and neither is a thing to hand to
-            # an analyst.
-            #
-            # RECORDED, not merely raised (F19). This used to raise into the
-            # router, which mapped it to a 409 and moved on — so the one
-            # signal that the malware store had been altered produced an
-            # error message for one analyst and nothing anybody would ever
-            # find. `core.evidence` has done this properly since Phase 1:
-            # a failed HASH_VERIFIED custody row, then the refusal.
-            #
-            # Written in its own transaction so it survives the raise. An
-            # audit row rolled back with the failure it records is not an
-            # audit row.
-            with self._c.transaction():
-                self._access(
-                    sample_id, actor_id, "VIEWED_META",
-                    {"event": "integrity_check_failed",
-                     "recorded_sha256": bytes(row[3]).hex(),
-                     "computed_sha256": digest.hex(),
-                     "storage_key": row[0]})
-                self._c.execute(
-                    """INSERT INTO audit.event
-                           (actor_id, actor_kind, action, object_type,
-                            object_id, outcome, detail)
-                       VALUES (%s, 'USER', 'SAMPLE_INTEGRITY_ALARM', 'sample',
-                               %s, 'DENIED', %s)""",
-                    (actor_id, sample_id,
-                     Json({"recorded_sha256": bytes(row[3]).hex(),
-                           "computed_sha256": digest.hex()})))
-            raise SampleError(
-                "sample integrity check failed: stored bytes do not match the "
-                "recorded sha256. This is a tamper alarm, not a transient "
-                "error. It has been written to the custody ledger and the "
-                "audit log, and the bytes have NOT been served.")
+        self._downloadable(sample_id, clearance=clearance,
+                           compartments=compartments)
+        # Re-verified on EVERY read, failing closed, and the failure
+        # RECORDED rather than merely raised (F19): `_verified_plaintext`
+        # is the one place that decrypts, checks and writes the alarm in
+        # its own transaction (F11-core D, 2026-09-24).
+        data = self._verified_plaintext(sample_id, actor_id=actor_id,
+                                        store=STORE_WORKING)
+        digest = hashlib.sha256(data).hexdigest()
 
         # `via` is derived rather than passed: a ticket id present means
         # the authority was a ticket, and two parameters that can disagree
@@ -2325,7 +3198,7 @@ class SampleService:
             custody["ticket_id"] = str(ticket_id)
         self._access(sample_id, actor_id, "DOWNLOADED", custody,
                      archive_format="ZIP_INFECTED")
-        return archive(data, digest.hex()), digest.hex()
+        return archive(data, digest), digest
 
     def _downloadable(self, sample_id: UUID, *, clearance: str | None,
                       compartments: frozenset[str] = frozenset()) -> tuple:
@@ -2357,17 +3230,13 @@ class SampleService:
         """
         _require_clearance(clearance)
         row = self._c.execute(
-            """SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
-                      s.sha256, s.state, s.preserved_key
-                 FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.id = %s
-                  AND greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                      <= %s::core.tlp
-                  AND (s.compartments
-                       || coalesce(c.compartments, '{}')) <@ %s""",
-            (sample_id, clearance, list(compartments))).fetchone()
+            f"""SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
+                       s.sha256, s.state, s.preserved_key
+                  FROM lab.sample s
+                  LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
+                 WHERE s.id = %(id)s AND {lab_gate()}""",
+            {"id": sample_id,
+             **gate_params(clearance, compartments)}).fetchone()
         if row is None:
             raise SampleError("no such sample")
         if row[4] == REJECTED:
@@ -2771,6 +3640,12 @@ class SampleService:
         sample = self.get(sample_id)
         if sample is None:
             raise SampleError("no such sample")
+        if sample.screening_outcome == "MATCH":
+            # F13. Such material leaves only outside the product.
+            raise SampleError(
+                "this sample matched a prohibited-content list. Material "
+                "preserved because of such a match is released only outside "
+                "this product, on counsel's instruction.")
         if not sample.preserved_key:
             raise SampleError(
                 "only a preserved sample can be authorised for retrieval; "
@@ -2820,13 +3695,20 @@ class SampleService:
         with names rather than uuids: the point of the record is that a
         NAMED person allowed a NAMED person, and a reviewer who has to look
         the ids up separately will not."""
+        # F13. An authorisation on a matched sample is VOID by
+        # derivation: 0063's CHECK makes every revocation name a person, and
+        # a screening pass has none, so it is reported dead rather than
+        # revoked, and every door refuses it (the grant, the mint, the
+        # redemption through retrieve_preserved, and the retrieval).
         rows = self._c.execute(
             """SELECT a.id, a.granted_to, gt.display_name, gt.email,
                       gb.display_name, gb.email, a.scope_note, a.legal_basis,
                       a.created_at, a.expires_at, a.revoked_at, rb.email,
                       a.retrieval_count,
-                      a.revoked_at IS NULL AND a.expires_at > now()
+                      a.revoked_at IS NULL AND a.expires_at > now(),
+                      s.screening_outcome = 'MATCH'
                  FROM lab.preservation_authorisation a
+                 JOIN lab.sample s ON s.id = a.sample_id
                  JOIN iam.app_user gt ON gt.id = a.granted_to
                  JOIN iam.app_user gb ON gb.id = a.granted_by
                  LEFT JOIN iam.app_user rb ON rb.id = a.revoked_by
@@ -2840,7 +3722,9 @@ class SampleService:
                  "expires_at": r[9].isoformat(),
                  "revoked_at": r[10].isoformat() if r[10] else None,
                  "revoked_by_email": r[11], "retrieval_count": r[12],
-                 "live": bool(r[13])} for r in rows]
+                 "live": bool(r[13]) and not r[14],
+                 "void_reason": "screening_match" if r[14] else None}
+                for r in rows]
 
     def preserved_for_authorisation(self, *, clearance: str | None,
                                     compartments: frozenset[str] = frozenset(),
@@ -2870,36 +3754,48 @@ class SampleService:
             raise SampleError(
                 "the preserved-sample list needs the caller's clearance; a "
                 "default would list every compartment to whoever forgot it")
+        # The officer's list opts out of LAB_EXCLUSIONS: what the Lab hides
+        # from analysts is still material the officer governs (F11-core C).
         rows = self._c.execute(
-            """SELECT s.id, s.sha256, s.byte_size, s.preserved_bucket,
-                      s.preserved_key, s.preserved_at,
-                      s.legal_hold OR coalesce(c.legal_hold, false), c.code,
-                      greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                 FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.preserved_key IS NOT NULL
-                  AND greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                      <= %s::core.tlp
-                  AND (s.compartments
-                       || coalesce(c.compartments, '{}')) <@ %s
-                ORDER BY s.preserved_at DESC LIMIT %s""",
-            (clearance, list(compartments), limit)).fetchall()
+            f"""SELECT s.id, s.sha256, s.byte_size, s.preserved_bucket,
+                       s.preserved_key, s.preserved_at,
+                       s.legal_hold OR coalesce(c.legal_hold, false), c.code,
+                       greatest(s.classification,
+                                coalesce(c.classification, s.classification)),
+                       s.screening_outcome = 'MATCH'
+                  FROM lab.sample s
+                  LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
+                 WHERE s.preserved_key IS NOT NULL
+                   AND {lab_gate(exclusions=False)}
+                 ORDER BY s.preserved_at DESC LIMIT %(limit)s""",
+            {"limit": limit,
+             **gate_params(clearance, compartments)}).fetchall()
         return [{"id": str(r[0]), "sha256": bytes(r[1]).hex(),
                  "byte_size": r[2], "preserved_bucket": r[3],
                  "preserved_key": r[4], "preserved_at": r[5].isoformat(),
                  "legal_hold": bool(r[6]), "case_code": r[7],
                  "classification": r[8],
+                 # F13. A matched sample's authorisations are void and
+                 # the console offers no Authorise or Revoke for it.
+                 "screening_match": bool(r[9]),
                  "authorisations": self.preservation_authorisations(r[0])}
                 for r in rows]
 
     def live_preservation_authorisation(self, user_id: UUID,
                                         sample_id: UUID) -> UUID | None:
         row = self._c.execute(
-            """SELECT id FROM lab.preservation_authorisation
+            """SELECT id FROM lab.preservation_authorisation a
                 WHERE granted_to = %s AND sample_id = %s
                   AND revoked_at IS NULL AND expires_at > now()
+                  -- F13, void by derivation on a matched sample.
+                  -- Asked positively (S1, 2026-09-25): under row-level
+                  -- security a NOT EXISTS over a sample the caller cannot
+                  -- see is true, and a matched sample's authorisation would
+                  -- read as live; a sample that cannot be read now answers
+                  -- "no live authorisation".
+                  AND EXISTS (SELECT 1 FROM lab.sample s
+                               WHERE s.id = a.sample_id
+                                 AND s.screening_outcome <> 'MATCH')
                 ORDER BY expires_at DESC LIMIT 1""",
             (user_id, sample_id)).fetchone()
         return row[0] if row else None
@@ -2936,18 +3832,14 @@ class SampleService:
         preserved_key, preserved_version_id)`."""
         _require_clearance(clearance)
         row = self._c.execute(
-            """SELECT s.sha256, s.data_key_ciphertext, s.data_key_id,
-                      s.preserved_bucket, s.preserved_key,
-                      s.preserved_version_id
-                 FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.id = %s
-                  AND greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                      <= %s::core.tlp
-                  AND (s.compartments
-                       || coalesce(c.compartments, '{}')) <@ %s""",
-            (sample_id, clearance, list(compartments))).fetchone()
+            f"""SELECT s.sha256, s.data_key_ciphertext, s.data_key_id,
+                       s.preserved_bucket, s.preserved_key,
+                       s.preserved_version_id
+                  FROM lab.sample s
+                  LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
+                 WHERE s.id = %(id)s AND {lab_gate()}""",
+            {"id": sample_id,
+             **gate_params(clearance, compartments)}).fetchone()
         if row is None:
             self._refuse_retrieval(sample_id, actor_id, "not_visible",
                                    "no such sample", stage=stage,
@@ -3052,37 +3944,12 @@ class SampleService:
         if not row[1]:
             raise SampleError("this sample has no data key; it cannot be read")
 
-        sha256, key_blob, key_id, bucket, key, version = row
-        data_key = bytes.fromhex(envelope.decrypt(key_blob, key_id=key_id))
-        ciphertext = self._preservation.get(key, version_id=version,
-                                            bucket=bucket)
-        data = _xor_stream(ciphertext, data_key)
-        digest = hashlib.sha256(data).digest()
-        if digest != bytes(sha256):
-            # The download's tamper discipline, word for word: recorded in
-            # its own transaction so the alarm survives the raise.
-            with self._c.transaction():
-                self._access(
-                    sample_id, actor_id, "VIEWED_META",
-                    {"event": "integrity_check_failed",
-                     "recorded_sha256": bytes(sha256).hex(),
-                     "computed_sha256": digest.hex(),
-                     "store": "preservation", "preserved_key": key})
-                self._c.execute(
-                    """INSERT INTO audit.event
-                           (actor_id, actor_kind, action, object_type,
-                            object_id, outcome, detail)
-                       VALUES (%s, 'USER', 'SAMPLE_INTEGRITY_ALARM', 'sample',
-                               %s, 'DENIED', %s)""",
-                    (actor_id, sample_id,
-                     Json({"recorded_sha256": bytes(sha256).hex(),
-                           "computed_sha256": digest.hex(),
-                           "store": "preservation"})))
-            raise SampleError(
-                "preserved sample integrity check failed: the held bytes do "
-                "not match the recorded sha256. This is a tamper alarm, not "
-                "a transient error. It has been written to the custody "
-                "ledger and the audit log, and nothing has been served.")
+        _sha256, _key_blob, _key_id, bucket, key, version = row
+        # The download's tamper discipline, through the one path that
+        # decrypts, verifies and records the alarm on its own (F11-core D).
+        data = self._verified_plaintext(sample_id, actor_id=actor_id,
+                                        store=STORE_PRESERVATION)
+        digest = hashlib.sha256(data).hexdigest()
 
         custody = {"source": "preservation_store", "origin": split.sample,
                    "preserved_bucket": bucket, "preserved_key": key,
@@ -3102,7 +3969,7 @@ class SampleService:
                         sample_id=sample_id,
                         detail={k: v for k, v in custody.items()
                                 if k != "origin"})
-        return archive(data, digest.hex()), digest.hex()
+        return archive(data, digest), digest
 
     # -- the ledger and the names in it ------------------------------------
 
@@ -3157,9 +4024,13 @@ class SampleService:
         wanted = sorted({str(i) for i in case_ids if i})
         if not wanted:
             return {}
+        # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
+        # hold no case assignment, so under row-level security core."case" is
+        # hidden from them, and its labels and read-only state must still compose.
         rows = self._c.execute(
-            'SELECT id, classification, compartments FROM core."case" '
-            "WHERE id = ANY(%s::uuid[])", (wanted,)).fetchall()
+            "SELECT c.id, c.classification, c.compartments "
+            "FROM unnest(%s::uuid[]) AS x(id) "
+            "CROSS JOIN LATERAL iam.case_facts(x.id) c", (wanted,)).fetchall()
         return {str(r[0]): (r[1], frozenset(r[2] or [])) for r in rows}
 
     #: The composed labels of one sample, as a CTE the two people lists
@@ -3173,7 +4044,7 @@ class SampleService:
                  s.compartments || coalesce(c.compartments, '{}') AS comps,
                  s.case_id
             FROM lab.sample s
-            LEFT JOIN core."case" c ON c.id = s.case_id
+            LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
            WHERE s.id = %(sample)s)"""
 
     def eligible_assignees(self, sample_id: UUID) -> list[dict]:
@@ -3201,7 +4072,8 @@ class SampleService:
         return [{"id": str(r[0]), "name": r[1], "email": r[2]} for r in rows]
 
     def detonation_authorisers(self, sample_id: UUID, *,
-                               exclude: UUID | None = None) -> list[dict]:
+                               exclude: UUID | None = None,
+                               only: UUID | None = None) -> list[dict]:
         """Who may sign off a non-private detonation of this sample.
 
         docs/11: "require case owner sign-off for anything non-private". So
@@ -3215,6 +4087,10 @@ class SampleService:
         another person's internal uuid, which no analyst has, and any valid
         uuid was accepted, so a mistype named the wrong human on the record
         whose whole point is that a named human agreed.
+
+        `only` (F14, 2026-09-24) narrows the list to one person, so
+        "is this person eligible NOW" is the same SQL as the list: the
+        sandbox sign-off, its listing and the worker's re-check all ask it.
         """
         rows = self._c.execute(
             self._EFFECTIVE + """
@@ -3222,6 +4098,7 @@ class SampleService:
               FROM s, iam.app_user u
              WHERE u.is_active
                AND u.id IS DISTINCT FROM %(exclude)s
+               AND (%(only)s::uuid IS NULL OR u.id = %(only)s::uuid)
                AND u.tlp_clearance >= s.tlp
                AND s.comps <@ coalesce(u.compartments, '{}')
                AND CASE WHEN s.case_id IS NOT NULL THEN EXISTS (
@@ -3234,7 +4111,7 @@ class SampleService:
                           WHERE ur.user_id = u.id AND ur.role_key = 'CASE_OWNER')
                    END
              ORDER BY u.display_name, u.email""",
-            {"sample": sample_id, "exclude": exclude}).fetchall()
+            {"sample": sample_id, "exclude": exclude, "only": only}).fetchall()
         return [{"id": str(r[0]), "name": r[1], "email": r[2]} for r in rows]
 
     def request_detonation(self, sample_id: UUID, *, requested_by: UUID,
@@ -3257,6 +4134,7 @@ class SampleService:
 
         Refused for a sample whose case is read-only (c7, 2026-09-24).
         """
+        self._refuse_if_screening_match(sample_id)  # F13
         self._refuse_if_case_read_only(sample_id)
         if exposure_level not in {"NONE", "VENDOR", "PUBLIC"}:
             raise SampleError(f"unknown exposure level {exposure_level!r}")
@@ -3343,17 +4221,13 @@ class SampleService:
                 "label check at all.")
         rows = self._c.execute(
             f"""SELECT {_SELECT} FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.state = ANY(%s::lab.sample_state[])
-                  AND (%s::uuid IS NULL OR s.case_id = %s::uuid)
-                  AND greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                      <= %s::core.tlp
-                  AND (s.compartments
-                       || coalesce(c.compartments, '{{}}')) <@ %s
-                ORDER BY s.submitted_at DESC LIMIT %s""",
-            (list(states), case_id, case_id, clearance, list(compartments),
-             limit)).fetchall()
+                 LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
+                WHERE s.state = ANY(%(states)s::lab.sample_state[])
+                  AND (%(case)s::uuid IS NULL OR s.case_id = %(case)s::uuid)
+                  AND {lab_gate()}
+                ORDER BY s.submitted_at DESC LIMIT %(limit)s""",
+            {"states": list(states), "case": case_id, "limit": limit,
+             **gate_params(clearance, compartments)}).fetchall()
         return [_record(r) for r in rows]
 
     def visible(self, sample_id: UUID, *, clearance: str,
@@ -3369,50 +4243,86 @@ class SampleService:
         """
         row = self._c.execute(
             f"""SELECT {_SELECT} FROM lab.sample s
-                 LEFT JOIN core."case" c ON c.id = s.case_id
-                WHERE s.id = %s
-                  AND greatest(s.classification,
-                               coalesce(c.classification, s.classification))
-                      <= %s::core.tlp
-                  AND (s.compartments
-                       || coalesce(c.compartments, '{{}}')) <@ %s""",
-            (sample_id, clearance, list(compartments))).fetchone()
+                 LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
+                WHERE s.id = %(id)s AND {lab_gate()}""",
+            {"id": sample_id,
+             **gate_params(clearance, compartments)}).fetchone()
         return _record(row) if row else None
 
-    def analyses(self, sample_id: UUID) -> list[dict]:
-        """Every recorded analysis, with WHO recorded it by name and the
-        tool's version.
+    def analyses(self, sample_id: UUID, *, clearance: str | None = None,
+                 compartments: frozenset[str] = frozenset()) -> list[dict]:
+        """Every recorded analysis the reader may see, with WHO recorded it
+        by name and the tool's version, or, for a machine row, what
+        produced it.
 
         ux13-lab:no-assign-or-record-analysis (2026-09-23): the console
         showed neither the analyst nor the version, and this read never
-        returned the version it was asked for (`tool_version` was read by
-        the console and selected by nobody)."""
+        returned the version it was asked for.
+
+        A row derived from a YARA rule set (a machine YARA row, or an
+        analyst's assessment taken from one) is returned only when the
+        ceiling given reaches the set's classification and compartments
+        (F12 G). With no ceiling such rows are hidden, so the new label
+        dimension fails closed and every existing caller keeps working.
+        Hidden rows are neither returned nor counted."""
         rows = self._c.execute(
             """SELECT a.id, a.kind, a.analyst_id, a.tool, a.findings,
                       a.extracted_selectors, a.yara_hits, a.family_assessment,
                       a.confidence, a.narrative, a.created_at, a.tool_version,
-                      u.display_name, u.email
+                      u.display_name, u.email, a.origin, a.run_id,
+                      a.yara_ruleset_version_id, r.key, v.version,
+                      r.classification, r.compartments, r.display_name
                  FROM lab.sample_analysis a
                  LEFT JOIN iam.app_user u ON u.id = a.analyst_id
-                WHERE a.sample_id = %s
-                ORDER BY a.created_at DESC""", (sample_id,)).fetchall()
-        return [{"id": str(r[0]), "kind": r[1],
-                 "analyst_id": str(r[2]) if r[2] else None, "tool": r[3],
-                 "findings": r[4], "extracted_selectors": r[5],
-                 "yara_hits": r[6] or [], "family_assessment": r[7],
-                 "confidence": r[8], "narrative": r[9],
-                 "created_at": r[10].isoformat(),
-                 "tool_version": r[11],
-                 "analyst_name": r[12], "analyst_email": r[13]}
-                for r in rows]
+                 LEFT JOIN lab.yara_ruleset_version v
+                        ON v.id = a.yara_ruleset_version_id
+                 LEFT JOIN lab.yara_ruleset r ON r.id = v.ruleset_id
+                WHERE a.sample_id = %(sample)s
+                  AND (a.yara_ruleset_version_id IS NULL
+                       OR (%(clearance)s::core.tlp IS NOT NULL
+                           AND r.classification <= %(clearance)s::core.tlp
+                           AND r.compartments <@ %(held)s::text[]))
+                ORDER BY a.created_at DESC""",
+            {"sample": sample_id, "clearance": clearance,
+             "held": sorted(compartments or ())}).fetchall()
+        out = []
+        for r in rows:
+            item = {"id": str(r[0]), "kind": r[1],
+                    "analyst_id": str(r[2]) if r[2] else None, "tool": r[3],
+                    "findings": r[4], "extracted_selectors": r[5],
+                    "yara_hits": r[6] or [], "family_assessment": r[7],
+                    "confidence": r[8], "narrative": r[9],
+                    "created_at": r[10].isoformat(),
+                    "tool_version": r[11],
+                    "analyst_name": r[12], "analyst_email": r[13],
+                    "origin": r[14],
+                    "run_id": str(r[15]) if r[15] else None,
+                    "yara_ruleset_version_id": str(r[16]) if r[16] else None}
+            if r[14] == "machine":
+                item["produced_by"] = (MACHINE_PRODUCERS.get(r[1], r[1])
+                                       + " (automated)")
+            if r[16]:
+                item["ruleset"] = {"key": r[17], "version": r[18],
+                                   "display_name": r[21],
+                                   "classification": r[19],
+                                   "compartments": sorted(r[20] or [])}
+            out.append(item)
+        return out
 
-    def analysis(self, sample_id: UUID, analysis_id: UUID) -> dict | None:
-        """One analysis of one sample, or None."""
-        return next((a for a in self.analyses(sample_id)
+    def analysis(self, sample_id: UUID, analysis_id: UUID, *,
+                 clearance: str | None = None,
+                 compartments: frozenset[str] = frozenset()) -> dict | None:
+        """One analysis of one sample the reader may see, or None."""
+        return next((a for a in self.analyses(sample_id, clearance=clearance,
+                                              compartments=compartments)
                      if a["id"] == str(analysis_id)), None)
 
     def propose_extracted_selector(self, sample: Sample, analysis_id: UUID,
-                                   index: int, *, actor_id: UUID) -> dict:
+                                   index: int, *, actor_id: UUID | None,
+                                   clearance: str | None = None,
+                                   compartments: frozenset[str] = frozenset(),
+                                   found: dict | None = None,
+                                   origin: str | None = None) -> dict:
         """Put ONE selector a lab analysis extracted into the sample's case
         triage queue, as a proposal. Never into the graph.
 
@@ -3424,14 +4334,23 @@ class SampleService:
         analysis). This is the "propose as assertion" path: machines and
         the lab propose, the case's analysts dispose.
 
-        The proposal is DERIVED here from what the analysis recorded, and
-        the caller names only which entry: `routers/proposals.py` refuses
-        caller-authored proposals, because a queue that took them would be
-        a way to push arbitrary suggestions at an analyst. It is refused
-        for a sample with no case, for a case that is closed or archived
-        (read-only for content), and for a sample carrying a compartment
-        its case does not, because an accepted proposal is written with
-        the case's compartments and would shed that restriction.
+        The row is resolved under the CALLER's ceiling, so a finding the
+        caller cannot see is "no such analysis" however its id was learned,
+        and its origin picks the proposal's (`PROPOSAL_ORIGINS`): an
+        analyst's row proposes as `lab/analysis`, a static-triage row as
+        `lab/static-triage`, which an analyst clicks for; the machine never
+        proposes on its own. `found` and `origin` are how `_propose_entry`
+        (the seam a machine finding calls with a row it resolved itself)
+        comes in.
+
+        It is refused for a sample with no case, for a case that is closed
+        or archived (read-only for content), and for a sample, or a rule
+        set the row derives from, carrying a compartment its case does
+        not, because an accepted proposal is written with the case's
+        compartments and would shed that restriction. The classification
+        is the strictest of the sample's, the case's and the rule set's:
+        an accepted element is never labelled below the material it came
+        from.
 
         The answer is the SAME whether a proposal was queued, one was
         already there in any state, or the case already holds the entity:
@@ -3442,21 +4361,35 @@ class SampleService:
         named the case's code, let a role barred from case content probe
         the case graph one value at a time (2026-09-23 verifier, on
         ux13-lab:no-assign-or-record-analysis). What actually happened is
-        written to the audit trail, where a reviewer can read it, and the
-        case's own analysts see the queue.
+        written to the audit trail, SYSTEM when no person asked, where a
+        reviewer can read it, and the case's own analysts see the queue.
         """
         from noctornal_ontology.definition import SELECTOR_TYPES
         from noctornal_ontology.normalisers import normalise
 
         from noctornal_api.proposals import KIND_NODE, ProposalStore
 
+        self._refuse_if_screening_match(sample.id)  # F13
+        if found is None:
+            found = self.analysis(sample.id, analysis_id, clearance=clearance,
+                                  compartments=compartments)
+            if found is not None:
+                origin = PROPOSAL_ORIGINS.get(
+                    (found["origin"],
+                     None if found["origin"] == "analyst" else found["kind"]))
+                if origin is None:
+                    raise SampleError(
+                        "findings of this kind are not proposed from the Lab")
         if sample.case_id is None:
             raise SampleError(
                 "this sample is not attached to a case, so there is no triage "
                 "queue to propose into")
+        # The case through iam.case_facts (S1, 2026-09-25): Lab analysts
+        # hold no case assignment, so under row-level security core."case" is
+        # hidden from them, and its labels and read-only state must still compose.
         case = self._c.execute(
-            'SELECT status, classification, compartments '
-            'FROM core."case" WHERE id = %s', (sample.case_id,)).fetchone()
+            "SELECT status, classification, compartments "
+            "FROM iam.case_facts(%s)", (sample.case_id,)).fetchone()
         if case is None:
             raise SampleError("no such case")
         status, case_tlp, case_comps = case
@@ -3478,9 +4411,17 @@ class SampleService:
                 + ", ".join(extra) + "), and an accepted proposal would be "
                 "written without them. Record it in the case by hand, with "
                 "the compartments it needs.")
-        found = self.analysis(sample.id, analysis_id)
         if found is None:
             raise SampleError("no such analysis on this sample")
+        ruleset = found.get("ruleset") or {}
+        extra = sorted(frozenset(ruleset.get("compartments") or [])
+                       - frozenset(case_comps or []))
+        if extra:
+            raise SampleError(
+                "the rule set this finding came from carries compartments the "
+                "sample's case does not, and an accepted proposal would be "
+                "written without them. Record it in the case by hand, with "
+                "the compartments it needs.")
         entries = found["extracted_selectors"] or []
         if not 0 <= index < len(entries):
             raise SampleError("that analysis has no selector at that position")
@@ -3502,8 +4443,9 @@ class SampleService:
                 f"the {known[kind].display_name.lower()} {raw!r} does not "
                 f"normalise: {exc}") from exc
         node_type = _NODE_FOR_SELECTOR.get(kind, "SELECTOR")
+        analysis_id = found["id"]
         audit = {"analysis_id": str(analysis_id), "index": index,
-                 "selector_type": kind}
+                 "selector_type": kind, "origin": origin}
         sent = {"sent": True, "label": norm}
         # Already proposed on this case (in any state), or already an
         # entity: the extraction path's rule, for the same reason. A second
@@ -3534,12 +4476,47 @@ class SampleService:
                         detail={**audit, "outcome": "already_in_graph",
                                 "node_id": str(exists[0])})
             return sent
-        who = found.get("analyst_name") or found.get("analyst_email") or "an analyst"
-        tool = found.get("tool")
+        levels = [tlp_from_name(sample.classification), tlp_from_name(case_tlp)]
+        if ruleset.get("classification"):
+            levels.append(tlp_from_name(ruleset["classification"]))
+        classification = max(levels).name
+        proposal_id = ProposalStore(self._c).propose(
+            case_id=sample.case_id, kind=KIND_NODE, origin=origin,
+            payload={"node_type": node_type, "label": norm,
+                     "classification": classification,
+                     "attrs": {"selector_type": kind, "raw_value": raw,
+                               "sample_id": str(sample.id),
+                               "analysis_id": str(analysis_id)}},
+            rationale=self._proposal_rationale(sample, found, entry))
+        self._audit("SAMPLE_SELECTOR_PROPOSED", sample_id=sample.id,
+                    actor_id=actor_id,
+                    detail={**audit, "outcome": "queued",
+                            "proposal_id": str(proposal_id)})
+        return sent
+
+    def _proposal_rationale(self, sample: Sample, found: dict,
+                            entry: dict) -> str:
+        """Why the case's analysts are being shown this value, in words."""
         when = found["created_at"][:10]
-        classification = max(tlp_from_name(sample.classification),
-                             tlp_from_name(case_tlp)).name
-        rationale = (
+        if found.get("origin") == "machine" and found.get("kind") == "SANDBOX":
+            # F14, 2026-09-24.
+            findings = found.get("findings") or {}
+            return (f"Observed by the sandbox {findings.get('sandbox') or 'CAPEv2'} "
+                    f"(CAPE task {findings.get('task_id')}) "
+                    + ("in the payload configuration it extracted"
+                       if entry.get("source") == "config"
+                       else "while the sample ran")
+                    + f", recorded {when} (UTC). A lab finding about the "
+                    f"sample, not yet a claim about any actor.")
+        if found.get("origin") == "machine" and found.get("kind") == "STATIC":
+            return (f"Computed by NocTORnal static triage (automated) with "
+                    f"{found.get('tool_version') or 'its recorded tools'}, "
+                    f"recorded {when} (UTC). A lab finding about the sample, "
+                    f"not yet a claim about any actor.")
+        who = (found.get("analyst_name") or found.get("analyst_email")
+               or found.get("produced_by") or "an analyst")
+        tool = found.get("tool")
+        return (
             f"Extracted by {who} in a {found['kind'].lower()} analysis of "
             f"sample {sample.sha256[:16]}"
             + (f" with {tool}" if tool else "")
@@ -3547,19 +4524,18 @@ class SampleService:
             + (f"Why: {entry['why']}. " if entry.get("why") else "")
             + "A lab finding about the sample, not yet a claim about any "
               "actor.")
-        proposal_id = ProposalStore(self._c).propose(
-            case_id=sample.case_id, kind=KIND_NODE, origin="lab/analysis",
-            payload={"node_type": node_type, "label": norm,
-                     "classification": classification,
-                     "attrs": {"selector_type": kind, "raw_value": raw,
-                               "sample_id": str(sample.id),
-                               "analysis_id": str(analysis_id)}},
-            rationale=rationale)
-        self._audit("SAMPLE_SELECTOR_PROPOSED", sample_id=sample.id,
-                    actor_id=actor_id,
-                    detail={**audit, "outcome": "queued",
-                            "proposal_id": str(proposal_id)})
-        return sent
+
+    def _propose_entry(self, sample: Sample, found: dict | None, index: int,
+                       *, actor_id: UUID | None, origin: str) -> dict:
+        """The seam a machine finding proposes through (F11-core H): a row
+        the caller resolved itself, and the origin its proposal carries.
+        The sandbox (F14) calls this with actor None for its
+        configured auto-propose; the refusals, labels and uniform answer
+        are `propose_extracted_selector`'s, which holds the body so there
+        is one."""
+        return self.propose_extracted_selector(
+            sample, UUID(found["id"]) if found else None, index,
+            actor_id=actor_id, found=found, origin=origin)
 
     def detonations(self, sample_id: UUID) -> list[dict]:
         """Every detonation REQUEST against this sample.
@@ -3576,27 +4552,56 @@ class SampleService:
         the whole point of the column is that a NAMED human agreed, and a
         name a reviewer has to look up separately is one they will not.
         """
+        # F14 (2026-09-24): SUBMIT rows are sent by the sandbox
+        # worker, so `submitted` is derived from the row rather than the
+        # literal False every row carried while nothing could be sent.
         rows = self._c.execute(
             """SELECT d.id, d.target, d.exposure_level, d.status,
                       d.requested_at, d.submitted_at, d.external_ref,
-                      d.authorisation_note, r.email, a.email
+                      d.authorisation_note, r.email, a.email, d.mode,
+                      d.network_route, d.route_class, d.machine,
+                      d.machine_class, d.signoff_required,
+                      d.signoff_expires_at, so.email, d.signed_off_at,
+                      d.signoff_decision, d.submit_outcome, d.external_status,
+                      d.last_error, d.completed_at, d.analysis_id,
+                      cb.email, d.requested_by, d.authorised_by, d.options,
+                      r.display_name, a.display_name
                  FROM lab.detonation d
                  JOIN iam.app_user r ON r.id = d.requested_by
                  LEFT JOIN iam.app_user a ON a.id = d.authorised_by
+                 LEFT JOIN iam.app_user so ON so.id = d.signed_off_by
+                 LEFT JOIN iam.app_user cb ON cb.id = d.cancelled_by
                 WHERE d.sample_id = %s
                 ORDER BY d.requested_at DESC""", (sample_id,)).fetchall()
-        return [{"id": str(r[0]), "target": r[1], "exposure_level": r[2],
-                 "status": r[3],
-                 "requested_at": r[4].isoformat() if r[4] else None,
-                 "submitted_at": r[5].isoformat() if r[5] else None,
-                 "external_ref": r[6], "authorisation_note": r[7],
-                 "requested_by": r[8], "authorised_by": r[9],
-                 # Stated on every row rather than once on the page: a
-                 # reader scanning a list of "AUTHORISED" rows should not
-                 # have to remember that none of them went anywhere.
-                 "submitted": False} for r in rows]
 
-    def custody(self, sample_id: UUID) -> list[dict]:
+        def iso(value):
+            return value.isoformat() if value else None
+        return [{"id": str(r[0]), "target": r[1], "exposure_level": r[2],
+                 "status": r[3], "requested_at": iso(r[4]),
+                 "submitted_at": iso(r[5]), "external_ref": r[6],
+                 "authorisation_note": r[7],
+                 "requested_by": r[8], "authorised_by": r[9],
+                 "mode": r[10], "network_route": r[11], "route_class": r[12],
+                 "machine": r[13], "machine_class": r[14],
+                 "signoff_required": r[15], "signoff_expires_at": iso(r[16]),
+                 "signed_off_by": r[17], "signed_off_at": iso(r[18]),
+                 "signoff_decision": r[19], "submit_outcome": r[20],
+                 "external_status": r[21], "last_error": r[22],
+                 "completed_at": iso(r[23]),
+                 "analysis_id": str(r[24]) if r[24] else None,
+                 "cancelled_by": r[25],
+                 "requested_by_id": str(r[26]),
+                 "authorised_by_id": str(r[27]) if r[27] else None,
+                 "options": r[28] or {},
+                 "requested_by_name": r[29], "authorised_by_name": r[30],
+                 # Stated on every row: a RECORD_ONLY row went nowhere, and
+                 # a SUBMIT row went out once its send was committed,
+                 # unless nothing of it reached the sandbox.
+                 "submitted": bool(r[5]) and r[20] != "NOT_SENT"}
+                for r in rows]
+
+    def custody(self, sample_id: UUID, *, clearance: str | None = None,
+                compartments: frozenset[str] = frozenset()) -> list[dict]:
         """The ledger, with WHO in it.
 
         `actor_id`, `archive_format` and `detail` were always returned and
@@ -3607,11 +4612,22 @@ class SampleService:
         actor's name and email come back now, and for an assignment the
         assignee's too; `detail.event` is what tells the console which
         VIEWED_META row it is looking at.
+
+        `actor_kind` says whether a person or the product acted: a SYSTEM
+        row has no actor (None, never the string 'None'), and the console
+        says "NocTORnal (automated)" for it (F11-core E).
+
+        An ANALYSED row whose analysis the reader cannot see (one derived
+        from a rule set above their labels, F12) keeps its person and time
+        and loses its kind and analysis id, so the ledger stays complete
+        without saying that a hidden rule set produced a finding here
+        (2026-09-24). The residual: the reader can
+        count an analysis they cannot open.
         """
         rows = self._c.execute(
             """SELECT a.actor_id, a.action, a.occurred_at, a.archive_format,
                       a.detail, u.display_name, u.email,
-                      an.display_name, an.email
+                      an.display_name, an.email, a.actor_kind
                  FROM lab.sample_access a
                  LEFT JOIN iam.app_user u ON u.id = a.actor_id
                  LEFT JOIN iam.app_user an
@@ -3620,22 +4636,59 @@ class SampleService:
                 WHERE a.sample_id = %s
                 ORDER BY a.occurred_at DESC, a.id DESC""",
             (sample_id,)).fetchall()
-        return [{"actor_id": str(r[0]), "action": r[1],
-                 "occurred_at": r[2].isoformat(), "archive_format": r[3],
-                 "detail": r[4], "actor_name": r[5], "actor_email": r[6],
-                 "event": (r[4] or {}).get("event"),
-                 "analyst_name": r[7], "analyst_email": r[8]}
-                for r in rows]
+        seen = None
+        out = []
+        for r in rows:
+            detail = dict(r[4] or {})
+            if r[1] == "ANALYSED" and detail.get("analysis_id"):
+                if seen is None:
+                    seen = {a["id"] for a in self.analyses(
+                        sample_id, clearance=clearance,
+                        compartments=compartments)}
+                if detail["analysis_id"] not in seen:
+                    detail.pop("analysis_id", None)
+                    detail.pop("kind", None)
+            out.append({"actor_id": str(r[0]) if r[0] else None,
+                        "actor_kind": r[9], "action": r[1],
+                        "occurred_at": r[2].isoformat(), "archive_format": r[3],
+                        "detail": detail, "actor_name": r[5],
+                        "actor_email": r[6], "event": detail.get("event"),
+                        "analyst_name": r[7], "analyst_email": r[8]})
+        return out
+
+    def derived_gaps(self, samples: list[Sample]) -> dict[str, list[dict]]:
+        """The gaps computed when a page of samples is READ (F11-core G).
+        The router drops any stored entry whose step is in
+        `DERIVED_GAP_STEPS` (legacy rows) and appends these.
+
+        F13 (2026-09-24): from the sample's screening outcome and file
+        type, never stored, because a later import changes them. Not
+        screened says nothing was compared; screened says exact hashes
+        only; a container says its members were not compared."""
+        from noctornal_api.screening import screening_gaps
+        return {str(s.id): screening_gaps(s.screening_outcome, s.file_type)
+                for s in samples}
+
+    def static_triage_summaries(self, ids) -> dict[str, dict]:
+        """The latest static-triage run of each sample in a page, for the
+        queue and the card (`lab_triage.static_triage_summaries`)."""
+        from noctornal_api.lab_triage import static_triage_summaries
+        return static_triage_summaries(self._c, ids)
 
     # -- internals ---------------------------------------------------------
 
-    def _access(self, sample_id: UUID, actor_id: UUID, action: str,
+    def _access(self, sample_id: UUID, actor_id: UUID | None, action: str,
                 detail: dict, archive_format: str | None = None) -> None:
+        """A custody row. No actor means the product acted on nobody's
+        request (SYSTEM); the table's CHECKs allow that only for SCANNED,
+        VIEWED_META, REJECTED and ANALYSED."""
         self._c.execute(
             """INSERT INTO lab.sample_access
-                   (sample_id, actor_id, action, archive_format, detail)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (sample_id, actor_id, action, archive_format, Json(detail)))
+                   (sample_id, actor_id, actor_kind, action, archive_format,
+                    detail)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (sample_id, actor_id, "USER" if actor_id else "SYSTEM", action,
+             archive_format, Json(detail)))
 
     def _audit(self, action: str, *, sample_id: UUID, detail: dict,
                actor_id: UUID | None = None, outcome: str = "SUCCESS",
@@ -3679,31 +4732,100 @@ def _xor_stream(data: bytes, key: bytes) -> bytes:
     sha256 on every read (see `download`), so tampering is detected on the
     path that matters, and a half-streamed AES implementation would be a
     worse thing to ship than a clearly-labelled simple one.
+
+    The keystream is SHA-256(key || 8-byte big-endian counter), produced
+    and XORed a megabyte at a time into one preallocated buffer (F11-core
+    I, 2026-09-24). It used to build the whole keystream and XOR through a
+    generator: about 15 MiB/s and three times the sample in memory, which
+    the static-triage runner would have paid on every sample it read. Same
+    bytes out, held equal to the old implementation by test. Returns the
+    buffer itself (a bytearray) so the peak is the sample plus one chunk.
     """
-    stream = bytearray()
+    n = len(data)
+    out = bytearray(n)
+    view = memoryview(data)
     counter = 0
-    while len(stream) < len(data):
-        stream.extend(hashlib.sha256(key + counter.to_bytes(8, "big")).digest())
-        counter += 1
-    return bytes(b ^ s for b, s in zip(data, stream[:len(data)], strict=True))
+    for start in range(0, n, _XOR_CHUNK):
+        end = min(n, start + _XOR_CHUNK)
+        size = end - start
+        blocks = (size + 31) // 32
+        stream = b"".join(
+            hashlib.sha256(key + (counter + i).to_bytes(8, "big")).digest()
+            for i in range(blocks))
+        counter += blocks
+        mixed = (int.from_bytes(view[start:end], "little")
+                 ^ int.from_bytes(stream[:size], "little"))
+        out[start:end] = mixed.to_bytes(size, "little")
+    return out
 
 
-_COLUMNS = ("id, case_id, sha256, sha1, md5, original_filename, byte_size, "
-            "state, reject_reason, file_type, entropy, triage_gaps, "
-            "submitted_by, submitted_at, source_note, assigned_to, "
-            "classification, compartments, preserved_bucket, preserved_key, "
-            "preserved_at, legal_hold")
+#: A multiple of the 32-byte keystream block, so the counter runs on
+#: across chunks exactly as it did in one piece.
+_XOR_CHUNK = 1 << 20
+
+
+#: The row shape, by NAME: (column, `Sample` field) pairs in select order
+#: (F11-core B, 2026-09-24). `_record` used to unpack by index, so adding a
+#: column meant renumbering every field after it (moving `key_destroyed`
+#: from r[22] to r[24], for one). A new column is now one entry here and
+#: one `Sample` field with a default; the queries below are derived from
+#: this tuple.
+SAMPLE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("id", "id"), ("case_id", "case_id"), ("sha256", "sha256"),
+    ("sha1", "sha1"), ("md5", "md5"),
+    ("original_filename", "original_filename"), ("byte_size", "byte_size"),
+    ("state", "state"), ("reject_reason", "reject_reason"),
+    ("file_type", "file_type"), ("entropy", "entropy"),
+    ("triage_gaps", "triage_gaps"), ("submitted_by", "submitted_by"),
+    ("submitted_at", "submitted_at"), ("source_note", "source_note"),
+    ("assigned_to", "assigned_to"), ("classification", "classification"),
+    ("compartments", "compartments"),
+    ("preserved_bucket", "preserved_bucket"),
+    ("preserved_key", "preserved_key"), ("preserved_at", "preserved_at"),
+    ("legal_hold", "legal_hold"),
+    # F11 (2026-09-24): what static triage computed. The columns are 0031's;
+    # nothing wrote them until the static-triage runner.
+    ("imphash", "imphash"), ("rich_header_hash", "rich_header_hash"),
+    ("ssdeep", "ssdeep"), ("tlsh", "tlsh"),
+    # F13, 2026-09-24 (migration 0102). screening_list_seq is read by
+    # screening.py's SQL alone and is not on Sample.
+    ("screening_outcome", "screening_outcome"),
+    ("screened_at", "screened_at"),
+    ("screening_bytes_absent_at", "screening_bytes_absent_at"),
+)
+#: The field names in select order, with `key_destroyed` last: it is not a
+#: column but a boolean computed from one (below).
+_NAMES: tuple[str, ...] = tuple(f for _c, f in SAMPLE_FIELDS) + ("key_destroyed",)
+_COLUMNS = ", ".join(c for c, _f in SAMPLE_FIELDS)
 #: The same list, table-qualified, for the reads that JOIN `core."case"` to
-#: compose its labels. Derived from the one string rather than restated, so
-#: the two cannot fall out of step and unpack into the wrong fields — the
-#: same discipline `notifications._N_COLUMNS` uses for the same reason.
-_SAMPLE_COLUMNS = ", ".join("s." + c.strip() for c in _COLUMNS.split(","))
+#: compose its labels. Derived from the one tuple rather than restated, so
+#: the two cannot fall out of step: the same discipline
+#: `notifications._N_COLUMNS` uses for the same reason.
+_SAMPLE_COLUMNS = ", ".join("s." + c for c, _f in SAMPLE_FIELDS)
 #: Whether the data key has been destroyed, read as a BOOLEAN (0063). The
 #: console needs to say "destroyed" or "kept" for a rejected sample, and
 #: selecting the sealed key itself to decide that would carry key material
 #: through every queue read for the sake of one word.
 _RETURNING = _COLUMNS + ", octet_length(data_key_ciphertext) = 0"
 _SELECT = _SAMPLE_COLUMNS + ", octet_length(s.data_key_ciphertext) = 0"
+
+
+def _hex(value) -> str | None:
+    return bytes(value).hex() if value else None
+
+
+#: How a raw value becomes a `Sample` field, by name. Anything not named
+#: here is taken as the database returned it.
+_CONVERT = {
+    "sha256": lambda v: bytes(v).hex(),
+    "sha1": _hex,
+    "md5": _hex,
+    "entropy": lambda v: float(v) if v is not None else None,
+    "triage_gaps": lambda v: v or [],
+    "compartments": lambda v: frozenset(v or []),
+    "legal_hold": bool,
+    "key_destroyed": bool,
+}
 
 
 def _require_clearance(clearance: str | None) -> None:
@@ -3764,19 +4886,16 @@ def _may_see(classification: str, compartments, clearance: str | None,
     return frozenset(compartments or []) <= held
 
 
-def _record(r) -> Sample:
-    return Sample(
-        id=r[0], case_id=r[1], sha256=bytes(r[2]).hex(),
-        sha1=bytes(r[3]).hex() if r[3] else None,
-        md5=bytes(r[4]).hex() if r[4] else None,
-        original_filename=r[5], byte_size=r[6], state=r[7], reject_reason=r[8],
-        file_type=r[9], entropy=float(r[10]) if r[10] is not None else None,
-        triage_gaps=r[11] or [], submitted_by=r[12], submitted_at=r[13],
-        source_note=r[14], assigned_to=r[15], classification=r[16],
-        compartments=frozenset(r[17] or []),
-        preserved_bucket=r[18], preserved_key=r[19], preserved_at=r[20],
-        legal_hold=bool(r[21]), key_destroyed=bool(r[22]),
-    )
+def _record(r, names: tuple[str, ...] = _NAMES) -> Sample:
+    """A row fetched with `_RETURNING` or `_SELECT`, decoded by NAME.
+
+    `names` exists for the test that reorders SAMPLE_FIELDS and checks a
+    row fetched in that order still decodes to the same `Sample`."""
+    values = dict(zip(names, r, strict=True))
+    for name, convert in _CONVERT.items():
+        if name in values:
+            values[name] = convert(values[name])
+    return Sample(**values)
 
 
 __all__ = [

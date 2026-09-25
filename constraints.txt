@@ -1,5 +1,6 @@
 # Exact versions of every Python distribution noctornal-api and
-# noctornal-ontology install, with their dev extras and db/requirements.txt.
+# noctornal-ontology install, with their dev extras, noctornal-api's
+# telegram and yara extras, and db/requirements.txt.
 #
 # Why this exists (sec-pin-dependencies, 2026-09-23). Every dependency in
 # apps/api/pyproject.toml is a floor (`fastapi>=0.110`), which is right for
@@ -23,10 +24,17 @@
 # passed on. Every one of them publishes wheels for CPython 3.12, 3.13 and
 # 3.14 on Linux (x86_64 and aarch64), Windows and macOS, checked against PyPI
 # when this was written, so the installers' "3.12 or newer" still installs
-# without a compiler.
+# without a compiler, except pyaes (the telegram extra), which is pure Python
+# and published only as an sdist, so pip builds its wheel with setuptools and
+# no compiler, and yara-x (the yara extra), whose macOS wheels need macOS 14
+# or newer. The pins the 2026-09 roadmap build added were re-checked against
+# that bar on 2026-09-24: numpy, selectolax and pefile are
+# installed with the API; telethon, python-socks, pyaes, rsa and pyasn1 are
+# the telegram extra; yara-x is the yara extra; python-socks is in the dev
+# extra too, for the egress wire-contract cases.
 #
 # To move a pin: change it here, reinstall with
-#     python -m pip install -c constraints.txt -e packages/ontology -e "apps/api[dev]"
+#     python -m pip install -c constraints.txt -e packages/ontology -e "apps/api[dev,telegram,yara]"
 # run the suite, and commit the two together. A distribution a new
 # dependency brings in must be added here, or test_dependency_pins fails.
 #
@@ -57,10 +65,14 @@ leidenalg==0.12.0
 mako==1.4.1
 markupsafe==3.0.3
 minio==7.2.20
+numpy==2.5.3
 packaging==26.3
+pefile==2024.8.26
 pluggy==1.6.0
 psycopg==3.3.5
 psycopg-binary==3.3.5
+pyaes==1.6.1
+pyasn1==0.6.4
 pycparser==3.0
 pycryptodome==3.23.0
 pydantic==2.13.5
@@ -68,11 +80,15 @@ pydantic-core==2.46.5
 pygments==2.21.0
 pytest==9.1.1
 python-multipart==0.0.32
+python-socks==3.1.1
 qrcode==8.2
 redis==8.1.0
+rsa==4.9.1
 ruff==0.6.9
+selectolax==0.4.12
 sqlalchemy==2.0.52
 starlette==1.6.0
+telethon==1.45.0
 texttable==1.7.0
 typing-extensions==4.16.0
 typing-inspection==0.4.4
@@ -80,3 +96,4 @@ tzdata==2026.3
 urllib3==2.7.0
 uvicorn==0.52.4
 websockets==17.1
+yara-x==1.20.0

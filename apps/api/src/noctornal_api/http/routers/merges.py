@@ -32,17 +32,20 @@ import psycopg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
+from noctornal_api.db import SystemPurpose
 from noctornal_api.http.deps import (
     CurrentUser,
     get_conn,
     require,
     require_step_up,
+    system_conn,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.approvals import (
     ApprovalError,
     ApprovalService,
     case_requires_dual_control,
+    policy_mode,
 )
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.merges import MergeError, MergeRecord, MergeService
@@ -131,6 +134,12 @@ def merge(
     user: CurrentUser = Depends(require("graph.merge")),
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
+    # A merge re-points EVERY edge of the source node, including ties
+    # above the merging user's own labels, as it always has; under row-level
+    # security that needs a connection that sees them, or hidden edges would
+    # be left on a redirected node (S1, 2026-09-25). Under dual control the
+    # approval's consume shares the merge's transaction on this connection.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MERGE)),
 ) -> MergeOut:
     """Fold one entity into another, reversibly.
 
@@ -142,28 +151,48 @@ def merge(
     leaving a reusable signature, which is the bad direction to fail in.
     """
     if case_requires_dual_control(conn, case_id, "node.merge"):
-        return _merge_under_dual_control(conn, case_id, body, user)
+        return _merge_under_dual_control(conn, case_id, body, user, sconn)
 
     if body.source_node_id is None or body.target_node_id is None or not body.reason:
         raise Problem(422, "Validation failed",
                       "source_node_id, target_node_id and reason are required")
     try:
-        return _out(MergeService(conn).merge(
+        record = MergeService(sconn).merge(
             case_id=case_id, source_node_id=body.source_node_id,
             target_node_id=body.target_node_id, merged_by=user.user_id,
-            reason=body.reason, basis_selector_id=body.basis_selector_id))
+            reason=body.reason, basis_selector_id=body.basis_selector_id)
     except MergeError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(_as_reader(conn, record))
+
+
+def _as_reader(conn, record: MergeRecord) -> MergeRecord:
+    """The record as its reader sees it (S1, 2026-09-25). The merge and its
+    reversal run on a system connection and re-point every tie; the counts
+    they answer with are read back on the request connection, so a tie
+    above the reader is counted nowhere they can see, exactly as the merge
+    history counts it (`core.node_merge_edge` is policied since 0123). The
+    audit row keeps the full count for its own readers."""
+    return MergeService(conn).get(record.id) or record
 
 
 def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
-                              user: CurrentUser) -> MergeOut:
+                              user: CurrentUser, sconn=None) -> MergeOut:
+    # `sconn` carries the approval read, its consume and the merge in
+    # one transaction (S1).
+    sconn = conn if sconn is None else sconn
     if body.approval_request_id is None:
+        # F9b (2026-09-24): said by where the requirement comes from,
+        # because "this case requires" is untrue of a case whose own
+        # switch is off under a deployment that requires it everywhere.
+        where = ("this deployment requires a second signature on every merge"
+                 if policy_mode(conn, "node.merge") == "ALWAYS"
+                 else "this case requires dual control on merges")
         raise Problem(
             409, "Approval required",
-            "this case requires dual control on merges: raise an approval "
-            "request, have a second analyst approve it, then merge with its id")
-    svc = ApprovalService(conn)
+            f"{where}: raise an approval request, have a second analyst "
+            f"approve it, then merge with its id")
+    svc = ApprovalService(sconn)
     approval = svc.get(body.approval_request_id)
     if approval is None or approval.case_id != case_id:
         raise Problem(404, "Not found", "no such approval request in this case")
@@ -185,10 +214,10 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
                       "that approval was not raised for a merge") from exc
 
     try:
-        with conn.transaction():
+        with sconn.transaction():
             svc.consume(body.approval_request_id, actor_id=user.user_id,
                         operation="node.merge", case_id=case_id, payload=payload)
-            record = MergeService(conn).merge(
+            record = MergeService(sconn).merge(
                 case_id=case_id, source_node_id=source_node_id,
                 target_node_id=target_node_id, merged_by=user.user_id,
                 reason=reason, basis_selector_id=basis_selector_id)
@@ -201,7 +230,7 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
     # the approval and its consequence, and failing to record it must not
     # roll back a merge that already succeeded.
     svc.attach_result(body.approval_request_id, record.id)
-    return _out(record)
+    return _out(_as_reader(conn, record))
 
 
 @router.post("/{merge_id}/reverse", response_model=MergeOut,
@@ -211,13 +240,16 @@ def reverse(
     user: CurrentUser = Depends(require("graph.unmerge")),
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
+    # An unmerge restores EVERY edge the merge re-pointed (S1).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MERGE)),
 ) -> MergeOut:
     """Restore every edge's original endpoints and clear the redirect."""
-    record = MergeService(conn).get(merge_id)
+    record = MergeService(sconn).get(merge_id)
     if record is None or record.case_id != case_id:
         raise Problem(404, "Not found", "no such merge in this case")
     try:
-        return _out(MergeService(conn).unmerge(
-            merge_id, reversed_by=user.user_id, reason=body.reason))
+        reversed_ = MergeService(sconn).unmerge(
+            merge_id, reversed_by=user.user_id, reason=body.reason)
     except MergeError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    return _out(_as_reader(conn, reversed_))

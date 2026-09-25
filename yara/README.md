@@ -16,8 +16,9 @@ compile is silently dropped, and licences are explicit.
   a build artifact, fetched on demand.
 - **Provenance.** `fetch.lock.json` records, per source, the exact commit
   pulled and when. Reproducible, and auditable in a disclosure context.
-- **Nothing dropped.** `build` compiles each file (if `yara-python` is present)
-  and routes non-compiling files to `dist/dead_letter.json` with the reason,
+- **Nothing dropped.** `build` compiles each file (with yara-x, the product's
+  own engine, when `noctornal-api[yara]` is installed) and routes
+  non-compiling files to `dist/dead_letter.json` with the reason,
   rather than dropping them (mirrors invariant 12). Rule-name collisions across
   sources go to `dist/collisions.json`, not a silent last-writer-wins merge.
 - **Licences vary.** Every source flagged `"review": true` in `sources.json`
@@ -50,24 +51,47 @@ python scripts/yara_db.py stats      # provenance + counts
 python scripts/yara_db.py fetch --only signature-base bartblaze-yara
 ```
 
-`build` uses `yara-python` when installed (compile validation); without it the
-index still lists every rule and its source, with `compiles` left null.
+`build` compiles with the product's own engine and two-pass compile when
+yara-x is installed (`noctornal-api[yara]`), so a file that fails there is a
+file that contributes no rule in the product either; without it the index
+still lists every rule and its source, with `compiles` left null.
 
-## How it will plug into Phase 8 (not yet wired)
+```bash
+python scripts/yara_db.py import --only bartblaze-yara \
+    --classification AMBER --compartments KEY1,KEY2
+```
 
-The corpus is scaffolding today. Wiring it into `SampleService` triage is
-Phase 8 work and carries two hard constraints from the invariants:
+`import` stores each named source in the deployment's database as a new
+version of a rule set of the same name (created if absent), with the licence
+and review flag from `sources.json` and the commit from `fetch.lock.json`,
+recorded as imported by this script on this host. **It never activates
+anything.**
 
-1. **Samples never render or execute (invariant 10).** YARA matching is static
-   pattern-matching over bytes in the sample store; a match must not cause the
-   sample to be rendered or run, and nothing about matching relaxes the
-   separate-origin download rule.
-2. **A YARA hit is not a fact (invariant 1 / decision: machines propose).** A
-   match is evidence, graded and attributed to the rule and its source; it is
-   written as a proposal / assertion for an analyst, never as ground truth on
-   the sample.
+## How it plugs into the Lab
 
-Still to do: namespaced multi-file compilation (cross-rule references currently
-fail per-file compile and land in the dead-letter), external-module coverage
-(`pe`, `math`, `hash`, `dotnet`; `cuckoo`/`androguard`/`magic` are usually
-absent), and a scan endpoint that records matches as gradeable assertions.
+Since 2026-09-24 (roadmap F12) rule sets live in the product, in the Lab's
+**Rules** tab:
+
+1. A lab member (`sample.yara.manage`) creates a labelled rule set and
+   uploads a version: a `.yar`/`.yara` file or a `.zip` of them, with its
+   licence. An imported version must be **adopted** by a lab member first.
+2. A Security Officer (`sample.yara.activate`), who may not be the version's
+   sponsor, activates it from Oversight, writing down the licence clearance
+   when the source asks for review.
+3. Static triage scans each sample with every active version, in a limited
+   child process, and records a machine finding per version: which rules
+   matched, their metadata, and pattern offsets and counts. Never the
+   matched bytes.
+
+The two hard constraints still hold, and the code enforces them:
+
+1. **Samples never render or execute (invariant 10).** Matching is static
+   pattern-matching over bytes decrypted in memory; nothing is rendered or
+   run, and the download rule is untouched.
+2. **A YARA hit is not a fact (invariant 1).** A match is a machine finding
+   about the sample, read through the rule set's labels; a family reaches a
+   case only as an analyst's assessment with a confidence.
+
+Each file compiles on its own first, and a file with any error (a
+cross-file reference, an include, an unknown identifier) contributes no
+rule; the build report names the file, line and error code.

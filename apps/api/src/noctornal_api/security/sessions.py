@@ -108,6 +108,10 @@ class SessionRecord:
     #: a None here is a fact strict mode compares, not a wildcard.
     ip: str | None = None
     user_agent: str | None = None
+    # The sha256 of the row-security binding proof (S1, 2026-09-25;
+    # security.tokens.rls_proof, migration 0110). Written at mint and never
+    # read back by the application: iam.rls_actor() reads it in SQL.
+    rls_binding_hash: bytes | None = None
 
 
 def binding_mismatch(record: SessionRecord, *, ip: str | None,
@@ -176,6 +180,7 @@ class SessionService:
             mfa_satisfied_at=now if mfa_satisfied else None,
             ip=normalise_ip(ip),
             user_agent=(user_agent or None),
+            rls_binding_hash=token.rls_binding_hash,  # S1
         )
         self._store.insert(record)
         return record, token.raw

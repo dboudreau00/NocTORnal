@@ -1,5 +1,777 @@
 # Changelog
 
+## Unreleased
+
+Everything since Alpha 6: the fifteen roadmap features (F1 to F15), the six
+things Alpha 6 left (L1 to L6), and the egress proxy (S2). Collection can
+now read forums and Telegram, but only under a written two-person
+authority and through an exit that is not the investigating host's own
+address; the Lab triages every sample it holds, scans it with the YARA
+rule sets a Security Officer has activated, screens it against
+prohibited-content hash lists, and can send it to a self-hosted CAPEv2;
+Search finds similar wording and, where an operator configures a model
+server, similar meaning; the Analysis pane gains roles (CONCOR), a
+projection of forums and wallets to ties between entities, and a scope of
+accepted ties only; Comms checks detached signatures and keeps a register
+of vendor keys; Jira, a delivery ledger with a screen of its own and
+outbound lookups join the integrations; and which operations take two
+people is now a policy that two people change.
+
+Underneath all of it, every outbound connection the product makes goes
+through one client, one address policy and one function that chooses its
+route, and in production through the egress proxy, which is now the only
+way out of the deployment: the application network is internal, and every
+connection the proxy makes is recorded in a ledger the application cannot
+write. docs/20 is that contract. The decisions this release took are
+docs/00 68 to 151, and docs/16 gains three determinations and a claim to
+confirm externally. Row-level security (S1) now stands behind the access
+gate on 66 tables, and the request role can no longer write accounts,
+sessions, roles, assignments or break-glass grants; fifteen tables are not
+under it yet, each with its work named (docs/17 F51).
+
+Still alpha, still not audited, and still not lawful to operate against
+real material until docs/16 L1 to L5 are settled outside this codebase.
+Alpha 6 stands at Alembic 0068, so an upgrade applies 56 revisions, 0069 to
+0124; several change existing data, two take an exclusive lock on the
+notification tables for their whole run, and many refuse a downgrade once
+the new features hold data. The readiness register grows from 18 checks to
+43, none of the new ones blocking. The steps an existing deployment takes
+are the next subsection.
+
+### Upgrading from Alpha 6
+
+**1. Stop the API and every cron loop, and back up.** Stop the API, the
+sample origin, and on a production stack `cron` too, before anything
+migrates. 0095 takes an ACCESS EXCLUSIVE lock on `notify.delivery` for the
+whole revision, and 0097 does again, so every merge, approval and
+notification waits until they commit; 0084 builds four indexes under a
+SHARE lock on `collect.proposal`, `comms.contact_block`,
+`collect.watch_hit` and `core.tag_assignment`; 0072 builds its index in
+the migration's transaction. Back up the database, the buckets and
+`.env.local` (or `secrets.env`) exactly as the Alpha 6 notes say. The
+backup is the way back: 0096 rewrites stored webhook addresses and cannot
+restore them, 0071 relabels captured documents, and most of the new tables
+refuse a downgrade once they hold a row (step 4).
+
+**2. Get the code and reinstall.** The installers install the exact
+versions in `constraints.txt`. numpy, selectolax and pefile are now
+installed with the API, and cryptography 47 or later is required. Two
+extras are opt-in: `telegram` (Telethon and python-socks) and `yara`
+(yara-x), through `install.sh --with-telegram --with-yara`,
+`install.ps1 -WithTelegram -WithYara`, or the image's `NOCTORNAL_EXTRAS`
+build argument (`telegram`, `yara` or `telegram,yara`). By hand:
+`pip install -c constraints.txt -e packages/ontology -e "apps/api[telegram,yara]"`.
+Without an extra the feature it serves stays off and its readiness row says
+so.
+
+**3. Settings.** A development stack needs none of the new ones to start.
+The installers write `COLLECT_RAW_BUCKET` (default `noctornal-collect-raw`,
+the bucket raw collected markup is kept in, with no object lock), and the
+development compose file's `minio-init` creates it on the next `up`. Every
+other new capability is off until an operator turns it on:
+
+- collection: `NOCTORNAL_FORUM_SOURCE_CEILING` and
+  `NOCTORNAL_TELEGRAM_SOURCE_CEILING` (CLEAR, GREEN or AMBER; unset means
+  that kind of collection is off), and `NOCTORNAL_FORUM_ALLOW_DIRECT=1`
+  (development only, to read a public forum with no egress proxy);
+- the egress proxy: `NOCTORNAL_EGRESS_PROXY_URL`,
+  `NOCTORNAL_EGRESS_INTERNAL_CIDRS` and the keys of step 6;
+- comms: `NOCTORNAL_WKD_CEILING` (key lookups) and
+  `NOCTORNAL_GPG_PATCHED_AS` (attests a distribution gpg that carries the
+  upstream fixes under an older version number);
+- similarity: `NOCTORNAL_EMBED_WORDING` (on by default) and the
+  `NOCTORNAL_EMBED_MEANING_*` settings (a model server; off unless its URL
+  is set, and then a ceiling and, outside this host, a written authority
+  are required);
+- integrations: `NOCTORNAL_JIRA_CEILING`, `NOCTORNAL_JIRA_NETWORK`,
+  `NOCTORNAL_JIRA_CA_FILE`, `NOCTORNAL_OUTBOUND_LOOKUPS` (only `on`
+  sends), `NOCTORNAL_LOOKUP_CA_FILE`, and the development-only
+  `NOCTORNAL_WEBHOOK_ALLOW_HTTP` and `NOCTORNAL_JIRA_ALLOW_HTTP`;
+- the Lab: `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY`,
+  `NOCTORNAL_SAMPLE_ANALYSIS_MAX_BYTES`, `NOCTORNAL_SAMPLE_FUZZY_MAX_BYTES`,
+  `NOCTORNAL_SAMPLE_ANALYSIS_TIMEOUT_S`,
+  `NOCTORNAL_SAMPLE_ANALYSIS_CONCURRENCY`, `NOCTORNAL_YARA_SCAN_TIMEOUT_S`
+  and `NOCTORNAL_YARA_MAX_UPLOAD_BYTES` (all with defaults),
+  `NOCTORNAL_HASH_SET_AUTHORITY` and `NOCTORNAL_MAX_SCREENING_LIST_BYTES`
+  (screening), and the `NOCTORNAL_SANDBOX_*` settings (the CAPEv2 target;
+  its exposure and ceiling have no default).
+
+`infra/production/secrets.env.example` lists each, commented out. A
+production start refuses a value it cannot use, naming the variable and
+never the value: an http webhook URL, either `ALLOW_HTTP` flag, a ceiling
+that is not CLEAR, GREEN or AMBER, an unreadable CA file, lookups on with no
+egress proxy, `NOCTORNAL_FORUM_ALLOW_DIRECT`, and a sandbox with no proxy.
+
+**4. Apply the migrations.** `alembic upgrade head` from the repository
+root, as the schema owner, as before; the installers and launch scripts run
+it too. Each revision is its own transaction, so a refusal keeps every
+revision before it and nothing of its own, and after any refused downgrade
+run `alembic upgrade head` again to return to a state a release runs on.
+What each does to an existing database:
+
+- **0069** makes the compartment registry read its bound columns from the
+  catalog (docs/00 decision 71). No data changes. Downgrade refuses while
+  any binding beyond 0059's eighteen exists.
+- **0070** gives `collect.document` compartments (metadata only on
+  Postgres 16), a partial GIN index, and a `document_tsv` trigger that
+  fires only when indexed text changes. Downgrade refuses while any
+  document carries a compartment.
+- **0071 changes existing data.** It labels every capture made before this
+  release from the cases that cite it: the compartments every citing case
+  holds, when all are compartmented, and a classification raised to the
+  least citing case's, never lowered, each with a
+  `DOCUMENT_LABELS_BACKFILLED` audit row and one summary row. People not
+  read into those compartments stop seeing those captures in Collected and
+  Search. A capture no lock fits is left unlabelled, counted on the
+  register and listed by `scripts/legacy_records.py`. Its downgrade
+  changes nothing, and once it has labelled a document 0070's downgrade
+  refuses.
+- **0072** adds a partial index on `ingest.record(duplicate_of)`, built in
+  the transaction. An INVALID index of that name is rebuilt; a valid one
+  with another definition is refused.
+- **0073 changes existing data**, narrowly: the two seeded retention
+  rationales that cite design documents are reworded, only where the rule
+  is still exactly as seeded and unconfirmed, with an audit row each. No
+  period moves.
+- **0074** makes an approval request write-once where it matters (a
+  trigger; no rows change).
+- **0075** adds the two-person policy: two permissions, the change ledger,
+  the per-operation mode and `iam.separated_duty.origin`. It refuses to
+  upgrade over a pair a two-person change added whose ledger row a
+  downgrade dropped. Downgrade refuses while any operation is stricter than
+  its default or a pair a change added still exists.
+- **0076** adds the merge switch's epoch and the trigger that makes
+  turning it off take a second signature. Its downgrade restores the
+  one-signature switch.
+- **0077** drops `iam.permission.requires_dual_control` and
+  `iam.dual_control_request`, which nothing read or wrote. It refuses,
+  naming the count, if that table holds any row. The downgrade restores
+  both.
+- **0078** lets custody record a read by the product itself (SYSTEM) and
+  adds the SCANNED action. Downgrade refuses once any SYSTEM or SCANNED
+  row exists.
+- **0079 changes existing data:** every held sample's stored triage gaps
+  are rewritten to the new vocabulary (the five checks static triage now
+  runs become pending, archive expansion unavailable, and the stored
+  prohibited-content screening gap is removed, because it is now derived).
+  Nothing is queued: triaging samples held before this release is step 5.
+  Downgrade refuses once a run has started or a machine analysis exists.
+- **0080** adds YARA rule sets, versions, activations and compiled builds.
+  Downgrade refuses while any rule set exists.
+- **0081** records what a poll asked for, who asked, its notes and deleted
+  items, and a source's parser settings. Downgrade refuses while any run
+  carries a request log.
+- **0082** makes a persona one account on one platform and binds sources
+  to a persona or an exit. Existing forum personas read platform NULL
+  until someone sets it. Downgrade refuses while any source is bound or
+  any persona names a platform.
+- **0083** adds the two-person collection authority and its permissions.
+  Downgrade refuses while any authority exists.
+- **0084** adds a document legal hold's reason and who placed it, and four
+  indexes (above). Downgrade refuses while any document is held.
+- **0085 changes existing data:** existing egress profiles get
+  `reach_changed_at` and existing bindings `bound_at` of `-infinity`, so
+  authorities confirmed before it stay valid; the never-written
+  `endpoint_ciphertext` column is retired by a CHECK. It adds exits,
+  integration routes and their destinations, the binding history, and the
+  permissions `egress.manage` and `egress.log.read`. Downgrade refuses
+  while any profile carries an exit, any route or destination exists, or
+  the binding history holds a row.
+- **0086** adds the connection ledger, its sequence, and the grants for
+  the proxy's own role `noctornal_egress` where that role exists.
+  Downgrade refuses while the ledger holds a row.
+- **0087** records a verification's signature form, signing primary and
+  class. Existing rows read CLEARSIGNED. Downgrade refuses while any row
+  is DETACHED or verified on a primary key.
+- **0088** adds the vendor key registry. Downgrade refuses while it holds a
+  row.
+- **0089** adds a verification's key citation and attribution and the
+  UNATTRIBUTED outcome, and makes the verification ledger refuse UPDATE
+  and DELETE. Rows written before it stay valid. Downgrade refuses while
+  any row cites a key or is UNATTRIBUTED.
+- **0090** adds key lookups and their two permissions. Downgrade refuses
+  while any lookup row exists.
+- **0091 to 0093** add similarity spaces, their queue, and document,
+  exhibit and claim vectors (built on empty tables, so they are instant),
+  and `embedding.manage`. Nothing is refused on the way down: vectors are
+  derived, and the next pass after an upgrade embeds again (for a meaning
+  index, sending the eligible text to the model server again, audited).
+- **0094** drops `collect.document.embedding`, which every row held as
+  NULL.
+- **0095 changes existing data** and locks `notify.delivery` for its whole
+  run: it adds a stable cause, the exposure that left, the queue time and
+  an event id, with cause and exposure backfilled from what the code that
+  ran could have sent (a SUPPRESSED row whose detail matches none of the
+  known sentences reads LEGACY). Downgrade is lossless.
+- **0096 changes existing data, for good:** every stored webhook address
+  in the delivery ledger is rewritten to its withheld form (scheme and
+  host kept, path replaced by a fingerprint). The downgrade is a no-op,
+  because the withheld text was a credential.
+- **0097** adds the Jira destination, its links, events and a case's veto,
+  and locks `notify.delivery` again for its run. Its downgrade drops the
+  destination with its sealed credential, the links and the vetoes (the
+  audit rows remain) and does not refuse.
+- **0098** adds lookup providers and their exposure changes. Downgrade
+  refuses while any lookup exists, and otherwise destroys the sealed keys.
+- **0099 to 0101** add the lookup ledger, the provenance from an answer to
+  its proposals and claims (constraints added NOT VALID, and left so), and
+  planned batches, with `lookup.request` and `lookup.authorise`. Each
+  downgrade refuses while any of its rows belongs to a case under legal
+  hold.
+- **0102** adds prohibited-content screening and its two permissions.
+  Downgrade refuses while any result records a match.
+- **0103 changes existing data:** every existing detonation becomes
+  RECORD_ONLY, and is never dispatched or changed. It adds everything a
+  real send records. Downgrade refuses while any SUBMIT row exists.
+- **0104** adds forum post and member side tables. Downgrade refuses while
+  either holds a row.
+- **0105** adds a Telegram persona's enrolment time and constraints. **It
+  refuses to upgrade**, naming the counts, when an existing Telegram
+  persona has no egress profile, is registered on a venue, or shares its
+  profile with another Telegram persona: give each its own profile first.
+  Downgrade refuses while any persona has an enrolled session.
+- **0106** adds Telegram chat and message records. Downgrade refuses while
+  any chat row exists.
+- **0107 changes existing data:** the Telegram platform's durable selector
+  type in the comms catalogue becomes TELEGRAM_ID (it read TELEGRAM_UID,
+  which is not an ontology type).
+
+**5. After migrating, on the server.** Run `python scripts/legacy_records.py`
+and keep its output: it lists the captures 0071 could not label, the Triage
+claims accepted before Alpha 6 with no observation date, and the ATTRIBUTE
+claims readable below their material or attached across cases. Nothing
+fills or moves them (docs/00 decision 80). To triage the samples held
+before this release, run `python scripts/lab_triage.py --backfill`, which
+decrypts every held sample and is therefore the operator's decision, and
+audited. Run `python scripts/embed_pass.py --limit 0 --max-seconds 0` once
+to build the first similar wording index, and then on a schedule: the
+production compose file does not run the pass yet (docs/17).
+
+**6. A production stack: the egress proxy.** From this release the
+production application network is internal, and the API, the cron loops
+and the sample origin have no route to the internet. Follow
+`release/egress-upgrade/README.md`: Docker Compose 2.24 or later; generate
+the keys (`scripts/egress_setup.py keygen`); write the three new env files,
+`egress-proxy.env`, `egress-client.env` and `postgres-init.env`, none of
+them in `secrets.env`; create the role `noctornal_egress` on the existing
+volume (`egress_setup.py role-sql`); run `egress_setup.py preflight`; then
+`up -d --build`. The compose file gains four services: `egress-proxy`,
+the only service besides caddy that reaches out, alone on the new `exits`
+and `models` networks; `lab-triage`, a loop running
+`scripts/lab_triage.py`; `lab-cron`, a loop running
+`scripts/sample_screen.py` and `scripts/sandbox_dispatch.py`; and
+`embed-pass`, a loop running `scripts/embed_pass.py`. The `cron`
+loop also runs `scripts/lookup_drain.py`.
+
+**Create the `smtp` and `webhook` integration routes before the API and
+cron serve on the new code.** `egress_setup.py adopt` proposes both from
+`SMTP_HOST` and `NOCTORNAL_WEBHOOK_URL`, and the passive default profile
+that feeds are read through, and creates them when you type `yes`. Until
+the routes exist every email and webhook delivery is held PENDING rather
+than failed, and they all go out, capped per drain, once the routes exist;
+feeds are refused for want of a route. The `jira`, `wkd`, `embeddings`,
+`sandbox` and `lookup-<key>` routes are created under Administration,
+Egress when those integrations are configured. A production process with
+any outbound use and no proxy now refuses to start.
+
+The production image now installs the distribution's gnupg, which
+reports a version below the floor PGP verification enforces. Set
+`NOCTORNAL_GPG_PATCHED_AS` once you have checked that its changelog
+carries the fixes; until then every PGP check records NO_VERIFIER and
+`pgp_verifier` says why.
+
+**7. The least-privilege role's grants.** Where `noctornal_app` existed
+when the database migrated, each revision revoked from it what its new
+tables must not allow, and nothing more is needed. A role created after
+the upgrade needs the grants by hand, and so does a database on which
+`release/alpha6-upgrade/app-role-grants.sql` is run again: its blanket
+grant gives the role full DML on every table, the new ledgers included.
+Run it first, then these, as the schema owner:
+
+```sql
+REVOKE UPDATE, DELETE ON iam.dual_control_policy_change FROM noctornal_app;
+REVOKE DELETE ON lab.yara_ruleset, lab.yara_ruleset_version, lab.yara_activation FROM noctornal_app;
+REVOKE UPDATE, DELETE ON lab.yara_compiled, lab.yara_compiled_rejected FROM noctornal_app;
+REVOKE DELETE ON collect.collection_authority, collect.collection_authority_target FROM noctornal_app;
+REVOKE INSERT, UPDATE, DELETE ON collect.egress_binding FROM noctornal_app;
+REVOKE INSERT, UPDATE, DELETE ON collect.egress_connection FROM noctornal_app;
+REVOKE USAGE, UPDATE ON SEQUENCE collect.egress_connection_seq FROM noctornal_app;
+REVOKE DELETE ON comms.pgp_key_acquisition, comms.pgp_key FROM noctornal_app;
+REVOKE UPDATE, DELETE ON comms.pgp_verification FROM noctornal_app;
+REVOKE DELETE ON comms.pgp_key_lookup FROM noctornal_app;
+REVOKE DELETE ON notify.jira_link, notify.jira_event FROM noctornal_app;
+REVOKE DELETE ON ingest.provider, ingest.provider_exposure_change FROM noctornal_app;
+REVOKE DELETE ON ingest.lookup, ingest.lookup_result FROM noctornal_app;
+REVOKE UPDATE, DELETE ON ingest.lookup_attempt FROM noctornal_app;
+REVOKE DELETE ON ingest.lookup_batch FROM noctornal_app;
+REVOKE DELETE ON lab.screening_list FROM noctornal_app;
+REVOKE UPDATE ON lab.screening_hash FROM noctornal_app;
+REVOKE UPDATE, DELETE ON lab.screening_result, lab.screening_review FROM noctornal_app;
+REVOKE DELETE ON lab.detonation FROM noctornal_app;
+REVOKE DELETE ON collect.telegram_chat, collect.telegram_message FROM noctornal_app;
+```
+
+Each line is the complement of what that revision's `GUARDED_TABLES`
+lets the role keep, and the next release's grants script will carry them.
+The proxy's own role is granted by 0086 where it exists when the database
+migrates; `egress_setup.py role-sql` prints its grants for a role created
+later.
+
+**8. The system database role, for row-level security.** Before the
+API serves on the new code, create `noctornal_worker`: on a fresh volume
+set `NOCTORNAL_WORKER_DB_PASSWORD` in `postgres-init.env`; on an existing
+cluster run `python scripts/runtime_roles.py ensure --production` as the
+schema owner after migrating, which creates or repairs both runtime roles
+and makes the IAM plane read-only to `noctornal_app`. Then set
+`NOCTORNAL_WORKER_DATABASE_URL` in `secrets.env` for every application
+service except the sample origin (the compose file blanks it there).
+Production refuses to start without it, refuses it on the sample origin,
+and refuses it when it names the same role as `DATABASE_URL`. Sessions
+issued before 0110 are signed out; everyone signs in once more.
+
+**9. Start, and read the readiness register.** Twenty-five rows are new,
+none blocking. On an upgraded stack expect these to be red until the step
+behind them is done: `egress_routes_cover_sources` until the routes of step
+6 exist; `egress_boundary` in production until the proxy runs;
+`embedding_wording_current` until the first pass of step 5;
+`captured_documents_compartmented`, `triage_claims_within_labels` and
+`triage_claims_dated` while the records of step 5 exist;
+`pgp_verifier` in the production image until the gpg is attested;
+`row_level_security_enforced` wherever the API still connects as the
+schema owner; `role_analysis_thread_capped` on
+a numpy built on Apple's Accelerate, which cannot be held to one thread;
+and `forum_collection` while `NOCTORNAL_FORUM_ALLOW_DIRECT` is set. The
+rest pass or carry a caveat while the feature they watch is off.
+
+**10. Tell the people who use it.**
+
+- A capture into a compartmented case now works, and is stored under the
+  case's compartments; a case walled off for victim data still refuses
+  capture. Some captures made before this release are now labelled with
+  their cases' compartments (step 4, 0071), and people outside those
+  compartments no longer see them.
+- Forum and Telegram sources are read only under a collection authority
+  recorded by one person and confirmed by a Security Officer, and only
+  where the deployment declares a ceiling. A source without one is held,
+  not failed.
+- The delivery ledger moved from the Inbox to Administration, Integrations.
+- Turning a case's merge switch off now takes a second Lead investigator on
+  the case (Triage, Dual control); the deployment-wide policy is changed
+  under Administration, Two-person controls by an administrator and a
+  Security Officer.
+- `KEY_MISMATCH` verifications recorded before this release for a
+  signature by a vendor's signing subkey were a misreading; verify them
+  again (docs/17, untrusted data). So should `CONFIRMED` bindings that no
+  contact block ties to their holder.
+- Script clients. A collection run's error class names the precise failure
+  (`HttpStatusError`, `UnresolvableHost`, `DestinationRefused` and the
+  like) where it said `CollectionError`. A contact block citing a document
+  answers 400 or 201 where it answered 500. The capture reply and the
+  proposals list carry the document's compartments. `GET
+  /api/v1/collection/sources/{id}/egress` names only personas the caller
+  may see and says one bit about the rest. `GET /api/v1/collection/documents`
+  returns a hold's reason only to holders of `retention.manage`. Every
+  analysis route takes `review_scope`, `one_mode`, `one_mode_weighting`,
+  `max_venue_size` and `one_mode_min_shared`. `POST /api/v1/cases/{id}/comms/pgp/verify`
+  loads the binding, the contact block and the key under the caller's
+  labels before anything runs.
+
+### Outbound connections: one client, one policy, and the egress proxy
+
+Every outbound HTTP request now goes through one pinned client
+(`pinned_http.py`), which connects only to the address it checked or
+tunnels to the name through the egress proxy, bounds the whole call by one
+wall-clock allowance, never retries, and never lets a credential or a body
+follow a redirect off its origin. One address policy (`egress_policy.py`),
+shared with the proxy, refuses cloud metadata addresses (now including
+Azure's 168.63.129.16) and the deployment's own networks on every route;
+private space is reached only through a rule that names it. A host with a
+trailing dot or a non-ASCII name is normalised, and a numeric host name
+such as `2130706433` is refused. Every outbound connection takes its route
+from one function, `egress.route_for`. The egress gate refuses a
+destination that has no gate record instead of treating it as in-app.
+
+**The egress proxy.** In production it is the only way out: one internal
+listener speaking HTTP CONNECT and SOCKS5, which the API and the cron loops
+reach at `NOCTORNAL_EGRESS_PROXY_URL` while their own network has no route
+to the internet. Persona traffic leaves only for a running collection, a
+live two-person collection authority or a logout, and only to the site of
+the source it serves; an act such as an enrolment or a join reaches a
+source's site only under that source's own authority, and a persona with no
+source yet reaches only its profile's own networks. Widening a profile or
+binding a persona to another profile voids the authorities recorded before
+the change. Integrations reach only the exact host and port entries an
+administrator allowed, private addresses only when an entry names their
+network, and a local model server only through an `embeddings` entry that
+names its network. Every connection is recorded in an append-only,
+hash-chained ledger that only the proxy's own database role writes. Exits
+(residential pools, VPNs, Tor) are sealed for the proxy alone and never
+shown again. docs/20 is the whole contract; docs/00 decisions 68, 72, 77,
+84, 85 and 107 to 111 record why.
+
+**Administration, Egress**, and `scripts/egress_setup.py` for headless
+setup, create and retire egress profiles and integration routes, seal
+exits, set the passive default that feeds are read through, dry-run a
+destination, and read and verify the connection log within your clearance.
+Two permissions: `egress.manage` (SYS_ADMIN, step-up) and
+`egress.log.read` (SYS_ADMIN, SECURITY_OFFICER). Three readiness rows:
+`egress_boundary` (whether the boundary is in force, and through a running
+proxy whether it accepts this process's key and refuses a private
+destination), `egress_routes_cover_sources` and `egress_exits_open`, and behind them
+the production start refusal.
+
+### Collection: the foundation, forums and Telegram
+
+**The foundation (for F3 to F5).** Every adapter builds on one contract:
+per-poll budgets and pacing, a custody log of what each poll asked for
+(written once when the run ends), raw markup kept per item in its own
+bucket and deleted with its document, parser drift recorded as a PARTIAL
+run and a DEGRADED source, and 429 backoff. Run start times are recorded
+from now on, and older runs say "not recorded". Sources can be added,
+bound, deactivated and read from the console (Feeds, Sources). Personas
+carry their platform, account id, active hours, and the pauses and locks a
+platform imposes, which nothing a person does can shorten.
+**Forum and Telegram sources are not read until a declared ceiling and a
+two-person collection authority cover them**, public boards included; an
+authority is recorded by a collector and confirmed by a Security Officer,
+scoped PUBLIC_READ or MEMBER_READ, and there is no active scope because
+nothing in the product posts, messages or buys. docs/16 L3 and docs/18 A3
+no longer describe an ACTIVE_ENGAGEMENT control that never existed. A held
+source is left out of the schedule, not recorded as a failure. The
+per-persona and per-source request gap now waits the whole gap when the
+host clock has stepped back, where it waited none.
+
+**Forums (F3, F4): XenForo and MyBB.** Public threads and boards are read
+on the foundation, under a confirmed authority and a declared ceiling,
+through the source's own egress profile, and never from this server's own
+address: with no proxy a forum source is refused before any request.
+Pages are parsed in a bounded child process, because a hostile board can
+serve markup the parser takes minutes over. Quotes and signatures are cut
+from each post; the posts it quotes, its signature and its reactions are
+kept beside it, and so are member profiles when asked for. Edits become new
+versions, and a deletion is recorded only when the posts on both sides of
+it are read again. Sign-in walls, anti-bot challenges, rate limits and
+parser drift are each recorded as themselves, and one forum is read at a
+time. MyBB times are read only under the board's declared zone and
+formats. Adding a source asks for pages per poll, pages rechecked and
+member pages, and for MyBB the board's zone and formats; collected forum
+documents offer Forum details. The authenticated forum path is not built.
+
+**Telegram (F5).** Monitoring over MTProto with Telethon, behind the
+collection authority, the egress proxy and the AMBER ceiling: personas with
+a sealed login enrolled on the server with `scripts/telegram_persona.py`,
+chats added by username or id, an attended join, a membership check, a
+rebind, the poll itself, a console section (Feeds, Sources, Telegram chats)
+and a readiness row. A direct route is refused in every environment. A
+Telegram persona keeps one egress profile for life, and no two share one.
+A chat's provenance follows how it is read (OPEN_GROUP without joining,
+PERSONA_PARTY as a member). No media is downloaded. The comms catalogue's
+Telegram entry now names the ontology's TELEGRAM_ID. docs/16 C18 lists what
+the adapter assumes about Telegram; it has not yet been run against
+Telegram itself (docs/17 F31).
+
+**Retention and holds on collected documents.** A legal hold can be placed
+on a collected document, and on every earlier version, with a reason that
+only those who place and lift holds can read. A hold on any case that
+cites a document holds it too, and a purge never runs past one. A purged
+document loses its title, address, author identities, raw markup and its
+forum and Telegram side rows. A hold placed while a purge runs can no
+longer report success on a document the purge destroyed. Form tokens in
+collected markup are scrubbed in linear time on hostile pages.
+
+### Analysis
+
+- **Accepted ties only (L3).** Every measure can be computed over the ties
+  a reviewer has accepted, and the result lists what it left out by review
+  state (unreviewed proposals, disputed, rejected, superseded). Runs under
+  this scope are stored, cached and charted apart from the default.
+- **Forums and wallets projected to entities (F2).** Forums and channels,
+  and wallets and transactions, can be projected to ties between the
+  entities they link: co-posters, co-controllers, and a payer's controller
+  to a payee's. A shared venue counts less the more entities share it, two
+  memberships tie only if they overlapped in time, a venue over the chosen
+  limit draws nothing and is named, and every exclusion is listed. Derived
+  ties are marked derived, never stored and never drawn on the graph. A
+  view that would derive more than 50,000 ties, or compare more than
+  1,000,000 dated periods, is refused before any work. Conversations stay
+  with the Comms pane's co-participation view.
+- **Roles (F1).** A Roles card finds entities in the same position (CONCOR,
+  one to four splits), states the fit first, shows each relation's block
+  densities with the tied blocks marked in words, and lists pairs alike but
+  not tied as leads. numpy runs on one BLAS thread per process, and the
+  readiness row `role_analysis_thread_capped` says whether that held.
+- The pane checks whether the runs on screen still hold with one request
+  instead of one per card. New routes: `GET /analytics/currency`,
+  `GET /analytics/concor` and `GET /analytics/concor/latest`; new limits
+  `analytics.one_mode` and `analytics.concor`.
+
+### Similarity search (F6)
+
+Search gains a Match choice: Exact words as before, Similar wording, and,
+when an operator configures a model server, Similar meaning. Similar
+wording runs on this host and sends nothing anywhere: it finds reposts,
+light edits and the same passage written in Cyrillic or in any common
+transliteration, and shows each hit as a near duplicate, much of the same
+wording or some shared wording, with the passages the texts share quoted as
+the hit writes them, never as a bare score. Every collected document,
+exhibit and live claim has a Similar button. Similar meaning is off unless
+configured; it never receives compartmented material, victim data or
+anything above its declared ceiling, any server outside this host needs a
+written authority (always, in production), every batch and query is
+audited before it is sent, and a server that answers with something other
+than vectors fails that batch without stopping the rest. Administration,
+Embeddings rebuilds, activates, retires and rechecks the indexes
+(`embedding.manage`); a retired index is not replaced until someone presses
+Rebuild. `scripts/embed_pass.py` keeps the indexes filled.
+`collect.document.embedding`, which nothing ever wrote, is removed.
+
+### Comms: detached signatures, vendor keys and key lookups (F10)
+
+- The verification queue shows what was checked, when and with what
+  outcome, to readers allowed to see the check, and Verify this claim fills
+  the Verify form with the claim it confirms.
+- Detached signatures can be checked beside the file they sign (upload the
+  file itself; a pasted copy can lose Windows line endings). A signature
+  made by a signing subkey now confirms a claim of the published primary
+  key. gpg must be 2.4.9 or later, or an attested patched build, and never
+  starts an agent; the readiness row `pgp_verifier` says which.
+- Vendor keys can be added to a case by paste or file, with where they
+  were obtained, and their fingerprint confirmed against a contact block
+  line or a named publication. A binding is confirmed only when a cited
+  contact block ties the key to its holder; otherwise the check is
+  recorded as UNATTRIBUTED, and the verification ledger can no longer be
+  rewritten or deleted.
+- Vendor keys can be looked up in a Web Key Directory. This is off by
+  default, goes only to directories an administrator names on the `wkd`
+  route, and each lookup is asked for by one person and approved and sent by
+  another, each confirming who they are when their sign-in is not recent.
+
+### The Lab: static triage, YARA, screening and the sandbox
+
+**Static triage and fuzzy hashing (F11).** After a sample is submitted,
+static triage computes its imphash and Rich header hash, its ssdeep and
+TLSH fuzzy hashes, and scans it with every active YARA rule set. It runs
+outside the upload, in child processes started without the deployment's
+secrets and limited in time (on Linux in memory and file writes too, and
+on Linux such a child can still read those secrets from other processes of
+the same user; the readiness page says so). Every read of the bytes is
+verified against the recorded SHA-256 and written to the access ledger,
+naming who asked or the product itself. Findings are the Lab's and never
+reach a case by themselves: a hash reaches one only when an analyst
+proposes it, and a YARA family only as an analyst's assessment with a
+confidence. Similar samples finds samples by imphash, Rich header, ssdeep
+score, TLSH distance and shared rules, among the samples you may see, and
+the queue can be searched by a hash. ssdeep and TLSH are ported into the
+tree and held to the reference implementations' vectors.
+
+**YARA (F12).** Rule sets are labelled and versioned in the Lab's Rules tab,
+uploaded by a malware analyst with their licence (`sample.yara.manage`),
+and activated from Oversight by a Security Officer who did not sponsor
+them (`sample.yara.activate`), who writes down the licence clearance when
+the source asks for review. Compiled builds are an insert-only history
+this host checks before loading. Retrohunt is manual and scoped to what you
+may see.
+
+**Prohibited-content screening (F13).** Every held and incoming sample is
+compared, by exact md5, sha1 and sha256, with hash lists a Security Officer
+imports. Nothing can be imported until counsel's authority to hold them is
+recorded (`NOCTORNAL_HASH_SET_AUTHORITY`) alongside the ingest policy. A
+match takes the sample out of the Lab for everyone and for good, preserves
+its bytes under a legal hold (or never stores a submission where rejected
+material is destroyed), voids its retrieval authorisations, refuses any
+waiting detonation, and alerts the Security Officers and the designated
+person without content. The officer reviews each match under Oversight.
+Screening compares exact hashes against the lists this deployment imported:
+no match does not mean the material is lawful to hold.
+
+**Sandbox (F14).** A detonation can now be sent to one self-hosted CAPEv2
+through the `sandbox` integration route, as the encrypted archive only, by
+the sandbox worker. A second person signs it off in the product when the
+sandbox is exposed or the sample's network route or analysis machine is
+live. The worker refuses a CAPE that answers without a token, records
+exactly what left and what came back, never resends, and records CAPE's
+report as a machine analysis whose selectors reach a case only through the
+proposal path. A report is read as hostile input: a part the reader does
+not understand is recorded as a gap, and a report that cannot be fetched is
+given up after the configured wait instead of being retried for ever.
+Record-only requests are unchanged and are never sent, and every detonation
+recorded before this release is one.
+
+### Integrations and lookups (F7, F8, F15)
+
+- **Administration, Integrations** shows every outbound channel with its
+  egress route, an outbox with drain and retry, and the delivery ledger,
+  moved from the Inbox, with a cause and the exposure that left for every
+  delivery. An account that manages only integrations opens straight onto
+  it. Webhook addresses are withheld. SMTP and webhooks leave by the
+  integration routes `smtp` and `webhook`, and a missing route holds
+  deliveries instead of failing them. Webhooks follow no redirect and read
+  neither HTTP_PROXY nor HTTPS_PROXY.
+- **Jira** is an opt-in notification channel: one operator-declared
+  destination on the `jira` route (`NOCTORNAL_JIRA_NETWORK` names a
+  private Data Center network), with a sealed credential, a ceiling, field
+  exposure, a per-case veto and idempotent issue links. Its answers are
+  read as hostile, and a Jira failure never stops the other notices.
+  Nothing comes back from Jira.
+- **Outbound lookups**: a provider registry (VirusTotal v3, Shodan host,
+  MISP restSearch; none verified against its live service) under
+  Administration, Providers, with sealed keys bound to their origin and
+  route. Each provider has an exposure level (NONE, VENDOR or PUBLIC);
+  lowering it takes a second administrator, whose approval is bound to the
+  address approved, and moving a provider asks again. The host switch
+  `NOCTORNAL_OUTBOUND_LOOKUPS` ships off. A VENDOR or PUBLIC lookup waits
+  for a named colleague's sign-off in the product (Records, Lookups).
+  Personal data is refused, and a sample's hash leaves only once the
+  sample is screened with no match. Quotas are counted from the attempt
+  ledger, answers are cached per case and raised as Triage proposals with
+  Show answer and File as exhibit, and NONE batches ("Look up all" on an
+  entity, cancellable) are sent by `scripts/lookup_drain.py` in the cron
+  loop. Permissions `lookup.request` and `lookup.authorise`.
+- Readiness rows `notify_outbox_draining`, `jira_destination` and
+  `outbound_lookup_providers`, none blocking.
+
+### Governance: two-person controls, compartments and retention
+
+- **Two-person controls (F9).** Administration has a Two-person controls
+  section: each operation that takes two people, who asks, who signs
+  second, how long a signature lasts, whether anything enforces it yet,
+  which permission pairs no role may hold, the changes waiting and their
+  history. Changing any of it takes two people: an administrator proposes,
+  a Security Officer who is not also an administrator countersigns, and the
+  administrator applies it. The database accepts a policy write only as
+  part of the change that accounts for it. Merges can be set to need a
+  second signature on every case in the deployment. A Security Officer who
+  administers nothing reviews waiting changes under Oversight, Two-person
+  changes, and is notified without the justification being quoted.
+- **Countersigner protection.** For seven days after someone else resets or
+  re-enrols an account's credentials, reactivates or unlocks it, or gives
+  it a role that countersigns, that account cannot countersign a policy
+  change, and the refusal says who did what and when (UTC); the database
+  checks it again when the change is applied. Approval requests can no
+  longer be rewritten after they are raised or decided.
+- **The case merge switch is on screen (F9b).** Triage, Dual control shows
+  and sets whether a case's merges need a second signature. Turning it on
+  takes one signature; turning it off takes a second Lead investigator on
+  the case, approved against the switch as it stands.
+- **Retired (F9c):** `iam.permission.requires_dual_control` and
+  `iam.dual_control_request`, which nothing read or wrote.
+- **Compartments.** The compartment registry reads its bound columns from
+  the catalog, so a column any later migration binds is guarded without
+  restating the guard, and the readiness row `compartment_bindings_intact`
+  watches it. Capture works in compartmented cases (L1): a captured
+  document is stored under its case's compartments, and every list, search,
+  watch hit, claim card and Triage read checks them.
+- **Leftovers.** Triage claims written under older rules are listed by
+  `scripts/legacy_records.py` and counted on the register (L2).
+  `ingest.record` has an index on `duplicate_of` (L4). MEGA, matrix.to,
+  web.telegram.org chat and twitter hashbang links keep their identity, a
+  MEGA key or a Telegram Web login token never becomes part of a selector,
+  links in prose lose trailing punctuation, and existing selectors are
+  listed, not rewritten (L5). The two seeded retention rationales no longer
+  cite design documents on screen (L6). Contact blocks citing a document no
+  longer answer 500. Relabels and triage clicks no longer rebuild a
+  document's text index, and a purge empties it.
+
+### Row-level security (S1)
+
+Row-level security now stands behind the access gate on 66 tables: the
+case record, entities, ties, exhibits, claims, exhibit links and custody;
+hypotheses and their evidence, assumptions, working sets and merges;
+collected documents and everything that hangs off them, forum and Telegram
+side tables included; Triage's proposals, watches and their hits; the
+deception records; stored analysis runs and the saved canvas; the Lab
+(samples, runs, detonations, screening results, preservation
+authorisations and YARA rule sets); the communications records (bindings,
+contact blocks, conversations, messages, the PGP registry and ledger and
+the stoplist); and selectors, tags, tombstones, merge records, two-person
+requests and the vectors of claims and exhibits. A query that forgets the
+gate's check, or a statement injected into a request, sees only what that
+user may read. The policies mirror the gate: assignment, clearance with a
+break-glass raise, compartments, and an element's labels composed over its
+case's. A row that belongs to no case (a collected document, a YARA rule
+set, a Lab sample's own labels) is held to the reader's case-less ceiling,
+so a grant on one case never raises it. The verb and the step-up stay in
+the application (docs/00 decisions 137 to 151).
+
+The API now runs on two database roles besides the owner. Requests use
+`noctornal_app`, which reads through the policies and can no longer write
+accounts, sessions, roles, assignments, break-glass grants or download
+tickets; sign-in, administration and ticket issue run on a separate system
+connection as `noctornal_worker`, which bypasses row security and owns
+nothing, so it still cannot switch off the append-only triggers. Each
+request's connection is bound to its session by a proof derived from the
+session token, which a statement inside the request cannot forge. Work
+that must see every row (purges, legal holds, lock extension, merges, the
+counts of withheld material, sample intake, minimisation, ingest scoring,
+the readiness counts and every script) runs as a named system purpose.
+
+Fifteen tables are not under row security yet, each with the work it
+needs named in `rls_registry.py` and docs/17 F51: the audit log, Telegram
+chats, the ingest records, the lookup ledger and the notification tables.
+On those, a statement injected into a request still reaches every row the
+request role can.
+
+Converting the readers found and fixed several that failed open. A
+lookup read its entity's and sample's labels through joins that a hidden
+row drops, so a selector on an entity above the requester read at the
+case's label and could have been sent to a provider; it now reads the
+labels whatever the requester may see. Registering, activating and
+rechecking a similarity index, and the console's embedding pass, ran as
+the administrator and saw only their cases: an administrator on no case
+registered an index with no exhibits or claims, and activating one deleted
+their queue entries. Every readiness count now covers the whole
+deployment. The sign-off notice for a Lab analyst's detonation request
+carries the case's labels; the request used to fail. Minimisation drops
+every message body of a conversation and reports that count. A legal hold
+on an exhibit is placed whatever the officer's own clearance, and a hold
+that finds nothing is refused instead of reported as placed. The saved
+graph layout no longer returns entities the reader cannot see, and merge
+counts are the reader's.
+
+### The readiness register
+
+Twenty-five new rows, none blocking, bringing the register to 43:
+`compartment_bindings_intact`, `captured_documents_compartmented`,
+`triage_claims_within_labels`, `triage_claims_dated`, `egress_boundary`,
+`role_analysis_thread_capped`, `dual_control_policy_changeable`,
+`sample_static_analysis`, `yara_rules_active`,
+`collection_sources_configured`, `collection_authority_current`,
+`egress_routes_cover_sources`, `egress_exits_open`, `pgp_verifier`,
+`pgp_key_directory`, `embedding_wording_current`,
+`embedding_meaning_endpoint`, `notify_outbox_draining`,
+`jira_destination`, `outbound_lookup_providers`,
+`prohibited_content_screening`, `sandbox_integration`, `forum_collection`,
+`telegram_collection` and `row_level_security_enforced`. Each counts and never names, and none counts a
+row a label hides from some administrator.
+
+### Dependencies and development
+
+numpy, selectolax and pefile are installed with the API, urllib3, certifi
+and idna are declared rather than inherited, and cryptography 47 or later
+is required; Telethon and python-socks are the `telegram` extra and yara-x
+the `yara` extra. Every pin is in `constraints.txt`, and NOTICE.md lists
+each new distribution with its licence, reproduces lexbor's notice, and
+carries the TLSH and ssdeep notices for the ports in `fuzzyhash.py`. CI's
+test job has two legs: "Tests and migrations" with every extra, and "Tests
+without optional extras", which runs the tests marked `extras_absent`; if
+branch protection lists required checks, add the second. The migration
+round-trip tests run first in a suite, because they migrate the database
+the rest use. New suites cover the outbound contract against a stub proxy
+and against the real one.
+
+### Known and not done
+
+Recorded in docs/17 rather than fixed here: the Telegram adapter has not
+met Telegram (F31); no route or script sweeps collected documents past
+their clock (F30); a webhook signature carries no timestamp (F28); a
+persona can be created on a profile
+that cannot carry persona traffic, which readiness flags and the proxy
+refuses; watches match neither forum signatures nor Telegram chats; the
+object stores are reached outside the egress routes; and the second person
+on a case's merge switch has no seasoning rule, which is open question 12
+in docs/00. Fifteen tables are not yet under row-level security (F51),
+and the schema owner's password still reaches the runtime services (F52).
+
 ## Alpha 6: 2026-09-24
 
 Everything since Alpha 5.2, ending in a review, the rest of that review's

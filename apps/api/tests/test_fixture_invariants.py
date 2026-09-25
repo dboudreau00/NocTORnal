@@ -116,3 +116,31 @@ def test_the_scan_sees_the_fixtures_it_is_meant_to_guard():
             if _COMPARTMENT_WRITE.search(_string_constants(fn)):
                 found += 1
     assert found >= 5, f"the scan found only {found} raw compartment writers"
+
+
+# Every email prefix a test file creates accounts under, however it spells
+# it: a PREFIX constant, an EMAIL_LIKE pattern, or an f-string address.
+_PREFIX_DEFS = (
+    re.compile(r'^\s*(?:PREFIX|EMAIL_PREFIX)\s*=\s*"([a-z0-9]+-)"', re.M),
+    re.compile(r'"([a-z0-9]+-)%@noctornal\.test"'),
+    re.compile(r'f"([a-z0-9]+-)\{uuid4\(\)\.hex\[:\d+\]\}@noctornal\.test"'),
+)
+
+
+def test_every_email_prefix_belongs_to_one_file():
+    """Teardowns delete by email prefix, and an append-only ledger (an
+    exhibit, a custody row) pins what one file leaves behind. Two files on
+    one prefix therefore break each other in a full run and never alone:
+    the dual-control tests took `dch-` and `dcp-`, both already the
+    deception tests', and every dual-control teardown then failed on the
+    deception exhibit it tried to delete (F9, 2026-09-24)."""
+    owners: dict[str, set[str]] = {}
+    for path in sorted(TESTS.glob("test_*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for pattern in _PREFIX_DEFS:
+            for match in pattern.finditer(text):
+                owners.setdefault(match.group(1), set()).add(path.name)
+    assert len(owners) >= 100, f"the scan found only {len(owners)} prefixes"
+    shared = {prefix: sorted(files) for prefix, files in owners.items()
+              if len(files) > 1}
+    assert not shared, f"email prefixes used by more than one test file: {shared}"

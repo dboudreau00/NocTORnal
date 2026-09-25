@@ -220,6 +220,64 @@ Additional concerns unique to outbound:
   the same treatment as sandbox detonation in `docs/11`.
 - Cache aggressively. Enrichment results are stable and quotas are not.
 
+### Status: BUILT (outbound lookups, roadmap F15, 2026-09-24)
+
+What exists, and where:
+
+- **The provider registry** (`providers.py`, `http/routers/providers.py`,
+  Alembic 0098; Administration, Providers). Nothing is seeded and nothing
+  is enabled. Each provider's key is envelope-sealed in the same vault
+  shape as personas (`ProviderVault`: store, clear and use, and nothing
+  that returns a key), audited before it is opened, and bound to the
+  origin (host and port) and the egress route it was entered with:
+  changing either destroys it. Each provider is anchored to an inactive
+  `collect.source` of kind VENDOR_API that claims cite and nothing polls.
+- **Two acts before anything leaves.** An administrator enables a provider;
+  the host operator sets `NOCTORNAL_OUTBOUND_LOOKUPS=on` in secrets.env for
+  the api and the cron. Either one alone sends nothing.
+- **One route per provider** (docs/00 decision 68): `lookup-<key>`, an integration
+  route an administrator creates in Administration, Egress. A provider
+  whose route is missing or does not admit its host is refused at enable
+  and at every send.
+- **The exposure ladder.** NONE (your own instance), VENDOR (the vendor
+  learns what was asked, under your account) or PUBLIC (anyone watching
+  the provider can see it), determined by an administrator with a written
+  basis. Every determination below PUBLIC, and every lowering, is a second
+  administrator's act, held by the database: an approval names the origin
+  (and, for NONE, the private network) it was asked about, and moving a
+  provider below PUBLIC to another host, port or private network makes it
+  wait for a second administrator again. The ceiling follows the level:
+  only NONE may take AMBER, VENDOR takes GREEN at most, PUBLIC CLEAR.
+  NONE needs a route entry naming a private network with no public entry
+  admitting the same host, which proves the first hop only; the
+  provider's own private network rides on its declared rule, so on a host
+  with no administrator route it is the whole allowlist.
+- **Sign-off in the product** (docs/00 decision 75, read strictly). A lookup to a
+  VENDOR or PUBLIC provider names a colleague who holds `lookup.authorise`
+  on the case, with a note; nothing is sent until that person signs it off
+  in Records, Lookups, within 24 hours. There are no standing
+  authorisations. A NONE lookup is sent at once.
+- **The lookup ledger** (`lookups.py`, `lookup_adapters.py`,
+  `http/routers/lookups.py`, Alembic 0099 to 0101). One row per request,
+  one append-only attempt row per send (the quota counts these, in exact
+  calendar windows, with a reserve kept for interactive work), and the
+  answer kept byte for byte as case material, never labelled below the
+  question. Answers become proposals in Triage citing the stored answer,
+  never graph. A fresh answer at or above the subject's label is served
+  from the per-case cache and nothing is sent.
+- **Refused outright:** personal data (by type, by the shape of any span
+  in the value, and social profile URLs) until a transfer authority is
+  recorded, and any hash a sample holds until prohibited-content screening
+  exists, whatever subject kind carries it.
+- **Batches** go to NONE providers only, previewed with nothing sent,
+  committed against the digest of the preview, and sent by
+  `scripts/lookup_drain.py` in the cron loop, which re-checks every rule
+  at send time and runs its housekeeping whatever the switch says.
+- **Adapters** for VirusTotal v3, Shodan host and MISP restSearch, report
+  lookups only: no scan, submission or upload operation exists (docs/16
+  L5). None has been verified against its live service, and the product
+  says so.
+
 ## Draft schema
 
 `ingest.api_key`, `ingest.batch`, `ingest.record`, `ingest.dead_letter`,

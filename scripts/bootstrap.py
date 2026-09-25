@@ -45,6 +45,15 @@ for _src in (_REPO / "apps" / "api" / "src", _REPO / "packages" / "ontology" / "
         sys.path.append(str(_src))
 
 
+
+def connect():
+    """Every script connects as the system role (S1, 2026-09-25). A
+    script serves no request and binds no user, so on the request role it
+    would see nothing under row-level security; `db.connect_system` refuses
+    rather than hand it a connection that silently sees part of the data.
+    Named `connect` so the tests that replace it still find it."""
+    return connect_system(SystemPurpose.SCRIPT)
+
 def _venv_python(windows: bool | None = None) -> str:
     """The project's interpreter as the installers print it, relative to the
     repository root. Commands this script suggests use it because a bare
@@ -69,7 +78,7 @@ try:
     from psycopg.types.json import Json
 
     from noctornal_api.cases import CaseError, CaseService
-    from noctornal_api.db import connect
+    from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
     from noctornal_api.security import totp
     from noctornal_api.security.access import Tlp

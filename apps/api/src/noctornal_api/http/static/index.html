@@ -1078,19 +1078,11 @@
         <!-- INBOX -->
         <section id="pane-inbox" class="pane" role="tabpanel"
                  aria-labelledby="tab-inbox" tabindex="-1" hidden>
-          <!-- Two views of the same machinery: what reached YOU, and what the
-               platform tried to send to anyone. The second is the delivery
-               ledger, which notify.delivery has recorded since 0029 and nothing
-               ever rendered. -->
-          <div class="subtabs" role="tablist" aria-label="Notification views">
-            <button type="button" class="subtab" role="tab" aria-selected="true"
-                    data-subtab="notifications"
-                    aria-controls="inbox-notifications">Notifications</button>
-            <button type="button" class="subtab" role="tab" aria-selected="false"
-                    tabindex="-1" data-subtab="deliveries"
-                    aria-controls="inbox-deliveries">Deliveries</button>
-          </div>
-
+          <!-- What reached YOU. The delivery ledger (what the platform tried
+               to send to anyone) moved to Administration, Integrations
+               (F8, 2026-09-24): it is a deployment surface, and two copies of
+               one view drift. An account that may read it gets the pointer
+               below. -->
           <div id="inbox-notifications" class="subpane">
 
 
@@ -1126,6 +1118,11 @@
                 reading one does not stop that, Acknowledge does.</p>
               <p id="inbox-msg" class="msg" role="status" hidden></p>
               <p id="inbox-read-all-msg" class="msg" role="status" hidden></p>
+              <!-- F8 G3. Shown to an account holding integration.manage. -->
+              <p id="inbox-ledger-pointer" class="help" hidden>The delivery
+                ledger is in Administration, Integrations.
+                <button id="inbox-ledger-go" type="button" class="btn ghost">Open
+                  the ledger</button></p>
             </div>
 
             <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
@@ -1148,32 +1145,6 @@
         
           </div>
 
-          <div id="inbox-deliveries" class="subpane" hidden>
-            <div class="card">
-              <h2 class="pane-title">Delivery ledger</h2>
-              <p class="help">Every attempt to send a summary out of the
-                platform, newest first: kinds, channels, destinations and
-                refusal reasons. <strong>Never subjects or summaries</strong>:
-                the ledger spans every case and every recipient, which is why it
-                needs <code>integration.manage</code> rather than your own
-                clearance. A <em>refused</em> row is the one that explains an
-                absence the recipient did not choose.</p>
-              <div class="row-form">
-                <label class="field">
-                  <span class="label">Kind</span>
-                  <input id="dlv-kind" type="text" spellcheck="false"
-                         autocomplete="off" placeholder="any">
-                </label>
-                <label class="field inline">
-                  <input id="dlv-refused" type="checkbox" />
-                  <span class="label">Refused, failed and revoked only</span>
-                </label>
-                <button id="dlv-reload" type="button" class="btn">Reload</button>
-              </div>
-            </div>
-            <p id="dlv-empty" class="empty" hidden>Nothing sent yet.</p>
-            <div id="dlv-list" class="stack"></div>
-          </div>
         </section>
 
         <section id="pane-triage" class="pane" role="tabpanel"
@@ -1186,12 +1157,14 @@
               proposals: <strong>nothing enters the graph here</strong>.
               The document is stored as the record of what was looked at,
               even if nothing is found, and never below the case's own
-              classification. Text captured before is not stored twice: it
-              keeps the label it was first stored at, and what it raises
-              here carries the stricter of that label and this capture's.</p>
-            <!-- Why a compartmented case takes no capture (final review
-                 c15, 2026-09-24): filled by syncCaptureForm in app.js. -->
-            <p id="cap-scope" class="msg warn" role="status" hidden></p>
+              classification. Text captured before under the same
+              compartments is not stored twice: it keeps the label it was
+              first stored at, and what it raises here carries the stricter
+              of that label and this capture's.</p>
+            <!-- Where a capture here is listed, or why this case takes none
+                 (final review c15 and L1, 2026-09-24): filled by
+                 syncCaptureForm in app.js, which toggles the warn class. -->
+            <p id="cap-scope" class="msg" role="status" hidden></p>
             <label class="field">
               <span class="label">Title</span>
               <input id="cap-title" spellcheck="false"
@@ -1282,6 +1255,23 @@
             because a request that vanished would hide the fact that
             somebody once asked.
           </p>
+          <!-- The case's merge switch, where the approvals it
+               produces are listed (F9b, 2026-09-24). Turning it on is one
+               signature; turning it off takes a second Lead investigator on
+               the case, through a case.policy.relax request raised here.
+               Governance, so it stays live on a closed case. -->
+          <div id="apr-policy" class="card apr-policy">
+            <p id="apr-policy-text"></p>
+            <button id="apr-policy-btn" type="button" class="btn small" hidden></button>
+            <div id="apr-policy-relax" class="row-form" hidden>
+              <label class="field grow">
+                <span class="label">Why merges here no longer need two people</span>
+                <input id="apr-policy-just" type="text" autocomplete="off">
+              </label>
+              <button id="apr-policy-send" type="button" class="btn small">Ask for a second Lead investigator</button>
+            </div>
+            <p id="apr-policy-msg" class="msg" role="status" hidden></p>
+          </div>
           <div class="pane-head">
             <label class="field inline">
               <span class="label">Show</span>
@@ -1321,6 +1311,17 @@
                 <option value="24">24 months</option>
               </select>
             </label>
+            <!-- L3 (2026-09-24): compute over the ties a reviewer has
+                 accepted. "Accepted", not "reviewed": a disputed tie has been
+                 reviewed and is left out too. What is left out is counted
+                 under the results, never dropped silently. -->
+            <label class="field inline">
+              <span class="label">Ties</span>
+              <select id="an-ties" class="select">
+                <option value="all" selected>All ties</option>
+                <option value="accepted">Accepted ties only</option>
+              </select>
+            </label>
             <label class="field inline">
               <span class="label">Removal set</span>
               <select id="an-kpp-n" class="select">
@@ -1331,6 +1332,39 @@
                 <option value="5">5 entities</option>
               </select>
             </label>
+            <!-- F2 (2026-09-24): forums and wallets projected to ties between
+                 the entities they link. Last of the controls, so opening it
+                 takes a row of its own below them. Conversations are not
+                 offered here (docs/00 decision 73): the Comms pane's
+                 co-participation view projects them with its protections
+                 for third parties. -->
+            <details id="an-onemode" class="an-onemode">
+              <summary>Project venues to entities</summary>
+              <div class="an-onemode-body">
+                <label class="check"><input id="an-om-forum" type="checkbox"><span>Forums and channels</span></label>
+                <label class="check"><input id="an-om-wallet" type="checkbox"><span>Wallets and transactions</span></label>
+                <label class="field inline">
+                  <span class="label">Largest venue</span>
+                  <select id="an-om-max" class="select">
+                    <option value="10">10 entities</option>
+                    <option value="25">25 entities</option>
+                    <option value="50" selected>50 entities</option>
+                    <option value="100">100 entities</option>
+                    <option value="250">250 entities</option>
+                  </select>
+                </label>
+                <p class="help">A forum or a wallet is not a person. Projecting
+                  it replaces it with ties between the entities it links:
+                  entities who post on the same forum or channel, or control
+                  the same wallet, are tied, and money moving between wallets
+                  becomes a tie from the payer's controller to the payee's. A
+                  venue counts for less the more entities share it, and a
+                  venue larger than the limit is left out and named. These
+                  ties are derived, not observed. Conversations are not
+                  projected here: the Comms pane's co-participation view does
+                  that, with its protections for third parties.</p>
+              </div>
+            </details>
             <span id="an-status" class="muted small"></span>
           </div>
 
@@ -1459,6 +1493,22 @@
             <h3 class="h3">Cohesion</h3>
             <div id="an-cohesion"></div>
 
+            <!-- F1 (2026-09-24): CONCOR positions, their own run stored for
+                 each number of splits, read after the table is drawn. -->
+            <h3 class="h3">Roles: entities in the same position</h3>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Splits</span>
+                <select id="an-concor-depth" class="select">
+                  <option value="1">1 split, 2 positions</option>
+                  <option value="2" selected>2 splits, up to 4 positions</option>
+                  <option value="3">3 splits, up to 8 positions</option>
+                  <option value="4">4 splits, up to 16 positions</option>
+                </select>
+              </label>
+            </div>
+            <div id="an-concor"></div>
+
             <h3 class="h3">Signed balance</h3>
             <div id="an-balance"></div>
           </div>
@@ -1572,6 +1622,22 @@
               <input id="search-q" type="search" required spellcheck="false"
                      aria-describedby="search-help">
             </label>
+            <!-- How to match (F6.3, 2026-09-24). Exact words is the text
+                 search it always was; the two similarity modes compare
+                 passages and are offered only when this deployment has them
+                 (paintSearchModes). -->
+            <fieldset id="search-mode" class="search-mode"
+                      aria-describedby="search-similar-help">
+              <legend class="label">Match</legend>
+              <label class="search-mode-opt"><input type="radio"
+                     name="search-mode" value="text" checked> Exact words</label>
+              <label id="search-mode-wording" class="search-mode-opt" hidden><input
+                     type="radio" name="search-mode" value="wording"> Similar
+                     wording</label>
+              <label id="search-mode-meaning" class="search-mode-opt" hidden><input
+                     type="radio" name="search-mode" value="meaning"> Similar
+                     meaning</label>
+            </fieldset>
             <button type="submit" class="btn primary">Search</button>
           </form>
           <p id="search-help" class="help search-help">Any fragment of three
@@ -1582,6 +1648,9 @@
             exhibit text and collected documents match on word starts.
             Assertions are the live claims, found by their rationale, the
             exhibit they cite, or a grading such as C3.</p>
+          <!-- What the similarity modes do, filled in by
+               paintSearchModes with where the model is (F6.3). -->
+          <p id="search-similar-help" class="help search-help" hidden></p>
           <p id="search-scope" class="search-scope" role="status" hidden></p>
           <!-- Four columns since 2026-09-23 (ux09-search
                documents-unsearchable and assertions-unsearchable). -->
@@ -1710,6 +1779,92 @@
           </form>
           <div id="comms-block-out"></div>
 
+          <!-- Vendor keys (F10b, F10c, 2026-09-24). A key used to be pasted
+               into a check and thrown away, so nothing recorded which key a
+               check used, where it came from, or who compared its
+               fingerprint with the one the actor published. Here a key is
+               recorded with where it was obtained, and a person confirms
+               its fingerprint against a published one before any check
+               stands on it. Ids are prefixed comms-pgpkey- because the
+               Feeds pane already uses key-*. -->
+          <section id="comms-pgpkey" class="stack">
+            <h2 class="h-sm">Vendor keys</h2>
+            <p class="help">
+              A key recorded here says where it was obtained and who compared
+              its fingerprint with the one the actor published. Nothing is
+              confirmed when it is added.
+            </p>
+            <form id="comms-pgpkey-form" class="card stack" novalidate>
+              <fieldset class="pgp-choice">
+                <legend class="label">Where the key comes from</legend>
+                <label class="check"><input id="comms-pgpkey-src-paste"
+                  type="radio" name="comms-pgpkey-src" value="PASTE"
+                  checked><span>Paste it</span></label>
+                <label class="check"><input id="comms-pgpkey-src-file"
+                  type="radio" name="comms-pgpkey-src"
+                  value="FILE"><span>A key file</span></label>
+                <label id="comms-pgpkey-src-wkd-label" class="check" hidden><input
+                  id="comms-pgpkey-src-wkd" type="radio" name="comms-pgpkey-src"
+                  value="WKD"><span>Look it up in a Web Key Directory</span></label>
+              </fieldset>
+              <p id="comms-pgpkey-wkd-off" class="hint" hidden></p>
+              <div id="comms-pgpkey-import-box" class="stack">
+                <label id="comms-pgpkey-paste-box" class="field">
+                  <span class="label">The public key, as published</span>
+                  <textarea id="comms-pgpkey-armor" rows="5" spellcheck="false"
+                            placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+                </label>
+                <label id="comms-pgpkey-file-box" class="field" hidden>
+                  <span class="label">The key file</span>
+                  <input id="comms-pgpkey-file" type="file">
+                </label>
+                <label class="field">
+                  <span class="label">Where this key was obtained</span>
+                  <input id="comms-pgpkey-source-ref" type="text" spellcheck="false"
+                         placeholder="the profile, thread or page it came from">
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="comms-pgpkey-class" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">From contact block (optional)</span>
+                  <select id="comms-pgpkey-block" class="select"></select>
+                </label>
+                <p id="comms-pgpkey-note" class="hint" hidden></p>
+                <p id="comms-pgpkey-msg" class="msg" hidden></p>
+                <button type="submit" class="btn primary">Add key</button>
+              </div>
+            </form>
+            <!-- A lookup is asked for here and approved and sent by somebody
+                 else, from the list below (docs/00 decision 75). Only the hash
+                 leaves. -->
+            <form id="comms-pgpkey-wkd-form" class="card stack" novalidate hidden>
+              <label class="field">
+                <span class="label">Address to look up</span>
+                <input id="comms-pgpkey-wkd-address" type="text" spellcheck="false"
+                       autocomplete="off" placeholder="vendor@provider">
+              </label>
+              <p id="comms-pgpkey-wkd-dirs" class="hint"></p>
+              <label class="field">
+                <span class="label">Why the key is needed</span>
+                <textarea id="comms-pgpkey-wkd-reason" rows="2"
+                          spellcheck="false"></textarea>
+              </label>
+              <p id="comms-pgpkey-wkd-exposure" class="hint warn"></p>
+              <p id="comms-pgpkey-wkd-msg" class="msg" hidden></p>
+              <button type="submit" class="btn primary">Ask for a lookup</button>
+            </form>
+            <h3 class="h-sm">Key lookups</h3>
+            <div id="comms-pgpkey-lookups"></div>
+            <p id="comms-pgpkey-lookups-empty" class="empty" hidden>
+              No key lookups in this case.</p>
+            <h3 class="h-sm">Keys in this case</h3>
+            <div id="comms-pgpkey-list"></div>
+            <p id="comms-pgpkey-empty" class="empty" hidden>
+              No vendor keys in this case yet.</p>
+          </section>
+
           <!-- PGP verification. The one path in Phase 7 that produces a
                CONFIRMATION rather than a claim, which is why the outcome
                is rendered as loudly as it is: docs/10 says a CONFIRMED
@@ -1728,21 +1883,75 @@
               control</strong>, not a claim. Everything else on this pane
               produces claims.
             </p>
-            <label class="field">
+            <!-- F10: the claim a check confirms, when one was chosen
+                 from the queue below. -->
+            <p id="comms-pgp-binding" class="hint pgp-binding" hidden>
+              <span id="comms-pgp-binding-text"></span>
+              <button id="comms-pgp-binding-clear" type="button"
+                      class="btn ghost small">Clear</button>
+            </p>
+            <fieldset class="pgp-choice">
+              <legend class="label">What was published</legend>
+              <label class="check"><input id="comms-pgp-kind-clear" type="radio"
+                name="comms-pgp-kind" value="CLEARSIGNED" checked><span>A
+                clearsigned message</span></label>
+              <label class="check"><input id="comms-pgp-kind-detached"
+                type="radio" name="comms-pgp-kind" value="DETACHED"><span>A
+                detached signature beside a file</span></label>
+            </fieldset>
+            <label id="comms-pgp-clear-box" class="field">
               <span class="label">The clearsigned message, as published</span>
               <textarea id="comms-pgp-message" rows="8" required
                         spellcheck="false"
                         placeholder="-----BEGIN PGP SIGNED MESSAGE-----"></textarea>
             </label>
+            <div id="comms-pgp-detached-box" class="stack" hidden>
+              <label class="field">
+                <span class="label">The detached signature</span>
+                <textarea id="comms-pgp-sig" rows="4" spellcheck="false"
+                          placeholder="-----BEGIN PGP SIGNATURE-----"></textarea>
+              </label>
+              <label class="field">
+                <span class="label">Or the signature file</span>
+                <input id="comms-pgp-sig-file" type="file">
+              </label>
+              <label class="field">
+                <span class="label">The signed data, pasted</span>
+                <textarea id="comms-pgp-data" rows="4" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span class="label">Or the signed file itself</span>
+                <input id="comms-pgp-data-file" type="file">
+              </label>
+              <p class="hint">
+                Upload the signed file itself when you have it. A pasted copy
+                loses Windows line endings, and a signature over the file's
+                exact bytes then fails.
+              </p>
+            </div>
             <label class="field">
-              <span class="label">The vendor's public key</span>
-              <textarea id="comms-pgp-key" rows="5" required spellcheck="false"
-                        placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+              <span class="label">Key</span>
+              <select id="comms-pgp-keysel" class="select"></select>
             </label>
-            <label class="field">
-              <span class="label">Fingerprint it should be signed by</span>
-              <input id="comms-pgp-fpr" type="text" spellcheck="false"
-                     placeholder="spaced or unspaced, both accepted">
+            <div id="comms-pgp-paste-box" class="stack">
+              <label class="field">
+                <span class="label">The vendor's public key</span>
+                <textarea id="comms-pgp-key" rows="5" required spellcheck="false"
+                          placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+              </label>
+              <label class="field">
+                <span class="label">Fingerprint it should be signed by</span>
+                <input id="comms-pgp-fpr" type="text" spellcheck="false"
+                       placeholder="spaced or unspaced, both accepted">
+              </label>
+              <label class="field">
+                <span class="label">Where this fingerprint was published (optional)</span>
+                <input id="comms-pgp-fpr-ref" type="text" spellcheck="false">
+              </label>
+            </div>
+            <label id="comms-pgp-block-box" class="field" hidden>
+              <span class="label">The contact block that ties this key to the claim</span>
+              <select id="comms-pgp-block" class="select"></select>
             </label>
             <label class="field">
               <span class="label">Identifier this should confirm (optional)</span>
@@ -1754,10 +1963,20 @@
           </form>
           <div id="comms-pgp-out"></div>
 
+          <h2 class="h-sm">Recorded checks</h2>
+          <div class="pane-head">
+            <button id="comms-pgp-ledger-load" type="button" class="btn">
+              Show recorded checks</button>
+            <span id="comms-pgp-ledger-count" class="muted small"></span>
+          </div>
+          <div id="comms-pgp-ledger"></div>
+          <p id="comms-pgp-ledger-empty" class="empty">
+            Recorded checks load when you ask for them.</p>
+
           <h2 class="h-sm">Awaiting verification</h2>
           <p class="help">
-            Bindings still at CLAIMED that have a fingerprint to check
-            against. A claim nobody checked is not a rejected one.
+            Bindings still at CLAIMED. A claim nobody checked is not a
+            rejected one.
           </p>
           <div class="pane-head">
             <button id="comms-unverified-refresh" type="button" class="btn">
@@ -2045,13 +2264,382 @@
             <div id="src-due"></div>
             <p id="src-due-empty" class="empty" hidden>Nothing is due.</p>
 
+            <!-- Sources (2026-09-24): what the collector leaves alone until
+                 a person acts. Not polled, not rescheduled, not a failure. -->
+            <h2 class="h-sm">Waiting on a person</h2>
+            <p class="help">
+              Sources the collector leaves alone until somebody acts: a
+              ceiling to declare, a persona to rest or replace, or an
+              authority to confirm. Nothing here is polled, and nothing here
+              counts as a failure.
+            </p>
+            <div id="src-held"></div>
+            <p id="src-held-empty" class="empty" hidden>Nothing is waiting on a person.</p>
+
+            <!-- Sources (2026-09-24): every source, who reads it and
+                 through which exit, and the way to add one. -->
+            <h2 class="h-sm">Sources</h2>
+            <details id="src-add-box" class="card" hidden>
+              <summary>Add a source</summary>
+              <form id="src-add-form" class="row-form" novalidate>
+                <label class="field">
+                  <span class="label">Parser</span>
+                  <select id="src-add-parser" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Kind</span>
+                  <select id="src-add-kind" class="select"></select>
+                </label>
+                <label class="field grow">
+                  <span class="label">Name</span>
+                  <input id="src-add-name" type="text" minlength="3" maxlength="200"
+                         required autocomplete="off" spellcheck="false">
+                </label>
+                <label class="field grow">
+                  <span class="label">Address</span>
+                  <input id="src-add-url" type="url" maxlength="2048"
+                         autocomplete="off" spellcheck="false"
+                         placeholder="https://board.example.test/forums/7/">
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="src-add-class" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Reliability</span>
+                  <select id="src-add-rel" class="select">
+                    <option>A</option><option>B</option><option selected>C</option>
+                    <option>D</option><option>E</option><option>F</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Poll every (minutes)</span>
+                  <input id="src-add-every" type="number" min="1" max="10080"
+                         value="15" required>
+                </label>
+                <label class="field">
+                  <span class="label">Jitter (percent)</span>
+                  <input id="src-add-jitter" type="number" min="0" max="90"
+                         value="25" required>
+                </label>
+                <label class="field">
+                  <span class="label">Requests per second</span>
+                  <input id="src-add-rps" type="number" min="0.01" max="10"
+                         step="0.01" value="0.2" required>
+                </label>
+                <label id="src-add-persona-field" class="field" hidden>
+                  <span class="label">Read as</span>
+                  <select id="src-add-persona" class="select"></select>
+                </label>
+                <label id="src-add-egress-field" class="field" hidden>
+                  <span class="label">Egress profile</span>
+                  <select id="src-add-egress" class="select"></select>
+                </label>
+                <!-- F3 and F4 (2026-09-24): what a forum parser reads
+                     beside the address; the zone and formats are MyBB's. -->
+                <label id="src-add-pages-field" class="field" hidden>
+                  <span class="label">Pages per poll</span>
+                  <input id="src-add-pages" type="number" min="1" max="20" value="5">
+                </label>
+                <label id="src-add-recheck-field" class="field" hidden>
+                  <span class="label">Pages rechecked</span>
+                  <input id="src-add-recheck" type="number" min="0" max="5" value="2">
+                </label>
+                <label id="src-add-members-field" class="field" hidden>
+                  <span class="label">Member pages per poll</span>
+                  <input id="src-add-members" type="number" min="0" max="10" value="0">
+                </label>
+                <label id="src-add-zone-field" class="field" hidden>
+                  <span class="label">Board time zone</span>
+                  <input id="src-add-zone" type="text" maxlength="64"
+                         autocomplete="off" spellcheck="false"
+                         placeholder="Europe/Riga">
+                </label>
+                <label id="src-add-datefmt-field" class="field" hidden>
+                  <span class="label">Board date format</span>
+                  <select id="src-add-datefmt" class="select"></select>
+                </label>
+                <label id="src-add-timefmt-field" class="field" hidden>
+                  <span class="label">Board time format</span>
+                  <select id="src-add-timefmt" class="select"></select>
+                </label>
+                <button id="src-add-btn" type="submit" class="btn primary">
+                  Add source</button>
+              </form>
+              <p class="help">
+                A forum or Telegram source is not read until its
+                classification is within the declared ceiling and a security
+                officer has confirmed the authority that covers it.
+              </p>
+              <p id="src-add-forum-help" class="help" hidden
+                 data-hint-xenforo="https://board.example.test/threads/name.123/"
+                 data-hint-mybb="https://board.example.test/showthread.php?tid=12">
+                A XenForo or MyBB source is a public thread or board, read
+                without signing in: the forum sees NocTORnal-collector in its
+                access logs, from the egress profile, never from this server.
+                Each poll reads the new pages and rechecks the last few for
+                edits and deletions. A MyBB board prints times in its own zone
+                with no offset: give the zone and the two formats its settings
+                show, or no posting time is stored.
+              </p>
+              <p id="src-add-error" class="form-error" role="alert" hidden></p>
+              <p id="src-add-ok" class="form-ok" role="status" hidden></p>
+            </details>
+            <div id="src-all"></div>
+            <p id="src-all-empty" class="empty" hidden>No sources are configured.</p>
+
+            <!-- F5.3 (2026-09-24): Telegram chats. A chat is looked up
+                 as its persona before it is added, and read only once a
+                 second person has confirmed it under the persona's
+                 authority. -->
+            <h2 class="h-sm">Telegram chats</h2>
+            <p class="help">
+              Each chat is read by one persona, through that persona's egress
+              profile, under an authority a second person confirmed. Nothing
+              is sent, nothing is marked read, and no watch term leaves this
+              server.
+            </p>
+            <p id="src-tg-off" class="help warn" hidden></p>
+            <details id="src-tg-box" class="card" hidden>
+              <summary>Add a chat</summary>
+              <form id="src-tg-form" class="row-form" novalidate>
+                <label class="field">
+                  <span class="label">Persona</span>
+                  <select id="stg-persona" class="select"></select>
+                </label>
+                <label class="field grow">
+                  <span class="label">Chat</span>
+                  <input id="stg-ref" type="text" maxlength="200" required
+                         autocomplete="off" spellcheck="false"
+                         placeholder="@name, t.me/name or c:1234567890">
+                </label>
+                <label class="field grow">
+                  <span class="label">Name</span>
+                  <input id="stg-name" type="text" minlength="3" maxlength="120"
+                         required autocomplete="off">
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="stg-class" class="select"></select>
+                </label>
+                <fieldset class="field grow src-fieldset">
+                  <legend class="label">How it is read</legend>
+                  <label class="field inline check">
+                    <input id="stg-public" type="radio" name="stg-mode"
+                           value="PUBLIC_READ" checked>
+                    <span>Read without joining (public chats only)</span>
+                  </label>
+                  <label class="field inline check">
+                    <input id="stg-member" type="radio" name="stg-mode" value="MEMBER">
+                    <span>Read as a member</span>
+                  </label>
+                </fieldset>
+                <label class="field">
+                  <span class="label">Poll every (minutes)</span>
+                  <input id="stg-every" type="number" min="5" max="10080"
+                         value="30" required>
+                </label>
+                <button id="stg-btn" type="submit" class="btn primary">
+                  Look it up and add</button>
+              </form>
+              <p class="help">
+                Looking a chat up asks Telegram, as the persona, which chat the
+                name belongs to. An invite link is never followed: join a
+                private chat from the persona's own device, then add it by its
+                id.
+              </p>
+              <p id="stg-error" class="form-error" role="alert" hidden></p>
+              <p id="stg-ok" class="form-ok" role="status" hidden></p>
+            </details>
+            <div id="src-tg"></div>
+            <p id="src-tg-empty" class="empty" hidden>No Telegram chats are configured.</p>
+
             <h2 class="h-sm">Personas</h2>
             <p class="help">
               BURNED is terminal. Re-using one a forum admin has already
               flagged is how you burn the next one too.
             </p>
+            <!-- Personas (2026-09-24): a persona is created here with NO
+                 credential; an operator enrols it on the server. -->
+            <p id="src-persona-none" class="help" hidden>No adapter in this
+              build reads through a persona yet.</p>
+            <details id="src-persona-box" class="card" hidden>
+              <summary>Create a persona</summary>
+              <form id="src-persona-form" class="row-form" novalidate>
+                <label class="field grow">
+                  <span class="label">Handle</span>
+                  <input id="sp-handle" type="text" minlength="2" maxlength="64"
+                         required autocomplete="off" spellcheck="false">
+                </label>
+                <label class="field">
+                  <span class="label">Platform</span>
+                  <select id="sp-platform" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Egress profile</span>
+                  <select id="sp-egress" class="select"></select>
+                </label>
+                <label id="sp-ua-field" class="field grow" hidden>
+                  <span class="label">Browser identity</span>
+                  <input id="sp-ua" type="text" maxlength="400" autocomplete="off"
+                         spellcheck="false">
+                </label>
+                <!-- F5.2 (2026-09-24): what Telegram is told this
+                     persona's device is, so it never sees this server's
+                     platform string. Shown for a Telegram persona only. -->
+                <fieldset id="sp-tg-device" class="field grow src-fieldset" hidden>
+                  <legend class="label">Telegram device</legend>
+                  <label class="field">
+                    <span class="label">Device model</span>
+                    <input id="sp-tg-model" type="text" maxlength="64"
+                           autocomplete="off" spellcheck="false" placeholder="Pixel 7">
+                  </label>
+                  <label class="field">
+                    <span class="label">System version</span>
+                    <input id="sp-tg-system" type="text" maxlength="64"
+                           autocomplete="off" spellcheck="false" placeholder="Android 14">
+                  </label>
+                  <label class="field">
+                    <span class="label">App version</span>
+                    <input id="sp-tg-app" type="text" maxlength="32"
+                           autocomplete="off" spellcheck="false" placeholder="10.14.5">
+                  </label>
+                  <label class="field">
+                    <span class="label">Language code</span>
+                    <input id="sp-tg-lang" type="text" maxlength="8"
+                           autocomplete="off" spellcheck="false" placeholder="en">
+                  </label>
+                  <label class="field">
+                    <span class="label">System language code</span>
+                    <input id="sp-tg-syslang" type="text" maxlength="16"
+                           autocomplete="off" spellcheck="false" placeholder="en-GB">
+                  </label>
+                  <p class="help">
+                    What Telegram is told this persona's device is. Choose
+                    something ordinary and keep it for the life of the
+                    persona.
+                  </p>
+                </fieldset>
+                <label class="field">
+                  <span class="label">Language</span>
+                  <input id="sp-lang" type="text" maxlength="64" autocomplete="off"
+                         spellcheck="false" placeholder="en-GB,en;q=0.9">
+                </label>
+                <label class="field">
+                  <span class="label">Active from (UTC)</span>
+                  <input id="sp-from" type="time">
+                </label>
+                <label class="field">
+                  <span class="label">Active until (UTC)</span>
+                  <input id="sp-to" type="time">
+                </label>
+                <label class="field grow">
+                  <span class="label">Notes</span>
+                  <input id="sp-notes" type="text" maxlength="2000" autocomplete="off">
+                </label>
+                <button id="sp-btn" type="submit" class="btn primary">
+                  Create persona</button>
+              </form>
+              <p class="help">
+                Do not put the account's phone number or password here.
+                Credentials are enrolled on the server, never through this
+                console.
+              </p>
+              <p id="sp-error" class="form-error" role="alert" hidden></p>
+              <p id="sp-ok" class="form-ok" role="status" hidden></p>
+            </details>
             <div id="src-personas"></div>
             <p id="src-personas-empty" class="empty" hidden>No personas.</p>
+
+            <!-- Collection authorities (2026-09-24): the written authorities every forum
+                 and Telegram source needs, recorded here by a collection
+                 manager and confirmed by a security officer in Oversight. -->
+            <h2 class="h-sm">Collection authorities</h2>
+            <details id="src-auth-box" class="card" hidden>
+              <summary>Record an authority</summary>
+              <form id="src-auth-form" class="row-form" novalidate>
+                <label class="field grow">
+                  <span class="label">Persona</span>
+                  <select id="sa-persona" class="select"></select>
+                </label>
+                <fieldset class="field grow src-fieldset">
+                  <legend class="label">What it allows</legend>
+                  <label class="field inline check">
+                    <input id="sa-scope-public" type="radio" name="sa-scope"
+                           value="PUBLIC_READ" checked>
+                    <span>Read what the platform shows to anyone, without
+                      joining or signing in to a members' area</span>
+                  </label>
+                  <label class="field inline check">
+                    <input id="sa-scope-member" type="radio" name="sa-scope"
+                           value="MEMBER_READ">
+                    <span>Read as a member, including what only members
+                      see</span>
+                  </label>
+                </fieldset>
+                <label id="sa-member-field" class="field grow" hidden>
+                  <span class="label">Member access authority reference</span>
+                  <input id="sa-member" type="text" maxlength="200" autocomplete="off">
+                </label>
+                <label class="field">
+                  <span class="label">Authority reference</span>
+                  <input id="sa-ref" type="text" minlength="3" maxlength="200"
+                         required autocomplete="off" spellcheck="false">
+                </label>
+                <label class="field">
+                  <span class="label">Issued by</span>
+                  <input id="sa-issuer" type="text" maxlength="200" required
+                         autocomplete="off">
+                </label>
+                <label class="field">
+                  <span class="label">Jurisdiction</span>
+                  <input id="sa-jur" type="text" maxlength="100" required
+                         autocomplete="off">
+                </label>
+                <label class="field grow">
+                  <span class="label">Legal basis</span>
+                  <input id="sa-basis" type="text" maxlength="500" required
+                         autocomplete="off">
+                </label>
+                <label class="field grow">
+                  <span class="label">What it covers</span>
+                  <textarea id="sa-covers" rows="3" maxlength="2000"></textarea>
+                </label>
+                <label class="field">
+                  <span class="label">Classification</span>
+                  <select id="sa-class" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Valid from (UTC)</span>
+                  <input id="sa-from" type="date" required>
+                </label>
+                <label class="field">
+                  <span class="label">Valid until (UTC)</span>
+                  <input id="sa-until" type="date" required>
+                </label>
+                <fieldset class="field grow src-fieldset">
+                  <legend class="label">Sources it covers</legend>
+                  <div id="sa-sources" class="check-list"></div>
+                </fieldset>
+                <button id="sa-btn" type="submit" class="btn primary">
+                  Record authority</button>
+              </form>
+              <p class="help">
+                The authority itself is a document outside this system. Record
+                its reference exactly as an auditor would look it up. A
+                security officer confirms it, and each source under it, before
+                any of them is read. Reading as a member needs its own
+                reference, because it is a different act from reading what is
+                public. An authority for a persona with no sources allows the
+                persona's own acts and no read. Adapter collection carries no
+                compartments: work that needs a compartment, or a label above
+                the declared ceiling, is collected by hand into its case.
+              </p>
+              <p id="sa-error" class="form-error" role="alert" hidden></p>
+              <p id="sa-ok" class="form-ok" role="status" hidden></p>
+            </details>
+            <div id="src-auth"></div>
+            <p id="src-auth-empty" class="empty" hidden>No collection authority is recorded.</p>
 
             <h2 class="h-sm">Recent runs</h2>
             <div id="src-runs"></div>
@@ -2458,6 +3046,47 @@
             <button type="button" class="subtab" role="tab"
                     aria-selected="false" tabindex="-1" data-subtab="audit"
                     aria-controls="gov-audit">Audit chain</button>
+            <!-- Lookups (F15.3 and F15.4, 2026-09-24). -->
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="lookups"
+                    aria-controls="gov-lookups">Lookups</button>
+          </div>
+
+          <!-- LOOKUPS (F15.3 and F15.4). What this case sent to an outbound
+               lookup provider, and what came back. A lookup that sends case
+               material to a vendor or the public waits for a named second
+               person to sign it off here, in the product. -->
+          <div id="gov-lookups" class="subpane" hidden>
+            <p class="help">A lookup sends one selector from this case to a
+              provider. Your own instance (NONE) is asked at once; a vendor or a
+              public service is asked only after the colleague the requester
+              names signs it off here. Every answer is kept as case material and
+              becomes proposals in Triage, never graph.</p>
+            <p id="lk-msg" class="msg" role="status" hidden></p>
+            <h2 class="h-sm">Waiting for your sign-off</h2>
+            <div id="lk-signoff" class="stack"></div>
+            <p id="lk-signoff-empty" class="empty" hidden>Nothing waits for you.</p>
+            <h2 class="h-sm">This case's lookups</h2>
+            <div class="pane-head">
+              <button id="lk-refresh" type="button" class="btn">Refresh</button>
+            </div>
+            <div id="lk-list" class="stack"></div>
+            <p id="lk-empty" class="empty" hidden>Nothing has been looked up.</p>
+            <h2 class="h-sm">Planned batches</h2>
+            <form id="lk-plan" class="card row-form" novalidate>
+              <label class="field">
+                <span class="label">Provider</span>
+                <select id="lk-plan-provider" class="select"></select>
+              </label>
+              <label class="field">
+                <span class="label">Every selector of type</span>
+                <input id="lk-plan-type" type="text" class="mono" autocomplete="off"
+                       spellcheck="false" placeholder="DOMAIN">
+              </label>
+              <button id="lk-plan-btn" type="submit" class="btn">Preview</button>
+            </form>
+            <div id="lk-plan-card" class="card" hidden></div>
+            <div id="lk-batches" class="stack"></div>
           </div>
 
           <!-- AUDIT CHAIN. docs/09 Phase 0 asks for a "verifiable audit
@@ -2763,6 +3392,34 @@
             <button type="button" class="subtab" role="tab"
                     aria-selected="false" tabindex="-1" data-subtab="compartments"
                     aria-controls="adm-compartments">Compartments</button>
+            <!-- The two-person policy (F9, 2026-09-24). -->
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="dual"
+                    aria-controls="adm-dual">Two-person controls<span
+                    id="adm-dual-badge" class="subtab-badge" hidden></span></button>
+            <!-- Egress (S2, 2026-09-24). Shown to an account holding
+                 egress.manage or egress.log.read; after Two-person
+                 controls. -->
+            <button type="button" class="subtab" role="tab" id="adm-sub-egress"
+                    aria-selected="false" tabindex="-1" data-subtab="egress"
+                    aria-controls="adm-egress" hidden>Egress</button>
+            <!-- The similarity indexes (F6.3, 2026-09-24). After Egress, and
+                 shown only to an account holding embedding.manage
+                 (loadAdminAccess). -->
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="embeddings"
+                    aria-controls="adm-embeddings" hidden>Embeddings</button>
+            <!-- Outbound integrations and lookup providers (F8 and
+                 F15.2, 2026-09-24). data-needs names the /admin/access flag
+                 that shows each; both stay hidden until it says so. -->
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="integrations"
+                    data-needs="integration_manage" aria-controls="adm-integrations"
+                    hidden>Integrations</button>
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="providers"
+                    data-needs="integration_manage" aria-controls="adm-providers"
+                    hidden>Providers</button>
           </div>
           <!-- What an account action did, said to a screen reader
                (`admSay`). Outside every section, so it is never hidden with
@@ -2921,12 +3578,609 @@
             <div id="adm-cmp-life"></div>
             <p id="adm-cmp-life-empty" class="empty" hidden>No compartments loaded.</p>
           </div>
+
+          <!-- Which acts take two people, and how that changes (F9,
+               2026-09-24). #dual-body is MOVED into the Oversight view's
+               "Two-person changes" section for a Security officer who
+               administers nothing (showDualReview), and back here after,
+               so the markup exists once. Changing any of it takes two
+               people too: an administrator proposes, a Security officer
+               who is not an administrator countersigns, and the
+               administrator applies it. -->
+          <div id="adm-dual" class="subpane adm-section" hidden>
+            <div id="dual-body" class="stack">
+              <p class="help">Which acts take two different people, who can be
+                each of them, and the changes waiting. Changing any of it
+                takes two people too: an administrator proposes, a Security
+                officer countersigns, and the administrator applies it. Keep
+                case details out of a justification: a Security officer reads
+                it and holds no case access.</p>
+              <p id="dual-say" class="sr-only" role="status" aria-live="polite"></p>
+              <p id="dual-refused" class="empty refused" hidden></p>
+              <button id="dual-signin" type="button" class="btn" hidden>Sign in again</button>
+              <h2 class="h-sm">Changes waiting</h2>
+              <p id="dual-msg" class="msg" role="status" hidden></p>
+              <div id="dual-changes"></div>
+              <p id="dual-changes-empty" class="empty" hidden>No change is waiting.</p>
+              <h2 class="h-sm">Operations</h2>
+              <div id="dual-ops"></div>
+              <h2 class="h-sm">Two people by role</h2>
+              <p class="help">Each pair is two permissions no single role may
+                hold together, so whoever holds one half needs someone else
+                for the other.</p>
+              <p id="dual-violations" class="msg bad" role="alert" hidden></p>
+              <div id="dual-pairs"></div>
+              <details id="dual-pair-add" class="card adm-create" hidden>
+                <summary class="adm-create-sum">Propose a pair</summary>
+                <form id="dual-pair-form" class="stack" novalidate>
+                  <div class="row-form">
+                    <label class="field grow">
+                      <span class="label">One permission</span>
+                      <select id="dual-pair-a" class="select"></select>
+                    </label>
+                    <label class="field grow">
+                      <span class="label">The other</span>
+                      <select id="dual-pair-b" class="select"></select>
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span class="label">Why no role may hold both</span>
+                    <input id="dual-pair-why" type="text" autocomplete="off"
+                           minlength="10">
+                  </label>
+                  <label class="field">
+                    <span class="label">Justification for the countersigner</span>
+                    <input id="dual-pair-just" type="text" autocomplete="off">
+                  </label>
+                  <p class="help">A release that later grants both halves to
+                    one role will stop at upgrade until the pair is removed
+                    here.</p>
+                  <div class="setup-actions">
+                    <button id="dual-pair-btn" type="submit" class="btn primary">Propose</button>
+                  </div>
+                  <p id="dual-pair-msg" class="msg" role="status" hidden></p>
+                </form>
+              </details>
+              <div id="dual-other-box" hidden>
+                <h2 class="h-sm">Other acts that take two people</h2>
+                <div id="dual-other"></div>
+              </div>
+              <h2 class="h-sm">History</h2>
+              <div id="dual-history"></div>
+              <p id="dual-history-empty" class="empty" hidden>No change has been applied.</p>
+            </div>
+          </div>
+
+          <!-- Administration, Egress (S2, 2026-09-24; docs/00 decision 68).
+               Where anything may leave this deployment:
+               egress profiles and their sealed exits for persona traffic,
+               integration routes and their exact destinations, and the
+               connection log the egress proxy writes. Every write asks for
+               a recent sign-in and is audited. An exit's address and
+               credentials are sealed for the proxy and never shown again,
+               so no field here is ever filled from the server. -->
+          <div id="adm-egress" class="subpane adm-section" hidden>
+            <p class="help">Where anything may leave this deployment. Every
+              change asks for a sign-in from the last 15 minutes and is
+              audited. A change that lets a profile reach further than
+              before stops the collection authorities recorded before it
+              from working until a second person confirms a new one.</p>
+            <p id="egr-say" class="sr-only" role="status" aria-live="polite"></p>
+            <p id="egr-refused" class="empty refused" hidden></p>
+            <button id="egr-signin" type="button" class="btn" hidden>Sign in again</button>
+            <div id="egr-status" class="card row-card egr-status"></div>
+
+            <h2 class="h-sm">Persona exits</h2>
+            <p id="egr-notice" class="help"></p>
+            <details id="egr-prof-box" class="card adm-create" hidden>
+              <summary class="adm-create-sum">Add an egress profile</summary>
+              <form id="egr-prof-form" class="stack" novalidate>
+                <div class="row-form">
+                  <label class="field grow">
+                    <span class="label">Name</span>
+                    <input id="egr-prof-name" type="text" autocomplete="off"
+                           minlength="3" maxlength="80" spellcheck="false">
+                  </label>
+                  <label class="field">
+                    <span class="label">Kind</span>
+                    <select id="egr-prof-kind" class="select">
+                      <option value="RESIDENTIAL">Residential</option>
+                      <option value="DATACENTRE">Datacentre</option>
+                      <option value="VPN">VPN</option>
+                      <option value="TOR">Tor</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="label">Region</span>
+                    <input id="egr-prof-region" type="text" autocomplete="off" maxlength="80">
+                  </label>
+                  <label class="field">
+                    <span class="label">Highest label it may carry</span>
+                    <select id="egr-prof-ceiling" class="select">
+                      <option value="" selected disabled>Choose a label</option>
+                      <option value="CLEAR">CLEAR</option>
+                      <option value="GREEN">GREEN</option>
+                      <option value="AMBER">AMBER</option>
+                      <option value="AMBER_STRICT">AMBER STRICT</option>
+                      <option value="RED">RED</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Ports, comma separated</span>
+                    <input id="egr-prof-ports" type="text" autocomplete="off" value="443">
+                  </label>
+                  <label class="check"><input id="egr-prof-any" type="checkbox">
+                    Any public host</label>
+                  <label class="check" id="egr-prof-onion-box" hidden><input
+                    id="egr-prof-onion" type="checkbox"> Onion services</label>
+                </div>
+                <label class="field">
+                  <span class="label">Host suffixes, one a line</span>
+                  <textarea id="egr-prof-suffixes" rows="3" spellcheck="false"></textarea>
+                </label>
+                <label class="field">
+                  <span class="label">Public networks, one a line</span>
+                  <textarea id="egr-prof-cidrs" rows="3" spellcheck="false"></textarea>
+                </label>
+                <label class="check"><input id="egr-prof-resolve" type="checkbox">
+                  Resolve target names at the proxy</label>
+                <p class="help">Every target name this persona visits is then
+                  looked up by this platform's own resolver, which the exit is
+                  meant to hide.</p>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Idle seconds</span>
+                    <input id="egr-prof-idle" type="number" min="5" max="3600" value="120">
+                  </label>
+                  <label class="field">
+                    <span class="label">Session seconds</span>
+                    <input id="egr-prof-session" type="number" min="10" max="86400" value="900">
+                  </label>
+                  <label class="field">
+                    <span class="label">Connections at once</span>
+                    <input id="egr-prof-conc" type="number" min="1" max="64" value="4">
+                  </label>
+                </div>
+                <p id="egr-preset-help" class="help" hidden></p>
+                <div class="setup-actions">
+                  <button id="egr-preset-telegram" type="button" class="btn" hidden>Telegram data centres</button>
+                  <button id="egr-prof-btn" type="submit" class="btn primary">Add profile</button>
+                </div>
+                <p id="egr-prof-msg" class="msg" role="status" hidden></p>
+              </form>
+            </details>
+            <div id="egr-prof-list"></div>
+            <p id="egr-prof-empty" class="empty" hidden>No egress profile yet.</p>
+            <details id="egr-prof-retired" class="egr-retired" hidden>
+              <summary id="egr-prof-retired-sum"></summary>
+              <div id="egr-prof-retired-list"></div>
+            </details>
+            <p id="egr-prof-hidden" class="help" hidden></p>
+
+            <h2 class="h-sm">Integration routes</h2>
+            <p class="help">Each route names exactly where one integration may
+              connect, as host and port, or host and the private network its
+              address must be in. There is no wildcard.</p>
+            <details id="egr-route-box" class="card adm-create" hidden>
+              <summary class="adm-create-sum">Add a route</summary>
+              <form id="egr-route-form" class="stack" novalidate>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Integration</span>
+                    <select id="egr-route-name" class="select"></select>
+                  </label>
+                  <label class="field" id="egr-route-key-box" hidden>
+                    <span class="label">Provider key</span>
+                    <input id="egr-route-key" type="text" autocomplete="off" maxlength="33"
+                           spellcheck="false">
+                  </label>
+                  <label class="field grow">
+                    <span class="label">What it is for</span>
+                    <input id="egr-route-desc" type="text" autocomplete="off"
+                           minlength="5" maxlength="500">
+                  </label>
+                </div>
+                <div class="setup-actions">
+                  <button id="egr-route-btn" type="submit" class="btn primary">Add route</button>
+                </div>
+                <p id="egr-route-msg" class="msg" role="status" hidden></p>
+              </form>
+            </details>
+            <div id="egr-route-list"></div>
+            <p id="egr-route-empty" class="empty" hidden>No integration route yet.
+              Nothing an integration sends can leave through the egress proxy
+              until a route names its destination.</p>
+            <details id="egr-route-retired" class="egr-retired" hidden>
+              <summary id="egr-route-retired-sum"></summary>
+              <div id="egr-route-retired-list"></div>
+            </details>
+
+            <h2 class="h-sm">Connection log</h2>
+            <p class="help">What the egress proxy let out and refused, newest
+              first. Rows you are not cleared to see are counted, not shown.</p>
+            <div class="row-form egr-log-controls">
+              <label class="field">
+                <span class="label">Route</span>
+                <select id="egr-log-route" class="select">
+                  <option value="">Every route</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Event</span>
+                <select id="egr-log-event" class="select">
+                  <option value="">Every event</option>
+                  <option value="OPEN">Opened</option>
+                  <option value="REFUSED">Refused</option>
+                  <option value="PREAUTH">Refused before sign-in</option>
+                  <option value="REWRAP">Sealed again</option>
+                </select>
+              </label>
+              <button id="egr-log-refresh" type="button" class="btn">Refresh</button>
+              <button id="egr-log-verify" type="button" class="btn">Verify the chain</button>
+            </div>
+            <p id="egr-log-verified" class="msg" role="status" hidden></p>
+            <div id="egr-log"></div>
+            <p id="egr-log-empty" class="empty" hidden>No connection is recorded.</p>
+            <p id="egr-log-hidden" class="help" hidden></p>
+          </div>
+
+          <!-- The similarity indexes (F6.3, 2026-09-24).
+               What each index is, where the model is, and the gaps, at the
+               administrator's own labels and only with collected-document
+               access; sizes are in the embed-pass log, not here. -->
+          <div id="adm-embeddings" class="subpane adm-section" hidden>
+            <p class="help">Similar wording runs on this host and sends nothing
+              anywhere. Similar meaning asks an operator's model server, and
+              only what its ceiling and its declarations allow ever leaves; each
+              batch is audited before it is sent. Every time here is UTC.</p>
+            <p id="emb-say" class="sr-only" role="status" aria-live="polite"></p>
+            <p id="emb-refused" class="empty refused" hidden></p>
+            <div class="emb-cards">
+              <section id="emb-wording" class="card stack emb-card"
+                       aria-labelledby="emb-wording-h">
+                <h2 id="emb-wording-h" class="h-sm">Similar wording</h2>
+                <div id="emb-wording-body" class="stack"></div>
+              </section>
+              <section id="emb-meaning" class="card stack emb-card"
+                       aria-labelledby="emb-meaning-h">
+                <h2 id="emb-meaning-h" class="h-sm">Similar meaning</h2>
+                <div id="emb-meaning-body" class="stack"></div>
+              </section>
+            </div>
+            <p id="emb-coverage-note" class="help" hidden></p>
+            <p id="emb-msg" class="msg" role="status" hidden></p>
+            <section id="emb-gaps-box" class="stack" hidden
+                     aria-labelledby="emb-gaps-h">
+              <h2 id="emb-gaps-h" class="h-sm">Not in the index</h2>
+              <div class="row-form">
+                <label class="field">
+                  <span class="label">Index</span>
+                  <select id="emb-gaps-space" class="select"></select>
+                </label>
+                <label class="field">
+                  <span class="label">Why</span>
+                  <select id="emb-gaps-status" class="select">
+                    <option value="">Any reason</option>
+                    <option value="FAILED">Failed</option>
+                    <option value="WITHHELD">Withheld</option>
+                    <option value="EXCLUDED">Excluded</option>
+                    <option value="EMPTY">Nothing to compare</option>
+                  </select>
+                </label>
+              </div>
+              <div id="emb-gaps"></div>
+              <p id="emb-gaps-empty" class="empty" hidden>No document you can read is
+                listed for this index.</p>
+              <button id="emb-gaps-more" type="button" class="btn small" hidden>Show
+                more</button>
+            </section>
+          </div>
+
+          <!-- Administration, Integrations (F8 and F7, 2026-09-24). What
+               tried to leave, where it went, why it did not, and whether
+               anything is draining; the Jira destination; the delivery
+               ledger, moved here from the Inbox. -->
+          <div id="adm-integrations" class="subpane adm-section" hidden>
+            <p class="help">Every channel that can carry a notification out of
+              the platform, the egress route each leaves by, and the ledger of
+              what tried to leave. A channel whose route is missing, or does
+              not allow its endpoint, is held: its deliveries wait and nothing
+              is attempted. Only an attempted send can fail.</p>
+            <p id="int-msg" class="msg" role="status" hidden></p>
+            <div id="int-channels" class="int-channels"></div>
+            <section id="int-outbox" class="card int-outbox" aria-labelledby="int-outbox-title">
+              <h2 id="int-outbox-title" class="h-sm">Outbox</h2>
+              <div id="int-outbox-facts" class="facts"></div>
+              <div class="row-form">
+                <button id="int-drain" type="button" class="btn">Drain now</button>
+              </div>
+              <p id="int-drain-msg" class="msg" role="status" hidden></p>
+            </section>
+            <section id="int-retry" class="card" aria-labelledby="int-retry-title">
+              <h2 id="int-retry-title" class="h-sm">Retry failed deliveries</h2>
+              <p class="help">Puts every failed delivery of one channel since a
+                time back in the outbox, at most 30 days back and a thousand
+                rows. The drain applies the recipient's access, the egress gate
+                and Jira's routing again, so a retry never sends more than the
+                first attempt could have.</p>
+              <div class="row-form">
+                <label class="field">
+                  <span class="label">Channel</span>
+                  <select id="int-retry-channel" class="select">
+                    <option value="SMTP">Email</option>
+                    <option value="WEBHOOK">Webhook</option>
+                    <option value="JIRA">Jira</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Failed since (UTC)</span>
+                  <input id="int-retry-since" type="date">
+                </label>
+                <button id="int-retry-btn" type="button" class="btn">Retry every
+                  failed delivery since</button>
+              </div>
+              <p id="int-retry-msg" class="msg" role="status" hidden></p>
+            </section>
+            <section id="int-jira" class="card int-jira" aria-labelledby="int-jira-title">
+              <h2 id="int-jira-title" class="h-sm">Jira</h2>
+              <div id="jira-head" class="row-head"></div>
+              <div id="jira-facts" class="facts"></div>
+              <p id="jira-route" class="help"></p>
+              <p id="jira-optins" class="help"></p>
+              <p id="jira-caveat" class="msg warn" hidden></p>
+              <form id="jira-form" class="stack" novalidate>
+                <div class="row-form">
+                  <label class="field grow">
+                    <span class="label">Label</span>
+                    <input id="jira-label" type="text" autocomplete="off" maxlength="80">
+                  </label>
+                  <label class="field grow">
+                    <span class="label">Base URL</span>
+                    <input id="jira-base-url" type="url" class="mono"
+                           spellcheck="false" autocomplete="off"
+                           placeholder="https://jira.example.org">
+                  </label>
+                </div>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Flavour</span>
+                    <select id="jira-flavour" class="select">
+                      <option value="AUTO">Detect at Test</option>
+                      <option value="CLOUD">Jira Cloud</option>
+                      <option value="DATA_CENTER">Data Center or Server</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="label">Signs in with</span>
+                    <select id="jira-auth-kind" class="select">
+                      <option value="CLOUD_API_TOKEN">Cloud API token</option>
+                      <option value="DC_PAT">Data Center personal access token</option>
+                      <option value="DC_BASIC">Data Center password</option>
+                    </select>
+                  </label>
+                  <label class="field grow">
+                    <span class="label">Account (email or user name)</span>
+                    <input id="jira-auth-user" type="text" autocomplete="off"
+                           spellcheck="false">
+                  </label>
+                </div>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Project key</span>
+                    <input id="jira-project" type="text" class="mono" autocomplete="off"
+                           spellcheck="false" maxlength="20">
+                  </label>
+                  <label class="field">
+                    <span class="label">Issue type</span>
+                    <input id="jira-issue-type" type="text" autocomplete="off"
+                           maxlength="80" placeholder="Task">
+                  </label>
+                  <label class="field">
+                    <span class="label">Ceiling</span>
+                    <select id="jira-ceiling" class="select">
+                      <option value="CLEAR">TLP:CLEAR</option>
+                      <option value="GREEN">TLP:GREEN</option>
+                      <option value="AMBER">TLP:AMBER</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="label">What an issue carries</span>
+                    <select id="jira-exposure" class="select">
+                      <option value="STUB">Only that work is waiting</option>
+                      <option value="SUBJECT">Case code and what happened</option>
+                      <option value="SUMMARY">As above, plus the summary</option>
+                    </select>
+                  </label>
+                </div>
+                <fieldset id="jira-kinds" class="jira-kinds">
+                  <legend class="label">Routed to Jira</legend>
+                </fieldset>
+                <label id="jira-new-cred" class="field" hidden>
+                  <span class="label">Credential</span>
+                  <input id="jira-credential-new" type="password" autocomplete="off"
+                         spellcheck="false">
+                </label>
+                <div class="setup-actions">
+                  <button id="jira-save" type="submit" class="btn primary">Save</button>
+                  <button id="jira-test" type="button" class="btn">Test</button>
+                  <button id="jira-activate" type="button" class="btn">Activate</button>
+                  <button id="jira-pause" type="button" class="btn">Pause</button>
+                  <button id="jira-retire" type="button" class="btn danger">Retire</button>
+                </div>
+              </form>
+              <form id="jira-cred-form" class="row-form" novalidate hidden>
+                <label class="field grow">
+                  <span class="label">Replace the credential</span>
+                  <input id="jira-credential" type="password" autocomplete="off"
+                         spellcheck="false" placeholder="Stored, sealed. Type to replace it.">
+                </label>
+                <button id="jira-cred-save" type="submit" class="btn">Replace</button>
+              </form>
+              <ol id="jira-test-steps" class="jira-steps" hidden></ol>
+              <p id="jira-msg" class="msg" role="status" hidden></p>
+              <details id="jira-links-box">
+                <summary>Issues NocTORnal raised</summary>
+                <p class="help">Jira issues outlive NocTORnal's retention. To find
+                  the issues raised about one case (a purge, a disclosure), give
+                  its id: the list never names a case. An unconfirmed create
+                  shows its ref label, which finds the issue in Jira by JQL.</p>
+                <div class="row-form">
+                  <label class="field grow">
+                    <span class="label">Case id</span>
+                    <input id="jira-links-case" type="text" class="mono"
+                           autocomplete="off" spellcheck="false">
+                  </label>
+                  <button id="jira-links-load" type="button" class="btn">List</button>
+                </div>
+                <div id="jira-links-list" class="stack"></div>
+                <p id="jira-links-empty" class="empty" hidden>No issue has been raised.</p>
+                <button id="jira-links-more" type="button" class="btn ghost" hidden>Show older</button>
+              </details>
+            </section>
+            <section class="card" aria-labelledby="dlv-title">
+              <h2 id="dlv-title" class="h-sm">Delivery ledger</h2>
+              <p class="help">Every attempt to send a notification out of the
+                platform, newest first: kinds, channels, destinations and why
+                each did or did not go. <strong>Never subjects or
+                summaries</strong>: the ledger spans every case and every
+                recipient. A webhook address is shown with its path withheld,
+                because a path commonly carries the hook's secret.</p>
+              <div class="row-form">
+                <label class="field">
+                  <span class="label">Channel</span>
+                  <select id="dlv-channel" class="select">
+                    <option value="">All outbound</option>
+                    <option value="SMTP">Email</option>
+                    <option value="WEBHOOK">Webhook</option>
+                    <option value="JIRA">Jira</option>
+                    <option value="IN_APP">In-app</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Outcome</span>
+                  <select id="dlv-outcome" class="select">
+                    <option value="">Any</option>
+                    <option value="PENDING">Pending</option>
+                    <option value="SENT">Sent</option>
+                    <option value="FAILED">Failed</option>
+                    <option value="REFUSED">Refused</option>
+                    <option value="SUPPRESSED">Suppressed</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Since (UTC)</span>
+                  <input id="dlv-since" type="date">
+                </label>
+                <label class="field">
+                  <span class="label">Kind</span>
+                  <input id="dlv-kind" type="text" spellcheck="false"
+                         autocomplete="off" placeholder="any">
+                </label>
+                <label class="field inline">
+                  <input id="dlv-refused" type="checkbox" />
+                  <span class="label">Refused, failed, revoked and withdrawn only</span>
+                </label>
+                <button id="dlv-reload" type="button" class="btn">Reload</button>
+              </div>
+            </section>
+            <p id="dlv-empty" class="empty" hidden>Nothing sent yet.</p>
+            <div id="dlv-list" class="stack"></div>
+            <button id="dlv-more" type="button" class="btn ghost" hidden>Show older</button>
+          </div>
+
+          <!-- Administration, Providers (F15.2, 2026-09-24):
+               the services a case selector may be sent to, their sealed keys,
+               the route each leaves by, and their exposure. -->
+          <div id="adm-providers" class="subpane adm-section" hidden>
+            <p class="help">Each provider is a service this deployment may send
+              selectors to. Nothing is sent while the host switch
+              NOCTORNAL_OUTBOUND_LOOKUPS is off, and nothing is sent to a
+              provider that is not enabled.</p>
+            <p id="prv-switch" class="msg warn" hidden></p>
+            <p id="prv-msg" class="msg" role="status" hidden></p>
+            <div id="prv-list" class="stack"></div>
+            <p id="prv-empty" class="empty" hidden>No provider is registered.</p>
+            <details id="prv-create-box" class="card adm-create">
+              <summary class="adm-create-sum">Register a provider</summary>
+              <form id="prv-create" class="stack" novalidate>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Adapter</span>
+                    <select id="prv-adapter" class="select"></select>
+                  </label>
+                  <label class="field">
+                    <span class="label">Key</span>
+                    <input id="prv-key" type="text" class="mono" autocomplete="off"
+                           spellcheck="false" maxlength="33">
+                  </label>
+                  <label class="field grow">
+                    <span class="label">Name</span>
+                    <input id="prv-name" type="text" autocomplete="off" maxlength="80">
+                  </label>
+                </div>
+                <label class="field">
+                  <span class="label">Base URL</span>
+                  <input id="prv-base-url" type="url" class="mono" autocomplete="off"
+                         spellcheck="false">
+                </label>
+                <label class="field">
+                  <span class="label">Private network it answers from (NONE only)</span>
+                  <input id="prv-cidr" type="text" class="mono" autocomplete="off"
+                         spellcheck="false" maxlength="50" placeholder="10.20.0.0/24">
+                </label>
+                <div class="row-form">
+                  <label class="field">
+                    <span class="label">Exposure</span>
+                    <select id="prv-exposure" class="select">
+                      <option value="">Choose</option>
+                      <option value="NONE">NONE: your own instance</option>
+                      <option value="VENDOR">VENDOR: the vendor sees the query</option>
+                      <option value="PUBLIC">PUBLIC: anyone watching sees it</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="label">Per minute</span>
+                    <input id="prv-q-minute" type="number" min="1">
+                  </label>
+                  <label class="field">
+                    <span class="label">Per day</span>
+                    <input id="prv-q-day" type="number" min="1">
+                  </label>
+                  <label class="field">
+                    <span class="label">Per month</span>
+                    <input id="prv-q-month" type="number" min="1">
+                  </label>
+                </div>
+                <label class="field">
+                  <span class="label">Why this exposure is right</span>
+                  <textarea id="prv-basis" rows="2"></textarea>
+                </label>
+                <p class="help">A level below PUBLIC is a second administrator's
+                  act: the provider cannot be enabled until one approves it. So is
+                  moving it later to another host, port or private network.</p>
+                <div class="setup-actions">
+                  <button id="prv-create-btn" type="submit" class="btn primary">Register</button>
+                </div>
+                <p id="prv-create-msg" class="msg" role="status" hidden></p>
+              </form>
+            </details>
+          </div>
         </section>
 
         <section id="pane-samples" class="pane" role="tabpanel"
                  aria-labelledby="tab-samples" tabindex="-1" hidden>
 
           <div id="smp-policy" class="banner banner-legal" hidden></div>
+
+          <!-- F14. The detonations waiting for this viewer's sign-off. -->
+          <section id="smp-signoff" class="card stack signoff-box"
+                   aria-label="Detonations awaiting your sign-off" hidden>
+            <h2 class="h-sm">Detonations awaiting your sign-off</h2>
+            <p id="smp-signoff-count" class="help"></p>
+            <div id="smp-signoff-list" class="rows"></div>
+          </section>
 
           <div class="subtabs" role="tablist" aria-label="Lab sections">
             <button type="button" class="subtab" role="tab"
@@ -2938,6 +4192,10 @@
             <button type="button" class="subtab" role="tab"
                     aria-selected="false" tabindex="-1" data-subtab="handling"
                     aria-controls="smp-handling-pane">Handling</button>
+            <!-- F12 J. The lab's YARA rule sets. -->
+            <button type="button" class="subtab" role="tab"
+                    aria-selected="false" tabindex="-1" data-subtab="rules"
+                    aria-controls="smp-rules-pane">Rules</button>
           </div>
 
           <!-- QUEUE -->
@@ -2971,6 +4229,26 @@
               classified above the case it belongs to, so the case gate
               alone would leak that it exists.
             </p>
+            <!-- F11 M. Search the samples you can see by a hash. The
+                 value is sent in the request body, never in the address,
+                 and the server neither logs nor keeps it. -->
+            <form id="smp-hash-search" class="row smp-hash-search">
+              <label class="field inline">
+                <span class="label">Search by hash</span>
+                <select id="smp-hash-by" class="select">
+                  <option value="imphash">imphash</option>
+                  <option value="rich_header">Rich header</option>
+                  <option value="ssdeep">ssdeep</option>
+                  <option value="tlsh">TLSH</option>
+                </select>
+              </label>
+              <input id="smp-hash-value" class="input" type="text"
+                     spellcheck="false" autocomplete="off"
+                     aria-label="The hash to search for"
+                     placeholder="the hash, as another tool printed it">
+              <button type="submit" class="btn">Search</button>
+            </form>
+            <div id="smp-hash-results" class="rows" hidden></div>
             <div id="smp-list" class="rows"></div>
             <p id="smp-empty" class="empty" hidden></p>
 
@@ -3082,17 +4360,65 @@
                   sample or its case refuses the destruction: preservation
                   and destruction can both be legal obligations, and
                   software does not get to pick.</li>
+                <!-- F13 and F14. -->
+                <li><strong>Screening compares exact hashes.</strong>
+                  Screening compares exact hashes against the lists this
+                  deployment imported. No match does not mean the material
+                  is lawful to hold. A matched sample disappears from the Lab
+                  for everyone and is held for the Security Officer.</li>
+                <li><strong>A sandbox send is made by the worker.</strong>
+                  Where an operator configured a sandbox, a request to it is
+                  sent by the sandbox worker, as the encrypted archive and
+                  never the raw file, after a second person's sign-off when
+                  the sandbox is exposed or the sample's network route is
+                  live. The sandbox keeps what it is sent outside this
+                  product's labels, holds and retention.</li>
               </ul>
-              <h2 class="h-sm">Gaps, recorded rather than hidden</h2>
+              <h2 class="h-sm">Static triage, and the gaps it leaves</h2>
               <p class="help">
-                Fuzzy hashing (imphash, ssdeep, TLSH), YARA and sandbox
-                detonation are not built. Each absence is written onto the
-                sample row as a gap with a reason, because a NULL imphash
-                reads as &ldquo;this sample has no imports&rdquo; and an
-                absent one says nobody looked.
+                After a sample is submitted, static triage computes its
+                imphash and Rich header, its ssdeep and TLSH fuzzy hashes,
+                and scans it with the YARA rule sets a Security Officer has
+                activated. It runs outside the upload, in child processes
+                that are limited in time, and on Linux in memory and file
+                writes too; the card says which limits applied. A child is
+                started without this deployment's secrets, but where it
+                could still read them from another process or reach the
+                database host, the readiness page says so. Every read of
+                the bytes is recorded in the access ledger. Findings are
+                recorded as the lab's, never
+                written into a case: a hash becomes a case entity only when
+                an analyst proposes it and the case accepts it.
+              </p>
+              <p class="help">
+                Archive expansion, prohibited-content screening and sandbox
+                detonation are not built yet. What any check could not do is
+                written onto the sample as a gap with a reason, because a
+                missing imphash reads as &ldquo;this sample has no
+                imports&rdquo; and a recorded gap says nobody looked.
               </p>
               <div id="smp-origin" class="help"></div>
             </div>
+          </div>
+
+          <!-- RULES (F12 J) -->
+          <div id="smp-rules-pane" class="subpane" hidden>
+            <div class="pane-head">
+              <h2 class="h-sm">YARA rule sets</h2>
+              <button id="rul-refresh" type="button" class="btn">Refresh</button>
+              <span id="rul-counts" class="muted small"></span>
+            </div>
+            <p class="help">
+              A rule set says what the lab hunts, so it is labelled, and you
+              see only the sets your clearance and compartments reach. A lab
+              member uploads a version with its licence; a Security Officer
+              who did not sponsor it activates it. Matches are the lab's
+              findings about a sample, never facts about an actor.
+            </p>
+            <p id="rul-engine" class="help"></p>
+            <div id="rul-forms"></div>
+            <div id="rul-list" class="rows"></div>
+            <p id="rul-empty" class="empty" hidden></p>
           </div>
         </section>
 
@@ -4284,6 +5610,25 @@
       </div>
     </form>
     <p id="case-edit-readonly" class="help" hidden></p>
+    <!-- F7 (2026-09-24). A case owner keeps a case's
+         notifications out of Jira: at queue time, and for what is already
+         queued at the next drain. Shown to case.update holders. -->
+    <section id="case-routing" class="stack case-routing" hidden>
+      <h3 class="h-xs">Work items outside NocTORnal</h3>
+      <p id="case-routing-status" class="help"></p>
+      <label class="field inline">
+        <input id="case-routing-jira" type="checkbox">
+        <span class="label">Keep this case out of Jira</span>
+      </label>
+      <label class="field">
+        <span class="label">Why</span>
+        <input id="case-routing-reason" type="text" autocomplete="off" maxlength="500">
+      </label>
+      <div class="stance-actions">
+        <button id="case-routing-save" type="button" class="btn">Save</button>
+      </div>
+      <p id="case-routing-msg" class="msg" role="status" hidden></p>
+    </section>
     <div class="stance-actions">
       <button id="case-copy-link" type="button" class="btn ghost">
         Copy link to this view</button>

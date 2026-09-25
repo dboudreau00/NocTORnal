@@ -312,7 +312,8 @@ def test_the_generated_env_declares_the_upload_caps(path: Path):
     src = path.read_text(encoding="utf-8")
     for key in ("NOCTORNAL_MAX_EVIDENCE_BYTES",
                 "NOCTORNAL_MAX_SAMPLE_BYTES",
-                "INGEST_BUCKET"):
+                "INGEST_BUCKET",
+                "COLLECT_RAW_BUCKET"):  # the collector's raw-markup store
         assert key in src, (
             f"{path.name} generates .env.local without {key}, so a fresh "
             f"install is born with a readiness warning it could have "

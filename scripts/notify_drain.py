@@ -51,15 +51,28 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from _env import load_env_local  # noqa: E402
-from noctornal_api.db import connect  # noqa: E402
+from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.transports import dispatch_due  # noqa: E402
 
 load_env_local()
 
 
+def connect():
+    """Every script connects as the system role (S1, 2026-09-25). A
+    script serves no request and binds no user, so on the request role it
+    would see nothing under row-level security; `db.connect_system` refuses
+    rather than hand it a connection that silently sees part of the data.
+    Named `connect` so the tests that replace it still find it."""
+    return connect_system(SystemPurpose.NOTIFY)
+
+
 def main() -> int:
     conn = connect()
     try:
+        # S2, the egress proxy (2026-09-24). A production cron with
+        # outbound uses and no egress proxy stops here, as the API does.
+        from noctornal_api.egress_routes import enforce_production_egress
+        enforce_production_egress(conn)
         counters = dispatch_due(conn)
     finally:
         conn.close()

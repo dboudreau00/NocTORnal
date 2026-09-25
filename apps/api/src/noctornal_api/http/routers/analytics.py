@@ -1,10 +1,18 @@
-"""Phase 3 analytics endpoints: the SNA suite, key player, and per-node
-metric history.
+"""Phase 3 analytics endpoints: the SNA suite, key player, role analysis
+(CONCOR), and per-node metric history.
 
 Everything is computed against a named projection and every response
 carries the parameters that produced it, because a metric without its
 projection is not reproducible (docs/03). Gated on `analytics.run`, the
 same permission Phase 2's local metrics use.
+
+The projection is ONE dependency, `analysis_projection`, shared by every
+analysis route since 2026-09-24 (L3): five routes had repeated five query
+parameters each and checked only the preset, so `/latest` with an unknown
+confidence floor answered 404 from a name lookup that could never match.
+It now answers 400 before any lookup, like every other route, and the
+projection options (the accepted-ties scope, L3; venues projected to
+entities, F2) are added in one place.
 """
 from __future__ import annotations
 
@@ -12,18 +20,31 @@ from datetime import datetime
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 
+from noctornal_api.affiliation import DEFAULT_MAX_VENUE_SIZE, OneModeParams
 from noctornal_api.analytics import (
     KPP_MAX_REMOVE,
     AnalyticsError,
     AnalyticsParams,
 )
 from noctornal_api.analytics_runs import AnalyticsRunService
-from noctornal_api.http.deps import CurrentUser, get_conn, require, user_ceiling
+from noctornal_api.blockmodel import CONCOR_DEFAULT_DEPTH, CONCOR_MAX_DEPTH
+from noctornal_api.http.deps import (
+    CurrentUser,
+    current_user,
+    get_conn,
+    require,
+    user_ceiling,
+)
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
-from noctornal_api.projections import PRESETS, Projection, ProjectionError
+from noctornal_api.http.limits import enforce, rate_limit
+from noctornal_api.projections import (
+    Projection,
+    ProjectionError,
+    ProjectionTooLarge,
+    validate_projection,
+)
 
 router = APIRouter(prefix="/cases/{case_id}/analytics", tags=["analytics"])
 
@@ -47,15 +68,57 @@ def _svc(conn: psycopg.Connection, user: CurrentUser,
                                actor_id=user.user_id)
 
 
-def _projection(case_id: UUID, preset: str, include_inferred: bool,
-                min_confidence: str, as_of: datetime | None) -> Projection:
-    if preset not in PRESETS:
-        raise Problem(400, "Invalid request",
-                      f"unknown preset {preset!r}; one of "
-                      f"{', '.join(sorted(PRESETS))}")
-    return Projection(case_id=case_id, preset=preset,
-                      include_inferred=include_inferred,
-                      min_confidence=min_confidence, as_of=as_of)
+def analysis_projection(
+    case_id: UUID,
+    preset: str = Query("all"),
+    include_inferred: bool = Query(False),
+    min_confidence: str = Query("LOW"),
+    as_of: datetime | None = Query(None),
+    review_scope: str = Query(
+        "all", description="all, or accepted: compute over ties a reviewer "
+                           "has accepted, counting every tie left out"),
+    one_mode: list[str] = Query(
+        default_factory=list,
+        description="forum or wallet: project those venues to entities. "
+                    "Repeat the parameter for both."),
+    one_mode_weighting: str = Query("NEWMAN", description="NEWMAN or COUNT"),
+    max_venue_size: int = Query(DEFAULT_MAX_VENUE_SIZE, ge=2, le=500,
+                                description="A larger venue draws nothing and "
+                                            "is named"),
+    one_mode_min_shared: int = Query(1, ge=1, le=100),
+) -> Projection:
+    """The projection every analysis route computes over, validated before
+    anything is looked up. An unknown preset, confidence floor, review
+    scope, family or weighting is a 400; an out-of-range size is
+    FastAPI's 422."""
+    p = Projection(
+        case_id=case_id, preset=preset, include_inferred=include_inferred,
+        min_confidence=min_confidence, as_of=as_of, review_scope=review_scope,
+        one_mode=OneModeParams(tuple(one_mode), one_mode_weighting,
+                               max_venue_size, one_mode_min_shared))
+    try:
+        validate_projection(p)
+    except ProjectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return p
+
+
+def _one_mode_meter(
+    request: Request,
+    response: Response,
+    p: Projection = Depends(analysis_projection),
+    user: CurrentUser = Depends(current_user),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> None:
+    """Charge a one-mode read where the transform is paid (F2, 2026-09-24).
+
+    Beside each route's own meter, and only when a venue family is listed,
+    so a plain read is charged exactly as before. FastAPI solves
+    `analysis_projection` once per request, so this reads the same
+    Projection the handler gets."""
+    if p.one_mode.enabled():
+        enforce(request, response, "analytics.one_mode", f"u:{user.user_id}",
+                conn=conn, actor_id=user.user_id)
 
 
 def _params(decay_half_life_months: float | None,
@@ -67,14 +130,26 @@ def _params(decay_half_life_months: float | None,
                            leiden_resolution=leiden_resolution)
 
 
+def _answer(call, *, cannot: str = "Cannot compute"):
+    """One error mapping for every analysis route: a view too large to
+    transform is a 422 (it is valid, just too big), any other projection
+    error a 400, and a metric that cannot be computed a 422."""
+    try:
+        return call()
+    except ProjectionTooLarge as exc:
+        raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
+    except ProjectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    except AnalyticsError as exc:
+        raise Problem(422, cannot, safe_detail(exc)) from exc
+
+
 @router.get("", response_model=dict,
-            dependencies=[Depends(rate_limit("analytics.suite"))])
+            dependencies=[Depends(rate_limit("analytics.suite")),
+                          Depends(_one_mode_meter)])
 def suite(
     case_id: UUID,
-    preset: str = Query("all"),
-    include_inferred: bool = Query(False),
-    min_confidence: str = Query("LOW"),
-    as_of: datetime | None = Query(None),
+    p: Projection = Depends(analysis_projection),
     decay_half_life_months: float | None = Query(
         None, description="Trust decay half-life. Omit to disable. docs/03 "
                           "suggests 12 months. Never mutates stored weights."),
@@ -90,29 +165,22 @@ def suite(
     Cached on a graph hash taken over the CALLER's visible graph, so a
     result computed for a better-cleared analyst is never served here.
     """
-    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, leiden_resolution)
-    try:
-        return _svc(conn, user, case_id).suite(p, params, force=force).as_response()
-    except ProjectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
-    except AnalyticsError as exc:
-        raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
+    return _answer(lambda: _svc(conn, user, case_id).suite(
+        p, params, force=force).as_response())
 
 
-# The three reads below compute nothing and write nothing, but each one
-# PROJECTS the caller's graph to compare hashes, which is the work
-# `GET /graph` does on every sociogram refresh. So they share that route's
-# meter, `graph.view`, rather than the analytics meters that ration igraph
-# runs (2026-09-23).
+# The reads below compute nothing and write nothing, but each one PROJECTS
+# the caller's graph to compare hashes, which is the work `GET /graph` does
+# on every sociogram refresh. So they share that route's meter,
+# `graph.view`, rather than the analytics meters that ration igraph runs
+# (2026-09-23), plus `analytics.one_mode` when venues are projected.
 @router.get("/latest", response_model=dict,
-            dependencies=[Depends(rate_limit("graph.view"))])
+            dependencies=[Depends(rate_limit("graph.view")),
+                          Depends(_one_mode_meter)])
 def latest(
     case_id: UUID,
-    preset: str = Query("all"),
-    include_inferred: bool = Query(False),
-    min_confidence: str = Query("LOW"),
-    as_of: datetime | None = Query(None),
+    p: Projection = Depends(analysis_projection),
     decay_half_life_months: float | None = Query(None),
     leiden_resolution: float = Query(1.0, gt=0, le=10),
     user: CurrentUser = Depends(require("analytics.run")),
@@ -135,12 +203,8 @@ def latest(
     bytes came out of `analytics.metric_run`; `computed_at` says WHEN the
     run happened, `current` says WHETHER it still describes the graph.
     """
-    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, leiden_resolution)
-    try:
-        found = _svc(conn, user, case_id).latest(p, params)
-    except ProjectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    found = _answer(lambda: _svc(conn, user, case_id).latest(p, params))
     if found is None:
         raise Problem(404, "Not found",
                       "no completed analytics run for this projection at your "
@@ -150,15 +214,13 @@ def latest(
 
 
 @router.get("/key-player/latest", response_model=dict,
-            dependencies=[Depends(rate_limit("graph.view"))])
+            dependencies=[Depends(rate_limit("graph.view")),
+                          Depends(_one_mode_meter)])
 def key_player_latest(
     case_id: UUID,
     n: int = Query(3, ge=1, le=KPP_MAX_REMOVE,
                    description="Size of the removal set"),
-    preset: str = Query("all"),
-    include_inferred: bool = Query(False),
-    min_confidence: str = Query("LOW"),
-    as_of: datetime | None = Query(None),
+    p: Projection = Depends(analysis_projection),
     decay_half_life_months: float | None = Query(None),
     user: CurrentUser = Depends(require("analytics.run")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -167,12 +229,9 @@ def key_player_latest(
     removal-set size, with `computed_at` and a checked `current`; 404 when
     there is none. What the pane shows under "Key player" when it opens on
     a stored suite, instead of an empty heading."""
-    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, 1.0)
-    try:
-        found = _svc(conn, user, case_id).latest_key_player(p, params, n_remove=n)
-    except ProjectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    found = _answer(lambda: _svc(conn, user, case_id).latest_key_player(
+        p, params, n_remove=n))
     if found is None:
         raise Problem(404, "Not found",
                       "no completed key-player run of this size for this "
@@ -181,14 +240,12 @@ def key_player_latest(
 
 
 @router.get("/runs/{run_id}/current", response_model=dict,
-            dependencies=[Depends(rate_limit("graph.view"))])
+            dependencies=[Depends(rate_limit("graph.view")),
+                          Depends(_one_mode_meter)])
 def run_current(
     case_id: UUID,
     run_id: UUID,
-    preset: str = Query("all"),
-    include_inferred: bool = Query(False),
-    min_confidence: str = Query("LOW"),
-    as_of: datetime | None = Query(None),
+    p: Projection = Depends(analysis_projection),
     decay_half_life_months: float | None = Query(None),
     leiden_resolution: float = Query(1.0, gt=0, le=10),
     user: CurrentUser = Depends(require("analytics.run")),
@@ -199,17 +256,11 @@ def run_current(
     are the ones the run was computed under; a run of another projection
     is a 422, and a run the caller cannot see is a 404.
 
-    The pane asks this after the graph under it changes, so it can mark
-    its numbers stale, or leave them unmarked, from the answer rather
-    than from a guess."""
-    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
+    The pane asked this after the graph under it changed; it now asks
+    `/currency` once for every card. This stays for API callers."""
     params = _params(decay_half_life_months, leiden_resolution)
-    try:
-        found = _svc(conn, user, case_id).currency(p, params, run_id)
-    except ProjectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
-    except AnalyticsError as exc:
-        raise Problem(422, "Cannot compare", safe_detail(exc)) from exc
+    found = _answer(lambda: _svc(conn, user, case_id).currency(p, params, run_id),
+                    cannot="Cannot compare")
     if found is None:
         raise Problem(404, "Not found",
                       "no completed run with that id in this case at your "
@@ -217,16 +268,38 @@ def run_current(
     return found
 
 
+@router.get("/currency", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view")),
+                          Depends(_one_mode_meter)])
+def currency(
+    case_id: UUID,
+    run_id: list[UUID] = Query(..., min_length=1, max_length=4,
+                               description="Repeat for every run on screen"),
+    p: Projection = Depends(analysis_projection),
+    decay_half_life_months: float | None = Query(None),
+    leiden_resolution: float = Query(1.0, gt=0, le=10),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Whether each of up to four stored runs still describes the caller's
+    graph, with ONE projection of it (F2, 2026-09-24): `{runs: [...]}` in
+    the order asked. A run of another projection answers `current: null`
+    with `reason: "other_projection"`, one the caller cannot see
+    `reason: "not_found"`. What the Analysis pane asks after every graph
+    refresh, instead of one request per card."""
+    params = _params(decay_half_life_months, leiden_resolution)
+    return _answer(lambda: _svc(conn, user, case_id).currency_many(p, params, run_id),
+                   cannot="Cannot compare")
+
+
 @router.get("/key-player", response_model=dict,
-            dependencies=[Depends(rate_limit("analytics.key_player"))])
+            dependencies=[Depends(rate_limit("analytics.key_player")),
+                          Depends(_one_mode_meter)])
 def key_player(
     case_id: UUID,
     n: int = Query(3, ge=1, le=KPP_MAX_REMOVE,
                    description="Size of the removal set"),
-    preset: str = Query("all"),
-    include_inferred: bool = Query(False),
-    min_confidence: str = Query("LOW"),
-    as_of: datetime | None = Query(None),
+    p: Projection = Depends(analysis_projection),
     decay_half_life_months: float | None = Query(None),
     force: bool = Query(False),
     user: CurrentUser = Depends(require("analytics.run")),
@@ -240,15 +313,56 @@ def key_player(
     NOT the same set -- two high-betweenness actors often broker the same
     pair of clusters, so removing both is redundant.
     """
-    p = _projection(case_id, preset, include_inferred, min_confidence, as_of)
     params = _params(decay_half_life_months, 1.0)
-    try:
-        return _svc(conn, user, case_id).key_player(
-            p, params, n_remove=n, force=force).as_response()
-    except ProjectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
-    except AnalyticsError as exc:
-        raise Problem(422, "Cannot compute", safe_detail(exc)) from exc
+    return _answer(lambda: _svc(conn, user, case_id).key_player(
+        p, params, n_remove=n, force=force).as_response())
+
+
+@router.get("/concor", response_model=dict,
+            dependencies=[Depends(rate_limit("analytics.concor")),
+                          Depends(_one_mode_meter)])
+def concor(
+    case_id: UUID,
+    depth: int = Query(CONCOR_DEFAULT_DEPTH, ge=1, le=CONCOR_MAX_DEPTH,
+                       description="Splits: up to 2 to the power depth positions"),
+    p: Projection = Depends(analysis_projection),
+    decay_half_life_months: float | None = Query(None),
+    force: bool = Query(False),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Role analysis: CONCOR positions, entities with the same pattern of
+    ties to the same others (F1, 2026-09-24). Cached on the graph hash,
+    the depth and every tie's direction, on its own meter. The decay and
+    Leiden parameters name the same projection row as the key player's, so
+    stored lookups line up; neither moves a position."""
+    params = _params(decay_half_life_months, 1.0)
+    return _answer(lambda: _svc(conn, user, case_id).concor(
+        p, params, depth=depth, force=force).as_response())
+
+
+@router.get("/concor/latest", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view")),
+                          Depends(_one_mode_meter)])
+def concor_latest(
+    case_id: UUID,
+    depth: int = Query(CONCOR_DEFAULT_DEPTH, ge=1, le=CONCOR_MAX_DEPTH),
+    p: Projection = Depends(analysis_projection),
+    decay_half_life_months: float | None = Query(None),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The most recent completed role analysis for this projection and
+    depth, with `computed_at` and a checked `current`; 404 when there is
+    none. Served exactly as computed, never upgraded."""
+    params = _params(decay_half_life_months, 1.0)
+    found = _answer(lambda: _svc(conn, user, case_id).latest_concor(
+        p, params, depth=depth))
+    if found is None:
+        raise Problem(404, "Not found",
+                      "no completed role analysis at this depth for this "
+                      "projection at your clearance yet")
+    return found.as_response()
 
 
 @router.get("/history/{node_id}", response_model=dict)

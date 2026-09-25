@@ -21,7 +21,7 @@ analytics, API, security, storage, collection, UI and stack, closing with the
 load-bearing decisions and the legal gates enforced in code.
 
 > **Freshness.** Surveyed 2026-07-25, counters and stack refreshed since, at
-> **Alembic head 0068** and **3448 tests** (`def test_` functions across both
+> **Alembic head 0124** and **6094 tests** (`def test_` functions across both
 > pytest roots, a figure `scripts/refresh_counters.py` maintains and
 > `test_doc_invariants` holds to the tree exactly). It follows the code, not
 > the original design intent: where the two diverged (front-end stack, UUID
@@ -29,6 +29,8 @@ load-bearing decisions and the legal gates enforced in code.
 > never wired) this document says so rather than describing the aspiration as
 > if it were built. Companion documents: `docs/00-decisions.md` (the numbered
 > decisions), `docs/09-roadmap.md` (what each phase was for),
+> `docs/20-outbound-connections.md` (the outbound contract: the address
+> policy, the one client, routes and the egress proxy),
 > `docs/16-legal-and-external.md` (the blocking legal items),
 > `CONVENTIONS.md` (the working agreement and the twelve invariants), and
 > `db/schema.sql` (the generated schema mirror, `db/README.md`).
@@ -87,7 +89,11 @@ flowchart TB
 
   ONT[["packages/ontology<br/>generates SQL seed + TS types"]]
   EG{{"egress gate  can_egress(object, destination)"}}
-  OUT([SMTP / Jira / webhook / export])
+  RT["route_for + the one pinned client<br/>egress_policy (docs/20)"]
+  PX{{"egress proxy<br/>the only way out in production"}}
+  OUT([SMTP / Jira / webhook / lookups / WKD / model server / CAPEv2])
+  SITES([forums / Telegram / feeds])
+  EXP([export: an analyst download])
 
   Analyst --> UI
   UI -->|"cookie + CSRF, or Bearer"| MW
@@ -100,14 +106,20 @@ flowchart TB
   ONT -.seeds.-> PG
   E --> EG
   CO --> EG
-  EG -->|"TLP-cleared only"| OUT
+  EG -->|"TLP-cleared only"| RT
+  EG --> EXP
+  RT --> PX
+  PX -->|"integration routes"| OUT
+  PX -->|"persona routes"| SITES
 ```
 
 Everything an analyst reaches is same-origin: the static console under `/ui`
 and the REST API under `/api/v1` are served by one FastAPI process, so there is
 no CORS surface. Every case-scoped request passes the five-part gate before a
 service runs. Every graph write carries an assertion. Every outbound path funnels
-through one TLP egress gate.
+through one TLP egress gate, every outbound connection through one client and
+one address policy, and in production through the egress proxy, the only way out
+of the deployment (docs/20).
 
 ## The twelve invariants and how each is enforced
 
@@ -123,8 +135,8 @@ is in the database it holds against any write path, including a mistaken one.
 | 4 | Inferred edges stay distinct | `core.edge.is_inferred`; projections exclude them unless `include_inferred`; SNA metrics exclude non-`is_social_tie` edges; the UI renders inferred edges dashed. |
 | 5 | History superseded, never overwritten | Retraction is a marked row, not a supersession (decided 2026-09-09): one `UPDATE` stamps `retracted_at`/`retracted_by`/`retraction_reason`, guarded by `WHERE retracted_at IS NULL` so it applies once, and `retract_assertion` errors on a 0-row update; the claim's own columns are never written again (`test_invariant_5_a_retraction_is_one_stamp_and_rewrites_nothing`). `superseded_at`/`superseded_by` exist (0007) and the read side honours them, but no code path writes them yet. A correction is a retraction plus a new assertion. "At least one *live* assertion" is a projection property, deliberately not write-enforced, so an element can dissolve from the live graph while its rows persist for replay. |
 | 6 | Audit append-only | `audit.event`: `block_mutation()` on UPDATE/DELETE/TRUNCATE + `REVOKE`, and a hash chain via `chain_hash()` under an advisory xact lock over a UTC-canonical column render (`0013`). |
-| 7 | Credentials never leave the vault | `collection.py` `PersonaVault` exposes no `get_secret()`, only a `use(...)` context manager that decrypts an envelope-sealed secret, yields it to a block and drops it, auditing every use; errors are `redact()`-ed before they reach a log. **The vault runs inside the API process** (there is no separate collector), so this is a guarantee about the shape of the code, not a network boundary: a compromised API host is a compromised vault. Reworded 2026-09-09 from "never leave the collector", which the topology never backed. |
-| 8 | TLP gates egress | `egress.py` `can_egress()` / `enforce_egress()`: `NEVER_EGRESS = {AMBER_STRICT, RED}` is checked before any per-destination ceiling, one function shared by export, SMTP, Jira and webhooks, failing closed on an unknown classification or destination (decision 38). |
+| 7 | Credentials never leave the vault | `collection.py` `PersonaVault` exposes no `get_secret()`, only a `use(...)` context manager that decrypts an envelope-sealed secret, yields it to a block and drops it, auditing every use; errors are `redact()`-ed before they reach a log. **The vault runs inside the API process** (there is no separate collector), so this is a guarantee about the shape of the code, not a network boundary: a compromised API host is a compromised vault. Reworded 2026-09-09 from "never leave the collector", which the topology never backed. `ProviderVault` (`providers.py`) holds lookup provider keys the same way, each key bound to the origin and egress route it was entered for, and an exposure approval is bound to the provider's origin and network. An egress exit is sealed to the egress proxy's own key, and the API holds only its public half (`security/egress_seal.py`). Every outbound path is operator-configured, labelled, audited and capped by a ceiling, and in production the egress proxy is the only way out (decision 68, docs/20). |
+| 8 | TLP gates egress | `egress.py` `can_egress()` / `enforce_egress()`: `NEVER_EGRESS = {AMBER_STRICT, RED}` is checked before any per-destination ceiling, one function shared by every outbound path (export, SMTP, webhooks, Jira, outbound lookups, Web Key Directories, the model server, the CAPEv2 sandbox and collection targets), failing closed on an unknown classification or a destination with no gate record (decisions 38 and 85). Every destination that crosses the boundary keeps the floor and refuses compartmented material by construction, and all but the four original ones require a declared ceiling. |
 | 9 | Durable identifiers, not displayed ones | The ontology encodes each split as a strong/weak selector pair sharing no normalised value: `TOX_PK` (64-hex) vs `TOX_ID_FULL` (rotatable nospam), `TELEGRAM_ID` (numeric) vs `TELEGRAM_USER` (`@username`). `is_strong` gates the merge lead (`StrongSelectorConflict`; merges are human-initiated); a rotated-nospam regression test pins it. |
 | 10 | Samples never render, never execute | `SampleService.download` serves bytes only on a process CONFIGURED as the sample origin -- `samples.origin_split()` decides from `NOCTORNAL_SAMPLE_ORIGIN`, `NOCTORNAL_BASE_URL` and `NOCTORNAL_PUBLIC_ORIGIN` alone and never reads the request (until 2026-09-09 it compared against `request.url`, which Starlette builds from the Host header); it refuses when the variable is unset (the split is OFF and every download refuses), when it is not an origin, when it equals the application origin, or on any process that is not the sample origin, naming the origin to fetch from; bytes ship `application/octet-stream` under `Content-Security-Policy: default-src 'none'; sandbox`; the object key is the SHA-256, never the filename; no sandbox combines `allow-scripts` with `allow-same-origin`. |
 | 11 | Ingest keys are write-only | Keys carry the `noct_sk_` prefix and a `CHECK` forbids a `case:read` scope on `ingest.api_key`; `POST /ingest` is the only endpoint a key can reach. A leaked ingest key means junk data, never the case file. |
@@ -134,20 +146,20 @@ is in the database it holds against any write path, including a mistaken one.
 
 ## The phases and how they link
 
-Each phase is independently useful; the numbering runs Phase 0 through Phase 9. Status figures are the four-dimension completion weights from `ROADMAP-REMAINING.md` (model+tests 45%, HTTP API 15%, analyst UI 25%, adversarial review 15%). **As of 2026-08-10 every phase has an HTTP API, an analyst pane and a COMPLETE adversarial review**, Phase 6 was the last, and its pass closed the `merges.py` / `retention.py` / `approvals.py` / `break_glass.py` gap this line used to name. The recurring gap is now feature work rather than reach or scrutiny.
+Each phase is independently useful; the numbering runs Phase 0 through Phase 9. Status figures are the four-dimension completion weights from `ROADMAP-REMAINING.md` (model+tests 45%, HTTP API 15%, analyst UI 25%, adversarial review 15%), as scored at Alpha 6; the roadmap features built since (F1 to F15, L1 to L6 and S2) are named in each row and are scored when they are released, after their review. **As of 2026-08-10 every phase has an HTTP API, an analyst pane and a COMPLETE adversarial review**, Phase 6 was the last, and its pass closed the `merges.py` / `retention.py` / `approvals.py` / `break_glass.py` gap this line used to name. The recurring gap is now feature work rather than reach or scrutiny.
 
 | Phase | Name | What it delivers | Depends on | Current status |
 |---|---|---|---|---|
 | 0 | Foundation | Monorepo, Docker Compose, Alembic, ontology to Py/TS codegen, Argon2id+TOTP auth, one five-part access gate, hash-chained `audit.event`, CI gates |, | **complete, 100%.** Model+tests done, API done, UI done, reviewed. No typecheck by decision 42. |
 | 1 | Graph core | Case CRUD, node/edge CRUD, assertion layer (`graph.py` `GraphWriteService`), selectors, evidence to MinIO WORM + custody ledger, tags, FTS | 0 (auth, gate, audit) | **complete, 100%.** All four dimensions done. |
 | 2 | Sociogram | Projection presets, graph API (neighbourhood/path/subgraph/as-of), canvas sociogram, inspector, live local metrics | 1 (graph, assertion, projections) | **partial, 95%.** Model+tests done, API done, UI partial, reviewed. WebSocket push is built (`/api/v1/live`, Postgres LISTEN/NOTIFY; `app.js` opens it). Gap: the full visual encoding of docs/06, and backlinks (docs/09 Phase 2). |
-| 3 | Analytics | `analytics.py` (pure, DB-free) fed by `GraphService.project()`; centralities, Leiden, Burt, cut vertices/bridges, KPP-Neg, signed balance; runs synchronously in API (decision 30) | 2 (materialises a projection) | **partial, 85%.** Model+tests partial, API done, UI partial, reviewed. Gap: CONCOR, history charting, actor-by-forum/wallet still two-mode. |
-| 4 | Collection | Adapter interface + scheduler (`due_sources`/`run_once`, no loop), RSS adapter, persona vault, document bucket, watch matching, `proposals.py` review gate | 1 (proposal to GraphWriteService; graph must work end-to-end first) | **partial, 75%.** Model+tests partial, API done, UI done (Feeds → Sources), reviewed (docs/17 F15: ten service defects, all fixed at the service). Gap: XenForo/MyBB/Telegram adapters, embeddings, scheduler process. |
-| 5 | Notification & integration | `egress.py` TLP gate (one function, fails closed), `notifications.py` centre (Alembic 0029), SMTP digest/quiet-hours, HMAC webhooks | 1 (TLP/classification); events from 6 (merge, dual-control) | **partial, 85%.** Model+tests done, API done, UI partial, reviewed 2026-07-26 (docs/17 F19, the centre never checked case assignment, the drain checked neither assignment nor current clearance). Gap: Jira, integration admin surface, priority-1 escalation, worker. |
-| 6 | Tradecraft & hardening | Entity merge with reversal (`merges.py`, 0027), dual control (decision 44, 0028), ACH (`ach.py`), report builder (`reports.py`), retention/purge, break-glass | 1 (nodes/edges, assertions); 5 (approval notifications) | **partial, 88%.** Model+tests partial, API done, UI done (merge in the inspector; Lifecycle, ACH, Report and (2026-08-10) the dual-control approvals surface, without which Merge was unreachable from the browser whenever dual control was on). **Reviewed 2026-08-10**, the last phase to get a hostile pass: nine findings, all closed, including `unmerge` writing recorded endpoints over an edge a later live merge owned. Gap: the assumptions register. ~~WebAuthn~~ is a documented deliberate absence (SECURITY.md says reporting it is not a finding) and ~~timeline replay~~ is built and belongs to Phase 2, both were listed here in error. |
-| 7 | Comms channels | `comms.platform` (15 seeded), contact-block parser, CLAIMED/OBSERVED/CONFIRMED bindings, PGP verification (`pgp.py`), co-participation, minimisation, 20-endpoint router | 1 (selectors, proposals); 5 (egress gate); 2 (co-participation into sociogram) | **partial, 95%.** Model+tests done, API done, UI done, reviewed (docs/17: a forged PGP verdict, a 499× tie weight, an ASCII-only label defence). Gap: detached signatures; a Telegram adapter able to pass the `c:` prefix (the id collision itself closed with migration 0051 on 2026-07-26, docs/17 F1 update, docs/16 D8). |
-| 8 | Sample handling | Separate-origin download-only service (`samples.py`, 0031), encrypted-at-rest by SHA-256, quarantine to triage to RE queue, `MALWARE_ANALYST` role, static triage, REJECTED path | 0 (role, gate); 1 (case model) | **partial, 80%.** Model+tests done, API done, UI done (Lab pane), reviewed 2026-07-26, **nine criticals**, incl. a download path with no label check and an "encrypted archive" that was a plain ZIP (docs/17 F19). Gap: imphash/ssdeep/TLSH, YARA (corpus pull started. See the YARA detection corpus section), prohibited-content screening, sandbox. **The one phase where 100% here would still mean "do not switch on". See docs/18 L1.** |
-| 9 | Ingest API | `noct_sk_` write-only keys (invariant 11 CHECK), raw-persist-before-parse, sniffed format detection, category classifier, triage scoring, simhash dedupe, dead-letter replay, stealer-log compartment | 1 (case file, selectors, dead-letter); 4 (watch/triage, proposals) | **partial, 90%.** Model+tests done, API done (202 wired), UI done (Feeds), reviewed (docs/17 F15). Gap: outbound credential vault with per-provider quota. |
+| 3 | Analytics | `analytics.py` (pure, DB-free) fed by `GraphService.project()`; centralities, Leiden, Burt, cut vertices/bridges, KPP-Neg, signed balance; roles by CONCOR (`blockmodel.py`); forums and wallets projected to entities (`affiliation.py`); an accepted-ties-only scope; runs synchronously in API (decision 30) | 2 (materialises a projection) | **partial, 85% at Alpha 6.** Since then CONCOR (decision 88), the forum and wallet one-mode projection (decision 73) and the accepted-ties scope (decision 87) are built. Left: history charting; REGE; conversations are projected only by the Comms pane, on purpose. |
+| 4 | Collection | Adapter contract and scheduler (`run_once`, the cron's `collection_poll.py`), RSS, XenForo and MyBB (`forum_adapters.py`), Telegram over MTProto (`telegram.py`), persona vault, the two-person collection authority (`collection_authority.py`), raw markup bucket, watch matching, `proposals.py` review gate, similarity indexes (`embeddings.py`) | 1 (proposal to GraphWriteService; graph must work end-to-end first) | **partial, 75% at Alpha 6.** Since then the collection foundation, the forum and Telegram adapters (each behind a confirmed authority and the egress proxy) and document embeddings are built (decisions 69, 116, 129 to 136). Left: the authenticated forum path, a deployment-wide sweep of collected documents (docs/17 F30), and a first run against Telegram itself (docs/17 F31). Blocked on docs/16 L3 and L4 as much as on code. |
+| 5 | Notification & integration | `egress.py` TLP gate (one function, fails closed), `notifications.py` centre (Alembic 0029), SMTP digest/quiet-hours, HMAC webhooks, the delivery ledger (Administration, Integrations), Jira (`jira.py`), outbound lookups (`lookups.py`, `providers.py`), the egress proxy (`egress_proxy.py`) | 1 (TLP/classification); events from 6 (merge, dual-control) | **partial, 85% at Alpha 6.** Since then Jira, the delivery ledger's screen, outbound lookups and the egress proxy are built (decisions 68, 75, 121 to 123). Left: priority-1 escalation beyond the existing rule, and a versioned webhook signature (docs/17 F28). |
+| 6 | Tradecraft & hardening | Entity merge with reversal (`merges.py`, 0027), dual control (decision 44, 0028) and the two-person policy (`dual_control.py`, 0075), ACH (`ach.py`), report builder (`reports.py`), retention/purge, break-glass | 1 (nodes/edges, assertions); 5 (approval notifications) | **partial, 88% at Alpha 6.** Model+tests partial, API done, UI done (merge in the inspector; Lifecycle, ACH, Report and (2026-08-10) the dual-control approvals surface, without which Merge was unreachable from the browser whenever dual control was on). **Reviewed 2026-08-10**, the last phase to get a hostile pass: nine findings, all closed, including `unmerge` writing recorded endpoints over an edge a later live merge owned. Since then the two-person policy screen, the case merge switch that takes two people to turn off, and the retirement of the dead dual-control columns are built (decisions 90 to 95). Left: the assumptions register; whether the switch's second person needs a seasoning rule (docs/00 open question 12). WebAuthn is a documented deliberate absence (SECURITY.md says reporting it is not a finding), and timeline replay is built and belongs to Phase 2; both were listed here in error once. |
+| 7 | Comms channels | `comms.platform` (15 seeded), contact-block parser, CLAIMED/OBSERVED/CONFIRMED bindings, PGP verification (`pgp.py`) with detached signatures, a vendor key registry and Web Key Directory lookups (`pgp_keys.py`), co-participation, minimisation | 1 (selectors, proposals); 5 (egress gate); 2 (co-participation into sociogram) | **partial, 95% at Alpha 6.** Model+tests done, API done, UI done, reviewed (docs/17: a forged PGP verdict, a 499x tie weight, an ASCII-only label defence). Since then detached signatures, subkey signatures confirming the primary, the key registry, attribution of a key to a binding's holder and two-person key lookups are built (decisions 112 to 115). Left: gpg's own double-spaced fingerprint display in a contact block (docs/17 F37). |
+| 8 | Sample handling | Separate-origin download-only service (`samples.py`, 0031), encrypted-at-rest by SHA-256, quarantine to triage to RE queue, `MALWARE_ANALYST` role, static triage in bounded children (`lab_triage.py`, `lab_static.py`), fuzzy hashing (`fuzzyhash.py`), YARA rule sets (`yara_rules.py`), prohibited-content screening (`screening.py`), the CAPEv2 sandbox (`sandbox.py`), REJECTED path | 0 (role, gate); 1 (case model) | **partial, 80% at Alpha 6.** Model+tests done, API done, UI done (Lab pane), reviewed 2026-07-26, **nine criticals**, incl. a download path with no label check and an "encrypted archive" that was a plain ZIP (docs/17 F19). Since then imphash, Rich header, ssdeep and TLSH, YARA, exact-hash screening and sending to a self-hosted CAPEv2 are built (decisions 96 to 102, 124 to 128). Left: archive expansion, and isolating the analysis children in a container of their own (docs/17 F42). **The one phase where 100% here would still mean "do not switch on". See docs/18 L1.** |
+| 9 | Ingest API | `noct_sk_` write-only keys (invariant 11 CHECK), raw-persist-before-parse, sniffed format detection, category classifier, triage scoring, simhash dedupe, dead-letter replay, stealer-log compartment, the outbound lookup vault (`providers.py` `ProviderVault`) | 1 (case file, selectors, dead-letter); 4 (watch/triage, proposals) | **partial, 90% at Alpha 6.** Model+tests done, API done (202 wired), UI done (Feeds), reviewed (docs/17 F15). Since then the outbound credential vault with per-provider quota, exposure levels and a second person's sign-off is built (decisions 75 and 123), and `ingest.record` has its `duplicate_of` index. Left: nothing named; no lookup adapter has met its live service (docs/17 F27). |
 
 ### Build-order rationale
 
@@ -155,7 +167,7 @@ The one ordering constraint that matters (`docs/09`): the graph and assertion la
 
 ### Current state
 
-Branch `main` (byte-identical to `deception-and-release-hardening` except `README.md`), Alembic head **0068**, **3448 tests** counted as `def test_` functions across the **two pytest roots** (`apps/api/tests` and `packages/ontology/tests`) ruff clean. Those counters are generated by `scripts/refresh_counters.py` and held to the tree exactly by `test_doc_invariants`, so they are not a snapshot that can drift; tests parametrise, so the number of COLLECTED items is larger and is recorded per release in `release/CHANGELOG.md`. Without `DATABASE_URL` roughly half the suite skips, because it is deliberately database-gated, and CI fails on any skip.
+Branch `main` (byte-identical to `deception-and-release-hardening` except `README.md`), Alembic head **0124**, **6094 tests** counted as `def test_` functions across the **two pytest roots** (`apps/api/tests` and `packages/ontology/tests`) ruff clean. Those counters are generated by `scripts/refresh_counters.py` and held to the tree exactly by `test_doc_invariants`, so they are not a snapshot that can drift; tests parametrise, so the number of COLLECTED items is larger and is recorded per release in `release/CHANGELOG.md`. Without `DATABASE_URL` roughly half the suite skips, because it is deliberately database-gated, and CI fails on any skip.
 
 Overall completion is **92.8%**, the unweighted mean across the ten phases under the four-dimension measure (`ROADMAP-REMAINING.md` computes it from the per-phase figures and is the only place it is worked out; `test_doc_invariants` holds every other quotation of it to that one). As of 2026-07-26 **every phase has a service, tests, an HTTP API, an analyst pane and an adversarial review.** UI was the single largest gap for most of this build's life and is no longer: the Lab pane (Phase 8) was the last, and what remains on that axis is WebSocket push for the sociogram and metric-history charting.
 
@@ -167,21 +179,21 @@ Completion is not lawfulness. `docs/16-legal-and-external.md` holds **five BLOCK
 
 ## Data model
 
-NocTORnal's system of record is Postgres 16 with `pgvector`. The authoritative source since 2026-07-24 is the Alembic chain `db/migrations/versions/0001`-`0068` (`alembic upgrade head`); `db/schema.sql` is a mirror of it, GENERATED by `scripts/dump_schema.py` and diffed in CI on every push since 2026-09-09, before that it was hand-maintained and named five of the ten schemas below. Extensions are loaded out of band by `db/init/00-extensions.sql` (they need superuser): `pgcrypto`, `pg_trgm`, `btree_gist`, `citext`, `vector`. IDs are v4 UUIDs (`uuid4()` app-side, `gen_random_uuid()` as the column default); all timestamps are `timestamptz` in UTC; weights and money are `numeric`, never float.
+NocTORnal's system of record is Postgres 16 with `pgvector`. The authoritative source since 2026-07-24 is the Alembic chain `db/migrations/versions/0001`-`0124` (`alembic upgrade head`); `db/schema.sql` is a mirror of it, GENERATED by `scripts/dump_schema.py` and diffed in CI on every push since 2026-09-09, before that it was hand-maintained and named five of the ten schemas below. Extensions are loaded out of band by `db/init/00-extensions.sql` (they need superuser): `pgcrypto`, `pg_trgm`, `btree_gist`, `citext`, `vector`. IDs are v4 UUIDs (`uuid4()` app-side, `gen_random_uuid()` as the column default); all timestamps are `timestamptz` in UTC; weights and money are `numeric`, never float.
 
 ### Schemas
 
 | Schema | Created | Key tables |
 |---|---|---|
-| `core` | `0001` | `node_type`, `edge_type`, `selector_type`, `"case"`, `node`, `selector`, `edge`, `assertion`, `hypothesis`, `hypothesis_evidence`, `evidence`, `evidence_custody`, `evidence_link`, `tag`, `tag_assignment`, `node_set`, `node_set_member` |
-| `collect` | `0001` | `source`, `collection_account`, `egress_profile`, `watch`, `collection_run`, `document`, `extraction`, `proposal`, `watch_hit` |
-| `iam` | `0001` | `app_user`, `webauthn_credential`, `role`, `permission`, `role_permission`, `user_role`, `case_assignment`, `break_glass`, `dual_control_request`, `session` |
+| `core` | `0001` | `node_type`, `edge_type`, `selector_type`, `"case"`, `node`, `selector`, `edge`, `assertion`, `hypothesis`, `hypothesis_evidence`, `evidence`, `evidence_custody`, `evidence_link`, `tag`, `tag_assignment`, `node_set`, `node_set_member`, `approval_request`, and the similarity tables `embedding_space`, `embedding_pending`, `evidence_embedding`, `assertion_embedding` (0091 to 0093) |
+| `collect` | `0001` | `source`, `collection_account`, `egress_profile`, `watch`, `collection_run`, `document`, `extraction`, `proposal`, `watch_hit`; `collection_authority` and `collection_authority_target` (0083); `egress_integration_route`, `egress_destination`, `egress_binding` (0085) and the connection ledger `egress_connection` (0086); `document_embedding` (0092); `forum_post`, `forum_member` (0104); `telegram_chat`, `telegram_message` (0106) |
+| `iam` | `0001` | `app_user`, `webauthn_credential`, `role`, `permission`, `role_permission`, `user_role`, `case_assignment`, `break_glass`, `session`, `compartment` (0059), `separated_duty` (0062), `dual_control_operation` and `dual_control_policy_change` (0075); `dual_control_request` was retired by 0077 |
 | `audit` | `0001` | `event` |
-| `analytics` | `0001` | `projection`, `metric_run`, `node_metric`, `community_assignment`, `layout_position` |
-| `notify` | `0029` | `notification`, `delivery`, `preference` |
-| `lab` | `0031` | `sample`, `sample_analysis`, `detonation`, `sample_access` |
-| `ingest` | `0033` | `api_key`, `batch`, `record`, `victim_credential`, `pii_authorisation`, `dead_letter`, `category_rule` |
-| `comms` | `0034` | `platform`, `channel_binding`, `device_fingerprint`, `conversation`, `participant`, `message` |
+| `analytics` | `0001` | `projection`, `metric_run`, `node_metric`, `community_assignment` (communities, and CONCOR positions by run), `layout_position` |
+| `notify` | `0029` | `notification`, `delivery`, `preference`; `jira_destination`, `jira_link`, `jira_event` and `case_route_block` (0097) |
+| `lab` | `0031` | `sample`, `sample_analysis`, `detonation`, `sample_access`, `download_ticket` (0061), `preservation_authorisation` (0063), `static_run` (0079), `yara_ruleset`, `yara_ruleset_version`, `yara_activation`, `yara_compiled`, `yara_compiled_rejected`, `yara_compile_job` (0080), `screening_list`, `screening_hash`, `screening_result`, `screening_review` (0102) |
+| `ingest` | `0033` | `api_key`, `batch`, `record`, `victim_credential`, `pii_authorisation`, `dead_letter`, `category_rule`; `provider`, `provider_exposure_change` (0098), `lookup`, `lookup_attempt`, `lookup_result` (0099), `lookup_batch` (0101) |
+| `comms` | `0034` | `platform`, `channel_binding`, `device_fingerprint`, `conversation`, `participant`, `message`, `contact_block`, `contact_block_entry`, `service_selector`, `pgp_verification`; `pgp_key_acquisition`, `pgp_key` (0088), `pgp_key_lookup` (0090) |
 | `deception` | `0048` | `capture`, `capture_hop`, `email_message`, `email_hop`, `email_attachment`, `call_record` |
 
 The ontology is data, not enums: `node_type`, `edge_type`, `selector_type` are reference tables keyed by `text`, so new types ship without a migration (seeded in `0017`). Genuinely fixed vocabularies are enums: `tlp`, `source_reliability` (A, F), `info_credibility` (1-6), `analytic_confidence` (LOW/MODERATE/HIGH), `assertion_basis`, `case_status`, `review_state`.
@@ -230,7 +242,7 @@ The ontology is data, not enums: `node_type`, `edge_type`, `selector_type` are r
 | `email_norm` | Gmail-only dot/`+`-tag stripping, `googlemail.com` to `gmail.com` |
 | `asn_norm` | `AS`-prefix strip, asdot to asplain |
 | `btc_norm` | lowercases bech32, preserves base58 case |
-| `url_norm` | lowercases scheme+host, strips default port/fragment |
+| `url_norm` | lowercases scheme and host, strips the default port, keeps a fragment only where it names the resource (MEGA in its current form without the key, matrix.to without `via`, web.telegram.org chat forms only and never a login token, twitter.com's `#!/` form), drops any other fragment (decision 81) |
 | `ip_norm` | stdlib canonical form, unwraps `::ffff:` IPv4-mapped |
 
 plus `ssh_norm`, `jid_norm`, `mxid_norm`, `tlsh_norm`, `onion_norm`.
@@ -276,6 +288,26 @@ Invariant 9 separates *durable* identifiers from *displayed* ones. The vocabular
 ### Analytics runs
 
 `analytics_runs.py` owns Postgres. `AnalyticsRunService(conn, clearance, compartments, actor_id)` projects first, computes `graph_hash` (over caller-visible nodes/edges), upserts an `analytics.projection` row, then `_lookup` caches on `projection_id + algorithm + graph_hash + status='COMPLETE'` **and** `visibility_clearance`/`visibility_compartments`: two independent barriers so a run over RED nodes is never served to an AMBER caller. A miss inserts `analytics.metric_run` (`RUNNING`), computes, then in one transaction updates to `COMPLETE` with `result`, `is_approximate`, `sample_size` and writes per-node rows to `analytics.node_metric` (`betweenness`, `harmonic_closeness`, `eigenvector`, `constraint`, `effective_size`, `efficiency`, `hierarchy`) plus `analytics.community_assignment`; any exception marks the run `FAILED` and re-raises (invariant 12). Every outcome writes `audit.event` (`ANALYTICS_RUN`/`ANALYTICS_RUN_FAILED`, `object_type='metric_run'`). Analytics run synchronously in the API process, not a worker (decision 30): the seam is kept worker-ready, but at docs/03's under-5k-node band a queue adds process, dependency and failure mode without changing a number.
+
+### Roles, venue projection and the review scope (F1, F2, L3)
+
+`blockmodel.py` finds roles by CONCOR, one to four splits, over the same
+projection the suite uses, with numpy held to one BLAS thread per process
+(threadpoolctl when installed, otherwise OpenBLAS's own setter; the
+readiness row `role_analysis_thread_capped` reads the cap back). Its runs
+are stored like any other, positions in `analytics.community_assignment`
+by run (decision 88). `affiliation.py` projects forums and channels, and
+wallets and transactions, to ties between the entities they link:
+co-posters, co-controllers and a payer's controller to a payee's,
+Newman-weighted, only between memberships that overlapped in time, with
+venue sizes taken before any filter and every exclusion reported. Derived
+ties are never stored and never drawn, and two arithmetic pre-counts
+refuse a view before any work (50,000 derived ties, 1,000,000 period
+comparisons; decision 73). Conversations are projected only by the Comms
+pane's co-participation view. `review_scope` computes over accepted ties
+alone and counts what it left out by review state (decision 87). Each of
+the three is a per-run choice that joins the cache key only when it is on,
+so no stored run changes meaning.
 
 ---
 
@@ -323,21 +355,32 @@ All prefixes below are relative to `/api/v1`.
 | `evidence.py` | `/cases/{case_id}/evidence` | WORM upload, download, verify, custody, links | `POST ""`, `GET /{id}/content`, `POST /{id}/export`, `GET /{id}/custody` | `evidence.upload`, `evidence.read`, `evidence.export` (step-up) |
 | `search.py` | `/cases/{case_id}` | Combined and per-kind search (word start, label fragment, selector with `via`; `with_total` for a counted page), selector lookup | `GET /search`, `GET /search/nodes`, `GET /search/selectors`, `GET /search/evidence`, `GET`/`POST /selectors` | `case.read`, `evidence.read`, `graph.node.update` |
 | `read.py` | `/cases/{case_id}` | Graph read, provenance, evidence list, ontology | `GET /nodes`, `GET /nodes/{id}/assertions`, `GET /edges`, `GET /ontology` | `case.read`, `evidence.read` |
-| `analytics.py` | `/cases/{case_id}/analytics` | SNA suite, key player, metric history | `GET ""`, `GET /key-player`, `GET /history/{node}` | `analytics.run` |
+| `analytics.py` | `/cases/{case_id}/analytics` | SNA suite, key player, roles (CONCOR), the currency of the runs on screen, metric history; every route takes the review scope and the one-mode projection parameters | `GET ""`, `GET /key-player`, `GET /concor`, `GET /currency`, `GET /history/{node}` | `analytics.run` |
 | `proposals.py` | `/cases/{case_id}/proposals` | Capture, triage queue, disposition | `POST /capture`, `GET ""`, `POST /{id}/accept`/`reject`/`defer` | `evidence.upload` (capture), `case.read` (queue), `proposal.review` |
 | `merges.py` | `/cases/{case_id}/merges` | Entity merge + reversal, dual control | `POST ""`, `POST /{id}/reverse`, `GET ""` | `graph.merge`+step-up, `graph.unmerge`+step-up, `case.read` |
 | `approvals.py` | `/cases/{case_id}/approvals` | Four-eyes request/decide/withdraw | `POST ""`, `POST /{id}/decide`, `POST /{id}/withdraw` | `case.read` + operation's own permission; decide is step-up |
+| `approvals.py` (`global_router`) | `/approvals` | Deployment-wide approval requests, such as a change to the two-person policy | `GET ""`, `POST /{id}/decide`, `POST /{id}/withdraw` | the operation's own permissions; decide is step-up |
 | `approvals.py` (`policy_router`) | `/cases/{case_id}/policy` | Per-case dual-control & disclosure policy | `GET ""`, `PUT ""` | `case.read`, `case.update`+step-up |
-| `notifications.py` | `/notifications` | Inbox, read/ack, preferences, outbox drain | `GET ""`, `POST /{id}/read`, `PUT /preferences/{ch}`, `POST /dispatch` | session-only; `/dispatch` `integration.manage` (global, step-up) |
-| `samples.py` | `/samples` | Sample submit/queue/detail, download, one-shot download ticket, analysis | `POST ""`, `GET /{id}`, `POST /{id}/download-ticket`, `POST /{id}/download`, `POST /{id}/detonation` | `sample.submit`/`read`/`analyse`/`download`(step-up)/`detonate`(step-up) (all global); the ticket mint runs the download's own decision, so it can never be minted above the caller's clearance |
+| `notifications.py` | `/notifications` | Inbox, read/ack, preferences, outbox drain, the delivery ledger (shown under Administration, Integrations) and requeue | `GET ""`, `POST /{id}/read`, `PUT /preferences/{ch}`, `POST /dispatch`, `GET /deliveries`, `POST /deliveries/requeue` | session-only; `/dispatch`, the ledger and requeue `integration.manage` (global, step-up where it writes) |
+| `samples.py` | `/samples` | Sample submit/queue/detail, download, one-shot download ticket, analysis, static triage on demand, similar samples, prohibited-content screening (lists, rescan, the officer's results and reviews), detonation and its sign-off | `POST ""`, `GET /{id}`, `POST /{id}/download-ticket`, `POST /{id}/download`, `POST /{id}/static-triage`, `GET /{id}/similar`, `POST /screening/lists`, `POST /{id}/detonation`, `POST /detonations/{id}/sign-off` | `sample.submit`/`read`/`analyse`/`download`(step-up)/`detonate`(step-up), `sample.screening.manage`/`review` (step-up) (all global); the ticket mint runs the download's own decision, so it can never be minted above the caller's clearance |
 | `ach.py` | `/cases/{case_id}/ach` | ACH matrix, hypotheses, stances | `GET ""`, `POST /hypotheses`, `PUT /hypotheses/{id}/stance` | `report.generate` |
 | `reports.py` | `/cases/{case_id}/report` | Build (redacted; JSON carrying the markdown and its `content_digest` for the preview) and release (egress-gated, and the only source of a file to save: the console refuses to save a cleared document whose digest differs from the one previewed) | `POST ""`, `POST /release` | `report.generate`, `report.export` (step-up) |
-| `comms.py` | `/cases/{case_id}/comms` | Bindings, PGP verify, contact blocks, conversations, co-participation | `POST /bindings`, `POST /pgp/verify`, `POST /conversations`, `GET /co-participation` | `comms.bind`, `comms.read`, `comms.stoplist.manage`, `comms.minimise` (step-up) |
+| `comms.py` | `/cases/{case_id}/comms` | Bindings, PGP verify (clearsigned and detached), the vendor key registry, Web Key Directory lookups, contact blocks, conversations, co-participation | `POST /bindings`, `POST /pgp/verify`, `POST /pgp/keys`, `POST /pgp/key-lookups`, `POST /pgp/key-lookups/{id}/approve`, `POST /conversations`, `GET /co-participation` | `comms.bind`, `comms.read`, `comms.key.lookup` and `comms.key.lookup.approve` (step-up), `comms.stoplist.manage`, `comms.minimise` (step-up) |
 | `comms.py` (`global_router`) | `/comms` | Platform reference data, global stoplist | `GET /platforms`, `POST /stoplist`, `POST /stoplist/{id}/retire` | session-only; stoplist `comms.stoplist.manage` (global) |
-| `governance.py` | `/retention` | Retention rules, due preview, purge, tombstones, legal hold | `GET /rules`, `POST /purge`, `POST /purge/out-of-schedule`, `POST /legal-hold` | `retention.read`/`manage`/`purge` (global, purge step-up); case checked via `_case_scoped` |
+| `governance.py` | `/retention` | Retention rules, due preview, purge, tombstones, legal hold on a case or a collected document | `GET /rules`, `POST /purge`, `POST /purge/out-of-schedule`, `POST /legal-hold`, `POST /documents/{id}/legal-hold` | `retention.read`/`manage`/`purge` (global, purge step-up); case checked via `_case_scoped` |
 | `governance.py` (`break_glass_router`) | `/break-glass` | Emergency access invoke/review/revoke | `POST ""`, `GET /unreviewed`, `POST /{id}/review`, `GET /mine` | `break_glass.invoke`, `break_glass.review` (global); `/mine` session-only |
-| `collection.py` | `/collection` | Source polling, persona health, egress separation | `GET /sources/due`, `POST /sources/{id}/run`, `GET /personas` | `collection.read`/`run`/`collection_account.manage` (all global) |
+| `collection.py` | `/collection` | Sources (add, bind, activate, deactivate), polling, runs, personas, egress profiles, collected documents and forum details | `GET /sources/due`, `POST /sources/{id}/run`, `POST /sources/{id}/binding`, `GET /runs/{id}`, `GET /personas`, `GET /egress-profiles`, `GET /documents/{id}/forum` | `collection.read`/`run`, `source.manage`, `collection_account.manage` (step-up) (all global) |
 | `ingest.py` | `/ingest` | Key-authed batch submit, key mgmt, parse, dead-letters, victim PII | `POST ""` (202), `POST /keys`, `POST /batches/{id}/parse`, `POST /credentials/{id}/reveal` | ingest API key (`POST ""`); else `ingest.manage`/`read`/`replay`, `victim_pii.authorise`/`reveal` (step-up) |
+| `collection_authority.py` | `/collection/authorities` | The two-person collection authority and its targets | `POST ""`, `POST /{id}/targets`, `GET /review`, `POST /{id}/confirm`, `POST /{id}/revoke` | `collection.authority.record` (COLLECTOR), `collection.authority.confirm` (SECURITY_OFFICER), both step-up |
+| `collection_telegram.py` | `/collection/telegram` | Telegram chats: add, join, rebind, membership check, a persona's active window | `GET /chats`, `POST /chats`, `POST /chats/{id}/join`, `POST /chats/{id}/membership` | `collection.read`/`run`, `source.manage`, `collection_account.manage` (global) |
+| `egress.py` | `/admin/egress` | Egress profiles, exits, the passive default, integration routes and their destinations, the connection log and its verification, a dry run | `GET ""`, `POST /profiles`, `PUT /profiles/{id}/exit`, `POST /routes`, `POST /routes/{id}/destinations`, `GET /connections`, `GET /connections/verify`, `POST /check` | `egress.manage` (SYS_ADMIN, step-up); the log `egress.log.read` (SYS_ADMIN, SECURITY_OFFICER) |
+| `dual_control.py` | `/admin/dual-control` | The two-person policy: what it is, its history, a proposal, applying one | `GET ""`, `GET /history`, `POST /changes`, `POST /changes/{id}/apply` | `dual_control.manage` (SYS_ADMIN) or `dual_control.countersign` (SECURITY_OFFICER), step-up to write |
+| `integrations.py` | `/integrations` | Every outbound channel with its route; the Jira destination (declare, credential, test, activate, pause, retire, links); a case's routing veto | `GET ""`, `POST /jira`, `PUT /jira/credential`, `POST /jira/test`, `GET /jira/links`, `PUT /cases/{id}/notify-routing` | `integration.manage` (global); the veto `case.update` |
+| `providers.py` | `/providers` | Outbound lookup providers: register, seal a key, enable, exposure changes and their second administrator, test, usage | `GET ""`, `POST ""`, `PUT /{id}/secret`, `POST /{id}/enable`, `POST /{id}/exposure-changes`, `POST /{id}/exposure-changes/{change}/decide` | `integration.manage` (global, step-up) |
+| `lookups.py` | `/cases/{case_id}/lookups` | A case's lookups: plan, request, sign-off, batches, answers filed as exhibits | `POST /plan`, `POST ""`, `POST /{id}/sign-off`, `POST /batches`, `POST /results/{id}/file` | `lookup.request`, `lookup.authorise` (step-up), `case.read`, `evidence.upload` |
+| `lab_yara.py` | `/samples/yara` | YARA rule sets, versions, adoption, activation, retrohunt | `GET /rulesets`, `POST /rulesets`, `POST /rulesets/{id}/versions`, `POST /versions/{id}/activate`, `POST /versions/{id}/retrohunt` | `sample.read`, `sample.yara.manage` (MALWARE_ANALYST), `sample.yara.activate` (SECURITY_OFFICER), step-up to write |
+| `embeddings.py` | (none) | The similarity indexes: status, gaps, rebuild, activate, retire, recheck, a pass | `GET /embeddings/status`, `GET /admin/embeddings`, `POST /admin/embeddings/spaces`, `POST /admin/embeddings/pass` | `embedding.manage` (SYS_ADMIN, step-up) |
+| `similarity.py` | (none) | Similar wording and meaning over collected documents, exhibits and claims (POST, so passages stay out of URLs) | `POST /collection/documents/{id}/similar`, `POST /cases/{id}/search/documents/similar`, `POST /cases/{id}/evidence/{id}/similar` | `collection.read`, `case.read`, `evidence.read` |
 
 `POST /ingest` is the only endpoint authenticated by an `ingest.api_key` (write-only, invariant 11) rather than a session; it returns 202 and a batch id and reaches nothing else.
 
@@ -370,16 +413,50 @@ The gate wires into requests through `apps/api/src/noctornal_api/http/deps.py`. 
 - **TOTP** (`totp.py`): RFC 6238, `STEP_SECONDS=30`, `DIGITS=6`, `DRIFT_WINDOWS=1` (plus/minus 1 step), SHA-1 for authenticator compatibility, at least a 160-bit base32 secret. Replay protection: a candidate step counter is accepted only if **strictly greater** than the stored `last_counter`; on success the caller persists `new_last_counter` via the store's atomic compare-and-set (`advance_totp_counter`), so a concurrent login consuming the same code fails.
 - **Sessions** (`sessions.py`): opaque, server-side, stored in `iam.session`. `ABSOLUTE_LIFETIME=12 h`, `IDLE_TIMEOUT=30 min`, `STEP_UP_FRESHNESS=15 min`, all enforced server-side in `validate()`. Single-session `revoke` (logout) and `revoke_all_for_user` (global, for password change/admin kill).
 - **Tokens** (`tokens.py`): 256-bit `secrets.token_urlsafe(32)`; only the SHA-256 hash is stored (`iam.session.token_hash`); raw token returned once.
-- **Envelope** (`envelope.py`): AES-256-GCM over TOTP secrets, persona credentials, victim-credential values, per-sample data keys and egress endpoints; blob = `nonce(12) || ciphertext`, and the `key_id` stored beside it **selects the key** (since 2026-09-11, until then it was written and never read). A ring: **`NOCTORNAL_TOTP_KEK`** is the active key (base64, 32 bytes) under the id `NOCTORNAL_TOTP_KEK_ID` (default `env:v1`), and `NOCTORNAL_TOTP_KEK_RETIRED` (`id=base64,…`) holds keys that only open. It refuses to encrypt/decrypt with a default key. The readiness check `kek_ring_opens_stored_secrets` opens one blob per (table, key id) across the five sealed columns (`security/sealed.py`), so a key that changed under its id is reported by table and count instead of surfacing as a 500 at login, which now answers 503 by name (`AuthOutcome.SECOND_FACTOR_UNAVAILABLE`). `scripts/rewrap_secrets.py --apply` re-seals every row under the active key; the four-step runbook is in the module docstring.
+- **Envelope** (`envelope.py`): AES-256-GCM over TOTP secrets, persona credentials, victim-credential values, per-sample data keys, the Jira credential and lookup provider keys (the egress profile's old endpoint column is retired; exits are sealed to the egress proxy's own key instead, `security/egress_seal.py`); blob = `nonce(12) || ciphertext`, and the `key_id` stored beside it **selects the key** (since 2026-09-11, until then it was written and never read). A ring: **`NOCTORNAL_TOTP_KEK`** is the active key (base64, 32 bytes) under the id `NOCTORNAL_TOTP_KEK_ID` (default `env:v1`), and `NOCTORNAL_TOTP_KEK_RETIRED` (`id=base64,…`) holds keys that only open. It refuses to encrypt/decrypt with a default key. The readiness check `kek_ring_opens_stored_secrets` opens one blob per (table, key id) across the sealed columns `security/sealed.py` lists, so a key that changed under its id is reported by table and count instead of surfacing as a 500 at login, which now answers 503 by name (`AuthOutcome.SECOND_FACTOR_UNAVAILABLE`). `scripts/rewrap_secrets.py --apply` re-seals every row under the active key; the four-step runbook is in the module docstring.
 
 ### Egress and credential invariants
 
 | Invariant | Enforced in |
 |-----------|-------------|
-| 8. TLP gates egress | `apps/api/src/noctornal_api/egress.py`: `can_egress()`/`enforce_egress()`. `NEVER_EGRESS = {AMBER_STRICT, RED}` checked before any per-destination ceiling; compartmented material never crosses; unknown classification/destination fails closed. Destinations: `IN_APP, EXPORT, SMTP, JIRA, WEBHOOK`. |
-| 7, credentials never leave the vault | `apps/api/src/noctornal_api/collection.py`: `collection_account.secret_*` is decrypted (`envelope.decrypt`) only inside `PersonaVault.use()`; no function returns a plaintext credential. The vault runs IN the API process. There is no collection worker. (Reworded 2026-09-09; the previous text claimed a worker the tree has never had.) |
+| 8. TLP gates egress | `apps/api/src/noctornal_api/egress.py`: `can_egress()`/`enforce_egress()`. `NEVER_EGRESS = {AMBER_STRICT, RED}` checked before any per-destination ceiling; compartmented material never crosses; an unknown classification, or a destination with no gate record, fails closed. Destinations: `IN_APP, EXPORT, SMTP, JIRA, WEBHOOK, COLLECTION_TARGET, KEY_DIRECTORY, MODEL_HOST, MODEL_REMOTE, LOOKUP, SANDBOX`; every one but `IN_APP` crosses the boundary except `MODEL_HOST` (a declared loopback model server outside production), and every one added since Alpha 6 requires a declared ceiling. |
+| 7, credentials never leave the vault | `apps/api/src/noctornal_api/collection.py`: `collection_account.secret_*` is decrypted (`envelope.decrypt`) only inside `PersonaVault.use()`; no function returns a plaintext credential. The vault runs IN the API process. There is no collection worker. (Reworded 2026-09-09; the previous text claimed a worker the tree has never had.) `providers.py` `ProviderVault` holds lookup provider keys the same way, bound to their origin and route; egress exits are sealed for the proxy alone. |
 | 6, audit append-only | `db/schema.sql`: trigger `event_append_only` (BEFORE UPDATE OR DELETE) + `event_no_truncate` calling `audit.block_mutation()`; `REVOKE UPDATE, DELETE, TRUNCATE ON audit.event FROM PUBLIC`; hash chain via `audit.chain_hash()` trigger `audit_chain`. Evidence custody has the parallel `evidence_custody_append_only`. |
 | 11 (ingest keys write-only | `ingest.api_key` `CONSTRAINT api_key_write_only CHECK (scopes <@ ARRAY['ingest:write','ingest:status'] AND NOT ('case:read' = ANY(scopes)))`, default `scopes = '{ingest:write}'`) migration 0033, visible in `db/schema.sql` since the mirror was regenerated on 2026-09-09. (The 2026-07-25 survey reported this constraint as concept-only, because the hand-written mirror had never been updated for 0033. It has been live since that migration; the sketch that misled the survey is gone.) |
+
+
+### Outbound connections and the egress proxy
+
+`docs/20-outbound-connections.md` is the contract; this is its shape.
+`egress_policy.py` is the one address classifier and the one table of
+refusal codes (decision 84): cloud metadata addresses and the deployment's
+own networks are refused on every route, and private space is reached only
+through a rule that names it. `pinned_http.py` is the one outbound client
+(decision 72): it connects only to an address it checked, or tunnels to the
+name through the proxy, under one wall-clock allowance, never retries, and
+never lets a credential follow a redirect. Every connection takes its route
+from `egress.route_for(kind, name, conn=..., context=...)`: a **persona**
+route (`persona:<egress profile>`, for a run, an act or a stop) or an
+**integration** route (`integration:smtp`, `webhook`, `jira`, `wkd`,
+`embeddings`, `sandbox`, or `lookup-<key>`). The route provider,
+`egress_routes.py`, builds each route's policy from its database row, and
+the proxy builds it the same way.
+
+In production the application network is internal, and `egress_proxy.py`,
+one listener for HTTP CONNECT and SOCKS5 on the proxy's own internal
+address, is the only way out (decision 68). It authenticates the route by
+a per-route HMAC token, decides a persona connection from the database
+(`egress_authz.py`: a live run, a live authority for an act, a logout;
+decision 107), resolves once and dials only admitted answers, and records
+every connection before it dials in `collect.egress_connection`, an
+append-only, hash-chained ledger only its own database role
+(`noctornal_egress`) writes (`egress_ledger.py`, decision 109). Exits are
+sealed to the proxy's key (decision 108). Profiles, exits and routes are
+configured under Administration, Egress (`egress.manage`) or with
+`scripts/egress_setup.py`. In development with no proxy the same policy is
+applied in process and nothing is recorded; the readiness row
+`egress_boundary` says so, and a production process with any outbound use
+and no proxy refuses to start.
 
 ---
 
@@ -401,11 +478,11 @@ Custody is an append-only ledger: `_custody` inserts into `core.evidence_custody
 
 Invariant 10 is enforced at runtime, not documented. `SampleService.download` refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is configured **and** the request arrived there, `request_origin` is taken from `request.url.scheme://netloc` server-side, never a client header. The `POST /samples/{id}/download` route (the only endpoint touching bytes; `sample.download` + `require_step_up`) returns `application/octet-stream`, `Content-Disposition: attachment; filename="{sha256}.zip"`, `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: default-src 'none'; sandbox`. Metadata endpoints render freely (hashes, `file_type`, `entropy`, `triage_gaps`, analyses, custody); sample bytes never render and no sandbox combines `allow-scripts` with `allow-same-origin` (invariant 10). The object key is the SHA-256 (`samples/{hh}/{sha256}`), never the attacker-controlled filename. Bytes are encrypted at rest under a per-sample key (envelope-wrapped via `security.envelope`); the current `_xor_stream` keystream is labelled containment, not confidentiality, its jobs are stopping EDR from quarantining evidence and ensuring nothing on disk is runnable. Every download re-hashes and fails closed on SHA-256 mismatch. `archive()` wraps as a ZIP with public password `infected` (interlock against double-click execution, no confidentiality).
 
-**The policy gate.** `SampleService.submit` calls `policy_declared()`, which requires both `NOCTORNAL_PROHIBITED_CONTENT_POLICY` (an auditor-followable reference, not a boolean) and `NOCTORNAL_DESIGNATED_PERSON`. Absent either, submit raises `PolicyNotDeclared` and the router returns **HTTP 451**. The refusal is legal, not technical. `GET /samples/policy` surfaces the state and a counsel-review notice. Samples land in `QUARANTINED`; triage is static-only (magic-byte typing, entropy, MD5/SHA-1/SHA-256) with absent steps recorded as `triage_gaps` rather than silent NULLs.
+**The policy gate.** `SampleService.submit` calls `policy_declared()`, which requires both `NOCTORNAL_PROHIBITED_CONTENT_POLICY` (an auditor-followable reference, not a boolean) and `NOCTORNAL_DESIGNATED_PERSON`. Absent either, submit raises `PolicyNotDeclared` and the router returns **HTTP 451**. The refusal is legal, not technical. `GET /samples/policy` surfaces the state and a counsel-review notice. Samples land in `QUARANTINED`; submission runs the quick checks (magic-byte typing, entropy, MD5/SHA-1/SHA-256) and queues static triage (below), and a step not yet run, or not built, is recorded in `triage_gaps` rather than as a silent NULL.
 
 Stealer logs are segregated from evidence: they live in the `ingest` schema, never `core.evidence` (decision 19). The malware store is `lab.sample` in its own bucket (`SAMPLE_BUCKET`, default `noctornal-samples`; `SAMPLE_ENDPOINT` / `SAMPLE_ACCESS_KEY` / `SAMPLE_SECRET_KEY`, falling back to the MINIO_* vars only for a single-node dev stack).
 
-### YARA detection corpus (in progress)
+### YARA: the corpus and the Lab's rule sets
 
 The static-triage side of Phase 8 is backed by a provenance-tracked YARA corpus
 pulled from public sources, laid out under `yara/` and driven by
@@ -423,7 +500,7 @@ rules as the rest of the system, not as a loose dump of signatures:
   pulled and when, reproducible and auditable in a disclosure context, the same
   discipline `core.assertion` applies to graph elements.
 - **Nothing dropped (invariant 12).** `build` compiles each file with
-  `yara-python` when present and routes non-compiling files to
+  `yara-x` (the `noctornal-api[yara]` extra) and routes non-compiling files to
   `yara/dist/dead_letter.json` with the reason; rule-name collisions across
   sources go to `yara/dist/collisions.json` rather than a silent
   last-writer-wins merge.
@@ -434,15 +511,49 @@ rules as the rest of the system, not as a loose dump of signatures:
   workstation AV quarantined mid-clone. `NOCTORNAL_YARA_HOME` relocates the
   corpus outside a cloud-synced or AV-watched tree.
 
-**Status: scaffolding and a fetch-on-demand, rules-only pipeline; not yet wired
-into `samples.py`.** Two invariants govern that wiring when it happens: a YARA match
-is static pattern-matching over bytes in the sample store and must never cause a
-sample to render or execute (**invariant 10**), and a match is graded evidence
-attributed to its rule and source, written as a proposal/assertion for an
-analyst, **never as a fact** (invariant 1). Remaining: namespaced multi-file
-compilation (per-file compile currently sends cross-referencing rules to the
-dead-letter), external-module coverage, and a scan endpoint that records hits as
-gradeable assertions.
+**Status: wired into the Lab (roadmap F11 and F12, 2026-09-24).** Static
+triage runs after submission, outside the request: `submit()` queues a
+`lab.static_run` in its insert transaction, and `scripts/lab_triage.py` (its
+own compose service) and the on-demand route drain it. Each step (PE, fuzzy
+hashes, one YARA scan per active rule set version, compiles) runs in a child
+process fed over stdin, started without the deployment's secrets, bounded by
+rlimits on Linux and a wall clock everywhere; the parent decrypts and
+verifies, writes SCANNED custody, validates everything the child reports,
+and records machine analyses. Liveness and concurrency use session advisory
+locks, and similarity reads go through `samples.lab_gate`. YARA rule sets are
+labelled, versioned records activated by a Security Officer who did not
+sponsor them; compiled builds are an insert-only, KEK-authenticated history
+keyed by engine, platform and CPU features, and rule bundles are parsed off
+the event loop behind a directory guard. The two invariants still govern
+it: a match is static pattern-matching over bytes and never causes a sample
+to render or execute (**invariant 10**), and it is recorded as a machine
+analysis attributed to its rule set version, reaching the graph only
+through a proposal an analyst decides (**invariant 1**).
+
+### Screening and the sandbox (F13, F14)
+
+`screening.py` compares every held and incoming sample, by exact md5, sha1
+and sha256, with hash lists a Security Officer imports into Postgres, once
+counsel's authority to hold them is recorded (`NOCTORNAL_HASH_SET_AUTHORITY`,
+docs/16 C3); `scripts/sample_screen.py` runs the pass in the `lab-cron`
+loop. A match is permanent: the sample leaves every Lab reader through one
+line of `LAB_EXCLUSIONS`, its bytes are preserved under a legal hold (or a
+submission is never stored where rejected material is destroyed), its
+retrieval authorisations become void, and the officer and the designated
+person are alerted without content (decisions 124 to 126). Perceptual
+matching is not built. `screening.sample_may_leave` is the one reader of
+whether a sample's bytes or hashes may leave the host, for the lookups and
+the sandbox.
+
+`sandbox.py` and `sandbox_capev2.py` send a detonation to one self-hosted
+CAPEv2 over the `sandbox` integration route, as the encrypted archive only,
+from `scripts/sandbox_dispatch.py` alone (decision 127). A send to an
+exposed target, or on a live network route or analysis machine, waits for
+a named second person's sign-off in the product, and the SHARED custody row
+is committed before the request. CAPE's report is read as hostile input and
+recorded as a machine SANDBOX analysis; nothing is proposed from it unless
+the operator turns that on (decision 128). Requests recorded before this
+existed are RECORD_ONLY and never sent.
 
 ### Ingest (`ingest.py`, `http/routers/ingest.py`, Phase 9)
 
@@ -535,7 +646,8 @@ page, including canary credentials, may constitute unauthorised access.
 platform that submits anything. `capture_active_needs_egress_profile` is
 an **attestation, not a routing control**, nothing here performs the
 fetch, and `collect.egress_profile.endpoint_ciphertext` is read by zero
-lines of Python. Stated plainly because a constraint that looks like a
+lines of Python (retired by a CHECK in 0085: an egress profile's exit is
+now sealed for the egress proxy, and a capture still performs no fetch). Stated plainly because a constraint that looks like a
 technical control while being an attestation is this codebase's recurring
 defect shape.
 
@@ -549,9 +661,9 @@ automation, a mailbox connector, URL detonation from the UI, and any
 
 `collection.py` implements the adapter/persona/scheduler engine over the `collect.*` schema, inside the API process. There is no separate collector, and the split is a deliberate not-yet. Invariant 7 (credentials never leave the vault) is enforced by shape, not discipline: `PersonaVault` exposes no `get_secret()`, only `use(persona_id, *, actor_id, purpose)`, a context manager that decrypts `collect.collection_account.secret_ciphertext` via `security/envelope.decrypt(..., key_id=secret_key_id)`, yields the plaintext to a block, and drops it. Every use writes an `audit.event` (`PERSONA_USED` with a purpose). `store()` re-encrypts with `envelope.encrypt` and stamps `secret_rotated_at`. `redact()` masks credential-shaped substrings (structural regex over `password|token|api_key|...` and `user:pass@` URLs) and is applied to every adapter error before it reaches `collect.collection_run.error_detail`.
 
-Persona lifecycle: `HEALTHY/COOLDOWN/LOCKED/BURNED`; `BURNED` is terminal and `set_status` requires a `burn_reason`. `check_egress_separation(source_id)` reports two live personas sharing an `egress_profile_id` against one source (a temporal condition, deliberately not a DB constraint).
+Persona lifecycle: `HEALTHY/COOLDOWN/LOCKED/BURNED`; `BURNED` is terminal and `set_status` requires a `burn_reason`. Since 0082 a persona is one account on one platform, and a platform's own holds and locks live in machine columns only `PersonaVault.signal()` writes and nothing a person does can shorten (decision 105); `PERSONA_USABLE_SQL` is the one usability rule the lease, the gate, the due list and the egress proxy all read. A source is bound to the persona it is polled as, or, persona-less, to the egress profile it is read through. `check_egress_separation(source_id)` reports two live personas sharing an `egress_profile_id` against one source (a temporal condition, deliberately not a DB constraint).
 
-The `Adapter` interface returns `Item`s, never graph elements, only `RssAdapter` (key `rss`) exists; XenForo/MyBB/Telegram are stubs pending authorisation (docs/16 L3). `parse_rss` refuses any feed containing a `DOCTYPE`/`ENTITY` (XXE floor). `CollectionService.run_once` rate-limits (`RateLimiter`), fetches, writes deduped/versioned `collect.document` rows (content_sha256, `supersedes_id`), and matches `collect.watch` keywords/selectors/regexes into `collect.watch_hit` with suppression. `due_sources()` reports; nothing loops (`next_due_at` adds symmetric percentage jitter). `fetch()` blocks non-HTTP schemes and private-range resolution (SSRF floor; DNS-rebinding unaddressed). Router `/collection` gates on `collection.read`, `collection.run`, `collection_account.manage`.
+The `Adapter` interface returns `Item`s, never graph elements, and every adapter builds on one frozen contract (`collection_context.py` `RunContext`, pinned by `test_collection_contract.py`): per-poll budgets and pacing, a custody log of what the poll asked for, raw markup kept per item in `COLLECT_RAW_BUCKET` and deleted with its document, and the persona lease through `persona_session` (decision 69). `RssAdapter` (key `rss`) reads feeds and web pages and refuses any feed containing a `DOCTYPE`/`ENTITY` (XXE floor); `forum_adapters.py` reads public XenForo and MyBB threads and boards, parsing each page in a bounded child process (`forum_parse.py`, decisions 129 to 133); `telegram.py` reads Telegram over MTProto with Telethon, through `telegram_wire.py` and `telegram_service.py` (decisions 134 to 136). **A forum or Telegram source is read only under a live collection authority** (`collection_authority.py`, 0083), recorded by one person and confirmed by a Security Officer, and only where the deployment declares a ceiling for that kind of collection; anything else is held, not failed. `CollectionService.run_once` rate-limits (`RateLimiter`, with a per-persona gap), takes its route from `egress.route_for` with the run as context, fetches through the one pinned client, writes deduped/versioned `collect.document` rows (content_sha256, `supersedes_id`), and matches `collect.watch` keywords/selectors/regexes into `collect.watch_hit` with suppression. `due_and_held()` reads the schedule once; the cron's `collection_poll.py` runs the pass (`next_due_at` adds symmetric percentage jitter). In production every poll leaves through the egress proxy on the source's or persona's own exit (docs/20). Router `/collection` gates on `collection.read`, `collection.run`, `source.manage`, `collection_account.manage`.
 
 ### Comms (Phase 7)
 
@@ -561,13 +673,19 @@ The `Adapter` interface returns `Item`s, never graph elements, only `RssAdapter`
 
 `pgp.verify_clearsigned` delegates to the `gpg` binary (env `NOCTORNAL_GPG`), parsing only `--status-fd` bytes split on `b"\n"` (`_status_lines`, the defence against a crafted-user-ID `VALIDSIG` forgery that `str.splitlines()` enabled). It checks the claimed fingerprint (trap 1) against gpg's `--output` of the signed region (trap 2), token-boundary-matches the value, and records every outcome in `comms.pgp_verification`; only `VERIFIED` upgrades a binding to `CONFIRMED`. `NO_VERIFIER` keeps it `CLAIMED`. `coparticipation.py` projects `comms.conversation x comms.participant` to one mode with Newman weighting over raw room size, excluding oversized/incidental/unresolved rooms (all reported), marked `is_inferred`.
 
+Since 2026-09-24 (F10) a detached signature is checked beside the file it signs, a signature by a signing subkey confirms a claim of its published primary, gpg never starts an agent and is refused below its version floor unless the operator attests a patched build (decision 112), and every key and signature is walked for OpenPGP framing before gpg sees it. `pgp_keys.py` keeps a case-scoped register of vendor keys, what was obtained and from where, never born confirmed; a binding is confirmed only when a cited contact block ties the signing key to its holder, and otherwise the check is UNATTRIBUTED (decision 114). A key can be looked up in a Web Key Directory over the `wkd` route, asked for by one person and approved and sent by another (decision 115). The verification ledger refuses UPDATE and DELETE.
+
+### Similarity (F6)
+
+`embedders.py` and `embeddings.py`, over `core.embedding_space` and the vector tables of 0091 to 0093. Two roles: similar wording from a built-in, versioned embedder that runs in this process and sends nothing (on by default), and similar meaning from an operator's model server through the `embeddings` integration route (off by default, and outside this host only under a written authority and a ceiling; decisions 116 and 117). Vectors carry their document's labels by trigger and are deleted with any change to its labels, text, category or purge; reads walk per-label partial HNSW indexes plus an exact compartmented branch and join back to the live document, so a hidden row can neither appear nor crowd out a visible one (decision 118). Case items are compared by an exact scan inside one case. A hit is shown as a band, never a number (decision 120). `scripts/embed_pass.py` drains the queue the triggers fill; Administration, Embeddings rebuilds, activates, retires and rechecks the indexes (`embedding.manage`).
+
 ### Curation: machines propose, analysts dispose (invariant 3)
 
 `proposals.py`: `ProposalStore.propose` (kinds `NODE/EDGE/ATTRIBUTE`) is the only extractor path; it holds no `GraphWriteService` so it physically cannot touch `core.node`/`core.edge`. `ProposalReview.accept` (permission `proposal.review`) is the sole path into the graph, requires a human `reviewed_by`, writes through `GraphWriteService` with basis `AUTOMATED_INFERENCE`, and creates edges as `is_inferred=True` (invariant 4). States: `PROPOSED/ACCEPTED/REJECTED/DISPUTED`.
 
 Note: the invariant-3 "auto-merge on an `is_strong` selector match" is **not** implemented as automatic. In `selectors.py`, a strong selector already attributed to another node raises `StrongSelectorConflict` (a merge *lead*) and `merges.py` merges are human-initiated. `MergeService.merge` records `core.node_merge` + `core.node_merge_edge` (endpoints saved before repointing), refuses the IDENTITY/PERSON boundary (invariant 2), audits `NODE_MERGED`, and fires `notify_events.merge_performed`; `unmerge` restores exactly.
 
-Supporting modules: `approvals.py` (four-eyes; `OPERATIONS` catalogue, payload-hash binding, `consume` one-shot; constraint in migration 0028); `notifications.py` (`notify.notification`/`delivery`/`preference`, four suppressions, current-clearance read filter); `ach.py` (Heuer matrix ranked by weighted inconsistency, pure); `reports.py` (`ReportBuilder` builds at a target-TLP projection, structural redaction, evidence SHA-256/BLAKE3 register, `check_egress`). Routers gate on `graph.merge`/`graph.unmerge`, `report.generate`/`report.export`, and `comms.bind`/`comms.read`/`comms.minimise`/`comms.stoplist.manage`.
+Supporting modules: `approvals.py` (four-eyes; `OPERATIONS` catalogue, payload-hash binding, `consume` one-shot; constraint in migration 0028; write-once since 0074, with a deployment-wide router for requests no case owns); `dual_control.py` (the two-person policy: which operations need a second signature in which mode, and which permission pairs no role may hold, changed only by an administrator's proposal, a Security Officer's countersignature and the administrator's apply, each write bound to its ledger row; decisions 90 to 94); `notifications.py` (`notify.notification`/`delivery`/`preference`, four suppressions, current-clearance read filter); `ach.py` (Heuer matrix ranked by weighted inconsistency, pure); `reports.py` (`ReportBuilder` builds at a target-TLP projection, structural redaction, evidence SHA-256/BLAKE3 register, `check_egress`). Routers gate on `graph.merge`/`graph.unmerge`, `report.generate`/`report.export`, and `comms.bind`/`comms.read`/`comms.minimise`/`comms.stoplist.manage`.
 
 ---
 
@@ -598,7 +716,7 @@ This diverges from the 2026-07 design sketch (Next.js 15 / TypeScript / Tailwind
 
 ### Coverage: the honest gap
 
-UI panes exist for: login/case list (Phase 0), Entities and add-entity/add-relationship/assertions (Phase 1), the sociogram and scrubber (Phase 2), Analysis (Phase 3), Triage/capture (Phase 4), Inbox notifications and delivery prefs (Phase 5), entity-resolution merge (Phase 6), and Comms (Phase 7). Phase 8 has the Lab pane (sample bytes are downloaded from the sample origin and never rendered, invariant 10), and Phase 9's keys, triage queue and dead letters reached the Feeds pane. **API-only** in this console: Phase 5 integration configuration beyond the inbox (the Jira and webhook transports). (This sentence said "no samples tab" until 2026-09-09, contradicting the Phase 8 row above it.) WebAuthn is not built.
+UI panes exist for: login/case list (Phase 0), Entities and add-entity/add-relationship/assertions (Phase 1), the sociogram and scrubber (Phase 2), Analysis (Phase 3), Triage/capture (Phase 4), Inbox notifications and delivery prefs (Phase 5), entity-resolution merge (Phase 6), and Comms (Phase 7). Phase 8 has the Lab pane (sample bytes are downloaded from the sample origin and never rendered, invariant 10), and Phase 9's keys, triage queue and dead letters reached the Feeds pane. Since 2026-09-24 the Administration pane also has Two-person controls, Egress, Integrations (the delivery ledger, moved from the Inbox, the outbox and Jira), Providers and Embeddings; Oversight has the officer's review of two-person changes, collection authorities, YARA activations and screening matches; the Lab has Rules; Records has Lookups; Triage has Dual control; Feeds, Sources adds forum and Telegram sources, personas and authorities; Search has the Match choice. No integration's configuration is API-only any more. (This paragraph said "no samples tab" until 2026-09-09, contradicting the Phase 8 row above it.) WebAuthn is not built.
 
 ---
 
@@ -614,18 +732,20 @@ Verified from `apps/api/pyproject.toml`, `infra/docker-compose.yml` and the sour
 | API | Python >=3.12 / FastAPI >=0.110 / uvicorn >=0.29 | REST service; entry point `noctornal_api.http.app:app` | Implemented |
 | Password/MFA | `argon2-cffi`, `cryptography` (AES-256-GCM), TOTP | Argon2id hashing; envelope-sealed TOTP secrets | Implemented |
 | SNA maths | `igraph` >=0.11, `leidenalg` >=0.10 | Centrality, key-player, communities (Leiden, not Louvain, `docs/00` #30) | Implemented, in-process |
-| Workers | none | The 2026-07 sketch's Arq / Celery workers were superseded by in-process execution | Analytics run synchronously in the API process (`docs/00` #30); notifications via `dispatch_due()` (#46); collection via `run_once`, by call. Compute is written worker-ready; there is no queue, no worker and no scheduler process |
+| Workers | none | The 2026-07 sketch's Arq / Celery workers were superseded by in-process execution | Analytics run synchronously in the API process (`docs/00` #30); notifications via `dispatch_due()` (#46); collection via `run_once`, by call. The production compose file runs the calls in loops: `cron` (notification drain, collection poll, lookup drain), `lab-triage` (static triage) and `lab-cron` (screening, sandbox dispatch). There is no queue broker and no resident worker; each loop is a script that finishes its pass |
+| Egress | the egress proxy (`egress_proxy.py`), `pinned_http.py`, `egress_policy.py` | The only way out of production: one listener for HTTP CONNECT and SOCKS5, persona and integration routes, an append-only connection ledger (docs/20) | Implemented; development applies the same policy directly |
+| Optional extras | `telegram` (Telethon, python-socks), `yara` (yara-x) | Telegram collection; YARA scanning. numpy, selectolax and pefile are installed with the API | Implemented; a missing extra leaves its feature off and its readiness row says so |
 | Front end | plain HTML/CSS/JS at `.../http/static/`, served at `/ui`, no build step | Analyst UI, same origin as API | **Implemented as static assets.** The sketch's Next.js + `graphology`/`sigma.js` was superseded before anything was built (`docs/00` #37, docs/14 U1, which also records the real open decision: Canvas 2D will not reach the node counts a GPU renderer does, and adopting one means adopting a bundler under the strict CSP). Layout is a hand-written ForceAtlas2 + Barnes-Hut Web Worker |
 | Live updates | Postgres `LISTEN`/`NOTIFY` → `/api/v1/live` WebSocket (`websockets` transport) | Push graph changes to the console; the socket carries no case content | Implemented (`http/routers/live.py`) |
 | Rate limits | Redis 7 (`redis:7-alpine`, `appendonly`, `maxmemory 1gb`/`noeviction`) | Rate-limit meters (GCRA Lua), and nothing else: an evicted meter is a reset one, so at the cap Redis refuses writes rather than deleting meters, and each limit falls back to its declared `on_backend_failure` (`docs/16` C8) | Implemented; limiter degrades per-process without `REDIS_URL` |
-| Evidence store | MinIO (`quay.io/minio/minio`, pinned) + `quay.io/minio/mc` init | WORM evidence via object lock; buckets `noctornal-evidence` (`--with-lock`), `noctornal-raw` (ingest raw bytes, `rawstore.py`), `noctornal-samples`, and `noctornal-preserved` (`--with-lock`, no default retention: a rejected sample's ciphertext under a per-object legal hold, 0063) | Implemented. Compose sets `--default GOVERNANCE 365d` on the evidence bucket; app writes COMPLIANCE-mode locks (`docs/00` #26) |
+| Evidence store | MinIO (`quay.io/minio/minio`, pinned) + `quay.io/minio/mc` init | WORM evidence via object lock; buckets `noctornal-evidence` (`--with-lock`), `noctornal-raw` (ingest raw bytes, `rawstore.py`), `noctornal-collect-raw` (raw collected markup, no lock, deleted with its document), `noctornal-samples`, and `noctornal-preserved` (`--with-lock`, no default retention: a rejected sample's ciphertext under a per-object legal hold, 0063) | Implemented. Compose sets `--default GOVERNANCE 365d` on the evidence bucket; app writes COMPLIANCE-mode locks (`docs/00` #26) |
 | Authorization | the five-part gate, `security/access.py` over `iam.*` | Verb, assignment, clearance, compartments, step-up (`docs/00` #29) | **Implemented, in-process.** No external engine: the sketch's OpenFGA/SpiceDB was superseded (#8), and OpenFGA, called by nothing, was removed from compose on 2026-07-26 (R13) |
 | Message bus | none |, | The sketch's NATS queue was removed from compose on 2026-07-26 (R13); no producer or consumer was ever written, and there is no `apps/collector` |
 | Mail | Mailpit (`axllent/mailpit`, service `mailpit`) | Captured dev SMTP (`:1025`), inbox UI (`:8025`) | Implemented |
 
 ### Infra services defined in `infra/docker-compose.yml`
 
-`postgres` (TCP healthcheck, `pg_stat_statements` preloaded, extensions from `../db/init` only, schema comes from Alembic), `redis`, `minio` + `minio-init` (one-shot bucket/lock creation, `set -e`), `mailpit`. Every port it publishes (5432, 6379, 9000, 9001, 1025, 8025) is bound to 127.0.0.1, because the passwords are in the file and Docker forwards a published port ahead of the host firewall; `test_compose_exposure.py` refuses any other binding. OpenFGA and NATS were REMOVED on 2026-07-26 (R13): neither was referenced by a line of `apps/api`, and between them they published four host ports (8080, 3001, 4222, 8222) that could fail the whole `compose up`. Named volumes: `pgdata`, `redisdata`, `miniodata`. The header comment says development only. The production manifest is `infra/production/compose.yml`, which is a separate deployment and not a derivation of this one; `infra/production/README.md` is its runbook.
+`postgres` (TCP healthcheck, `pg_stat_statements` preloaded, extensions from `../db/init` only, schema comes from Alembic), `redis`, `minio` + `minio-init` (one-shot bucket/lock creation, `set -e`), `mailpit`. Every port it publishes (5432, 6379, 9000, 9001, 1025, 8025) is bound to 127.0.0.1, because the passwords are in the file and Docker forwards a published port ahead of the host firewall; `test_compose_exposure.py` refuses any other binding. OpenFGA and NATS were REMOVED on 2026-07-26 (R13): neither was referenced by a line of `apps/api`, and between them they published four host ports (8080, 3001, 4222, 8222) that could fail the whole `compose up`. Named volumes: `pgdata`, `redisdata`, `miniodata`. The header comment says development only. The production manifest is `infra/production/compose.yml`, which is a separate deployment and not a derivation of this one; `infra/production/README.md` is its runbook. Its application network is internal, and besides caddy only `egress-proxy` reaches out, alone on the `exits` network (Tor and VPN sidecars) and the `models` network (a local model server); `lab-triage` and `lab-cron` are the Lab's loops.
 
 ### Conventions
 
@@ -668,6 +788,15 @@ From `docs/00-decisions.md`. Numbers are the decision IDs in that file.
 - **24.** Invariant 1 is enforced in the database by a symmetric pair of deferrable constraint triggers (Alembic 0022), guaranteeing at least one assertion row per element via any write path, LIVE provenance stays a projection property, deliberately not write-enforced, so retraction can dissolve an element while its rows persist for temporal replay.
 - **30.** Phase 3 analytics run synchronously in the API process, not a worker, at this scale (under 5k nodes, sub-second) a queue adds a process and a failure mode for no numeric gain; `analytics.py` is kept pure and worker-ready but the seam is unused.
 - **38.** One destination-aware egress gate, `can_egress(object, destination)`, called by SMTP, Jira, webhooks and export alike, a single TLP checkpoint (invariant 8) that no per-integration copy can drift from; fails closed on unknown classification or destination.
+- **68.** The egress proxy is the only way out of production, with persona routes for collection and integration routes for operator-configured services; development applies the same policy directly and records nothing (docs/20).
+- **69.** Every forum and Telegram source needs a live two-person collection authority and a declared ceiling before anything is read, public boards included.
+- **71.** The triggers are the compartment registry: every column storing compartment keys, derived copies included, is bound, and the guard reads the bindings from the catalog.
+- **72.** One outbound HTTP client, `pinned_http.fetch_response`; a second client would be a second place for the next SSRF.
+- **74.** No purge of collected documents runs past a legal hold on the document or on any case that cites it.
+- **75.** A lookup that sends case material to a third party takes a named second person's sign-off in the product; there are no standing authorisations.
+- **76.** Row-level security is written last, against the complete schema; it stands on 66 tables, with fifteen deferred (docs/17 F51).
+- **138.** Four database roles: the owner for migrations, `noctornal_app` for requests (read through policies, IAM plane read-only), `noctornal_worker` for named system purposes (bypasses row security, owns nothing), `noctornal_egress` for the proxy.
+- **140.** Each request's connection is bound to its session by a proof derived from the session token, which a statement inside the request cannot forge.
 
 ---
 
@@ -685,6 +814,18 @@ unlawfully:
 - **Ingest** mints no keys and fingerprints nothing without
   `NOCTORNAL_INGEST_PEPPER`; stealer-log reveals require a live
   `ingest.pii_authorisation` or return 451.
+- **Forum and Telegram collection** refuses a source no confirmed collection
+  authority covers, and every source of a kind whose ceiling the deployment
+  has not declared (`NOCTORNAL_FORUM_SOURCE_CEILING`,
+  `NOCTORNAL_TELEGRAM_SOURCE_CEILING`); a forum is never read from this
+  host's own address, and Telegram never directly.
+- **Production egress**: a process with any outbound use refuses to start
+  without `NOCTORNAL_EGRESS_PROXY_URL`, and `route_for` refuses a direct
+  route there (`egress_routes.enforce_production_egress`).
+- **Screening** imports no hash list until `NOCTORNAL_HASH_SET_AUTHORITY`
+  records the authority to hold one, beside the ingest policy.
+- **Outbound lookups** send nothing until `NOCTORNAL_OUTBOUND_LOOKUPS=on`,
+  and a VENDOR or PUBLIC lookup waits for a named colleague's sign-off.
 - **The envelope** refuses to seal or open a TOTP secret without a real
   `NOCTORNAL_TOTP_KEK`; there is no default key anywhere in the code.
 

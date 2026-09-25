@@ -17,9 +17,10 @@ Each test here reads BOTH sides of a contract that crosses a file:
 - the registration route the message names EXISTS in the FastAPI route
   table, and the live trigger function's source carries the same text as
   the migration module's constant, so neither can drift from the other;
-- the catalog's set of compartment columns equals the migration's
-  `BOUND_COLUMNS` and every one carries the trigger, so a future column
-  cannot be added unbound;
+- the catalog's set of compartment columns equals the bound columns at
+  head (the migration's `BOUND_COLUMNS` and every later
+  `ADDED_BOUND_COLUMNS`, docs/00 decision 71, 2026-09-24) and every one
+  carries the trigger, so a future column cannot be added unbound;
 - the refusal reaches an HTTP client with the STATUS the service's own
   check produces (400 for a case or an ingest key, 409 for a read-in),
   which is the fact the migration relies on when it keeps the service
@@ -327,34 +328,51 @@ def test_a_direct_write_of_an_unregistered_key_is_refused_on_every_named_column(
 
 def test_every_compartment_column_in_the_catalog_carries_the_binding(conn):
     """Two halves that must agree: the catalog's compartment columns and
-    the migration's `BOUND_COLUMNS`. A column in the catalog the tuple
-    does not name is a column a future migration added unbound -- the
-    hole re-opened -- and a tuple entry with no column is a claim the
-    schema does not back. Then every bound column carries the trigger,
+    the bound columns at head (0059's tuple plus every later migration's
+    `ADDED_BOUND_COLUMNS`, docs/00 decision 71, 2026-09-24). A column in
+    the catalog the list does not name is a column a later migration added
+    unbound (the hole re-opened), and a list entry with no column is a
+    claim the schema does not back. The catalog side is every text column NAMED like
+    a compartment, not only the three names 0059 knew, so a differently
+    named copy is caught too. Then every bound column carries the trigger,
     installed BEFORE the write and only on writes of that column, and
     the registry carries its own guard."""
+    from test_compartment_contract_pg import (
+        UNBOUND_BY_DESIGN,
+        bound_columns_at_head,
+    )
     m = _m0059()
+    head = bound_columns_at_head()
     in_catalog = {tuple(r) for r in conn.execute(
-        """SELECT table_schema, table_name, column_name
-             FROM information_schema.columns
-            WHERE column_name IN ('compartments', 'visibility_compartments',
-                                  'forced_compartment')
-              AND table_schema NOT IN ('pg_catalog', 'information_schema')"""
+        """SELECT c.table_schema, c.table_name, c.column_name
+             FROM information_schema.columns c
+             JOIN information_schema.tables t
+               ON t.table_schema = c.table_schema
+              AND t.table_name = c.table_name
+            WHERE t.table_type = 'BASE TABLE'
+              AND c.column_name LIKE '%%compartment%%'
+              AND (c.data_type = 'text' OR c.udt_name = '_text')
+              AND c.table_schema NOT IN ('pg_catalog', 'information_schema')"""
     ).fetchall()}
-    bound = {(s, t, c) for s, t, c, _kind in m.BOUND_COLUMNS}
+    in_catalog -= {tuple(label.split(".")) for label in UNBOUND_BY_DESIGN}
+    bound = {(s, t, c) for s, t, c, _kind in head}
     assert in_catalog == bound, {
         "in the catalog but not bound": sorted(in_catalog - bound),
         "bound but not in the catalog": sorted(bound - in_catalog)}
+    # A statement about 0059 alone: its released tuple.
     assert len(m.BOUND_COLUMNS) == 18
 
-    for schema, table, column, kind in m.BOUND_COLUMNS:
+    for schema, table, column, kind in head:
         row = conn.execute(
             """SELECT pg_get_triggerdef(t.oid)
                  FROM pg_trigger t
                  JOIN pg_class c ON c.oid = t.tgrelid
                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = %s AND c.relname = %s AND t.tgname = %s""",
-            (schema, table, m.TRIGGER_NAME)).fetchone()
+                WHERE n.nspname = %s AND c.relname = %s
+                  AND t.tgname IN (%s, %s)
+                  AND pg_get_triggerdef(t.oid) LIKE %s""",
+            (schema, table, m.TRIGGER_NAME, f"{m.TRIGGER_NAME}_{column}",
+             f"%UPDATE OF {column} ON%")).fetchone()
         assert row is not None, f"{schema}.{table}.{column} is not bound"
         definition = row[0]
         assert "BEFORE INSERT OR UPDATE OF " + column in definition, definition
@@ -699,10 +717,46 @@ def _chain_head() -> str:
 
 
 def _binding_count(conn) -> int:
+    """Every binding (by the names docs/05's binding rules give) and the
+    registry's own guard."""
     return conn.execute(
         """SELECT count(*) FROM pg_trigger
-            WHERE tgname IN ('compartments_registered', 'compartment_in_use')
+            WHERE (tgname IN ('compartments_registered', 'compartment_in_use')
+                   OR starts_with(tgname::text, 'compartments_registered_'))
               AND NOT tgisinternal""").fetchone()[0]
+
+
+#: Rows a later migration's downgrade refuses to drop while they exist,
+#: which the round trip below clears before going down to 0058 and puts
+#: back after coming up to head: (table, key column, column, the cleared
+#: value as SQL). APPEND-ONLY, one entry per migration, under a comment
+#: naming it (docs/05, "Binding a compartment column", rule 8).
+ROUND_TRIP_STASH: list[tuple[str, str, str, str]] = [
+    # 0070 refuses to drop collect.document.compartments while any
+    # document carries one (it would declassify them).
+    ("collect.document", "id", "compartments", "'{}'"),
+]
+
+
+def _stash(conn) -> dict:
+    """Clear every ROUND_TRIP_STASH column, returning what it held."""
+    saved = {}
+    for table, key, column, cleared in ROUND_TRIP_STASH:
+        rows = conn.execute(
+            f"SELECT {key}, {column} FROM {table} "
+            f"WHERE {column} IS DISTINCT FROM {cleared}").fetchall()
+        saved[(table, key, column)] = rows
+        if rows:
+            conn.execute(f"UPDATE {table} SET {column} = {cleared} "
+                         f"WHERE {column} IS DISTINCT FROM {cleared}")
+    return saved
+
+
+def _unstash(conn, saved: dict) -> None:
+    for (table, key, column), rows in saved.items():
+        for row_key, value in rows:
+            conn.execute(f"UPDATE {table} SET {column} = %s WHERE {key} = %s",
+                         (value, row_key))
 
 
 def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
@@ -732,6 +786,8 @@ def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
     pipeline that named neither.
     """
     from alembic import command
+
+    from test_compartment_contract_pg import bound_columns_at_head
     m = _m0059()
     head = _chain_head()
     assert _version(conn) == head, (
@@ -741,9 +797,13 @@ def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
     assert conn.execute(m.UNREGISTERED_SQL).fetchall() == [], (
         "the database already holds an unregistered value; the upgrade "
         "would refuse for it, so clean it up before running this test")
-    assert _binding_count(conn) == len(m.BOUND_COLUMNS) + 1
+    at_head = len(bound_columns_at_head()) + 1
+    assert _binding_count(conn) == at_head
     cfg = _alembic()
     typo, good = _key(), _key()
+    # Rows whose later migration refuses its downgrade while they exist
+    # (ROUND_TRIP_STASH), cleared first and put back in the finally.
+    saved = _stash(conn)
     try:
         command.downgrade(cfg, "0058")
         assert _version(conn) == "0058"
@@ -776,7 +836,7 @@ def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
                             (uid,)).fetchone()[0] == [good]
         command.upgrade(cfg, "head")
         assert _version(conn) == head
-        assert _binding_count(conn) == len(m.BOUND_COLUMNS) + 1
+        assert _binding_count(conn) == at_head
         # And the hole is closed again on the row the upgrade found.
         with pytest.raises(psycopg.errors.RaiseException, match=typo):
             conn.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s",
@@ -786,3 +846,4 @@ def test_downgrade_to_0058_and_upgrade_to_head_round_trip(conn):
             conn.execute("DELETE FROM iam.app_user WHERE email LIKE %s",
                          (EMAIL_LIKE,))
             command.upgrade(cfg, "head")
+        _unstash(conn, saved)

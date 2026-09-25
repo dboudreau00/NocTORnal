@@ -265,6 +265,9 @@ const state = {
   /* Why this case takes no capture (its compartments), from the queue
      read; '' when it takes one, null until read (final review c15). */
   captureRefused: null,
+  /* What a capture here is stored under at the least, {classification,
+     compartments}, from the queue read; null until read (L1, 2026-09-24). */
+  captureLabels: null,
   triageAcceptAt: {},        // proposal id -> label chosen on its card
   triageSources: {},         // proposal id -> its opened capture window
   /* An approval request a notification's Open was for, focused once the
@@ -1850,6 +1853,7 @@ const CASE_CONTENT_CONTROLS = [
   'capture-box',                                              // triage
   'ev-form',                                                  // evidence
   'comms-bind-form', 'comms-block-form', 'comms-pgp-form',    // comms
+  'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms F10b, F10c
   'dcp-cap-new', 'dcp-eml-new', 'dcp-call-new',               // deception
   'ach-score-card', 'ach-add-card', 'asm-create',             // analysis
 ];
@@ -2295,6 +2299,7 @@ async function openCase(caseId) {
     show($('btn-cases'), true);
     showCaseChrome(rec);
     renderHeaderRole();
+    loadLookupProviders();   // F15.3, the inspector's Look up
     document.title = caseTitle();
     show($('hdr-asof'), true);
     show($('view-cases'), false);
@@ -2393,6 +2398,11 @@ function selectTab(name) {
        It is a projection over every conversation in the case and belongs
        behind a button for the same reason the report does. */
     loadUnverified();
+    /* The vendor keys, the lookups and whether lookups are on (F10b,
+       F10c); the recorded checks stay behind their button. */
+    loadPgpKeys();
+    loadKeyDirectory();
+    loadKeyLookups();
   }
   if (name === 'inbox') { loadInbox(); loadInboxPreferences(); }
   /* Only the visible subtab loads. Four fetches on tab-open would mean
@@ -2409,6 +2419,7 @@ function selectTab(name) {
        cached "declared" after somebody unset the variable would be the
        worst possible stale value. */
     loadSamplePolicy();
+    loadSignoffs();   // F14, the requests waiting for your sign-off
     selectSamplesSub(currentSub('pane-samples'));
   }
   if (name === 'deception' && selectDeceptionSub) {
@@ -6914,7 +6925,9 @@ function renderEvidence() {
   clear(list);
   const page = evView.page;
   if (!page) return;
-  for (const ev of page.items || []) list.appendChild(exhibitCard(ev, page));
+  for (const ev of page.items || []) {
+    list.appendChild(exhibitCardWithSimilar(ev, page));   // F6.4
+  }
   setMsg($('ev-count'), registerCountText(page, evView));
   renderShortLocks(page);
   show($('ev-empty'), (Number(page.total) || 0) === 0);
@@ -7323,6 +7336,14 @@ function exhibitCard(ev, page) {
   actions.appendChild(verdict);
   item.appendChild(actions);
   item.appendChild(custodyBox);
+  return item;
+}
+
+/** An exhibit's card with its Similar control (F6.4, 2026-09-24):
+ *  exhibits like this one, by title and description, opened under it. */
+function exhibitCardWithSimilar(ev, page) {
+  const item = exhibitCard(ev, page);
+  if (!ev.purged_at) item.appendChild(similarControl('evidence', ev.id));
   return item;
 }
 
@@ -7925,6 +7946,9 @@ async function runSearch(event) {
   event.preventDefault();
   const q = $('search-q').value.trim();
   if (!q) return;
+  // A similarity mode compares passages, by POST (F6.3, 2026-09-24).
+  const mode = searchMode();
+  if (mode !== 'text') { runSimilarSearch(q, mode); return; }
   const token = caseToken();
   const seq = ++searchSeq;
   for (const kind of SEARCH_KINDS) {
@@ -8079,6 +8103,10 @@ function hitChips(hit) {
     chips.appendChild(el('span', 'chip tlp-' + hit.classification,
       'TLP:' + hit.classification));
   }
+  // A document's compartments, as labelChips draws a row's (L1).
+  for (const c of hit.compartments || []) {
+    chips.appendChild(el('span', 'chip compartment', visibleText(c)));
+  }
   return chips;
 }
 
@@ -8109,7 +8137,7 @@ function exhibitReason(hit) {
  *  excerpt is what was collected, and the source URL is neither linked
  *  nor shown here, because following it from an analyst's own browser is
  *  the visit the collector exists to make instead (docs/19). */
-function documentHit(d) {
+function documentHit(d, noSimilar) {
   const card = el('div', 'hit hit-static');
   const main = el('span', 'hit-main');
   main.appendChild(el('span', 'hit-label', visibleText(d.label || 'Untitled document')));
@@ -8119,6 +8147,8 @@ function documentHit(d) {
   where.push(d.posted_at ? 'posted ' + fmtTime(d.posted_at) : 'posting time not recorded');
   main.appendChild(el('span', 'hit-via', where.join(' · ')));
   if (d.excerpt) main.appendChild(el('span', 'hit-excerpt', visibleText(d.excerpt)));
+  // Documents like this one (F6.3). Not inside a Similar panel.
+  if (!noSimilar) main.appendChild(similarControl('document', d.id));
   card.appendChild(main);
   card.appendChild(hitChips(d));
   return card;
@@ -8192,6 +8222,383 @@ async function openAssertionHit(a) {
   }
   const key = a.element_kind + ':' + a.element_id;
   showCardWhenLoaded(a.id, key, token, 0);
+}
+
+/* ── Similarity: the Match modes and the Similar panels ──────────────────
+ *
+ * F6.3 and F6.4 (embeddings, 2026-09-24). Similar wording compares
+ * character patterns on this host; similar meaning asks an operator's
+ * model server. Both are POSTs with the text in the body, so a pasted
+ * passage never enters a URL or a log line (routers/similarity.py). The
+ * number the server returns is never printed: a hit shows its band
+ * (similar wording) or its position (similar meaning) and what the two
+ * texts share, because a bare 0.87 is either over-trusted or ignored
+ * (docs/13 #9). Beside every answer, the standing sentence that similar
+ * text is not the same author (invariant 2).
+ */
+
+const EMB = { status: null };
+
+const NOT_THE_SAME_AUTHOR = 'Similar text is not the same author: one advert is '
+  + 'reposted by many personas, and one author writes in many ways.';
+
+const MIN_WORDING_CHARS = 20;
+
+/** What this deployment offers, read once a session exists and again
+ *  after an Administration, Embeddings action. Never throws: with no
+ *  answer the modes stay hidden and a Similar button says what the server
+ *  says when pressed. */
+async function loadEmbeddingStatus(force) {
+  if (EMB.status && !force) return EMB.status;
+  try {
+    EMB.status = await api('/embeddings/status');
+  } catch (_err) {
+    EMB.status = null;
+  }
+  paintSearchModes();
+  return EMB.status;
+}
+
+onCaseSwitch(() => { loadEmbeddingStatus(); });
+
+/** The Match mode chosen in the Search pane: text, wording or meaning. */
+function searchMode() {
+  const on = document.querySelector('input[name="search-mode"]:checked');
+  return on ? on.value : 'text';
+}
+
+/** Show each similarity mode only when it can answer, and say what the
+ *  modes do, with where the model is, in words. A mode that went away
+ *  while chosen falls back to Exact words. */
+function paintSearchModes() {
+  const w = EMB.status ? EMB.status.wording : null;
+  const m = EMB.status ? EMB.status.meaning : null;
+  show($('search-mode-wording'), !!(w && w.query_available));
+  show($('search-mode-meaning'), !!(m && m.query_available));
+  const chosen = document.querySelector('input[name="search-mode"]:checked');
+  if (chosen && chosen.closest('label').hidden) {
+    document.querySelector('input[name="search-mode"][value="text"]').checked = true;
+  }
+  const parts = [];
+  if (w && w.query_available) {
+    parts.push('Similar wording compares character patterns, so it finds reposts, '
+      + 'light edits and the same passage in another alphabet or spelling.');
+  }
+  if (m && m.query_available) {
+    parts.push('Similar meaning asks the model ' + (m.endpoint_label || 'endpoint')
+      + ' which texts say something alike in other words.');
+  }
+  if (parts.length) parts.push('Neither says who wrote them.');
+  const help = $('search-similar-help');
+  help.textContent = parts.join(' ');
+  show(help, parts.length > 0);
+}
+
+/** The three columns similarity reads, each from its own POST route. */
+const SIMILAR_COLUMNS = {
+  documents: { path: '/search/documents/similar',
+               one: 'collected document', many: 'collected documents',
+               none: 'No collected document is close enough to show.' },
+  evidence: { path: '/search/evidence/similar', one: 'exhibit', many: 'exhibits',
+              none: 'No exhibit is close enough to show.' },
+  assertions: { path: '/search/assertions/similar', one: 'live claim',
+                many: 'live claims',
+                none: 'No live claim is close enough to show.' },
+};
+
+async function runSimilarSearch(q, mode) {
+  const token = caseToken();
+  const seq = ++searchSeq;
+  const code = state.caseRec ? state.caseRec.code : 'this case';
+  setMsg($('search-scope'), (mode === 'wording' ? 'Similar wording' : 'Similar meaning')
+    + ' to the passage typed, in ' + code + '.');
+  notSearched($('search-nodes'),
+    'Similarity compares text. Entities are found by Exact words.');
+  notSearched($('search-deception'),
+    'Deception records are found by Exact words.');
+  const kinds = Object.keys(SIMILAR_COLUMNS);
+  if (mode === 'wording' && q.length < MIN_WORDING_CHARS) {
+    for (const kind of kinds) {
+      notSearched($(SEARCH_COLUMNS[kind].box), 'Similar wording compares passages: '
+        + 'type or paste at least 20 characters, or use Exact words.');
+    }
+    return;
+  }
+  for (const kind of kinds) {
+    const box = $(SEARCH_COLUMNS[kind].box);
+    clear(box);
+    box.appendChild(el('p', 'help', 'Comparing…'));
+  }
+  const settled = await Promise.allSettled(kinds.map((kind) =>
+    api(cpath(SIMILAR_COLUMNS[kind].path), { method: 'POST',
+      json: { q: q, mode: mode, limit: 50 } })));
+  if (caseChanged(token) || seq !== searchSeq) return;
+  kinds.forEach((kind, i) => {
+    const box = $(SEARCH_COLUMNS[kind].box);
+    const got = settled[i];
+    if (got.status === 'fulfilled') { similarHits(box, kind, got.value, mode); return; }
+    const err = got.reason;
+    if (err instanceof ApiError && err.status === 403 && SEARCH_COLUMNS[kind].refused) {
+      notSearched(box, refusalText(err, SEARCH_COLUMNS[kind].refused));
+    } else if (err instanceof ApiError && (err.status === 409 || err.status === 422)) {
+      clear(box);
+      box.appendChild(el('p', 'empty not-searched', err.detail || err.title));
+    } else {
+      searchProblem(box, err);
+    }
+  });
+}
+
+/** One similarity column: the hits in their order, what was compared,
+ *  and the standing sentence. */
+function similarHits(box, kind, page, mode) {
+  const column = SIMILAR_COLUMNS[kind];
+  clear(box);
+  if (page && page.not_searched) {
+    box.appendChild(el('p', 'empty not-searched', page.not_searched));
+    return;
+  }
+  if (kind === 'evidence' && page && page.note) {
+    box.appendChild(el('p', 'help', page.note));
+  }
+  const hits = (page && page.hits) || [];
+  if (!hits.length) {
+    box.appendChild(el('p', 'empty', column.none));
+  } else {
+    box.appendChild(el('p', 'hit-count', countOf(hits.length, column.one, column.many)
+      + (mode === 'wording' ? ', closest wording first.' : ', nearest in meaning first.')));
+  }
+  for (const hit of hits) box.appendChild(similarHitCard(kind, hit, mode));
+  const cover = similarCoverageLine(page ? page.coverage : null, column);
+  if (cover) box.appendChild(cover);
+  box.appendChild(el('p', 'help similar-note', NOT_THE_SAME_AUTHOR));
+}
+
+/** A similarity hit: the kind's own row, with its band or position and
+ *  what the two texts share. Never the number. */
+function similarHitCard(kind, hit, mode, inPanel) {
+  let card;
+  if (kind === 'documents') {
+    card = documentHit(hit, inPanel);
+  } else if (kind === 'evidence') {
+    card = el('button', 'hit');
+    card.type = 'button';
+    const main = el('span', 'hit-main');
+    main.appendChild(el('span', 'hit-label', visibleText(hit.label || 'Untitled exhibit')));
+    if (hit.description) {
+      main.appendChild(el('span', 'hit-excerpt', visibleText(hit.description)));
+    }
+    card.appendChild(main);
+    card.appendChild(hitChips(hit));
+    card.addEventListener('click', () => focusEvidence(hit.id));
+  } else {
+    card = assertionHit(hit);
+    const via = card.querySelector('.hit-via');
+    if (via) via.textContent = basisName(hit.basis);
+  }
+  const main = card.querySelector('.hit-main');
+  const shared = sharedTermsLine(hit);
+  if (shared && main) main.appendChild(shared);
+  const chips = card.querySelector('.hit-chips');
+  if (chips) chips.insertBefore(bandChip(hit, mode), chips.firstChild);
+  return card;
+}
+
+function bandChip(hit, mode) {
+  if (mode === 'wording') {
+    const chip = el('span', 'chip band-chip', hit.band || 'similar');
+    chip.title = 'How much of the wording the two texts share: near duplicate, '
+      + 'much of the same wording, or some shared wording.';
+    return chip;
+  }
+  const chip = el('span', 'chip band-chip', 'Position ' + hit.position);
+  chip.title = 'Its place in the list the model ranked by meaning. Read what they '
+    + 'share before relying on it.';
+  return chip;
+}
+
+/** "Both mention vendor42@exploit.im. Shared phrase: "pay bank transfer".
+ *  Shared words: escrow, fullz." Or null when they share nothing named. */
+function sharedTermsLine(hit) {
+  const parts = [];
+  const selectors = (hit.shared_selectors || []).map((s) => visibleText(s.value));
+  if (selectors.length) parts.push('Both mention ' + listWords(selectors) + '.');
+  const phrases = (hit.shared_phrases || []).map((p) => '"' + visibleText(p) + '"');
+  if (phrases.length) {
+    parts.push(agree(phrases.length, 'Shared phrase', 'Shared phrases') + ': '
+      + phrases.join(', ') + '.');
+  }
+  const words = (hit.shared_words || []).map((w) => visibleText(w));
+  if (words.length) parts.push('Shared words: ' + words.join(', ') + '.');
+  return parts.length ? el('span', 'shared-terms', parts.join(' ')) : null;
+}
+
+function grouped(n) {
+  return Number(n || 0).toLocaleString('en-GB');
+}
+
+/** "Compared with 12,030 of the 12,041 collected documents you can read.
+ *  9 wait to be embedded and 2 are withheld from the model endpoint by
+ *  their label." Figures at the reader's own labels, from the server. */
+function similarCoverageLine(cov, column) {
+  if (!cov) return null;
+  if (!cov.readable) {
+    return el('p', 'coverage-line', 'There are no ' + column.many + ' you can read '
+      + 'to compare.');
+  }
+  let text = 'Compared with ' + grouped(cov.embedded) + ' of the '
+    + grouped(cov.readable) + ' ' + agree(cov.readable, column.one, column.many)
+    + ' you can read.';
+  const more = [];
+  if (cov.pending) {
+    more.push(grouped(cov.pending) + ' ' + agree(cov.pending, 'waits', 'wait')
+      + ' to be embedded');
+  }
+  if (cov.failed) {
+    more.push(grouped(cov.failed) + ' failed and ' + agree(cov.failed, 'is', 'are')
+      + ' tried again');
+  }
+  if (cov.withheld) {
+    more.push(grouped(cov.withheld) + ' ' + agree(cov.withheld, 'is', 'are')
+      + ' withheld from the model endpoint by ' + agree(cov.withheld, 'its', 'their')
+      + ' label or content');
+  }
+  if (cov.excluded) {
+    more.push(grouped(cov.excluded) + ' ' + agree(cov.excluded, 'is', 'are')
+      + ' victim data, which is never embedded');
+  }
+  if (cov.empty) {
+    more.push(grouped(cov.empty) + ' ' + agree(cov.empty, 'has', 'have')
+      + ' nothing to compare');
+  }
+  /* 2026-09-25: a claim whose row is owed to material it
+     cites that this reader cannot read is counted here, with no reason,
+     because any reason would describe that material. */
+  if (cov.not_compared) {
+    more.push(grouped(cov.not_compared) + ' cannot be compared');
+  }
+  if (more.length) text += ' ' + closeClause(listWords(more));
+  return el('p', 'coverage-line', text);
+}
+
+/** Which similarity an item can be compared by here. */
+function similarSpaces() {
+  const s = EMB.status;
+  const out = [];
+  if (!s || (s.wording && s.wording.similar_available)) out.push('wording');
+  if (s && s.meaning && s.meaning.similar_available) out.push('meaning');
+  return out;
+}
+
+const SIMILAR_NOUNS = { document: 'Documents', evidence: 'Exhibits',
+                        assertion: 'Claims' };
+
+/** A Similar button and the panel it opens under its item. `kind` is
+ *  document, evidence or assertion. Hidden when nothing here can compare
+ *  it. */
+function similarControl(kind, id) {
+  const wrap = el('div', 'similar-control');
+  const btn = el('button', 'btn ghost small', 'Similar');
+  btn.type = 'button';
+  btn.title = 'Items worded or meaning something alike. Similar text is not the '
+    + 'same author.';
+  btn.setAttribute('aria-expanded', 'false');
+  const panel = el('div', 'similar-panel');
+  panel.hidden = true;
+  panel.setAttribute('role', 'region');
+  panel.setAttribute('aria-label', 'Similar ' + SIMILAR_NOUNS[kind].toLowerCase());
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!panel.hidden) {
+      show(panel, false);
+      btn.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    btn.setAttribute('aria-expanded', 'true');
+    loadSimilarPanel(kind, id, panel, { space: similarSpaces()[0] || 'wording',
+                                        versions: false });
+  });
+  show(btn, similarSpaces().length > 0);
+  wrap.appendChild(btn);
+  wrap.appendChild(panel);
+  return wrap;
+}
+
+/** Fill a Similar panel: its heading, a switch when both modes can
+ *  compare the item, the hits, the earlier versions of a document on
+ *  request, what was compared, and the standing sentence. A refusal is
+ *  the server's sentence, in the panel. */
+async function loadSimilarPanel(kind, id, panel, opts) {
+  const token = caseToken();
+  clear(panel);
+  panel.appendChild(el('p', 'help', 'Comparing…'));
+  show(panel, true);
+  let body;
+  try {
+    body = await api(kind === 'document'
+      ? '/collection/documents/' + encodeURIComponent(id) + '/similar'
+      : cpath('/' + (kind === 'evidence' ? 'evidence' : 'assertions') + '/'
+        + encodeURIComponent(id) + '/similar'), { method: 'POST',
+      json: { space: opts.space, limit: 10, include_versions: !!opts.versions } });
+  } catch (err) {
+    if (kind !== 'document' && caseChanged(token)) return;
+    clear(panel);
+    panel.appendChild(el('p', err instanceof ApiError && err.status === 409
+      ? 'empty not-searched' : 'form-error',
+      refusalText(err, 'Similar items could not be read.')));
+    return;
+  }
+  if (kind !== 'document' && caseChanged(token)) return;
+  clear(panel);
+  panel.appendChild(el('h3', 'h-sm', SIMILAR_NOUNS[kind] + ' with similar '
+    + (opts.space === 'wording' ? 'wording' : 'meaning')));
+  const spaces = similarSpaces();
+  if (spaces.length > 1) {
+    const sw = el('div', 'similar-switch');
+    sw.setAttribute('role', 'radiogroup');
+    sw.setAttribute('aria-label', 'Compare by');
+    const name = 'similar-space-' + kind + '-' + id;
+    for (const space of spaces) {
+      const label = el('label', 'search-mode-opt');
+      const radio = el('input');
+      radio.type = 'radio';
+      radio.name = name;
+      radio.value = space;
+      radio.checked = space === opts.space;
+      radio.addEventListener('change', () => loadSimilarPanel(kind, id, panel,
+        { space: space, versions: opts.versions }));
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(space === 'wording'
+        ? ' Similar wording' : ' Similar meaning'));
+      sw.appendChild(label);
+    }
+    panel.appendChild(sw);
+  }
+  if (body.query_embedded_now) {
+    panel.appendChild(el('p', 'help', 'Embedded just now to compare it.'));
+  }
+  const hits = body.hits || [];
+  const columnKind = kind === 'document' ? 'documents'
+    : kind === 'evidence' ? 'evidence' : 'assertions';
+  if (!hits.length) panel.appendChild(el('p', 'empty', SIMILAR_COLUMNS[columnKind].none));
+  for (const hit of hits) {
+    panel.appendChild(similarHitCard(columnKind, hit, opts.space, true));
+  }
+  if (kind === 'document') {
+    const label = el('label', 'search-mode-opt');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = !!opts.versions;
+    box.addEventListener('change', () => loadSimilarPanel(kind, id, panel,
+      { space: opts.space, versions: box.checked }));
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(' Show earlier versions'));
+    panel.appendChild(label);
+  }
+  if (kind === 'evidence' && body.note) panel.appendChild(el('p', 'help', body.note));
+  const cover = similarCoverageLine(body.coverage, SIMILAR_COLUMNS[columnKind]);
+  if (cover) panel.appendChild(cover);
+  panel.appendChild(el('p', 'help similar-note', NOT_THE_SAME_AUTHOR));
 }
 
 /* The inspector reads a selection's assertions asynchronously (loadInto),
@@ -9475,6 +9882,7 @@ function renderCaseRecord(rec) {
       + 'corrected.'
     : 'Correcting this record needs case.update, which ' + caseRoleWords(rec)
       + ' on this case does not include. The case owner can.');
+  renderCaseRouting(rec);   // F7, keep a case out of Jira
   if (!can) return;
   $('case-edit-title').value = rec.title || '';
   $('case-edit-summary').value = rec.summary || '';
@@ -10586,6 +10994,9 @@ function renderAssertions(box, all) {
       actions.appendChild(btn);
       card.appendChild(actions);
     }
+    // Live claims like this one (F6.4). Outside .assert-actions, which
+    // a read-only case turns off: comparing is a read.
+    if (!dead) card.appendChild(similarControl('assertion', a.id));
     box.appendChild(card);
   }
   if (hidden) {
@@ -11470,8 +11881,10 @@ function renderSelectors(box, list) {
         s.norm_value, 'normalised value'));
     }
     item.appendChild(el('div', 'ev-meta', selectorSeenWords(s)));
+    lookupButton(item, s);   // F15.3
     box.appendChild(item);
   }
+  lookupAllButton(box, list);   // F15.4
 }
 
 /** "observed 3 times, 27 Aug 2025 to 2 Jan 2026": the count WITH its
@@ -12722,7 +13135,7 @@ const TAB_NAMES = [
   ['ach', 'ACH', 'competing hypotheses'],
   ['report', 'Report', 'export, disclosure, redaction'],
   ['governance', 'Records', 'retention, legal holds, purge, break-glass, audit'],
-  ['admin', 'Admin', 'accounts, roles, readiness'],
+  ['admin', 'Admin', 'accounts, roles, readiness, two-person controls'],
   ['samples', 'Lab', 'malware samples'],
   ['deception', 'Deception', 'phishing, BEC, vishing'],
   ['add-node', 'Add entity', 'new entity, create'],
@@ -12740,7 +13153,8 @@ function buildPaletteItems() {
     }
     /* Deployment-wide, so offered with no case open, to the same accounts
        the header offers it to (ux16, 2026-09-22). */
-    if (canAdmin || canReview) {
+    if (canAdmin || canReview || canCountersign
+        || canConfirmAuthority) {
       items.push({ kind: 'View', label: 'Go to ' + adminViewName(),
                    hint: canAdmin ? 'accounts and readiness'
                                   : 'the security officer queue',
@@ -13352,6 +13766,11 @@ const PRIORITY_LABEL = { 1: 'urgent', 2: 'normal', 3: 'low' };
  *  that is not the one on screen. */
 function notificationRoute(n) {
   const t = n.object_type;
+  /* F9 (2026-09-24): a deployment-wide request has no case, and is
+     read under Administration or Oversight, Two-person controls. */
+  if (t === 'approval_request' && !n.case_id) {
+    return { label: 'Open the change', oversight: true, dual: n.object_id };
+  }
   if (t === 'approval_request' && n.case_id) {
     return { label: 'Open the request', tab: 'triage', approval: n.object_id };
   }
@@ -13396,8 +13815,15 @@ async function openNotificationTarget(n) {
        under Oversight, both on screen at once (verifier's fix round,
        2026-09-23). Put the pane back once Oversight is up, not before,
        so the screen is never empty while its access is read. */
+    if (route.dual) DUAL.target = route.dual;
     await showAdmin();
     if (adminView) leaveInbox();
+    /* An administrator reads the change under its subtab, whether
+       the pane came up as the case-less view or as the Admin tab of an
+       open case; an officer's Oversight section loaded it already. */
+    if (route.dual && canAdmin && selectAdminSub) {
+      selectAdminSub('dual');
+    }
     return;
   }
   if (n.case_id && n.case_id !== state.caseId) {
@@ -13700,6 +14126,13 @@ async function loadInboxPreferences() {
     enabled.type = 'checkbox';
     enabled.checked = p.enabled;
     row.appendChild(prefField('Deliver on this channel', enabled, 'control'));
+    /* F8 and F7 (2026-09-24): a channel that cannot deliver says
+       why, and is not switched on into a hold; switching it off stays
+       possible. Jira takes no digest, no quiet window and no threshold:
+       the destination's routed kinds are the filter. */
+    const avail = (data.channels || {})[p.channel];
+    const jira = p.channel === 'JIRA';
+    if (avail && !avail.available && !p.enabled) enabled.disabled = true;
 
     const priority = el('select');
     opts(priority, [['1', 'urgent only'], ['2', 'normal and up'],
@@ -13725,12 +14158,20 @@ async function loadInboxPreferences() {
     opts(zone, prefZoneOptions(p.timezone, zoneHere), p.timezone || 'UTC');
     row.appendChild(prefField('Zone', zone));
 
+    if (jira) {
+      for (const n of Array.from(row.children).slice(1)) n.hidden = true;
+    }
     const save = el('button', 'btn ghost small', 'Save');
     save.type = 'button';
     row.appendChild(save);
     group.appendChild(row);
+    if (avail && !avail.available) group.appendChild(el('p', 'help warn', avail.why));
 
-    const kinds = el('p', 'help pref-kinds', prefKindsText(data.kinds, p.min_priority));
+    const kinds = el('p', 'help pref-kinds', jira && avail && avail.available
+      ? 'Issues go to project ' + avail.project_key + ' on ' + avail.host
+        + '. It takes: ' + (avail.kinds.length ? avail.kinds.join('; ') : 'nothing')
+        + '. A case owner can keep a case out.'
+      : prefKindsText(data.kinds, p.min_priority));
     group.appendChild(kinds);
     priority.addEventListener('change', () => {
       kinds.textContent = prefKindsText(data.kinds, Number(priority.value));
@@ -13747,7 +14188,7 @@ async function loadInboxPreferences() {
       try {
         await api('/notifications/preferences/' + p.channel, {
           method: 'PUT',
-          json: {
+          json: jira ? { enabled: enabled.checked } : {
             enabled: enabled.checked,
             min_priority: Number(priority.value),
             digest: digest.checked,
@@ -14219,6 +14660,40 @@ function initComms() {
   initCommsBlocks();
 }
 
+/** The PGP half of the pane (F10, F10a, F10b, F10c, 2026-09-24). */
+function initCommsPgp() {
+  $('comms-pgp-binding-clear').addEventListener('click', clearPgpBinding);
+  for (const id of ['comms-pgp-kind-clear', 'comms-pgp-kind-detached']) {
+    $(id).addEventListener('change', setPgpFormKind);
+  }
+  $('comms-pgp-keysel').addEventListener('change', pgpKeyChosen);
+  $('comms-pgp-block').addEventListener('change', pgpBlockChosen);
+  $('comms-pgp-ledger-load').addEventListener('click', loadPgpLedger);
+  for (const id of ['comms-pgpkey-src-paste', 'comms-pgpkey-src-file',
+                    'comms-pgpkey-src-wkd']) {
+    $(id).addEventListener('change', setPgpKeySource);
+  }
+  $('comms-pgpkey-form').addEventListener('submit', importPgpKey);
+  $('comms-pgpkey-wkd-form').addEventListener('submit', requestKeyLookup);
+  $('comms-pgpkey-wkd-address').addEventListener('input', paintWkdExposure);
+  opts($('comms-pgpkey-class'), [['', 'The case\'s own classification']]
+    .concat(TLP.map((t) => [t, t])), '');
+  fillPgpKeySelect([]);
+  fillPgpKeyBlocks([]);
+  clearPgpBinding();
+  setPgpFormKind();
+  setPgpKeySource();
+  paintWkdExposure();
+}
+
+/** The exposure sentence names the domain being typed. */
+function paintWkdExposure() {
+  const typed = $('comms-pgpkey-wkd-address').value.trim();
+  const at = typed.lastIndexOf('@');
+  $('comms-pgpkey-wkd-exposure').textContent = wkdExposure(
+    at > 0 && at < typed.length - 1 ? visibleText(typed.slice(at + 1)) : null);
+}
+
 /* ── boot ─────────────────────────────────────────────────────────────── */
 
 function wire() {
@@ -14235,6 +14710,9 @@ function wire() {
   wireCustodyVerify();
   wireRetentionConfirm();
   wireDeliveries();
+  initIntegrations();   // F8 and F7
+  initProviders();      // F15.2
+  initCaseRouting();    // F7 and F15.3
   wireAssumptions();
   wireCaseActions();
   initCanvas();
@@ -14267,6 +14745,7 @@ function wire() {
   });
   $('apr-refresh').addEventListener('click', loadApprovals);
   $('apr-state').addEventListener('change', loadApprovals);
+  initCasePolicy();   // the merge switch (F9b)
   document.addEventListener('keydown', onTriageKey);
   wireTriageLetters();
   $('an-run').addEventListener('click', runAnalysis);
@@ -14278,7 +14757,16 @@ function wire() {
   $('an-decay').addEventListener('change', () => {
     blankAnalytics('Parameters changed. Run the analysis again.');
   });
+  /* The projection options (L3 and F2, 2026-09-24) are part of what every
+     number means, exactly as decay is, so changing one blanks the pane the
+     same way. */
+  for (const id of ['an-ties', 'an-om-forum', 'an-om-wallet', 'an-om-max']) {
+    $(id).addEventListener('change', () => {
+      blankAnalytics('Parameters changed. Run the analysis again.');
+    });
+  }
   $('an-kpp-n').addEventListener('change', onKppSizeChange);
+  $('an-concor-depth').addEventListener('change', onConcorDepthChange);
   for (const th of document.querySelectorAll('#an-table th[data-sort]')) {
     const b = th.querySelector('button');
     if (b) b.addEventListener('click', () => sortAnalysisBy(th.dataset.sort));
@@ -14632,8 +15120,11 @@ async function runMerge() {
        nobody agreed to. */
     if (err instanceof ApiError && err.status === 409
         && /approval/i.test(err.detail || err.title || '')) {
+      /* The server's own sentence first (F9b, 2026-09-24): it says
+         whether the case or the whole deployment asks for the signature. */
       const ask = window.confirm(
-        'This case requires a second signature on merges.\n\n' +
+        closeClause(err.detail || 'This case requires a second signature '
+          + 'on merges') + '\n\n' +
         'Raise an approval request for merging "' + losing + '" into "' +
         surviving + '"?\n\nIt will carry the reason you just gave. Somebody '
         + 'other than you must approve it, and it can then be executed once '
@@ -14708,6 +15199,182 @@ function approvalRaisedText(raised) {
  */
 const MERGE_OPERATION = 'node.merge';
 
+/* --- The case's merge switch (F9b, 2026-09-24) --------------------------
+ *
+ * `PUT /cases/{id}/policy` turned a case's second signature on merges on
+ * and off, and nothing in the console called it: the only way to turn it
+ * on was curl, and turning it off took one person. It is drawn here, above
+ * the approvals it produces. Turning it ON is one signature. Turning it
+ * OFF takes a second Lead investigator on the case: this raises a
+ * `case.policy.relax` request for the switch as it stands (its epoch), the
+ * other lead decides it below, and the one who asked applies it from its
+ * row. Under a deployment that requires a second signature on every merge
+ * (Administration, Two-person controls), a case cannot turn it off at all.
+ * Governance, so it stays live on a closed case.
+ */
+const RELAX_OPERATION = 'case.policy.relax';
+
+/** The last policy read, for the relax request's epoch. */
+let casePolicy = null;
+
+async function loadCasePolicy() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  try {
+    const p = await api(cpath('/policy'));
+    if (caseChanged(token)) return;
+    casePolicy = p;
+    paintCasePolicy(p);
+  } catch (err) {
+    if (caseChanged(token)) return;
+    casePolicy = null;
+    $('apr-policy-text').textContent = refusalText(err,
+      'The merge policy of this case could not be read.');
+    show($('apr-policy-btn'), false);
+    show($('apr-policy-relax'), false);
+  }
+}
+
+/** The sentence and the one button, by what is in force and who is asking. */
+function paintCasePolicy(p) {
+  const text = $('apr-policy-text');
+  const btn = $('apr-policy-btn');
+  show($('apr-policy-relax'), false);
+  if (p.dual_control_merge_mode === 'ALWAYS') {
+    text.textContent = 'Every merge on this deployment needs a second '
+      + 'signature. Administration sets this, and a case cannot turn it off.';
+    show(btn, false);
+    return;
+  }
+  const may = caseCan(state.caseRec, 'case.update');
+  if (p.dual_control_merge) {
+    let said = 'Merges in this case need a second signature.';
+    if (may && !p.relax_signers) {
+      said += ' Nobody else on this case can approve turning that off: name '
+        + 'a deputy first.';
+    }
+    text.textContent = said;
+    btn.textContent = 'Stop requiring it';
+    btn.dataset.action = 'relax';
+    show(btn, may && p.relax_signers > 0);
+    return;
+  }
+  text.textContent = 'Merges in this case take one signature.';
+  btn.textContent = 'Require a second signature';
+  btn.dataset.action = 'require';
+  show(btn, may);
+}
+
+function casePolicyMsg(text, kind) {
+  const msg = $('apr-policy-msg');
+  msg.className = 'msg' + (kind ? ' ' + kind : '');
+  setMsg(msg, text);
+}
+
+/** On is one signature, behind the step-up the route asks for. */
+async function setCaseMergePolicy() {
+  const btn = $('apr-policy-btn');
+  btn.disabled = true;
+  try {
+    const out = await withStepUp('Changing the merge policy needs a sign-in '
+      + 'from the last 15 minutes.', () => api(cpath('/policy'), {
+      method: 'PUT', json: { dual_control_merge: true } }));
+    if (!out) {
+      casePolicyMsg('Not changed: it needs a sign-in from the last 15 '
+        + 'minutes.', 'warn');
+      return;
+    }
+    casePolicy = out;
+    paintCasePolicy(out);
+    casePolicyMsg('Merges in this case now need a second signature.', 'ok');
+  } catch (err) {
+    casePolicyMsg(refusalText(err, 'Changing the merge policy needs the '
+      + 'case.update permission on this case.'), 'bad');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Off takes a second Lead investigator: ask for one, bound to the switch
+ *  as it stands. */
+async function raiseRelaxRequest() {
+  const why = $('apr-policy-just').value.trim();
+  if (!why) {
+    casePolicyMsg('Say why merges here no longer need two people: it is what '
+      + 'the other Lead investigator decides on.', 'bad');
+    return;
+  }
+  if (!casePolicy) return;
+  const btn = $('apr-policy-send');
+  btn.disabled = true;
+  try {
+    const raised = await api(cpath('/approvals'), {
+      method: 'POST',
+      json: {
+        operation: RELAX_OPERATION,
+        payload: { setting: 'dual_control_merge', from: true, to: false,
+                   epoch: casePolicy.dual_control_merge_epoch },
+        justification: why,
+      },
+    });
+    $('apr-policy-just').value = '';
+    show($('apr-policy-relax'), false);
+    casePolicyMsg(approvalRaisedText(raised),
+      (raised && (raised.warnings || []).length) ? 'warn' : 'ok');
+    loadApprovals();
+  } catch (err) {
+    casePolicyMsg(refusalText(err, 'Asking to turn it off needs the '
+      + 'case.update permission on this case.'), 'bad');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** The approved request spent on the switch it was raised for. Only the
+ *  one who asked may, once (approvals.py: consuming is the requester's). */
+async function applyRelaxApproval(a, btn) {
+  btn.disabled = true;
+  try {
+    const out = await withStepUp('Changing the merge policy needs a sign-in '
+      + 'from the last 15 minutes.', () => api(cpath('/policy'), {
+      method: 'PUT', json: { dual_control_merge: false,
+                             approval_request_id: a.id } }));
+    if (!out) {
+      btn.disabled = false;
+      return;
+    }
+    casePolicy = out;
+    paintCasePolicy(out);
+    loadApprovals();
+    banner('Merges take one signature again',
+      'The approval is now spent and cannot be reused.', 'info');
+  } catch (err) {
+    btn.disabled = false;
+    if (err instanceof ApiError) inlineProblem($('apr-counts'), err);
+    else fail(err);
+  }
+}
+
+function initCasePolicy() {
+  $('apr-policy-btn').addEventListener('click', () => {
+    if ($('apr-policy-btn').dataset.action === 'require') {
+      setCaseMergePolicy();
+      return;
+    }
+    show($('apr-policy-relax'), true);
+    $('apr-policy-just').focus();
+  });
+  $('apr-policy-send').addEventListener('click', raiseRelaxRequest);
+}
+
+onCaseSwitch(() => {
+  casePolicy = null;
+  $('apr-policy-text').textContent = '';
+  show($('apr-policy-btn'), false);
+  show($('apr-policy-relax'), false);
+  setMsg($('apr-policy-msg'), '');
+});
+
 /* --- Dual control ------------------------------------------------------
  *
  * Approvals had no analyst surface at all. The notification centre's
@@ -14723,6 +15390,7 @@ const MERGE_OPERATION = 'node.merge';
  */
 async function loadApprovals() {
   if (!state.caseId) return;
+  loadCasePolicy();   // the switch above the list (F9b)
   const wanted = $('apr-state').value;
   const token = caseToken();
   listPending('apr-list', 'apr-empty');
@@ -14803,6 +15471,10 @@ function approvalTitle(a) {
     const s = a.subjects || {};
     return 'Merge ' + approvalEntity(s.source, p.source_node_id) + ' INTO '
       + approvalEntity(s.target, p.target_node_id);
+  }
+  // The case's own switch, in the words the policy block uses (F9b).
+  if (a.operation === RELAX_OPERATION) {
+    return 'Stop requiring a second signature on merges in this case';
   }
   return visibleText(a.operation_description || a.operation);
 }
@@ -14913,6 +15585,16 @@ function approvalRow(a) {
       }
     });
     card.appendChild(run);
+  }
+  /* F9b (2026-09-24): an approved relax is spent from its own row by
+     the one who asked, like Execute merge, and is governance, so it carries
+     no `case-write` and works on a closed case. */
+  if (a.state === 'APPROVED' && !a.consumed_at && !a.is_expired
+      && a.operation === RELAX_OPERATION && mine) {
+    const off = el('button', 'btn small', 'Stop requiring it now');
+    off.type = 'button';
+    off.addEventListener('click', () => applyRelaxApproval(a, off));
+    card.appendChild(off);
   }
   return card;
 }
@@ -15046,7 +15728,8 @@ async function loadTriage() {
     state.triageCounts = data.counts || {};
     state.triageFailed = false;
     state.captureRefused = data.capture_refused || '';
-    syncCaptureForm(state.caseRec, state.captureRefused);
+    state.captureLabels = data.capture_labels || null;
+    syncCaptureForm(state.caseRec, state.captureRefused, state.captureLabels);
     /* The canvas's proposal ring reads THIS queue, so the two cannot
        disagree about what is waiting (ux08-triage:graph-says-unreviewed-
        triage-says-nothing, 2026-09-23). */
@@ -15113,6 +15796,7 @@ onCaseSwitch(() => {
      fits the form to it: the old case's floor and compartments are not
      this one's (final review c15). */
   state.captureRefused = null;
+  state.captureLabels = null;
   syncCaptureForm(null, '');
   setMsg($('cap-result'), '');
   setMsg($('cap-error'), '');
@@ -15407,6 +16091,13 @@ function triageSourceLine(p) {
     : null;
   line.appendChild(el('span', 'muted small',
     'from ' + (doc ? doc + ' · ' : '') + visibleText(p.origin)));
+  if (p.lookup) {
+    // F15.3: raised from a lookup answer, which the reader may open.
+    line.appendChild(el('span', 'muted small', 'from a lookup on '
+      + visibleText(p.lookup.provider_name) + ', fetched '
+      + fmtTime(p.lookup.fetched_at)));
+    line.appendChild(lookupAnswerToggle(p.lookup.result_id));
+  }
   if (p.document_id) {
     const open = el('button', 'btn ghost small', 'Open source');
     open.type = 'button';
@@ -15471,8 +16162,10 @@ async function toggleTriageSource(p, btn, view) {
 
 function triageSourceHeading(src) {
   const title = src.title ? '"' + visibleText(src.title) + '"' : 'Untitled capture';
-  return title + ' · TLP:' + src.classification + ' · captured '
-    + fmtTime(src.captured_at)
+  const keys = src.compartments || [];
+  return title + ' · TLP:' + src.classification
+    + (keys.length ? ' · ' + compartmentWords(keys) : '')
+    + ' · captured ' + fmtTime(src.captured_at)
     + (src.purged ? ' · the text has been purged under retention' : '');
 }
 
@@ -15874,12 +16567,18 @@ function triageNamed(p) {
  *  OP-HALCYON-25 was stored at AMBER, below its case, in the collection
  *  every AMBER reader lists. It now starts at the case's own level and
  *  offers nothing below it (the server raises anything lower whatever is
- *  sent). A compartmented case cannot hold a capture yet, and the form
+ *  sent). A case walled off for victim data takes no capture, and the form
  *  says so rather than offering one: `refused` is the server's sentence
  *  from the queue read (`capture_refused`), '' when the case takes a
  *  capture, and left out to fit the select alone. `rec` null is no case:
- *  every level, at AMBER. */
-function syncCaptureForm(rec, refused) {
+ *  every level, at AMBER.
+ *
+ *  Since L1 (2026-09-24) a compartmented case captures, and the text is
+ *  stored under the case's compartments: `labels` is the queue read's
+ *  `capture_labels`, and when it names compartments the note under the
+ *  help says who can list the text, as a plain note rather than a
+ *  warning (the class is toggled, never a style). */
+function syncCaptureForm(rec, refused, labels) {
   const sel = $('cap-class');
   const cls = rec && TLP.includes(rec.classification) ? rec.classification : null;
   const fit = rec ? String(rec.id) + ':' + cls : '';
@@ -15891,7 +16590,20 @@ function syncCaptureForm(rec, refused) {
   opts(sel, levels.map((t) => [t, t]),
     levels.includes(kept) ? kept : (cls || 'AMBER'));
   if (refused === undefined || refused === null) return;
-  setMsg($('cap-scope'), refused ? visibleText(refused) : '');
+  const note = $('cap-scope');
+  const keys = labels && Array.isArray(labels.compartments)
+    ? labels.compartments : [];
+  note.classList.toggle('warn', !!refused);
+  if (refused) {
+    setMsg(note, visibleText(refused));
+  } else if (keys.length) {
+    setMsg(note, 'Text captured here is stored in '
+      + compartmentWords(keys) + ', and only people read into '
+      + agree(keys.length, 'it', 'them')
+      + ' can list or search it in the collection.');
+  } else {
+    setMsg(note, '');
+  }
   /* Only a button this turned off is turned back on here, or every one on
      a switch: a live reload mid-capture must not free the button the
      capture is holding. */
@@ -15911,10 +16623,13 @@ function syncCaptureForm(rec, refused) {
  *  where it was: it is one copy of the text, which other cases read at
  *  that label. So "Stored at" is said only when the document and the
  *  proposals agree. A label above the analyst's clearance comes back
- *  null and is not named. */
+ *  null and is not named. The compartments the document is stored in
+ *  are named after its label (L1, 2026-09-24): they are the case's. */
 function captureLabelWords(out) {
   const cls = out.classification;
   const doc = out.document_classification;
+  const keys = out.document_compartments || [];
+  const where = keys.length ? ' in ' + compartmentWords(keys) : '';
   if (!cls) {
     return out.deduplicated
       ? 'It was captured before at a label above your clearance, so what it '
@@ -15922,10 +16637,11 @@ function captureLabelWords(out) {
       : '';
   }
   if (doc && doc !== cls) {
-    return 'An earlier capture stored this text at TLP:' + doc + ', and it '
-      + 'stays at that label. Its proposals here carry TLP:' + cls + '. ';
+    return 'An earlier capture stored this text at TLP:' + doc + where
+      + ', and it stays at that label. Its proposals here carry TLP:'
+      + cls + '. ';
   }
-  return 'Stored at TLP:' + cls + '. ';
+  return 'Stored at TLP:' + cls + where + '. ';
 }
 
 async function runCapture() {
@@ -16020,10 +16736,30 @@ function absentClass(v) {
   return v === null || v === undefined || v === '' ? 'absent' : null;
 }
 
+/** The venue families the pane can project to entities (F2, 2026-09-24),
+ *  with the word each is called in the pane's sentences. Conversations are
+ *  not among them (docs/00 decision 73): the Comms pane projects those,
+ *  with its protections for third parties. */
+const AN_ONE_MODE = [['forum', 'forums'], ['wallet', 'wallets']];
+
 function anQuery() {
   const q = projQuery();
   const decay = $('an-decay').value;
   if (decay) q.set('decay_half_life_months', decay);
+  /* L3 and F2 (2026-09-24): each option is set only when it is not the
+     default, so the default query string, and with it every stored
+     projection name and the query a run is remembered under, is unchanged. */
+  if ($('an-ties').value === 'accepted') q.set('review_scope', 'accepted');
+  let venues = false;
+  for (const [family] of AN_ONE_MODE) {
+    if ($('an-om-' + family).checked) {
+      q.append('one_mode', family);
+      venues = true;
+    }
+  }
+  if (venues && $('an-om-max').value && $('an-om-max').value !== '50') {
+    q.set('max_venue_size', $('an-om-max').value);
+  }
   return q;
 }
 
@@ -16058,6 +16794,18 @@ const AN_PROJECTION_CHANGED = 'The projection changed. Run the analysis '
  *  not pressed Run for minutes can still be throttled. So the line says
  *  that, and when to try again. */
 function analysisFailureText(err, fallback) {
+  /* F1 and F2 (2026-09-24): the role analysis and a view with venues
+     projected spend budgets of their own, so a throttle there says so
+     rather than blaming the timeline. */
+  if (err instanceof ApiError && err.status === 429
+      && /analytics\.(one_mode|concor)/.test(err.detail || '')) {
+    const m = /retry in (\d+)\s*s/i.exec(err.detail || '');
+    const which = /analytics\.one_mode/.test(err.detail || '')
+      ? 'Projecting venues to entities' : 'Role analysis';
+    return which + ' is briefly throttled: it has a budget of its own, spent '
+      + 'by each run and each check with it. Try again '
+      + (m ? 'in ' + countOf(Number(m[1]), 'second', 'seconds') : 'shortly') + '.';
+  }
   if (err instanceof ApiError && err.status === 429) {
     const m = /retry in (\d+)\s*s/i.exec(err.detail || '');
     return 'Analysis is briefly throttled: the graph view and this pane '
@@ -16115,6 +16863,14 @@ function blankAnalytics(note) {
   state.analyticsGen = (state.analyticsGen || 0) + 1;
   state.analytics = null;
   state.analyticsKpp = null;
+  /* The Roles card is one run's too (F1, 2026-09-24). */
+  state.analyticsConcor = null;
+  state.analyticsConcorAll = {};
+  /* A held-back one-mode check was for the run just cleared (F2). */
+  if (state.analyticsOneModeTimer) {
+    clearTimeout(state.analyticsOneModeTimer);
+    state.analyticsOneModeTimer = null;
+  }
   state.analyticsQuery = '';
   state.analyticsCurrency = null;
   show($('an-results'), false);
@@ -16132,7 +16888,8 @@ onCaseSwitch(() => {
   blankAnalytics(AN_EMPTY_TEXT);
   state.analyticsRunning = false;
   $('an-run').disabled = false;
-  for (const id of ['an-body', 'an-leads', 'an-kpp', 'an-cohesion', 'an-balance']) {
+  for (const id of ['an-body', 'an-leads', 'an-kpp', 'an-cohesion', 'an-concor',
+                    'an-balance']) {
     clear($(id));
   }
   /* Sort, filter and the expanded lead lists are a way of reading ONE
@@ -16217,6 +16974,11 @@ async function runAnalysis() {
     if (stale()) { retire(); return; }
     if (kgen === state.analyticsKppGen) state.analyticsKpp = safeLabelsDeep(kpp);
     renderAnalytics();
+    /* F1 (2026-09-24): the Roles card after the suite and the key player
+       are drawn, and NOT awaited, so a slow or failed role analysis never
+       delays or blanks the table. It reads the stored run first and
+       computes only when there is none or the graph has moved. */
+    loadConcor(false);
     /* The open trend is fetched again, not only re-filtered (release
        review u14, 2026-09-24). renderAnalytics re-draws the series fetched
        when Trend was pressed, so the run just computed was missing from the
@@ -16296,11 +17058,38 @@ function analyticsAfterGraphRefresh() {
     blankAnalytics(AN_PROJECTION_CHANGED);
     return;
   }
+  /* F2 (2026-09-24): with venues projected every check
+     re-projects AND transforms, and spends the one-mode budget an explicit
+     Run needs too, so on a busy case colleagues' live edits could empty it.
+     Those checks run at most once in AN_ONE_MODE_CHECK_MS; the status line
+     still says when the last one was made. */
+  if (new URLSearchParams(state.analyticsQuery).has('one_mode')) {
+    checkOneModeCurrencyLater();
+    return;
+  }
   checkAnalysisCurrencySoon();
 }
 
 const checkAnalysisCurrencySoon = debounce(() => { checkAnalysisCurrency(); }, 600);
 
+const AN_ONE_MODE_CHECK_MS = 30000;
+
+function checkOneModeCurrencyLater() {
+  if (state.analyticsOneModeTimer) return;
+  const since = Date.now() - (state.analyticsOneModeCheckAt || 0);
+  state.analyticsOneModeTimer = setTimeout(() => {
+    state.analyticsOneModeTimer = null;
+    state.analyticsOneModeCheckAt = Date.now();
+    checkAnalysisCurrency();
+  }, Math.max(600, AN_ONE_MODE_CHECK_MS - since));
+}
+
+/** Whether the runs on screen still describe the graph: ONE request for
+ *  every card (F2, 2026-09-24), so the graph is projected once rather than
+ *  once per card. Each verdict lands only on the card it was asked for:
+ *  the suite's under the pane's own guard, and the key player's and the
+ *  roles' only while that card is still the one on screen, since a size
+ *  or depth changed during the check has started its own load. */
 async function checkAnalysisCurrency() {
   const a = state.analytics;
   if (!state.caseId || !a || !a.run_id) return;
@@ -16309,29 +17098,34 @@ async function checkAnalysisCurrency() {
   const stale = () => caseChanged(token) || gen !== (state.analyticsGen || 0)
     || state.analytics !== a;
   const q = new URLSearchParams(state.analyticsQuery);
-  const ask = (runId) => api(cpath('/analytics/runs/' + encodeURIComponent(runId)
-    + '/current?' + q.toString()));
-  let current = null, note = '';
+  const k = state.analyticsKpp;
+  const roles = state.analyticsConcor;
+  const asked = (card) => !!(card && card.run_id && !card.error);
+  q.append('run_id', a.run_id);
+  if (asked(k)) q.append('run_id', k.run_id);
+  if (asked(roles)) q.append('run_id', roles.run_id);
+  let verdicts = null, note = '';
   try {
-    const out = await ask(a.run_id);
-    current = out.current === true ? true : (out.current === false ? false : null);
+    const out = await api(cpath('/analytics/currency?' + q.toString()));
+    verdicts = new Map((out.runs || []).map((v) => [v.run_id, v.current]));
   } catch (err) {
     if (stale()) return;
     note = analysisFailureText(err, 'the check could not be made.');
   }
   if (stale()) return;
+  const verdict = (runId) => {
+    const v = verdicts ? verdicts.get(runId) : null;
+    return v === true ? true : (v === false ? false : null);
+  };
+  const current = verdict(a.run_id);
   state.analyticsCurrency = { current, note, checkedAt: new Date().toISOString() };
-  const k = state.analyticsKpp;
-  if (k && k.run_id && !k.error) {
-    try {
-      const out = await ask(k.run_id);
-      if (stale() || state.analyticsKpp !== k) return;
-      k.current = out.current === true ? true : (out.current === false ? false : null);
-    } catch (_err) {
-      if (stale() || state.analyticsKpp !== k) return;
-      k.current = null;
-    }
+  if (asked(k) && state.analyticsKpp === k) {
+    k.current = verdict(k.run_id);
     renderKeyPlayer();
+  }
+  if (asked(roles) && state.analyticsConcor === roles) {
+    roles.current = verdict(roles.run_id);
+    renderConcor();
   }
   renderAnalyticsFlags(state.analytics);
   if (current === false) {
@@ -16407,6 +17201,64 @@ async function loadKeyPlayer(storedOnly) {
   if (stale()) return;
   state.analyticsKpp = safeLabelsDeep(kpp);
   renderKeyPlayer();
+}
+
+/* --- the Roles card: CONCOR positions (F1, 2026-09-24) --------------------
+ *
+ * The key-player card's shape, on purpose: its own run, stored for each
+ * number of splits, read first and computed only when there is none or the
+ * graph has moved since. `state.analyticsConcorGen` numbers what may draw
+ * on the card, so a depth changed while a reply is out draws only the
+ * answer for the depth on screen, and the case token drops a reply for a
+ * case the analyst has left. */
+
+/** The number of splits changed: only the Roles card is fetched again. */
+function onConcorDepthChange() {
+  state.analyticsConcorGen = (state.analyticsConcorGen || 0) + 1;
+  state.analyticsConcorAll = {};
+  if (state.analytics) loadConcor(false);
+}
+
+async function loadConcor(storedOnly) {
+  if (!state.caseId || !state.analytics) return;
+  const depth = Number($('an-concor-depth').value) || 2;
+  const token = caseToken();
+  const gen = state.analyticsGen || 0;
+  const rgen = state.analyticsConcorGen = (state.analyticsConcorGen || 0) + 1;
+  const stale = () => caseChanged(token) || gen !== (state.analyticsGen || 0)
+    || rgen !== state.analyticsConcorGen;
+  const q = new URLSearchParams(state.analyticsQuery);
+  q.set('depth', String(depth));
+  state.analyticsConcor = { pending: true, reading: true, depth };
+  renderConcor();
+  let roles = null;
+  try {
+    try {
+      const stored = await api(cpath('/analytics/concor/latest?' + q.toString()));
+      if (stale()) return;
+      if (storedOnly || stored.current !== false) roles = stored;
+    } catch (err) {
+      if (stale()) return;
+      if (!(err instanceof ApiError && (err.status === 404 || err.status === 403))) {
+        throw err;
+      }
+    }
+    if (!roles && storedOnly) roles = { missing: true, depth };
+    if (!roles) {
+      state.analyticsConcor = { pending: true, depth };
+      renderConcor();
+      roles = await api(cpath('/analytics/concor?' + q.toString()));
+    }
+  } catch (err) {
+    if (stale()) return;
+    roles = { error: analysisFailureText(err, 'The role analysis request failed.'),
+              depth };
+  }
+  if (stale()) return;
+  /* De-fang at the boundary: positions and "alike but not tied" pairs name
+     people, as the key-player set does. */
+  state.analyticsConcor = safeLabelsDeep(roles);
+  renderConcor();
 }
 
 /* --- rendering ------------------------------------------------------------ */
@@ -16504,6 +17356,158 @@ function reviewCoverageText(rc) {
   return text;
 }
 
+/** The left-out counts of one bucket in words, the non-zero ones only:
+ *  "2 unreviewed proposals and 1 superseded tie". */
+function leftOutParts(counts, one, many) {
+  const c = counts || {};
+  const n = (key) => Number(c[key]) || 0;
+  const out = [];
+  if (n('proposed')) out.push(countOf(n('proposed'), 'unreviewed proposal', 'unreviewed proposals'));
+  if (n('disputed')) out.push(countOf(n('disputed'), 'disputed ' + one, 'disputed ' + many));
+  if (n('rejected')) out.push(countOf(n('rejected'), 'rejected ' + one, 'rejected ' + many));
+  if (n('superseded')) {
+    out.push(countOf(n('superseded'), 'superseded ' + one, 'superseded ' + many));
+  }
+  if (n('other')) {
+    out.push(countOf(n('other'), one + ' in another review state',
+      many + ' in another review state'));
+  }
+  return out;
+}
+
+/** What the accepted-ties scope left out, in words (L3, 2026-09-24).
+ *  "Accepted", not "reviewed": a disputed tie has been reviewed and is
+ *  still left out, and the coverage line counts it as reviewed. Reads
+ *  `left_out.ties`, and `left_out.affiliations` when venues were
+ *  projected, the one shape the server emits. */
+function reviewScopeText(rs) {
+  const left = (rs && rs.left_out) || {};
+  const ties = leftOutParts(left.ties, 'tie', 'ties');
+  let text = ties.length
+    ? 'Computed over accepted ties only. Left out: ' + andList(ties) + '. These '
+      + 'numbers describe what reviewers have accepted, not everything the case holds.'
+    : 'Computed over accepted ties only. Every tie in this view is accepted, so '
+      + 'nothing was left out.';
+  const aff = leftOutParts(left.affiliations, 'affiliation', 'affiliations');
+  if (aff.length) text += ' Affiliations left out before projecting: ' + andList(aff) + '.';
+  return text;
+}
+
+/** The families a run projected, in the pane's words: "forums and wallets". */
+function oneModeFamilies(om) {
+  return ((om && om.families) || []).map(
+    (f) => (AN_ONE_MODE.find(([key]) => key === f) || [f, f])[1]);
+}
+
+function derivedTotal(om) {
+  const dt = (om && om.derived_ties) || {};
+  return (Number(dt.forum) || 0) + (Number(dt.wallet_control) || 0)
+    + (Number(dt.wallet_flow) || 0);
+}
+
+/** What projecting venues did, as a note (F2, 2026-09-24). Says that the
+ *  derived ties are derived and that they count although stored inferred
+ *  ties may be left out, so the projection line and this note never read
+ *  as contradicting each other. */
+function oneModeText(om, includeInferred) {
+  const dt = om.derived_ties || {};
+  const parts = [];
+  if (dt.forum) parts.push(countOf(dt.forum, 'tie from shared forums', 'ties from shared forums'));
+  if (dt.wallet_control) {
+    parts.push(countOf(dt.wallet_control, 'tie from shared wallets',
+      'ties from shared wallets'));
+  }
+  if (dt.wallet_flow) {
+    parts.push(countOf(dt.wallet_flow, 'tie from money moving between wallets',
+      'ties from money moving between wallets'));
+  }
+  return 'Projected to entities: ' + andList(oneModeFamilies(om)) + '. Derived here: '
+    + (parts.length ? andList(parts) : 'none') + '. These ties are derived, not '
+    + 'observed, and count here ' + (includeInferred
+      ? 'as inferred ties do. '
+      : 'although stored inferred ties are left out. ')
+    + (om.size_note || '');
+}
+
+/** Every exclusion the one-mode projection counted, one line each, so
+ *  nothing it left out is silent. Names come from the payload's `label`
+ *  keys, which safeLabelsDeep has already de-fanged. */
+function oneModeFlags(om) {
+  const out = [];
+  const warn = (n, text) => { if (Number(n) > 0) out.push(['warn', text]); };
+  const n = (key) => Number(om[key]) || 0;
+  const over = om.oversized || [];
+  if (over.length) {
+    const shown = over.slice(0, 5).map((v) => v.label + ' (' + v.size
+      + (v.size_basis === 'recorded' ? ' recorded' : '') + ')');
+    const rest = (Number(om.oversized_total) || over.length) - shown.length;
+    out.push(['warn', 'Left out as larger than ' + countOf(om.max_venue_size, 'entity',
+      'entities') + ': ' + shown.join(', ')
+      + (rest > 0 ? ', and ' + countOf(rest, 'more', 'more') : '') + '.']);
+  }
+  warn(n('pairs_same_identity'), countOf(n('pairs_same_identity'), 'pair', 'pairs')
+    + ' sharing a venue ' + agree(n('pairs_same_identity'), 'was', 'were')
+    + ' not tied, because the two are recorded as one identity.');
+  warn(n('pairs_identity_disputed'), countOf(n('pairs_identity_disputed'), 'pair',
+    'pairs') + ' linked only by a disputed or rejected identity claim '
+    + agree(n('pairs_identity_disputed'), 'keeps its', 'keep their') + ' derived tie.');
+  warn(n('pairs_not_contemporaneous'), countOf(n('pairs_not_contemporaneous'), 'pair',
+    'pairs') + ' sharing a venue at different times '
+    + agree(n('pairs_not_contemporaneous'), 'was', 'were') + ' not tied.');
+  warn(n('pairs_below_min_shared'), countOf(n('pairs_below_min_shared'), 'pair', 'pairs')
+    + ' sharing fewer venues than the minimum '
+    + agree(n('pairs_below_min_shared'), 'was', 'were') + ' left untied.');
+  warn(n('flow_legs_not_contemporaneous'), countOf(n('flow_legs_not_contemporaneous'),
+    'payment leg', 'payment legs') + ' fell outside the time the wallets were '
+    + 'controlled, and ' + agree(n('flow_legs_not_contemporaneous'), 'pays', 'pay')
+    + ' nobody.');
+  warn(n('transactions_unattributed'), countOf(n('transactions_unattributed'),
+    'transaction', 'transactions') + ' with no recorded controller on either side '
+    + agree(n('transactions_unattributed'), 'draws', 'draw') + ' no tie.');
+  warn(n('transactions_partly_unattributed'), countOf(
+    n('transactions_partly_unattributed'), 'transaction', 'transactions') + ' '
+    + agree(n('transactions_partly_unattributed'), 'has', 'have') + ' legs with no '
+    + 'recorded controller; that share of the money is not handed to anyone else.');
+  warn(n('self_transfers'), countOf(n('self_transfers'), 'transfer', 'transfers')
+    + ' between wallets of one entity or one identity '
+    + agree(n('self_transfers'), 'was', 'were') + ' not counted as a tie.');
+  warn(n('flow_already_paid'), countOf(n('flow_already_paid'), 'money flow',
+    'money flows') + ' between entities already joined by a recorded payment '
+    + agree(n('flow_already_paid'), 'was', 'were') + ' not added again.');
+  warn(n('flow_legs_through_oversized_wallets'), countOf(
+    n('flow_legs_through_oversized_wallets'), 'payment leg', 'payment legs')
+    + ' through a wallet with more controllers than the limit '
+    + agree(n('flow_legs_through_oversized_wallets'), 'draws', 'draw') + ' no tie.');
+  warn(n('paid_legs_unattributed'), countOf(n('paid_legs_unattributed'), 'payment',
+    'payments') + ' to or from a wallet with no recorded controller '
+    + agree(n('paid_legs_unattributed'), 'draws', 'draw') + ' no tie.');
+  /* Only types that counted: a zero never becomes "0 controls ties". */
+  const dropped = Object.entries(om.edges_dropped_with_venues || {})
+    .filter(([, count]) => Number(count) > 0);
+  if (dropped.length) {
+    out.push(['warn', 'Ties to the projected venues left the view with them: '
+      + andList(dropped.map(([type, count]) => countOf(count,
+        edgeTypeName(type).toLowerCase() + ' tie', edgeTypeName(type).toLowerCase()
+          + ' ties'))) + '.']);
+  }
+  const none = Object.entries(om.venues_without_ties || {})
+    .filter(([, count]) => Number(count) > 0);
+  if (none.length) {
+    const total = none.reduce((s, [, count]) => s + Number(count), 0);
+    out.push(['note', countOf(total, 'projected venue', 'projected venues') + ' ('
+      + andList(none.map(([type]) => typeName(type))) + ') '
+      + agree(total, 'draws', 'draw') + ' no tie: one member, every pair excluded, '
+      + 'or no payment with a recorded controller.']);
+  }
+  const floor = Number((om.members_not_drawing || {}).confidence) || 0;
+  if (floor) {
+    out.push(['note', countOf(floor, 'membership', 'memberships') + ' below the '
+      + 'confidence floor ' + agree(floor, 'counts', 'count') + ' toward venue sizes '
+      + 'but ' + agree(floor, 'draws', 'draw') + ' no tie.']);
+  }
+  return out;
+}
+
 function renderAnalytics() {
   const a = state.analytics;
   if (!a) return;
@@ -16531,7 +17535,17 @@ function renderAnalytics() {
      the build team's word: the reader's is connected pairs, and the ties
      behind them are counted too, since parallel ties collapse into one
      pair (ux10-analytics: explanations-in-developer-language). */
+  /* L3 and F2 (2026-09-24): the projection options are part of the view,
+     so the line says them. Derived ties are counted although stored
+     inferred ties may be left out, and it says so rather than leaving
+     "inferred left out" beside numbers that rest on derived ties. */
+  const om = a.one_mode;
   $('an-projection').textContent = viewWords(p)
+    + (p.review_scope === 'accepted' ? ' | accepted ties only' : '')
+    + (om ? ' | ' + andList(oneModeFamilies(om)) + ' projected to entities: '
+      + countOf(derivedTotal(om), 'derived tie', 'derived ties') + ' included'
+      + (p.include_inferred ? '' : ', although stored inferred ties are left out')
+      : '')
     + ' | ' + countOf(a.node_count, 'entity', 'entities') + ', '
     + countOf(a.dyad_count, 'connected pair', 'connected pairs') + ' from '
     + countOf(a.edge_count, 'tie', 'ties') +
@@ -16547,6 +17561,7 @@ function renderAnalytics() {
   renderAnalyticsTable(a);
   renderKeyPlayer();
   renderCohesion(a);
+  renderConcor();
   renderBalance(a);
   syncAnalysisSizeOptions();
   /* The trend's filter is this run's projection, so a trend already open
@@ -16585,6 +17600,16 @@ function renderAnalyticsFlags(a) {
     flags.push(['note', 'This run was stored before review and evidence '
       + 'coverage were recorded, so what its ties rest on is not known here. '
       + 'Run the analysis again to see it.']);
+  }
+  /* L3 (2026-09-24): the scope is always said, and what it left out. */
+  if (a.review_scope && a.review_scope.scope === 'accepted') {
+    flags.push(['note', reviewScopeText(a.review_scope)]);
+  }
+  /* F2 (2026-09-24): what was projected, then every exclusion, warned. */
+  if (a.one_mode) {
+    flags.push(['note', oneModeText(a.one_mode,
+      !!(a.projection && a.projection.include_inferred))]);
+    for (const flag of oneModeFlags(a.one_mode)) flags.push(flag);
   }
   if (a.decay && a.decay.half_life_months && a.decay.undated_edges) {
     flags.push(['note', 'Trust decay: ' + decayWords(a) + '.']);
@@ -16960,8 +17985,15 @@ function markChartedRow(nodeId) {
  *  out on purpose, because it is the axis. */
 function trendKey(preset, params) {
   const p = params || {};
+  /* The review scope (L3) and the venue projection (F2, every one of its
+     parameters, min_shared included) measure something else too, so runs
+     under them never join another projection's line (2026-09-24). */
+  const om = p.one_mode;
   return [preset || p.preset || '', p.min_confidence || '',
-          String(!!p.include_inferred), String(p.decay_half_life_months || '')].join('|');
+          String(!!p.include_inferred), String(p.decay_half_life_months || ''),
+          p.review_scope || 'all',
+          om ? [(om.families || []).join(','), om.weighting, om.max_venue_size,
+                om.min_shared].join(';') : ''].join('|');
 }
 
 /** The key of the run on screen, which the trend joins into a line. */
@@ -16971,7 +18003,8 @@ function shownTrendKey() {
   const p = a.projection || {};
   return trendKey(p.preset, { min_confidence: p.min_confidence,
     include_inferred: p.include_inferred,
-    decay_half_life_months: (a.params || {}).decay_half_life_months });
+    decay_half_life_months: (a.params || {}).decay_half_life_months,
+    review_scope: p.review_scope, one_mode: p.one_mode });
 }
 
 /** The world time a point measured: its as-of, or when the run started
@@ -17061,6 +18094,10 @@ function histRow(p) {
   if (params.decay_half_life_months) {
     bits.push('decay ' + params.decay_half_life_months + ' months');
   }
+  /* L3 and F2 (2026-09-24): said only when set, so a default row reads
+     as it always has. */
+  if (params.review_scope === 'accepted') bits.push('accepted ties only');
+  if (params.one_mode) bits.push('projected: ' + andList(oneModeFamilies(params.one_mode)));
   if (bits.length) preset.appendChild(el('span', 'muted small', '  ' + bits.join(', ')));
   tr.appendChild(preset);
   return tr;
@@ -17454,6 +18491,220 @@ function renderCohesion(a) {
   box.appendChild(card);
 }
 
+/** How well CONCOR's positions account for the ties, in words. The cut
+ *  points are rules of thumb and the tooltip says so. A null R squared means
+ *  the positions predict one density for every pair. */
+function concorFitText(r2) {
+  if (r2 === null || r2 === undefined || !Number.isFinite(Number(r2))) {
+    return 'How well the positions account for the ties cannot be measured '
+      + 'here: the positions predict the same density for every pair of entities.';
+  }
+  const v = Number(r2);
+  return 'The positions account for ' + pctOf(v) + ' of the pattern of ties, '
+    + (v < 0.2 ? 'a weak fit' : (v < 0.5 ? 'a moderate fit' : 'a strong fit')) + '.';
+}
+
+/** One relation's block densities as a table. A block at or above the
+ *  relation's own density is shaded by a class AND marked in words, and
+ *  the caption states the cut, so nothing rests on colour alone
+ *  (docs/06). Three decimals, because an investigative graph
+ *  is sparse: at two, a block of 0.004 over a cut of 0.003 read "0.00
+ *  tied" under "at least 0.00" (seen on the demo estate, 2026-09-24). */
+function concorImageTable(c, rel, letters) {
+  const d = (c.density || {})[rel.key] || [];
+  const img = (c.image || {})[rel.key] || [];
+  const alpha = (c.alpha || {})[rel.key];
+  const table = el('table', 'table an-image');
+  table.appendChild(el('caption', null, 'Density of ' + rel.label + ' from each '
+    + 'position (rows) to each position (columns). Blocks marked tied are at least '
+    + metricNum(alpha, 3) + ', the density of ' + rel.label + ' among these entities.'));
+  const head = el('tr');
+  head.appendChild(el('th', null, 'From / to'));
+  for (const x of letters) head.appendChild(el('th', null, x));
+  const thead = el('thead');
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const body = el('tbody');
+  d.forEach((row, i) => {
+    const tr = el('tr');
+    const th = el('th', null, letters[i]);
+    th.setAttribute('scope', 'row');
+    tr.appendChild(th);
+    row.forEach((v, j) => {
+      const td = el('td', absentClass(v), metricNum(v, 3));
+      if ((img[i] || [])[j] === 1) {
+        td.classList.add('on-' + rel.key);
+        td.appendChild(el('span', 'an-image-mark', ' tied'));
+      }
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  const wrap = el('div', 'scroll-x');
+  wrap.appendChild(table);
+  return wrap;
+}
+
+/** The Roles card (F1, 2026-09-24): CONCOR positions, the fit that says
+ *  how far to trust them, the density image per relation, and the pairs
+ *  that are alike but not tied. Every count agrees with its noun, and every
+ *  reading is worded as a possibility: these are leads about people. */
+function renderConcor() {
+  const box = $('an-concor');
+  clear(box);
+  /* A position shown on the graph says so when its run goes stale. */
+  if (state.focus && state.focus.kind === 'set') renderFocusFlag();
+  const r = state.analyticsConcor;
+  if (!r || r.missing) {
+    const card = el('div', 'card');
+    card.appendChild(el('p', 'muted small', 'Not computed for this view yet. '
+      + 'Positions are their own run, stored for each number of splits.'));
+    const btn = el('button', 'btn small', 'Find positions');
+    btn.type = 'button';
+    btn.addEventListener('click', () => { loadConcor(false); });
+    card.appendChild(btn);
+    box.appendChild(card);
+    return;
+  }
+  if (r.pending) {
+    box.appendChild(el('p', 'muted small', r.reading
+      ? 'Looking for stored positions...' : 'Finding positions...'));
+    return;
+  }
+  if (r.error) {
+    box.appendChild(el('p', 'muted small', r.error));
+    return;
+  }
+  const c = r.concor || {};
+  const positions = c.positions || [];
+  const letters = positions.map((p) => p.position);
+  const card = el('div', 'card');
+  if (r.current === false) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', 'The graph has changed since '
+      + 'this role run. Run the analysis again to recompute it.'));
+  }
+  if (r.truncated && r.truncation_note) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', r.truncation_note));
+  }
+  if (r.computed_at) {
+    card.appendChild(el('p', 'muted small', 'From the role run of '
+      + fmtTime(r.computed_at) + ' (' + ageText(r.computed_at) + ').'));
+  }
+  const r2 = (c.r_squared || {}).overall;
+  const placed = (r.nodes || []).length;
+  const head = el('p', null, 'CONCOR placed ' + countOf(placed, 'entity with ties',
+    'entities with ties') + ' in ' + countOf(positions.length, 'position', 'positions')
+    + '. ' + concorFitText(r2));
+  if (r2 !== null && r2 !== undefined) {
+    head.title = 'R squared between the ties and the densities of the positions. '
+      + 'The cut points, 0.2 and 0.5, are rules of thumb, not tests.';
+  }
+  card.appendChild(head);
+  if (r2 !== null && r2 !== undefined && Number(r2) < 0.2) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', 'A weak fit means CONCOR, which '
+      + 'always splits in two, has divided entities that do not really differ. Read '
+      + 'the positions as a sorting, not a finding.'));
+  }
+  if (c.all_converged === false) {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'Some splits did not settle within '
+      + countOf(c.max_iterations, 'round', 'rounds') + ' and were made on the '
+      + 'correlations as they stood.'));
+  }
+  if (c.derived_ties_counted_whole) {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'With venues projected, a derived '
+      + 'tie counts here as a whole tie, however many entities shared the venue, '
+      + 'because role analysis compares who is tied to whom, not how strongly.'));
+  }
+  const all = state.analyticsConcorAll || {};
+  for (const pos of positions) {
+    const item = el('div', 'an-lead');
+    const line = el('p', 'an-lead-head');
+    line.appendChild(document.createTextNode('Position ' + pos.position + ' ('
+      + pos.size + '): '));
+    const members = pos.members || [];
+    const shown = all[pos.position] ? members : members.slice(0, 8);
+    shown.forEach((m, i) => {
+      if (i) line.appendChild(document.createTextNode(', '));
+      line.appendChild(actorButton(m));
+    });
+    if (members.length > shown.length) {
+      line.appendChild(document.createTextNode(', and '
+        + countOf(members.length - shown.length, 'more', 'more') + ' '));
+      const more = el('button', 'btn ghost small', 'Show all ' + members.length);
+      more.type = 'button';
+      more.addEventListener('click', () => {
+        state.analyticsConcorAll = { ...(state.analyticsConcorAll || {}),
+                                     [pos.position]: true };
+        renderConcor();
+      });
+      line.appendChild(more);
+    }
+    item.appendChild(line);
+    const lit = new Set(members.map((m) => m.id));
+    const actions = el('p', 'an-graph-actions');
+    const b = graphButton('Show on graph', () => ({
+      label: 'position ' + pos.position, lit, pairs: pairsWithin(lit), fromConcor: true,
+      note: 'Position ' + pos.position + ' of the last role analysis: entities with the '
+        + 'same pattern of ties to the same others. They need not be tied to each other.',
+    }));
+    b.setAttribute('aria-label', 'Show position ' + pos.position + ', '
+      + countOf(pos.size, 'entity', 'entities') + ', on graph');
+    actions.appendChild(b);
+    item.appendChild(actions);
+    if ((c.unsplit || []).some((u) => u.block === pos.block && u.reason === 'alike')) {
+      item.appendChild(el('p', 'muted small', 'Position ' + pos.position + ' was not '
+        + 'split further: its members’ ties are alike.'));
+    }
+    card.appendChild(item);
+  }
+  for (const rel of c.relations || []) {
+    if ((c.density || {})[rel.key]) card.appendChild(concorImageTable(c, rel, letters));
+  }
+  const pairs = c.equivalent_pairs || [];
+  if (pairs.length) {
+    card.appendChild(el('h4', 'h4', 'Alike but not tied'));
+    card.appendChild(el('p', 'muted small', 'Same ties to the same others, and none '
+      + 'to each other. They may fill the same role, one may be the other’s '
+      + 'replacement, or one person may be behind both; the pattern does not say which.'));
+    for (const pr of pairs) {
+      const row = el('p', 'an-lead-head');
+      row.appendChild(actorButton(pr.a));
+      row.appendChild(document.createTextNode(' and '));
+      row.appendChild(actorButton(pr.b));
+      row.appendChild(document.createTextNode(': profiles correlate at '
+        + num(pr.correlation, 2) + ', ' + (pr.same_position ? 'same position'
+          : 'different positions') + '. '));
+      row.appendChild(graphButton('Show both on graph', {
+        label: 'two entities alike but not tied', lit: new Set([pr.a.id, pr.b.id]),
+        pairs: new Set(), fromConcor: true,
+        note: 'Two entities with the same pattern of ties to the same others and no '
+          + 'tie to each other.',
+      }));
+      card.appendChild(row);
+    }
+    if (c.equivalent_pairs_truncated) {
+      card.appendChild(el('p', 'muted small', 'More pairs qualify than are listed here.'));
+    }
+  }
+  const noTies = Number((c.no_ties || {}).count) || 0;
+  if (noTies) {
+    card.appendChild(el('p', 'muted small', countOf(noTies, 'entity', 'entities')
+      + ' with no tie in this view ' + agree(noTies, 'has', 'have') + ' no position.'));
+  }
+  const only = c.profile_only || {};
+  if (Number(only.count)) {
+    card.appendChild(el('p', 'muted small', countOf(Number(only.count),
+      'vertex that is not an entity', 'vertices that are not entities') + ' ('
+      + andList((only.types || []).map(typeName)) + ') '
+      + agree(Number(only.count), 'shapes', 'shape') + ' who is alike but '
+      + agree(Number(only.count), 'holds', 'hold') + ' no position.'));
+  }
+  if (c.reading) card.appendChild(el('p', 'muted small', c.reading));
+  if (c.method) card.appendChild(el('p', 'muted small', c.method));
+  box.appendChild(card);
+}
+
 /** Every tie of the projection on screen with both ends in `ids`. */
 function pairsWithin(ids) {
   const out = new Set();
@@ -17584,11 +18835,19 @@ function analysisSizeRaw(n) {
  *  is kept with it, so the flag can say when that run has left the pane
  *  or the graph has moved past it (setFocusSource). */
 function showSetOnGraph(spec) {
-  const from = spec.fromKpp ? state.analyticsKpp : state.analytics;
-  state.focus = { kind: 'set', label: spec.label, note: spec.note || '',
+  const from = spec.fromKpp ? state.analyticsKpp
+    : (spec.fromConcor ? state.analyticsConcor : state.analytics);
+  /* A set grouped over projected venues (F2, 2026-09-24) is drawn on a
+     graph that still shows the forums and wallets as recorded, so the flag
+     says why the ties that grouped them are not the ties on screen. */
+  const om = from && from.one_mode;
+  const venues = om ? ' The ties that grouped them run through '
+    + oneModeFamilies(om).join(' or ') + ', which the graph draws as recorded.' : '';
+  state.focus = { kind: 'set', label: spec.label, note: (spec.note || '') + venues,
                   hide: spec.hide || null, keep: spec.keep || null,
                   lit: spec.lit || null, pairs: spec.pairs || null,
-                  fromKpp: !!spec.fromKpp, runId: (from && from.run_id) || null };
+                  fromKpp: !!spec.fromKpp, fromConcor: !!spec.fromConcor,
+                  runId: (from && from.run_id) || null };
   state.pathIds = null;
   state.pathAnchor = null;
   state.needFit = true;
@@ -17606,11 +18865,14 @@ function showSetOnGraph(spec) {
  *  ux10-analytics:results-dont-reach-the-graph, 2026-09-23). The set is
  *  still the analyst's to look at; the flag says what it now rests on. */
 function setFocusSource(f) {
-  const run = f.fromKpp ? state.analyticsKpp : state.analytics;
+  /* The key player and the Roles card (F1, 2026-09-24) are runs of their
+     own, each with its own verdict. */
+  const run = f.fromKpp ? state.analyticsKpp
+    : (f.fromConcor ? state.analyticsConcor : state.analytics);
   if (!run || !f.runId || run.run_id !== f.runId) {
     return 'from an analysis run no longer on the Analysis pane';
   }
-  const current = f.fromKpp
+  const current = f.fromKpp || f.fromConcor
     ? run.current
     : (state.analyticsCurrency && state.analyticsCurrency.current);
   if (current === false) return 'from an analysis run the graph has changed since';
@@ -17658,6 +18920,10 @@ function renderInspectorAnalysis(nodeId) {
       text += ' The graph has changed since that run.';
     }
   }
+  /* The Roles card's position, when it placed this entity (F1, 2026-09-24). */
+  const roles = state.analyticsConcor;
+  const placed = roles && !roles.error && (roles.nodes || []).find((n) => n.id === nodeId);
+  if (placed) text += ' Position ' + placed.position + ' in the role analysis.';
   box.appendChild(document.createTextNode(text + ' '));
   const b = el('button', 'btn ghost small', 'Open the Analysis pane');
   b.type = 'button';
@@ -17701,12 +18967,16 @@ function initSubtabs(paneId, onSelect) {
     }
     if (onSelect) onSelect(name);
   };
-  tabs.forEach((t, i) => {
+  tabs.forEach((t) => {
     t.addEventListener('click', () => select(t.dataset.subtab));
     t.addEventListener('keydown', (e) => {
       let next = null;
-      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
-      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      // A hidden subtab (an Admin section the account may not open) is
+      // skipped, so the arrow keys never reach it (F8 G1, 2026-09-24).
+      const live = tabs.filter((x) => !x.hidden);
+      const at = live.indexOf(t);
+      if (e.key === 'ArrowRight') next = live[(at + 1) % live.length];
+      else if (e.key === 'ArrowLeft') next = live[(at - 1 + live.length) % live.length];
       if (next) { e.preventDefault(); next.focus(); select(next.dataset.subtab); }
     });
   });
@@ -17874,6 +19144,14 @@ function fact(label, value, cls) {
   wrap.appendChild(el('span', 'fact-v', value === null || value === undefined
     ? NO_VALUE : String(value)));
   return wrap;
+}
+
+/** "compartment X" or "compartments X, Y": the keys a capture or a
+ *  document is stored under, agreed with their number (L1, 2026-09-24). */
+function compartmentWords(keys) {
+  const list = (keys || []).map((k) => visibleText(k));
+  return agree(list.length, 'compartment', 'compartments') + ' '
+    + list.join(', ');
 }
 
 function labelChips(row) {
@@ -19161,7 +20439,17 @@ async function loadSources() {
   /* The never-polled line comes with the health read, so it waits with it
      (ux17-failure:loading-shows-empty-claims, 2026-09-23). */
   listPending('src-never', 'src-never-empty');
-  const [unhealthy, due] = await Promise.all([
+  // 2026-09-24: the held list comes with the due read,
+  // the exit listing is asked afresh on each visit, and the source listing
+  // is read before the authorities, whose rows offer the sources that fit.
+  listPending('src-held', 'src-held-empty');
+  SRC.egress = null;
+  SRC.personas = [];
+  const sourcesRead = section('/collection/sources', 'src-all', 'src-all-empty',
+    (b) => { SRC.form = b; return b.sources; }, sourceRow,
+    'The source list needs collection.read.', loadSources)
+    .then((body) => { if (!body) SRC.form = null; return body; });
+  const [unhealthy, due, personas, , sources, authorities] = await Promise.all([
     section('/collection/sources/unhealthy', 'src-unhealthy',
       'src-unhealthy-empty', (b) => b.sources, unhealthyRow,
       'Source health needs collection.read.', loadSources)
@@ -19183,15 +20471,28 @@ async function loadSources() {
       }),
     section('/collection/sources/due', 'src-due', 'src-due-empty',
       (b) => { srcRun = b.run || null; paintRunState(srcRun); return b.due; },
-      dueRow, 'The poll schedule needs collection.read.', loadSources),
+      dueRow, 'The poll schedule needs collection.read.', loadSources)
+      .then((body) => { paintHeld(body); return body; }),
     section('/collection/personas', 'src-personas', 'src-personas-empty',
-      (b) => b.personas, personaRow,
+      (b) => { SRC.personas = b.personas || []; return b.personas; },
+      personaRow,
       'Personas belong to the collector role. Credentials never leave the '
       + 'vault, and neither does the roster.', loadSources),
     section('/collection/runs?limit=25', 'src-runs', 'src-runs-empty',
       (b) => b.runs, runRow, 'Run history needs collection.read.',
       loadSources),
+    sourcesRead,
+    sourcesRead.then(() => section('/collection/authorities', 'src-auth',
+      'src-auth-empty', (b) => b.authorities, authorityRow,
+      'Collection authorities belong to the collector role.', loadSources)),
   ]);
+  // The forms, once the listings they are built from have answered.
+  paintSourceForms(sources);
+  paintPersonaForm(Boolean(personas));
+  paintAuthorityForm(Boolean(authorities));
+  // F5.3 (2026-09-24). After the personas, whose Telegram rows the
+  // Add a chat form offers.
+  loadTelegramChats();
   $('src-counts').textContent = (due && unhealthy)
     ? ((due.due || []).length + ' due · '
        + (unhealthy.sources || []).length + ' unhealthy')
@@ -19295,7 +20596,17 @@ function dueRow(s) {
   card.appendChild(head);
   const facts = el('div', 'facts');
   facts.appendChild(fact('due', fmtTime(s.due_at) + dueAgo(s.due_at)));
-  facts.appendChild(fact('host', visibleText(urlHost(s.base_url))));
+  // F5.3 (2026-09-24). A Telegram chat has no host: its chat, the
+  // persona that reads it and that persona's exit instead.
+  const tgDue = s.kind === 'TELEGRAM' && s.telegram ? s.telegram : null;
+  if (tgDue) {
+    facts.appendChild(fact('chat', visibleText(tgDue.chat)));
+    facts.appendChild(fact('persona', personaLabel(s.persona)));
+    facts.appendChild(fact('egress', tgDue.egress ? visibleText(tgDue.egress)
+      : 'the persona’s own'));
+  } else {
+    facts.appendChild(fact('host', visibleText(urlHost(s.base_url))));
+  }
   facts.appendChild(fact('max rps', s.max_rps));
   facts.appendChild(fact('parser', s.parser_key));
   card.appendChild(facts);
@@ -19318,7 +20629,11 @@ function dueRow(s) {
        where, as whom, and how fast. One unconfirmed click beside other
        sources' buttons was the finding. */
     const host = urlHost(s.base_url);
-    if (!window.confirm('Poll ' + s.name + ' now?\n\n'
+    // An authority source says who reads it, through which exit and
+    // what the site sees (2026-09-24).
+    if (!window.confirm(tgDue ? telegramPollText(s, tgDue)   // F5.3
+        : s.requires_authority ? authorityPollText(s, host)
+        : 'Poll ' + s.name + ' now?\n\n'
         + 'This fetches ' + host + ' once, from this server’s own network '
         + 'address, identified honestly as a collector and not a browser. '
         + 'No persona signs in and no egress profile is applied: the '
@@ -19361,6 +20676,7 @@ function personaRow(p) {
   const cls = p.status === 'BURNED' ? 'bad'
     : (p.status === 'HEALTHY' ? 'ok' : 'warn');
   head.appendChild(el('span', 'chip ' + cls, p.status));
+  if (p.platform) head.appendChild(authorityChip(p.authority));
   card.appendChild(head);
   const facts = el('div', 'facts');
   if (p.platform) facts.appendChild(fact('platform', p.platform));
@@ -19369,7 +20685,49 @@ function personaRow(p) {
   if (p.cooldown_until) {
     facts.appendChild(fact('cooling until', fmtTime(p.cooldown_until), 'warn'));
   }
+  // Personas (2026-09-24). What the persona is on its platform, where it
+  // reads from, when, and whether its platform has paused or locked it.
+  if (p.platform_uid) facts.appendChild(fact('account', visibleText(p.platform_uid)));
+  if (p.egress_profile_name) {
+    facts.appendChild(fact('egress', visibleText(p.egress_profile_name)));
+  }
+  if (p.active_window_utc) {
+    facts.appendChild(fact('active hours',
+      p.active_window_utc.replace('-', ' to ') + ' UTC'));
+  }
+  if (p.sources_bound !== undefined) {
+    facts.appendChild(fact('sources bound', p.sources_bound));
+  }
+  if (p.credential_stored !== undefined) {
+    facts.appendChild(fact('credential', p.credential_stored ? 'enrolled' : 'none yet',
+      p.credential_stored ? null : 'warn'));
+  }
+  if (p.machine_hold_until && new Date(p.machine_hold_until) > new Date()) {
+    facts.appendChild(fact('paused by its platform until',
+      fmtTime(p.machine_hold_until), 'warn'));
+  }
+  // F5.2 (2026-09-24). A Telegram persona's session and chats.
+  const tg = p.telegram || null;
+  if (tg) {
+    facts.appendChild(fact('session', tg.session_enrolled_at
+      ? 'enrolled ' + fmtTime(tg.session_enrolled_at)
+      : 'No session yet. An operator enrols one on the server.',
+    tg.session_enrolled_at ? null : 'warn'));
+    facts.appendChild(fact('chats', tg.chats_bound));
+  }
   card.appendChild(facts);
+  if (tg && tg.hold) {   // Telegram's own words for its hold or lock
+    card.appendChild(el('p', 'why ' + (tg.hold.until ? 'warn' : 'bad'),
+      visibleText(tg.hold.words)));
+  }
+  if (tg) {   // its active hours
+    card.appendChild(telegramWindowAction(card, p));
+  }
+  if (p.machine_lock_code && !tg) {   // a Telegram row says it above
+    card.appendChild(el('p', 'why bad', 'Locked by its platform. Its platform '
+      + 'refused its credential, and it comes back only with a new credential '
+      + 'enrolled after the lock.'));
+  }
   if (p.status === 'BURNED') {
     card.appendChild(el('p', 'why',
       'Terminal. Re-using a persona a forum admin has already flagged is how '
@@ -19377,6 +20735,13 @@ function personaRow(p) {
   }
   return card;
 }
+
+/** A run's status chip. PARTIAL and RATE_LIMITED are warnings (the run
+ *  did what it could and will be tried again); BLOCKED and FAILED are not
+ *  (2026-09-24: BLOCKED is a poll that could not run at all). */
+const RUN_STATUS_CLASS = {
+  OK: 'ok', PARTIAL: 'warn', RATE_LIMITED: 'warn', BLOCKED: 'bad', FAILED: 'bad',
+};
 
 function runRow(r) {
   const card = el('div', 'card row-card compact');
@@ -19387,18 +20752,1250 @@ function runRow(r) {
      'bad' alongside genuine failures buries it; painting it 'ok' is what
      the code did before PARTIAL was ever written, and is how a dead watch
      stayed invisible. `error_detail` below carries the reason. */
-  head.appendChild(el('span', 'chip ' + (
-    r.status === 'OK' ? 'ok' : r.status === 'PARTIAL' ? 'warn' : 'bad'),
+  head.appendChild(el('span', 'chip ' + (RUN_STATUS_CLASS[r.status] || 'bad'),
     r.status));
   card.appendChild(head);
   const facts = el('div', 'facts');
-  facts.appendChild(fact('started', fmtTime(r.started_at)));
+  // A run whose start was never recorded says so (2026-09-24).
+  facts.appendChild(fact('started', r.started_at ? fmtTime(r.started_at) : NO_VALUE));
   if (r.items_seen !== undefined) {
-    facts.appendChild(fact('items', r.items_new + ' new / ' + r.items_seen));
+    facts.appendChild(fact('items', r.items_new + ' new / ' + r.items_seen
+      + (r.items_deleted ? ', ' + r.items_deleted + ' gone upstream' : '')));
+  }
+  // Who asked for it, and as whom it read.
+  if (r.requested_by_name) facts.appendChild(fact('asked by', visibleText(r.requested_by_name)));
+  if (r.persona) facts.appendChild(fact('persona', personaLabel(r.persona)));
+  if (r.notes && r.notes.length) {
+    facts.appendChild(fact('Notes', r.notes.map((n) => visibleText(n)).join(' ')));
   }
   card.appendChild(facts);
   if (r.error_detail) card.appendChild(el('p', 'why', r.error_detail));
   return card;
+}
+
+/* --- sources, personas, bindings and authorities -----------------------
+ *
+ * 2026-09-24 (docs/00 decision 69). Every forum and Telegram source needs a
+ * declared ceiling, an exit or a persona, and a written authority recorded
+ * by one person and confirmed, with each source, by another, before
+ * anything is read from it. These regions show what waits on a person,
+ * every source with who reads it and through which exit, and the forms to
+ * add a source, create a persona (with no credential: an operator enrols
+ * it on the server), change who reads a source, and record an authority.
+ */
+
+/** What the last Sources, Personas and Authorities reads said, for the
+ *  forms and the rows. `egress` is the exit listing, read once per pane
+ *  visit when a form first needs it; `flash` is a sentence to show on one
+ *  source row after the reload an action causes. */
+const SRC = { form: null, personas: [], egress: null, flash: null };
+
+/** The labels the caller may put on something: their own clearance and
+ *  below, and no higher than `cap` when one is given. */
+function labelsUpTo(cap) {
+  const mine = Math.max(0, TLP.indexOf(state.clearance || 'CLEAR'));
+  const top = cap && TLP.indexOf(cap) >= 0 ? Math.min(mine, TLP.indexOf(cap)) : mine;
+  return TLP.slice(0, top + 1);
+}
+
+/** A default label for a select built from `labels`: AMBER when it is
+ *  offered (the collection default), else the highest offered. */
+function defaultLabel(labels) {
+  return labels.includes('AMBER') ? 'AMBER' : labels[labels.length - 1];
+}
+
+/** A persona as a row may name it: never the id or handle of one the
+ *  caller may not see (the server sends `hidden` and a label instead). */
+function personaLabel(p) {
+  if (!p) return 'no persona';
+  if (p.hidden) return p.label || 'a persona you cannot see';
+  return visibleText(p.handle);
+}
+
+/** The authority state of a source or a persona, as one chip. Shared by
+ *  sourceRow, personaRow and authorityRow. */
+function authorityChip(a) {
+  const st = a ? a.state : 'NONE';
+  const words = {
+    LIVE: ['in force until ' + fmtDate(a && a.valid_until) + ' UTC', 'ok'],
+    PENDING: ['waiting for a second person', 'warn'],
+    NOT_YET_VALID: ['not yet in force', 'warn'],
+    EXPIRED: ['expired', 'bad'],
+    REVOKED: ['revoked', 'bad'],
+  };
+  const [text, cls] = words[st] || ['no authority', 'bad'];
+  const chip = el('span', 'chip ' + cls, text);
+  chip.title = 'The written authority that covers reading this. A collection '
+    + 'manager records it and a security officer confirms it.';
+  return chip;
+}
+
+/** Why a held source waits, as its chip. */
+const HELD_WORDS = {
+  REFUSED: 'needs configuring',
+  PERSONA: 'waits on its persona',
+  AUTHORITY: 'waits on an authority',
+};
+
+function heldRow(h) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(h.name)));
+  head.appendChild(el('span', 'chip', h.kind));
+  head.appendChild(el('span', 'chip warn', HELD_WORDS[h.reason] || h.reason));
+  card.appendChild(head);
+  card.appendChild(el('p', 'why', visibleText(h.sentence)));
+  if (h.until || h.persona) {
+    const facts = el('div', 'facts');
+    if (h.until) facts.appendChild(fact('waits until', fmtTime(h.until)));
+    if (h.persona) facts.appendChild(fact('persona', personaLabel(h.persona)));
+    card.appendChild(facts);
+  }
+  return card;
+}
+
+/** The exit a source reads through, in words. */
+function sourceExit(s) {
+  if (s.egress_profile) return visibleText(s.egress_profile.name);
+  if (s.persona) return 'the persona’s own';
+  return s.requires_authority ? 'none bound' : 'the passive default';
+}
+
+function sourceRow(s) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(s.name)));
+  head.appendChild(el('span', 'chip', s.kind));
+  head.appendChild(tlpChip(s.classification));
+  if (!s.is_active) head.appendChild(el('span', 'chip', 'deactivated'));
+  if (s.health && !['OK', 'UNKNOWN'].includes(s.health)) {
+    head.appendChild(el('span', 'chip bad', s.health));
+  }
+  if (s.requires_authority) head.appendChild(authorityChip(s.authority));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('host', s.base_url ? visibleText(urlHost(s.base_url))
+    : 'no address'));
+  facts.appendChild(fact('parser', s.parser_key ? visibleText(s.parser_key) : 'none'));
+  facts.appendChild(fact('reads as', personaLabel(s.persona)));
+  facts.appendChild(fact('exit', sourceExit(s)));
+  card.appendChild(facts);
+  if (s.refusal) {
+    card.appendChild(el('p', 'why bad', 'Not read: ' + visibleText(s.refusal)));
+  } else if (s.blocked_reason) {
+    card.appendChild(el('p', 'why', 'The last poll could not run: '
+      + visibleText(s.blocked_reason)));
+  }
+  if (SRC.flash && SRC.flash.id === s.id) {
+    card.appendChild(el('p', 'form-ok', SRC.flash.text));
+    SRC.flash = null;
+  }
+  const form = SRC.form || {};
+  const actions = el('div', 'row-actions');
+  if (form.can_manage) {
+    const verb = s.is_active ? 'Deactivate' : 'Activate';
+    const toggle = el('button', 'btn small ghost', verb);
+    toggle.type = 'button';
+    toggle.addEventListener('click', () => rowForm(card, {
+      kind: 'active', submit: verb,
+      help: s.is_active ? 'Nothing is read from a deactivated source.' : null,
+      fields: [{ label: 'Why', grow: true }],
+      check: ([why]) => (why.trim().length < 5
+        ? 'Say why, in at least 5 characters.' : null),
+      submitFn: async ([why]) => {
+        await api('/collection/sources/' + s.id
+          + (s.is_active ? '/deactivate' : '/activate'),
+        { method: 'POST', json: { reason: why.trim() } });
+        loadSources();
+      },
+    }));
+    actions.appendChild(toggle);
+  }
+  if (form.can_bind && s.requires_authority) {
+    const bind = el('button', 'btn small ghost', 'Change who reads it');
+    bind.type = 'button';
+    bind.addEventListener('click', () => openBindForm(card, s));
+    actions.appendChild(bind);
+  }
+  if (actions.children.length) card.appendChild(actions);
+  return card;
+}
+
+/** The exit listing, read once per pane visit when a form first needs it.
+ *  Empty, and asked again next time, when it cannot be read. */
+async function srcEgress() {
+  if (SRC.egress) return SRC.egress;
+  try {
+    const body = await api('/collection/egress-profiles');
+    SRC.egress = body.egress_profiles || [];
+    return SRC.egress;
+  } catch (_err) {
+    return [];
+  }
+}
+
+/** The parser a source or the add form names, from the last listing. */
+function srcAdapterFor(key) {
+  return ((SRC.form && SRC.form.adapters) || []).find((a) => a.parser_key === key)
+    || null;
+}
+
+/** Change who reads a source. A parser that reads through a persona takes
+ *  a persona of its platform (the persona brings its own exit); any other
+ *  authority parser takes an exit no persona holds. */
+async function openBindForm(card, s) {
+  const adapter = srcAdapterFor(s.parser_key) || {};
+  const fields = [];
+  if (adapter.persona_platform) {
+    const options = SRC.personas
+      .filter((p) => p.platform === adapter.persona_platform && p.status !== 'BURNED')
+      .map((p) => [p.id, visibleText(p.handle)]);
+    if (!options.length) options.push(['', 'No ' + adapter.persona_platform + ' persona']);
+    fields.push({ label: 'Read as', options,
+      value: s.persona && !s.persona.hidden ? s.persona.id : null });
+  } else {
+    const exits = await srcEgress();
+    const options = [['', 'None']];
+    for (const e of exits) {
+      if (e.available || (s.egress_profile && e.id === s.egress_profile.id)) {
+        options.push([e.id, visibleText(e.name)]);
+      }
+    }
+    fields.push({ label: 'Egress profile', options,
+      value: s.egress_profile ? s.egress_profile.id : '' });
+  }
+  fields.push({ label: 'Reading position',
+    options: [['keep', 'Keep it'], ['reset', 'Start it afresh']] });
+  fields.push({ label: 'Why', grow: true });
+  rowForm(card, {
+    kind: 'bind', submit: 'Change who reads it',
+    help: 'The authority recorded for the old binding stops covering this '
+      + 'source at once: the new binding needs its own confirmed authority '
+      + 'before the next poll.',
+    fields,
+    check: (values) => (values[values.length - 1].trim().length < 5
+      ? 'Say why, in at least 5 characters.' : null),
+    submitFn: async ([choice, position, why]) => {
+      const json = { reason: why.trim(), reset_cursor: position === 'reset' };
+      if (adapter.persona_platform) json.collection_account_id = choice || null;
+      else json.egress_profile_id = choice || null;
+      const out = await withStepUp('Changing who reads a source needs a '
+        + 'recent sign-in.', () => api('/collection/sources/' + s.id + '/binding',
+        { method: 'POST', json }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      SRC.flash = { id: s.id, text: out.notice || 'Changed.' };
+      SRC.egress = null;
+      loadSources();
+    },
+  });
+}
+
+/** Fill the Add a source form from the listing: the parsers, the kinds
+ *  each reads, labels up to the caller's clearance and the declared
+ *  ceiling, and the binding field the parser takes. */
+function paintSourceForms(body) {
+  show($('src-add-box'), Boolean(body && body.can_manage));
+  if (!body || !body.can_manage) return;
+  const parser = $('src-add-parser');
+  const keep = parser.value;
+  clear(parser);
+  for (const a of body.adapters || []) {
+    parser.appendChild(selectOption(a.parser_key, a.parser_key
+      + (a.requires_authority ? ' (needs an authority)' : '')));
+  }
+  if ((body.adapters || []).some((a) => a.parser_key === keep)) parser.value = keep;
+  paintSourceKinds();
+}
+
+function paintSourceKinds() {
+  const a = srcAdapterFor($('src-add-parser').value);
+  const kind = $('src-add-kind');
+  const keepKind = kind.value;
+  clear(kind);
+  const kinds = a && a.kinds.length ? a.kinds : ((SRC.form && SRC.form.kinds) || []);
+  for (const k of kinds) kind.appendChild(selectOption(k, SOURCE_KIND_WORDS[k] || k));
+  if (kinds.includes(keepKind)) kind.value = keepKind;
+  paintSourceLabels();
+  paintForumFields(a);  // F3 and F4 (2026-09-24)
+  const withPersona = Boolean(a && a.persona_platform);
+  const withExit = Boolean(a && a.requires_authority && !a.persona_platform);
+  show($('src-add-persona-field'), withPersona);
+  show($('src-add-egress-field'), withExit);
+  if (withPersona) {
+    const sel = $('src-add-persona');
+    clear(sel);
+    const mine = SRC.personas.filter((p) => p.platform === a.persona_platform
+      && p.status !== 'BURNED');
+    for (const p of mine) sel.appendChild(selectOption(p.id, visibleText(p.handle)));
+    if (!mine.length) sel.appendChild(selectOption('', 'Create a persona first'));
+  }
+  if (withExit) {
+    srcEgress().then((exits) => {
+      const sel = $('src-add-egress');
+      clear(sel);
+      sel.appendChild(selectOption('', 'Choose later'));
+      for (const e of exits.filter((x) => x.available)) {
+        sel.appendChild(selectOption(e.id, visibleText(e.name)));
+      }
+    });
+  }
+}
+
+/** The Classification select: the caller's clearance, capped for an
+ *  authority parser at the ceiling declared for the chosen kind. */
+function paintSourceLabels() {
+  const a = srcAdapterFor($('src-add-parser').value);
+  const ceilings = (SRC.form && SRC.form.ceilings) || {};
+  const cap = a && a.requires_authority ? ceilings[$('src-add-kind').value] : null;
+  const labels = labelsUpTo(cap || null);
+  const cls = $('src-add-class');
+  const keep = cls.value;
+  clear(cls);
+  for (const t of labels) cls.appendChild(selectOption(t, t));
+  cls.value = labels.includes(keep) ? keep : defaultLabel(labels);
+}
+
+async function addSource(e) {
+  e.preventDefault();
+  const err = $('src-add-error');
+  setMsg(err, '');
+  setMsg($('src-add-ok'), '');
+  const a = srcAdapterFor($('src-add-parser').value);
+  if (!a) { setMsg(err, 'Choose a parser.'); return; }
+  const name = $('src-add-name').value.trim();
+  if (name.length < 3) { setMsg(err, 'Name the source, in at least 3 characters.'); return; }
+  const every = Number($('src-add-every').value);
+  if (!(every >= 1)) { setMsg(err, 'Poll every 1 minute or more.'); return; }
+  const json = {
+    kind: $('src-add-kind').value, name, parser_key: a.parser_key,
+    base_url: $('src-add-url').value.trim() || null,
+    classification: $('src-add-class').value,
+    default_reliability: $('src-add-rel').value,
+    poll_interval_s: Math.round(every * 60),
+    jitter_pct: Number($('src-add-jitter').value),
+    max_rps: Number($('src-add-rps').value),
+  };
+  if (a.persona_platform) json.collection_account_id = $('src-add-persona').value || null;
+  if (a.requires_authority && !a.persona_platform) {
+    json.egress_profile_id = $('src-add-egress').value || null;
+  }
+  // F3 and F4 (2026-09-24). A forum parser's settings.
+  const forum = forumConfig(a);
+  if (forum.error) { setMsg(err, forum.error); return; }
+  if (forum.config) json.parser_config = forum.config;
+  const binds = Boolean(json.collection_account_id || json.egress_profile_id);
+  const call = () => api('/collection/sources', { method: 'POST', json });
+  $('src-add-btn').disabled = true;
+  try {
+    const out = binds
+      ? await withStepUp('Binding a source to a persona or an exit needs a '
+        + 'recent sign-in.', call)
+      : await call();
+    if (!out) return;
+    $('src-add-name').value = '';
+    $('src-add-url').value = '';
+    setMsg($('src-add-ok'), 'Added. ' + (out.next || ''));
+    SRC.egress = null;
+    loadSources();
+  } catch (ex) {
+    if (ex instanceof ApiError && ex.status >= 400 && ex.status < 500) {
+      setMsg(err, ex.detail || ex.title);
+    } else {
+      fail(ex);
+    }
+  } finally {
+    $('src-add-btn').disabled = false;
+  }
+}
+
+/* F3 and F4 (2026-09-24). The two forum parsers, the
+   words for their source kinds, and the date and time formats the MyBB
+   parser reads: exactly forum_parse.DATE_FORMATS and TIME_FORMATS on the
+   server (test_forum_ui holds the lists equal). A MyBB board prints its
+   own zone with no offset, so without the zone and both formats no
+   posting time is stored rather than a guessed one. */
+const FORUM_PARSERS = ['xenforo', 'mybb'];
+const SOURCE_KIND_WORDS = { XENFORO: 'XenForo forum', MYBB: 'MyBB forum' };
+const MYBB_DATE_FORMATS = ['m-d-Y', 'd-m-Y', 'Y-m-d', 'm/d/Y', 'd/m/Y', 'Y/m/d',
+  'd.m.Y', 'm.d.Y', 'M j, Y', 'F j, Y', 'j M Y', 'j F Y'];
+const MYBB_TIME_FORMATS = ['h:i A', 'g:i A', 'h:i a', 'g:i a', 'H:i', 'G:i'];
+
+/** Show the settings a forum parser reads, and MyBB's zone and formats
+ *  for MyBB alone. */
+function paintForumFields(a) {
+  const forum = Boolean(a && FORUM_PARSERS.includes(a.parser_key));
+  const mybb = Boolean(a && a.parser_key === 'mybb');
+  for (const id of ['src-add-pages-field', 'src-add-recheck-field',
+    'src-add-members-field', 'src-add-forum-help']) show($(id), forum);
+  for (const id of ['src-add-zone-field', 'src-add-datefmt-field',
+    'src-add-timefmt-field']) show($(id), mybb);
+  // The example address the markup carries, per parser (index.html).
+  const url = $('src-add-url');
+  if (!url.dataset.hintDefault) url.dataset.hintDefault = url.placeholder;
+  const hints = $('src-add-forum-help').dataset;
+  url.placeholder = (forum && (a.parser_key === 'mybb' ? hints.hintMybb
+    : hints.hintXenforo)) || url.dataset.hintDefault;
+  for (const [id, list] of [['src-add-datefmt', MYBB_DATE_FORMATS],
+    ['src-add-timefmt', MYBB_TIME_FORMATS]]) {
+    const sel = $(id);
+    if (sel.children.length) continue;
+    for (const f of list) sel.appendChild(selectOption(f, f));
+  }
+}
+
+/** A forum parser's settings from the form, or the sentence refusing
+ *  them: the same bounds the server's validate_config holds. */
+function forumConfig(a) {
+  if (!a || !FORUM_PARSERS.includes(a.parser_key)) return { config: null };
+  const whole = (id, low, high) => {
+    const n = Number($(id).value);
+    return Number.isInteger(n) && n >= low && n <= high ? n : null;
+  };
+  const pages = whole('src-add-pages', 1, 20);
+  if (pages === null) return { error: 'Pages per poll is a whole number from 1 to 20.' };
+  const recheck = whole('src-add-recheck', 0, 5);
+  if (recheck === null) return { error: 'Pages rechecked is a whole number from 0 to 5.' };
+  const members = whole('src-add-members', 0, 10);
+  if (members === null) {
+    return { error: 'Member pages per poll is a whole number from 0 to 10.' };
+  }
+  const config = { page_budget: pages, recheck_pages: recheck, member_pages: members };
+  if (a.parser_key === 'mybb') {
+    const zone = $('src-add-zone').value.trim();
+    if (!zone) {
+      return { error: 'Give the board’s time zone, as its settings name it, '
+        + 'such as Europe/Riga.' };
+    }
+    config.timezone = zone;
+    config.date_format = $('src-add-datefmt').value;
+    config.time_format = $('src-add-timefmt').value;
+  }
+  return { config };
+}
+
+/** The persona form: the platforms some parser reads through, the exits
+ *  nothing else holds, and the browser identity only for a parser that
+ *  reads the web as the persona. Shown when the persona listing loaded. */
+async function paintPersonaForm(visible) {
+  const platforms = [...new Set(((SRC.form && SRC.form.adapters) || [])
+    .map((a) => a.persona_platform).filter(Boolean))];
+  show($('src-persona-none'), Boolean(visible && SRC.form && !platforms.length));
+  show($('src-persona-box'), Boolean(visible && platforms.length));
+  if (!visible || !platforms.length) return;
+  const sel = $('sp-platform');
+  const keep = sel.value;
+  clear(sel);
+  for (const p of platforms) sel.appendChild(selectOption(p, p));
+  if (platforms.includes(keep)) sel.value = keep;
+  paintPersonaIdentity();
+  const exits = await srcEgress();
+  const ex = $('sp-egress');
+  clear(ex);
+  /* One persona, one exit, and never an exit a persona-less source reads
+     through (docs/04): two identities seen from one address are linked. */
+  for (const e of exits.filter((x) => x.available && !x.sources)) {
+    ex.appendChild(selectOption(e.id, visibleText(e.name)));
+  }
+  if (!ex.children.length) ex.appendChild(selectOption('', 'No free egress profile'));
+}
+
+function paintPersonaIdentity() {
+  const platform = $('sp-platform').value;
+  show($('sp-ua-field'), ((SRC.form && SRC.form.adapters) || [])
+    .some((a) => a.persona_platform === platform && a.persona_http));
+  show($('sp-tg-device'), platform === 'TELEGRAM');   // F5.2
+}
+
+/* F5.2 (2026-09-24). A Telegram persona's device, field by field:
+   what Telegram is told instead of this server's platform string. */
+const TG_DEVICE_FIELDS = [
+  ['device_model', 'sp-tg-model', 'device model', 1, 64],
+  ['system_version', 'sp-tg-system', 'system version', 1, 64],
+  ['app_version', 'sp-tg-app', 'app version', 1, 32],
+  ['lang_code', 'sp-tg-lang', 'language code', 2, 8],
+  ['system_lang_code', 'sp-tg-syslang', 'system language code', 2, 16],
+];
+
+/** The device fields into `fingerprint`, or the first sentence refusing
+ *  them (the server says the same). */
+function telegramDevice(fingerprint) {
+  for (const [key, id, words, low, high] of TG_DEVICE_FIELDS) {
+    const value = $(id).value.trim();
+    if (value.length < low || value.length > high) {
+      return 'A Telegram persona records its ' + words + ', ' + low + ' to '
+        + high + ' characters.';
+    }
+    fingerprint[key] = value;
+  }
+  return null;
+}
+
+async function createPersona(e) {
+  e.preventDefault();
+  const err = $('sp-error');
+  setMsg(err, '');
+  setMsg($('sp-ok'), '');
+  const handle = $('sp-handle').value.trim();
+  if (handle.length < 2) { setMsg(err, 'A handle is at least 2 characters.'); return; }
+  if (!$('sp-egress').value) {
+    setMsg(err, 'Choose an egress profile nothing else reads through.');
+    return;
+  }
+  const fingerprint = {};
+  if (!$('sp-ua-field').hidden && $('sp-ua').value.trim()) {
+    fingerprint.user_agent = $('sp-ua').value.trim();
+  }
+  if ($('sp-lang').value.trim()) fingerprint.accept_language = $('sp-lang').value.trim();
+  const from = $('sp-from').value;
+  const to = $('sp-to').value;
+  if (Boolean(from) !== Boolean(to)) {
+    setMsg(err, 'Active hours need both a start and an end, or neither.');
+    return;
+  }
+  if (from && to) fingerprint.active_window_utc = from + '-' + to;
+  // F5.2 (2026-09-24). A Telegram persona's device.
+  if ($('sp-platform').value === 'TELEGRAM') {
+    const problem = telegramDevice(fingerprint);
+    if (problem) { setMsg(err, problem); return; }
+  }
+  const json = { handle, platform: $('sp-platform').value,
+    egress_profile_id: $('sp-egress').value, fingerprint,
+    notes: $('sp-notes').value.trim() || null };
+  $('sp-btn').disabled = true;
+  try {
+    const out = await withStepUp('Creating a persona needs a recent sign-in.',
+      () => api('/collection/personas', { method: 'POST', json }));
+    if (!out) return;
+    for (const id of ['sp-handle', 'sp-ua', 'sp-lang', 'sp-from', 'sp-to', 'sp-notes']) {
+      $(id).value = '';
+    }
+    for (const [, id] of TG_DEVICE_FIELDS) $(id).value = '';
+    setMsg($('sp-ok'), out.notice || 'Created.');
+    SRC.egress = null;
+    loadSources();
+  } catch (ex) {
+    if (ex instanceof ApiError && ex.status >= 400 && ex.status < 500) {
+      setMsg(err, ex.detail || ex.title);
+    } else {
+      fail(ex);
+    }
+  } finally {
+    $('sp-btn').disabled = false;
+  }
+}
+
+/* --- the authority form and rows (2026-09-24) ------------------------- */
+
+/** YYYY-MM-DD for a date input, in UTC. */
+function isoDay(d) {
+  return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-'
+    + pad2(d.getUTCDate());
+}
+
+/** Shown when the authority listing loaded (the caller records them). */
+function paintAuthorityForm(visible) {
+  show($('src-auth-box'), Boolean(visible));
+  if (!visible) return;
+  const persona = $('sa-persona');
+  const keep = persona.value;
+  clear(persona);
+  persona.appendChild(selectOption('', 'No persona: read what the site shows to anyone'));
+  for (const p of SRC.personas.filter((x) => x.status !== 'BURNED')) {
+    persona.appendChild(selectOption(p.id, visibleText(p.handle)));
+  }
+  if ([...persona.children].some((o) => o.value === keep)) persona.value = keep;
+  const labels = labelsUpTo(null);
+  const cls = $('sa-class');
+  const keepCls = cls.value;
+  clear(cls);
+  for (const t of labels) cls.appendChild(selectOption(t, t));
+  cls.value = labels.includes(keepCls) ? keepCls : defaultLabel(labels);
+  if (!$('sa-from').value) {
+    const now = new Date();
+    $('sa-from').value = isoDay(now);
+    $('sa-until').value = isoDay(new Date(now.getTime() + 90 * 86400000));
+  }
+  paintAuthoritySources();
+}
+
+/** The sources an authority for this binding may cover: active, read by an
+ *  authority parser, and bound as the authority is (read as the chosen
+ *  persona, or with no persona). */
+function authorityEligible(personaId) {
+  return ((SRC.form && SRC.form.sources) || []).filter((s) => s.requires_authority
+    && s.is_active
+    && (personaId ? Boolean(s.persona && s.persona.id === personaId) : !s.persona));
+}
+
+/** A checkbox per source, in a check-list. */
+function sourceChecks(box, sources) {
+  for (const s of sources) {
+    const label = el('label', 'field inline check');
+    const tick = el('input');
+    tick.type = 'checkbox';
+    tick.value = s.id;
+    label.appendChild(tick);
+    label.appendChild(el('span', null, visibleText(s.name) + ' ('
+      + (s.base_url ? visibleText(urlHost(s.base_url)) : s.kind) + ')'));
+    box.appendChild(label);
+  }
+}
+
+function paintAuthoritySources() {
+  show($('sa-member-field'), $('sa-scope-member').checked);
+  const box = $('sa-sources');
+  clear(box);
+  const personaId = $('sa-persona').value;
+  const eligible = authorityEligible(personaId);
+  if (!eligible.length) {
+    box.appendChild(el('p', 'muted small', personaId
+      ? 'No source is read as this persona yet. An authority with no sources '
+        + 'allows the persona’s own acts and no read.'
+      : 'No active source that needs an authority is read without a persona.'));
+    return;
+  }
+  sourceChecks(box, eligible);
+}
+
+/** What stops the authority form from being sent, or null. */
+function authorityFormProblem(persona, scope, sources, covers) {
+  if (!persona && !sources.length) {
+    return 'An authority with no persona covers sources: tick at least one.';
+  }
+  if (scope === 'MEMBER_READ' && !persona) return 'Reading as a member needs a persona.';
+  if (scope === 'MEMBER_READ' && !$('sa-member').value.trim()) {
+    return 'Reading as a member needs its own authority reference.';
+  }
+  if ($('sa-ref').value.trim().length < 3) {
+    return 'The authority reference is at least 3 characters.';
+  }
+  if (covers.length <= 20) return 'Say what it covers, in more than 20 characters.';
+  if (!$('sa-from').value || !$('sa-until').value) {
+    return 'Give the dates it is valid from and until.';
+  }
+  return null;
+}
+
+async function recordAuthority(e) {
+  e.preventDefault();
+  const err = $('sa-error');
+  setMsg(err, '');
+  setMsg($('sa-ok'), '');
+  const persona = $('sa-persona').value || null;
+  const scope = $('sa-scope-member').checked ? 'MEMBER_READ' : 'PUBLIC_READ';
+  const sources = [...$('sa-sources').querySelectorAll('input:checked')]
+    .map((i) => i.value);
+  const covers = $('sa-covers').value.trim();
+  const problem = authorityFormProblem(persona, scope, sources, covers);
+  if (problem) { setMsg(err, problem); return; }
+  const json = {
+    persona_id: persona, scope,
+    classification: $('sa-class').value,
+    authority_ref: $('sa-ref').value.trim(),
+    issued_by: $('sa-issuer').value.trim(),
+    jurisdiction: $('sa-jur').value.trim(),
+    legal_basis: $('sa-basis').value.trim(),
+    member_authority_ref: scope === 'MEMBER_READ' ? $('sa-member').value.trim() : null,
+    target_description: covers,
+    /* Whole days in UTC: in force from the start of the first day to the
+       end of the last. */
+    valid_from: $('sa-from').value + 'T00:00:00Z',
+    valid_until: $('sa-until').value + 'T23:59:59Z',
+    source_ids: sources,
+  };
+  $('sa-btn').disabled = true;
+  try {
+    const out = await withStepUp('Recording an authority needs a recent sign-in.',
+      () => api('/collection/authorities', { method: 'POST', json }));
+    if (!out) return;
+    for (const id of ['sa-ref', 'sa-issuer', 'sa-jur', 'sa-basis', 'sa-member',
+                      'sa-covers', 'sa-from', 'sa-until']) {
+      $(id).value = '';
+    }
+    setMsg($('sa-ok'), 'Recorded. A security officer confirms it, and each '
+      + 'source under it, before anything is read.');
+    loadSources();
+  } catch (ex) {
+    if (ex instanceof ApiError && ex.status >= 400 && ex.status < 500) {
+      setMsg(err, ex.detail || ex.title);
+    } else {
+      fail(ex);
+    }
+  } finally {
+    $('sa-btn').disabled = false;
+  }
+}
+
+/** One source under an authority: its name, kind and the host it was
+ *  recorded for, and the binding. Shared with the Oversight review. */
+function authorityTargetText(t) {
+  // F5.3 (2026-09-24). A Telegram target has no host: the confirmer
+  // is shown which chat it is and how it is read, never only a typed name.
+  const where = t.chat
+    ? ', chat ' + visibleText(t.chat.durable_id)
+      + (t.chat.username_at_resolve ? ' @' + visibleText(t.chat.username_at_resolve) : '')
+      + (t.chat.title_at_resolve ? ', titled ' + visibleText(t.chat.title_at_resolve) : '')
+      + (t.chat.access_mode === 'MEMBER' ? ', read as a member' : ', read without joining')
+    : (t.source_host ? ', ' + visibleText(t.source_host) : '');
+  const b = t.binding || {};
+  const how = 'persona' in b ? 'as ' + personaLabel(b.persona)
+    : 'No persona, through ' + (b.egress_profile
+      ? visibleText(b.egress_profile.name) : 'no egress profile');
+  return visibleText(t.source_name) + ' (' + t.source_kind + where + '), ' + how;
+}
+
+const TARGET_WORDS = {
+  LIVE: ['confirmed', 'ok'],
+  PENDING: ['waiting for a second person', 'warn'],
+  REVOKED: ['revoked', 'bad'],
+};
+
+/** `stopped`: the authority itself is revoked or expired, so a source's
+ *  own state under it says nothing more and is not drawn. */
+function authorityTargetLine(t, stopped) {
+  const line = el('div', 'row-head');
+  line.appendChild(el('span', 'muted small', authorityTargetText(t)));
+  if (stopped) return line;
+  const [text, cls] = TARGET_WORDS[t.state] || [t.state, 'warn'];
+  line.appendChild(el('span', 'chip ' + cls, text));
+  if (t.state !== 'REVOKED' && (t.address_changed || t.binding_changed)) {
+    const chip = el('span', 'chip bad', 'no longer covered');
+    chip.title = t.address_changed
+      ? 'The source’s address changed after this was recorded.'
+      : 'Who reads the source changed after this was recorded.';
+    line.appendChild(chip);
+  }
+  return line;
+}
+
+function authorityRow(a) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(a.authority_ref)));
+  head.appendChild(tlpChip(a.classification));
+  head.appendChild(authorityChip(a));
+  card.appendChild(head);
+  card.appendChild(el('p', 'muted small', visibleText(a.scope_words || a.scope)));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('persona', a.persona ? personaLabel(a.persona) : 'No persona'));
+  facts.appendChild(fact('issued by', visibleText(a.issued_by)));
+  facts.appendChild(fact('valid', fmtTime(a.valid_from) + ' to '
+    + fmtTime(a.valid_until)));
+  facts.appendChild(fact('recorded by', visibleText(a.recorded_by_name)));
+  if (a.confirmed_by_name) {
+    facts.appendChild(fact('confirmed by', visibleText(a.confirmed_by_name)));
+  }
+  card.appendChild(facts);
+  const targets = a.targets || [];
+  const stopped = a.state === 'REVOKED' || a.state === 'EXPIRED';
+  if (targets.length) {
+    const list = el('div', 'rows');
+    for (const t of targets) list.appendChild(authorityTargetLine(t, stopped));
+    card.appendChild(list);
+  } else if (a.persona) {
+    card.appendChild(el('p', 'help', 'No sources: it allows the persona’s '
+      + 'own acts and no read.'));
+  }
+  if (a.has_hidden_targets) {
+    card.appendChild(el('p', 'help', 'Some sources under this authority are '
+      + 'above your clearance.'));
+  }
+  if (stopped) return card;
+  const actions = el('div', 'row-actions');
+  const covered = new Set(targets.filter((t) => t.state !== 'REVOKED')
+    .map((t) => t.source_id));
+  const personaId = a.persona && !a.persona.hidden ? a.persona.id : null;
+  const eligible = a.persona && a.persona.hidden ? []
+    : authorityEligible(personaId).filter((s) => !covered.has(s.id));
+  if (eligible.length) {
+    const add = el('button', 'btn small ghost', 'Add sources');
+    add.type = 'button';
+    add.addEventListener('click', () => openAddTargets(card, a, eligible));
+    actions.appendChild(add);
+  }
+  const revoke = el('button', 'btn small danger', 'Revoke');
+  revoke.type = 'button';
+  revoke.addEventListener('click', () => rowForm(card, {
+    kind: 'revoke', submit: 'Revoke',
+    help: 'Nothing is read under a revoked authority, and it cannot be undone.',
+    fields: [{ label: 'Why', grow: true }],
+    check: ([why]) => (why.trim().length < 5
+      ? 'Say why, in at least 5 characters.' : null),
+    submitFn: async ([why]) => {
+      const out = await withStepUp('Revoking an authority needs a recent '
+        + 'sign-in.', () => api('/collection/authorities/' + a.id + '/revoke',
+        { method: 'POST', json: { reason: why.trim() } }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      loadSources();
+    },
+  }));
+  actions.appendChild(revoke);
+  card.appendChild(actions);
+  return card;
+}
+
+/** Add sources under an authority: a checklist of those that fit its
+ *  binding, each waiting for a security officer once added. */
+function openAddTargets(card, a, eligible) {
+  const open = card.querySelector('.row-inline');
+  if (open) {
+    const same = open.dataset.kind === 'add';
+    open.remove();
+    if (same) return;
+  }
+  const wrap = el('div', 'row-inline');
+  wrap.dataset.kind = 'add';
+  wrap.appendChild(el('p', 'help', 'Each source waits for a security officer '
+    + 'to confirm it before it is read.'));
+  const form = el('form', 'row-form');
+  form.noValidate = true;
+  const box = el('div', 'check-list');
+  sourceChecks(box, eligible);
+  form.appendChild(box);
+  const go = el('button', 'btn small primary', 'Add');
+  go.type = 'submit';
+  const cancel = el('button', 'btn small ghost', 'Cancel');
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => wrap.remove());
+  form.appendChild(go);
+  form.appendChild(cancel);
+  wrap.appendChild(form);
+  const msg = el('p', 'form-error');
+  msg.setAttribute('role', 'alert');
+  msg.hidden = true;
+  wrap.appendChild(msg);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ids = [...box.querySelectorAll('input:checked')].map((i) => i.value);
+    if (!ids.length) { setMsg(msg, 'Tick at least one source.'); return; }
+    go.disabled = true;
+    try {
+      const out = await withStepUp('Adding a source to an authority needs a '
+        + 'recent sign-in.', () => api('/collection/authorities/' + a.id
+        + '/targets', { method: 'POST', json: { source_ids: ids } }));
+      if (out) loadSources();
+    } catch (err) {
+      setMsg(msg, err instanceof ApiError ? (err.detail || err.title) : String(err));
+    } finally {
+      go.disabled = false;
+    }
+  });
+  card.appendChild(wrap);
+}
+
+/** The Waiting on a person list, from the due read's three held lists.
+ *  When that read failed, the list is unknown, not empty. */
+function paintHeld(body) {
+  if (!body) {
+    renderList('src-held', 'src-held-empty', [], heldRow);
+    showLoadFailure('src-held-empty', 'The waiting list',
+      new Error('it comes with the poll schedule read, which failed'), loadSources);
+    return;
+  }
+  renderList('src-held', 'src-held-empty', [
+    ...(body.refused || []), ...(body.waiting_on_persona || []),
+    ...(body.awaiting_authority || [])], heldRow);
+}
+
+/** The exit a due authority source reads through, in words, from the
+ *  source and persona listings. */
+function srcExitWords(s) {
+  const row = ((SRC.form && SRC.form.sources) || []).find((x) => x.id === s.id);
+  if (row && row.egress_profile) {
+    return 'egress profile ' + visibleText(row.egress_profile.name);
+  }
+  const p = s.persona && !s.persona.hidden
+    ? SRC.personas.find((x) => x.id === s.persona.id) : null;
+  if (p && p.egress_profile_name) {
+    return 'egress profile ' + visibleText(p.egress_profile_name);
+  }
+  return 'its bound egress profile';
+}
+
+/** Poll now's confirmation for a source an authority covers
+ *  (2026-09-24): who reads it, through which exit, what the site sees,
+ *  and how long and how fast. A persona-less read names the honest agent
+ *  the site will log. */
+function authorityPollText(s, host) {
+  if (s.persona) {
+    return 'Poll ' + s.name + ' now?\n\n'
+      + 'This reads ' + host + ' as persona ' + personaLabel(s.persona)
+      + ', over ' + srcExitWords(s) + '. The site sees that account read it. '
+      + 'Nothing is posted or sent.';
+  }
+  // F3 and F4 (2026-09-24). With no egress proxy (development, and
+  // only with NOCTORNAL_FORUM_ALLOW_DIRECT set) a forum read leaves from
+  // this server, and the confirmation must not name an exit it skips.
+  const direct = (s.parser_key === 'xenforo' || s.parser_key === 'mybb')
+    && Boolean(SRC.form && SRC.form.forum_reads_direct);
+  return 'Poll ' + s.name + ' now?\n\n'
+    + 'This reads ' + host + (direct ? ' from this server’s own address, with '
+      + 'no egress proxy configured' : ' through ' + srcExitWords(s)) + ', identified '
+    + 'honestly as a collector: this site will see NocTORnal-collector in its '
+    + 'access logs. No persona signs in. At most ' + s.max_rps + ' requests '
+    + 'per second, for at most ' + s.run_seconds + ' seconds.\n\n'
+    + 'Whoever runs ' + host + ' can see the requests.';
+}
+
+/* --- Telegram chats (F5.2 and F5.3, 2026-09-24) ------------------------
+ *
+ * A chat is looked up as its persona (an act Telegram sees) and added as a
+ * source that persona reads; nothing is read until a second person has
+ * confirmed it under the persona's authority. Adding, rebinding, marking
+ * as a member chat and joining each tie a covert identity to a chat, so
+ * each asks for a recent sign-in first; stopping and resuming never do.
+ */
+
+/** The last chat listing (rows and whether Telegram collection is on),
+ *  and a sentence to show on one chat row after the reload an act causes. */
+const TG = { body: null, flash: null };
+
+async function loadTelegramChats() {
+  const body = await section('/collection/telegram/chats', 'src-tg', 'src-tg-empty',
+    (b) => { TG.body = b; return b.chats; }, tgChatRow,
+    'Telegram chats need collection.read.', loadSources);
+  if (!body) TG.body = null;
+  paintTelegramForm();
+}
+
+/** Telegram personas that can look a chat up: enrolled, and not burnt. */
+function telegramPersonas() {
+  return (SRC.personas || []).filter((p) => p.platform === 'TELEGRAM'
+    && p.telegram && p.telegram.session_enrolled_at && p.status !== 'BURNED');
+}
+
+/** The Add a chat form: replaced by the server's sentence when Telegram
+ *  collection is off, offered only to a caller who may bind a persona and
+ *  poll, and with the labels the declared ceiling allows. */
+function paintTelegramForm() {
+  const tg = TG.body && TG.body.telegram;
+  const sentence = tg ? tg.sentence : null;
+  const off = $('src-tg-off');
+  off.textContent = sentence ? visibleText(sentence) : '';
+  show(off, Boolean(sentence));
+  const form = SRC.form || {};
+  const personas = telegramPersonas();
+  show($('src-tg-box'), Boolean(tg && !sentence && form.can_bind
+    && srcRun && srcRun.allowed && personas.length));
+  if (!tg || sentence) return;
+  const sel = $('stg-persona');
+  const keep = sel.value;
+  clear(sel);
+  for (const p of personas) sel.appendChild(selectOption(p.id, visibleText(p.handle)));
+  if (personas.some((p) => p.id === keep)) sel.value = keep;
+  const cls = $('stg-class');
+  const was = cls.value;
+  clear(cls);
+  const labels = labelsUpTo(tg.ceiling);
+  for (const l of labels) cls.appendChild(selectOption(l, l));
+  cls.value = labels.includes(was) ? was : defaultLabel(labels);
+}
+
+async function addTelegramChat(e) {
+  e.preventDefault();
+  const err = $('stg-error');
+  setMsg(err, '');
+  setMsg($('stg-ok'), '');
+  const persona = telegramPersonas().find((p) => p.id === $('stg-persona').value);
+  const ref = $('stg-ref').value.trim();
+  const name = $('stg-name').value.trim();
+  const minutes = Number($('stg-every').value);
+  if (!persona) { setMsg(err, 'Choose a Telegram persona with an enrolled session.'); return; }
+  if (!ref) { setMsg(err, 'Give the chat as @name, t.me/name or its id.'); return; }
+  if (name.length < 3) { setMsg(err, 'A name is at least 3 characters.'); return; }
+  if (!Number.isInteger(minutes) || minutes < 5) {
+    setMsg(err, 'A chat is polled at most once every 5 minutes.');
+    return;
+  }
+  const egress = persona.egress_profile_name
+    ? 'egress profile ' + visibleText(persona.egress_profile_name)
+    : 'its own egress profile';
+  if (!window.confirm('Look up ' + visibleText(ref) + ' now?\n\n'
+      + 'This asks Telegram, as persona ' + visibleText(persona.handle) + ', over '
+      + egress + ', which chat the name belongs to. Telegram records that this '
+      + 'account looked it up. Nothing is joined and nothing is sent.')) return;
+  const json = { persona_id: persona.id, ref, name,
+    classification: $('stg-class').value,
+    access_mode: $('stg-member').checked ? 'MEMBER' : 'PUBLIC_READ',
+    poll_interval_s: minutes * 60 };
+  $('stg-btn').disabled = true;
+  try {
+    const out = await withStepUp('Adding a Telegram chat needs a recent sign-in.',
+      () => api('/collection/telegram/chats', { method: 'POST', json }));
+    if (!out) return;
+    $('stg-ref').value = '';
+    $('stg-name').value = '';
+    setMsg($('stg-ok'), [out.notice, out.next].filter(Boolean).join(' '));
+    loadSources();
+  } catch (ex) {
+    if (ex instanceof ApiError && ex.status >= 400 && ex.status < 600) {
+      setMsg(err, ex.detail || ex.title);
+    } else {
+      fail(ex);
+    }
+  } finally {
+    $('stg-btn').disabled = false;
+  }
+}
+
+/** Poll now's confirmation for a Telegram chat: which chat, as whom,
+ *  through which exit, and what never leaves this server. */
+function telegramPollText(s, tg) {
+  return 'Poll ' + visibleText(s.name) + ' now?\n\n'
+    + 'This reads ' + visibleText(tg.chat) + ' through Telegram as persona '
+    + personaLabel(s.persona) + ', over '
+    + (tg.egress ? 'egress profile ' + visibleText(tg.egress) : 'its own egress profile')
+    + '. Telegram sees this account read the chat. Nothing is sent, nothing is '
+    + 'marked read, and no watch term leaves this server: matching happens '
+    + 'here, after the messages arrive.';
+}
+
+function tgChatRow(c) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(c.name)));
+  head.appendChild(el('span', 'chip', 'TELEGRAM'));
+  head.appendChild(tlpChip(c.classification));
+  const seen = Boolean(c.member_since_observed);
+  head.appendChild(el('span', 'chip', c.access_mode === 'MEMBER'
+    ? (seen ? 'member' : 'member, not joined yet') : 'public, not joined'));
+  const live = Boolean(c.authority && c.authority.live);
+  const auth = el('span', 'chip ' + (live ? 'ok' : 'bad'),
+    live ? 'authority live' : 'no live authority');
+  auth.title = visibleText((c.authority && c.authority.sentence) || '');
+  head.appendChild(auth);
+  if (!c.is_active) head.appendChild(el('span', 'chip', 'stopped'));
+  if (c.blocked_reason) {
+    const blocked = el('span', 'chip bad', 'blocked');
+    blocked.title = visibleText(c.blocked_reason);
+    head.appendChild(blocked);
+  }
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('chat', visibleText(c.durable_id)));
+  if (c.username_at_resolve) {
+    facts.appendChild(fact('name at lookup', '@' + visibleText(c.username_at_resolve)));
+  }
+  if (c.title_at_resolve) {
+    facts.appendChild(fact('title at lookup', visibleText(c.title_at_resolve)));
+  }
+  facts.appendChild(fact('persona', personaLabel(c.persona)));
+  facts.appendChild(fact('egress', c.egress_profile_name
+    ? visibleText(c.egress_profile_name) : NO_VALUE));
+  facts.appendChild(fact('last message', c.last_message_id === null
+    || c.last_message_id === undefined ? 'none read yet' : c.last_message_id));
+  facts.appendChild(fact('deleted upstream',
+    countOf(c.deleted_upstream || 0, 'message', 'messages')));
+  if (c.joined) facts.appendChild(fact('joined', fmtTime(c.joined)));
+  if (c.migrated_to) facts.appendChild(fact('became', visibleText(c.migrated_to), 'warn'));
+  card.appendChild(facts);
+  if (c.blocked_reason) {
+    card.appendChild(el('p', 'why', 'The last poll could not run: '
+      + visibleText(c.blocked_reason)));
+  }
+  if (TG.flash && TG.flash.id === c.source_id) {
+    card.appendChild(el('p', 'form-ok', TG.flash.text));
+    TG.flash = null;
+  }
+  const actions = telegramChatActions(card, c);
+  if (actions.children.length) card.appendChild(actions);
+  return card;
+}
+
+/** The verbs a chat row offers this caller: the persona acts only to one
+ *  who may bind a persona and poll, stopping and resuming to one who may
+ *  manage sources. */
+function telegramChatActions(card, c) {
+  const form = SRC.form || {};
+  const actions = el('div', 'row-actions');
+  const acts = Boolean(form.can_bind && srcRun && srcRun.allowed && c.is_active
+    && !c.migrated_to && c.persona && !c.persona.hidden);
+  const button = (text, cls, onClick) => {
+    const b = el('button', 'btn small ' + cls, text);
+    b.type = 'button';
+    b.addEventListener('click', onClick);
+    actions.appendChild(b);
+    return b;
+  };
+  const reload = (text) => { TG.flash = { id: c.source_id, text }; loadSources(); };
+  if (acts && c.access_mode === 'MEMBER' && !c.member_since_observed
+      && c.peer_type !== 'CHAT' && c.username_at_resolve) {
+    button('Join', 'ghost', () => openTelegramJoin(card, c, reload));
+  }
+  if (acts && c.access_mode === 'MEMBER' && !c.member_since_observed) {
+    button('Check membership', 'ghost', async (e) => {
+      e.target.disabled = true;
+      try {
+        const out = await api('/collection/telegram/chats/' + c.source_id
+          + '/membership', { method: 'POST', json: {} });
+        reload(out.notice || 'Checked.');
+      } catch (err) {
+        card.appendChild(el('p', 'form-error', err instanceof ApiError
+          ? (err.detail || err.title) : String(err)));
+      } finally {
+        e.target.disabled = false;
+      }
+    });
+  }
+  if (acts && c.access_mode === 'PUBLIC_READ') {
+    button('Mark as a member chat', 'ghost', () => rowForm(card, {
+      kind: 'member', submit: 'Mark as a member chat',
+      help: 'The chat is then read as a member, which needs a member authority. '
+        + 'Its membership is checked at once; nothing is joined. It never '
+        + 'goes back to a public chat.',
+      fields: [{ label: 'Why', grow: true }],
+      check: ([why]) => (why.trim().length < 5 ? 'Say why, in at least 5 characters.' : null),
+      submitFn: async ([why]) => {
+        const out = await withStepUp('Marking a member chat needs a recent sign-in.',
+          () => api('/collection/telegram/chats/' + c.source_id + '/member',
+            { method: 'POST', json: { reason: why.trim() } }));
+        if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+        reload(out.notice || 'Marked.');
+      },
+    }));
+  }
+  if (acts) {
+    const others = telegramPersonas().filter((p) => p.id !== c.persona.id);
+    if (others.length) {
+      button('Change persona', 'ghost', () => rowForm(card, {
+        kind: 'persona', submit: 'Change persona',
+        help: 'The chat is looked up again as the new persona, which needs its own '
+          + 'confirmed authority for this chat before the next poll.',
+        fields: [{ label: 'Read as', options: others.map((p) => [p.id,
+          visibleText(p.handle)]) }, { label: 'Why', grow: true }],
+        check: ([, why]) => (why.trim().length < 5
+          ? 'Say why, in at least 5 characters.' : null),
+        submitFn: async ([persona, why]) => {
+          const out = await withStepUp('Changing who reads a chat needs a recent '
+            + 'sign-in.', () => api('/collection/telegram/chats/' + c.source_id
+            + '/persona', { method: 'POST', json: { persona_id: persona,
+            reason: why.trim() } }));
+          if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+          reload(out.notice || 'Changed.');
+        },
+      }));
+    }
+  }
+  if (form.can_manage && !c.migrated_to) {
+    const verb = c.is_active ? 'Stop reading' : 'Resume reading';
+    button(verb, 'ghost', () => rowForm(card, {
+      kind: 'active', submit: verb,
+      help: c.is_active ? 'Nothing is read from a stopped chat.' : null,
+      fields: [{ label: 'Why', grow: true }],
+      check: ([why]) => (why.trim().length < 5 ? 'Say why, in at least 5 characters.' : null),
+      submitFn: async ([why]) => {
+        await api('/collection/telegram/chats/' + c.source_id
+          + (c.is_active ? '/deactivate' : '/resume'),
+        { method: 'POST', json: { reason: why.trim() } });
+        loadSources();
+      },
+    }));
+  }
+  return actions;
+}
+
+/** Join a member chat as its persona: an overt act, acknowledged in so
+ *  many words, with a note, behind a recent sign-in. */
+function openTelegramJoin(card, c, reload) {
+  const open = card.querySelector('.row-inline');
+  if (open) {
+    const same = open.dataset.kind === 'join';
+    open.remove();
+    if (same) return;
+  }
+  const wrap = el('div', 'row-inline');
+  wrap.dataset.kind = 'join';
+  wrap.appendChild(el('p', 'help', 'Joining is an overt act. The chat’s '
+    + 'administrators can see this persona in the member list and in the recent '
+    + 'actions log, and some groups announce every new member. Leaving is '
+    + 'visible too.'));
+  const form = el('form', 'row-form');
+  form.noValidate = true;
+  const ack = el('label', 'field inline check');
+  const tick = el('input');
+  tick.type = 'checkbox';
+  ack.appendChild(tick);
+  ack.appendChild(el('span', null, 'I understand that joining is visible to the '
+    + 'chat’s administrators'));
+  form.appendChild(ack);
+  const noteField = el('label', 'field grow');
+  noteField.appendChild(el('span', 'label', 'Why it is joined'));
+  const note = el('input');
+  note.type = 'text';
+  note.maxLength = 500;
+  note.autocomplete = 'off';
+  noteField.appendChild(note);
+  form.appendChild(noteField);
+  const go = el('button', 'btn small primary', 'Join');
+  go.type = 'submit';
+  const cancel = el('button', 'btn small ghost', 'Cancel');
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => wrap.remove());
+  form.appendChild(go);
+  form.appendChild(cancel);
+  wrap.appendChild(form);
+  const msg = el('p', 'form-error');
+  msg.setAttribute('role', 'alert');
+  msg.hidden = true;
+  wrap.appendChild(msg);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!tick.checked) {
+      setMsg(msg, 'Tick the box: joining is visible to the chat’s administrators.');
+      return;
+    }
+    if (note.value.trim().length < 10) {
+      setMsg(msg, 'Say why it is joined, in at least 10 characters.');
+      return;
+    }
+    go.disabled = true;
+    try {
+      const out = await withStepUp('Joining a chat needs a recent sign-in.',
+        () => api('/collection/telegram/chats/' + c.source_id + '/join',
+          { method: 'POST', json: { acknowledge_overt: true, note: note.value.trim() } }));
+      if (out) reload(out.notice || 'Joined.');
+    } catch (err) {
+      setMsg(msg, err instanceof ApiError ? (err.detail || err.title) : String(err));
+    } finally {
+      go.disabled = false;
+    }
+  });
+  card.appendChild(wrap);
+}
+
+/** A Telegram persona's active hours in UTC: outside them it rests and
+ *  its chats wait. */
+function telegramWindowAction(card, p) {
+  const actions = el('div', 'row-actions');
+  const current = (p.telegram && p.telegram.active_window_utc) || '';
+  const [from, until] = current ? current.split('-') : ['', ''];
+  const btn = el('button', 'btn small ghost', 'Set active hours');
+  btn.type = 'button';
+  btn.addEventListener('click', () => rowForm(card, {
+    kind: 'window', submit: 'Save',
+    help: 'Outside these hours, in UTC, the persona rests and its chats wait. '
+      + 'Leave both empty for none.',
+    fields: [{ label: 'From (UTC, HH:MM)', value: from },
+      { label: 'Until (UTC, HH:MM)', value: until }],
+    check: ([a, b]) => {
+      const hhmm = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+      if (!a.trim() && !b.trim()) return null;
+      if (!hhmm.test(a.trim()) || !hhmm.test(b.trim()) || a.trim() === b.trim()) {
+        return 'Both times as HH:MM in UTC, and not the same time.';
+      }
+      return null;
+    },
+    submitFn: async ([a, b]) => {
+      const out = await withStepUp('Changing a persona’s active hours needs a '
+        + 'recent sign-in.', () => api('/collection/telegram/personas/' + p.id
+        + '/window', { method: 'POST',
+        json: { active_window_utc: a.trim() ? a.trim() + '-' + b.trim() : null } }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      loadSources();
+    },
+  }));
+  actions.appendChild(btn);
+  return actions;
 }
 
 /* --- ingest keys ------------------------------------------------------- */
@@ -19883,29 +22480,61 @@ function syncRuleForm(force) {
  * every destination since 0044, and nothing rendered it: the one table that
  * answers "did the summary leave the building, and where did it go" was
  * write-only.
+ *
+ * F8 (2026-09-24): the ledger lives in Administration, Integrations,
+ * its ids unchanged, with the channel, outcome and time filters, a cursor
+ * ("Show older") and Retry on a failed or backing-off row. Every row says
+ * why in the server's own sentence (`cause_text`), so no cause wording is
+ * kept here.
  */
+const DLV = { next: null };
+
 function wireDeliveries() {
   const btn = $('dlv-reload');
   if (!btn) return;
   btn.addEventListener('click', () => loadDeliveries());
-  $('dlv-refused').addEventListener('change', () => loadDeliveries());
+  for (const id of ['dlv-refused', 'dlv-channel', 'dlv-outcome', 'dlv-since']) {
+    $(id).addEventListener('change', () => loadDeliveries());
+  }
+  $('dlv-more').addEventListener('click', () => loadDeliveries(true));
 }
 
-async function loadDeliveries() {
+/** The query the filters say. "All outbound" is the default and leaves the
+ *  in-app rows out: those are the notification rows themselves. */
+function deliveryQuery(more) {
   const q = new URLSearchParams({ limit: '100' });
   const kind = $('dlv-kind').value.trim();
   if (kind) q.set('kind', kind);
+  const channel = $('dlv-channel').value;
+  if (channel) q.set('channel', channel);
+  else q.set('outbound', 'true');
+  const outcome = $('dlv-outcome').value;
+  if (outcome) q.set('outcome', outcome);
+  const since = $('dlv-since').value;
+  if (since) q.set('since', since + 'T00:00:00Z');
   if ($('dlv-refused').checked) q.set('refused_only', 'true');
+  if (more && DLV.next) q.set('before', DLV.next);
+  return q;
+}
+
+async function loadDeliveries(more) {
   try {
-    const body = await api('/notifications/deliveries?' + q.toString());
-    renderList('dlv-list', 'dlv-empty', body.deliveries, deliveryRow);
-    if (!body.deliveries.length) {
-      $('dlv-empty').textContent = $('dlv-refused').checked
-        ? 'Nothing was refused, failed or revoked.'
-        : 'Nothing has been sent yet.';
+    const body = await api('/notifications/deliveries?' + deliveryQuery(more).toString());
+    if (more) {
+      for (const d of body.deliveries) $('dlv-list').appendChild(deliveryRow(d));
+    } else {
+      renderList('dlv-list', 'dlv-empty', body.deliveries, deliveryRow);
+      if (!body.deliveries.length) {
+        $('dlv-empty').textContent = $('dlv-refused').checked
+          ? 'Nothing was refused, failed, revoked or withdrawn.'
+          : 'Nothing has been sent yet.';
+      }
     }
+    DLV.next = body.next || null;
+    show($('dlv-more'), !!DLV.next);
   } catch (err) {
     clear($('dlv-list'));
+    show($('dlv-more'), false);
     /* The empty line carries the refusal, rather than a banner: "no
        deliveries" and "you may not read the ledger" are different facts and
        an empty list must never stand in for the second. Only a refusal,
@@ -19915,34 +22544,48 @@ async function loadDeliveries() {
       listRefused('dlv-empty', refusalText(err,
         'The delivery ledger needs integration.manage.'));
     } else {
-      showLoadFailure('dlv-empty', 'The delivery ledger', err, loadDeliveries);
+      showLoadFailure('dlv-empty', 'The delivery ledger', err, () => loadDeliveries());
     }
   }
 }
 
 /** One delivery attempt.
  *
- *  SUPPRESSED is deliberately not styled as a failure. Two different things
- *  write it: the recipient's own channel preference (no attempt timestamp),
- *  and a clearance or assignment revoked after queueing -- which IS an
- *  absence somebody should see. The attempt time tells them apart, so it is
- *  shown rather than summarised away.
+ *  SUPPRESSED is deliberately not styled as a failure: a channel the
+ *  recipient turned off is their own choice. Why a row is in its state is
+ *  the server's sentence (`cause_text`), rendered as sent.
+ *
+ *  The address is the server's stored form: an email address, a Jira
+ *  browse URL, or a webhook endpoint with its path WITHHELD behind a
+ *  fingerprint (migration 0096), because incoming-webhook paths carry the
+ *  hook's secret. Until 2026-09-24 this comment claimed the server
+ *  redacted it, and the server stored the URL verbatim.
  */
 function deliveryRow(d) {
+  const LEFT = { SUMMARY: 'Summary left', SUBJECT: 'Subject line left',
+                 STUB: 'Stub left', NOTHING: 'Nothing left' };
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', d.kind));
   const bad = d.outcome === 'REFUSED' || d.outcome === 'FAILED';
   head.appendChild(el('span', 'chip ' + (bad ? 'bad'
-    : (d.outcome === 'SENT' ? 'good' : 'subtle')), d.outcome));
+    : (d.outcome === 'SENT' ? 'ok' : 'subtle')), d.outcome));
   head.appendChild(el('span', 'chip subtle', d.channel));
-  if (d.redacted) head.appendChild(el('span', 'chip warn', 'redacted'));
+  if (d.left) head.appendChild(el('span', 'chip ' + (d.left === 'NOTHING' ? 'subtle' : 'warn'),
+    LEFT[d.left] || d.left));
   card.appendChild(head);
   const facts = el('div', 'facts');
-  if (d.recipient) facts.appendChild(el('span', 'muted small', d.recipient));
-  /* The address is the whole point of the ledger -- "where did it go" -- and
-     it is already the server's redacted form where redaction applied. */
-  if (d.address) facts.appendChild(el('span', 'mono small', d.address));
+  if (d.recipient) {
+    facts.appendChild(el('span', d.recipient_active === false ? 'muted small absent'
+      : 'muted small', d.recipient));
+  }
+  if (d.jira_issue && d.address) {
+    /* Named and copyable, never a link: the console points nowhere but its
+       own origin, and a Jira issue is opened from Jira. */
+    facts.appendChild(el('span', 'mono small', d.jira_issue + ' ' + d.address));
+  } else if (d.address) {
+    facts.appendChild(el('span', 'mono small', d.address));
+  }
   if (d.attempts) {
     facts.appendChild(el('span', 'muted small',
       countOf(d.attempts, 'attempt', 'attempts')));
@@ -19952,9 +22595,1278 @@ function deliveryRow(d) {
      2026-09-23). */
   const when = d.attempted_at || d.raised_at;
   if (when) facts.appendChild(el('span', 'muted small', fmtTime(when)));
+  if (d.next_attempt_at && d.attempts) {
+    facts.appendChild(el('span', 'muted small', 'next attempt '
+      + fmtTime(d.next_attempt_at)));
+  }
   card.appendChild(facts);
-  if (d.reason) card.appendChild(el('p', 'why', d.reason));
+  if (d.cause_text) card.appendChild(el('p', 'why', d.cause_text));
+  if (d.reason && d.reason !== d.cause_text && d.outcome !== 'REFUSED') {
+    card.appendChild(el('p', 'muted small', d.reason));
+  }
+  if (d.outcome === 'FAILED' || (d.outcome === 'PENDING' && d.attempts > 0)) {
+    const retry = el('button', 'btn ghost small', 'Retry now');
+    retry.type = 'button';
+    retry.addEventListener('click', () => requeueDelivery(d, retry, card));
+    card.appendChild(retry);
+  }
   return card;
+}
+
+async function requeueDelivery(d, btn, card) {
+  btn.disabled = true;
+  const note = el('p', 'msg', '');
+  note.setAttribute('role', 'status');
+  try {
+    const got = await withStepUp('Retrying a delivery sends real mail or a real '
+      + 'Jira issue, so it needs a sign-in from the last 15 minutes.',
+    () => api('/notifications/deliveries/' + d.id + '/requeue', { method: 'POST' }));
+    if (!got) { btn.disabled = false; return; }
+    card.replaceWith(deliveryRow(got));
+  } catch (err) {
+    btn.disabled = false;
+    note.className = 'msg bad';
+    setMsg(note, refusalText(err, 'Nothing was requeued.'));
+    card.appendChild(note);
+  }
+}
+
+/* --- Administration, Integrations (F8 and F7, 2026-09-24) --------------
+ *
+ * One administrator surface that answers "what tried to leave, where did
+ * it go, why did it not, and is anything draining". Every write goes
+ * through withStepUp; nothing here renders a password, a webhook secret or
+ * the Jira credential, which the server never sends.
+ */
+const INT = { view: null, jira: null, linksNext: null };
+
+const CHANNEL_WORDS = { SMTP: 'Email', WEBHOOK: 'Webhook', JIRA: 'Jira' };
+
+function initIntegrations() {
+  if (!$('int-drain')) return;
+  $('int-drain').addEventListener('click', drainNow);
+  $('int-retry-btn').addEventListener('click', retryFailed);
+  $('jira-form').addEventListener('submit', saveJira);
+  $('jira-test').addEventListener('click', testJira);
+  $('jira-activate').addEventListener('click', activateJira);
+  $('jira-pause').addEventListener('click', pauseJira);
+  $('jira-retire').addEventListener('click', retireJira);
+  $('jira-cred-form').addEventListener('submit', saveJiraCredential);
+  $('jira-links-load').addEventListener('click', () => loadJiraLinks(false));
+  $('jira-links-more').addEventListener('click', () => loadJiraLinks(true));
+  $('jira-auth-kind').addEventListener('change', jiraAuthUserShown);
+}
+
+async function loadIntegrations() {
+  setMsg($('int-msg'), '');
+  try {
+    const [view, summary] = await withStepUp('Administration, Integrations '
+      + 'needs a sign-in from the last 15 minutes.',
+    () => Promise.all([api('/integrations'),
+                       api('/notifications/deliveries/summary?hours=24')])) || [];
+    if (!view) return;
+    INT.view = view;
+    renderChannels(view, summary);
+    renderOutbox(summary);
+    renderJira(view.jira);
+    loadDeliveries();
+  } catch (err) {
+    $('int-msg').className = 'msg bad';
+    setMsg($('int-msg'), refusalText(err, 'The integrations could not be read.'));
+  }
+}
+
+/** One card per channel: available, how it leaves, and the last day. */
+function renderChannels(view, summary) {
+  const box = $('int-channels');
+  clear(box);
+  const facts = {
+    SMTP: view.smtp.host ? [view.smtp.host + ':' + view.smtp.port, view.smtp.tls,
+      view.smtp.auth ? 'signs in' : 'no sign-in', 'from ' + view.smtp.from]
+      : ['SMTP_HOST is not set'],
+    WEBHOOK: view.webhook.configured ? [view.webhook.endpoint,
+      view.webhook.signed ? 'signed' : 'not signed'] : ['no webhook is configured'],
+    JIRA: view.jira && view.jira.destination
+      ? [view.jira.destination.host, 'project ' + view.jira.destination.project_key]
+      : ['no Jira destination'],
+  };
+  for (const name of ['SMTP', 'WEBHOOK', 'JIRA']) {
+    const ch = (summary.channels || {})[name] || {};
+    const card = el('section', 'card int-channel');
+    const head = el('div', 'row-head');
+    head.appendChild(el('span', 'row-title', CHANNEL_WORDS[name]));
+    head.appendChild(el('span', 'chip ' + (ch.available ? 'ok' : 'bad'),
+      ch.available ? 'available' : 'held'));
+    card.appendChild(head);
+    const f = el('div', 'facts');
+    for (const line of facts[name]) f.appendChild(el('span', 'muted small', line));
+    card.appendChild(f);
+    card.appendChild(el('p', 'help', channelRouteWords(ch)));
+    const states = ch.states || {};
+    const counted = Object.keys(states).sort().map((s) => countOf(states[s],
+      s.toLowerCase(), s.toLowerCase()));
+    card.appendChild(el('p', 'muted small', 'Last 24 hours: '
+      + (counted.length ? counted.join(', ') : 'nothing') + '.'));
+    if (ch.last_sent_at) {
+      card.appendChild(el('p', 'muted small', 'Last sent ' + fmtTime(ch.last_sent_at)));
+    }
+    if (ch.last_failure) {
+      card.appendChild(el('p', 'why', 'Last failure '
+        + (ch.last_failure.at ? fmtTime(ch.last_failure.at) : '') + ': '
+        + (ch.last_failure.detail || 'no detail')));
+    }
+    box.appendChild(card);
+  }
+}
+
+function channelRouteWords(ch) {
+  const r = ch.route || {};
+  if (!ch.available) return 'Held: ' + (ch.why || r.why || 'not available');
+  return r.proxied ? 'Through egress route ' + r.name + ', proxied.'
+    : 'Through egress route ' + r.name + ', direct: development, the network '
+      + 'boundary is not in force.';
+}
+
+function renderOutbox(summary) {
+  const o = summary.outbox || {};
+  const box = $('int-outbox-facts');
+  clear(box);
+  box.appendChild(el('span', 'muted small', countOf(o.due_now || 0, 'delivery',
+    'deliveries') + ' due now'));
+  if (o.oldest_due_at) {
+    box.appendChild(el('span', 'muted small', 'oldest due ' + fmtTime(o.oldest_due_at)));
+  }
+  box.appendChild(el('span', 'muted small', (o.deferred_future || 0)
+    + ' deferred to later'));
+  for (const [name, n] of Object.entries(o.held || {})) {
+    box.appendChild(el('span', 'chip warn', CHANNEL_WORDS[name] + ' held: ' + n));
+  }
+}
+
+/** The drain's counters in words, every one of them (DrainOut). */
+function drainText(c) {
+  return 'Sent ' + c.sent + ', refused ' + c.refused + ' ('
+    + countOf(c.redacted, 'stub', 'stubs') + ' went out), failed ' + c.failed
+    + ', held ' + c.held + ', deferred ' + c.deferred + ', withdrawn '
+    + c.withdrawn + ', revoked ' + c.revoked + ', reviews due ' + c.reviews_due
+    + ', escalated ' + c.escalated + '.';
+}
+
+async function drainNow() {
+  const btn = $('int-drain');
+  btn.disabled = true;
+  const msg = $('int-drain-msg');
+  try {
+    const got = await withStepUp('Draining sends real mail and real Jira issues, '
+      + 'so it needs a sign-in from the last 15 minutes.',
+    () => api('/notifications/dispatch', { method: 'POST' }));
+    if (!got) return;
+    msg.className = 'msg ok';
+    setMsg(msg, drainText(got));
+    loadIntegrations();
+  } catch (err) {
+    msg.className = 'msg bad';
+    setMsg(msg, refusalText(err, 'The drain did not run.'));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function retryFailed() {
+  const since = $('int-retry-since').value;
+  const msg = $('int-retry-msg');
+  if (!since) {
+    msg.className = 'msg bad';
+    setMsg(msg, 'Choose the date to retry from.');
+    return;
+  }
+  const btn = $('int-retry-btn');
+  btn.disabled = true;
+  try {
+    const got = await withStepUp('A retry sends real mail or real Jira issues, so '
+      + 'it needs a sign-in from the last 15 minutes.',
+    () => api('/notifications/deliveries/requeue', { method: 'POST',
+      json: { channel: $('int-retry-channel').value, since: since + 'T00:00:00Z' } }));
+    if (!got) return;
+    msg.className = 'msg ok';
+    setMsg(msg, countOf(got.requeued, 'delivery is', 'deliveries are')
+      + ' back in the outbox.');
+    loadDeliveries();
+  } catch (err) {
+    msg.className = 'msg bad';
+    setMsg(msg, refusalText(err, 'Nothing was retried.'));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* --- Jira (F7) ------------------------------------------------------------- */
+
+function jiraAuthUserShown() {
+  const pat = $('jira-auth-kind').value === 'DC_PAT';
+  show($('jira-auth-user').closest('.field'), !pat);
+}
+
+function renderJira(j) {
+  INT.jira = j;
+  const d = j ? j.destination : null;
+  const head = $('jira-head');
+  clear(head);
+  const facts = $('jira-facts');
+  clear(facts);
+  if (d) {
+    head.appendChild(el('span', 'chip ' + (d.state === 'ACTIVE' ? 'ok'
+      : (d.state === 'PAUSED' ? 'warn' : 'subtle')), d.state));
+    head.appendChild(el('span', 'chip ' + (d.health === 'OK' ? 'ok'
+      : (d.health === 'UNTESTED' ? 'subtle' : 'bad')), d.health));
+    for (const line of [d.host + ':' + d.port, 'project ' + d.project_key,
+      d.flavour + (d.server_version ? ' ' + d.server_version : ''),
+      'ceiling ' + d.effective_ceiling, d.exposure_words,
+      d.tested_at ? 'tested ' + fmtTime(d.tested_at) : 'never tested',
+      countOf(d.held, 'delivery', 'deliveries') + ' waiting',
+      countOf(d.overdue, 'overdue', 'overdue')]) {
+      facts.appendChild(el('span', 'muted small', line));
+    }
+    if (d.health_detail) facts.appendChild(el('span', 'why', d.health_detail));
+  } else {
+    head.appendChild(el('span', 'chip subtle', 'not configured'));
+  }
+  $('jira-route').textContent = j && j.route_words ? j.route_words
+    : 'Jira leaves only by the egress route jira, which an administrator creates '
+      + 'in Administration, Egress.';
+  $('jira-optins').textContent = j ? countOf(j.opted_in, 'person receives',
+    'people receive') + ' Jira work items; ' + countOf(j.cases_blocked, 'case is',
+    'cases are') + ' kept out.' : '';
+  const caveat = d && d.edit_caveat;
+  $('jira-caveat').textContent = caveat || '';
+  show($('jira-caveat'), !!caveat);
+  $('jira-label').value = d ? d.label : '';
+  $('jira-base-url').value = d ? d.base_url : '';
+  $('jira-flavour').value = d ? d.flavour : 'AUTO';
+  $('jira-auth-kind').value = d ? d.auth_kind : 'CLOUD_API_TOKEN';
+  $('jira-auth-user').value = d && d.auth_user ? d.auth_user : '';
+  $('jira-project').value = d ? d.project_key : '';
+  $('jira-issue-type').value = d ? d.issue_type : 'Task';
+  $('jira-ceiling').value = d ? d.ceiling : 'GREEN';
+  $('jira-exposure').value = d ? d.field_exposure : 'SUBJECT';
+  jiraAuthUserShown();
+  const kinds = $('jira-kinds');
+  for (const n of Array.from(kinds.querySelectorAll('label'))) n.remove();
+  const chosen = new Set(d ? d.kinds : ['APPROVAL_REQUESTED', 'APPROVAL_DECIDED',
+    'PROPOSAL_QUEUED', 'CASE_REVIEW_DUE']);
+  for (const [key, words] of Object.entries((j && j.routable_kinds) || {})) {
+    const box = el('input');
+    box.type = 'checkbox';
+    box.value = key;
+    box.checked = chosen.has(key);
+    const lab = el('label', 'field inline');
+    lab.appendChild(box);
+    lab.appendChild(el('span', 'label', words));
+    kinds.appendChild(lab);
+  }
+  show($('jira-new-cred'), !d);
+  show($('jira-cred-form'), !!d);
+  $('jira-credential').value = '';
+  $('jira-credential-new').value = '';
+  $('jira-test').disabled = !d;
+  $('jira-activate').disabled = !d || !(d.state === 'DRAFT' || d.state === 'PAUSED');
+  $('jira-pause').disabled = !d || !(d.state === 'ACTIVE' || d.state === 'PAUSED');
+  $('jira-pause').textContent = d && d.state === 'PAUSED' ? 'Resume' : 'Pause';
+  $('jira-retire').disabled = !d;
+}
+
+function jiraFormValues() {
+  return {
+    label: $('jira-label').value.trim(),
+    base_url: $('jira-base-url').value.trim(),
+    flavour: $('jira-flavour').value,
+    auth_kind: $('jira-auth-kind').value,
+    auth_user: $('jira-auth-kind').value === 'DC_PAT' ? null
+      : $('jira-auth-user').value.trim(),
+    project_key: $('jira-project').value.trim(),
+    issue_type: $('jira-issue-type').value.trim() || 'Task',
+    ceiling: $('jira-ceiling').value,
+    field_exposure: $('jira-exposure').value,
+    kinds: Array.from($('jira-kinds').querySelectorAll('input:checked'))
+      .map((b) => b.value),
+  };
+}
+
+/** The confirmation activation and any widening ask for, in words. */
+function jiraConfirmText(v, host, flavour) {
+  const words = { STUB: 'only that work is waiting, with no case code',
+                  SUBJECT: 'the case code, what happened, the priority and the '
+                    + 'TLP marking',
+                  SUMMARY: 'the case code, what happened, the priority, the TLP '
+                    + 'marking and the one-line summary' };
+  let text = 'Jira on ' + host + ', project ' + v.project_key + ', will receive '
+    + words[v.field_exposure] + ', for material marked TLP:' + v.ceiling
+    + ' or below, about ' + countOf(v.kinds.length, 'kind', 'kinds')
+    + ' of notification.';
+  if (flavour === 'CLOUD') {
+    text += ' Jira Cloud is hosted by Atlassian: what this sends leaves your '
+      + 'infrastructure.';
+  }
+  return text + '\n\nConfirm?';
+}
+
+async function jiraAct(call, done) {
+  const msg = $('jira-msg');
+  try {
+    const got = await withStepUp('Jira configuration needs a sign-in from the '
+      + 'last 15 minutes.', call);
+    if (!got) return null;
+    msg.className = 'msg ok';
+    setMsg(msg, done(got));
+    loadIntegrations();
+    return got;
+  } catch (err) {
+    msg.className = 'msg bad';
+    setMsg(msg, refusalText(err, 'Nothing was changed.'));
+    return null;
+  } finally {
+    $('jira-credential').value = '';
+    $('jira-credential-new').value = '';
+  }
+}
+
+async function saveJira(e) {
+  e.preventDefault();
+  const v = jiraFormValues();
+  const d = INT.jira && INT.jira.destination;
+  if (!d) {
+    v.credential = $('jira-credential-new').value;
+    await jiraAct(() => api('/integrations/jira', { method: 'POST', json: v }),
+      () => 'Drafted. Test it, then activate it.');
+    return;
+  }
+  const wider = ['CLEAR', 'GREEN', 'AMBER'].indexOf(v.ceiling)
+      > ['CLEAR', 'GREEN', 'AMBER'].indexOf(d.ceiling)
+    || ['STUB', 'SUBJECT', 'SUMMARY'].indexOf(v.field_exposure)
+      > ['STUB', 'SUBJECT', 'SUMMARY'].indexOf(d.field_exposure)
+    || v.kinds.some((k) => !d.kinds.includes(k));
+  if (wider && (d.state === 'ACTIVE' || d.state === 'PAUSED')) {
+    if (!window.confirm(jiraConfirmText(v, d.host, d.flavour))) return;
+    v.confirm = { ceiling: v.ceiling, field_exposure: v.field_exposure, kinds: v.kinds };
+  }
+  await jiraAct(() => api('/integrations/jira', { method: 'PATCH', json: v }),
+    () => 'Saved.');
+}
+
+async function testJira() {
+  const steps = $('jira-test-steps');
+  const got = await jiraAct(() => api('/integrations/jira/test', { method: 'POST' }),
+    (r) => r.ok ? 'Test passed.' : 'Test failed: see the steps.');
+  clear(steps);
+  if (!got) { show(steps, false); return; }
+  for (const s of got.steps) {
+    const li = el('li', s.ok ? 'ok' : 'bad');
+    li.appendChild(el('span', 'chip ' + (s.ok ? 'ok' : 'bad'), s.step));
+    li.appendChild(document.createTextNode(' ' + s.evidence));
+    steps.appendChild(li);
+  }
+  show(steps, true);
+}
+
+async function activateJira() {
+  const d = INT.jira && INT.jira.destination;
+  if (!d) return;
+  const v = { ceiling: d.ceiling, field_exposure: d.field_exposure, kinds: d.kinds,
+              project_key: d.project_key };
+  if (!window.confirm(jiraConfirmText(v, d.host, d.flavour))) return;
+  await jiraAct(() => api('/integrations/jira/activate', { method: 'POST',
+    json: { ceiling: d.ceiling, field_exposure: d.field_exposure, kinds: d.kinds } }),
+  () => 'Active: routed notifications now reach Jira.');
+}
+
+async function pauseJira() {
+  const d = INT.jira && INT.jira.destination;
+  if (!d) return;
+  const resume = d.state === 'PAUSED';
+  await jiraAct(() => api('/integrations/jira/' + (resume ? 'resume' : 'pause'),
+    { method: 'POST' }), () => resume ? 'Resumed.'
+    : 'Paused: Jira deliveries wait, and nothing is dropped.');
+}
+
+async function retireJira() {
+  const d = INT.jira && INT.jira.destination;
+  if (!d || !window.confirm('Retire the Jira destination on ' + d.host + '? Its '
+    + 'credential is destroyed, its issues are closed here (not in Jira), and '
+    + 'queued deliveries are withdrawn. A new destination starts as a draft.')) return;
+  await jiraAct(() => api('/integrations/jira/retire', { method: 'POST' }),
+    (r) => 'Retired. ' + countOf(r.links_closed, 'issue link was', 'issue links were')
+      + ' closed here.');
+}
+
+async function saveJiraCredential(e) {
+  e.preventDefault();
+  const value = $('jira-credential').value;
+  if (!value) return;
+  await jiraAct(() => api('/integrations/jira/credential', { method: 'PUT',
+    json: { credential: value } }), () => 'Replaced and sealed. Run Test.');
+}
+
+async function loadJiraLinks(more) {
+  const q = new URLSearchParams({ limit: '50' });
+  const caseId = $('jira-links-case').value.trim();
+  if (caseId) q.set('case_id', caseId);
+  if (more && INT.linksNext) q.set('before', INT.linksNext);
+  try {
+    const got = await withStepUp('The Jira issue list needs a sign-in from the '
+      + 'last 15 minutes.', () => api('/integrations/jira/links?' + q.toString()));
+    if (!got) return;
+    if (more) for (const l of got.links) $('jira-links-list').appendChild(jiraLinkRow(l));
+    else renderList('jira-links-list', 'jira-links-empty', got.links, jiraLinkRow);
+    INT.linksNext = got.next || null;
+    show($('jira-links-more'), !!INT.linksNext);
+  } catch (err) {
+    listRefused('jira-links-empty', refusalText(err, 'The issue list could not be read.'));
+  }
+}
+
+function jiraLinkRow(l) {
+  const row = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  if (l.issue_key && l.browse_url) {
+    head.appendChild(copyable(el('span', 'mono', l.issue_key), l.browse_url,
+      'Jira link'));
+  } else {
+    head.appendChild(el('span', 'mono', l.ref_label || 'not created'));
+  }
+  head.appendChild(el('span', 'chip subtle', l.state));
+  head.appendChild(el('span', 'chip subtle', l.exposure));
+  row.appendChild(head);
+  const f = el('div', 'facts');
+  f.appendChild(el('span', 'muted small', 'raised ' + fmtTime(l.created_at)));
+  f.appendChild(el('span', 'muted small', countOf(l.events, 'event', 'events')
+    + ' posted'));
+  if (l.closed_reason) f.appendChild(el('span', 'muted small', l.closed_reason));
+  row.appendChild(f);
+  return row;
+}
+
+/* --- Administration, Providers (F15.2, 2026-09-24) ------------------------- */
+
+const PRV = { catalogue: [] };
+
+const PRV_EXPOSURE_CHIP = { NONE: 'exposure-NONE', VENDOR: 'exposure-VENDOR',
+                            PUBLIC: 'exposure-PUBLIC' };
+
+function initProviders() {
+  if (!$('prv-create')) return;
+  $('prv-create').addEventListener('submit', createProvider);
+  $('prv-adapter').addEventListener('change', providerAdapterPicked);
+}
+
+async function loadProviders() {
+  setMsg($('prv-msg'), '');
+  listPending('prv-list', 'prv-empty');
+  try {
+    const got = await withStepUp('Administration, Providers needs a sign-in from '
+      + 'the last 15 minutes.', () => Promise.all([api('/providers/catalogue'),
+      api('/providers')]));
+    if (!got) return;
+    const [cat, list] = got;
+    PRV.catalogue = cat.adapters || [];
+    opts($('prv-adapter'), PRV.catalogue.map((a) => [a.key, a.display_name]),
+      $('prv-adapter').value || (PRV.catalogue[0] && PRV.catalogue[0].key));
+    providerAdapterPicked();
+    const off = list.switch !== 'on';
+    $('prv-switch').textContent = off ? 'Nothing is sent to any provider while '
+      + 'NOCTORNAL_OUTBOUND_LOOKUPS is off on this host.' : '';
+    show($('prv-switch'), off);
+    renderList('prv-list', 'prv-empty', list.providers, providerCard);
+  } catch (err) {
+    clear($('prv-list'));
+    listRefused('prv-empty', refusalText(err, 'The providers could not be read.'));
+  }
+}
+
+function providerAdapterPicked() {
+  const a = PRV.catalogue.find((x) => x.key === $('prv-adapter').value);
+  if (!a) return;
+  if (!$('prv-base-url').value && a.default_base_url) $('prv-base-url').value = a.default_base_url;
+  if (!$('prv-q-minute').value && a.suggested_quota.minute) {
+    $('prv-q-minute').value = a.suggested_quota.minute;
+  }
+  if (!$('prv-q-day').value && a.suggested_quota.day) $('prv-q-day').value = a.suggested_quota.day;
+  if (!$('prv-q-month').value && a.suggested_quota.month) {
+    $('prv-q-month').value = a.suggested_quota.month;
+  }
+}
+
+function providerStatusWords(p) {
+  if (p.status === 'LOCKED') return 'Locked: ' + p.locked_reason;
+  if (p.cooldown_until) return 'Cooling down until ' + fmtTime(p.cooldown_until);
+  return 'Healthy';
+}
+
+function providerCard(p) {
+  const card = el('section', 'card prv-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', p.display_name));
+  head.appendChild(el('span', 'chip ' + PRV_EXPOSURE_CHIP[p.exposure_level],
+    p.exposure_level));
+  head.appendChild(el('span', 'chip ' + (p.enabled ? 'ok' : 'subtle'),
+    p.enabled ? 'enabled' : 'disabled'));
+  if (p.retired_at) head.appendChild(el('span', 'chip subtle', 'retired'));
+  card.appendChild(head);
+  card.appendChild(el('p', 'help', p.consequence));
+  const f = el('div', 'facts');
+  f.appendChild(el('span', 'muted small', p.adapter + ' ' + p.adapter_version));
+  f.appendChild(el('span', 'muted small', 'ceiling TLP:' + p.classification_ceiling));
+  f.appendChild(el('span', 'mono small', p.base_url));
+  if (p.private_cidr) {
+    f.appendChild(el('span', 'muted small', 'answers from ' + p.private_cidr));
+  }
+  const windows = Object.entries(p.quota || {}).filter(([, v]) => v)
+    .map(([k, v]) => v + ' per ' + k);
+  f.appendChild(el('span', 'muted small', windows.length ? windows.join(', ')
+    : 'no quota window'));
+  f.appendChild(el('span', 'muted small', providerStatusWords(p)));
+  card.appendChild(f);
+  const s = p.secret || {};
+  card.appendChild(el('p', 'muted small', s.held
+    ? 'Key held, set by ' + (s.set_by_name || 'an account no longer listed') + ' on '
+      + fmtTime(s.set_at) + ', rotate by ' + s.rotate_by
+      + (s.origin_matches === false ? '. It was entered for another host.' : '.')
+    : 'No key held.'));
+  card.appendChild(el('p', 'muted small', p.route_words));
+  if (!p.live_verified) {
+    card.appendChild(el('p', 'help warn', 'Not yet verified against the live service.'));
+  }
+  if (p.open_change) card.appendChild(providerChangeCard(p));
+  if (!p.retired_at) card.appendChild(providerActions(p));
+  return card;
+}
+
+function providerChangeCard(p) {
+  const c = p.open_change;
+  const box = el('div', 'card prv-change');
+  box.appendChild(el('p', 'help', 'A second administrator must approve '
+    + (c.from_level === 'PUBLIC' && p.needs_exposure_approval
+      ? 'determining this provider as ' + c.to_level
+      : 'lowering this provider from ' + c.from_level + ' to ' + c.to_level)
+    + '. Asked by ' + c.requested_by_name + ' on ' + fmtTime(c.requested_at)
+    + ', lapses ' + fmtTime(c.expires_at) + '.'));
+  /* What is approved is this destination and no other: moving the provider
+     afterwards asks again (2026-09-25). */
+  box.appendChild(el('p', 'mono small', 'For ' + c.origin
+    + (c.private_cidr ? ', answering from ' + c.private_cidr : '')));
+  box.appendChild(el('p', 'why', c.basis));
+  const row = el('div', 'row-form');
+  const act = (label, path, json) => {
+    const b = el('button', 'btn small', label);
+    b.type = 'button';
+    b.addEventListener('click', () => providerAct(p, path, json, label));
+    row.appendChild(b);
+  };
+  if (c.yours) {
+    act('Withdraw', '/exposure-changes/' + c.id + '/withdraw', undefined);
+  } else {
+    act('Approve', '/exposure-changes/' + c.id + '/decide', { approve: true });
+    act('Decline', '/exposure-changes/' + c.id + '/decide', { approve: false });
+  }
+  box.appendChild(row);
+  return box;
+}
+
+function providerActions(p) {
+  const row = el('div', 'row-form');
+  const add = (label, handler) => {
+    const b = el('button', 'btn small', label);
+    b.type = 'button';
+    b.addEventListener('click', handler);
+    row.appendChild(b);
+  };
+  if (!p.enabled) {
+    add('Enable', () => providerAct(p, '/enable',
+      { confirm_exposure: p.exposure_level }, 'Enable'));
+  } else {
+    add('Disable', () => {
+      const reason = window.prompt('Why disable it?');
+      if (reason) providerAct(p, '/disable', { reason: reason }, 'Disable');
+    });
+  }
+  add('Replace key', () => providerKeyForm(p, row));
+  if (p.status === 'LOCKED') {
+    add('Unlock', () => {
+      const reason = window.prompt('What was settled at the vendor?');
+      if (reason) providerAct(p, '/unlock', { reason: reason }, 'Unlock');
+    });
+  }
+  add('Test', () => providerAct(p, '/test', undefined, 'Test'));
+  add('Retire', () => {
+    const reason = window.prompt('Retiring destroys the key and is final. Why?');
+    if (reason) providerAct(p, '/retire', { reason: reason }, 'Retire');
+  });
+  return row;
+}
+
+/** One password input per key field, cleared on every outcome and never
+ *  kept anywhere but the input. */
+function providerKeyForm(p, after) {
+  const a = PRV.catalogue.find((x) => x.key === p.adapter);
+  const form = el('form', 'row-form prv-key');
+  const inputs = {};
+  for (const name of (a ? a.secret_fields : ['api_key'])) {
+    const input = el('input');
+    input.type = 'password';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    inputs[name] = input;
+    form.appendChild(prefField(name, input));
+  }
+  const save = el('button', 'btn small', 'Store sealed');
+  save.type = 'submit';
+  form.appendChild(save);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fields = {};
+    for (const [k, v] of Object.entries(inputs)) fields[k] = v.value;
+    for (const v of Object.values(inputs)) v.value = '';
+    await providerAct(p, '/secret', { fields: fields }, 'Store', 'PUT');
+  });
+  after.after(form);
+}
+
+async function providerAct(p, path, json, label, method) {
+  const msg = $('prv-msg');
+  try {
+    const got = await withStepUp('Provider configuration needs a sign-in from the '
+      + 'last 15 minutes.', () => api('/providers/' + p.id + path,
+      { method: method || 'POST', json: json }));
+    if (!got) return;
+    msg.className = 'msg ok';
+    setMsg(msg, got.notice || (label === 'Test' ? 'Test: ' + got.state
+      + (got.http_status ? ', HTTP ' + got.http_status : '')
+      + (got.outcome ? ', ' + got.outcome : '') + '.' : label + ': done.'));
+    loadProviders();
+  } catch (err) {
+    msg.className = 'msg bad';
+    setMsg(msg, refusalText(err, 'Nothing was changed.'));
+  }
+}
+
+async function createProvider(e) {
+  e.preventDefault();
+  const msg = $('prv-create-msg');
+  const num = (id) => ($(id).value ? Number($(id).value) : null);
+  const body = {
+    key: $('prv-key').value.trim(), display_name: $('prv-name').value.trim() || null,
+    adapter: $('prv-adapter').value, base_url: $('prv-base-url').value.trim() || null,
+    exposure_level: $('prv-exposure').value, exposure_basis: $('prv-basis').value.trim(),
+    private_cidr: $('prv-cidr').value.trim() || null,   // NONE only
+    quota_per_minute: num('prv-q-minute'), quota_per_day: num('prv-q-day'),
+    quota_per_month: num('prv-q-month'),
+  };
+  if (!body.exposure_level) {
+    msg.className = 'msg bad';
+    setMsg(msg, 'Choose the exposure: it has no default.');
+    return;
+  }
+  try {
+    const got = await withStepUp('Provider configuration needs a sign-in from the '
+      + 'last 15 minutes.', () => api('/providers', { method: 'POST', json: body }));
+    if (!got) return;
+    msg.className = 'msg ok';
+    setMsg(msg, got.needs_exposure_approval ? 'Registered. A second administrator '
+      + 'must approve its exposure before it can be enabled.' : 'Registered.');
+    $('prv-create').reset();
+    loadProviders();
+  } catch (err) {
+    msg.className = 'msg bad';
+    setMsg(msg, refusalText(err, 'Nothing was registered.'));
+  }
+}
+
+/* --- a case's lookups (F15.3 and F15.4, 2026-09-24) ------------------------
+ *
+ * Vendor text is attacker-influenced (a Shodan banner is whatever a scanned
+ * server said): every answer renders through el() and visibleText, and
+ * nothing is innerHTML.
+ */
+const LOOKUP = { providers: null, caseId: null };
+
+async function loadLookupProviders() {
+  if (!state.caseId) return;
+  LOOKUP.caseId = state.caseId;
+  try {
+    const got = await api(cpath('/lookups/providers'));
+    if (LOOKUP.caseId === state.caseId) LOOKUP.providers = got.providers || [];
+  } catch (_err) {
+    LOOKUP.providers = [];
+  }
+}
+
+function lookupProvidersFor(selectorType) {
+  return (LOOKUP.providers || []).filter((p) => p.can_request
+    && p.operations.some((op) => op.selector_types.includes(selectorType)));
+}
+
+/** "Look up" beside a selector, when a provider offers its type. */
+function lookupButton(item, s) {
+  if (!s.id || !lookupProvidersFor(s.selector_type).length) return;
+  const b = el('button', 'btn ghost small case-write', 'Look up');
+  b.type = 'button';
+  b.addEventListener('click', () => {
+    const open = item.querySelector('.lookup-panel');
+    if (open) { open.remove(); return; }
+    item.appendChild(lookupPanel(s));
+  });
+  item.appendChild(b);
+}
+
+function lookupAvailabilityWords(a) {
+  if (a.state === 'LIMITED') return 'Limited: queued sends start at ' + fmtTime(a.until);
+  if (a.state === 'COOLING_DOWN') return 'Cooling down until ' + fmtTime(a.until);
+  if (a.state === 'LOCKED') return 'Locked by the provider: an administrator must '
+    + 'replace its key';
+  return 'Available now';
+}
+
+function lookupPanel(s) {
+  const panel = el('div', 'card lookup-panel');
+  const providers = lookupProvidersFor(s.selector_type);
+  const msg = el('p', 'msg');
+  msg.setAttribute('role', 'status');
+  msg.hidden = true;
+  const answer = el('div', 'lookup-answer');
+  let chosen = providers[0];
+  const extra = el('div', 'stack');
+  const send = el('button', 'btn small case-write', '');
+  send.type = 'button';
+  const queue = el('input');
+  queue.type = 'checkbox';
+  const authoriser = el('select', 'select');
+  const note = el('input');
+  note.type = 'text';
+  note.maxLength = 2000;
+  const paint = async () => {
+    clear(extra);
+    const op = chosen.operations.find((o) => o.selector_types.includes(s.selector_type));
+    extra.appendChild(el('p', 'help', chosen.consequence));
+    extra.appendChild(el('p', 'muted small', lookupAvailabilityWords(chosen.availability)
+      + '. Ceiling TLP:' + chosen.classification_ceiling + '.'));
+    if (chosen.signoff_required) {
+      extra.appendChild(prefField('Who signs it off', authoriser));
+      extra.appendChild(prefField('Why it should go', note));
+      const who = await api(cpath('/lookups/authorisers'));
+      opts(authoriser, (who.authorisers || []).map((a) => [a.id, a.name]));
+      extra.appendChild(el('p', 'help', 'Nothing is sent until they sign this off in '
+        + 'the product. The request lapses after 24 hours if they do not.'));
+      send.textContent = 'Ask for a sign-off';
+    } else {
+      extra.appendChild(prefField('If the provider is at its limit, queue it', queue,
+        'control'));
+      send.textContent = 'Look up on ' + chosen.display_name;
+    }
+    send.dataset.operation = op ? op.key : '';
+  };
+  const picker = el('div', 'stack');
+  providers.forEach((p, i) => {
+    const r = el('input');
+    r.type = 'radio';
+    r.name = 'lookup-provider-' + s.id;
+    r.checked = i === 0;
+    r.addEventListener('change', () => { chosen = p; paint(); });
+    const lab = el('label', 'field inline');
+    lab.appendChild(r);
+    lab.appendChild(el('span', 'label', p.display_name));
+    lab.appendChild(el('span', 'chip ' + PRV_EXPOSURE_CHIP[p.exposure_level],
+      p.exposure_level));
+    picker.appendChild(lab);
+  });
+  send.addEventListener('click', async () => {
+    send.disabled = true;
+    setMsg(msg, '');
+    try {
+      const got = await api(cpath('/lookups'), { method: 'POST', json: {
+        provider_id: chosen.id, operation: send.dataset.operation,
+        subject: { kind: 'SELECTOR', selector_id: s.id },
+        confirm_exposure: chosen.exposure_level,
+        authorised_by: chosen.signoff_required ? authoriser.value || null : null,
+        authorisation_note: chosen.signoff_required ? note.value.trim() : null,
+        queue_if_limited: !chosen.signoff_required && queue.checked } });
+      renderLookupAnswer(answer, got);
+    } catch (err) {
+      msg.className = 'msg bad';
+      setMsg(msg, refusalText(err, 'Nothing was sent.'));
+    } finally {
+      send.disabled = false;
+    }
+  });
+  panel.appendChild(picker);
+  panel.appendChild(extra);
+  panel.appendChild(send);
+  panel.appendChild(msg);
+  panel.appendChild(answer);
+  if (chosen) paint();
+  return panel;
+}
+
+const LOOKUP_WITHHELD = 'The answer is labelled above your clearance and is not shown.';
+
+/** The answer, or why there is none, in words. */
+function renderLookupAnswer(box, got) {
+  clear(box);
+  if (got.notice) { box.appendChild(el('p', 'help', got.notice)); return; }
+  if (got.not_before) {
+    box.appendChild(el('p', 'help', 'Queued: sends after ' + fmtTime(got.not_before)));
+    return;
+  }
+  const r = got.result;
+  if (r && r.withheld) {
+    box.appendChild(el('p', 'help warn', LOOKUP_WITHHELD));
+    return;
+  }
+  if (!r) {
+    box.appendChild(el('p', 'why', got.detail || (got.lookup && got.lookup.error_detail)
+      || 'The provider did not answer.'));
+    return;
+  }
+  renderLookupResult(box, r);
+}
+
+/** One stored answer (GET .../lookups/results/{id}): its outcome and
+ *  summary through el() and visibleText only (a vendor's text is whatever
+ *  a scanned server said), what it raised in Triage, and File as exhibit
+ *  for a caller who may upload (F15.3; 2026-09-25: the requester of a
+ *  signed-off lookup had no way to read the answer in the console). */
+function renderLookupResult(box, r) {
+  clear(box);
+  if (r.purged) {
+    box.appendChild(el('p', 'help', 'Retention emptied this answer on the case\'s '
+      + 'schedule. The record that it was asked and answered stays.'));
+    return;
+  }
+  const words = { FOUND: 'Found', NOT_FOUND: 'Not found', UNREADABLE: 'Could not be read' };
+  box.appendChild(el('p', 'row-title', (words[r.outcome] || 'Answered') + ', fetched '
+    + fmtTime(r.fetched_at) + ' from ' + visibleText(r.provider || 'the provider')));
+  for (const [k, v] of Object.entries(r.summary || {})) {
+    if (v === null || v === undefined) continue;
+    box.appendChild(el('div', 'mono small', k + ': ' + visibleText(
+      typeof v === 'string' ? v : JSON.stringify(v))));
+  }
+  const raised = r.proposals_raised || 0;
+  box.appendChild(el('p', 'help', countOf(raised, 'proposal', 'proposals')
+    + ' raised in Triage.'));
+  if (r.findings_total > r.findings_proposed) {
+    const more = r.findings_total - r.findings_proposed;
+    box.appendChild(el('p', 'muted small', countOf(more, 'more finding was',
+      'more findings were') + ' not proposed.'));
+  }
+  if (r.filed_evidence_id) {
+    box.appendChild(el('p', 'muted small', 'Filed as an exhibit.'));
+    return;
+  }
+  if (!caseCan(state.caseRec, 'evidence.upload')) return;
+  const file = el('button', 'btn ghost small case-write', 'File as exhibit');
+  file.type = 'button';
+  file.title = 'Keep the answer as it came back, as an exhibit of this case. An '
+    + 'exhibit is locked for the retention period.';
+  const msg = el('p', 'msg');
+  msg.setAttribute('role', 'status');
+  msg.hidden = true;
+  file.addEventListener('click', async () => {
+    file.disabled = true;
+    try {
+      await api(cpath('/lookups/results/' + r.id + '/file'), { method: 'POST' });
+      msg.className = 'msg ok';
+      setMsg(msg, 'Filed as an exhibit of this case.');
+      file.remove();
+    } catch (err) {
+      msg.className = 'msg bad';
+      setMsg(msg, refusalText(err, 'Nothing was filed.'));
+      file.disabled = false;
+    }
+  });
+  box.appendChild(file);
+  box.appendChild(msg);
+}
+
+/** "Show answer" beside a lookup or a proposal raised from one: reads the
+ *  stored answer when pressed, never before (a reader who never asks to
+ *  see it leaves no read of it). */
+function lookupAnswerToggle(resultId) {
+  const wrap = el('div', 'lookup-toggle');
+  const btn = el('button', 'btn ghost small', 'Show answer');
+  btn.type = 'button';
+  const view = el('div', 'lookup-answer');
+  view.hidden = true;
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!view.hidden) {
+      show(view, false);
+      btn.textContent = 'Show answer';
+      return;
+    }
+    btn.disabled = true;
+    const token = caseToken();
+    try {
+      const r = await api(cpath('/lookups/results/' + resultId));
+      if (caseChanged(token)) return;
+      renderLookupResult(view, r);
+    } catch (err) {
+      clear(view);
+      view.appendChild(el('p', 'why', err instanceof ApiError && err.status === 404
+        ? 'The answer is not shown to you: its labels are above what you may read.'
+        : refusalText(err, 'The answer could not be read.')));
+    } finally {
+      btn.disabled = false;
+    }
+    show(view, true);
+    btn.textContent = 'Hide answer';
+  });
+  wrap.appendChild(btn);
+  wrap.appendChild(view);
+  return wrap;
+}
+
+async function loadCaseLookups() {
+  const token = caseToken();
+  listPending('lk-list', 'lk-empty');
+  try {
+    const [mine, all, batches] = await Promise.all([
+      api(cpath('/lookups/awaiting-signoff')), api(cpath('/lookups')),
+      api(cpath('/lookups/batches'))]);
+    if (caseChanged(token)) return;
+    renderList('lk-signoff', 'lk-signoff-empty', mine.lookups, signoffRow);
+    renderList('lk-list', 'lk-empty', all.lookups, lookupRow);
+    const box = $('lk-batches');
+    clear(box);
+    for (const b of batches.batches) box.appendChild(batchRow(b));
+    await loadLookupProviders();
+    opts($('lk-plan-provider'), (LOOKUP.providers || [])
+      .filter((p) => p.exposure_level === 'NONE').map((p) => [p.id, p.display_name]));
+  } catch (err) {
+    listRefused('lk-empty', refusalText(err, 'The lookups could not be read.'));
+  }
+}
+
+function lookupRow(l) {
+  const row = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', l.provider));
+  head.appendChild(el('span', 'chip ' + PRV_EXPOSURE_CHIP[l.exposure_level],
+    l.exposure_level));
+  head.appendChild(el('span', 'chip subtle', l.state));
+  row.appendChild(head);
+  const f = el('div', 'facts');
+  f.appendChild(el('span', 'mono small', l.selector_type + ' ' + visibleText(l.value)));
+  f.appendChild(el('span', 'muted small', 'asked by ' + l.requested_by_name + ' '
+    + fmtTime(l.requested_at)));
+  if (l.withheld) f.appendChild(el('span', 'muted small', 'answer withheld: above your '
+    + 'clearance'));
+  else if (l.outcome) f.appendChild(el('span', 'muted small', l.outcome));
+  if (l.proposals_raised) {
+    f.appendChild(el('span', 'muted small', countOf(l.proposals_raised, 'proposal',
+      'proposals') + ' raised'));
+  }
+  row.appendChild(f);
+  if (l.refusal) row.appendChild(el('p', 'why', l.refusal));
+  if (l.error_detail) row.appendChild(el('p', 'why', l.error_detail));
+  if (l.state === 'QUEUED' && l.not_before) {
+    row.appendChild(el('p', 'muted small', 'Queued: sends after ' + fmtTime(l.not_before)));
+  }
+  // 2026-09-25: the answer, for whoever may read it.
+  if (l.result_id && !l.withheld) row.appendChild(lookupAnswerToggle(l.result_id));
+  if (l.yours && (l.state === 'AWAITING_SIGNOFF' || l.state === 'QUEUED')) {
+    const b = el('button', 'btn ghost small', 'Cancel');
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      const reason = window.prompt('Why cancel it?');
+      if (!reason) return;
+      try {
+        await api(cpath('/lookups/' + l.id + '/cancel'), { method: 'POST',
+          json: { reason: reason } });
+        loadCaseLookups();
+      } catch (err) {
+        setMsg($('lk-msg'), refusalText(err, 'Nothing was cancelled.'));
+      }
+    });
+    row.appendChild(b);
+  }
+  return row;
+}
+
+function signoffRow(l) {
+  const row = lookupRow(l);
+  row.appendChild(el('p', 'help', l.consequence || ''));
+  if (l.authorisation_note) row.appendChild(el('p', 'why', l.authorisation_note));
+  row.appendChild(el('p', 'muted small', 'Lapses ' + fmtTime(l.signoff_expires_at)));
+  const answer = el('div', 'lookup-answer');
+  const act = (label, approve) => {
+    const b = el('button', 'btn small case-write', label);
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const got = await withStepUp('A sign-off sends case material out, so it '
+          + 'needs a sign-in from the last 15 minutes.',
+        () => api(cpath('/lookups/' + l.id + '/sign-off'), { method: 'POST',
+          json: { approve: approve } }));
+        if (got) renderLookupAnswer(answer, got);
+        loadCaseLookups();
+      } catch (err) {
+        setMsg($('lk-msg'), refusalText(err, 'Nothing was sent.'));
+      } finally {
+        b.disabled = false;
+      }
+    });
+    row.appendChild(b);
+  };
+  act('Sign off', true);
+  act('Decline', false);
+  row.appendChild(answer);
+  return row;
+}
+
+function batchRow(b) {
+  const row = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', b.provider + ', ' + b.operation));
+  if (b.cancelled_at) head.appendChild(el('span', 'chip subtle', 'cancelled'));
+  row.appendChild(head);
+  const states = Object.entries(b.states || {}).map(([k, v]) => v + ' ' + k.toLowerCase());
+  row.appendChild(el('p', 'muted small', 'asked by ' + b.requested_by + ' '
+    + fmtTime(b.requested_at) + ': ' + states.join(', ')));
+  if (b.note) row.appendChild(el('p', 'why', b.note));
+  /* Cancel stops the sends still queued; what was sent stays sent. Offered
+     where the server takes it: the requester or a lead investigator
+     (2026-09-25). */
+  if (b.can_cancel) {
+    const cancel = el('button', 'btn ghost small', 'Cancel the queued sends');
+    cancel.type = 'button';
+    cancel.addEventListener('click', async () => {
+      const reason = window.prompt('Why cancel what is still queued?');
+      if (!reason) return;
+      cancel.disabled = true;
+      try {
+        const got = await api(cpath('/lookups/batches/' + b.id + '/cancel'),
+          { method: 'POST', json: { reason: reason } });
+        setMsg($('lk-msg'), countOf(got.cancelled, 'queued lookup was',
+          'queued lookups were') + ' cancelled. Nothing already sent is recalled.');
+        loadCaseLookups();
+      } catch (err) {
+        setMsg($('lk-msg'), refusalText(err, 'Nothing was cancelled.'));
+        cancel.disabled = false;
+      }
+    });
+    row.appendChild(cancel);
+  }
+  return row;
+}
+
+/** The plan, in words and numbers, before anything is queued: what would
+ *  go, what is already answered, what is refused and why, when the sends
+ *  start and end, and what the provider's exposure means (F15.4).
+ *  Queue posts the digest this card rendered, so a plan that changed since
+ *  is refused rather than sent. `ask` is {provider_id, operation,
+ *  selection}. Shared by Records, Lookups and the inspector's Look up all. */
+async function renderLookupPlan(card, ask) {
+  clear(card);
+  try {
+    const plan = await api(cpath('/lookups/plan'), { method: 'POST', json: ask });
+    const head = el('div', 'row-head');
+    head.appendChild(el('span', 'row-title', plan.summary));
+    head.appendChild(el('span', 'chip ' + PRV_EXPOSURE_CHIP[plan.exposure_level],
+      plan.exposure_level));
+    card.appendChild(head);
+    card.appendChild(el('p', 'help', plan.consequence));
+    const a = plan.availability || {};
+    if (a.last_send_estimate && plan.to_send) {
+      card.appendChild(el('p', 'help', 'Sends start at ' + fmtTime(a.first_send_at)
+        + '; at the provider\'s limits the last is expected by '
+        + fmtTime(a.last_send_estimate) + '.'));
+    }
+    for (const r of plan.refused.slice(0, 20)) {
+      card.appendChild(el('p', 'muted small', r.detail));
+    }
+    if (plan.refused.length > 20) {
+      card.appendChild(el('p', 'muted small', countOf(plan.refused.length - 20,
+        'more refusal is', 'more refusals are') + ' not listed.'));
+    }
+    if (!plan.to_send && !plan.cached) return;
+    const note = el('input');
+    note.type = 'text';
+    note.maxLength = 2000;
+    card.appendChild(prefField('Why these should go', note));
+    const go = el('button', 'btn small case-write', 'Queue them');
+    go.type = 'button';
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      try {
+        const got = await api(cpath('/lookups/batches'), { method: 'POST', json: {
+          provider_id: ask.provider_id, operation: ask.operation,
+          selection: ask.selection, confirm_exposure: plan.exposure_level,
+          note: note.value.trim(), plan_digest: plan.plan_digest } });
+        card.appendChild(el('p', 'help', countOf(got.queued, 'lookup is', 'lookups are')
+          + ' queued.'));
+        go.remove();
+        if (state.tab === 'governance') loadCaseLookups();
+      } catch (err) {
+        card.appendChild(el('p', 'why', refusalText(err, 'Nothing was queued.')));
+        go.disabled = false;
+      }
+    });
+    card.appendChild(go);
+  } catch (err) {
+    card.appendChild(el('p', 'why', refusalText(err, 'The plan could not be made.')));
+  }
+}
+
+async function planLookups(e) {
+  e.preventDefault();
+  const card = $('lk-plan-card');
+  clear(card);
+  const provider = $('lk-plan-provider').value;
+  const type = $('lk-plan-type').value.trim();
+  const p = (LOOKUP.providers || []).find((x) => x.id === provider);
+  const op = p && p.operations.find((o) => o.selector_types.includes(type));
+  if (!p || !op) {
+    card.appendChild(el('p', 'why', 'Choose a provider that looks up that type.'));
+    show(card, true);
+    return;
+  }
+  show(card, true);
+  await renderLookupPlan(card, { provider_id: provider, operation: op.key,
+                                 selection: { selector_type: type } });
+}
+
+/** "Look up all" beside an entity's selectors (F15.4): every
+ *  selector of that entity, planned against one of your own instances
+ *  (NONE), since a batch never goes to a vendor or the public. Offered
+ *  only when such a provider looks up one of its types. */
+function lookupAllButton(box, list) {
+  const nodeId = list.length && list[0].node_id;
+  if (!nodeId) return;
+  const types = new Set(list.map((s) => s.selector_type));
+  const choices = [];
+  for (const p of (LOOKUP.providers || [])) {
+    if (!p.can_request || p.exposure_level !== 'NONE') continue;
+    for (const op of p.operations) {
+      if (op.selector_types.some((t) => types.has(t))) {
+        choices.push([p.id + '|' + op.key, p.display_name + ': ' + op.description]);
+      }
+    }
+  }
+  if (!choices.length) return;
+  const b = el('button', 'btn ghost small case-write', 'Look up all');
+  b.type = 'button';
+  b.title = 'Plan a lookup of every selector of this entity on your own instance. '
+    + 'Nothing is sent until you queue the plan.';
+  b.addEventListener('click', () => {
+    const open = box.querySelector('.lookup-all');
+    if (open) { open.remove(); return; }
+    const panel = el('div', 'card lookup-panel lookup-all');
+    const pick = el('select', 'select');
+    opts(pick, choices);
+    panel.appendChild(prefField('Provider and lookup', pick));
+    const card = el('div', 'lookup-answer');
+    const preview = el('button', 'btn small', 'Preview');
+    preview.type = 'button';
+    preview.addEventListener('click', () => {
+      const [providerId, operation] = pick.value.split('|');
+      renderLookupPlan(card, { provider_id: providerId, operation: operation,
+                               selection: { node_id: nodeId } });
+    });
+    panel.appendChild(preview);
+    panel.appendChild(card);
+    box.appendChild(panel);
+  });
+  box.appendChild(b);
+}
+
+/* --- the case record: keep this case out of Jira (F7, 2026-09-24) --------- */
+
+async function renderCaseRouting(rec) {
+  const box = $('case-routing');
+  if (!box) return;
+  const owner = !!rec && caseCan(rec, 'case.update');
+  show(box, owner);
+  if (!owner) return;
+  setMsg($('case-routing-msg'), '');
+  try {
+    const got = await api(cpath('/notify-routing'));
+    const j = got.jira;
+    $('case-routing-jira').checked = j.blocked;
+    $('case-routing-reason').value = j.reason || '';
+    $('case-routing-status').textContent = (j.destination
+      ? 'Jira on ' + j.destination.host + ', project ' + j.destination.project_key
+        + ', is ' + j.destination.state.toLowerCase() + '.'
+      : 'Jira is not set up on this deployment.')
+      + (j.issues ? ' ' + countOf(j.issues, 'Jira issue has', 'Jira issues have')
+        + ' already been raised about this case; keeping it out now does not '
+        + 'remove ' + agree(j.issues, 'it', 'them') + '.' : '');
+  } catch (_err) {
+    show(box, false);
+  }
+}
+
+async function saveCaseRouting() {
+  const msg = $('case-routing-msg');
+  try {
+    const got = await api(cpath('/notify-routing'), { method: 'PUT', json: {
+      jira_blocked: $('case-routing-jira').checked,
+      reason: $('case-routing-reason').value.trim() || null } });
+    msg.className = 'msg ok';
+    setMsg(msg, got.jira.blocked ? 'Kept out of Jira.' : 'Jira may receive work '
+      + 'items about this case.');
+  } catch (err) {
+    msg.className = 'msg bad';
+    setMsg(msg, refusalText(err, 'Nothing was saved.'));
+  }
+}
+
+function initCaseRouting() {
+  if ($('case-routing-save')) $('case-routing-save').addEventListener('click', saveCaseRouting);
+  if ($('lk-plan')) $('lk-plan').addEventListener('submit', planLookups);
+  if ($('lk-refresh')) $('lk-refresh').addEventListener('click', loadCaseLookups);
+  if ($('inbox-ledger-go')) {
+    $('inbox-ledger-go').addEventListener('click', () => {
+      showAdmin().then(() => { if (selectAdminSub) selectAdminSub('integrations'); });
+    });
+  }
+}
+
+/* --- the Admin sections an account may open (F8 G1) -----------------------
+ *
+ * A subtab that names a flag in `data-needs` is shown only when the caller's
+ * /admin/access answer holds it true. Subtabs without one keep the rules they
+ * had, so an account holding neither verb still gets Accounts, which explains
+ * its own refusal.
+ */
+function adminSubtabAllowed(btn) {
+  const needs = btn.dataset.needs;
+  return !needs || !!(ADM.access && ADM.access[needs]);
+}
+
+function adminAnyAllowed() {
+  return !!(ADM.access && ADM.access.integration_manage);
+}
+
+/** The section the pane opens on when nothing blocks and nothing was
+ *  chosen: Accounts for an account administrator, as before; otherwise the
+ *  first data-needs section the account may open, so an account holding
+ *  only integration.manage lands on Integrations rather than on the
+ *  Accounts refusal (F8 G1, 2026-09-25). */
+function adminFirstSub() {
+  if (canAdmin) return 'accounts';
+  for (const btn of Array.from(document.querySelectorAll('#pane-admin .subtab'))) {
+    if (btn.dataset.needs && adminSubtabAllowed(btn)) return btn.dataset.subtab;
+  }
+  return 'accounts';
+}
+
+function applyAdminGates() {
+  for (const btn of Array.from(document.querySelectorAll('#pane-admin .subtab'))) {
+    if (!btn.dataset.needs) continue;
+    const on = adminSubtabAllowed(btn);
+    show(btn, on);
+    if (!on) show($(btn.getAttribute('aria-controls')), false);
+  }
+  show($('inbox-ledger-pointer'), adminAnyAllowed());
 }
 
 /* --- the readiness register --------------------------------------------
@@ -20316,6 +24228,9 @@ async function loadLatestAnalysis() {
   renderAnalytics();
   setMsg($('an-status'), storedRunStatus(suite));
   loadKeyPlayer(true);
+  /* And the stored role analysis after it, on its own, for the same reason
+     (F1, 2026-09-24): a stored read never computes. */
+  loadConcor(true);
   /* The open trend is fetched again, as after a Run (u14, 2026-09-24):
      the stored run may be one computed since Trend was pressed, by this
      analyst under another view or by a colleague. */
@@ -23000,6 +26915,165 @@ onCaseSwitch(() => {
 
 const PGP_GOOD = 'VERIFIED';
 const PGP_UNCHECKED = new Set(['NO_VERIFIER', 'KEY_UNAVAILABLE', 'MALFORMED']);
+/* Outcomes shown amber rather than red (F10, 2026-09-24): a failure to
+   look, and UNATTRIBUTED, a good signature with a missing link (F10b). */
+const PGP_WARN = new Set(['NO_VERIFIER', 'KEY_UNAVAILABLE', 'MALFORMED',
+                          'UNATTRIBUTED']);
+/* The browser refuses these before sending, in the server's own words
+   (F10a): the data cap is MAX_MESSAGE_BYTES, the signature cap
+   MAX_SIGNATURE_BYTES, and a key file is at most MAX_KEY_BYTES. */
+const PGP_DATA_MAX = 1000000;
+const PGP_SIG_MAX = 65536;
+const PGP_KEY_MAX = 1000000;
+/* What the Key select offers for a key pasted for one check only. */
+const PGP_PASTE = '';
+
+/** Bytes to base64: ONE binary string built in 0x8000-byte slices, then
+ *  ONE btoa over the whole. A btoa per slice puts padding in the middle
+ *  of the stream whenever a slice is not a multiple of three bytes, which
+ *  the server rightly refuses as not base64 (F10a). */
+function bytesToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** A fingerprint in the groups of four it is printed in. */
+function fprGroups(fpr) {
+  const clean = String(fpr || '').replace(/\s+/g, '').toUpperCase();
+  const out = [];
+  for (let i = 0; i < clean.length; i += 4) out.push(clean.slice(i, i + 4));
+  return out;
+}
+
+function fprLine(fpr, cls) {
+  const line = el('code', 'pgpkey-fpr' + (cls ? ' ' + cls : ''));
+  line.textContent = fprGroups(fpr).join(' ');
+  return copyable(line, String(fpr || ''), 'fingerprint');
+}
+
+/** The bytes of a chosen file, or a refusal in the server's words when it
+ *  is over `limit` (File.size, so nothing is read). Null when no file. */
+async function readPgpFile(input, limit, what) {
+  const file = input.files && input.files[0];
+  if (!file) return null;
+  if (file.size > limit) {
+    throw new Error(what + ' is larger than ' + limit + ' bytes, which the '
+      + 'server refuses.');
+  }
+  return new Uint8Array(await file.arrayBuffer());
+}
+
+/* ── which claim a check confirms (F10) ─────────────────────────────── */
+
+/** Choose the claim a check will confirm, from the queue. The identifier
+ *  field takes the binding's durable value and is read-only: the server
+ *  refuses any other value for a named binding. */
+function choosePgpBinding(c) {
+  state.pgpBinding = {
+    id: c.channel_binding_id, platform_key: c.platform_key,
+    observed_value: c.observed_value, durable_value: c.durable_value,
+  };
+  $('comms-pgp-binding-text').textContent = 'Confirms the claim: '
+    + (c.platform_key || 'unknown platform') + ' '
+    + visibleText(c.observed_value || c.durable_value || NO_VALUE);
+  show($('comms-pgp-binding'), true);
+  const confirms = $('comms-pgp-confirms');
+  confirms.value = c.durable_value || '';
+  confirms.readOnly = true;
+  show($('comms-pgp-block-box'), true);
+  loadPgpAttribution(c.channel_binding_id);
+  $(pgpFormKind() === 'DETACHED' ? 'comms-pgp-sig' : 'comms-pgp-message').focus();
+}
+
+function clearPgpBinding() {
+  state.pgpBinding = null;
+  show($('comms-pgp-binding'), false);
+  $('comms-pgp-binding-text').textContent = '';
+  const confirms = $('comms-pgp-confirms');
+  confirms.readOnly = false;
+  confirms.value = '';
+  show($('comms-pgp-block-box'), false);
+  opts($('comms-pgp-block'), [['', 'No contact block']], '');
+  state.pgpBlocks = [];
+  fillPgpKeySelect(state.pgpKeys || []);
+}
+
+/** The contact blocks that could tie a key to the chosen claim's holder,
+ *  for the block select. Choosing one fills the fingerprint when it lists
+ *  one. */
+async function loadPgpAttribution(bindingId) {
+  const sel = $('comms-pgp-block');
+  opts(sel, [['', 'Loading the contact blocks…']], '');
+  const token = caseToken();
+  try {
+    const body = await api(cpath('/comms/pgp/bindings/' + bindingId
+      + '/attribution-blocks'));
+    if (caseChanged(token)) return;
+    const blocks = body.blocks || [];
+    state.pgpBlocks = blocks;
+    opts(sel, [['', blocks.length
+      ? 'No contact block (the check will not confirm the claim)'
+      : 'No contact block ties a key to this claim yet']]
+      .concat(blocks.map((b) => [b.block_id,
+        visibleText(b.publisher_handle || b.source_ref) + ', '
+        + fmtTime(b.created_at) + ', '
+        + (b.via === 'SAME_IDENTITY' ? 'published by this identity'
+          : 'lists this identifier')])),
+    blocks.length === 1 ? blocks[0].block_id : '');
+    pgpBlockChosen();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    opts(sel, [['', 'The contact blocks could not be read']], '');
+    fail(err);
+  }
+}
+
+/** A chosen block narrows the key select to the confirmed keys whose
+ *  fingerprint it lists, and fills the pasted-key fingerprint from it. */
+function pgpBlockChosen() {
+  const id = $('comms-pgp-block').value;
+  const b = (state.pgpBlocks || []).find((x) => x.block_id === id);
+  const listed = b && b.fingerprints ? b.fingerprints : null;
+  fillPgpKeySelect(state.pgpKeys || [], listed);
+  if (listed && listed.length && $('comms-pgp-keysel').value === PGP_PASTE) {
+    $('comms-pgp-fpr').value = listed[0];
+  }
+}
+
+/* ── the Verify form ─────────────────────────────────────────────────── */
+
+function pgpFormKind() {
+  return $('comms-pgp-kind-detached').checked ? 'DETACHED' : 'CLEARSIGNED';
+}
+
+function setPgpFormKind() {
+  const detached = pgpFormKind() === 'DETACHED';
+  show($('comms-pgp-clear-box'), !detached);
+  show($('comms-pgp-detached-box'), detached);
+}
+
+function pgpKeyChosen() {
+  show($('comms-pgp-paste-box'), $('comms-pgp-keysel').value === PGP_PASTE);
+}
+
+/** The key select: confirmed, unretired registry keys by fingerprint and
+ *  first user ID, and the default of a key pasted for this check only. */
+function fillPgpKeySelect(keys, onlyFingerprints) {
+  const sel = $('comms-pgp-keysel');
+  const was = sel.value;
+  const usable = (keys || []).filter((k) => k.confirmation && !k.retirement
+    && (!onlyFingerprints || onlyFingerprints.includes(k.fingerprint)));
+  opts(sel, [[PGP_PASTE, 'Paste a key for this check only']].concat(
+    usable.map((k) => [k.id, fprGroups(k.fingerprint).join(' ') + ', '
+      + visibleText(k.user_ids && k.user_ids[0] ? k.user_ids[0].uid
+        : 'no user ID')])),
+  usable.some((k) => k.id === was) ? was : PGP_PASTE);
+  pgpKeyChosen();
+}
 
 async function verifyPgp(e) {
   e.preventDefault();
@@ -23008,23 +27082,52 @@ async function verifyPgp(e) {
   setMsg(msg, '');
   clear(out);
   const token = caseToken();
+  const form = pgpFormKind();
+  const keyId = $('comms-pgp-keysel').value;
+  const json = {
+    form,
+    confirms_value: $('comms-pgp-confirms').value.trim() || null,
+    channel_binding_id: state.pgpBinding ? state.pgpBinding.id : null,
+    contact_block_id: state.pgpBinding
+      ? ($('comms-pgp-block').value || null) : null,
+  };
+  if (keyId === PGP_PASTE) {
+    json.public_key = $('comms-pgp-key').value;
+    json.claimed_fingerprint = $('comms-pgp-fpr').value.trim();
+    json.claimed_fingerprint_source_ref = $('comms-pgp-fpr-ref').value.trim()
+      || null;
+  } else {
+    json.pgp_key_id = keyId;
+  }
   try {
-    const body = await api(cpath('/comms/pgp/verify'), {
-      method: 'POST',
-      json: {
-        signed_message: $('comms-pgp-message').value,
-        public_key: $('comms-pgp-key').value,
-        claimed_fingerprint: $('comms-pgp-fpr').value.trim(),
-        confirms_value: $('comms-pgp-confirms').value.trim() || null,
-      },
-    });
+    if (form === 'CLEARSIGNED') {
+      json.signed_message = $('comms-pgp-message').value;
+    } else {
+      const sig = await readPgpFile($('comms-pgp-sig-file'), PGP_SIG_MAX,
+        'The signature file');
+      if (sig) json.signature_base64 = bytesToBase64(sig);
+      else json.signature = $('comms-pgp-sig').value;
+      const data = await readPgpFile($('comms-pgp-data-file'), PGP_DATA_MAX,
+        'The signed file');
+      if (data) json.signed_data_base64 = bytesToBase64(data);
+      else json.signed_data = $('comms-pgp-data').value;
+    }
+  } catch (err) {
+    setMsg(msg, err.message);
+    return;
+  }
+  try {
+    const body = await api(cpath('/comms/pgp/verify'), { method: 'POST', json });
     /* The verdict belongs to the case it was posted to; after a switch it
        would read as the new case's binding. */
     if (caseChanged(token)) return;
     out.appendChild(pgpOutcome(body));
+    clearPgpBinding();
     loadUnverified();
   } catch (err) {
     if (caseChanged(token)) return;
+    clearPgpBinding();
+    loadUnverified();
     inlineProblem(msg, err);
   }
 }
@@ -23034,14 +27137,22 @@ function pgpOutcome(body) {
   const card = el('div', 'card row-card');
   const head = el('div', 'row-head');
   const chip = el('span', 'chip '
-    + (outcome === PGP_GOOD ? 'ok'
-      : (PGP_UNCHECKED.has(outcome) ? 'warn' : 'bad')), outcome);
+    + (outcome === PGP_GOOD ? 'ok' : (PGP_WARN.has(outcome) ? 'warn' : 'bad')),
+  outcome);
   head.appendChild(chip);
   head.appendChild(el('span', 'row-title',
     outcome === PGP_GOOD ? 'Cryptographic evidence of control'
-      : (PGP_UNCHECKED.has(outcome)
-        ? 'Nobody checked, so this is not a finding about the evidence'
-        : 'Checked, and it did not hold')));
+      : (outcome === 'UNATTRIBUTED'
+        ? 'Signed, but nothing on record ties the key to this binding\'s holder'
+        : (PGP_UNCHECKED.has(outcome)
+          ? 'Nobody checked, so this is not a finding about the evidence'
+          : 'Checked, and it did not hold'))));
+  if (body.form) head.appendChild(el('span', 'chip', body.form === 'DETACHED'
+    ? 'detached signature' : 'clearsigned'));
+  if (body.claimed_fingerprint_basis) {
+    head.appendChild(el('span', 'chip', body.claimed_fingerprint_basis
+      === 'CONFIRMED_KEY' ? 'key confirmed' : 'fingerprint stated at the check'));
+  }
   card.appendChild(head);
 
   const facts = el('div', 'facts');
@@ -23049,10 +27160,20 @@ function pgpOutcome(body) {
     facts.appendChild(fact('signed by',
       String(body.signing_fingerprint).slice(0, 16)));
   }
+  if (body.signing_primary_fingerprint
+      && body.signing_primary_fingerprint !== body.signing_fingerprint) {
+    facts.appendChild(fact('signed by subkey',
+      String(body.signing_fingerprint).slice(0, 16) + ' of key '
+      + String(body.signing_primary_fingerprint).slice(0, 16)));
+  }
   if (body.value_in_payload !== undefined) {
     facts.appendChild(fact('identifier inside the signed region',
       body.value_in_payload ? 'yes' : 'no',
       body.value_in_payload ? '' : 'bad'));
+  }
+  if (body.attribution) {
+    facts.appendChild(fact('tied to the holder by', body.attribution
+      === 'SAME_IDENTITY' ? 'the block\'s publisher' : 'the same block'));
   }
   if (body.binding_upgraded) {
     facts.appendChild(fact('binding', 'upgraded to CONFIRMED', 'warn'));
@@ -23067,7 +27188,543 @@ function pgpOutcome(body) {
       + 'stays CLAIMED and should be checked again when a verifier is '
       + 'available.'));
   }
+  if (outcome === 'UNATTRIBUTED') {
+    card.appendChild(el('p', 'help warn',
+      'Cite the contact block where the holder publishes this fingerprint '
+      + 'as their own. A key confirmed against a publication elsewhere '
+      + 'needs that publication recorded as a contact block.'));
+  }
   return card;
+}
+
+/* ── the recorded checks (F10b) ─────────────────────────────────────── */
+
+async function loadPgpLedger() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  listPending('comms-pgp-ledger', 'comms-pgp-ledger-empty');
+  try {
+    const body = await api(cpath('/comms/pgp'));
+    if (caseChanged(token)) return;
+    const rows = body.verifications || [];
+    renderList('comms-pgp-ledger', 'comms-pgp-ledger-empty', rows, (v) => {
+      const card = el('div', 'card row-card compact');
+      const head = el('div', 'row-head');
+      head.appendChild(el('span', 'chip ' + (v.outcome === PGP_GOOD ? 'ok'
+        : (PGP_WARN.has(v.outcome) ? 'warn' : 'bad')), v.outcome));
+      head.appendChild(el('span', 'row-title', fmtTime(v.verified_at)));
+      head.appendChild(el('span', 'chip', v.form === 'DETACHED'
+        ? 'detached' : 'clearsigned'));
+      head.appendChild(el('span', 'chip', v.claimed_fingerprint_basis
+        === 'CONFIRMED_KEY' ? 'key confirmed' : 'fingerprint stated'));
+      card.appendChild(head);
+      const facts = el('div', 'facts');
+      facts.appendChild(fact('claimed', String(v.claimed_fingerprint).slice(0, 16)));
+      if (v.signing_fingerprint) {
+        facts.appendChild(fact('signed by', String(v.signing_fingerprint).slice(0, 16)));
+      }
+      if (v.attribution) facts.appendChild(fact('attribution', v.attribution));
+      card.appendChild(facts);
+      return card;
+    });
+    $('comms-pgp-ledger-count').textContent = countOf(rows.length, 'check',
+      'checks');
+    if (!rows.length) {
+      $('comms-pgp-ledger-empty').textContent = 'No checks are recorded in '
+        + 'this case, or none you may see.';
+    }
+  } catch (err) {
+    if (caseChanged(token)) return;
+    renderList('comms-pgp-ledger', 'comms-pgp-ledger-empty', [], () => el('div'));
+    showLoadFailure('comms-pgp-ledger-empty', 'The recorded checks', err,
+      loadPgpLedger);
+  }
+}
+
+/* ── the case key registry (F10b) ───────────────────────────────────── */
+
+function pgpKeySource() {
+  if ($('comms-pgpkey-src-wkd').checked) return 'WKD';
+  return $('comms-pgpkey-src-file').checked ? 'FILE' : 'PASTE';
+}
+
+function setPgpKeySource() {
+  const src = pgpKeySource();
+  show($('comms-pgpkey-import-box'), src !== 'WKD');
+  show($('comms-pgpkey-paste-box'), src === 'PASTE');
+  show($('comms-pgpkey-file-box'), src === 'FILE');
+  show($('comms-pgpkey-wkd-form'), src === 'WKD');
+}
+
+/** The optional contact-block select of the import form: the case's
+ *  blocks the analyst can see, from the published fingerprints read. */
+function fillPgpKeyBlocks(fingerprints) {
+  const seen = new Map();
+  for (const f of fingerprints || []) {
+    if (!seen.has(f.block_id)) {
+      seen.set(f.block_id, visibleText(f.publisher_handle || f.source_ref));
+    }
+  }
+  opts($('comms-pgpkey-block'), [['', 'None']].concat(
+    Array.from(seen.entries())), '');
+}
+
+async function loadPgpKeys() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  listPending('comms-pgpkey-list', 'comms-pgpkey-empty');
+  try {
+    const [body, published] = await Promise.all([
+      api(cpath('/comms/pgp/keys?include_retired=true')),
+      api(cpath('/comms/pgp/published-fingerprints')),
+    ]);
+    if (caseChanged(token)) return;
+    state.pgpKeys = body.keys || [];
+    state.pgpPublished = published.fingerprints || [];
+    renderList('comms-pgpkey-list', 'comms-pgpkey-empty', state.pgpKeys,
+      renderPgpKey);
+    fillPgpKeySelect(state.pgpKeys);
+    fillPgpKeyBlocks(state.pgpPublished);
+  } catch (err) {
+    if (caseChanged(token)) return;
+    renderList('comms-pgpkey-list', 'comms-pgpkey-empty', [], () => el('div'));
+    if (err instanceof ApiError && err.status === 403) {
+      listRefused('comms-pgpkey-empty', refusalText(
+        err, 'This needs comms.read on the case.'));
+      return;
+    }
+    showLoadFailure('comms-pgpkey-empty', 'The vendor keys', err, loadPgpKeys);
+  }
+}
+
+/** One key: its fingerprint in groups of four, its user IDs (attacker
+ *  text, so through visibleText and textContent only), where it came
+ *  from, whether its fingerprint was confirmed and against what. */
+function renderPgpKey(k) {
+  const card = el('div', 'card row-card pgpkey-card');
+  const head = el('div', 'row-head');
+  head.appendChild(fprLine(k.fingerprint));
+  head.appendChild(labelChips(k));
+  if (k.revoked) head.appendChild(el('span', 'chip bad', 'revoked'));
+  if (k.expired) head.appendChild(el('span', 'chip warn', 'expired'));
+  if (k.retirement) head.appendChild(el('span', 'chip', 'retired'));
+  const acq = k.acquisition || {};
+  head.appendChild(el('span', 'chip', acq.source === 'WKD'
+    ? 'looked up' : (acq.source === 'FILE' ? 'key file' : 'pasted')));
+  card.appendChild(head);
+  for (const u of k.user_ids || []) {
+    card.appendChild(el('p', 'hint', visibleText(u.uid)));
+  }
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('algorithm', k.algorithm + (k.curve ? ' ' + k.curve
+    : (k.bits ? ' ' + k.bits : ''))));
+  facts.appendChild(fact('created', fmtTime(k.created)));
+  facts.appendChild(fact('expires', k.expires ? fmtTime(k.expires) : 'never'));
+  facts.appendChild(fact('subkeys', String((k.subkeys || []).length)));
+  card.appendChild(facts);
+  card.appendChild(el('p', 'hint', 'Obtained from '
+    + visibleText(acq.source_ref || NO_VALUE)
+    + (acq.filename ? ' (' + visibleText(acq.filename) + ')' : '')
+    + ', added by ' + visibleText(acq.requested_by || NO_VALUE) + ' at '
+    + fmtTime(acq.requested_at)));
+  if (acq.looked_up_address) {
+    card.appendChild(el('p', acq.names_looked_up_address ? 'hint' : 'hint warn',
+      acq.names_looked_up_address
+        ? 'A user ID names the address that was looked up.'
+        : 'No user ID names the address that was looked up.'));
+  }
+  const conf = k.confirmation;
+  if (!conf) {
+    card.appendChild(el('span', 'chip warn', 'fingerprint not confirmed'));
+  } else if (conf.against === 'CONTACT_BLOCK') {
+    card.appendChild(el('span', 'chip ok', 'confirmed against contact block '
+      + 'line ' + conf.line_no + ' by ' + visibleText(conf.confirmed_by)
+      + ' at ' + fmtTime(conf.confirmed_at)));
+  } else {
+    card.appendChild(el('span', 'chip ok', 'confirmed against a publication '
+      + 'elsewhere: ' + visibleText(conf.source_ref)));
+  }
+  if (k.retirement) {
+    card.appendChild(el('p', 'hint', 'Retired at '
+      + fmtTime(k.retirement.retired_at) + ': '
+      + visibleText(k.retirement.reason)));
+    return card;
+  }
+  const actions = el('div', 'row-actions');
+  if (!conf) {
+    const confirm = el('button', 'btn small case-write pgpkey-confirm-btn',
+      'Confirm fingerprint…');
+    confirm.type = 'button';
+    confirm.addEventListener('click', () => openPgpKeyConfirm(card, k));
+    actions.appendChild(confirm);
+  } else {
+    const use = el('button', 'btn small pgpkey-use-btn', 'Use for a check');
+    use.type = 'button';
+    use.addEventListener('click', () => usePgpKey(k));
+    actions.appendChild(use);
+  }
+  const retire = el('button', 'btn ghost small case-write pgpkey-retire-btn',
+    'Retire…');
+  retire.type = 'button';
+  retire.addEventListener('click', () => openPgpKeyRetire(card, k));
+  actions.appendChild(retire);
+  card.appendChild(actions);
+  return card;
+}
+
+function usePgpKey(k) {
+  const sel = $('comms-pgp-keysel');
+  sel.value = k.id;
+  pgpKeyChosen();
+  $(pgpFormKind() === 'DETACHED' ? 'comms-pgp-sig' : 'comms-pgp-message').focus();
+}
+
+/** The live comparison of a published fingerprint with the key's, group
+ *  by group. Informative only: the server decides. */
+function paintFprComparison(box, published, fpr) {
+  clear(box);
+  const want = fprGroups(fpr);
+  const got = fprGroups(String(published || '').replace(/^0x/i, ''));
+  if (!got.length) return;
+  want.forEach((g, i) => {
+    box.appendChild(el('span', 'fpr-group ' + (got[i] === g ? 'match' : 'miss'),
+      got[i] || '....'));
+  });
+}
+
+function openPgpKeyConfirm(card, k) {
+  if (card.querySelector('.pgpkey-panel')) return;
+  const panel = el('div', 'row-detail pgpkey-panel case-write');
+  const sel = el('select', 'select');
+  const usable = (state.pgpPublished || []);
+  opts(sel, [['', 'Type the published fingerprint instead']].concat(
+    usable.map((f) => [f.entry_id, visibleText(f.observed_value) + ', line '
+      + f.line_no + ' of ' + visibleText(f.publisher_handle || f.source_ref)
+      + (f.usable ? '' : (f.why_not === 'KEY_ID_ONLY'
+        ? ' (a key ID, not a fingerprint)' : ' (not a fingerprint)'))])), '');
+  Array.from(sel.options).forEach((o) => {
+    const f = usable.find((x) => x.entry_id === o.value);
+    if (f && !f.usable) o.disabled = true;
+  });
+  const typed = el('input', 'input');
+  typed.type = 'text';
+  typed.spellcheck = false;
+  typed.placeholder = 'The fingerprint as it was published';
+  const ref = el('input', 'input');
+  ref.type = 'text';
+  ref.placeholder = 'Where it was published';
+  const compare = el('div', 'fpr-compare');
+  const statement = el('input', 'input');
+  statement.type = 'text';
+  statement.placeholder = 'Statement (optional)';
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const repaint = () => {
+    const f = usable.find((x) => x.entry_id === sel.value);
+    show(typed, !f);
+    show(ref, !f);
+    paintFprComparison(compare, f ? (f.fingerprint || f.observed_value)
+      : typed.value, k.fingerprint);
+  };
+  sel.addEventListener('change', repaint);
+  typed.addEventListener('input', repaint);
+  const go = el('button', 'btn small primary case-write',
+    'Confirm: this is the published key');
+  go.type = 'button';
+  go.addEventListener('click', () => confirmPgpKey(k, {
+    entry: sel.value, typed: typed.value, ref: ref.value,
+    statement: statement.value, msg }));
+  const cancel = el('button', 'btn ghost small', 'Cancel');
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => panel.remove());
+  panel.append(el('span', 'label', 'Compare with what was published'),
+    sel, typed, ref, compare, statement, msg, go, cancel);
+  card.appendChild(panel);
+  repaint();
+}
+
+async function confirmPgpKey(k, form) {
+  setMsg(form.msg, '');
+  const token = caseToken();
+  const json = form.entry
+    ? { contact_block_entry_id: form.entry }
+    : { published_fingerprint: form.typed.trim(),
+        source_ref: form.ref.trim() };
+  json.statement = form.statement.trim() || null;
+  try {
+    await api(cpath('/comms/pgp/keys/' + k.id + '/confirm'),
+      { method: 'POST', json });
+    if (caseChanged(token)) return;
+    loadPgpKeys();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    inlineProblem(form.msg, err);
+  }
+}
+
+function openPgpKeyRetire(card, k) {
+  if (card.querySelector('.pgpkey-panel')) return;
+  const panel = el('div', 'row-detail pgpkey-panel case-write');
+  const reason = el('input', 'input');
+  reason.type = 'text';
+  reason.placeholder = 'Why this key stands behind no new check';
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const go = el('button', 'btn small case-write', 'Retire the key');
+  go.type = 'button';
+  go.addEventListener('click', () => retirePgpKey(k, reason.value, msg));
+  const cancel = el('button', 'btn ghost small', 'Cancel');
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => panel.remove());
+  panel.append(reason, msg, go, cancel);
+  card.appendChild(panel);
+}
+
+async function retirePgpKey(k, reason, msg) {
+  setMsg(msg, '');
+  const token = caseToken();
+  try {
+    const body = await api(cpath('/comms/pgp/keys/' + k.id + '/retire'),
+      { method: 'POST', json: { reason: reason.trim() } });
+    if (caseChanged(token)) return;
+    const n = (body.bindings_confirmed_with_it || []).length;
+    if (n) {
+      banner('Key retired', agree(n, 'binding you can see was',
+        'bindings you can see were') + ' confirmed with this key. Nothing '
+        + 'was demoted: review ' + (n === 1 ? 'it' : 'them')
+        + ' in the channel list.', 'warn');
+    }
+    loadPgpKeys();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    inlineProblem(msg, err);
+  }
+}
+
+async function importPgpKey(e) {
+  e.preventDefault();
+  const msg = $('comms-pgpkey-msg');
+  setMsg(msg, '');
+  show($('comms-pgpkey-note'), false);
+  const token = caseToken();
+  const src = pgpKeySource();
+  const json = {
+    source: src,
+    source_ref: $('comms-pgpkey-source-ref').value.trim(),
+    classification: $('comms-pgpkey-class').value || null,
+    contact_block_id: $('comms-pgpkey-block').value || null,
+  };
+  try {
+    if (src === 'FILE') {
+      const data = await readPgpFile($('comms-pgpkey-file'), PGP_KEY_MAX,
+        'The key file');
+      if (!data) { setMsg(msg, 'Choose the key file first.'); return; }
+      json.data_base64 = bytesToBase64(data);
+      json.filename = $('comms-pgpkey-file').files[0].name;
+    } else {
+      json.armor = $('comms-pgpkey-armor').value;
+    }
+  } catch (err) {
+    setMsg(msg, err.message);
+    return;
+  }
+  try {
+    const body = await api(cpath('/comms/pgp/keys'), { method: 'POST', json });
+    if (caseChanged(token)) return;
+    if (body.raised_note) {
+      $('comms-pgpkey-note').textContent = body.raised_note;
+      show($('comms-pgpkey-note'), true);
+    }
+    setMsg(msg, body.already_imported
+      ? 'That key is already recorded in this case, filed the same way.'
+      : body.notice);
+    $('comms-pgpkey-armor').value = '';
+    $('comms-pgpkey-file').value = '';
+    loadPgpKeys();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    inlineProblem(msg, err);
+  }
+}
+
+/* ── Web Key Directory lookups (F10c) ──────────────────────────────── */
+
+const WKD_STATE_WORDS = {
+  REQUESTED: 'waiting for a second person',
+  EXPIRED: 'lapsed',
+  DECLINED: 'declined',
+  SENDING: 'started and never finished: the request may have left',
+  FOUND: 'found',
+  NOT_FOUND: 'no key there',
+  FAILED: 'failed',
+};
+
+function wkdExposure(domain) {
+  return 'Approving sends a request from this deployment to the directory '
+    + 'for ' + (domain || 'the address\'s domain') + '. Its operator learns '
+    + 'which address was looked up, and when. Nothing is sent until a second '
+    + 'person approves.';
+}
+
+async function loadKeyDirectory() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  try {
+    const d = await api(cpath('/comms/pgp/key-directory'));
+    if (caseChanged(token)) return;
+    const usable = d.enabled && !d.case_problem;
+    show($('comms-pgpkey-src-wkd-label'), usable);
+    const off = $('comms-pgpkey-wkd-off');
+    off.textContent = usable ? '' : (d.case_problem || d.problem || '');
+    show(off, !usable && !!off.textContent);
+    if (!usable && $('comms-pgpkey-src-wkd').checked) {
+      $('comms-pgpkey-src-paste').checked = true;
+      setPgpKeySource();
+    }
+    $('comms-pgpkey-wkd-dirs').textContent = usable
+      ? 'Directories on the route: ' + (d.directories || []).map(
+        (x) => x.domain).join(', ') + '.' : '';
+    paintWkdExposure();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    show($('comms-pgpkey-src-wkd-label'), false);
+  }
+}
+
+async function loadKeyLookups() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  listPending('comms-pgpkey-lookups', 'comms-pgpkey-lookups-empty');
+  try {
+    const body = await api(cpath('/comms/pgp/key-lookups'));
+    if (caseChanged(token)) return;
+    renderList('comms-pgpkey-lookups', 'comms-pgpkey-lookups-empty',
+      body.lookups || [], renderKeyLookup);
+  } catch (err) {
+    if (caseChanged(token)) return;
+    renderList('comms-pgpkey-lookups', 'comms-pgpkey-lookups-empty', [],
+      () => el('div'));
+    showLoadFailure('comms-pgpkey-lookups-empty', 'The key lookups', err,
+      loadKeyLookups);
+  }
+}
+
+/** One lookup: the address (attacker-chosen text, through visibleText),
+ *  why, who asked and when, its state, and the URLs planned and used as
+ *  code, never as links. */
+function renderKeyLookup(l) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  const st = l.effective_state;
+  head.appendChild(el('span', 'chip ' + (st === 'FOUND' ? 'ok'
+    : (st === 'FAILED' || st === 'SENDING' ? 'warn' : '')),
+  WKD_STATE_WORDS[st] || st));
+  head.appendChild(el('span', 'row-title', visibleText(l.address)));
+  head.appendChild(labelChips(l));
+  card.appendChild(head);
+  card.appendChild(el('p', 'hint', visibleText(l.reason)));
+  card.appendChild(el('p', 'hint', 'Asked by ' + visibleText(l.requested_by)
+    + ' at ' + fmtTime(l.requested_at)
+    + (st === 'REQUESTED' ? '. It lapses at ' + fmtTime(l.expires_at) + '.' : '.')));
+  if (l.decided_by) {
+    card.appendChild(el('p', 'hint', (st === 'DECLINED' ? 'Declined by '
+      : 'Approved by ') + visibleText(l.decided_by) + ' at '
+      + fmtTime(l.decided_at)
+      + (l.decision_note ? ': ' + visibleText(l.decision_note) : '')));
+  }
+  for (const url of l.planned_urls || []) {
+    const line = el('p', 'hint');
+    line.appendChild(el('span', 'label', url === l.url_used ? 'sent to '
+      : 'planned '));
+    line.appendChild(el('code', 'mono-sm', url));
+    card.appendChild(line);
+  }
+  if (l.detail) card.appendChild(el('p', 'why', l.detail));
+  if (l.can_approve || l.can_decline) {
+    const actions = el('div', 'row-actions');
+    if (l.can_approve) {
+      const approve = el('button',
+        'btn small case-write pgpkey-lookup-approve', 'Approve and send');
+      approve.type = 'button';
+      approve.title = wkdExposure(l.domain);
+      approve.addEventListener('click', () => approveKeyLookup(l, card));
+      actions.appendChild(approve);
+    }
+    const reason = el('input', 'input case-write pgpkey-lookup-reason');
+    reason.type = 'text';
+    reason.placeholder = 'Why it is declined';
+    const decline = el('button',
+      'btn ghost small case-write pgpkey-lookup-decline', 'Decline');
+    decline.type = 'button';
+    decline.addEventListener('click', () => declineKeyLookup(l, reason.value,
+      card));
+    actions.append(reason, decline);
+    card.appendChild(actions);
+    /* What approving discloses, beside the button that does it. */
+    if (l.can_approve) card.appendChild(el('p', 'hint warn', wkdExposure(l.domain)));
+  }
+  return card;
+}
+
+async function requestKeyLookup(e) {
+  e.preventDefault();
+  const msg = $('comms-pgpkey-wkd-msg');
+  setMsg(msg, '');
+  const token = caseToken();
+  try {
+    const body = await withStepUp('Asking for a key lookup',
+      () => api(cpath('/comms/pgp/key-lookups'), {
+        method: 'POST',
+        json: {
+          address: $('comms-pgpkey-wkd-address').value.trim(),
+          reason: $('comms-pgpkey-wkd-reason').value.trim(),
+          classification: $('comms-pgpkey-class').value || null,
+        },
+      }));
+    if (!body || caseChanged(token)) return;
+    setMsg(msg, body.notice);
+    $('comms-pgpkey-wkd-address').value = '';
+    $('comms-pgpkey-wkd-reason').value = '';
+    loadKeyLookups();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    inlineProblem(msg, err);
+  }
+}
+
+async function approveKeyLookup(l, card) {
+  const token = caseToken();
+  try {
+    const body = await withStepUp(wkdExposure(l.domain),
+      () => api(cpath('/comms/pgp/key-lookups/' + l.id + '/approve'),
+        { method: 'POST' }));
+    if (!body || caseChanged(token)) return;
+    loadKeyLookups();
+    if ((body.key_ids || []).length) loadPgpKeys();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    card.appendChild(el('p', 'msg', err instanceof ApiError
+      ? (err.detail || err.title) : failureReason(err)));
+  }
+}
+
+/* Declining needs comms.key.lookup.approve, which 0090 marks step-up, so
+ * a plain api() call answered a sign-in older than the window with a bare
+ * "re-authentication required" and no identity prompt. It goes through
+ * withStepUp like approving does (F10c, 2026-09-24). */
+async function declineKeyLookup(l, reason, card) {
+  const token = caseToken();
+  try {
+    const body = await withStepUp('Declining a key lookup',
+      () => api(cpath('/comms/pgp/key-lookups/' + l.id + '/decline'),
+        { method: 'POST', json: { reason: reason.trim() } }));
+    if (!body || caseChanged(token)) return;
+    loadKeyLookups();
+  } catch (err) {
+    if (caseChanged(token)) return;
+    card.appendChild(el('p', 'msg', err instanceof ApiError
+      ? (err.detail || err.title) : failureReason(err)));
+  }
 }
 
 /* Every comms result on this pane was read from, or written into, ONE
@@ -23084,19 +27741,31 @@ function pgpOutcome(body) {
 const COMMS_EMPTY_TEXT = [
   ['comms-unverified-empty', 'Nothing awaiting verification.', false],
   ['comms-copart-empty', 'No co-participation computed for this case.', true],
+  // The key registry, the lookups and the recorded checks (F10b, F10c).
+  ['comms-pgpkey-empty', 'No vendor keys in this case yet.', false],
+  ['comms-pgpkey-lookups-empty', 'No key lookups in this case.', false],
+  ['comms-pgp-ledger-empty', 'Recorded checks load when you ask for them.', true],
 ];
 
 onCaseSwitch(() => {
   for (const id of ['comms-pgp-out', 'comms-correlate-out', 'comms-block-out',
                     'comms-unverified', 'comms-copart',
-                    'comms-copart-coverage']) {
+                    'comms-copart-coverage',
+                    // F10b and F10c lists
+                    'comms-pgpkey-list', 'comms-pgpkey-lookups',
+                    'comms-pgp-ledger']) {
     clear($(id));
   }
   setMsg($('comms-pgp-msg'), '');
   setMsg($('comms-block-msg'), '');
   setMsg($('comms-bind-msg'), '');
+  // F10b and F10c messages and notes
+  setMsg($('comms-pgpkey-msg'), '');
+  setMsg($('comms-pgpkey-wkd-msg'), '');
+  setMsg($('comms-pgpkey-note'), '');
   $('comms-unverified-count').textContent = '';
   $('comms-copart-count').textContent = '';
+  $('comms-pgp-ledger-count').textContent = '';
   for (const [id, text, before] of COMMS_EMPTY_TEXT) {
     $(id).textContent = text;
     $(id).classList.remove('pending', 'refused');
@@ -23111,10 +27780,31 @@ onCaseSwitch(() => {
   for (const id of ['comms-observed', 'comms-codecl', 'comms-corr-observed',
                     'comms-block-source', 'comms-block-handle',
                     'comms-block-text', 'comms-pgp-message', 'comms-pgp-key',
-                    'comms-pgp-fpr', 'comms-pgp-confirms']) {
+                    'comms-pgp-fpr', 'comms-pgp-confirms',
+                    // F10a, F10b and F10c inputs
+                    'comms-pgp-sig', 'comms-pgp-sig-file', 'comms-pgp-data',
+                    'comms-pgp-data-file', 'comms-pgp-fpr-ref',
+                    'comms-pgpkey-armor', 'comms-pgpkey-file',
+                    'comms-pgpkey-source-ref', 'comms-pgpkey-wkd-address',
+                    'comms-pgpkey-wkd-reason']) {
     $(id).value = '';
   }
   show($('comms-preview'), false);
+  // The claim a check was about to confirm, the forms' choices and the
+  // registry's selects (F10, F10a, F10b, F10c).
+  clearPgpBinding();
+  $('comms-pgp-kind-clear').checked = true;
+  setPgpFormKind();
+  $('comms-pgpkey-src-paste').checked = true;
+  setPgpKeySource();
+  show($('comms-pgpkey-note'), false);
+  show($('comms-pgpkey-src-wkd-label'), false);
+  show($('comms-pgpkey-wkd-off'), false);
+  state.pgpKeys = [];
+  state.pgpPublished = [];
+  state.pgpBlocks = [];
+  fillPgpKeySelect([]);
+  fillPgpKeyBlocks([]);
 });
 
 /** The case a write was sent to, by the name the analyst knows it by. A
@@ -23137,16 +27827,33 @@ async function loadUnverified() {
       (c) => {
         const card = el('div', 'card row-card compact');
         const head = el('div', 'row-head');
+        /* The observed value is attacker text (F10, 2026-09-24): it was
+           drawn raw, and fell back to an id key the API never sends. */
         head.appendChild(el('span', 'row-title',
-          c.observed_value || c.durable_value || c.id));
-        head.appendChild(el('span', 'chip', c.platform_key || '?'));
+          visibleText(c.observed_value || c.durable_value || NO_VALUE)));
+        head.appendChild(el('span', 'chip', c.platform_key || 'unknown'));
         /* The split the endpoint exists for. Without it, "not confirmed"
-           and "not checked" look identical. */
-        head.appendChild(c.attempted
-          ? el('span', 'chip bad', 'checked, not confirmed')
+           and "not checked" look identical. It read a flag name the API
+           never sent, so every claim said "never checked" (F10). */
+        head.appendChild(c.verification_attempted
+          ? el('span', 'chip ' + (c.last_outcome === PGP_GOOD ? 'ok'
+            : (PGP_WARN.has(c.last_outcome) ? 'warn' : 'bad')), c.last_outcome)
           : el('span', 'chip warn', 'never checked'));
         card.appendChild(head);
-        if (c.last_outcome) card.appendChild(el('p', 'why', c.last_outcome));
+        if (c.last_verified_at) {
+          card.appendChild(el('p', 'hint', 'Last checked '
+            + fmtTime(c.last_verified_at)));
+        }
+        if (c.confirmable) {
+          const go = el('button', 'btn small case-write unverified-verify',
+            'Verify this claim');
+          go.type = 'button';
+          go.addEventListener('click', () => choosePgpBinding(c));
+          card.appendChild(go);
+        } else {
+          card.appendChild(el('p', 'hint', 'No durable form was recorded for '
+            + 'this identifier, so a signature cannot confirm it.'));
+        }
         return card;
       });
     $('comms-unverified-count').textContent = claims.length
@@ -25703,12 +30410,17 @@ function watchHitRow(h) {
 
 async function loadCollectedDocuments() {
   const triage = $('col-doc-triage').value;
+  // Whether a row can offer Similar (F6.3); read once, cached.
+  await loadEmbeddingStatus();
   try {
     const q = new URLSearchParams({ limit: '100' });
     if (triage) q.set('triage_state', triage);
     const body = await api('/collection/documents?' + q.toString());
     const docs = body.documents || [];
-    renderList('col-doc-list', 'col-doc-empty', docs, collectedDocRow);
+    // Whether the caller may place a legal hold (docs/00 decision 74).
+    const canHold = Boolean(body.can_hold);
+    renderList('col-doc-list', 'col-doc-empty', docs,
+      (d) => collectedDocRowWithSimilar(d, canHold));   // F6.3
     $('col-doc-counts').textContent = docs.length
       ? countOf(docs.length, 'document', 'documents') : '';
     if (!docs.length) {
@@ -25728,24 +30440,53 @@ async function loadCollectedDocuments() {
   }
 }
 
-function collectedDocRow(d) {
+function collectedDocRow(d, canHold) {   // canHold: docs/00 decision 74
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
-  head.appendChild(el('span', 'row-title', visibleText(d.title || '(untitled)')));
+  const tgm = d.telegram || null;   // F5.3, a Telegram message's capture record
+  head.appendChild(el('span', 'row-title', visibleText(d.title
+    || (tgm ? 'Telegram message' : '(untitled)'))));
   head.appendChild(el('span', 'chip small', d.triage_state));
+  if (tgm && tgm.is_service) head.appendChild(el('span', 'chip small', 'service message'));
+  if (tgm && tgm.media_kind) {
+    const media = el('span', 'chip small', 'media not collected');
+    media.title = 'Media in Telegram chats is not downloaded. Open the message on '
+      + 'the persona’s device if it matters.';
+    head.appendChild(media);
+  }
   head.appendChild(el('span', 'chip small', d.classification));
+  // A captured document's compartments (L1, 2026-09-24).
+  for (const c of d.compartments || []) {
+    head.appendChild(el('span', 'chip small compartment', visibleText(c)));
+  }
   if (d.is_deleted_upstream) {
     const chip = el('span', 'chip warn', 'deleted upstream');
     chip.title = 'Gone from the source since capture. This copy is why '
                + 'collection persists what it reads.';
     head.appendChild(chip);
   }
+  // A person's hold on it and its earlier versions (docs/00 decision 74).
+  if (d.legal_hold) {
+    const hold = el('span', 'chip warn', 'on legal hold');
+    hold.title = 'A legal hold stops every deletion of this document and its '
+      + 'earlier versions.';
+    head.appendChild(hold);
+  }
   card.appendChild(head);
   const facts = el('div', 'facts');
   facts.appendChild(fact('source', visibleText(d.source_name)));
-  facts.appendChild(fact('author', visibleText(d.author_handle)));
+  // F5.3. A Telegram author is the name at capture and the typed id.
+  facts.appendChild(fact('author', tgm && tgm.sender_uid
+    ? visibleText([tgm.sender_handle || d.author_handle, tgm.sender_uid]
+      .filter(Boolean).join(', '))
+    : visibleText(d.author_handle)));
   facts.appendChild(fact('posted', fmtTime(d.posted_at)));
   if (d.version > 1) facts.appendChild(fact('version', d.version));
+  if (tgm && (tgm.fwd_from_uid || tgm.fwd_from_name)) {
+    facts.appendChild(fact('forwarded from', visibleText(
+      [tgm.fwd_from_name, tgm.fwd_from_uid].filter(Boolean).join(', '))));
+  }
+  if (tgm && tgm.edit_date) facts.appendChild(fact('edited', fmtTime(tgm.edit_date)));
   card.appendChild(facts);
   if (d.excerpt) {
     card.appendChild(el('p', 'muted small', visibleText(d.excerpt)));
@@ -25759,6 +30500,117 @@ function collectedDocRow(d) {
   if (d.external_url) {
     card.appendChild(el('p', 'mono small', visibleText(d.external_url)));
   }
+  // The hold's reason, when the server sent it (2026-09-24).
+  if (d.legal_hold && d.legal_hold_reason) {
+    card.appendChild(el('p', 'help', 'Held: ' + visibleText(d.legal_hold_reason)));
+  }
+  if (canHold) card.appendChild(documentHoldActions(card, d));
+  // F3 and F4 (2026-09-24). A forum post's signature, quotes and
+  // reactions, or a member's profile, kept beside the text.
+  if (d.source_kind === 'XENFORO' || d.source_kind === 'MYBB') {
+    card.appendChild(forumDetailsControl(d));
+  }
+  return card;
+}
+
+/** F3 and F4 (2026-09-24). "Forum details" under a collected forum
+ *  document: read on request, under the same labels as the document, and
+ *  drawn as facts. The signature is said to describe the author, because
+ *  it is repeated on every post the author writes. */
+function forumDetailsControl(d) {
+  const box = el('div', 'row-actions');
+  const btn = el('button', 'btn small ghost', 'Forum details');
+  btn.type = 'button';
+  const out = el('div', 'facts');
+  out.hidden = true;
+  btn.addEventListener('click', async () => {
+    if (!out.hidden) { out.hidden = true; return; }
+    btn.disabled = true;
+    try {
+      const f = await api('/collection/documents/' + d.id + '/forum');
+      clear(out);
+      for (const node of forumDetailFacts(f)) out.appendChild(node);
+      out.hidden = false;
+    } catch (ex) {
+      if (ex instanceof ApiError && ex.status === 404) {
+        clear(out);
+        out.appendChild(el('p', 'help', 'No forum details are kept for this document.'));
+        out.hidden = false;
+      } else {
+        fail(ex);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  box.appendChild(btn);
+  box.appendChild(out);
+  return box;
+}
+
+/** The facts a forum details answer draws, in order. */
+function forumDetailFacts(f) {
+  const facts = [];
+  if (f.kind === 'member') {
+    const p = f.profile || {};
+    if (p.title) facts.push(fact('title', visibleText(p.title)));
+    for (const [k, v] of Object.entries(p.fields || {})) {
+      facts.push(fact(visibleText(k), visibleText(v)));
+    }
+    if (!facts.length) facts.push(el('p', 'help', 'The profile showed no fields.'));
+    return facts;
+  }
+  facts.push(fact('signature', f.signature_text ? visibleText(f.signature_text) : 'none'));
+  if (f.signature_text) {
+    facts.push(el('p', 'help', 'A signature is repeated on every post its author '
+      + 'writes: it describes the author, and is not an observation per post.'));
+  }
+  const quoted = f.quoted_post_refs || [];
+  facts.push(fact('quotes', quoted.length ? quoted.map(visibleText).join(', ') : 'none'));
+  const r = f.reactions || {};
+  if (r.count) {
+    const names = (r.reactors || []).map(visibleText).join(', ');
+    facts.push(fact('reactions', countOf(r.count, 'reaction', 'reactions')
+      + (names ? ', shown: ' + names : '')));
+  }
+  if (f.observed_at) facts.push(fact('seen', fmtTime(f.observed_at)));
+  return facts;
+}
+
+/** Place or lift a hold on a collected document, with a reason either way,
+ *  behind the step-up gate (docs/00 decision 74, 2026-09-24). */
+function documentHoldActions(card, d) {
+  const actions = el('div', 'row-actions');
+  const verb = d.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
+  const btn = el('button', 'btn small ghost', verb);
+  btn.type = 'button';
+  btn.addEventListener('click', () => rowForm(card, {
+    kind: 'hold', submit: verb,
+    help: d.legal_hold
+      ? 'Once lifted, this document and its earlier versions follow their '
+        + 'retention rule again, unless a case that cites them is held.'
+      : 'A hold stops every deletion of this document and its earlier '
+        + 'versions until somebody lifts it.',
+    fields: [{ label: 'Why', grow: true }],
+    check: ([why]) => (why.trim().length < 5
+      ? 'Say why, in at least 5 characters.' : null),
+    submitFn: async ([why]) => {
+      const out = await withStepUp('A legal hold needs a recent sign-in.',
+        () => api('/retention/documents/' + d.id + '/legal-hold',
+          { method: 'POST', json: { on: !d.legal_hold, reason: why.trim() } }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      loadCollectedDocuments();
+    },
+  }));
+  actions.appendChild(btn);
+  return actions;
+}
+
+/** A collected document's row with its Similar control (F6.3,
+ *  2026-09-24): documents like this one, opened under the row. */
+function collectedDocRowWithSimilar(d, canHold) {
+  const card = collectedDocRow(d, canHold);
+  card.appendChild(similarControl('document', d.id));
   return card;
 }
 
@@ -26746,7 +31598,8 @@ function adminAssignBox(u) {
 let selectAdminSub = null;
 
 function enterAdminPane() {
-  const sub = ADM.blocking.length ? 'readiness' : (ADM.userSub || 'accounts');
+  const sub = ADM.blocking.length ? 'readiness'
+    : (ADM.userSub || adminFirstSub());   // F8 G1, the first section it may open
   ADM.auto = true;
   try { selectAdminSub(sub); } finally { ADM.auto = false; }
 }
@@ -26811,7 +31664,15 @@ function initAdmin() {
     /* Rename and retire (sec-compartment-retirement) live on this
        subpane too, so their list loads with it. */
     if (name === 'compartments') loadCompartmentKeys();
+    if (name === 'dual') loadDualControl();   // two-person controls
+    if (name === 'egress') loadEgress();      // egress (S2)
+    if (name === 'embeddings') loadEmbeddingsAdmin();   // F6.3
+    if (name === 'integrations') loadIntegrations();   // F8 and F7
+    if (name === 'providers') loadProviders();         // F15.2
   });
+  initDualControl();
+  initEgress();
+  initEmbeddingsAdmin();
   $('adm-comp-form').addEventListener('submit', registerCompartment);
   $('adm-roles').addEventListener('change', summariseCreate);
   $('adm-create').addEventListener('submit', async (e) => {
@@ -26887,6 +31748,17 @@ onCaseSwitch(() => {
  */
 let canAdmin = false;       // user.manage: accounts and readiness
 let canReview = false;      // break_glass.review: the officer's queue
+let canDualManage = false;  // dual_control.manage: proposes a change
+let canCountersign = false; // dual_control.countersign: signs one
+// F12. sample.yara.activate: the YARA rule sets awaiting activation.
+let canYaraReview = false;
+let canConfirmAuthority = false;  // collection.authority.confirm: confirms an authority
+let canEgressManage = false; // egress.manage: changes where anything leaves
+let canEgressRead = false;   // egress.log.read: reads the connection log
+let canEmbeddings = false;  // embedding.manage: the similarity indexes
+// F13. sample.screening.review: the prohibited-content screening record.
+let canScreenReview = false;
+let canScreenManage = false;
 let adminView = false;
 let adminHome = null;
 let reviewHome = null;
@@ -26896,14 +31768,29 @@ let reviewHome = null;
  *  preserved-sample authorisations, so it is not named for one of them
  *  (final review U3, 2026-09-23). */
 function adminViewName() {
-  return canReview && !canAdmin ? 'Oversight' : 'Administration';
+  // An officer who may countersign two-person changes is one too.
+  // And one who confirms collection authorities (2026-09-24).
+  return (canReview || canCountersign || canConfirmAuthority) && !canAdmin
+    ? 'Oversight' : 'Administration';
 }
 
 /** The entry button's tooltip, for the same two kinds of account. */
 function adminViewTitle() {
-  return canReview && !canAdmin
-    ? 'The break-glass review queue and the preserved-sample authorisations. '
-      + 'They cover the whole deployment, so no case is needed.'
+  // F8 G1 (2026-09-25): an account whose only way in is a data-needs
+  // section is told what is there, not "Accounts".
+  if (!canAdmin && !canReview && !canCountersign && !canConfirmAuthority
+      && adminAnyAllowed()) {
+    return 'Outbound integrations and lookup providers. They cover the whole '
+      + 'deployment, so no case is needed.';
+  }
+  /* F13. The officer's view also holds the screening record; the
+     screening verbs are the Security Officer's, who reviews break-glass. */
+  return (canReview || canCountersign || canConfirmAuthority) && !canAdmin
+    ? 'The break-glass review queue, the preserved-sample authorisations, '
+      + 'the collection authorities that wait for a second person, '
+      + 'the two-person changes waiting for a countersignature and the '
+      + 'prohibited-content screening record. They cover the whole '
+      + 'deployment, so no case is needed.'
     : 'Accounts and the readiness register. They cover the whole '
       + 'deployment, so no case is needed.';
 }
@@ -26920,6 +31807,11 @@ async function loadAdminAccess() {
      case by design: reachable only through a case's Lifecycle pane, it
      was unreachable for exactly the account whose job it is. */
   canReview = !!access.break_glass_review;
+  // F12 J.
+  canYaraReview = !!access.sample_yara_activate;
+  // F13.
+  canScreenReview = !!access.sample_screening_review;
+  canScreenManage = !!access.sample_screening_manage;
   /* The failing blocking checks, for an administrator (2026-09-23): the
      badges on the way in, and the section the pane opens on. */
   ADM.blocking = canAdmin && Array.isArray(access.blocking_failures)
@@ -26928,6 +31820,27 @@ async function loadAdminAccess() {
      (security-officer-false-green): they mark Readiness in amber. */
   ADM.caveats = canAdmin && Array.isArray(access.readiness_caveats)
     ? access.readiness_caveats : [];
+  /* F9 (2026-09-24): the two-person policy, and how many changes wait
+     for this account's countersignature (the subtab's badge). */
+  canDualManage = !!access.dual_control_manage;
+  canCountersign = !!access.dual_control_countersign;
+  ADM.dualAwaiting = Number(access.dual_control_awaiting) || 0;
+  paintDualBadge();
+  // 2026-09-24: the officer who confirms collection authorities.
+  canConfirmAuthority = !!access.collection_authority_confirm;
+  // S2 (2026-09-24): the Egress section, for whoever may change or
+  // read where anything leaves this deployment.
+  canEgressManage = !!access.egress_manage;
+  canEgressRead = !!access.egress_log_read;
+  show($('adm-sub-egress'), canEgressManage || canEgressRead);
+  // F6.3 (2026-09-24): Administration, Embeddings, for an account
+  // holding embedding.manage. Not a gate: every route runs its own.
+  canEmbeddings = !!access.embedding_manage;
+  const embTab = document.querySelector(
+    '#pane-admin .subtab[data-subtab="embeddings"]');
+  if (embTab) show(embTab, canEmbeddings);
+  ADM.access = access;   // the data-needs flags (F8 G1)
+  applyAdminGates();
 }
 
 /** The way in, and the count of what is blocking on it. Asked on every
@@ -26943,7 +31856,13 @@ async function refreshAdminEntry() {
   if (state.caseId || adminView) { show(btn, false); return; }
   btn.textContent = adminViewName();
   btn.title = adminViewTitle();
-  show(btn, (canAdmin || canReview) && !state.caseId && !adminView);
+  show(btn, (canAdmin || canReview || canCountersign || canConfirmAuthority
+             || adminAnyAllowed())
+    && !state.caseId && !adminView);
+  // F12 J. An officer who may activate rule sets has a way in too.
+  if (canYaraReview && !state.caseId && !adminView) show(btn, true);
+  // F13. So does an officer who reviews screening matches.
+  if (canScreenReview && !state.caseId && !adminView) show(btn, true);
 }
 
 async function showAdmin() {
@@ -26960,7 +31879,8 @@ async function showAdmin() {
   adminView = true;
   /* An account holding neither verb still gets the accounts pane, which
      explains its own refusal: the honest answer to a hand-typed link. */
-  const accounts = canAdmin || !canReview;
+  const accounts = canAdmin || adminAnyAllowed()   // data-needs (F8 G1)
+    || !(canReview || canCountersign || canConfirmAuthority);
   if (accounts) {
     $('view-admin').appendChild(pane);
     show(pane, true);
@@ -26972,6 +31892,18 @@ async function showAdmin() {
   /* The officer's preserved samples (final review U3, 2026-09-23), built
      and loaded by the Lab code; hidden for an account that is not one. */
   showPreservedReview(canReview);
+  /* 2026-09-24: the collection authorities waiting for a second person,
+     after the preserved samples. */
+  showAuthorityReview(canConfirmAuthority);
+  /* F9 (2026-09-24): the two-person changes waiting, for an officer
+     who may countersign and administers nothing; an administrator reads
+     them under Administration, Two-person controls. */
+  showDualReview(canCountersign && !canAdmin);
+  // F13. Prohibited-content screening, after the two-person changes and
+  // before the YARA section.
+  showScreeningReview(canScreenReview);
+  // F12 J. The YARA rule sets awaiting activation, also the Lab's.
+  showYaraReview(canYaraReview);
   show($('view-cases'), false);
   show($('view-admin'), true);
   show($('btn-admin'), false);
@@ -27002,6 +31934,7 @@ function leaveAdmin() {
   if (reviewHome && review.parentNode !== reviewHome.parent) {
     reviewHome.parent.insertBefore(review, reviewHome.next);
   }
+  returnDualBody();
   show($('view-admin'), false);
 }
 
@@ -27191,6 +32124,2170 @@ function compartmentLifecycleControls(x, done) {
 
 function initCompartmentKeys() {
   $('adm-cmp-life-refresh').addEventListener('click', loadCompartmentKeys);
+}
+
+/* --- Admin: two-person controls ------------------------------------------
+ *
+ * F9 (2026-09-24). Which acts take two different people
+ * was two places nobody could see: `approvals.OPERATIONS` in code and
+ * `iam.separated_duty` in the database, and the one switch there was (a
+ * case's merges) could be turned off by one person. This section shows
+ * both, the changes waiting and the history, and changing any of it takes
+ * two people as well: an administrator proposes, a Security officer who is
+ * not an administrator countersigns (GET /approvals, POST
+ * /approvals/{id}/decide), and the administrator applies it.
+ *
+ * Nobody sees a button the server would refuse them: the proposer's Apply
+ * appears once the change is countersigned, unspent and still applies to
+ * the policy as it stands; a countersigner the seven-day rule blocks sees
+ * why, and Refuse, never Countersign (2026-09-24: the person best placed
+ * to say no must be able to).
+ *
+ * The body is one piece of markup (#dual-body), moved into the Oversight
+ * view for an officer who administers nothing (`showDualReview`) and back
+ * into its subpane after (`leaveAdmin`).
+ */
+const DUAL_POLICY_OPERATION = 'dual_control.policy';
+const DUAL_MODE_WORDS = { PER_CASE: 'Where the case asks for it', ALWAYS: 'Every time' };
+const DUAL_STEP_UP_WHY = 'Two-person controls need a sign-in from the last '
+  + '15 minutes. Nothing on screen changes.';
+
+/** What a change's state means to someone reading the card. */
+const DUAL_STATE_WORDS = {
+  PENDING: 'Waiting for a countersignature', APPROVED: 'Countersigned',
+  REJECTED: 'Refused', WITHDRAWN: 'Withdrawn', CONSUMED: 'Applied',
+};
+
+const DUAL = {
+  gen: 0,            // the read on screen, so a slower earlier one is dropped
+  you: null,         // what the caller may do, from GET /admin/dual-control
+  notes: new Map(),  // change id -> { text, kind }: what the last action said
+  target: null,      // a change a notification's Open asked for
+};
+
+/** Said to a screen reader, and on the visible status line. */
+function dualSay(text, kind) {
+  $('dual-say').textContent = text;
+  const msg = $('dual-msg');
+  msg.className = 'msg' + (kind ? ' ' + kind : '');
+  setMsg(msg, text);
+}
+
+async function loadDualControl() {
+  const gen = ++DUAL.gen;
+  show($('dual-refused'), false);
+  show($('dual-signin'), false);
+  listPending('dual-changes', 'dual-changes-empty');
+  listPending('dual-history', 'dual-history-empty');
+  let got = null;
+  let failure = null;
+  try {
+    got = await withStepUp(DUAL_STEP_UP_WHY, () => Promise.all([
+      api('/admin/dual-control'),
+      api('/approvals?operation=' + encodeURIComponent(DUAL_POLICY_OPERATION)
+        + '&state=OPEN'),
+      api('/admin/dual-control/history'),
+    ]));
+  } catch (err) {
+    failure = err;
+  }
+  if (gen !== DUAL.gen) return;
+  if (!got) {
+    paintDualRefused(failure);
+    return;
+  }
+  const [overview, waiting, history] = got;
+  paintDualControl(overview, waiting.approvals || [], history.changes || []);
+  focusDualTarget();
+}
+
+/** A sign-in cancelled or lapsed says so, with the way back; a missing
+ *  role is said as the roles that hold it; anything else is a failure to
+ *  read, with a Retry, never an empty list. */
+function paintDualRefused(err) {
+  for (const id of ['dual-ops', 'dual-pairs', 'dual-other']) clear($(id));
+  renderList('dual-changes', 'dual-changes-empty', [], (r) => r);
+  renderList('dual-history', 'dual-history-empty', [], (r) => r);
+  show($('dual-changes-empty'), false);
+  show($('dual-history-empty'), false);
+  show($('dual-pair-add'), false);
+  const refused = $('dual-refused');
+  if (!err || admStepUpRefused(err)) {
+    refused.textContent = 'Two-person controls are shown only after a sign-in '
+      + 'from the last 15 minutes. Press Sign in again and confirm it is you; '
+      + 'nothing else on screen changes.';
+    show(refused, true);
+    show($('dual-signin'), true);
+    return;
+  }
+  if (err instanceof ApiError && err.status === 403) {
+    refused.textContent = refusalText(err, 'The two-person policy is read by '
+      + 'an administrator or a Security officer.');
+    show(refused, true);
+    return;
+  }
+  showLoadFailure('dual-changes-empty', 'The two-person controls', err,
+                  loadDualControl);
+}
+
+function paintDualControl(overview, waiting, history) {
+  const you = Object.assign({ user_id: state.userId }, overview.you || {});
+  DUAL.you = you;
+  renderList('dual-changes', 'dual-changes-empty', waiting,
+             (r) => dualChangeCard(r, you));
+  const ops = $('dual-ops');
+  clear(ops);
+  for (const op of overview.operations || []) ops.appendChild(dualOperationCard(op, you));
+  const pairs = $('dual-pairs');
+  clear(pairs);
+  for (const p of overview.separated_duties || []) pairs.appendChild(dualPairRow(p, you));
+  /* A role that holds both halves of a pair is a control that is not there;
+     expected never to happen, and said loudly if it does. */
+  const broken = overview.violations || [];
+  const violations = $('dual-violations');
+  violations.textContent = broken.length
+    ? broken.map((v) => 'Role ' + v.role + ' holds both ' + v.permission_a
+      + ' and ' + v.permission_b + '.').join(' ') + ' Revoke one half.'
+    : '';
+  show(violations, broken.length > 0);
+  paintDualPairForm(overview.permissions || [], you);
+  const others = overview.other_controls || [];
+  const other = $('dual-other');
+  clear(other);
+  for (const c of others) other.appendChild(dualOtherRow(c));
+  show($('dual-other-box'), others.length > 0);
+  renderList('dual-history', 'dual-history-empty', history, dualHistoryRow);
+}
+
+/** The roles that hold one side of an operation, by name. */
+function dualRoleNames(side) {
+  const roles = (side && side.roles) || [];
+  return roles.length ? roles.map((r) => visibleText(r.display_name || r.key)).join(', ')
+    : 'no role holds ' + visibleText((side && side.permission) || 'it');
+}
+
+/** How long a signature lasts, in words. */
+function dualDuration(seconds) {
+  const s = Number(seconds) || 0;
+  if (s % 3600 === 0) return countOf(s / 3600, 'hour', 'hours');
+  return countOf(Math.round(s / 60), 'minute', 'minutes');
+}
+
+function dualOperationCard(op, you) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(op.description)));
+  /* The mode only where something enforces it: "Every time" beside "Not
+     enforced yet" would be two chips contradicting each other. */
+  if (op.enforced) {
+    head.appendChild(el('span', 'chip', DUAL_MODE_WORDS[op.mode] || op.mode));
+  }
+  head.appendChild(el('span', 'chip',
+    op.scope === 'global' ? 'Deployment-wide' : 'Per case'));
+  if (!op.enforced) {
+    const warn = el('span', 'chip warn', 'Not enforced yet');
+    warn.title = op.not_enforced_because || '';
+    head.appendChild(warn);
+  }
+  card.appendChild(head);
+  if (!op.enforced && op.not_enforced_because) {
+    card.appendChild(el('p', 'help', op.not_enforced_because));
+  }
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('asks', dualRoleNames(op.asks)));
+  facts.appendChild(fact('signs second', dualRoleNames(op.signs)));
+  facts.appendChild(fact('a signature lasts', dualDuration(op.ttl_seconds)));
+  card.appendChild(facts);
+  if (!op.configurable) return card;
+  /* Over the viewer's own cases only, and not said at all to someone who
+     holds none (2026-09-24). */
+  if (typeof op.cases_requiring === 'number') {
+    card.appendChild(el('p', 'help', countOf(op.cases_requiring,
+      'of the cases you are assigned to asks', 'of the cases you are assigned '
+      + 'to ask') + ' for it today.'));
+  }
+  if (!you.may_propose) return card;
+  const form = el('div', 'row-form');
+  const modeField = el('label', 'field');
+  const mode = el('select', 'select');
+  for (const m of op.modes || []) {
+    const o = el('option', null, DUAL_MODE_WORDS[m] || m);
+    o.value = m;
+    if (m === op.mode) o.selected = true;
+    mode.appendChild(o);
+  }
+  modeField.append(el('span', 'label', 'Needs a second signature'), mode);
+  const justField = el('label', 'field grow');
+  const just = el('input');
+  just.type = 'text';
+  just.autocomplete = 'off';
+  justField.append(el('span', 'label', 'Justification for the countersigner'), just);
+  const go = el('button', 'btn small', 'Propose change');
+  go.type = 'button';
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  msg.setAttribute('role', 'status');
+  go.addEventListener('click', () => {
+    if (mode.value === op.mode) {
+      msg.className = 'msg bad';
+      setMsg(msg, 'Choose the other setting first: this is the one in force.');
+      return;
+    }
+    proposeDualChange({ change: 'OPERATION_MODE', operation: op.key,
+                        to: mode.value }, just.value, msg, go);
+  });
+  form.append(modeField, justField, go);
+  card.append(form, msg);
+  return card;
+}
+
+function dualPairRow(pair, you) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(pair.permission_a)
+    + ' and ' + visibleText(pair.permission_b) + ' are never held by one role'));
+  if (pair.origin === 'policy') {
+    head.appendChild(el('span', 'chip', 'Added ' + fmtTime(pair.added_at)));
+  } else {
+    const fixed = el('span', 'chip', 'Fixed');
+    fixed.title = 'Installed with the software or by the database owner, so '
+      + 'this screen cannot remove it';
+    head.appendChild(fixed);
+  }
+  card.appendChild(head);
+  if (pair.why) card.appendChild(el('p', 'help', visibleText(pair.why)));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact(pair.permission_a, dualRoleNames(
+    { roles: pair.a_roles, permission: pair.permission_a })));
+  facts.appendChild(fact(pair.permission_b, dualRoleNames(
+    { roles: pair.b_roles, permission: pair.permission_b })));
+  if (pair.origin === 'policy') {
+    facts.appendChild(fact('proposed by', visibleText(pair.proposer_name)));
+    facts.appendChild(fact('countersigned by', visibleText(pair.countersigner_name)));
+  }
+  card.appendChild(facts);
+  if (pair.origin !== 'policy' || !you.may_propose) return card;
+  const det = el('details', 'adm-assign');
+  det.appendChild(el('summary', null, 'Propose removal'));
+  const form = el('div', 'row-form');
+  const justField = el('label', 'field grow');
+  const just = el('input');
+  just.type = 'text';
+  just.autocomplete = 'off';
+  justField.append(el('span', 'label', 'Justification for the countersigner'), just);
+  const go = el('button', 'btn small', 'Propose removal');
+  go.type = 'button';
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  msg.setAttribute('role', 'status');
+  go.addEventListener('click', () => proposeDualChange(
+    { change: 'SEPARATED_DUTY_REMOVE', permission_a: pair.permission_a,
+      permission_b: pair.permission_b }, just.value, msg, go));
+  form.append(justField, go);
+  det.append(form, msg);
+  card.appendChild(det);
+  return card;
+}
+
+/** The add-a-pair form: offered to a proposer only, filled from the
+ *  permissions the deployment has. */
+function paintDualPairForm(permissions, you) {
+  const box = $('dual-pair-add');
+  show(box, !!you.may_propose);
+  if (!you.may_propose) return;
+  for (const id of ['dual-pair-a', 'dual-pair-b']) {
+    const sel = $(id);
+    const keep = sel.value;
+    clear(sel);
+    sel.appendChild(selectOption('', 'Choose a permission'));
+    for (const p of permissions) sel.appendChild(selectOption(p.key, p.key));
+    sel.value = permissions.some((p) => p.key === keep) ? keep : '';
+  }
+}
+
+function submitDualPair(e) {
+  e.preventDefault();
+  const msg = $('dual-pair-msg');
+  const a = $('dual-pair-a').value;
+  const b = $('dual-pair-b').value;
+  const why = $('dual-pair-why').value.trim();
+  msg.className = 'msg bad';
+  if (!a || !b || a === b) {
+    setMsg(msg, 'Choose two different permissions.');
+    return;
+  }
+  if (why.length < 10) {
+    setMsg(msg, 'Say why no role may hold both, in at least 10 characters: '
+      + 'it is shown beside the pair.');
+    return;
+  }
+  proposeDualChange({ change: 'SEPARATED_DUTY_ADD', permission_a: a,
+                      permission_b: b, why: why },
+                    $('dual-pair-just').value, msg, $('dual-pair-btn'));
+}
+
+/** One waiting change. Its title is what it would do; its buttons are the
+ *  ones this viewer may press, and no others. */
+function dualChangeCard(req, you) {
+  const card = el('div', 'card row-card');
+  card.id = 'dual-change-' + req.id;
+  card.tabIndex = -1;
+  const preview = req.preview || {};
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title',
+    visibleText(preview.effect || req.operation_description || req.operation)));
+  const dead = req.state === 'PENDING' && req.is_expired;
+  head.appendChild(el('span', 'chip ' + (
+    req.state === 'APPROVED' ? 'ok'
+      : (req.state === 'REJECTED' || req.state === 'WITHDRAWN') ? 'bad'
+        : dead ? 'warn' : ''),
+  dead ? 'Expired' : (DUAL_STATE_WORDS[req.state] || req.state)));
+  if (req.stale) {
+    const chip = el('span', 'chip warn', 'No longer applicable');
+    chip.title = 'The policy changed after this was proposed, so it can no '
+      + 'longer be applied. Propose it again if it is still wanted.';
+    head.appendChild(chip);
+  }
+  card.appendChild(head);
+  if (preview.refusal) card.appendChild(el('p', 'help', preview.refusal));
+  card.appendChild(el('p', null, visibleText(req.justification)));
+
+  const mine = req.requested_by === you.user_id;
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('requested by', mine ? 'you'
+    : visibleText(req.requested_by_name || 'account ' + shortId(req.requested_by))));
+  facts.appendChild(fact('requested', fmtTime(req.requested_at)));
+  facts.appendChild(fact('expires', fmtTime(req.expires_at)));
+  if (req.decided_at) {
+    facts.appendChild(fact('decided by', visibleText(
+      req.decided_by_name || 'account ' + shortId(req.decided_by))));
+    facts.appendChild(fact('decided', fmtTime(req.decided_at)));
+  }
+  card.appendChild(facts);
+  if (req.provenance && req.provenance.sentence) {
+    card.appendChild(el('p', 'help', asSentence(req.provenance.sentence)));
+  }
+  if (req.decision_note) {
+    card.appendChild(el('p', 'help', 'Note: ' + visibleText(req.decision_note)));
+  }
+  const note = DUAL.notes.get(req.id);
+  const msg = el('p', note ? 'msg ' + note.kind : 'msg', note ? note.text : '');
+  msg.hidden = !note;
+  msg.setAttribute('role', 'status');
+  const actions = el('div', 'row-actions');
+  const cs = req.countersign;
+  if (req.state === 'PENDING' && !dead) {
+    if (cs) {
+      if (!cs.allowed && cs.reason) card.appendChild(el('p', 'help', cs.reason));
+      const noteField = el('label', 'field grow');
+      const noteIn = el('input');
+      noteIn.type = 'text';
+      noteIn.autocomplete = 'off';
+      noteField.append(el('span', 'label', 'Note with your decision'), noteIn);
+      actions.appendChild(noteField);
+      if (cs.allowed) {
+        const yes = el('button', 'btn small', 'Countersign');
+        yes.type = 'button';
+        yes.addEventListener('click', () => decideDualChange(
+          req, true, noteIn.value, msg, yes));
+        actions.appendChild(yes);
+      }
+      if (cs.may_refuse !== false) {
+        const no = el('button', 'btn ghost small', 'Refuse');
+        no.type = 'button';
+        no.addEventListener('click', () => decideDualChange(
+          req, false, noteIn.value, msg, no));
+        actions.appendChild(no);
+      }
+    } else if (mine) {
+      const w = el('button', 'btn ghost small', 'Withdraw');
+      w.type = 'button';
+      w.addEventListener('click', () => withdrawDualChange(req, msg, w));
+      actions.appendChild(w);
+    } else {
+      actions.appendChild(el('span', 'muted small', 'Waiting for a Security officer'));
+    }
+  } else if (req.state === 'APPROVED' && !req.consumed_at && mine) {
+    if (req.stale) {
+      actions.appendChild(el('span', 'muted small', 'The policy changed after '
+        + 'this was countersigned, so it cannot be applied. Propose it again.'));
+    } else if (!req.is_expired && you.may_propose) {
+      const go = el('button', 'btn small', 'Apply');
+      go.type = 'button';
+      go.addEventListener('click', () => applyDualChange(req, msg, go));
+      actions.appendChild(go);
+    }
+  } else if (req.state === 'APPROVED' && !req.consumed_at) {
+    actions.appendChild(el('span', 'muted small',
+      'Countersigned: its proposer applies it.'));
+  }
+  card.append(actions, msg);
+  return card;
+}
+
+function dualHistoryRow(row) {
+  const card = el('div', 'card row-card');
+  card.appendChild(el('p', null, 'On ' + fmtTime(row.applied_at) + ', '
+    + visibleText(row.proposer_name) + ' proposed and '
+    + visibleText(row.countersigner_name) + ' countersigned: '
+    + visibleText(row.effect) + '.'));
+  if (row.why) card.appendChild(el('p', 'help', visibleText(row.why)));
+  return card;
+}
+
+function dualOtherRow(c) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(c.act)));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('first', visibleText(c.first)));
+  facts.appendChild(fact('second', visibleText(c.second)));
+  card.appendChild(facts);
+  return card;
+}
+
+/** A refusal on the card it is about, as the server said it. */
+function dualRefusal(msg, err) {
+  msg.className = 'msg bad';
+  if (admStepUpRefused(err) || !err) {
+    setMsg(msg, 'Not done: it needs a sign-in from the last 15 minutes. Press '
+      + 'the button again and confirm it is you.');
+  } else if (err instanceof ApiError) {
+    setMsg(msg, closeClause(err.detail || err.title));
+  } else {
+    fail(err);
+  }
+}
+
+async function proposeDualChange(change, justification, msg, btn) {
+  const why = String(justification || '').trim();
+  if (!why) {
+    msg.className = 'msg bad';
+    setMsg(msg, 'Say why, for the Security officer who countersigns: it is '
+      + 'the only thing they have to work from. Keep case details out of it.');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const out = await withStepUp(DUAL_STEP_UP_WHY, () => api(
+      '/admin/dual-control/changes',
+      { method: 'POST', json: Object.assign({}, change, { justification: why }) }));
+    if (!out) {
+      dualRefusal(msg, null);
+      return;
+    }
+    const warned = out.warnings || [];
+    const text = warned.length
+      ? 'Proposed, with a warning. ' + warned.map(asSentence).join(' ')
+      : 'Proposed. ' + countOf(Number(out.approvers_notified) || 0,
+        'Security officer was', 'Security officers were')
+        + ' asked to countersign it. Nothing changes until it is '
+        + 'countersigned and you apply it.';
+    DUAL.notes.set(out.id, { text: text, kind: warned.length ? 'warn' : 'ok' });
+    dualSay(text, warned.length ? 'warn' : 'ok');
+    if (btn === $('dual-pair-btn')) {
+      $('dual-pair-form').reset();
+      setMsg(msg, '');
+    }
+    await loadDualControl();
+  } catch (err) {
+    dualRefusal(msg, err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function decideDualChange(req, approve, noteText, msg, btn) {
+  btn.disabled = true;
+  try {
+    const out = await withStepUp(DUAL_STEP_UP_WHY, () => api(
+      '/approvals/' + encodeURIComponent(req.id) + '/decide',
+      { method: 'POST', json: { approve: approve,
+                                note: String(noteText || '').trim() || null } }));
+    if (!out) {
+      dualRefusal(msg, null);
+      return;
+    }
+    const warned = out.warnings || [];
+    const text = (approve
+      ? 'Countersigned. Its proposer can now apply it.'
+      : 'Refused. It cannot be decided again.')
+      + (warned.length ? ' ' + warned.map(asSentence).join(' ') : '');
+    DUAL.notes.set(req.id, { text: text, kind: warned.length ? 'warn' : 'ok' });
+    dualSay(text, warned.length ? 'warn' : 'ok');
+    await loadDualControl();
+    await loadAdminAccess();
+    paintDualBadge();
+  } catch (err) {
+    dualRefusal(msg, err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function applyDualChange(req, msg, btn) {
+  const effect = (req.preview && req.preview.effect) || 'this change';
+  if (!window.confirm('Apply this change?\n\n' + effect + '\n\nIt takes effect '
+      + 'at once for the whole deployment, and the countersignature is spent.')) {
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const out = await withStepUp(DUAL_STEP_UP_WHY, () => api(
+      '/admin/dual-control/changes/' + encodeURIComponent(req.id) + '/apply',
+      { method: 'POST' }));
+    if (!out) {
+      dualRefusal(msg, null);
+      return;
+    }
+    dualSay('Applied: ' + visibleText(out.effect) + '.', 'ok');
+    await loadDualControl();
+  } catch (err) {
+    dualRefusal(msg, err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function withdrawDualChange(req, msg, btn) {
+  if (!window.confirm('Withdraw this change?\n\n'
+      + ((req.preview && req.preview.effect) || '') + '\n\nA withdrawn change '
+      + 'stays in the record and cannot be reinstated.')) return;
+  btn.disabled = true;
+  try {
+    const out = await withStepUp(DUAL_STEP_UP_WHY, () => api(
+      '/approvals/' + encodeURIComponent(req.id) + '/withdraw',
+      { method: 'POST' }));
+    if (!out) {
+      dualRefusal(msg, null);
+      return;
+    }
+    dualSay('Withdrawn.', 'ok');
+    await loadDualControl();
+  } catch (err) {
+    dualRefusal(msg, err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** The subtab's count of changes waiting for this account's
+ *  countersignature, from GET /admin/access. */
+function paintDualBadge() {
+  const badge = $('adm-dual-badge');
+  const n = ADM.dualAwaiting || 0;
+  badge.textContent = n ? String(n) : '';
+  badge.title = n ? countOf(n, 'change waits', 'changes wait')
+    + ' for your countersignature' : '';
+  show(badge, n > 0);
+}
+
+/* ── Administration, Embeddings ──────────────────────────────────────────
+ *
+ * F6.3 (embeddings, 2026-09-24). Each index, where the model is, and
+ * the documents not in an index, for an account holding embedding.manage.
+ * The figures come only to an account that also reads collected documents,
+ * at its own labels; the server sends none otherwise, and the pane says
+ * so. Every action names what it will do before it is done, a rebuild of
+ * similar meaning the most plainly, because it sends every eligible text
+ * to the model endpoint again. Times are UTC, as everywhere here.
+ */
+const EMB_ADM = { data: null, next: null };
+const EMB_STEP_UP_WHY = 'The similarity indexes need a sign-in from the last 15 '
+  + 'minutes. Nothing on screen changes.';
+const EMB_ROLE_NAME = { WORDING: 'Similar wording', MEANING: 'Similar meaning' };
+const EMB_STATE_NAME = { ACTIVE: 'active', BUILDING: 'being built',
+                         RETIRED: 'retired' };
+const EMB_GAP_STATUS = { FAILED: 'failed', WITHHELD: 'withheld',
+                         EXCLUDED: 'excluded', EMPTY: 'nothing to compare' };
+
+function initEmbeddingsAdmin() {
+  $('emb-gaps-space').addEventListener('change', () => loadEmbeddingGaps(false));
+  $('emb-gaps-status').addEventListener('change', () => loadEmbeddingGaps(false));
+  $('emb-gaps-more').addEventListener('click', () => loadEmbeddingGaps(true));
+}
+
+function embSay(text, kind) {
+  const m = $('emb-msg');
+  m.className = 'msg' + (kind ? ' ' + kind : '');
+  setMsg(m, text);
+  setMsg($('emb-say'), text);
+}
+
+async function loadEmbeddingsAdmin() {
+  const refused = $('emb-refused');
+  show(refused, false);
+  let body = null;
+  try {
+    body = await withStepUp(EMB_STEP_UP_WHY, () => api('/admin/embeddings'));
+  } catch (err) {
+    refused.textContent = refusalText(err, 'The similarity indexes could not be read.');
+    show(refused, true);
+    return;
+  }
+  if (!body) {
+    refused.textContent = 'The similarity indexes are shown only after a sign-in '
+      + 'from the last 15 minutes. Open Embeddings again and confirm it is you.';
+    show(refused, true);
+    return;
+  }
+  EMB_ADM.data = body;
+  renderEmbeddingCard('WORDING', $('emb-wording-body'), body);
+  renderEmbeddingCard('MEANING', $('emb-meaning-body'), body);
+  const note = $('emb-coverage-note');
+  note.textContent = body.coverage_note || '';
+  show(note, !!body.coverage_note);
+  const live = (body.spaces || []).filter((s) => s.state !== 'RETIRED');
+  show($('emb-gaps-box'), !!body.coverage && live.length > 0);
+  if (!body.coverage || !live.length) return;
+  const sel = $('emb-gaps-space');
+  const before = sel.value;
+  clear(sel);
+  for (const s of live) {
+    const o = el('option', null, EMB_ROLE_NAME[s.role] + ', slot ' + s.slot + ', '
+      + EMB_STATE_NAME[s.state]);
+    o.value = s.id;
+    sel.appendChild(o);
+  }
+  if (live.some((s) => s.id === before)) sel.value = before;
+  loadEmbeddingGaps(false);
+}
+
+function renderEmbeddingCard(role, box, body) {
+  clear(box);
+  const spaces = (body.spaces || []).filter((s) => s.role === role
+    && (s.state !== 'RETIRED' || !s.rows_cleared_at));
+  if (role === 'WORDING') {
+    box.appendChild(el('p', 'help', body.wording_setting === 'off'
+      ? 'Off by configuration (NOCTORNAL_EMBED_WORDING).'
+      : 'Runs on this host. Nothing it compares leaves it.'));
+  } else {
+    renderEndpointFacts(box, body.endpoint);
+  }
+  if (!spaces.length) box.appendChild(el('p', 'empty', noIndexText(role, body)));
+  for (const s of spaces) box.appendChild(embeddingSpaceRow(s, body));
+  const label = el('label', 'field');
+  label.appendChild(el('span', 'label', 'Reason, for the audit trail'));
+  const reason = el('input');
+  reason.type = 'text';
+  reason.autocomplete = 'off';
+  reason.minLength = 5;
+  label.appendChild(reason);
+  box.appendChild(label);
+  const actions = el('div', 'emb-actions');
+  const act = (text, run) => {
+    const b = el('button', 'btn small', text);
+    b.type = 'button';
+    b.addEventListener('click', () => run(b));
+    actions.appendChild(b);
+  };
+  act('Rebuild…', (b) => embRebuild(role, b, reason));
+  const building = spaces.find((s) => s.state === 'BUILDING');
+  if (building) act('Activate the new index…', (b) => embActivate(building, b, reason));
+  for (const s of spaces.filter((x) => x.state !== 'RETIRED')) {
+    const which = EMB_STATE_NAME[s.state] + ' index';
+    act('Recheck the ' + which + '…', (b) => embRecheck(s, b, reason));
+    act('Retire the ' + which + '…', (b) => embRetire(s, b, reason));
+  }
+  act('Run a pass now', (b) => embPass(role, b));
+  box.appendChild(actions);
+}
+
+/** Why a role has no index. Only a role's first index is started by the
+ *  embedding pass; after a retire only Rebuild starts one (2026-09-25),
+ *  so "the pass builds the first one" would be untrue. */
+function noIndexText(role, body) {
+  const retired = (body.spaces || []).some((s) => s.role === role
+    && s.state === 'RETIRED');
+  if (retired) {
+    return 'No index. The last one was retired, and nothing replaces it until '
+      + 'someone presses Rebuild.';
+  }
+  return 'No index yet. The embedding pass builds the first one.';
+}
+
+/** What a retire will do, before it does it. Retiring the active index with
+ *  no new one being built leaves the role with none: the pass never starts
+ *  a replacement by itself, because a new similar meaning index sends every
+ *  eligible text to the model endpoint again. */
+function retireQuestion(space, spaces) {
+  let text = 'Retire the ' + EMB_STATE_NAME[space.state] + ' index? It stops '
+    + 'answering at once and is never used again; its rows are cleared by the '
+    + 'next passes.';
+  const building = (spaces || []).some((s) => s.role === space.role
+    && s.state === 'BUILDING' && s.id !== space.id);
+  if (space.state === 'ACTIVE' && !building) {
+    text += ' Nothing replaces it until someone presses Rebuild.';
+  }
+  return text;
+}
+
+function renderEndpointFacts(box, ep) {
+  if (!ep || !ep.configured) {
+    box.appendChild(el('p', 'help', 'No model endpoint is configured, so no case '
+      + 'text is sent anywhere to be embedded.'));
+    return;
+  }
+  for (const p of ep.problems || []) box.appendChild(el('p', 'msg bad', p));
+  if (!ep.endpoint) return;
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('endpoint', visibleText(ep.endpoint)));
+  facts.appendChild(fact('where', ep.locality || NO_VALUE));
+  facts.appendChild(fact('ceiling', 'TLP:' + ep.ceiling));
+  facts.appendChild(fact('authority', ep.authority ? visibleText(ep.authority)
+    : 'not declared'));
+  facts.appendChild(fact('message authority', ep.message_authority
+    ? visibleText(ep.message_authority) : 'not declared'));
+  if (ep.local_host) {
+    facts.appendChild(fact('declared as this host', visibleText(ep.local_host)));
+  }
+  box.appendChild(facts);
+  if (ep.route_status) box.appendChild(el('p', 'help', closeClause(ep.route_status)));
+}
+
+function embeddingSpaceRow(s, body) {
+  const row = el('div', 'emb-space');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', 'Slot ' + s.slot));
+  head.appendChild(el('span', 'chip small', EMB_STATE_NAME[s.state]));
+  row.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('model', visibleText(s.model)));
+  facts.appendChild(s.state === 'ACTIVE'
+    ? fact('active since', fmtTime(s.activated_at))
+    : fact('registered', fmtTime(s.created_at)));
+  if (s.retired_at) facts.appendChild(fact('retired', fmtTime(s.retired_at)));
+  if (s.registered_endpoint) {
+    facts.appendChild(fact('registered at', visibleText(s.registered_endpoint)));
+  }
+  if (s.unicode_version) facts.appendChild(fact('Unicode', s.unicode_version));
+  row.appendChild(facts);
+  if (s.model_mismatch_at) {
+    row.appendChild(el('p', 'msg bad', 'The model behind the endpoint changed on '
+      + fmtTime(s.model_mismatch_at) + '. Nothing new is added to this index; '
+      + 'rebuild it to compare new text.'));
+  }
+  if (s.state === 'RETIRED') {
+    row.appendChild(el('p', 'help', 'Its rows are cleared by the next passes, which '
+      + 'frees its slot.'));
+  }
+  const cov = body.coverage ? body.coverage[s.id] : null;
+  const line = similarCoverageLine(cov, { one: 'collected document',
+                                   many: 'collected documents' });
+  if (line) row.appendChild(line);
+  return row;
+}
+
+/** The reason every action records, or null (said on screen). */
+function embReason(input) {
+  const text = input.value.trim();
+  if (text.length < 5) {
+    embSay('Give a reason of at least 5 characters first: it goes into the audit '
+      + 'trail.', 'bad');
+    input.focus();
+    return null;
+  }
+  return text;
+}
+
+/** What a rebuild will do, before it does it. A similar meaning rebuild
+ *  says what it sends and where: outside this host nothing above
+ *  TLP:AMBER ever goes, whatever the ceiling says (invariant 8). */
+function rebuildQuestion(role) {
+  if (role === 'WORDING') {
+    return 'Rebuild the similar wording index? Every item is embedded again on '
+      + 'this host, in a new index, and queries keep using the current one until '
+      + 'the new one is complete. Nothing leaves this host.';
+  }
+  const ep = EMB_ADM.data ? EMB_ADM.data.endpoint : null;
+  let level = ep && ep.ceiling ? ep.ceiling : 'its ceiling';
+  if (ep && ep.destination === 'model_remote'
+      && (level === 'AMBER_STRICT' || level === 'RED')) level = 'AMBER';
+  return 'Rebuild the similar meaning index? Rebuilding sends the text of every '
+    + 'eligible item at or below TLP:' + level + ' to '
+    + (ep && ep.endpoint ? ep.endpoint : 'the model endpoint')
+    + ' again. Each batch is audited before it is sent.';
+}
+
+async function embAct(button, call, done) {
+  button.disabled = true;
+  try {
+    const body = await withStepUp(EMB_STEP_UP_WHY, call);
+    if (!body) {
+      embSay('Not done. It needs a sign-in from the last 15 minutes: press it again '
+        + 'and confirm it is you.', 'warn');
+      return null;
+    }
+    embSay(done(body), 'ok');
+    await loadEmbeddingStatus(true);
+    await loadEmbeddingsAdmin();
+    return body;
+  } catch (err) {
+    embSay('Not done. ' + closeClause(refusalText(err, '')), 'bad');
+    return null;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function embRebuild(role, button, input) {
+  const reason = embReason(input);
+  if (!reason || !window.confirm(rebuildQuestion(role))) return;
+  await embAct(button, () => api('/admin/embeddings/spaces', {
+    method: 'POST', json: { role: role, reason: reason } }),
+  (s) => (s.state === 'ACTIVE' ? 'The index is registered and active.'
+    : 'The new index is registered. The embedding pass fills it, and it becomes '
+      + 'active by itself once every item is in it.'));
+}
+
+async function embActivate(space, button, input) {
+  const reason = embReason(input);
+  if (!reason || !window.confirm('Activate the new index? The index it replaces is '
+      + 'retired, and its rows are cleared by the next passes.')) return;
+  const call = (accept) => () => api('/admin/embeddings/spaces/'
+    + encodeURIComponent(space.id) + '/activate', { method: 'POST',
+    json: { reason: reason, accept_missing: accept } });
+  const done = () => 'The new index is active; the one it replaced is retired.';
+  let partial = null;
+  button.disabled = true;
+  try {
+    const body = await withStepUp(EMB_STEP_UP_WHY, call(false));
+    if (body) {
+      embSay(done(), 'ok');
+      await loadEmbeddingStatus(true);
+      await loadEmbeddingsAdmin();
+    } else {
+      embSay('Not done. It needs a sign-in from the last 15 minutes: press it '
+        + 'again and confirm it is you.', 'warn');
+    }
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409
+        && /partial index/i.test(err.detail || '')) {
+      partial = err.detail;
+    } else {
+      embSay('Not done. ' + closeClause(refusalText(err, '')), 'bad');
+    }
+  } finally {
+    button.disabled = false;
+  }
+  if (partial && window.confirm(partial + ' Activate it with what it holds now?')) {
+    await embAct(button, call(true), done);
+  }
+}
+
+async function embRetire(space, button, input) {
+  const reason = embReason(input);
+  const spaces = EMB_ADM.data ? EMB_ADM.data.spaces : [];
+  if (!reason || !window.confirm(retireQuestion(space, spaces))) return;
+  await embAct(button, () => api('/admin/embeddings/spaces/'
+    + encodeURIComponent(space.id) + '/retire', { method: 'POST',
+    json: { reason: reason } }), () => 'The index is retired.');
+}
+
+async function embRecheck(space, button, input) {
+  const reason = embReason(input);
+  const question = space.role === 'MEANING'
+    ? 'Recheck this index? Items that failed or were withheld are judged again on '
+      + 'the next pass, and the model endpoint is sent the public canary to see '
+      + 'whether its model changed.'
+    : 'Recheck this index? Items that failed are tried again on the next pass.';
+  if (!reason || !window.confirm(question)) return;
+  await embAct(button, () => api('/admin/embeddings/spaces/'
+    + encodeURIComponent(space.id) + '/recheck', { method: 'POST',
+    json: { reason: reason } }), () => 'Done. The next pass judges them again.');
+}
+
+async function embPass(role, button) {
+  await embAct(button, () => api('/admin/embeddings/pass', { method: 'POST',
+    json: { role: role, limit: 500 } }), (r) => {
+    if (r.refused) {
+      return 'The pass sent nothing: ' + closeClause(r.refused_text || r.refused);
+    }
+    return 'The pass ran.' + (r.any_failed ? ' Some items failed; the embed-pass log '
+      + 'says why.' : '') + (r.deferred ? ' It stopped at its time limit, and the '
+      + 'next pass goes on from there.' : '');
+  });
+}
+
+async function loadEmbeddingGaps(more) {
+  const spaceId = $('emb-gaps-space').value;
+  if (!spaceId) return;
+  const q = new URLSearchParams({ space_id: spaceId, limit: '50' });
+  const status = $('emb-gaps-status').value;
+  if (status) q.set('status', status);
+  if (more && EMB_ADM.next) {
+    q.set('after_at', EMB_ADM.next.after_at);
+    q.set('after_id', EMB_ADM.next.after_id);
+  }
+  let body;
+  try {
+    body = await withStepUp(EMB_STEP_UP_WHY,
+      () => api('/admin/embeddings/gaps?' + q.toString()));
+  } catch (err) {
+    listRefused('emb-gaps-empty', refusalText(err, 'The list could not be read.'));
+    return;
+  }
+  if (!body) return;
+  const list = $('emb-gaps');
+  if (!more) clear(list);
+  for (const g of body.gaps || []) list.appendChild(embGapRow(g));
+  EMB_ADM.next = body.next;
+  show($('emb-gaps-more'), !!body.next);
+  const empty = $('emb-gaps-empty');
+  const coverage = EMB_ADM.data && EMB_ADM.data.coverage
+    ? EMB_ADM.data.coverage[spaceId] : null;
+  empty.textContent = embGapsEmptyText(status, coverage);
+  show(empty, !list.children.length);
+}
+
+const EMB_GAP_NONE = {
+  FAILED: 'No document you can read has failed in this index.',
+  WITHHELD: 'No document you can read is withheld from this index.',
+  EXCLUDED: 'No document you can read is excluded from this index.',
+  EMPTY: 'No document you can read is in this index with nothing to compare.',
+};
+
+/** What an empty gap list means, and no more. The list holds failed,
+ *  withheld, excluded and empty documents only: a document the pass has not
+ *  reached yet has no row and is never in it, and a status filter narrows
+ *  it further. "Every document you can read is in this index" was shown in
+ *  both cases and was untrue in both (2026-09-25).
+ *  `cov` is the index's coverage at the reader's labels, or null. */
+function embGapsEmptyText(status, cov) {
+  const pending = cov && cov.pending ? cov.pending : 0;
+  let text;
+  if (status) {
+    text = EMB_GAP_NONE[status] || 'No document you can read is listed for this '
+      + 'index.';
+  } else if (!pending && cov) {
+    return 'Every document you can read is in this index.';
+  } else {
+    text = 'No document you can read has failed or is withheld, excluded or empty '
+      + 'in this index.';
+  }
+  if (pending) {
+    text += ' ' + grouped(pending) + ' ' + agree(pending, 'document still waits',
+      'documents still wait') + ' for the embedding pass, and waiting documents '
+      + 'are not listed here.';
+  } else if (!cov) {
+    text += ' Documents still waiting for the embedding pass are not listed here.';
+  }
+  return text;
+}
+
+function embGapRow(g) {
+  const row = el('div', 'emb-gap');
+  row.appendChild(el('span', 'mono small', g.document_id));
+  row.appendChild(el('span', 'chip small', EMB_GAP_STATUS[g.status] || g.status));
+  row.appendChild(el('span', null, closeClause(g.reason_text || '')));
+  if (g.status === 'FAILED') {
+    row.appendChild(el('span', 'muted small', countOf(g.attempts, 'attempt',
+      'attempts') + ', tried again ' + fmtTime(g.next_attempt_at)));
+  } else if (g.status === 'WITHHELD') {
+    row.appendChild(el('span', 'muted small', 'judged again '
+      + fmtTime(g.next_attempt_at)));
+  }
+  return row;
+}
+
+/** The change a notification's Open was for, marked once the list drew.
+ *  Consumed once, like `focusApprovalTarget`. */
+function focusDualTarget() {
+  const id = DUAL.target;
+  if (!id) return;
+  DUAL.target = null;
+  const card = $('dual-change-' + id);
+  if (!card) {
+    banner('That change is not waiting any more',
+      'It may have been decided, applied, withdrawn or expired since the '
+      + 'notification. The history below lists what was applied.', 'warn');
+    return;
+  }
+  card.classList.add('is-highlighted');
+  card.scrollIntoView({ block: 'center' });
+  card.focus({ preventScroll: true });
+}
+
+/* The officer's view (F9, 2026-09-24). A Security officer who administers
+   nothing reads the Oversight view, which has no Administration pane, so
+   #dual-body is moved into a section of its own there, after break-glass,
+   the preserved samples and the collection authorities. */
+let dualReview = null;
+let dualHome = null;
+
+/** Called by `showAdmin`: mounts the section for an account that may
+ *  countersign and administers nothing, and hides it (with the body back
+ *  home) for any other, so a later sign-in on the same page never inherits
+ *  the last officer's list. */
+function showDualReview(canSee) {
+  const body = $('dual-body');
+  if (!dualHome) dualHome = { parent: body.parentNode, next: body.nextSibling };
+  if (!dualReview) {
+    dualReview = el('section', 'pane dual-review');
+    dualReview.id = 'dual-review';
+    dualReview.setAttribute('aria-label', 'Two-person changes');
+    dualReview.hidden = true;
+    dualReview.appendChild(el('h2', 'h-sm', 'Two-person changes'));
+  }
+  /* Appended last on every visit, not once: `showAdmin` re-appends the
+     break-glass queue each time, so a section placed once would drift
+     above it on the second visit and break the Oversight order. */
+  $('view-admin').appendChild(dualReview);
+  show(dualReview, canSee);
+  if (canSee) {
+    if (body.parentNode !== dualReview) dualReview.appendChild(body);
+    loadDualControl();
+  } else {
+    returnDualBody();
+  }
+}
+
+/** #dual-body back into the Administration subpane it belongs to. */
+function returnDualBody() {
+  const body = $('dual-body');
+  if (dualHome && body.parentNode !== dualHome.parent) {
+    dualHome.parent.insertBefore(body, dualHome.next);
+  }
+}
+
+function initDualControl() {
+  $('dual-signin').addEventListener('click', loadDualControl);
+  $('dual-pair-form').addEventListener('submit', submitDualPair);
+}
+
+/* --- the collection authorities waiting for a second person -------------
+ *
+ * 2026-09-24 (docs/00 decision 69). A collection manager records a written
+ * authority and the sources under it; a security officer confirms it, and
+ * each source, as the second person, and nothing is read from a source
+ * before that. The officer's section is built here and mounted on the
+ * deployment view only, as the preserved samples are, so it never lands in
+ * a case pane. The listing needs a fresh second factor, so the sign-in is
+ * asked for BEFORE the read, as it is before every confirm.
+ */
+let authorityReview = null;
+let authorityReviewGen = 0;
+
+/** Called by `showAdmin`: mounts the section for an account that confirms
+ *  authorities, and hides it for any other, so a later sign-in on the same
+ *  page never inherits the last officer's list. Appended on every visit,
+ *  as the two-person section is, so it stays after the break-glass queue
+ *  and the preserved samples. */
+function showAuthorityReview(canSee) {
+  if (!authorityReview) authorityReview = buildAuthorityReview();
+  $('view-admin').appendChild(authorityReview);
+  show(authorityReview, canSee);
+  if (canSee) {
+    loadAuthorityReview();
+  } else {
+    authorityReviewGen += 1;
+    clear($('cauth-pending'));
+    clear($('cauth-live'));
+    $('cauth-counts').textContent = '';
+  }
+}
+
+function buildAuthorityReview() {
+  const box = el('section', 'pane authority-review');
+  box.id = 'cauth-review';
+  box.setAttribute('aria-label', 'Collection authorities');
+  box.hidden = true;
+  box.appendChild(el('h2', 'h-sm', 'Collection authorities'));
+  box.appendChild(el('p', 'help',
+    'A collection manager recorded each of these from a written authority '
+    + 'that exists outside this system. Confirm one only when you have seen '
+    + 'that document and the sources listed match it. Nothing is read from '
+    + 'these sources until you confirm, and you can refuse or revoke one at '
+    + 'any time.'));
+  const head = el('div', 'pane-head');
+  const refresh = el('button', 'btn', 'Refresh');
+  refresh.type = 'button';
+  refresh.id = 'cauth-refresh';
+  refresh.addEventListener('click', () => loadAuthorityReview());
+  head.appendChild(refresh);
+  const counts = el('span', 'muted small');
+  counts.id = 'cauth-counts';
+  head.appendChild(counts);
+  box.appendChild(head);
+  const withheld = el('p', 'help', 'Some authorities are above your clearance.');
+  withheld.id = 'cauth-withheld';
+  withheld.hidden = true;
+  box.appendChild(withheld);
+  /* Each id written out, so the id check can see it is made here. */
+  box.appendChild(el('h3', 'h-xs', 'Waiting for a second person'));
+  const pending = el('div', 'rows');
+  pending.id = 'cauth-pending';
+  box.appendChild(pending);
+  const pendingEmpty = el('p', 'empty', 'Nothing waits for a second person.');
+  pendingEmpty.id = 'cauth-pending-empty';
+  pendingEmpty.hidden = true;
+  box.appendChild(pendingEmpty);
+  box.appendChild(el('h3', 'h-xs', 'In force'));
+  const live = el('div', 'rows');
+  live.id = 'cauth-live';
+  box.appendChild(live);
+  const liveEmpty = el('p', 'empty', 'No collection authority is in force.');
+  liveEmpty.id = 'cauth-live-empty';
+  liveEmpty.hidden = true;
+  box.appendChild(liveEmpty);
+  return box;
+}
+
+async function loadAuthorityReview() {
+  const gen = ++authorityReviewGen;
+  listPending('cauth-pending', 'cauth-pending-empty');
+  listPending('cauth-live', 'cauth-live-empty');
+  let body;
+  try {
+    body = await withStepUp('The collection authorities need a recent sign-in.',
+      () => api('/collection/authorities/review'));
+  } catch (err) {
+    if (gen !== authorityReviewGen) return;
+    renderList('cauth-pending', 'cauth-pending-empty', [], authorityReviewRow);
+    renderList('cauth-live', 'cauth-live-empty', [], authorityReviewRow);
+    $('cauth-counts').textContent = '';
+    if (err instanceof ApiError && err.status === 403) {
+      listRefused('cauth-pending-empty', refusalText(err,
+        'Confirming a collection authority needs collection.authority.confirm.'));
+      return;
+    }
+    showLoadFailure('cauth-pending-empty', 'The collection authorities', err,
+      loadAuthorityReview);
+    return;
+  }
+  if (gen !== authorityReviewGen) return;
+  if (!body) {
+    renderList('cauth-pending', 'cauth-pending-empty', [], authorityReviewRow);
+    renderList('cauth-live', 'cauth-live-empty', [], authorityReviewRow);
+    listRefused('cauth-pending-empty', 'Sign in again to read the collection '
+      + 'authorities, then press Refresh.');
+    return;
+  }
+  const pending = body.pending || [];
+  const live = body.live || [];
+  renderList('cauth-pending', 'cauth-pending-empty', pending,
+    (a) => authorityReviewRow(a, true));
+  renderList('cauth-live', 'cauth-live-empty', live,
+    (a) => authorityReviewRow(a, false));
+  $('cauth-counts').textContent = countOf(pending.length, 'authority waits',
+    'authorities wait') + ' for a second person';
+  show($('cauth-withheld'), Boolean(body.withheld));
+}
+
+/** One authority for the officer: what it is, what it covers, the sources
+ *  waiting (ticked to confirm) and those in force, and the verbs. On the
+ *  pending list the verbs are Confirm and Refuse; on the in-force list,
+ *  Revoke. */
+function authorityReviewRow(a, pendingList) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(a.authority_ref)));
+  head.appendChild(tlpChip(a.classification));
+  head.appendChild(authorityChip(a));
+  card.appendChild(head);
+  card.appendChild(el('p', 'muted small', visibleText(a.scope_words || a.scope)));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('reference', visibleText(a.authority_ref)));
+  facts.appendChild(fact('issued by', visibleText(a.issued_by)));
+  facts.appendChild(fact('jurisdiction', visibleText(a.jurisdiction)));
+  facts.appendChild(fact('legal basis', visibleText(a.legal_basis)));
+  if (a.member_authority_ref) {
+    facts.appendChild(fact('member access reference',
+      visibleText(a.member_authority_ref)));
+  }
+  facts.appendChild(fact('classification', a.classification));
+  facts.appendChild(fact('valid from', fmtTime(a.valid_from)));
+  facts.appendChild(fact('valid until', fmtTime(a.valid_until)));
+  facts.appendChild(fact('persona', a.persona ? personaLabel(a.persona) : 'No persona'));
+  facts.appendChild(fact('recorded by', visibleText(a.recorded_by_name)));
+  card.appendChild(facts);
+  card.appendChild(el('p', 'why', 'Covers: ' + visibleText(a.target_description)));
+  if (a.persona_acts) card.appendChild(el('p', 'help', visibleText(a.persona_acts)));
+  const targets = a.targets || [];
+  const waiting = targets.filter((t) => t.state === 'PENDING');
+  const confirmed = targets.filter((t) => t.state === 'LIVE');
+  const ticks = [];
+  if (pendingList && waiting.length) {
+    card.appendChild(el('p', 'label', 'Sources waiting for you'));
+    const box = el('div', 'check-list');
+    for (const t of waiting) {
+      const label = el('label', 'field inline check');
+      const tick = el('input');
+      tick.type = 'checkbox';
+      tick.value = t.id;
+      ticks.push(tick);
+      label.appendChild(tick);
+      label.appendChild(el('span', null, authorityTargetText(t)));
+      box.appendChild(label);
+    }
+    card.appendChild(box);
+  }
+  if (confirmed.length) {
+    const lines = el('div', 'facts');
+    for (const t of confirmed) {
+      lines.appendChild(fact('confirmed source', authorityTargetText(t)));
+    }
+    card.appendChild(lines);
+  }
+  if (a.has_hidden_targets) {
+    card.appendChild(el('p', 'help', 'Some sources under this authority are '
+      + 'above your clearance, and you cannot confirm them.'));
+  }
+  const msg = el('p', 'form-error');
+  msg.setAttribute('role', 'alert');
+  msg.hidden = true;
+  const actions = el('div', 'row-actions');
+  if (pendingList) {
+    const noteField = el('label', 'field grow');
+    noteField.appendChild(el('span', 'label', 'What you checked'));
+    const note = el('input');
+    note.type = 'text';
+    note.maxLength = 1000;
+    note.autocomplete = 'off';
+    noteField.appendChild(note);
+    const confirmBtn = el('button', 'btn small primary', 'Confirm');
+    confirmBtn.type = 'button';
+    const ready = () => {
+      const ticked = ticks.some((t) => t.checked);
+      confirmBtn.disabled = note.value.trim().length < 5
+        || !(a.confirmed_at === null || a.confirmed_at === undefined || ticked);
+    };
+    note.addEventListener('input', ready);
+    for (const t of ticks) t.addEventListener('change', ready);
+    ready();
+    confirmBtn.addEventListener('click', async () => {
+      confirmBtn.disabled = true;
+      setMsg(msg, '');
+      try {
+        const out = await withStepUp('Confirming an authority needs a recent '
+          + 'sign-in.', () => api('/collection/authorities/' + a.id + '/confirm',
+          { method: 'POST', json: { note: note.value.trim(),
+            target_ids: ticks.filter((t) => t.checked).map((t) => t.value) } }));
+        if (out) loadAuthorityReview();
+      } catch (err) {
+        setMsg(msg, err instanceof ApiError ? (err.detail || err.title) : String(err));
+      } finally {
+        ready();
+      }
+    });
+    actions.appendChild(noteField);
+    actions.appendChild(confirmBtn);
+  }
+  const stop = el('button', 'btn small danger', pendingList ? 'Refuse' : 'Revoke');
+  stop.type = 'button';
+  stop.addEventListener('click', () => rowForm(card, {
+    kind: 'stop', submit: pendingList ? 'Refuse' : 'Revoke',
+    help: 'Nothing is read under a refused or revoked authority, and it cannot '
+      + 'be undone.',
+    fields: [{ label: 'Why', grow: true }],
+    check: ([why]) => (why.trim().length < 5
+      ? 'Say why, in at least 5 characters.' : null),
+    submitFn: async ([why]) => {
+      const out = await withStepUp('Stopping an authority needs a recent '
+        + 'sign-in.', () => api('/collection/authorities/' + a.id + '/refuse',
+        { method: 'POST', json: { reason: why.trim() } }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      loadAuthorityReview();
+    },
+  }));
+  actions.appendChild(stop);
+  card.appendChild(actions);
+  card.appendChild(msg);
+  return card;
+}
+
+/* --- Admin: egress ---------------------------------------------------------
+ *
+ * S2 (2026-09-24; docs/00 decision 68). Where anything may
+ * leave this deployment, made visible and changeable in one place: the
+ * egress proxy's state, the egress profiles persona traffic leaves through
+ * (their policy and their sealed exit), the integration routes and the
+ * exact destinations each may reach, and the connection log the proxy
+ * writes. GET /admin/egress needs egress.log.read; every write needs
+ * egress.manage and a sign-in from the last 15 minutes (withStepUp).
+ *
+ * An exit's address and credentials go to the server once and are sealed
+ * for the proxy, which alone can open them: no field here is ever filled
+ * from an answer, and the password field is emptied whatever the outcome.
+ * A change that lets a profile reach further is asked about first, with
+ * what it costs: every collection authority recorded before it stops
+ * working until a second person confirms a new one.
+ */
+const EGR_STEP_UP_WHY = 'Egress changes need a sign-in from the last 15 minutes. '
+  + 'Nothing on screen changes.';
+const EGR = {
+  gen: 0,            // the read on screen, so a slower earlier one is dropped
+  overview: null,    // the last GET /admin/egress
+  notes: new Map(),  // profile or route id -> { text, kind }
+};
+
+const EGR_EVENT_WORDS = {
+  OPEN: 'Opened', REFUSED: 'Refused', PREAUTH: 'Refused before sign-in',
+  REWRAP: 'Sealed again',
+};
+const EGR_KIND_WORDS = {
+  RESIDENTIAL: 'Residential', DATACENTRE: 'Datacentre', VPN: 'VPN', TOR: 'Tor',
+};
+
+function egrSay(text) { $('egr-say').textContent = text; }
+
+function egrStepUp(call) {
+  return canEgressManage ? withStepUp(EGR_STEP_UP_WHY, call) : call();
+}
+
+/** Lines of a textarea, trimmed, blanks dropped. */
+function egrLines(text) {
+  return String(text || '').split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+function egrPorts(text) {
+  return String(text || '').split(/[\s,]+/).filter(Boolean).map(Number);
+}
+
+async function loadEgress() {
+  const gen = ++EGR.gen;
+  show($('egr-refused'), false);
+  show($('egr-signin'), false);
+  listPending('egr-prof-list', 'egr-prof-empty');
+  listPending('egr-route-list', 'egr-route-empty');
+  let overview = null;
+  let failure = null;
+  try {
+    overview = await api('/admin/egress');
+  } catch (err) {
+    failure = err;
+  }
+  if (gen !== EGR.gen) return;
+  if (!overview) {
+    paintEgressRefused(failure);
+    return;
+  }
+  EGR.overview = overview;
+  renderEgressStatus(overview);
+  paintEgressForms(overview);
+  $('egr-notice').textContent = overview.notice || '';
+  /* Retired profiles and routes stay on the record (a name is unique for
+     life), folded under one line so the live ones are what the section
+     shows. */
+  const profiles = overview.profiles || [];
+  renderList('egr-prof-list', 'egr-prof-empty', profiles.filter((p) => !p.retired),
+             egressProfileCard);
+  paintEgressRetired('egr-prof-retired', profiles.filter((p) => p.retired),
+                     egressProfileCard, 'retired profile', 'retired profiles');
+  const hidden = $('egr-prof-hidden');
+  hidden.textContent = overview.withheld
+    ? 'and ' + countOf(overview.withheld, 'profile', 'profiles')
+      + ' you are not cleared to see, shown by name and state only'
+    : '';
+  show(hidden, overview.withheld > 0);
+  const routes = overview.routes || [];
+  renderList('egr-route-list', 'egr-route-empty', routes.filter((r) => !r.retired),
+             egressRouteCard);
+  paintEgressRetired('egr-route-retired', routes.filter((r) => r.retired),
+                     egressRouteCard, 'retired route', 'retired routes');
+  fillEgressLogRoutes(overview);
+  await loadEgressLog();
+}
+
+/** The retired rows under one folded line. */
+function paintEgressRetired(id, rows, build, one, many) {
+  const box = $(id + '-list');
+  clear(box);
+  for (const row of rows) box.appendChild(build(row));
+  $(id + '-sum').textContent = countOf(rows.length, one, many);
+  show($(id), rows.length > 0);
+}
+
+function paintEgressRefused(err) {
+  for (const id of ['egr-prof-list', 'egr-route-list', 'egr-log']) clear($(id));
+  const refused = $('egr-refused');
+  if (err instanceof ApiError && err.status === 403) {
+    refused.textContent = refusalText(err, 'Egress is read by an administrator or '
+      + 'a Security officer.');
+    show(refused, true);
+    return;
+  }
+  showLoadFailure('egr-prof-empty', 'The egress configuration', err, loadEgress);
+}
+
+/** The proxy's state in words, and the way to the readiness rows. */
+function renderEgressStatus(overview) {
+  const box = $('egr-status');
+  clear(box);
+  const p = overview.proxy || {};
+  let text;
+  if (p.mode === 'proxy') {
+    text = 'Egress proxy at ' + p.address + ' (HTTP CONNECT and SOCKS5).';
+  } else if (p.mode === 'development') {
+    text = 'Development: no egress proxy is configured. Connections are made '
+      + 'directly by this process under the same policy, so the network boundary '
+      + 'is not in force.';
+  } else if (p.mode === 'production_without_proxy') {
+    text = 'Production without an egress proxy: nothing can leave.';
+  } else {
+    text = p.problem || 'The egress proxy setting cannot be used.';
+  }
+  text += p.seal_key_id
+    ? ' Sealing key ' + p.seal_key_id + '.'
+    : ' No sealing key is set for this process, so exits cannot be sealed here: '
+      + 'set NOCTORNAL_EGRESS_SEAL_PUBLIC (python scripts/egress_setup.py keygen).';
+  box.appendChild(el('p', 'egr-status-text', text));
+  const go = el('button', 'btn ghost small', 'Go to Readiness');
+  go.type = 'button';
+  go.addEventListener('click', () => selectAdminSub('readiness'));
+  box.appendChild(go);
+}
+
+function paintEgressForms(overview) {
+  show($('egr-prof-box'), canEgressManage);
+  show($('egr-route-box'), canEgressManage);
+  const preset = (overview.presets || {}).telegram;
+  show($('egr-preset-telegram'), !!preset);
+  const help = $('egr-preset-help');
+  help.textContent = preset ? preset.note : '';
+  show(help, false);
+  const names = $('egr-route-name');
+  const current = names.value;
+  const pairs = (overview.integrations || []).map((n) => [n, n]);
+  for (const family of overview.families || []) {
+    pairs.push([family, 'A lookup provider']);
+  }
+  opts(names, pairs, current || (pairs[0] && pairs[0][0]));
+  show($('egr-route-key-box'), (names.value || '').endsWith('-'));
+}
+
+/** What a policy lets a profile reach, in one sentence. */
+function egressPolicySummary(policy) {
+  const parts = [];
+  if (policy.any_public_host) parts.push('any public host');
+  const suffixes = policy.allowed_host_suffixes || [];
+  if (suffixes.length) {
+    parts.push(countOf(suffixes.length, 'host suffix', 'host suffixes') + ' ('
+      + suffixes.map(visibleText).join(', ') + ')');
+  }
+  const cidrs = policy.allowed_cidrs || [];
+  if (cidrs.length) parts.push(countOf(cidrs.length, 'network', 'networks'));
+  if (policy.allow_onion) parts.push('onion services');
+  const ports = (policy.allowed_ports || []).join(', ');
+  return (parts.length ? parts.join(', ') : 'nothing yet') + ', on '
+    + agree((policy.allowed_ports || []).length, 'port', 'ports') + ' ' + ports;
+}
+
+/** Whether `next` lets the profile reach further than its current policy:
+ *  the database decides (collect.egress_profile_reach), this only asks
+ *  first. */
+function egressWidens(p, next) {
+  const now = p.policy || {};
+  const within = (a, b) => (a || []).every((x) => (b || []).map(String).includes(String(x)));
+  if (next.allowed_ports && !within(next.allowed_ports, now.allowed_ports)) return true;
+  if (next.any_public_host && !now.any_public_host) return true;
+  if (next.allowed_host_suffixes && !within(next.allowed_host_suffixes,
+    now.allowed_host_suffixes)) return true;
+  if (next.allowed_cidrs && !within(next.allowed_cidrs, now.allowed_cidrs)) return true;
+  if (next.allow_onion && !now.allow_onion) return true;
+  const order = ['CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED'];
+  if (next.ceiling && order.indexOf(next.ceiling) > order.indexOf(p.ceiling)) return true;
+  return false;
+}
+
+/** The question a widening asks first, with its cost in authorities. */
+function egressWidenQuestion(p, n, above) {
+  const name = visibleText(p.name);
+  const cost = n
+    ? 'The ' + countOf(n, 'live authority', 'live authorities') + ' for its personas '
+      + agree(n, 'was', 'were') + ' confirmed before this change, so none of them can '
+      + 'be used again until a new authority is recorded and confirmed by a second '
+      + 'person.'
+    : 'Any collection authority recorded before this change stops working until a '
+      + 'new one is recorded and confirmed by a second person.';
+  return name + ' will reach further than before. ' + cost
+    + (above ? ' Authorities above your clearance are affected too.' : '')
+    + '\n\nWiden it?';
+}
+
+function egressProfileCard(p) {
+  const card = el('div', 'card row-card egr-profile');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(p.name)));
+  const chips = el('span', 'chips');
+  chips.appendChild(el('span', 'chip', EGR_KIND_WORDS[p.kind] || p.kind));
+  chips.appendChild(el('span', 'chip', p.exit_kind ? 'Exit ' + p.exit_kind : 'No exit'));
+  chips.appendChild(el('span', 'chip' + (p.retired ? '' : (p.is_active ? ' ok' : ' warn')),
+    p.retired ? 'Retired' : (p.is_active ? 'On' : 'Off')));
+  if (p.is_passive_default) chips.appendChild(el('span', 'chip flag', 'Passive default'));
+  if (p.ceiling) chips.appendChild(tlpChip(p.ceiling));
+  head.appendChild(chips);
+  card.appendChild(head);
+  if (p.withheld) {
+    card.appendChild(el('p', 'help', 'Above your clearance: only its name, kind, '
+      + 'exit and state are shown.'));
+    return card;
+  }
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('reaches', egressPolicySummary(p.policy || {})));
+  if (p.exit_kind === 'DIRECT') {
+    facts.appendChild(fact('exit', 'leaves from this deployment\'s own address'));
+  } else if (p.exit_kind) {
+    facts.appendChild(fact('exit', p.exit_kind + ', sealed ' + fmtTime(p.exit_sealed_at)
+      + (p.exit_sealed_by ? ' by ' + visibleText(p.exit_sealed_by) : '')
+      + ' under key ' + (p.exit_seal_key_id || NO_VALUE)
+      + '. The address and credentials cannot be shown again.'));
+  }
+  facts.appendChild(fact('reach changed', p.reach_changed_at
+    ? fmtTime(p.reach_changed_at) : 'not since it was set up'));
+  facts.appendChild(fact('personas', String(p.persona_count || 0)));
+  facts.appendChild(fact('live authorities', String(p.live_authorities || 0)
+    + (p.authorities_above_clearance ? ' and more above your clearance' : '')));
+  card.appendChild(facts);
+  if (p.cleartext_upstream_ack) {
+    card.appendChild(el('p', 'msg warn', 'The exit\'s credentials and every target '
+      + 'name cross the internet in clear to this provider.'));
+  }
+  if (p.policy && p.policy.resolve_at_proxy) {
+    card.appendChild(el('p', 'msg warn', 'Every target name this persona visits is '
+      + 'looked up by this platform\'s own resolver, which the exit is meant to hide.'));
+  }
+  const note = EGR.notes.get(p.id);
+  const noteLine = el('p', 'msg adm-note' + (note ? ' ' + note.kind : ''),
+    note ? note.text : '');
+  noteLine.setAttribute('role', 'status');
+  show(noteLine, !!note);
+  card.appendChild(noteLine);
+  if (!canEgressManage || p.retired) return card;
+  const actions = el('div', 'row-actions');
+  const slot = el('div', 'egr-slot');
+  const toggle = (label, build) => {
+    const btn = el('button', 'btn small', label);
+    btn.type = 'button';
+    btn.addEventListener('click', () => {
+      const open = slot.firstChild && slot.firstChild.dataset.form === label;
+      clear(slot);
+      if (!open) {
+        const form = build();
+        form.dataset.form = label;
+        slot.appendChild(form);
+        const first = form.querySelector('input, select, textarea');
+        if (first) first.focus();
+      }
+    });
+    return btn;
+  };
+  actions.appendChild(toggle('Seal an exit', () => egressExitForm(p, noteLine)));
+  actions.appendChild(toggle('Change the policy', () => egressPolicyForm(p, noteLine)));
+  if (!p.is_passive_default && p.kind === 'DATACENTRE' && !p.persona_count) {
+    const pd = el('button', 'btn small', 'Make passive default');
+    pd.type = 'button';
+    pd.addEventListener('click', () => setEgressPassiveDefault(p, pd, noteLine));
+    actions.appendChild(pd);
+  }
+  const onoff = el('button', 'btn small', p.is_active ? 'Deactivate' : 'Activate');
+  onoff.type = 'button';
+  onoff.addEventListener('click', () => setEgressProfileActive(p, !p.is_active, onoff,
+                                                               noteLine));
+  actions.appendChild(onoff);
+  actions.appendChild(toggle('Retire', () => egressRetireForm(p, noteLine)));
+  card.appendChild(actions);
+  card.appendChild(slot);
+  return card;
+}
+
+/** Run one egress write behind the step-up gate; the outcome on `line`. */
+async function egressAct(call, btn, line, done) {
+  if (btn) btn.disabled = true;
+  try {
+    const body = await egrStepUp(call);
+    if (!body) {
+      egressNote(line, 'Not done. ' + admStepUpAgain(btn ? btn.textContent : ''), 'warn');
+      return null;
+    }
+    const text = done(body);
+    egrSay(text);
+    await loadEgress();
+    return body;
+  } catch (err) {
+    if (!(err instanceof ApiError)) { fail(err); return null; }
+    egressNote(line, 'Not done. ' + (admStepUpRefused(err)
+      ? admStepUpAgain(btn ? btn.textContent : '')
+      : (err.detail || err.title)), 'bad');
+    return null;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function egressNote(line, text, kind) {
+  if (!line) return;
+  line.className = 'msg adm-note ' + (kind || '');
+  setMsg(line, text);
+  egrSay(text);
+}
+
+function egressPolicyForm(p, line) {
+  const policy = p.policy || {};
+  const form = el('form', 'stack row-inline egr-form');
+  form.noValidate = true;
+  const field = (label, input) => {
+    const wrap = el('label', 'field');
+    wrap.appendChild(el('span', 'label', label));
+    wrap.appendChild(input);
+    return wrap;
+  };
+  const ports = el('input');
+  ports.type = 'text';
+  ports.value = (policy.allowed_ports || []).join(', ');
+  const any = el('input');
+  any.type = 'checkbox';
+  any.checked = !!policy.any_public_host;
+  const anyLabel = el('label', 'check');
+  anyLabel.append(any, ' Any public host');
+  const suffixes = el('textarea');
+  suffixes.rows = 3;
+  suffixes.spellcheck = false;
+  suffixes.value = (policy.allowed_host_suffixes || []).join('\n');
+  const cidrs = el('textarea');
+  cidrs.rows = 3;
+  cidrs.spellcheck = false;
+  cidrs.value = (policy.allowed_cidrs || []).join('\n');
+  const ceiling = el('select', 'select');
+  opts(ceiling, [['CLEAR', 'CLEAR'], ['GREEN', 'GREEN'], ['AMBER', 'AMBER'],
+    ['AMBER_STRICT', 'AMBER STRICT'], ['RED', 'RED']], p.ceiling);
+  const row = el('div', 'row-form');
+  row.append(field('Ports', ports), field('Highest label', ceiling), anyLabel);
+  form.append(row, field('Host suffixes, one a line', suffixes),
+    field('Public networks, one a line', cidrs));
+  let onion = null;
+  let resolve = null;
+  if (p.kind === 'TOR') {
+    onion = el('input');
+    onion.type = 'checkbox';
+    onion.checked = !!policy.allow_onion;
+    const l = el('label', 'check');
+    l.append(onion, ' Onion services');
+    form.appendChild(l);
+  } else {
+    resolve = el('input');
+    resolve.type = 'checkbox';
+    resolve.checked = !!policy.resolve_at_proxy;
+    const l = el('label', 'check');
+    l.append(resolve, ' Resolve target names at the proxy');
+    form.appendChild(l);
+  }
+  const save = el('button', 'btn primary small', 'Save the policy');
+  save.type = 'submit';
+  form.appendChild(save);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const body = {
+      ceiling: ceiling.value,
+      allowed_ports: egrPorts(ports.value),
+      any_public_host: any.checked,
+      allowed_host_suffixes: egrLines(suffixes.value),
+      allowed_cidrs: egrLines(cidrs.value),
+    };
+    if (onion) body.allow_onion = onion.checked;
+    if (resolve) body.resolve_at_proxy = resolve.checked;
+    saveEgressPolicy(p, body, save, line);
+  });
+  return form;
+}
+
+async function saveEgressPolicy(p, body, btn, line) {
+  if (egressWidens(p, body)
+      && !window.confirm(egressWidenQuestion(p, p.live_authorities || 0,
+                                             p.authorities_above_clearance))) {
+    return;
+  }
+  await egressAct(() => api('/admin/egress/profiles/' + p.id + '/policy',
+    { method: 'PATCH', json: body }), btn, line, (res) => {
+    const text = res.widened
+      ? 'Saved. It now reaches further than before: '
+        + countOf(res.authorities_affected || 0, 'authority', 'authorities')
+        + ' recorded before now ' + agree(res.authorities_affected || 0, 'no longer passes',
+          'no longer pass') + '.'
+      : 'Saved.';
+    EGR.notes.set(p.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+/** The exit form. Nothing is ever filled from the server; the password is
+ *  emptied after the submit whatever came of it. */
+function egressExitForm(p, line) {
+  const form = el('form', 'stack row-inline egr-form egr-exit-form');
+  form.noValidate = true;
+  const kinds = p.kind === 'TOR' ? ['SOCKS5']
+    : (p.kind === 'DATACENTRE' ? ['DIRECT', 'HTTPS', 'HTTP', 'SOCKS5']
+      : ['HTTPS', 'HTTP', 'SOCKS5']);
+  const group = el('fieldset', 'egr-kinds');
+  group.appendChild(el('legend', 'label', 'Exit'));
+  const radios = [];
+  for (const kind of kinds) {
+    const r = el('input');
+    r.type = 'radio';
+    r.name = 'egr-exit-' + p.id;
+    r.value = kind;
+    r.checked = kind === kinds[0];
+    const l = el('label', 'check');
+    l.append(r, ' ' + (kind === 'DIRECT' ? 'This deployment\'s own address' : kind));
+    group.appendChild(l);
+    radios.push(r);
+  }
+  const field = (label, input) => {
+    const wrap = el('label', 'field');
+    wrap.appendChild(el('span', 'label', label));
+    wrap.appendChild(input);
+    return wrap;
+  };
+  const host = el('input');
+  host.type = 'text';
+  host.autocomplete = 'off';
+  host.spellcheck = false;
+  const port = el('input');
+  port.type = 'number';
+  port.min = '1';
+  port.max = '65535';
+  const user = el('input');
+  user.type = 'text';
+  user.autocomplete = 'off';
+  user.spellcheck = false;
+  const pass = el('input');
+  pass.type = 'password';
+  pass.autocomplete = 'off';
+  const ack = el('input');
+  ack.type = 'checkbox';
+  const ackLabel = el('label', 'check');
+  ackLabel.append(ack, ' Send the exit\'s credentials in clear: they and every target '
+    + 'name cross the internet in clear to this provider');
+  const details = el('div', 'row-form');
+  details.append(field('Host', host), field('Port', port), field('User name', user),
+    field('Password', pass));
+  const kind = () => (radios.find((r) => r.checked) || {}).value;
+  const paint = () => {
+    const k = kind();
+    show(details, k !== 'DIRECT');
+    show(ackLabel, (p.kind === 'RESIDENTIAL' || p.kind === 'VPN')
+      && (k === 'HTTP' || k === 'SOCKS5'));
+  };
+  radios.forEach((r) => r.addEventListener('change', paint));
+  const seal = el('button', 'btn primary small', 'Seal');
+  seal.type = 'submit';
+  form.append(group, details, ackLabel,
+    el('p', 'help', 'Sealed for the egress proxy alone: once sealed, the address and '
+      + 'credentials cannot be shown again, here or anywhere.'), seal);
+  paint();
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = { exit_kind: kind(), cleartext_ack: ack.checked };
+    if (body.exit_kind !== 'DIRECT') {
+      body.host = host.value.trim();
+      body.port = Number(port.value);
+      body.username = user.value;
+      body.password = pass.value;
+    }
+    try {
+      await sealEgressExit(p, body, seal, line);
+    } finally {
+      pass.value = '';
+      body.password = '';
+    }
+  });
+  return form;
+}
+
+async function sealEgressExit(p, body, btn, line) {
+  if (p.exit_kind && (p.live_authorities || 0) > 0
+      && !window.confirm(visibleText(p.name) + ' has live authorities. Sealing another '
+        + 'address, port, user name or kind makes it reach further than before, and '
+        + 'those authorities stop working until new ones are confirmed; a password '
+        + 'change alone does not.\n\nSeal it?')) {
+    return;
+  }
+  await egressAct(() => api('/admin/egress/profiles/' + p.id + '/exit',
+    { method: 'PUT', json: body }), btn, line, (res) => {
+    const text = 'Sealed. ' + (res.notice || '')
+      + (res.widened ? ' It now reaches further than before.' : '');
+    EGR.notes.set(p.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+async function setEgressPassiveDefault(p, btn, line) {
+  await egressAct(() => api('/admin/egress/profiles/' + p.id + '/passive-default',
+    { method: 'POST' }), btn, line, () => {
+    const text = 'Feeds now leave through ' + visibleText(p.name) + '.';
+    EGR.notes.set(p.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+async function setEgressProfileActive(p, active, btn, line) {
+  await egressAct(() => api('/admin/egress/profiles/' + p.id
+    + (active ? '/activate' : '/deactivate'), { method: 'POST' }), btn, line, (res) => {
+    const text = active ? 'Switched on.' + (res.widened ? ' Switching it on counts as '
+      + 'reaching further: authorities recorded before now no longer pass.' : '')
+      : 'Switched off.';
+    EGR.notes.set(p.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+function egressRetireForm(p, line) {
+  const form = el('form', 'row-form row-inline egr-form');
+  const reason = el('input');
+  reason.type = 'text';
+  reason.autocomplete = 'off';
+  reason.minLength = 5;
+  reason.placeholder = 'Why it is retired';
+  const go = el('button', 'btn small danger', 'Retire it');
+  go.type = 'submit';
+  form.append(reason, go);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    retireEgressProfile(p, reason.value.trim(), go, line);
+  });
+  return form;
+}
+
+async function retireEgressProfile(p, reason, btn, line) {
+  if (reason.length < 5) {
+    egressNote(line, 'Say why, in at least five characters.', 'bad');
+    return;
+  }
+  await egressAct(() => api('/admin/egress/profiles/' + p.id + '/retire',
+    { method: 'POST', json: { reason: reason } }), btn, line, (res) => {
+    const text = 'Retired.' + (res.notice ? ' ' + res.notice : '');
+    EGR.notes.set(p.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+async function createEgressProfile(e) {
+  e.preventDefault();
+  const msg = $('egr-prof-msg');
+  setMsg(msg, '');
+  const ceiling = $('egr-prof-ceiling').value;
+  if (!ceiling) {
+    setMsg(msg, 'Choose the highest label this profile may carry.');
+    return;
+  }
+  const kind = $('egr-prof-kind').value;
+  const policy = {
+    allowed_ports: egrPorts($('egr-prof-ports').value),
+    any_public_host: $('egr-prof-any').checked,
+    allowed_host_suffixes: egrLines($('egr-prof-suffixes').value),
+    allowed_cidrs: egrLines($('egr-prof-cidrs').value),
+    idle_timeout_s: Number($('egr-prof-idle').value),
+    max_session_s: Number($('egr-prof-session').value),
+    max_concurrent: Number($('egr-prof-conc').value),
+  };
+  if (kind === 'TOR') policy.allow_onion = $('egr-prof-onion').checked;
+  else policy.resolve_at_proxy = $('egr-prof-resolve').checked;
+  const btn = $('egr-prof-btn');
+  btn.disabled = true;
+  try {
+    const made = await egrStepUp(() => api('/admin/egress/profiles', {
+      method: 'POST',
+      json: { name: $('egr-prof-name').value.trim(), kind: kind,
+              region: $('egr-prof-region').value.trim() || null, ceiling: ceiling,
+              policy: policy },
+    }));
+    if (!made) {
+      setMsg(msg, 'Not added. ' + admStepUpAgain('Add profile'));
+      return;
+    }
+    EGR.notes.set(made.id, { text: 'Added. Seal its exit next.', kind: 'ok' });
+    $('egr-prof-form').reset();
+    $('egr-prof-box').open = false;
+    egrSay('Added.');
+    await loadEgress();
+  } catch (err) {
+    if (err instanceof ApiError) {
+      setMsg(msg, admStepUpRefused(err) ? 'Not added. ' + admStepUpAgain('Add profile')
+        : (err.detail || err.title));
+    } else { fail(err); }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** The Telegram preset: its published IPv4 networks and ports. */
+function applyEgressTelegramPreset() {
+  const preset = ((EGR.overview || {}).presets || {}).telegram;
+  if (!preset) return;
+  $('egr-prof-ports').value = preset.ports.join(', ');
+  $('egr-prof-cidrs').value = preset.cidrs.join('\n');
+  $('egr-prof-suffixes').value = '';
+  $('egr-prof-any').checked = false;
+  const help = $('egr-preset-help');
+  help.textContent = preset.note;
+  show(help, true);
+}
+
+function egressRouteCard(r) {
+  const card = el('div', 'card row-card egr-route');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title mono', r.name));
+  const chips = el('span', 'chips');
+  chips.appendChild(el('span', 'chip' + (r.retired ? '' : (r.is_active ? ' ok' : ' warn')),
+    r.retired ? 'Retired' : (r.is_active ? 'On' : 'Off')));
+  head.appendChild(chips);
+  card.appendChild(head);
+  card.appendChild(el('p', 'help', visibleText(r.description)));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('idle', r.idle_timeout_s + ' s'));
+  facts.appendChild(fact('session', r.max_session_s + ' s'));
+  facts.appendChild(fact('at once', String(r.max_concurrent)));
+  card.appendChild(facts);
+  const note = EGR.notes.get(r.id);
+  const line = el('p', 'msg adm-note' + (note ? ' ' + note.kind : ''), note ? note.text : '');
+  line.setAttribute('role', 'status');
+  show(line, !!note);
+  const live = (r.destinations || []).filter((d) => !d.retired);
+  const list = el('div', 'egr-entries');
+  if (!live.length) list.appendChild(el('p', 'empty', 'No destination: this route reaches nothing.'));
+  for (const d of live) {
+    const row = el('div', 'egr-entry');
+    row.appendChild(el('code', 'mono', d.entry));
+    if (d.private_network) {
+      row.appendChild(el('span', 'chip', 'private network ' + d.private_network));
+    }
+    row.appendChild(el('span', 'help', visibleText(d.note)));
+    if (canEgressManage && !r.retired) {
+      const off = el('button', 'btn ghost small', 'Retire');
+      off.type = 'button';
+      off.addEventListener('click', () => retireEgressDestination(r, d, off, line));
+      row.appendChild(off);
+    }
+    list.appendChild(row);
+  }
+  card.appendChild(list);
+  card.appendChild(line);
+  if (!canEgressManage || r.retired) return card;
+  const form = el('form', 'row-form row-inline egr-form');
+  const entry = el('input');
+  entry.type = 'text';
+  entry.autocomplete = 'off';
+  entry.spellcheck = false;
+  entry.placeholder = 'jira.corp.example@10.20.0.0/24:443';
+  const why = el('input');
+  why.type = 'text';
+  why.autocomplete = 'off';
+  why.placeholder = 'Why this destination is allowed';
+  const add = el('button', 'btn small', 'Add destination');
+  add.type = 'submit';
+  form.append(entry, why, add);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    addEgressDestination(r, entry.value.trim(), why.value.trim(), add, line);
+  });
+  card.appendChild(form);
+  const actions = el('div', 'row-actions');
+  const onoff = el('button', 'btn small', r.is_active ? 'Switch off' : 'Switch on');
+  onoff.type = 'button';
+  onoff.addEventListener('click', () => egressAct(() => api('/admin/egress/routes/' + r.id,
+    { method: 'PATCH', json: { is_active: !r.is_active } }), onoff, line, () => {
+    const text = r.is_active ? 'Switched off.' : 'Switched on.';
+    EGR.notes.set(r.id, { text: text, kind: 'ok' });
+    return text;
+  }));
+  const retireForm = el('form', 'row-form row-inline egr-form');
+  const reason = el('input');
+  reason.type = 'text';
+  reason.autocomplete = 'off';
+  reason.placeholder = 'Why the route is retired';
+  const retire = el('button', 'btn small danger', 'Retire the route');
+  retire.type = 'submit';
+  retireForm.append(reason, retire);
+  retireForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const why = reason.value.trim();
+    if (why.length < 5) {
+      egressNote(line, 'Say why, in at least five characters.', 'bad');
+      return;
+    }
+    egressAct(() => api('/admin/egress/routes/' + r.id + '/retire',
+      { method: 'POST', json: { reason: why } }), retire, line, () => {
+      const text = 'Retired. Nothing ' + r.name + ' sends can leave until a new route '
+        + 'names its destination.';
+      EGR.notes.set(r.id, { text: text, kind: 'ok' });
+      return text;
+    });
+  });
+  actions.append(onoff);
+  card.append(actions, retireForm);
+  return card;
+}
+
+async function addEgressDestination(r, entry, note, btn, line) {
+  if (!entry || note.length < 5) {
+    egressNote(line, 'Give the destination and why it is allowed, in at least five '
+      + 'characters.', 'bad');
+    return;
+  }
+  await egressAct(() => api('/admin/egress/routes/' + r.id + '/destinations',
+    { method: 'POST', json: { entry: entry, note: note } }), btn, line, (res) => {
+    const text = 'Added ' + res.entry + '.';
+    EGR.notes.set(r.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+async function retireEgressDestination(r, d, btn, line) {
+  await egressAct(() => api('/admin/egress/routes/' + r.id + '/destinations/' + d.id
+    + '/retire', { method: 'POST' }), btn, line, () => {
+    const text = 'Retired ' + d.entry + '. An open connection to it closes within 30 '
+      + 'seconds.';
+    EGR.notes.set(r.id, { text: text, kind: 'ok' });
+    return text;
+  });
+}
+
+async function createEgressRoute(e) {
+  e.preventDefault();
+  const msg = $('egr-route-msg');
+  setMsg(msg, '');
+  let name = $('egr-route-name').value;
+  if (name.endsWith('-')) {
+    const key = $('egr-route-key').value.trim();
+    if (!key) {
+      setMsg(msg, 'Give the lookup provider\'s key.');
+      return;
+    }
+    name += key;
+  }
+  const btn = $('egr-route-btn');
+  btn.disabled = true;
+  try {
+    const made = await egrStepUp(() => api('/admin/egress/routes', {
+      method: 'POST', json: { name: name, description: $('egr-route-desc').value.trim() },
+    }));
+    if (!made) {
+      setMsg(msg, 'Not added. ' + admStepUpAgain('Add route'));
+      return;
+    }
+    EGR.notes.set(made.id, { text: 'Added. Name its destinations next.', kind: 'ok' });
+    $('egr-route-form').reset();
+    $('egr-route-box').open = false;
+    egrSay('Added.');
+    await loadEgress();
+  } catch (err) {
+    if (err instanceof ApiError) {
+      setMsg(msg, admStepUpRefused(err) ? 'Not added. ' + admStepUpAgain('Add route')
+        : (err.detail || err.title));
+    } else { fail(err); }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function fillEgressLogRoutes(overview) {
+  const select = $('egr-log-route');
+  const current = select.value;
+  const pairs = [['', 'Every route']];
+  for (const p of overview.profiles || []) {
+    const id = p.is_passive_default ? 'persona:passive' : 'persona:' + p.id;
+    pairs.push([id, visibleText(p.name)]);
+  }
+  for (const r of overview.routes || []) {
+    if (!r.retired) pairs.push(['integration:' + r.name, r.name]);
+  }
+  opts(select, pairs, current);
+}
+
+async function loadEgressLog() {
+  const params = new URLSearchParams();
+  if ($('egr-log-route').value) params.set('route_id', $('egr-log-route').value);
+  if ($('egr-log-event').value) params.set('event', $('egr-log-event').value);
+  listPending('egr-log', 'egr-log-empty');
+  let body;
+  try {
+    body = await api('/admin/egress/connections' + (params.toString()
+      ? '?' + params.toString() : ''));
+  } catch (err) {
+    showLoadFailure('egr-log-empty', 'The connection log', err, loadEgressLog);
+    return;
+  }
+  renderList('egr-log', 'egr-log-empty', body.rows || [], egressLogRow);
+  const hidden = $('egr-log-hidden');
+  hidden.textContent = body.withheld
+    ? 'and ' + countOf(body.withheld, 'row', 'rows') + ' you are not cleared to see' : '';
+  show(hidden, body.withheld > 0);
+}
+
+function egressLogRow(row) {
+  const card = el('div', 'card row-card compact egr-log-row');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'mono egr-when', fmtTime(row.occurred_at, true)));
+  head.appendChild(el('span', 'chip' + (row.event === 'OPEN' ? ' ok'
+    : (row.event === 'REFUSED' || row.event === 'PREAUTH' ? ' warn' : '')),
+    EGR_EVENT_WORDS[row.event] || row.event));
+  if (row.context_kind === 'stop') head.appendChild(el('span', 'chip flag', 'Stop'));
+  if (row.route_kind === 'persona') head.appendChild(tlpChip(row.classification));
+  head.appendChild(el('span', 'row-title', row.route_id));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  if (row.destination_withheld) {
+    facts.appendChild(fact('destination', 'kept as a digest: it was not one this route '
+      + 'names', 'muted'));
+  } else if (row.dest_host) {
+    facts.appendChild(fact('destination', visibleText(row.dest_host) + ':' + row.dest_port));
+  }
+  if (row.exit_kind) facts.appendChild(fact('exit', row.exit_kind));
+  if (row.item_count !== null && row.item_count !== undefined) {
+    facts.appendChild(fact('count', String(row.item_count)));
+  }
+  facts.appendChild(fact('why', row.reason_text));
+  if (row.event === 'OPEN') {
+    if (row.closed) {
+      facts.appendChild(fact('sent', fmtBytes(row.closed.bytes_up)));
+      facts.appendChild(fact('received', fmtBytes(row.closed.bytes_down)));
+      facts.appendChild(fact('lasted', (row.closed.duration_ms / 1000).toFixed(1) + ' s'));
+    }
+    facts.appendChild(fact('ended', row.close_text, row.closed ? '' : 'warn'));
+  }
+  card.appendChild(facts);
+  return card;
+}
+
+async function verifyEgressLog() {
+  const out = $('egr-log-verified');
+  const btn = $('egr-log-verify');
+  btn.disabled = true;
+  try {
+    const res = await api('/admin/egress/connections/verify');
+    out.className = 'msg ' + (res.first_break_seq === null ? 'ok' : 'bad');
+    setMsg(out, res.first_break_seq === null
+      ? 'The chain holds: ' + countOf(res.rows, 'row', 'rows') + ' checked at '
+        + fmtTime(res.checked_at, true) + '.'
+      : 'The chain breaks at row ' + res.first_break_seq + ': a row was changed or '
+        + 'removed outside the egress proxy.');
+  } catch (err) {
+    out.className = 'msg bad';
+    setMsg(out, err instanceof ApiError ? (err.detail || err.title) : String(err));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function initEgress() {
+  $('egr-prof-form').addEventListener('submit', createEgressProfile);
+  $('egr-route-form').addEventListener('submit', createEgressRoute);
+  $('egr-preset-telegram').addEventListener('click', applyEgressTelegramPreset);
+  $('egr-prof-kind').addEventListener('change', () => {
+    const tor = $('egr-prof-kind').value === 'TOR';
+    show($('egr-prof-onion-box'), tor);
+    $('egr-prof-resolve').disabled = tor;
+    if (tor) $('egr-prof-resolve').checked = false;
+  });
+  $('egr-route-name').addEventListener('change', () => {
+    show($('egr-route-key-box'), $('egr-route-name').value.endsWith('-'));
+  });
+  $('egr-log-refresh').addEventListener('click', loadEgressLog);
+  $('egr-log-route').addEventListener('change', loadEgressLog);
+  $('egr-log-event').addEventListener('change', loadEgressLog);
+  $('egr-log-verify').addEventListener('click', verifyEgressLog);
+  $('egr-signin').addEventListener('click', loadEgress);
 }
 
 /* --- Share: who is on this case ----------------------------------------
@@ -27461,23 +34558,23 @@ function initOpsPanes() {
   $('col-hits-unack').addEventListener('change', loadWatchHits);
   $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
   $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
-  /* The deliveries view is fetched on selection rather than on sign-in:
-     it needs integration.manage, which most accounts do not hold, and a
-     403 banner on every login would train people to ignore banners. */
+  /* The delivery ledger moved to Administration, Integrations (F8,
+     2026-09-24), where it is fetched on selection: it needs
+     integration.manage, which most accounts do not hold. */
   initSubtabs('pane-ach', (name) => {
     if (name === 'assumptions') loadAssumptions();
-  });
-  initSubtabs('pane-inbox', (name) => {
-    if (name === 'deliveries') loadDeliveries();
   });
   selectGovSub = initSubtabs('pane-governance', (name) => {
     if (name === 'retention') { purgeDefaults(); loadRetention(); }
     if (name === 'tombstones') loadTombstones();
     if (name === 'glass') loadBreakGlass();
+    if (name === 'lookups') loadCaseLookups();   // F15.3
   });
   selectSamplesSub = initSubtabs('pane-samples', (name) => {
     if (name === 'queue') loadSamples();
     if (name === 'submit') fillSampleCase();
+    // F12 J. The rule sets, loaded when the subtab is opened.
+    if (name === 'rules') loadRules();
   });
   selectDeceptionSub = initSubtabs('pane-deception', (name) => {
     if (name === 'captures') loadCaptures();
@@ -27500,6 +34597,9 @@ function initOpsPanes() {
     loadSamples();
   });
   $('smp-submit').addEventListener('click', submitSample);
+  // F11 M. The queue's search by hash, and the Rules subtab's refresh.
+  wireHashSearch();
+  $('rul-refresh').addEventListener('click', loadRules);
   /* Focus goes back to the Open button of the row the card was under. */
   $('smp-close').addEventListener('click', () => smpCloseDetail(true));
 
@@ -27518,6 +34618,17 @@ function initOpsPanes() {
   $('dl-feed').addEventListener('change', loadDeadLetters);
   $('src-refresh').addEventListener('click', loadSources);
   $('src-run-readiness').addEventListener('click', openReadinessFromFeeds);
+  // The Sources forms (2026-09-24).
+  $('src-add-form').addEventListener('submit', addSource);
+  $('src-add-parser').addEventListener('change', paintSourceKinds);
+  $('src-add-kind').addEventListener('change', paintSourceLabels);
+  $('src-persona-form').addEventListener('submit', createPersona);
+  $('sp-platform').addEventListener('change', paintPersonaIdentity);
+  $('src-tg-form').addEventListener('submit', addTelegramChat);   // F5.3
+  $('src-auth-form').addEventListener('submit', recordAuthority);
+  $('sa-persona').addEventListener('change', paintAuthoritySources);
+  $('sa-scope-public').addEventListener('change', paintAuthoritySources);
+  $('sa-scope-member').addEventListener('change', paintAuthoritySources);
   $('key-refresh').addEventListener('click', loadKeys);
   $('key-revoked').addEventListener('change', loadKeys);
   $('key-issue-form').addEventListener('submit', issueKey);
@@ -27561,6 +34672,8 @@ function initOpsPanes() {
 
   $('comms-pgp-form').addEventListener('submit', verifyPgp);
   $('comms-unverified-refresh').addEventListener('click', loadUnverified);
+  // comms F10, F10a, F10b and F10c.
+  initCommsPgp();
   $('comms-copart-refresh').addEventListener('click', loadCoParticipation);
 
   $('rep-build').addEventListener('click', buildReport);
@@ -27955,10 +35068,53 @@ const TRIAGE_GAP_NAMES = {
   tlsh: 'TLSH',
   yara: 'YARA',
   archive_expansion: 'Archive expansion',
+  // F13. Screened samples carry these two instead.
+  prohibited_content_perceptual: 'Perceptual matching',
+  prohibited_content_archive_members: 'Archive members',
 };
 const PROHIBITED_GAP = 'prohibited_content_screening';
 
+/* F13 (2026-09-24). What exact-hash screening did for this sample, on
+   its Identity card, with the sentence that stops "no match" reading as
+   "clean". */
+const EXACT_HASH_SENTENCE = 'Screening compares exact hashes against the '
+  + 'lists this deployment imported. No match does not mean the material is '
+  + 'lawful to hold.';
+
+function screeningLine(s) {
+  const line = el('p', 'help screening-line');
+  if (s.screening_outcome === 'NO_MATCH') {
+    line.textContent = 'Screened ' + fmtTime(s.screened_at) + ' against '
+      + (s.screening_lists_consulted
+        ? countOf(s.screening_lists_consulted, 'hash list', 'hash lists')
+        : 'the active hash lists') + ': no exact match.';
+  } else {
+    line.textContent = 'Not screened: no prohibited-content hash list is loaded.';
+  }
+  line.title = EXACT_HASH_SENTENCE;
+  return line;
+}
+
+/* What each gap status means, in the card's words (F11-core G,
+   2026-09-24). A check that does not apply to this sample (not a PE, no
+   Rich header) is listed apart, under "Does not apply", and never counted
+   as a check not done. */
+const GAP_STATUS_WORDS = {
+  pending: 'waiting for static triage',
+  skipped: 'skipped',
+  failed: 'failed',
+  unavailable: 'not available in this deployment',
+  not_applicable: 'does not apply',
+};
+
 function gapStep(g) { return g.step || g.what || g.kind || ''; }
+
+function gapStatus(g) { return (g && g.status) || ''; }
+
+/** The gaps that are checks not done: everything but "does not apply". */
+function gapsNotDone(gaps) {
+  return (gaps || []).filter((g) => gapStatus(g) !== 'not_applicable');
+}
 
 function gapName(g) {
   const step = gapStep(g);
@@ -27975,15 +35131,15 @@ function orderedGaps(gaps) {
 }
 
 function gapSummary(gaps) {
-  const list = gaps || [];
+  /* A check that does not apply is not a check left undone (F11-core G). */
+  const list = gapsNotDone(gaps);
   const unscreened = list.some((g) => gapStep(g) === PROHIBITED_GAP);
   const others = list.length - (unscreened ? 1 : 0);
-  const rest = others + ' other check' + (others === 1 ? '' : 's')
-    + ' never ran';
+  const rest = countOf(others, 'other check', 'other checks') + ' not done';
   if (unscreened) {
     return 'Not screened for prohibited content' + (others ? ' · ' + rest : '');
   }
-  return others + ' triage check' + (others === 1 ? '' : 's') + ' never ran';
+  return countOf(others, 'triage check', 'triage checks') + ' not done';
 }
 
 /* What happened to a rejected sample's bytes, in the words the row and the
@@ -28060,6 +35216,9 @@ function sampleRow(s) {
   head.appendChild(stateChip(s.state));
   const disposed = dispositionChip(s);
   if (disposed) head.appendChild(disposed);
+  // F11 M. Where static triage stands, on the row.
+  const triaged = triageRowChip(s);
+  if (triaged) head.appendChild(triaged);
   head.appendChild(sampleLabelChips(s));
   card.appendChild(head);
 
@@ -28092,11 +35251,12 @@ function sampleRow(s) {
     card.appendChild(p);
   }
 
-  if ((s.triage_gaps || []).length) {
-    const unscreened = s.triage_gaps.some((g) => gapStep(g) === PROHIBITED_GAP);
+  if (gapsNotDone(s.triage_gaps).length) {
+    const notDone = gapsNotDone(s.triage_gaps);
+    const unscreened = notDone.some((g) => gapStep(g) === PROHIBITED_GAP);
     const gaps = el('p', 'why gaps' + (unscreened ? ' unscreened' : ''),
       gapSummary(s.triage_gaps));
-    gaps.title = orderedGaps(s.triage_gaps).map(gapName).join(', ')
+    gaps.title = orderedGaps(notDone).map(gapName).join(', ')
       + '. A recorded gap reads as "nobody looked"; a NULL would read as a '
       + 'finding.';
     card.appendChild(gaps);
@@ -28199,6 +35359,33 @@ function custodyLine(c) {
     case 'VIEWED_META':
       if (d.event === 'submitted') return ['Submitted into quarantine', null];
       if (d.event === 'viewed') return ['Opened this record', null];
+      // F13 and F14. What screening and the sandbox worker recorded.
+      if (d.event === 'preserved_after_screening') {
+        return ['Moved into the preservation store under a legal hold after '
+          + 'a screening match', 'notable'];
+      }
+      if (d.event === 'screening_bytes_not_found') {
+        return ['Looked for the bytes to preserve them and found none; '
+          + 'looking again on the next pass', 'notable'];
+      }
+      if (d.event === 'screening_bytes_absent') {
+        return ['The bytes were found in neither store on two looks; the '
+          + 'data key is kept and the Security Officer reviews it', 'alarm'];
+      }
+      if (d.event === 'sandbox_submission_confirmed') {
+        return ['The sandbox confirmed it holds the archive'
+          + (d.external_ref ? ' as task ' + d.external_ref : ''), 'notable'];
+      }
+      if (d.event === 'sandbox_submission_not_sent') {
+        return ['Nothing reached the sandbox: the send did not start', null];
+      }
+      if (d.event === 'sandbox_submission_refused_by_target') {
+        return ['The sandbox refused the archive it was sent', 'notable'];
+      }
+      if (d.event === 'sandbox_submission_unconfirmed') {
+        return ['Sent, and the sandbox\'s answer was lost: it may hold a task '
+          + 'for this sample. Not resent', 'alarm'];
+      }
       if (d.event === 'integrity_check_failed') {
         return ['Integrity check FAILED: recorded ' + short(d.recorded_sha256)
           + ', computed ' + short(d.computed_sha256)
@@ -28214,6 +35401,10 @@ function custodyLine(c) {
       return ['Downloaded as a ' + archiveWords
         + (d.via === 'ticket' ? ', on a one-shot ticket' : ''), 'notable'];
     case 'REJECTED': {
+      // F13. A screening match isolates; it names no reason here.
+      if (d.by === 'screening') {
+        return ['Withdrawn by prohibited-content screening', 'alarm'];
+      }
       const what = {
         preserved: 'bytes preserved under a legal hold',
         destroyed: 'bytes and data key destroyed',
@@ -28229,11 +35420,26 @@ function custodyLine(c) {
       return ['Recorded an analysis' + (d.kind
         ? ' (' + analysisKindWords(d.kind).toLowerCase() + ')' : ''), null];
     case 'DETONATED':
+      // F14. A request to the configured sandbox names its route.
+      if (d.mode === 'submit') {
+        return ['Asked for a send to ' + (d.target || 'the sandbox')
+          + (d.network_route ? ', network route ' + d.network_route : ''),
+        'notable'];
+      }
       return ['Requested a detonation' + (d.target ? ' on ' + d.target : '')
         + (d.exposure_level ? ', exposure ' + d.exposure_level.toLowerCase() : ''),
       'notable'];
     case 'SHARED':
+      // F14. The record of a copy leaving, written before it could.
+      if (d.event === 'sandbox_submission') {
+        return ['Sent to ' + (d.target || 'the sandbox') + ' as a '
+          + archiveWords + (d.confirmed ? '' : ', not yet confirmed'), 'notable'];
+      }
       return ['Shared', 'notable'];
+    // F11-core E. The product read the bytes for machine analysis.
+    case 'SCANNED':
+      return ['Read in memory by static triage, SHA-256 verified; nothing '
+        + 'was written to disk or served', null];
     default:
       return [String(c.action || 'Unknown event'), null];
   }
@@ -28250,7 +35456,8 @@ function custodyPanel(rows) {
     + 'prune is not one. It records the submission, every opening of this '
     + 'record (once per person per five minutes), every download and '
     + 'retrieval, each assignment, analysis, detonation request and '
-    + 'rejection, and any failed integrity check.'));
+    + 'rejection, any failed integrity check, and every time the product '
+    + 'read the bytes for automated analysis.'));
   if (!(rows || []).length) {
     cust.appendChild(el('p', 'muted', 'No entries.'));
     return cust;
@@ -28263,7 +35470,13 @@ function custodyPanel(rows) {
     const t = el('div', 'timeline-body');
     t.appendChild(el('span', 'custody-when muted small',
       fmtTime(c.at || c.occurred_at)));
-    t.appendChild(smpPerson(c.actor_name, c.actor_email));
+    /* F11-core E. A row the product wrote on nobody's request names
+       nobody, and says so; a person's row still names the person. */
+    if (c.actor_kind === 'SYSTEM') {
+      t.appendChild(el('span', 'person is-automated', 'NocTORnal (automated)'));
+    } else {
+      t.appendChild(smpPerson(c.actor_name, c.actor_email));
+    }
     t.appendChild(el('span', 'custody-what', text));
     item.appendChild(t);
     list.appendChild(item);
@@ -28332,15 +35545,18 @@ async function openSample(id, opener) {
     line.appendChild(copy);
     hashes.appendChild(line);
   }
+  // F11 M. What static triage computed, each copyable.
+  for (const line of fuzzyHashLines(s)) hashes.appendChild(line);
+  hashes.appendChild(screeningLine(s));   // F13
   body.appendChild(hashes);
 
   /* --- what triage could not do, by the name of each check. Listed
      before the findings, because an analyst reading findings needs to
      know what was never looked at, and prohibited-content screening
      leads because it is the gap with legal consequences. */
-  const gaps = orderedGaps(s.triage_gaps);
+  const gaps = orderedGaps(gapsNotDone(s.triage_gaps));
   const gapBox = el('div', 'card sub');
-  gapBox.appendChild(el('h3', 'h-xs', 'Checks that never ran'));
+  gapBox.appendChild(el('h3', 'h-xs', 'Checks not done'));
   if (!gaps.length) {
     gapBox.appendChild(el('p', 'muted', 'None recorded.'));
   } else {
@@ -28348,6 +35564,11 @@ async function openSample(id, opener) {
     for (const g of gaps) {
       const li = el('li', gapStep(g) === PROHIBITED_GAP ? 'gap-unscreened' : null);
       li.appendChild(el('strong', null, gapName(g)));
+      // F11-core G. The status in words, before the reason.
+      if (GAP_STATUS_WORDS[gapStatus(g)]) {
+        li.appendChild(el('span', 'gap-status gap-' + gapStatus(g),
+          GAP_STATUS_WORDS[gapStatus(g)]));
+      }
       li.appendChild(document.createTextNode(': ' + (g.why || g.reason
         || 'no reason was recorded')));
       ul.appendChild(li);
@@ -28359,7 +35580,26 @@ async function openSample(id, opener) {
         + 'offence. Treat it as unscreened before you download or share it.'));
     }
   }
+  // F11-core G. What does not apply to this sample, listed last.
+  const moot = (s.triage_gaps || []).filter((g) => gapStatus(g) === 'not_applicable');
+  if (moot.length) {
+    gapBox.appendChild(el('p', 'fact-k gap-na-head', 'Does not apply'));
+    const ul = el('ul', 'rules gap-list gap-na');
+    for (const g of moot) {
+      const li = el('li');
+      li.appendChild(el('strong', null, gapName(g)));
+      li.appendChild(document.createTextNode(': ' + (g.reason
+        || 'no reason was recorded')));
+      ul.appendChild(li);
+    }
+    gapBox.appendChild(ul);
+  }
   body.appendChild(gapBox);
+
+  // F11 M and F12 J. The static-triage run, its findings, YARA, and
+  // the samples like this one.
+  body.appendChild(sampleTriagePanel(s, data, you));
+  body.appendChild(similarPanel(s));
 
   /* --- the lab's own work: assign, then record what was found. */
   const people = you.analyse || you.detonate
@@ -28370,14 +35610,20 @@ async function openSample(id, opener) {
   /* --- findings */
   const anal = el('div', 'card sub');
   anal.appendChild(el('h3', 'h-xs', 'Analysis'));
-  if (!(data.analyses || []).length) {
+  /* F11-core F. The static triage panel draws the machine STATIC and
+     YARA rows; any other machine row (a sandbox run, F14) stays here,
+     named by what produced it. */
+  const listed = (data.analyses || []).filter((a) => !(a.origin === 'machine'
+    && (a.kind === 'STATIC' || a.kind === 'YARA')));
+  if (!listed.length) {
     anal.appendChild(el('p', 'muted', 'Nothing recorded yet.'));
   } else {
-    for (const a of data.analyses) anal.appendChild(analysisRow(s, a, you));
+    for (const a of listed) anal.appendChild(analysisRow(s, a, you));
   }
   body.appendChild(anal);
 
-  body.appendChild(detonationPanel(s, data.detonations || [], you, people));
+  body.appendChild(detonationPanel(s, data.detonations || [], you, people,
+    data.sandbox));   // F14, whether this sample may be sent
 
   if (s.bytes_disposition === 'preserved') {
     body.appendChild(preservationPanel(s, data.preservation || {}));
@@ -28571,6 +35817,8 @@ function parseFindingLines(text) {
 function analysisForm(s, people, msg) {
   const box = el('details', 'analysis-form');
   box.appendChild(el('summary', null, 'Record an analysis'));
+  // F12 G. "Use as family assessment" fills this form (analysisPrefill).
+  box.dataset.derivedFrom = '';
   const form = el('div', 'stack');
   const labelled = (label, input, help) => {
     const f = el('label', 'field');
@@ -28679,6 +35927,8 @@ function analysisForm(s, people, msg) {
           confidence: confidence.value || null,
           findings: parsed.findings,
           extracted_selectors: selectors,
+          // F12 G. The rule set version the assessment came from.
+          derived_from_version_id: box.dataset.derivedFrom || null,
         },
       });
     } catch (err) {
@@ -28695,6 +35945,20 @@ function analysisForm(s, people, msg) {
   });
   form.appendChild(save);
   box.appendChild(form);
+  /* F12 G. What "Use as family assessment" fills in: kind YARA, the
+     engine, the family the rule's metadata names, the version it came
+     from, and the confidence left EMPTY, because it is the analyst's
+     judgement and the form refuses a family without one. */
+  box.prefill = (p) => {
+    kind.value = 'YARA';
+    tool.value = p.tool || '';
+    version.value = p.tool_version || '';
+    family.value = p.family || '';
+    confidence.value = '';
+    box.dataset.derivedFrom = p.version_id || '';
+    box.open = true;
+    family.focus();
+  };
   return box;
 }
 
@@ -28723,14 +35987,32 @@ function analysisRow(s, a, you) {
     h.appendChild(el('span', 'chip conf-' + (a.confidence || 'LOW'),
       (a.confidence || 'LOW').toLowerCase() + ' confidence'));
   }
+  // F12 G. An assessment taken from a rule set's finding says which.
+  if (a.ruleset) {
+    const from = el('span', 'chip', 'from ' + a.ruleset.key + ' v'
+      + a.ruleset.version);
+    from.title = 'Taken from a YARA scan by this rule set version, and read '
+      + 'through its labels as well as the sample\'s.';
+    h.appendChild(from);
+  }
   row.appendChild(h);
   const f = el('div', 'facts');
-  f.appendChild(personFact('recorded by', a.analyst_name, a.analyst_email));
+  /* F11-core F. A machine row names what produced it and no person. */
+  if (a.origin === 'machine') {
+    f.appendChild(fact('produced by', a.produced_by || 'NocTORnal (automated)'));
+  } else {
+    f.appendChild(personFact('recorded by', a.analyst_name, a.analyst_email));
+  }
   f.appendChild(fact('recorded', fmtTime(a.recorded_at || a.created_at)));
   if (a.tool) f.appendChild(fact('tool', a.tool + (a.tool_version
     ? ' ' + a.tool_version : '')));
   row.appendChild(f);
   if (a.narrative) row.appendChild(el('p', 'why', visibleText(a.narrative)));
+  // F14. A sandbox row says which CAPE task and network route.
+  if (a.origin === 'machine' && a.kind === 'SANDBOX' && a.findings) {
+    row.appendChild(el('p', 'help', 'CAPE task ' + findingText(a.findings.task_id)
+      + ', network route ' + findingText(a.findings.network_route)));
+  }
   if ((a.yara_hits || []).length) {
     const hits = el('div', 'chips');
     hits.appendChild(el('span', 'fact-k', 'YARA'));
@@ -28806,6 +36088,1076 @@ function extractedSelector(s, a, x, index, you) {
   return line;
 }
 
+/* ── static triage, similar samples and YARA (F11 and F12) ───────────────
+ *
+ * 2026-09-24. Static triage runs after submission, in bounded child
+ * processes, and records what it computed as a machine finding: the fuzzy
+ * hashes on the Identity card, the run and its findings in the Static
+ * triage panel, and each YARA rule set the reader may see with what it
+ * matched. Nothing here writes the graph: a hash becomes a case entity
+ * only when an analyst proposes it and one of the case's analysts accepts
+ * it. Every time is UTC through fmtTime; every count agrees.
+ */
+
+/* The row's chip for where static triage stands. */
+function triageRowChip(s) {
+  const run = s.static_triage || {};
+  if (run.status === 'queued' || run.status === 'running') {
+    const chip = el('span', 'chip', 'triage ' + run.status);
+    chip.title = 'Static triage is ' + run.status + ' for this sample.';
+    return chip;
+  }
+  if (run.status === 'failed' || run.status === 'abandoned') {
+    const chip = el('span', 'chip bad', 'triage failed');
+    chip.title = run.failure || 'The last static triage run did not finish.';
+    return chip;
+  }
+  return null;
+}
+
+/* The fuzzy hashes on the Identity card. TLSH is stored without its T1
+   prefix (the ontology's canonical form) and shown and copied with it,
+   which is how other tools print it; the search takes both. */
+function fuzzyHashLines(s) {
+  const out = [];
+  const line = (label, shown, extra) => {
+    const row = el('div', 'hash-line');
+    row.appendChild(el('span', 'fact-k', label));
+    row.appendChild(el('code', 'mono selectable', shown));
+    if (extra) row.appendChild(extra);
+    const copy = el('button', 'btn tiny', 'Copy');
+    copy.type = 'button';
+    copy.setAttribute('aria-label', 'Copy the ' + label);
+    copy.addEventListener('click', () => copyText(shown, copy));
+    row.appendChild(copy);
+    return row;
+  };
+  if (s.imphash) {
+    let chip = null;
+    if (s.imphash_common && s.imphash_common.common) {
+      chip = el('span', 'chip warn', 'common');
+      chip.title = (s.imphash_common.why || 'An import hash many binaries '
+        + 'share') + '. A match on it says nothing about who wrote this sample.';
+    }
+    out.push(line('imphash', s.imphash, chip));
+  }
+  if (s.rich_header_hash) out.push(line('Rich header', s.rich_header_hash));
+  if (s.ssdeep) out.push(line('ssdeep', s.ssdeep));
+  if (s.tlsh) out.push(line('TLSH', 'T1' + s.tlsh));
+  return out;
+}
+
+const TRIAGE_STATUS_WORDS = {
+  never: 'Not run yet',
+  queued: 'Queued',
+  running: 'Running',
+  done: 'Done',
+  failed: 'Failed',
+  skipped: 'Skipped',
+  abandoned: 'Stopped before it finished',
+};
+
+/* The limits a run's child processes ran under, in a sentence. */
+function triageLimitsText(limits) {
+  if (!limits) return '';
+  const secs = countOf(limits.timeout_s, 'second', 'seconds');
+  if (limits.kind === 'rlimit') {
+    return 'Ran in limited child processes: no file writes, '
+      + fmtBytes(limits.memory_bytes) + ' memory, ' + secs + ' each.';
+  }
+  if (limits.kind === 'no_writes_cpu_wall') {
+    return 'Ran in limited child processes: no file writes, CPU and '
+      + 'wall-clock limits of ' + secs + ' each; memory is not limited on '
+      + 'this platform.';
+  }
+  return 'Ran in child processes limited by the wall clock only ('
+    + secs + ' each): this platform cannot limit their memory or writes.';
+}
+
+/* Who caused the last run and when, in words. */
+function triageRunLine(run) {
+  const p = el('p', 'triage-run');
+  const tone = { done: ' ok', failed: ' bad', abandoned: ' bad' }[run.status] || '';
+  p.appendChild(el('span', 'chip' + tone,
+    TRIAGE_STATUS_WORDS[run.status] || run.status || 'Not run yet'));
+  if (run.status === 'never') return p;
+  let who = 'automated';
+  if (run.trigger_kind === 'requested') {
+    who = 'requested by ' + (run.requested_by_name || run.requested_by_email
+      || 'an account that no longer exists');
+    const more = (run.requesters || 1) - 1;
+    if (more > 0) who += ' and ' + countOf(more, 'other person', 'other people');
+  }
+  const when = run.finished_at || run.started_at || run.queued_at;
+  p.appendChild(document.createTextNode(' ' + who + ', ' + fmtTime(when)));
+  return p;
+}
+
+function sampleTriagePanel(s, data, you) {
+  const box = el('div', 'card sub triage-panel');
+  box.appendChild(el('h3', 'h-xs', 'Static triage'));
+  const run = s.static_triage || { status: 'never' };
+  box.appendChild(triageRunLine(run));
+  if (run.failure) box.appendChild(el('p', 'why bad', run.failure));
+  if (run.limits) box.appendChild(el('p', 'help', triageLimitsText(run.limits)));
+
+  const stat = (data.analyses || []).find((a) => a.origin === 'machine'
+    && a.kind === 'STATIC');
+  if (stat) {
+    box.appendChild(staticFinding(s, stat, you));
+  } else {
+    box.appendChild(el('p', 'muted', 'No static triage finding is recorded '
+      + 'for this sample yet.'));
+  }
+
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  if (you.static_triage && s.state !== 'REJECTED' && !s.case_read_only) {
+    const go = el('button', 'btn', 'Run static triage now');
+    go.type = 'button';
+    go.title = 'Decrypts the sample in memory and runs the parsers in limited '
+      + 'child processes. The read is recorded in the access ledger in your '
+      + 'name.';
+    go.disabled = run.status === 'running';
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      let r;
+      try {
+        r = await api('/samples/' + encodeURIComponent(s.id) + '/static-triage',
+          { method: 'POST' });
+      } catch (err) {
+        setMsg(msg, smpRefusal(err, 'Running static triage needs the malware '
+          + 'analyst role.'));
+        msg.className = 'msg bad';
+        go.disabled = false;
+        return;
+      }
+      setMsg(msg, r && r.will_run === 'now' ? 'Queued; it runs now.'
+        : 'Queued for the next static triage pass.');
+      msg.className = 'msg ok';
+    });
+    const row = el('div', 'row audit-actions');
+    row.appendChild(go);
+    box.appendChild(row);
+  }
+  box.appendChild(msg);
+  box.appendChild(yaraSection(s, data, you));
+  return box;
+}
+
+/* The machine STATIC finding: the hashes, the PE facts, and each extracted
+   selector with the existing Propose control (machines propose only when
+   an analyst clicks). */
+function staticFinding(s, a, you) {
+  const f = a.findings || {};
+  const row = el('div', 'row-card inner');
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('produced by', a.produced_by || 'NocTORnal (automated)'));
+  facts.appendChild(fact('recorded', fmtTime(a.created_at)));
+  if (a.tool_version) facts.appendChild(fact('with', a.tool_version));
+  const pe = f.pe || null;
+  if (pe) {
+    facts.appendChild(fact('image', pe.is_dotnet ? '.NET'
+      : (pe.is_dll ? 'DLL' : 'executable')));
+    if (pe.machine !== null && pe.machine !== undefined) {
+      facts.appendChild(fact('machine', '0x' + Number(pe.machine).toString(16)));
+    }
+  }
+  row.appendChild(facts);
+  if (f.imphash_common) {
+    row.appendChild(el('p', 'help warn', 'The imphash is common: '
+      + f.imphash_common + '. A match on it says nothing about who wrote '
+      + 'this sample.'));
+  }
+  const sels = a.extracted_selectors || [];
+  if (sels.length) {
+    const list = el('div', 'selector-list');
+    list.appendChild(el('span', 'fact-k', 'selectors computed'));
+    sels.forEach((x, i) => list.appendChild(extractedSelector(s, a, x, i, you)));
+    row.appendChild(list);
+  }
+  return row;
+}
+
+const YARA_ERROR_WORDS = {
+  rules_not_compiled: 'the rule set had no usable build for this engine yet',
+  timeout: 'it timed out',
+  crashed: 'the scanning process stopped',
+  output_too_large: 'its output passed the cap',
+  engine_error: 'the engine refused this input',
+  rules_rejected: 'the build could not be loaded and is being rebuilt',
+};
+
+/* The metadata key a rule most often names a family under. */
+function yaraFamily(rules) {
+  for (const r of rules || []) {
+    const m = r.metadata || {};
+    for (const k of ['family', 'malware_family', 'malware', 'mal_family']) {
+      if (typeof m[k] === 'string' && m[k].trim()) return m[k].trim();
+    }
+  }
+  return '';
+}
+
+/* Each rule set the reader may see that scanned this sample, its latest
+   scan first. A set above the reader's labels is not here at all: not a
+   row, not a count, not a coverage line. */
+function yaraSection(s, data, you) {
+  const box = el('div', 'yara-section');
+  box.appendChild(el('h4', 'h-xs', 'YARA'));
+  const engine = data.yara_engine || {};
+  if (!engine.installed) {
+    box.appendChild(el('p', 'muted', 'YARA is not installed in this '
+      + 'deployment.'));
+    return box;
+  }
+  const rows = (data.analyses || []).filter((a) => a.origin === 'machine'
+    && a.kind === 'YARA');
+  if (!rows.length) {
+    box.appendChild(el('p', 'muted', 'No rule set you can see has scanned '
+      + 'this sample.'));
+    return box;
+  }
+  const bySet = new Map();
+  for (const a of rows) {
+    const key = (a.ruleset && a.ruleset.key) || 'unknown';
+    if (!bySet.has(key)) bySet.set(key, []);
+    bySet.get(key).push(a);
+  }
+  for (const list of bySet.values()) {
+    box.appendChild(yaraScanRow(s, list[0], you));
+    if (list.length > 1) {
+      const older = el('details', 'yara-earlier');
+      older.appendChild(el('summary', null, 'Earlier scans'));
+      for (const a of list.slice(1)) older.appendChild(yaraScanRow(s, a, you));
+      box.appendChild(older);
+    }
+  }
+  return box;
+}
+
+function yaraScanRow(s, a, you) {
+  const f = a.findings || {};
+  const rs = a.ruleset || f.ruleset || {};
+  const card = el('div', 'row-card inner yara-scan');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', (rs.display_name || rs.key || 'A rule set')
+    + ' v' + (rs.version || '?')));
+  const n = Number(f.matched) || 0;
+  head.appendChild(el('span', 'chip' + (f.error ? ' bad' : (n ? ' warn' : '')),
+    f.error ? 'did not finish' : countOf(n, 'rule matched', 'rules matched')));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('scanned', fmtTime(a.created_at)));
+  facts.appendChild(fact('engine', (a.tool || 'yara-x')
+    + (a.tool_version ? ' ' + a.tool_version : '')));
+  card.appendChild(facts);
+  if (f.error) {
+    card.appendChild(el('p', 'why bad', 'The scan did not finish: '
+      + (YARA_ERROR_WORDS[f.error] || 'it stopped') + '.'));
+  }
+  for (const r of f.rules || []) {
+    const line = el('div', 'yara-rule');
+    const name = el('span', 'chip yara-hit', visibleText(r.identifier));
+    name.title = 'In ' + visibleText(r.namespace);
+    line.appendChild(name);
+    for (const t of r.tags || []) line.appendChild(el('span', 'chip', visibleText(t)));
+    const meta = Object.entries(r.metadata || {});
+    if (meta.length) {
+      const dl = el('dl', 'kv');
+      for (const [k, v] of meta) {
+        dl.appendChild(el('dt', null, visibleText(k)));
+        dl.appendChild(el('dd', null, findingText(v)));
+      }
+      line.appendChild(dl);
+    }
+    const pats = (r.patterns || []).map((p) => visibleText(p.identifier) + ': '
+      + countOf(p.hits, 'hit', 'hits'));
+    if (pats.length) line.appendChild(el('p', 'muted small', pats.join(', ')));
+    card.appendChild(line);
+  }
+  if (f.truncated) {
+    card.appendChild(el('p', 'help', 'More rules matched than are listed '
+      + 'here.'));
+  }
+  if (you.analyse && !s.case_read_only && s.state !== 'REJECTED'
+      && (f.rules || []).length && a.yara_ruleset_version_id) {
+    const use = el('button', 'btn small', 'Use as family assessment');
+    use.type = 'button';
+    use.title = 'Fills the Record an analysis form with this finding. The '
+      + 'confidence is yours to choose, and the recorded analysis is read '
+      + 'through this rule set\'s labels as well as the sample\'s.';
+    use.addEventListener('click', () => {
+      const form = document.querySelector('#smp-detail-body .analysis-form');
+      if (!form || typeof form.prefill !== 'function') return;
+      form.prefill({ tool: a.tool || 'yara-x', tool_version: a.tool_version,
+        family: yaraFamily(f.rules), version_id: a.yara_ruleset_version_id });
+      form.scrollIntoView({ block: 'nearest',
+        behavior: reduceMotion ? 'auto' : 'smooth' });
+    });
+    card.appendChild(use);
+  }
+  return card;
+}
+
+/* ── similar samples ─────────────────────────────────────────────────── */
+
+const SIMILAR_METHODS = [
+  ['all', 'Every measure'],
+  ['imphash', 'Same imphash'],
+  ['rich_header', 'Same Rich header'],
+  ['ssdeep', 'ssdeep score'],
+  ['tlsh', 'TLSH distance'],
+  ['yara', 'Shared YARA rules'],
+];
+
+function similarMatchChip(m) {
+  if (m.by === 'imphash') {
+    const chip = el('span', 'chip' + (m.common ? '' : ' ok'),
+      'same imphash' + (m.common ? ' (common)' : ''));
+    if (m.common) chip.title = 'Every .NET binary of this kind shares it.';
+    return chip;
+  }
+  if (m.by === 'rich_header') return el('span', 'chip ok', 'same Rich header');
+  if (m.by === 'ssdeep') return el('span', 'chip', 'ssdeep ' + m.score);
+  if (m.by === 'tlsh') return el('span', 'chip', 'TLSH distance ' + m.distance);
+  if (m.by === 'yara') {
+    return el('span', 'chip', countOf(m.shared, 'shared YARA rule',
+      'shared YARA rules'));
+  }
+  return el('span', 'chip', String(m.by));
+}
+
+function similarRow(entry) {
+  const s = entry.sample || {};
+  const card = el('div', 'row-card inner similar-row');
+  const head = el('div', 'row-head');
+  const title = el('span', 'row-title mono', String(s.sha256 || '').slice(0, 16) + '…');
+  title.title = s.sha256 || '';
+  head.appendChild(copyable(title, s.sha256, 'the full SHA-256'));
+  if (s.state) head.appendChild(stateChip(s.state));
+  head.appendChild(sampleLabelChips(s));
+  card.appendChild(head);
+  const chips = el('div', 'chips');
+  for (const m of entry.matched || []) chips.appendChild(similarMatchChip(m));
+  card.appendChild(chips);
+  const open = el('button', 'btn small', 'Open');
+  open.type = 'button';
+  open.setAttribute('aria-label', 'Open sample ' + String(s.sha256 || '').slice(0, 16));
+  open.addEventListener('click', () => openSample(s.id, open));
+  card.appendChild(open);
+  return card;
+}
+
+/* The list a similarity answer draws, with what it could not say. */
+function similarResults(target, body) {
+  clear(target);
+  const rows = body.results || [];
+  if (!rows.length) {
+    target.appendChild(el('p', 'muted', 'No sample you can see is similar by '
+      + 'these measures.'));
+  }
+  for (const entry of rows) target.appendChild(similarRow(entry));
+  if (body.candidates_capped) {
+    target.appendChild(el('p', 'help', 'More candidates matched than were '
+      + 'compared, so the closest may be missing: narrow the search.'));
+  }
+  if (body.partial) {
+    target.appendChild(el('p', 'help', 'Scoring stopped at its time limit, '
+      + 'so this list may be incomplete.'));
+  }
+  for (const u of body.unavailable || []) {
+    target.appendChild(el('p', 'muted small', u.reason + '.'));
+  }
+}
+
+function similarPanel(s) {
+  const box = el('details', 'card sub similar-panel');
+  box.appendChild(el('summary', null, 'Similar samples'));
+  const form = el('div', 'row similar-form');
+  const method = el('select', 'select');
+  method.setAttribute('aria-label', 'Similar by');
+  opts(method, SIMILAR_METHODS, 'all');
+  const minScore = el('input', 'input narrow-num');
+  minScore.type = 'number';
+  minScore.min = '1';
+  minScore.max = '100';
+  minScore.value = '50';
+  minScore.setAttribute('aria-label', 'ssdeep minimum score');
+  const maxDist = el('input', 'input narrow-num');
+  maxDist.type = 'number';
+  maxDist.min = '0';
+  maxDist.max = '300';
+  maxDist.value = '100';
+  maxDist.setAttribute('aria-label', 'TLSH maximum distance');
+  const rejected = el('input');
+  rejected.type = 'checkbox';
+  const rejLabel = el('label', 'field inline check');
+  rejLabel.appendChild(rejected);
+  rejLabel.appendChild(el('span', 'label', 'Include rejected samples'));
+  const go = el('button', 'btn', 'Find similar');
+  go.type = 'button';
+  const pair = (label, input) => {
+    const f = el('label', 'field inline');
+    f.appendChild(el('span', 'label', label));
+    f.appendChild(input);
+    return f;
+  };
+  form.appendChild(pair('By', method));
+  form.appendChild(pair('ssdeep at least', minScore));
+  form.appendChild(pair('TLSH at most', maxDist));
+  form.appendChild(rejLabel);
+  form.appendChild(go);
+  box.appendChild(form);
+  const out = el('div', 'rows similar-results');
+  box.appendChild(out);
+  go.addEventListener('click', async () => {
+    const q = new URLSearchParams({ by: method.value,
+      ssdeep_min: minScore.value || '50', tlsh_max: maxDist.value || '100',
+      include_rejected: rejected.checked ? 'true' : 'false' });
+    go.disabled = true;
+    clear(out);
+    out.appendChild(el('p', 'muted', 'Looking…'));
+    try {
+      const body = await api('/samples/' + encodeURIComponent(s.id)
+        + '/similar?' + q.toString());
+      similarResults(out, body);
+    } catch (err) {
+      clear(out);
+      out.appendChild(el('p', 'msg bad', refusalText(err,
+        'Similarity needs sample.read.')));
+    } finally {
+      go.disabled = false;
+    }
+  });
+  return box;
+}
+
+/* The queue's search by hash. The value is POSTed in the body, never put
+   in the URL, and the server neither logs nor keeps it. */
+function wireHashSearch() {
+  const form = $('smp-hash-search');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const out = $('smp-hash-results');
+    const value = $('smp-hash-value').value.trim();
+    if (!value) return;
+    clear(out);
+    out.appendChild(el('p', 'muted', 'Looking…'));
+    show(out, true);
+    try {
+      const body = await api('/samples/similar', { method: 'POST',
+        json: { by: $('smp-hash-by').value, value } });
+      similarResults(out, body);
+    } catch (err) {
+      clear(out);
+      out.appendChild(el('p', 'msg bad', refusalText(err,
+        'Searching by hash needs sample.read.')));
+    }
+  });
+}
+
+/* ── the Lab's Rules subtab (F12 J) ─────────────────────────────────── */
+
+let rulesGen = 0;
+
+async function loadRules() {
+  const gen = ++rulesGen;
+  const list = $('rul-list');
+  const empty = $('rul-empty');
+  listPending('rul-list', 'rul-empty');
+  let body;
+  try {
+    body = await api('/samples/yara/rulesets');
+  } catch (err) {
+    if (gen !== rulesGen) return;
+    clear(list);
+    empty.textContent = refusalText(err, 'The rule sets need sample.read.');
+    show(empty, true);
+    return;
+  }
+  if (gen !== rulesGen) return;
+  const engine = body.engine || {};
+  $('rul-engine').textContent = engine.installed
+    ? 'Engine: yara-x ' + engine.version + ' on ' + engine.platform
+      + '. Rule sets compile after upload, in a limited child process.'
+    : 'YARA is not installed in this deployment: install ' + engine.extra
+      + '. Rule sets can be stored, and wait to compile until it is.';
+  const you = body.you_may || {};
+  const forms = $('rul-forms');
+  clear(forms);
+  if (you.manage) forms.appendChild(rulesetCreateForm());
+  const rows = body.rulesets || [];
+  clear(list);
+  for (const rs of rows) list.appendChild(rulesetCard(rs, you));
+  $('rul-counts').textContent = rows.length
+    ? countOf(rows.length, 'rule set', 'rule sets') + ' you can see' : '';
+  empty.textContent = 'No rule set you can see.';
+  show(empty, !rows.length);
+}
+
+function rulesetCreateForm() {
+  const box = el('details', 'card sub ruleset-form');
+  box.appendChild(el('summary', null, 'New rule set'));
+  const form = el('div', 'stack');
+  const field = (label, input, help) => {
+    const f = el('label', 'field');
+    f.appendChild(el('span', 'label', label));
+    f.appendChild(input);
+    if (help) f.appendChild(el('span', 'help', help));
+    form.appendChild(f);
+    return input;
+  };
+  const key = el('input', 'input');
+  key.type = 'text';
+  key.spellcheck = false;
+  key.placeholder = 'lower-case letters, digits and hyphens';
+  field('Key', key, 'Never changes once created.');
+  const name = el('input', 'input');
+  name.type = 'text';
+  field('Name', name);
+  const desc = el('input', 'input');
+  desc.type = 'text';
+  field('Description', desc);
+  const cls = el('select', 'select');
+  opts(cls, [['CLEAR', 'CLEAR'], ['GREEN', 'GREEN'], ['AMBER', 'AMBER'],
+    ['AMBER_STRICT', 'AMBER_STRICT'], ['RED', 'RED']], 'AMBER');
+  field('Classification', cls, 'A rule set says what the lab hunts, so it is '
+    + 'labelled, and a label is only ever raised. Its findings are shown '
+    + 'only to people who may see it.');
+  const comps = el('input', 'input');
+  comps.type = 'text';
+  comps.spellcheck = false;
+  comps.placeholder = 'compartment keys, separated by commas';
+  field('Compartments', comps);
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const save = el('button', 'btn primary', 'Create the rule set');
+  save.type = 'button';
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    try {
+      const out = await withStepUp('Creating a rule set needs a sign-in from '
+        + 'the last 15 minutes.', () => api('/samples/yara/rulesets', {
+        method: 'POST',
+        json: { key: key.value.trim(), display_name: name.value.trim(),
+          description: desc.value.trim() || null, classification: cls.value,
+          compartments: comps.value.split(',').map((x) => x.trim())
+            .filter(Boolean) } }));
+      if (out === null) { save.disabled = false; return; }
+    } catch (err) {
+      setMsg(msg, refusalText(err, 'Creating a rule set needs the malware '
+        + 'analyst role.'));
+      msg.className = 'msg bad';
+      save.disabled = false;
+      return;
+    }
+    loadRules();
+  });
+  form.appendChild(msg);
+  form.appendChild(save);
+  box.appendChild(form);
+  return box;
+}
+
+function rulesetCard(rs, you) {
+  const card = el('div', 'card row-card ruleset-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', rs.display_name));
+  head.appendChild(el('code', 'mono muted small', rs.key));
+  head.appendChild(el('span', 'chip tlp-' + rs.classification, rs.classification));
+  for (const c of rs.compartments || []) {
+    head.appendChild(el('span', 'chip compartment', c));
+  }
+  if (rs.open) {
+    head.appendChild(el('span', 'chip ok', 'v' + rs.open.version
+      + ' active since ' + fmtTime(rs.open.activated_at)));
+  } else {
+    head.appendChild(el('span', 'chip', 'not active'));
+  }
+  card.appendChild(head);
+  if (rs.description) card.appendChild(el('p', 'why', visibleText(rs.description)));
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('created', fmtTime(rs.created_at)));
+  if (rs.created_via === 'yara_db.py') {
+    facts.appendChild(fact('created by', 'scripts/yara_db.py (an import)'));
+  } else {
+    facts.appendChild(personFact('created by', rs.created_by_name,
+      rs.created_by_email));
+  }
+  card.appendChild(facts);
+  const versions = rs.versions || [];
+  if (!versions.length) card.appendChild(el('p', 'muted', 'No version uploaded yet.'));
+  for (const v of versions) card.appendChild(rulesetVersionRow(rs, v, you));
+  if (you.manage) card.appendChild(rulesetUploadForm(rs));
+  return card;
+}
+
+const BUILD_WORDS = {
+  COMPILED: ['compiled', 'chip ok'],
+  PARTIAL: ['compiled in part', 'chip warn'],
+  FAILED: ['did not compile', 'chip bad'],
+  compiling: ['compiling', 'chip'],
+  compile_failed: ['compiling failed', 'chip bad'],
+  // F12 (2026-09-24): this host's build did not verify; the listing
+  // never rebuilds from a read, the next activation or scan does.
+  rebuild_needed: ['needs rebuilding', 'chip warn'],
+  engine_absent: ['no engine', 'chip'],
+};
+
+function rulesetVersionRow(rs, v, you) {
+  const row = el('div', 'row-card inner ruleset-version');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', 'Version ' + v.version));
+  const lic = el('span', 'chip' + (v.licence_review_required ? ' warn' : ''),
+    visibleText(v.licence) + (v.licence_review_required ? ' (review)' : ''));
+  lic.title = v.licence_review_required
+    ? 'The source asks for its licence to be reviewed: the activator must '
+      + 'write down the clearance.'
+    : 'The licence as the source states it.';
+  head.appendChild(lic);
+  const build = v.build || {};
+  const words = BUILD_WORDS[build.status] || [String(build.status || ''), 'chip'];
+  head.appendChild(el('span', words[1], words[0]));
+  if (v.needs_adoption) head.appendChild(el('span', 'chip warn', 'awaits adoption'));
+  if (rs.open && rs.open.version_id === v.id) head.appendChild(el('span', 'chip ok', 'active'));
+  row.appendChild(head);
+  const facts = el('div', 'facts');
+  if (v.imported) {
+    facts.appendChild(fact('imported by', 'scripts/yara_db.py'
+      + (v.provenance && v.provenance.host_user ? ' as ' + v.provenance.host_user : '')));
+    if (v.adopted_at) {
+      facts.appendChild(personFact('adopted by', v.adopted_by_name,
+        v.adopted_by_email));
+    }
+  } else {
+    facts.appendChild(personFact('uploaded by', v.uploaded_by_name,
+      v.uploaded_by_email));
+  }
+  facts.appendChild(fact('uploaded', fmtTime(v.uploaded_at)));
+  facts.appendChild(fact('files', countOf(v.file_count, 'rule file', 'rule files')));
+  if (typeof build.rule_count === 'number') {
+    facts.appendChild(fact('rules', String(build.rule_count)));
+  }
+  row.appendChild(facts);
+  const prov = v.provenance || {};
+  if (prov.source_name || prov.source_url || prov.source_commit) {
+    row.appendChild(el('p', 'muted small', 'From ' + visibleText(
+      [prov.source_name, prov.source_url, prov.source_commit
+        ? 'commit ' + String(prov.source_commit).slice(0, 12) : null]
+        .filter(Boolean).join(', '))));
+  }
+  const failed = ((build.report && build.report.files) || [])
+    .filter((f) => f.status === 'failed');
+  if (failed.length) {
+    const d = el('details', 'compile-report');
+    d.appendChild(el('summary', null, countOf(failed.length, 'file',
+      'files') + ' did not compile'));
+    const ul = el('ul', 'rules');
+    for (const f of failed) {
+      const e = (f.errors || [])[0] || {};
+      ul.appendChild(el('li', null, visibleText(f.path) + (e.line ? ', line '
+        + e.line + (e.column ? ' column ' + e.column : '') : '') + ': '
+        + visibleText(e.title || 'does not compile')));
+    }
+    d.appendChild(ul);
+    row.appendChild(d);
+  }
+  const ignored = (v.files || []).filter((f) => f.status === 'ignored');
+  if (ignored.length) {
+    row.appendChild(el('p', 'muted small', countOf(ignored.length, 'file',
+      'files') + ' in the upload ' + agree(ignored.length, 'is not a rule',
+      'are not rules') + ': '
+      + ignored.slice(0, 5).map((f) => visibleText(f.path)).join(', ')
+      + (ignored.length > 5 ? ', and ' + (ignored.length - 5) + ' more' : '')));
+  }
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const actions = el('div', 'row audit-actions');
+  if (you.manage && v.needs_adoption) {
+    const adopt = el('button', 'btn', 'Adopt this version');
+    adopt.type = 'button';
+    adopt.title = 'Vouch for an imported version, so a Security Officer '
+      + 'other than you can activate it.';
+    adopt.addEventListener('click', () => rulesetAction(adopt, msg,
+      '/samples/yara/versions/' + encodeURIComponent(v.id) + '/adopt', {},
+      'Adopting a version needs a sign-in from the last 15 minutes.'));
+    actions.appendChild(adopt);
+  }
+  if (you.manage && rs.open && rs.open.version_id === v.id) {
+    const hunt = el('button', 'btn', 'Queue a rescan');
+    hunt.type = 'button';
+    hunt.title = 'Scan every sample you can see with this version. Each read '
+      + 'is recorded in the sample\'s access ledger in your name.';
+    hunt.addEventListener('click', async () => {
+      hunt.disabled = true;
+      let r;
+      try {
+        r = await withStepUp('Queueing a rescan needs a sign-in from the last '
+          + '15 minutes.', () => api('/samples/yara/versions/'
+          + encodeURIComponent(v.id) + '/retrohunt', { method: 'POST' }));
+      } catch (err) {
+        setMsg(msg, refusalText(err, 'A rescan needs the malware analyst role.'));
+        msg.className = 'msg bad';
+        hunt.disabled = false;
+        return;
+      }
+      hunt.disabled = false;
+      if (!r) return;
+      const skipped = r.skipped || {};
+      const left = (skipped.rejected || 0) + (skipped.case_read_only || 0)
+        + (skipped.too_large || 0);
+      setMsg(msg, countOf(r.queued + r.merged, 'sample', 'samples')
+        + ' queued for a scan' + (left ? '; ' + left + ' left out (rejected, '
+        + 'closed or too large)' : '') + '.');
+      msg.className = 'msg ok';
+    });
+    actions.appendChild(hunt);
+  }
+  if (you.view_source && (v.files || []).some((f) => f.status === 'accepted')) {
+    const view = el('details', 'rule-source');
+    view.appendChild(el('summary', null, 'View source'));
+    const pre = el('pre', 'rule-text');
+    for (const f of v.files || []) {
+      if (f.status !== 'accepted') continue;
+      const b = el('button', 'btn small subtle', visibleText(f.path));
+      b.type = 'button';
+      b.addEventListener('click', async () => {
+        try {
+          const out = await api('/samples/yara/versions/' + encodeURIComponent(v.id)
+            + '/files/' + f.index);
+          /* Text only: rule source carries attacker byte patterns, so it is
+             never markup. */
+          pre.textContent = (out.text || '') + (out.truncated
+            ? '\n\n(cut at 1 MiB)' : '');
+        } catch (err) {
+          pre.textContent = refusalText(err, 'Rule source needs the malware '
+            + 'analyst role.');
+        }
+      });
+      view.appendChild(b);
+    }
+    view.appendChild(pre);
+    row.appendChild(view);
+  }
+  if (actions.childNodes.length) row.appendChild(actions);
+  row.appendChild(msg);
+  return row;
+}
+
+async function rulesetAction(btn, msg, path, json, why) {
+  btn.disabled = true;
+  let out;
+  try {
+    out = await withStepUp(why, () => api(path, { method: 'POST', json }));
+  } catch (err) {
+    setMsg(msg, refusalText(err, ''));
+    msg.className = 'msg bad';
+    btn.disabled = false;
+    return null;
+  }
+  btn.disabled = false;
+  if (out !== null) loadRules();
+  return out;
+}
+
+function rulesetUploadForm(rs) {
+  const box = el('details', 'ruleset-upload');
+  box.appendChild(el('summary', null, 'Upload a version'));
+  const form = el('div', 'stack');
+  const field = (label, input, help) => {
+    const f = el('label', 'field');
+    f.appendChild(el('span', 'label', label));
+    f.appendChild(input);
+    if (help) f.appendChild(el('span', 'help', help));
+    form.appendChild(f);
+    return input;
+  };
+  const file = el('input');
+  file.type = 'file';
+  file.accept = '.yar,.yara,.zip';
+  field('Rules', file, 'One .yar or .yara file, or a .zip of them. Anything '
+    + 'else in a zip is listed and not stored as a rule.');
+  const licence = el('input', 'input');
+  licence.type = 'text';
+  field('Licence', licence, 'As the source states it. Required.');
+  const review = el('input');
+  review.type = 'checkbox';
+  const rl = el('label', 'field inline check');
+  rl.appendChild(review);
+  rl.appendChild(el('span', 'label', 'The licence needs review before use'));
+  form.appendChild(rl);
+  const src = el('input', 'input');
+  src.type = 'text';
+  field('Source name', src);
+  const url = el('input', 'input');
+  url.type = 'text';
+  field('Source address', url);
+  const commit = el('input', 'input');
+  commit.type = 'text';
+  field('Source commit', commit);
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const save = el('button', 'btn primary', 'Upload the version');
+  save.type = 'button';
+  save.addEventListener('click', async () => {
+    if (!file.files.length || !licence.value.trim()) {
+      setMsg(msg, 'Choose the rules and say their licence.');
+      msg.className = 'msg bad';
+      return;
+    }
+    const data = new FormData();
+    data.append('file', file.files[0]);
+    data.append('licence', licence.value.trim());
+    data.append('licence_review_required', review.checked ? 'true' : 'false');
+    if (src.value.trim()) data.append('source_name', src.value.trim());
+    if (url.value.trim()) data.append('source_url', url.value.trim());
+    if (commit.value.trim()) data.append('source_commit', commit.value.trim());
+    save.disabled = true;
+    try {
+      const out = await withStepUp('Uploading a version needs a sign-in from '
+        + 'the last 15 minutes.', () => api('/samples/yara/rulesets/'
+        + encodeURIComponent(rs.id) + '/versions', { method: 'POST', form: data }));
+      if (out === null) { save.disabled = false; return; }
+    } catch (err) {
+      setMsg(msg, refusalText(err, 'Uploading needs the malware analyst role.'));
+      msg.className = 'msg bad';
+      save.disabled = false;
+      return;
+    }
+    loadRules();
+  });
+  form.appendChild(msg);
+  form.appendChild(save);
+  box.appendChild(form);
+  return box;
+}
+
+/* ── Oversight: YARA rule sets to activate (F12 J) ──────────────────────
+ *
+ * The Security Officer activates a version somebody else sponsored, and
+ * writes down the licence clearance when the source asks for review. The
+ * list is built by the Lab code and mounted by `showAdmin` beside the
+ * preserved samples, as that list is; it shows which set and version, its
+ * labels, sponsor, licence and build, and never a rule.
+ */
+let yaraReview = null;
+let yaraReviewGen = 0;
+
+function showYaraReview(canSee) {
+  if (!yaraReview) yaraReview = buildYaraReview();
+  const view = $('view-admin');
+  if (yaraReview.parentNode !== view) view.appendChild(yaraReview);
+  show(yaraReview, canSee);
+  if (canSee) {
+    loadYaraReview();
+  } else {
+    yaraReviewGen += 1;
+    clear($('yara-list'));
+    $('yara-counts').textContent = '';
+  }
+}
+
+function buildYaraReview() {
+  const box = el('section', 'pane yara-review');
+  box.id = 'yara-review';
+  box.setAttribute('aria-label', 'YARA rule sets to activate');
+  box.hidden = true;
+  box.appendChild(el('h2', 'h-sm', 'YARA rule sets to activate'));
+  box.appendChild(el('p', 'help',
+    'A lab member uploads or adopts a version; you activate it, and nobody '
+    + 'may activate a version they sponsored. When the source asks for its '
+    + 'licence to be reviewed, write down the clearance you are relying on: '
+    + 'it is kept with the activation and in the audit trail. Activating '
+    + 'does not rescan samples already held.'));
+  const head = el('div', 'pane-head');
+  const refresh = el('button', 'btn', 'Refresh');
+  refresh.type = 'button';
+  refresh.addEventListener('click', () => loadYaraReview());
+  head.appendChild(refresh);
+  const counts = el('span', 'muted small');
+  counts.id = 'yara-counts';
+  head.appendChild(counts);
+  box.appendChild(head);
+  const list = el('div', 'rows');
+  list.id = 'yara-list';
+  box.appendChild(list);
+  const empty = el('p', 'empty', 'Nothing awaits activation.');
+  empty.id = 'yara-empty';
+  empty.hidden = true;
+  box.appendChild(empty);
+  return box;
+}
+
+async function loadYaraReview() {
+  const gen = ++yaraReviewGen;
+  const list = $('yara-list');
+  const empty = $('yara-empty');
+  let body;
+  try {
+    body = await api('/samples/yara/pending');
+  } catch (err) {
+    if (gen !== yaraReviewGen) return;
+    clear(list);
+    $('yara-counts').textContent = '';
+    empty.textContent = err instanceof ApiError
+      ? refusalText(err, 'The list needs sample.yara.activate and a fresh '
+        + 'second factor.')
+      : 'The rule sets could not be read. The list is not known to be empty.';
+    show(empty, true);
+    return;
+  }
+  if (gen !== yaraReviewGen) return;
+  clear(list);
+  const waiting = body.waiting || [];
+  const active = body.active || [];
+  const openBySet = new Set(active.map((a) => a.ruleset_id));
+  for (const v of waiting) {
+    list.appendChild(yaraPendingRow(v, body.you, openBySet.has(v.ruleset_id)));
+  }
+  for (const a of active) list.appendChild(yaraActiveRow(a));
+  $('yara-counts').textContent = countOf(waiting.length, 'version awaits',
+    'versions await') + ' activation; ' + countOf(active.length,
+    'rule set is', 'rule sets are') + ' active';
+  empty.textContent = 'Nothing awaits activation and nothing is active.';
+  show(empty, !waiting.length && !active.length);
+}
+
+function yaraPendingRow(v, you, hasOpen) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', v.display_name + ' v' + v.version));
+  head.appendChild(el('span', 'chip tlp-' + v.classification, v.classification));
+  for (const c of v.compartments || []) head.appendChild(el('span', 'chip compartment', c));
+  head.appendChild(el('span', 'chip' + (v.licence_review_required ? ' warn' : ''),
+    visibleText(v.licence) + (v.licence_review_required ? ' (review)' : '')));
+  const build = v.build || {};
+  const words = BUILD_WORDS[build.status] || [String(build.status || ''), 'chip'];
+  head.appendChild(el('span', words[1], words[0]));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  if (v.needs_adoption) {
+    facts.appendChild(fact('sponsor', 'imported, not yet adopted by a lab member',
+      'warn'));
+  } else {
+    facts.appendChild(personFact('sponsor', v.sponsor_name, v.sponsor_email));
+  }
+  facts.appendChild(fact('uploaded', fmtTime(v.uploaded_at)));
+  facts.appendChild(fact('files', countOf(v.file_count, 'rule file', 'rule files')));
+  card.appendChild(facts);
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  if (v.sponsor_id && v.sponsor_id === you) {
+    card.appendChild(el('p', 'help', 'You uploaded or adopted this version; '
+      + 'somebody else has to activate it.'));
+    return card;
+  }
+  if (v.needs_adoption) {
+    card.appendChild(el('p', 'help', 'A lab member must adopt it in the '
+      + 'Lab\'s Rules tab before it can be activated.'));
+    return card;
+  }
+  let ack = null;
+  if (v.licence_review_required) {
+    ack = el('textarea', 'input');
+    ack.rows = 3;
+    ack.placeholder = 'the clearance you are relying on, and who gave it';
+    const f = el('label', 'field');
+    f.appendChild(el('span', 'label', 'Licence clearance'));
+    f.appendChild(ack);
+    card.appendChild(f);
+  }
+  let replace = null;
+  if (hasOpen) {
+    replace = el('input');
+    replace.type = 'checkbox';
+    const rl = el('label', 'field inline check');
+    rl.appendChild(replace);
+    rl.appendChild(el('span', 'label', 'Replace the version active now'));
+    card.appendChild(rl);
+  }
+  const go = el('button', 'btn primary', 'Activate');
+  go.type = 'button';
+  go.addEventListener('click', async () => {
+    if (ack && ack.value.trim().length <= 20) {
+      setMsg(msg, 'Write down the clearance, in more than 20 characters.');
+      msg.className = 'msg bad';
+      ack.focus();
+      return;
+    }
+    go.disabled = true;
+    let out;
+    try {
+      out = await withStepUp('Activating a rule set needs a sign-in from the '
+        + 'last 15 minutes.', () => api('/samples/yara/versions/'
+        + encodeURIComponent(v.version_id) + '/activate', { method: 'POST',
+        json: { licence_acknowledgement: ack ? ack.value.trim() : null,
+          replace_open: !!(replace && replace.checked) } }));
+    } catch (err) {
+      setMsg(msg, refusalText(err, ''));
+      msg.className = 'msg bad';
+      go.disabled = false;
+      return;
+    }
+    go.disabled = false;
+    if (out !== null) loadYaraReview();
+  });
+  card.appendChild(go);
+  card.appendChild(msg);
+  return card;
+}
+
+function yaraActiveRow(a) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', a.display_name + ' v' + a.version));
+  head.appendChild(el('span', 'chip ok', 'active since ' + fmtTime(a.activated_at)));
+  head.appendChild(el('span', 'chip tlp-' + a.classification, a.classification));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(personFact('activated by', a.activated_by_name,
+    a.activated_by_email));
+  card.appendChild(facts);
+  const reason = el('input', 'input');
+  reason.type = 'text';
+  reason.placeholder = 'why it is being switched off';
+  reason.setAttribute('aria-label', 'Why it is being switched off');
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const off = el('button', 'btn danger', 'Deactivate');
+  off.type = 'button';
+  off.addEventListener('click', async () => {
+    if (reason.value.trim().length < 10) {
+      setMsg(msg, 'Say why, in at least 10 characters.');
+      msg.className = 'msg bad';
+      reason.focus();
+      return;
+    }
+    off.disabled = true;
+    let out;
+    try {
+      out = await withStepUp('Deactivating a rule set needs a sign-in from the '
+        + 'last 15 minutes.', () => api('/samples/yara/versions/'
+        + encodeURIComponent(a.version_id) + '/deactivate', { method: 'POST',
+        json: { reason: reason.value.trim() } }));
+    } catch (err) {
+      setMsg(msg, refusalText(err, ''));
+      msg.className = 'msg bad';
+      off.disabled = false;
+      return;
+    }
+    off.disabled = false;
+    if (out !== null) loadYaraReview();
+  });
+  const row = el('div', 'row audit-actions');
+  row.appendChild(reason);
+  row.appendChild(off);
+  card.appendChild(row);
+  card.appendChild(msg);
+  return card;
+}
+
 /* ── detonation: the VM / sandbox surface ─────────────────────────────
  *
  * docs/11 is emphatic that you INTEGRATE with a sandbox rather than build
@@ -28825,9 +37177,12 @@ function extractedSelector(s, a, x, index, you) {
  */
 
 const EXPOSURE = [
-  ['NONE', 'Private instance: nothing leaves your estate',
-    'A sandbox you run. The sample does not leave the boundary and nobody '
-    + 'outside learns you hold it. No authoriser required.'],
+  // F14. A sandbox you run is still outside NocTORnal's labels, holds
+  // and retention, so the sentence no longer says nothing leaves.
+  ['NONE', 'Private instance: a sandbox you run',
+    'A sandbox you run: the sample goes only to it, outside NocTORnal\'s '
+    + 'labels, holds and retention. No authoriser required unless its network '
+    + 'route is live.'],
   ['VENDOR', 'Vendor sandbox: the vendor sees the sample',
     'The sample and its hash reach a commercial vendor. Several "private" '
     + 'tiers still share hashes with partners; confirm what yours does '
@@ -28838,24 +37193,28 @@ const EXPOSURE = [
     + 'Assume the subject learns you have it, the same day.'],
 ];
 
-function detonationPanel(s, rows, you, people) {
+function detonationPanel(s, rows, you, people, sandboxState) {
   you = you || {};
   const box = el('details', 'card sub');
   const summary = el('summary', null,
     'Detonation / VM' + (rows.length ? ` (${rows.length})` : ''));
   box.appendChild(summary);
 
-  box.appendChild(el('p', 'help warn',
-    'Nothing here submits anything anywhere. There is no sandbox '
-    + 'integration in this build: the design integrates an existing '
-    + 'sandbox rather than building one, and none has been integrated '
-    + 'yet. What this records is the '
-    + 'AUTHORISATION, captured before anything could be sent, so that it '
-    + 'exists whether or not an integration ever appears.'));
+  /* F14. With a sandbox configured, requests to it are sent by the
+     worker after any sign-off; a record-only request never is. Without
+     one, nothing here sends anything. */
+  const sb = (smpPolicy && smpPolicy.sandbox) || {};
+  box.appendChild(el('p', 'help warn', sb.configured
+    ? 'Requests to ' + sb.name + ' are sent by the sandbox worker, after '
+      + 'sign-off where one is needed. A record-only request is never sent.'
+    : 'Nothing here submits anything anywhere: no sandbox is configured on '
+      + 'this deployment. What this records is the AUTHORISATION, captured '
+      + 'before anything could be sent.'));
 
   if (rows.length) {
     const list = el('div', 'rows');
-    for (const d of rows) list.appendChild(detonationRow(d));
+    const again = () => openSample(s.id);   // after a cancel or sign-off
+    for (const d of rows) list.appendChild(detonationRow(d, again));
     box.appendChild(list);
   } else {
     box.appendChild(el('p', 'muted', 'No detonation requested.'));
@@ -28872,6 +37231,16 @@ function detonationPanel(s, rows, you, people) {
   if (s.case_read_only) {
     box.appendChild(smpCaseShut());
     return box;
+  }
+
+  /* F14. The send first; recording one done elsewhere under its own
+     fold. */
+  let recordHolder = box;
+  if (sb.configured) {
+    box.appendChild(sandboxSendForm(s, people, sandboxState));
+    recordHolder = el('details', 'authorise-form');
+    recordHolder.appendChild(el('summary', null, 'Record one done elsewhere'));
+    box.appendChild(recordHolder);
   }
 
   /* --- the request form */
@@ -29011,37 +37380,329 @@ function detonationPanel(s, rows, you, people) {
   });
   form.appendChild(msg);
   form.appendChild(btn);
-  box.appendChild(form);
+  recordHolder.appendChild(form);   // F14
 
   exposure.addEventListener('change', paint);
   paint();
   return box;
 }
 
-function detonationRow(d) {
+function detonationRow(d, after) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', d.target));
   head.appendChild(el('span', 'chip exposure-' + d.exposure_level,
     d.exposure_level.toLowerCase()));
-  head.appendChild(el('span', 'chip', d.status.toLowerCase()));
-  /* On EVERY row. "AUTHORISED" reads as "it went" unless something says
-     otherwise, and nothing in this build ever sends. */
-  const never = el('span', 'chip ok', 'not submitted');
-  never.title = 'No sandbox integration exists. This row is an '
-    + 'authorisation record, not a submission.';
-  head.appendChild(never);
+  /* F14. The status in words; "sent" names CAPE's task. */
+  const status = DETONATION_STATUS[d.status] || [d.status.toLowerCase(), 'chip'];
+  head.appendChild(el('span', status[1], status[0]
+    + (d.status === 'SUBMITTED' && d.external_ref ? ', task ' + d.external_ref : '')));
+  /* "not submitted" on a record-only row alone: a SUBMIT row says what
+     happened to it instead. */
+  if (d.mode !== 'SUBMIT') {
+    const never = el('span', 'chip ok', 'not submitted');
+    never.title = 'A record-only request. This row is an authorisation '
+      + 'record, and it is never sent.';
+    head.appendChild(never);
+  } else if (d.network_route) {
+    head.appendChild(el('span', d.route_class === 'LIVE' ? 'chip warn' : 'chip',
+      d.network_route));
+  }
   card.appendChild(head);
 
   const facts = el('div', 'facts');
-  facts.appendChild(fact('requested by', d.requested_by));
+  facts.appendChild(fact('requested by', d.requested_by_name || d.requested_by));
   facts.appendChild(fact('when',
     fmtTime(d.requested_at)));
-  if (d.authorised_by) facts.appendChild(fact('authorised by', d.authorised_by));
+  if (d.authorised_by) {
+    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'authorised by',
+      d.authorised_by_name || d.authorised_by));
+  }
+  if (d.signed_off_at) {
+    facts.appendChild(fact(d.signoff_decision === 'DECLINED' ? 'declined'
+      : 'signed off', fmtTime(d.signed_off_at)));
+  }
+  if (d.status === 'AWAITING_SIGNOFF' && d.signoff_expires_at) {
+    facts.appendChild(fact('lapses', fmtTime(d.signoff_expires_at)));
+  }
+  if (d.submitted_at) facts.appendChild(fact('sent', fmtTime(d.submitted_at)));
+  if (d.completed_at) facts.appendChild(fact('ended', fmtTime(d.completed_at)));
   card.appendChild(facts);
   if (d.authorisation_note) {
     card.appendChild(el('p', 'why', d.authorisation_note));
   }
+  if (d.last_error && d.status !== 'CANCELLED') {
+    card.appendChild(el('p', 'help warn', d.last_error));
+  }
+  if (after) card.appendChild(detonationActions(d, after));
+  return card;
+}
+
+/* ── sending to the configured sandbox (F14, 2026-09-24) ────────────────
+ *
+ * A detonation can be SENT to one operator-configured CAPEv2. The send is
+ * made by the sandbox worker, never by this page, and only the encrypted
+ * archive a download produces ever leaves. The target's exposure and
+ * ceiling are the operator's declarations; the analyst picks the CAPE
+ * network route and, where the operator lists them, the analysis machine.
+ * A live route or machine, or an exposed target, needs a second person's
+ * sign-off in the product. */
+
+const DETONATION_STATUS = {
+  PENDING: ['recorded', 'chip'],
+  AUTHORISED: ['recorded, authorised', 'chip'],
+  AWAITING_SIGNOFF: ['awaiting sign-off', 'chip warn'],
+  QUEUED: ['queued', 'chip'],
+  SUBMITTED: ['sent', 'chip'],
+  REPORTED: ['reported', 'chip ok'],
+  FAILED: ['failed', 'chip bad'],
+  REFUSED: ['refused', 'chip bad'],
+  DECLINED: ['declined', 'chip bad'],
+  CANCELLED: ['cancelled', 'chip'],
+};
+
+/** The words for a CAPE network route, by its class. */
+function routeWords(route, klass) {
+  return klass === 'LIVE'
+    ? route + ': live, the sample can reach its operators, who may notice'
+    : route + ': isolated, the sample reaches nothing';
+}
+
+/** The send form, for a sandbox the operator configured. `state` is the
+ *  card's `sandbox` block: whether this sample may be sent now, and why
+ *  not, from the one eligibility reader. */
+function sandboxSendForm(s, people, state) {
+  const sb = (smpPolicy && smpPolicy.sandbox) || {};
+  const form = el('div', 'stack');
+  form.appendChild(el('hr', 'rule'));
+  form.appendChild(el('h3', 'h-xs', 'Send to ' + sb.name));
+  form.appendChild(el('p', 'help' + (sb.exposure_level === 'NONE' ? '' : ' warn'),
+    'Exposure ' + String(sb.exposure_level || '').toLowerCase() + ', declared by '
+    + 'the operator. ' + (sb.exposure_words || '')));
+  form.appendChild(el('p', 'help', 'Nothing above TLP:' + sb.ceiling
+    + ', and nothing compartmented, is sent. What leaves is the encrypted '
+    + 'archive a download produces, never the raw file.'));
+  if (state && !state.eligible) {
+    form.appendChild(el('p', 'help warn', 'This sample cannot be sent: '
+      + state.reason));
+    return form;
+  }
+  const route = el('select', 'select');
+  opts(route, (sb.network_routes || []).map((r) => [r.route,
+    routeWords(r.route, r.class)]), sb.default_network_route);
+  const routeField = el('label', 'field');
+  routeField.appendChild(el('span', 'label', 'Network route'));
+  routeField.appendChild(route);
+  form.appendChild(routeField);
+  const machines = sb.machines || [];
+  const machine = el('select', 'select');
+  opts(machine, [['', 'the sandbox chooses']].concat(machines.map((m) => [m.machine,
+    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])), '');
+  const machineField = el('label', 'field');
+  machineField.appendChild(el('span', 'label', 'Analysis machine'));
+  machineField.appendChild(machine);
+  if (machines.length) form.appendChild(machineField);
+  const extra = el('details', 'authorise-form');
+  extra.appendChild(el('summary', null, 'Package, timeout and platform'));
+  const extraForm = el('div', 'stack');
+  const pkg = el('input', 'input');
+  pkg.type = 'text';
+  pkg.spellcheck = false;
+  pkg.placeholder = 'a CAPE package, for example exe or dll';
+  const pkgField = el('label', 'field');
+  pkgField.appendChild(el('span', 'label', 'Package'));
+  pkgField.appendChild(pkg);
+  extraForm.appendChild(pkgField);
+  const timeout = el('input', 'input');
+  timeout.type = 'number';
+  timeout.min = '30';
+  timeout.max = '1200';
+  timeout.value = String(sb.timeout_s || 180);
+  const timeoutField = el('label', 'field');
+  timeoutField.appendChild(el('span', 'label', 'Analysis timeout in seconds'));
+  timeoutField.appendChild(timeout);
+  extraForm.appendChild(timeoutField);
+  const platform = el('select', 'select');
+  opts(platform, [['', 'as the package implies'], ['windows', 'Windows'],
+    ['linux', 'Linux']], '');
+  const platformField = el('label', 'field');
+  platformField.appendChild(el('span', 'label', 'Platform'));
+  platformField.appendChild(platform);
+  extraForm.appendChild(platformField);
+  extra.appendChild(extraForm);
+  form.appendChild(extra);
+
+  const authWrap = el('div', 'stack');
+  const auth = el('select', 'select');
+  const signers = (people && people.detonation_authorisers) || [];
+  opts(auth, signers.length
+    ? [['', 'Choose who signs it off…']].concat(signers.map(personOption))
+    : [['', 'Nobody else can sign this off']], '');
+  auth.disabled = !signers.length;
+  const authField = el('label', 'field');
+  authField.appendChild(el('span', 'label', 'Signed off by'));
+  authField.appendChild(auth);
+  authWrap.appendChild(authField);
+  const note = el('textarea', 'input');
+  note.rows = 2;
+  note.placeholder = 'why this send is acceptable: this is what a later review reads';
+  const noteField = el('label', 'field');
+  noteField.appendChild(el('span', 'label', 'Why'));
+  noteField.appendChild(note);
+  authWrap.appendChild(noteField);
+  authWrap.appendChild(el('p', 'help warn', 'The person you name approves it in '
+    + 'the product within 72 hours, or nothing is sent.'));
+  form.appendChild(authWrap);
+  const classOf = (value, list, key) => (list.find((x) => x[key] === value) || {}).class;
+  const needsSignoff = () => sb.exposure_level !== 'NONE'
+    || classOf(route.value, sb.network_routes || [], 'route') === 'LIVE'
+    || classOf(machine.value, machines, 'machine') === 'LIVE';
+  const paint = () => show(authWrap, needsSignoff());
+  route.addEventListener('change', paint);
+  machine.addEventListener('change', paint);
+  paint();
+
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const btn = el('button', 'btn', 'Ask the worker to send it');
+  btn.type = 'button';
+  btn.addEventListener('click', async () => {
+    const payload = { mode: 'submit', network_route: route.value };
+    if (machine.value) payload.machine = machine.value;
+    if (pkg.value.trim()) payload.package = pkg.value.trim();
+    if (platform.value) payload.platform = platform.value;
+    if (timeout.value) payload.timeout_s = Number(timeout.value);
+    if (needsSignoff()) {
+      if (!auth.value || !note.value.trim()) {
+        setMsg(msg, 'Choose who signs it off and say why.');
+        msg.className = 'msg bad';
+        return;
+      }
+      payload.authorised_by = auth.value;
+      payload.note = note.value.trim();
+    }
+    btn.disabled = true;
+    const token = caseToken();
+    let out;
+    try {
+      out = await smpSend(() => api('/samples/' + encodeURIComponent(s.id)
+        + '/detonation', { method: 'POST', json: payload }),
+      'Asking for a send', () => caseChanged(token));
+    } catch (err) {
+      setMsg(msg, smpRefusal(err, 'Sending to the sandbox needs the '
+        + 'detonation permission.'));
+      msg.className = 'msg bad';
+      btn.disabled = false;
+      return;
+    }
+    if (!out) {
+      setMsg(msg, 'Nothing was asked for. It needs a sign-in from the last 15 '
+        + 'minutes; press the button again to be asked for one.');
+      msg.className = 'msg warn';
+      btn.disabled = false;
+      return;
+    }
+    await openSample(s.id);
+    banner('Send requested', out.notice, out.signoff_required ? 'warn' : 'ok');
+  });
+  form.appendChild(msg);
+  form.appendChild(btn);
+  return form;
+}
+
+/** Cancel, approve or decline one request from its row, when this viewer
+ *  may: its requester or its named authoriser cancels; the authoriser
+ *  approves or declines. The server decides again. */
+function detonationActions(d, after) {
+  const actions = el('div', 'row-actions');
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const mine = d.requested_by_id === state.userId;
+  const signer = d.authorised_by_id === state.userId;
+  const live = d.status === 'AWAITING_SIGNOFF' || d.status === 'QUEUED';
+  const act = (label, path, json, what, cls) => {
+    const b = el('button', 'btn small' + (cls ? ' ' + cls : ''), label);
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      const token = caseToken();
+      try {
+        const out = await smpSend(() => api('/samples/detonations/'
+          + encodeURIComponent(d.id) + path, { method: 'POST', json }),
+        what, () => caseChanged(token));
+        if (out) await after();
+        else b.disabled = false;
+      } catch (err) {
+        setMsg(msg, smpRefusal(err, ''));
+        msg.className = 'msg bad';
+        b.disabled = false;
+      }
+    });
+    actions.appendChild(b);
+  };
+  if (d.mode === 'SUBMIT' && live && (mine || signer)) {
+    act('Cancel', '/cancel', undefined, 'Cancelling a detonation', 'danger');
+  }
+  if (d.mode === 'SUBMIT' && signer && d.status === 'AWAITING_SIGNOFF') {
+    act('Approve', '/sign-off', { approve: true }, 'Signing off a detonation');
+    act('Decline', '/sign-off', { approve: false }, 'Declining a detonation');
+  }
+  const box = el('div', 'stack');
+  if (actions.childNodes.length) box.appendChild(actions);
+  box.appendChild(msg);
+  return box;
+}
+
+/* The requests waiting for this viewer's sign-off, at the top of the Lab
+   (section#smp-signoff), loaded with the policy banner on every visit. */
+let signoffGen = 0;
+
+async function loadSignoffs() {
+  const gen = ++signoffGen;
+  const box = $('smp-signoff');
+  if (!box) return;
+  let body;
+  try {
+    body = await api('/samples/detonations/awaiting-signoff');
+  } catch (_err) {
+    if (gen === signoffGen) show(box, false);
+    return;
+  }
+  if (gen !== signoffGen) return;
+  const rows = body.detonations || [];
+  const list = $('smp-signoff-list');
+  clear(list);
+  for (const d of rows) list.appendChild(signoffRow(d));
+  $('smp-signoff-count').textContent = countOf(rows.length, 'request waits',
+    'requests wait') + ' for your sign-off.';
+  show(box, rows.length > 0);
+}
+
+function signoffRow(d) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', 'Sample ' + d.sha256.slice(0, 16) + '…'));
+  head.appendChild(el('span', 'chip exposure-' + d.exposure_level,
+    d.exposure_level.toLowerCase()));
+  head.appendChild(el('span', d.route_class === 'LIVE' ? 'chip warn' : 'chip',
+    routeWords(d.network_route, d.route_class)));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('case', d.case_code || 'not attached to a case'));
+  facts.appendChild(fact('to', d.target));
+  if (d.machine) facts.appendChild(fact('machine', d.machine + ', '
+    + String(d.machine_class || '').toLowerCase()));
+  facts.appendChild(fact('size', humanBytes(d.byte_size)));
+  facts.appendChild(fact('type', d.file_type || 'unrecognised'));
+  facts.appendChild(personFact('asked by', d.requested_by_name, d.requested_by_email));
+  facts.appendChild(fact('asked', fmtTime(d.requested_at)));
+  facts.appendChild(fact('lapses', fmtTime(d.expires_at)));
+  card.appendChild(facts);
+  if (d.note) card.appendChild(el('p', 'why', d.note));
+  card.appendChild(el('p', 'help warn', d.consequence));
+  card.appendChild(detonationActions(Object.assign({}, d, {
+    mode: 'SUBMIT', status: 'AWAITING_SIGNOFF', authorised_by_id: state.userId,
+  }), loadSignoffs));
   return card;
 }
 
@@ -29200,8 +37861,10 @@ function authorisationRow(s, a, msg, after) {
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', 'For '));
   head.lastChild.appendChild(smpPerson(a.granted_to_name, a.granted_to_email));
+  // F13. An authorisation on a matched sample is void, not expired.
   const status = a.live ? ['live', 'chip ok']
-    : (a.revoked_at ? ['revoked', 'chip bad'] : ['expired', 'chip']);
+    : (a.void_reason ? ['void', 'chip bad']
+      : (a.revoked_at ? ['revoked', 'chip bad'] : ['expired', 'chip']));
   head.appendChild(el('span', status[1], status[0]));
   card.appendChild(head);
   const facts = el('div', 'facts');
@@ -29448,6 +38111,17 @@ function preservedReviewRow(s) {
   const msg = el('p', 'msg');
   msg.hidden = true;
   const reload = () => loadPreservedReview();
+  /* F13. A sample that matched prohibited-content screening is released
+     only outside the product, on counsel's instruction: its authorisations
+     are void and nothing here authorises or revokes. */
+  if (s.screening_match) {
+    card.appendChild(el('p', 'help warn', 'Void: matched prohibited-content '
+      + 'screening. Released only outside this product, on counsel\'s '
+      + 'instruction.'));
+    for (const a of auths) card.appendChild(authorisationRow(s, a, msg, null));
+    card.appendChild(msg);
+    return card;
+  }
   if (!auths.length) {
     card.appendChild(el('p', 'muted small', 'Nobody has been authorised to '
       + 'retrieve this sample.'));
@@ -29459,6 +38133,574 @@ function preservedReviewRow(s) {
   card.appendChild(authoriseForm(s, msg, reload));
   card.appendChild(msg);
   return card;
+}
+
+/* ── prohibited-content screening, the Security Officer's review ─────────
+ *
+ * F13, 2026-09-24. Every held and incoming sample is compared by exact
+ * md5, sha1 and sha256 with the hash lists an officer imported under a
+ * recorded authority. A match leaves the Lab for everyone and for good,
+ * its bytes are preserved under a legal hold, and the officer is alerted.
+ * This section is the officer's record of it: the authorities, the lists,
+ * and every match. The match list is label-free by an owner decision, so
+ * each row carries only a hash prefix, the time, the list names and what
+ * happened; the full record opens only within the officer's own ceiling,
+ * and it never shows a filename, a source note or anything of the case.
+ * Mounted by `showAdmin` after the other Oversight sections.
+ */
+let screeningReview = null;
+let screeningReviewGen = 0;
+let screeningManage = false;
+
+const SCREENING_DISPOSITION = {
+  PRESERVE: 'to be preserved',
+  NOT_STORED: 'not stored',
+  STORE_FAILED: 'could not be stored',
+  ALREADY_PRESERVED: 'already preserved',
+  NO_BYTES: 'bytes already destroyed',
+  ALREADY_ISOLATED: 'already isolated',
+};
+const SCREENING_NOW = {
+  preserved: ['preserved', 'chip ok'],
+  awaiting_preservation: ['bytes waiting to move', 'chip warn'],
+  not_stored: ['nothing held', 'chip'],
+  bytes_not_found: ['bytes not found, needs a review', 'chip bad'],
+  // F13 (2026-09-24). Only a review recorded after the absence ends
+  // the question, and the chip says so rather than asking again.
+  bytes_not_found_reviewed: ['bytes not found, reviewed', 'chip warn'],
+};
+const SCREENING_ALERT = {
+  SENT: 'alert sent',
+  COALESCED: 'alert already open',
+  NONE_REACHED: 'nobody could be alerted',
+  FAILED: 'alert failed',
+};
+const SCREENING_TRIGGER = {
+  SUBMISSION: 'at submission',
+  LIST_IMPORT: 'when a list was imported',
+  RESCAN: 'in a screening pass',
+};
+const SCREENING_REVIEW_WORDS = {
+  ACKNOWLEDGED: 'Acknowledged',
+  REFERRED: 'Referred (give the reference)',
+  FALSE_POSITIVE_SUSPECTED: 'A false match is suspected',
+  DISPOSED_OUTSIDE: 'Disposed of outside the product on counsel\'s instruction',
+  NOTE: 'Note',
+};
+const SCREENING_CATEGORY = {
+  KNOWN_CSAM: 'Known child sexual abuse material',
+  TERRORIST_CONTENT: 'Terrorist content',
+  OTHER_PROHIBITED: 'Other prohibited material',
+};
+
+/** Called by `showAdmin`. Mounted for an account that may review, hidden
+ *  for one that may not, so a later sign-in on the same page never
+ *  inherits the last officer's record. */
+function showScreeningReview(canSee) {
+  if (!screeningReview) screeningReview = buildScreeningReview();
+  const view = $('view-admin');
+  if (screeningReview.parentNode !== view) view.appendChild(screeningReview);
+  show(screeningReview, canSee);
+  if (canSee) {
+    loadScreeningReview();
+  } else {
+    screeningReviewGen += 1;
+    clear($('scr-matches'));
+    clear($('scr-lists'));
+    $('scr-status').textContent = '';
+  }
+}
+
+function buildScreeningReview() {
+  const box = el('section', 'pane screening-review');
+  box.id = 'screening-review';
+  box.setAttribute('aria-label', 'Prohibited-content screening');
+  box.hidden = true;
+  box.appendChild(el('h2', 'h-sm', 'Prohibited-content screening'));
+  box.appendChild(el('p', 'help',
+    'Screening compares exact hashes against the lists this deployment '
+    + 'imported. No match does not mean the material is lawful to hold. A '
+    + 'matched sample disappears from the Lab for everyone, its bytes are '
+    + 'kept under a legal hold, and it is never downloaded, retrieved or '
+    + 'sent anywhere from here. You see which lists matched and what '
+    + 'happened, never the file\'s name or the case\'s content.'));
+  const head = el('div', 'pane-head');
+  const refresh = el('button', 'btn', 'Refresh');
+  refresh.type = 'button';
+  refresh.id = 'scr-refresh';
+  refresh.addEventListener('click', () => loadScreeningReview());
+  head.appendChild(refresh);
+  const unreviewed = el('label', 'field inline check');
+  const only = el('input');
+  only.type = 'checkbox';
+  only.id = 'scr-unreviewed';
+  only.addEventListener('change', () => loadScreeningReview());
+  unreviewed.appendChild(only);
+  unreviewed.appendChild(el('span', 'label', 'Only matches with no review'));
+  head.appendChild(unreviewed);
+  box.appendChild(head);
+  const status = el('p', 'muted small');
+  status.id = 'scr-status';
+  box.appendChild(status);
+  box.appendChild(el('h3', 'h-xs', 'Matches'));
+  const matches = el('div', 'rows');
+  matches.id = 'scr-matches';
+  box.appendChild(matches);
+  const empty = el('p', 'empty', 'No sample has matched.');
+  empty.id = 'scr-empty';
+  empty.hidden = true;
+  box.appendChild(empty);
+  const record = el('div', 'stack');
+  record.id = 'scr-record';
+  record.hidden = true;
+  box.appendChild(record);
+  const manage = el('div', 'stack');
+  manage.id = 'scr-manage';
+  manage.hidden = true;
+  manage.appendChild(el('h3', 'h-xs', 'Hash lists'));
+  const lists = el('div', 'rows');
+  lists.id = 'scr-lists';
+  manage.appendChild(lists);
+  manage.appendChild(screeningImportForm());
+  const pass = el('button', 'btn', 'Start a screening pass');
+  pass.type = 'button';
+  pass.id = 'scr-pass';
+  const passMsg = el('p', 'msg');
+  passMsg.hidden = true;
+  pass.addEventListener('click', async () => {
+    pass.disabled = true;
+    try {
+      const out = await api('/samples/screening/rescan', { method: 'POST' });
+      setMsg(passMsg, out.skipped ? 'Another screening pass is running.'
+        : 'Screened ' + countOf(out.screened || 0, 'sample', 'samples') + '; '
+          + countOf(out.matched || 0, 'match', 'matches') + ' found. The worker '
+          + 'moves matched bytes and finishes anything left.');
+      passMsg.className = 'msg ok';
+      await loadScreeningReview();
+    } catch (err) {
+      setMsg(passMsg, smpRefusal(err, 'Starting a pass needs '
+        + 'sample.screening.manage and a fresh second factor.'));
+      passMsg.className = 'msg bad';
+    } finally {
+      pass.disabled = false;
+    }
+  });
+  manage.appendChild(pass);
+  manage.appendChild(passMsg);
+  box.appendChild(manage);
+  return box;
+}
+
+async function loadScreeningReview() {
+  const gen = ++screeningReviewGen;
+  const matches = $('scr-matches');
+  const empty = $('scr-empty');
+  const only = $('scr-unreviewed').checked;
+  let body;
+  try {
+    body = await api('/samples/screening' + (only ? '?unreviewed=true' : ''));
+  } catch (err) {
+    if (gen !== screeningReviewGen) return;
+    clear(matches);
+    $('scr-status').textContent = '';
+    empty.textContent = err instanceof ApiError
+      ? smpRefusal(err, 'The screening record needs sample.screening.review '
+        + 'and a fresh second factor.')
+      : 'The screening record could not be read. It is not known to be empty.';
+    show(empty, true);
+    return;
+  }
+  if (gen !== screeningReviewGen) return;
+  screeningManage = !!body.you_may_manage;
+  const c = body.counts || {};
+  const active = (body.lists || []).filter((l) => !l.retired_at).length;
+  $('scr-status').textContent = [
+    body.authority.declared ? 'Authority: ' + body.authority.reference
+      : 'No hash-set authority is recorded, so no list can be imported',
+    countOf(active, 'active list', 'active lists'),
+    'last pass ' + fmtTime(body.last_pass_at),
+    countOf(c.matches || 0, 'match', 'matches') + ', '
+      + countOf(c.unreviewed || 0, 'without a review', 'without a review'),
+    countOf(c.pending_preservation || 0, 'awaiting preservation',
+      'awaiting preservation'),
+    countOf(c.behind || 0, 'sample behind the newest list',
+      'samples behind the newest list'),
+  ].join(' · ');
+  clear(matches);
+  for (const m of body.matches || []) matches.appendChild(screeningMatchRow(m));
+  empty.textContent = only ? 'Every match has a review.' : 'No sample has matched.';
+  show(empty, !(body.matches || []).length);
+  show($('scr-manage'), screeningManage);
+  const lists = $('scr-lists');
+  clear(lists);
+  if (screeningManage) {
+    if (!(body.lists || []).length) {
+      lists.appendChild(el('p', 'muted', 'No list has been imported.'));
+    }
+    for (const l of body.lists || []) lists.appendChild(screeningListRow(l));
+    const cap = $('scr-cap');
+    if (cap) {
+      cap.textContent = 'Up to ' + fmtBytes(body.list_cap_bytes)
+        + ' here; a larger list goes through scripts/sample_screen.py import '
+        + 'on the server.';
+    }
+  }
+}
+
+function screeningMatchRow(m) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', 'Sample ' + m.sha256_prefix + '…'));
+  head.appendChild(el('span', 'chip bad', 'match'));
+  const now = SCREENING_NOW[m.disposition_now] || [m.disposition_now, 'chip'];
+  head.appendChild(el('span', now[1], now[0]));
+  if (!m.review_count) head.appendChild(el('span', 'chip warn', 'no review'));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('matched', fmtTime(m.screened_at) + ', '
+    + (SCREENING_TRIGGER[m.trigger] || m.trigger)));
+  facts.appendChild(fact('lists', (m.matched_list_names || []).join(', ')));
+  facts.appendChild(fact('by', (m.matched_algorithms || []).join(', ')));
+  facts.appendChild(fact('bytes then',
+    SCREENING_DISPOSITION[m.disposition] || m.disposition));
+  facts.appendChild(fact('alert', (SCREENING_ALERT[m.alert_outcome]
+    || m.alert_outcome) + ', ' + countOf(m.officers_notified || 0,
+    'person told', 'people told')));
+  facts.appendChild(fact('reviews', m.review_count
+    ? countOf(m.review_count, 'review', 'reviews') + ', last: '
+      + (SCREENING_REVIEW_WORDS[m.last_review_action] || m.last_review_action)
+    : 'none'));
+  card.appendChild(facts);
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const actions = el('div', 'row-actions');
+  if (m.you_may_open) {
+    const open = el('button', 'btn small', 'Open record');
+    open.type = 'button';
+    open.addEventListener('click', () => openScreeningResult(m.result_id));
+    actions.appendChild(open);
+  } else {
+    actions.appendChild(el('span', 'muted small', 'Above your clearance or '
+      + 'compartments: the record does not open for you.'));
+  }
+  card.appendChild(actions);
+  card.appendChild(screeningReviewForm(m, msg));
+  card.appendChild(msg);
+  return card;
+}
+
+/** The record of one match, drawn with exactly the fields the detail
+ *  route returns: identity, labels, case code, submitter and time, lists,
+ *  what happened, and the reviews. Opening it is audited. */
+async function openScreeningResult(id) {
+  const box = $('scr-record');
+  clear(box);
+  show(box, true);
+  box.appendChild(el('p', 'muted', 'Loading…'));
+  let r;
+  try {
+    r = await api('/samples/screening/results/' + encodeURIComponent(id));
+  } catch (err) {
+    clear(box);
+    box.appendChild(el('p', 'msg bad', smpRefusal(err, 'Opening a record needs '
+      + 'sample.screening.review and a fresh second factor.')));
+    return;
+  }
+  clear(box);
+  const card = el('div', 'card sub');
+  card.appendChild(el('h3', 'h-xs', 'Match record'));
+  const s = r.sample || {};
+  for (const [k, v] of [['SHA-256', s.sha256], ['SHA-1', s.sha1], ['MD5', s.md5]]) {
+    if (!v) continue;
+    const line = el('div', 'hash-line');
+    line.appendChild(el('span', 'fact-k', k));
+    line.appendChild(el('code', 'mono selectable', v));
+    card.appendChild(line);
+  }
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('matched', fmtTime(r.screened_at) + ', '
+    + (SCREENING_TRIGGER[r.trigger] || r.trigger)));
+  facts.appendChild(fact('case', s.case_code || 'not attached to a case'));
+  facts.appendChild(fact('label', s.classification + ((s.compartments || []).length
+    ? ' · ' + s.compartments.join(', ') : '')));
+  facts.appendChild(fact('size', humanBytes(s.byte_size)));
+  facts.appendChild(fact('type', s.file_type || 'unrecognised'));
+  facts.appendChild(fact('submitted', (s.submitted_by_name || 'somebody') + ', '
+    + fmtTime(s.submitted_at)));
+  facts.appendChild(fact('bytes now',
+    (SCREENING_NOW[r.disposition_now] || [r.disposition_now])[0]));
+  if (s.preserved_at) facts.appendChild(fact('preserved', fmtTime(s.preserved_at)));
+  facts.appendChild(fact('lists consulted', r.lists_consulted));
+  card.appendChild(facts);
+  for (const l of r.matched_lists || []) {
+    card.appendChild(el('p', 'why', l.name + ' from ' + l.provider + ': '
+      + (SCREENING_CATEGORY[l.category] || l.category_words)));
+  }
+  for (const d of r.detonations_sent || []) {
+    card.appendChild(el('p', 'help warn', 'Already sent to the sandbox '
+      + d.target + (d.external_ref ? ' as task ' + d.external_ref : '')
+      + ' on ' + fmtTime(d.submitted_at) + '. Nothing here can recall it.'));
+  }
+  if ((r.authorisations_voided || []).length) {
+    card.appendChild(el('p', 'help', countOf(r.authorisations_voided.length,
+      'retrieval authorisation became void', 'retrieval authorisations became void')
+      + ' with the match.'));
+  }
+  if (r.bytes_not_found_at) {
+    card.appendChild(el('p', 'help warn', 'Its bytes were found in neither store '
+      + 'on two looks (' + fmtTime(r.bytes_not_found_at) + '). The data key is '
+      + 'kept. ' + (r.disposition_now === 'bytes_not_found_reviewed'
+        ? 'A review was recorded after that.'
+        : 'Record a review once the storage administrator has checked.')));
+  }
+  const list = el('div', 'rows');
+  for (const v of r.reviews || []) {
+    const row = el('div', 'card row-card compact');
+    row.appendChild(el('span', 'row-title',
+      SCREENING_REVIEW_WORDS[v.action] || v.action));
+    const vf = el('div', 'facts');
+    vf.appendChild(personFact('by', v.reviewed_by_name, v.reviewed_by_email));
+    vf.appendChild(fact('when', fmtTime(v.reviewed_at)));
+    if (v.reference) vf.appendChild(fact('reference', v.reference));
+    row.appendChild(vf);
+    if (v.note) row.appendChild(el('p', 'why', v.note));
+    list.appendChild(row);
+  }
+  card.appendChild(list);
+  const close = el('button', 'btn small', 'Close the record');
+  close.type = 'button';
+  close.addEventListener('click', () => { clear(box); show(box, false); });
+  card.appendChild(close);
+  box.appendChild(card);
+  box.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
+}
+
+function screeningReviewForm(m, msg) {
+  const box = el('details', 'authorise-form');
+  box.appendChild(el('summary', null, 'Record a review'));
+  const form = el('div', 'stack');
+  const action = el('select', 'select');
+  opts(action, Object.entries(SCREENING_REVIEW_WORDS), 'ACKNOWLEDGED');
+  const actionField = el('label', 'field');
+  actionField.appendChild(el('span', 'label', 'Review'));
+  actionField.appendChild(action);
+  form.appendChild(actionField);
+  const reference = el('input', 'input');
+  reference.type = 'text';
+  reference.placeholder = 'the report, the instruction or the ticket';
+  const refField = el('label', 'field');
+  refField.appendChild(el('span', 'label', 'Reference'));
+  refField.appendChild(reference);
+  form.appendChild(refField);
+  const note = el('textarea', 'input');
+  note.rows = 2;
+  const noteField = el('label', 'field');
+  noteField.appendChild(el('span', 'label', 'Note'));
+  noteField.appendChild(note);
+  form.appendChild(noteField);
+  form.appendChild(el('p', 'help', 'A referral and a disposal outside the '
+    + 'product each name their reference. Disposal outside the product '
+    + 'records counsel\'s instruction; the storage administrator lifts the '
+    + 'hold, and nothing here deletes anything.'));
+  const btn = el('button', 'btn', 'Record the review');
+  btn.type = 'button';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      await api('/samples/screening/results/' + encodeURIComponent(m.result_id)
+        + '/reviews', { method: 'POST', json: {
+        action: action.value,
+        reference: reference.value.trim() || null,
+        note: note.value.trim() || null,
+      } });
+      await loadScreeningReview();
+    } catch (err) {
+      setMsg(msg, smpRefusal(err, 'Recording a review needs '
+        + 'sample.screening.review and a fresh second factor.'));
+      msg.className = 'msg bad';
+      btn.disabled = false;
+    }
+  });
+  form.appendChild(btn);
+  box.appendChild(form);
+  return box;
+}
+
+function screeningListRow(l) {
+  const card = el('div', 'card row-card compact');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', l.name));
+  head.appendChild(el('span', l.retired_at ? 'chip' : 'chip ok',
+    l.retired_at ? 'retired' : 'active'));
+  if (l.entries_purged_at) head.appendChild(el('span', 'chip', 'entries deleted'));
+  else if (l.purge_requested) head.appendChild(el('span', 'chip warn',
+    'entries being deleted'));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('provider', l.provider));
+  facts.appendChild(fact('category', SCREENING_CATEGORY[l.category] || l.category));
+  facts.appendChild(fact('entries', countOf(l.entry_count, 'entry', 'entries')
+    + ' (' + (l.algorithms || []).join(', ') + ')'));
+  facts.appendChild(fact('licence', l.authority_reference));
+  facts.appendChild(fact('authority', l.deployment_authority));
+  facts.appendChild(fact('imported', (l.imported_by_name || 'somebody') + ', '
+    + fmtTime(l.imported_at) + (l.imported_via === 'cli' ? ', on the server' : '')));
+  if (l.retired_at) {
+    facts.appendChild(fact('retired', fmtTime(l.retired_at)));
+  }
+  card.appendChild(facts);
+  if (l.retire_reason) card.appendChild(el('p', 'why', l.retire_reason));
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  if (!l.retired_at) {
+    const retire = el('details', 'authorise-form');
+    retire.appendChild(el('summary', null, 'Retire this list'));
+    const form = el('div', 'stack');
+    const reason = el('input', 'input');
+    reason.type = 'text';
+    reason.placeholder = 'why, in a sentence';
+    const rf = el('label', 'field');
+    rf.appendChild(el('span', 'label', 'Reason'));
+    rf.appendChild(reason);
+    form.appendChild(rf);
+    const purge = el('label', 'field inline check');
+    const box = el('input');
+    box.type = 'checkbox';
+    purge.appendChild(box);
+    purge.appendChild(el('span', 'label', 'Also delete its entries'));
+    form.appendChild(purge);
+    form.appendChild(el('p', 'help', 'A sample that matched stays matched. '
+      + 'Deleting the entries removes them here; copies in old backups are '
+      + 'not touched.'));
+    const btn = el('button', 'btn danger', 'Retire');
+    btn.type = 'button';
+    btn.addEventListener('click', async () => {
+      if (reason.value.trim().length < 10) {
+        setMsg(msg, 'Say why the list is retired, in a sentence.');
+        msg.className = 'msg bad';
+        return;
+      }
+      if (!window.confirm('Retire the list "' + l.name + '"'
+          + (box.checked ? ' and delete its entries' : '') + '?')) return;
+      btn.disabled = true;
+      try {
+        await api('/samples/screening/lists/' + encodeURIComponent(l.id)
+          + '/retire', { method: 'POST', json: {
+          reason: reason.value.trim(), purge_entries: box.checked } });
+        await loadScreeningReview();
+      } catch (err) {
+        setMsg(msg, smpRefusal(err, 'Retiring needs sample.screening.manage.'));
+        msg.className = 'msg bad';
+        btn.disabled = false;
+      }
+    });
+    form.appendChild(btn);
+    retire.appendChild(form);
+    card.appendChild(retire);
+  } else if (!l.purge_requested) {
+    const purge = el('button', 'btn small danger', 'Delete its entries');
+    purge.type = 'button';
+    purge.addEventListener('click', async () => {
+      if (!window.confirm('Delete the entries of the retired list "' + l.name
+          + '"? The worker deletes them in batches.')) return;
+      purge.disabled = true;
+      try {
+        await api('/samples/screening/lists/' + encodeURIComponent(l.id)
+          + '/purge', { method: 'POST' });
+        await loadScreeningReview();
+      } catch (err) {
+        setMsg(msg, smpRefusal(err, 'Deleting entries needs '
+          + 'sample.screening.manage.'));
+        msg.className = 'msg bad';
+        purge.disabled = false;
+      }
+    });
+    const actions = el('div', 'row-actions');
+    actions.appendChild(purge);
+    card.appendChild(actions);
+  }
+  card.appendChild(msg);
+  return card;
+}
+
+function screeningImportForm() {
+  const box = el('details', 'authorise-form');
+  box.appendChild(el('summary', null, 'Import a hash list'));
+  const form = el('div', 'stack');
+  form.appendChild(el('p', 'help warn', 'Import a list only if counsel has '
+    + 'confirmed this deployment may hold it. The import is '
+    + 'refused until the hash-set authority is recorded. One md5, sha1 or '
+    + 'sha256 in hex per line; lines starting with # are ignored; one bad '
+    + 'line refuses the whole list.'));
+  const labelled = (label, input) => {
+    const f = el('label', 'field');
+    f.appendChild(el('span', 'label', label));
+    f.appendChild(input);
+    form.appendChild(f);
+    return input;
+  };
+  const file = el('input', 'input');
+  file.type = 'file';
+  labelled('List file', file);
+  const name = el('input', 'input');
+  name.type = 'text';
+  labelled('Name', name);
+  const provider = el('input', 'input');
+  provider.type = 'text';
+  labelled('Provider', provider);
+  const reference = el('input', 'input');
+  reference.type = 'text';
+  reference.placeholder = 'the licence or the provider agreement';
+  labelled('Authority reference', reference);
+  const category = el('select', 'select');
+  opts(category, Object.entries(SCREENING_CATEGORY), 'OTHER_PROHIBITED');
+  labelled('Category', category);
+  const cap = el('p', 'help');
+  cap.id = 'scr-cap';
+  form.appendChild(cap);
+  const msg = el('p', 'msg');
+  msg.hidden = true;
+  const btn = el('button', 'btn', 'Import');
+  btn.type = 'button';
+  btn.addEventListener('click', async () => {
+    if (!file.files[0] || !name.value.trim() || !provider.value.trim()
+        || reference.value.trim().length < 6) {
+      setMsg(msg, 'Choose the file and give its name, its provider and its '
+        + 'authority reference.');
+      msg.className = 'msg bad';
+      return;
+    }
+    const body = new FormData();
+    body.append('file', file.files[0]);
+    body.append('name', name.value.trim());
+    body.append('provider', provider.value.trim());
+    body.append('authority_reference', reference.value.trim());
+    body.append('category', category.value);
+    btn.disabled = true;
+    setMsg(msg, 'Importing and screening…');
+    msg.className = 'msg';
+    try {
+      const out = await api('/samples/screening/lists', { method: 'POST', form: body });
+      const r = out.rescan || {};
+      setMsg(msg, 'Imported ' + countOf(out.entry_count, 'entry', 'entries')
+        + '. ' + (r.skipped ? 'Another pass was running; the worker screens '
+          + 'against it next.' : countOf(r.matched || 0, 'sample matched',
+          'samples matched') + '.'));
+      msg.className = 'msg ok';
+      file.value = '';
+      await loadScreeningReview();
+    } catch (err) {
+      setMsg(msg, smpRefusal(err, 'Importing needs sample.screening.manage and '
+        + 'a fresh second factor.'));
+      msg.className = 'msg bad';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  form.appendChild(btn);
+  form.appendChild(msg);
+  box.appendChild(form);
+  return box;
 }
 
 /* What a rejection will do on THIS deployment, from the policy endpoint,
@@ -30101,9 +39343,12 @@ async function submitSample() {
     /* 451 is the legal refusal, and it must not read as an upload problem
        — that is the whole reason the status code is not a 400. */
     const legal = err instanceof ApiError && err.status === 451;
+    /* F13. A prohibited-content match is its own 451: the server's
+       sentence, as a refusal, and no card is opened. */
+    const matched = legal && /prohibited-content hash list/.test(err.detail || '');
     setMsg(msg, (legal ? 'Refused for legal reasons. ' : '')
       + refusalText(err, ''));
-    msg.className = 'msg ' + (legal ? 'warn' : 'bad');
+    msg.className = 'msg ' + (legal && !matched ? 'warn' : 'bad');
     /* A refusal the banner did not know about (the declaration was
        withdrawn since it loaded): read the policy again, so the form
        closes and says why rather than inviting the next upload. */

@@ -228,7 +228,11 @@ def test_the_pane_is_three_sections_and_readiness_is_one_of_them():
     """blocking-banner-buried-under-account-list."""
     pane = _pane_html()
     tabs = re.findall(r'data-subtab="(\w+)"', pane)
-    assert tabs == ["readiness", "accounts", "compartments"], tabs
+    assert tabs == ["readiness", "accounts", "compartments",
+                    "dual",    # Two-person controls (F9)
+                    "egress",      # Egress (S2)
+                    "embeddings",  # Embeddings (F6.3)
+                    "integrations", "providers"], tabs   # F8 and F15.2
     assert pane.index('id="rdy-blocking"') < pane.index('id="adm-accounts"'), (
         "the blocking banner is below the account list again")
     assert 'id="adm-sub-badge"' in pane
@@ -241,7 +245,9 @@ def test_the_pane_is_three_sections_and_readiness_is_one_of_them():
 
 @needs_node
 def test_the_pane_opens_on_readiness_while_anything_blocks(tmp_path):
-    got = _run(["enterAdminPane"], """
+    # F8: the default section is adminFirstSub's.
+    got = _run(["enterAdminPane", "adminFirstSub"], """
+let canAdmin = true;   // an account administrator still opens on Accounts
 const ADM = { blocking: [], userSub: null, auto: false };
 const opened = [];
 function selectAdminSub(name) { opened.push([name, ADM.auto]); }

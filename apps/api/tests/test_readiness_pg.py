@@ -66,7 +66,49 @@ EXPECTED_CHECKS = (
     "evidence_size_cap_declared",
     "migrations_at_head",
     "app_db_role_not_owner",
+    # S1 (2026-09-25): row-level security is the second line here.
+    "row_level_security_enforced",
     "smtp_configured",
+    # docs/00 decision 71, L1 and L2 (2026-09-24): the compartment registry, the
+    # captures no lock fits, and the Triage claims written under older rules.
+    "compartment_bindings_intact",
+    "captured_documents_compartmented",
+    "triage_claims_within_labels",
+    "triage_claims_dated",
+    "egress_boundary",  # the network boundary (docs/00 decision 68)
+    # 2026-09-24, F1 roles: CONCOR's BLAS cap took effect.
+    "role_analysis_thread_capped",
+    # Two different people can change the two-person policy (F9).
+    "dual_control_policy_changeable",
+    # F11 and F12 (2026-09-24): static triage can run and its queue
+    # drains; every active YARA rule set has a build this host can load.
+    "sample_static_analysis",
+    "yara_rules_active",
+    # Every forum and Telegram source configured and covered (docs/00
+    # decision 69).
+    "collection_sources_configured",
+    "collection_authority_current",
+    # S2: every outbound use has a route and every sealed exit opens.
+    "egress_routes_cover_sources",
+    "egress_exits_open",
+    # F10a and F10c (2026-09-24): a usable gpg at the floor, and
+    # Web Key Directory lookups off, on, or half configured.
+    "pgp_verifier",
+    "pgp_key_directory",
+    # The similarity indexes (F6.1 and F6.2).
+    "embedding_wording_current",
+    "embedding_meaning_endpoint",
+    # Outbound integrations (F8, F7 and F15.2).
+    "notify_outbox_draining", "jira_destination", "outbound_lookup_providers",
+    # F13 and F14 (2026-09-24): lists held under a recorded authority
+    # and every sample screened; the configured sandbox reachable,
+    # authenticated and routed.
+    "prohibited_content_screening",
+    "sandbox_integration",
+    # The forum adapters (F3 and F4).
+    "forum_collection",
+    # Telegram collection (F5.3).
+    "telegram_collection",
 )
 
 
