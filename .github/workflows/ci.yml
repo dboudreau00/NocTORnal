@@ -430,7 +430,15 @@ jobs:
       # tests alone on the second. A leg that selects nothing fails, which
       # pytest's own exit status 5 already says.
       - name: Tests
-        run: pytest apps/api/tests packages/ontology/tests -q -m "${{ matrix.select }}"
+        run: |
+          # One run, kept with its skip reasons for the gate below
+          # (2026-09-25). The gate used to run the whole suite a second time
+          # on the database this run had written to, and since 0083, 0085 and
+          # 0086 refuse their downgrade over append-only history, the
+          # migration round-trip tests cannot pass on a used database.
+          # pipefail: the step's status is pytest's, not tee's.
+          set -o pipefail
+          pytest apps/api/tests packages/ontology/tests -q -rs -m "${{ matrix.select }}" 2>&1 | tee /tmp/tests.out
 
       # docs/09 Phase 0 asks for "a chain verification job" and there was
       # none -- the audit chain was written by a trigger and never once
@@ -534,18 +542,13 @@ jobs:
       # service would show as a green run with 100+ skips.
       - name: No tests were skipped
         run: |
-          # pipefail: without it the step's exit status is tee's, so a
-          # pytest FAILURE in this run would pass as long as nothing
-          # skipped. Harmless while the Tests step above runs first and
-          # fails on its own, but a gate that discards the exit code of
-          # the thing it is gating is one edit away from being the only
-          # run -- and then green would mean nothing.
-          set -o pipefail
-          # The same selection as the Tests step, on each leg. Deselected
-          # tests are reported as "N deselected", never as skipped, so the
-          # grep below still reads only real skips.
-          pytest apps/api/tests packages/ontology/tests -q -rs -m "${{ matrix.select }}" 2>&1 | tee /tmp/out
-          if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/out; then
+          # The Tests step's own run, read back: the same selection on each
+          # leg, and no second run on a used database. Deselected tests are
+          # reported as "N deselected", never as skipped, so the grep below
+          # reads only real skips.
+          test -s /tmp/tests.out || { echo "::error::the Tests step left no output"; exit 1; }
+          grep -E "^SKIPPED" /tmp/tests.out || true
+          if grep -qE "^[0-9]+ passed, [0-9]+ skipped" /tmp/tests.out; then
             echo "::error::Tests were SKIPPED. The Postgres or MinIO leg is not running."
             exit 1
           fi

@@ -452,9 +452,13 @@ def test_ci_runs_the_extras_absent_job():
     assert legs["Tests and migrations"]["full"] == "true"
     assert legs["Tests without optional extras"]["full"] == "false"
     assert 'name: ${{ matrix.name }}' in text
-    for step in ("Tests", "No tests were skipped"):
-        assert '-m "${{ matrix.select }}"' in _step(text, step), step
-    assert "passed, [0-9]+ skipped" in _step(text, "No tests were skipped")
+    # One run: the gate reads the Tests step's output rather than running
+    # the suite again on the database the first run wrote to (2026-09-25).
+    assert '-m "${{ matrix.select }}"' in _step(text, "Tests")
+    assert "tee /tmp/tests.out" in _step(text, "Tests")
+    gate = _step(text, "No tests were skipped")
+    assert "pytest" not in gate and "/tmp/tests.out" in gate
+    assert "passed, [0-9]+ skipped" in gate
     # Both legs get the database the marked readiness tests need.
     for step in ("Load extensions", "Create the least-privilege runtime role",
                  "Create the egress proxy role", "Migrate to head"):
