@@ -10,7 +10,7 @@ name = "noctornal-api"
 # and nothing read both, so the packaging metadata and the OpenAPI document
 # disagreed for three releases. apps/api/tests/test_version_contract.py holds
 # every reporter of the version to this line.
-version = "0.6.0"
+version = "0.7.0"
 description = "NocTORnal API: the FastAPI service. One process serving the REST API, the analyst console and the live channel over Postgres, Redis and S3-compatible object storage."
 requires-python = ">=3.12"
 dependencies = [

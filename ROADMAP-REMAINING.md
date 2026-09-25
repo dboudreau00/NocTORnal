@@ -2,7 +2,7 @@
 
 **State (2026-09-25):** branch `main`, Alembic head `0124`,
 6095 tests counted as `def test_` functions across the two pytest roots,
-version 0.6.0 single-sourced from `pyproject.toml`. Those four counters are
+version 0.7.0 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
@@ -59,8 +59,8 @@ The unweighted mean across the ten phases: 100, 100, 100, 85, 90, 92, 96, 95,
 80, 90. This file is the only place the figure is worked out. Every other
 document quotes it, and `test_doc_invariants` holds the quotations to this
 line, because quoting is what drifted: three documents once carried three
-different numbers. It is the Alpha 6 figure; the next release scores the work
-above.
+different numbers. It is the Alpha 6 figure: the work above, released in
+Alpha 7, is not scored yet.
 
 Two things the number does not say.
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Alpha 7: 2026-09-25
 
 Everything since Alpha 6: the fifteen roadmap features (F1 to F15), the six
 things Alpha 6 left (L1 to L6), and the egress proxy (S2). Collection can
@@ -37,6 +37,11 @@ notification tables for their whole run, and many refuse a downgrade once
 the new features hold data. The readiness register grows from 18 checks to
 43, none of the new ones blocking. The steps an existing deployment takes
 are the next subsection.
+
+6095 tests (`def test_` functions). On CI, with every extra installed and both
+runtime database roles present, 8996 passed and none skipped; the tests
+written for the extras being absent pass on a second leg that installs
+none of them.
 
 ### Upgrading from Alpha 6
 
@@ -312,7 +317,7 @@ REVOKE DELETE ON collect.telegram_chat, collect.telegram_message FROM noctornal_
 ```
 
 Each line is the complement of what that revision's `GUARDED_TABLES`
-lets the role keep, and the next release's grants script will carry them.
+lets the role keep; a role created later needs them by hand.
 The proxy's own role is granted by 0086 where it exists when the database
 migrates; `egress_setup.py role-sql` prints its grants for a role created
 later.
