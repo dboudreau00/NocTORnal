@@ -188,3 +188,16 @@ Python ports, so that no compiled extension is needed to hash a sample:
 YARA rule sets an operator uploads or imports are stored in the
 deployment's database, not redistributed by this project; a backup or
 export handed to another party carries them and their licences.
+
+## MinIO server and client images (mirrored)
+
+The development stack, the production compose file and CI run MinIO's last
+community builds, unmodified: server `RELEASE.2025-04-22T22-12-26Z` and
+client `RELEASE.2025-08-13T08-35-41Z`, as published at `quay.io/minio/minio`
+and `quay.io/minio/mc`. MinIO withdrew those images and binaries from public
+download on 2026-09-25, so this project mirrors the same images, byte for
+byte, at `ghcr.io/dboudreau00/minio` and `ghcr.io/dboudreau00/mc`, for
+linux/amd64 only (the platform this project's machines held). Both are
+licensed under the GNU Affero General Public License v3.0; their
+corresponding source is the upstream repositories at those release tags,
+`https://github.com/minio/minio` and `https://github.com/minio/mc`.

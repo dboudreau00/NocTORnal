@@ -194,8 +194,11 @@ jobs:
       # login'" to an unauthenticated puller, and this step failed in one
       # second on a commit that had touched documentation and nothing else.
       # Both outages have the same shape: an unpinned tag on a registry
-      # somebody else controls. It now pulls from quay.io, which MinIO
-      # publishes to directly, at a pinned RELEASE tag.
+      # somebody else controls. It then pulled from quay.io at a pinned
+      # RELEASE tag, until 2026-09-25, when quay.io, Docker Hub and dl.min.io
+      # all stopped serving MinIO's community builds to anonymous pullers.
+      # It now pulls the same pinned build, mirrored byte for byte to this
+      # project's GHCR namespace.
 
     steps:
       - uses: actions/checkout@v4
@@ -231,7 +234,7 @@ jobs:
             -p 9000:9000 \
             -e MINIO_ROOT_USER=noctornal \
             -e MINIO_ROOT_PASSWORD=dev_only_change_me \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z server /data
           # Wait for readiness rather than sleeping: a fixed sleep is either
           # too short on a slow runner or wasted on a fast one.
           for i in $(seq 1 40); do
@@ -358,7 +361,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_local="http://noctornal:dev_only_change_me@localhost:9000" \
-              quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z "$@"
+              ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z "$@"
           }
           for i in $(seq 1 30); do
             mc ls local >/dev/null 2>&1 && break

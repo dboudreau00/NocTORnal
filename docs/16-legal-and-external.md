@@ -482,8 +482,9 @@ be deleted before its retention expires *even to satisfy a deletion order*.
 > KES projects are archived and no longer maintained. MinIO does not
 > provide product support, security updates, or security advisories for
 > them, and does not accept or process vulnerability reports concerning
-> them." The Docker Hub images went with it; quay.io still serves the last
-> community builds, which is what this tree now pins.
+> them." The Docker Hub images went with it, and on 2026-09-25 so did
+> quay.io's. This tree pins the last community builds, mirrored byte for byte
+> to this project's GHCR namespace.
 >
 > That is a second question for the same reviewer, and a harder one. The
 > WORM guarantee under every exhibit rests on software that will receive no

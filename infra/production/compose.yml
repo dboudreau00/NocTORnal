@@ -375,11 +375,14 @@ services:
     # unauthenticated puller. Reproduced locally the same day, on a machine
     # that had pulled it a week earlier.
     #
-    # So: quay.io, which MinIO publishes to directly, and a RELEASE tag rather
-    # than `latest`, because the lesson of both outages is that an unpinned
-    # third-party tag is a dependency on somebody else's decisions that arrives
-    # as a red build with no local change to explain it.
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    # So: a RELEASE tag rather than `latest`, because the lesson of both
+    # outages is that an unpinned third-party tag is a dependency on somebody
+    # else's decisions that arrives as a red build with no local change to
+    # explain it. On 2026-09-25 quay.io, Docker Hub and dl.min.io all stopped
+    # serving MinIO's community builds to anonymous pullers, so the image is
+    # the same pinned build, byte for byte, mirrored to this project's GHCR
+    # namespace (NOTICE.md names the upstream source).
+    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z
     restart: unless-stopped
     networks: [noctornal]
     env_file: [secrets.env]
@@ -534,7 +537,7 @@ services:
   # credentials, so a rejected pair loops here exactly like a refused
   # handshake.
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on: [minio]
     networks: [noctornal]
     env_file: [secrets.env]

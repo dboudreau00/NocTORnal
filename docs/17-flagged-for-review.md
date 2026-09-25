@@ -203,8 +203,10 @@ happened, and nobody re-granted them.
 **Found 2026-09-16,** by a CI failure on a commit that changed only
 documentation. `https://dl.min.io` answers 410 Gone: the open-source MinIO
 server, client and KES are archived, unmaintained, and outside security
-support, with vulnerability reports not accepted. quay.io still serves the
-last community builds, and the CI step and both compose files pin those.
+support, with vulnerability reports not accepted. quay.io served the last
+community builds until 2026-09-25; the CI step and both compose files now
+pin the same builds, mirrored byte for byte to this project's GHCR
+namespace, for linux/amd64 only: an ARM host cannot pull them.
 
 **Decided: stay on the pinned build, with the risk accepted in writing** (by
 the owner, 2026-09-22, recorded here). The exposure is bounded by the store
