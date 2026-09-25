@@ -365,17 +365,34 @@ def test_a_cyrillic_page_near_the_size_cap_comes_back_whole():
     assert all(p["raw"] is not None and p["body"].startswith(word) for p in out["posts"])
 
 
-def test_a_page_built_to_exhaust_the_parser_is_abandoned_at_the_wall_clock():
+def test_a_child_that_outruns_its_wall_clock_is_abandoned(monkeypatch):
+    """The parent kills a child still working at its wall clock and abandons
+    the page, never waiting on it: shown with a child that never answers, so
+    the proof does not depend on how fast one platform's parser is."""
+    monkeypatch.setattr(fa, "CHILD_ARGV", [
+        sys.executable, "-c", "import sys, time; sys.stdin.buffer.read(); time.sleep(60)"])
+    fetched = fh.fetched(fh.XF_THREAD, 200, b"<p>x</p>")
+    started = time.monotonic()
+    with pytest.raises(fa.ParseAbandoned) as exc:
+        fa.parse_bounded("xenforo", "thread", fetched, config={}, now=NOW, wall_s=1)
+    assert exc.value.reason == "timeout"
+    assert time.monotonic() - started < 15
+
+
+def test_a_page_built_to_exhaust_the_parser_never_holds_the_caller():
     """Repeated unclosed <a> within 4 MiB: lexbor's tree builder is
-    quadratic on it (measured 2026-09-24: over 25 seconds). The child is
-    killed at its wall clock and the page is abandoned, never waited on."""
+    quadratic on it on Windows (measured 2026-09-24: over 25 seconds), and
+    Linux's build parses it inside the wall clock. Either way the caller has
+    an answer, the page or an abandonment, by the wall clock plus the
+    child's start and kill."""
     unit = "<a>" * 64 + "x" + "</a>" * 64
     hostile = (unit * (fp.MAX_PAGE_BYTES // len(unit)))[:fp.MAX_PAGE_BYTES].encode()
     fetched = fh.fetched(fh.XF_THREAD, 200, hostile)
     started = time.monotonic()
-    with pytest.raises(fa.ParseAbandoned) as exc:
+    try:
         fa.parse_bounded("xenforo", "thread", fetched, config={}, now=NOW, wall_s=3)
-    assert exc.value.reason == "timeout"
+    except fa.ParseAbandoned as exc:
+        assert exc.reason == "timeout"
     assert time.monotonic() - started < 20
 
 

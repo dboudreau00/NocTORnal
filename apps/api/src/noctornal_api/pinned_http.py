@@ -785,7 +785,11 @@ def _read_head(sock: socket.socket, deadline: Deadline, timeout: float) -> bytes
 
     MSG_PEEK shows what has arrived; the bytes before the terminator are
     consumed as they come, so a head arriving a byte at a time never spins
-    on bytes already seen (2026-09-24)."""
+    on bytes already seen (2026-09-24).
+
+    At the deadline the watchdog shuts the socket, and a pending read then
+    returns nothing rather than raising: an empty read after the deadline
+    is the deadline, not a malformed reply (2026-09-25)."""
     head = b""
     peek = getattr(socket, "MSG_PEEK", 0)
     while True:
@@ -795,6 +799,8 @@ def _read_head(sock: socket.socket, deadline: Deadline, timeout: float) -> bytes
         else:  # pragma: no cover - every supported platform has MSG_PEEK
             seen = sock.recv(1)
         if not seen:
+            if deadline.spent():
+                raise deadline.exceeded()
             raise Unreachable(explain("proxy_protocol"), code="proxy_protocol")
         combined = head + seen
         end = combined.find(b"\r\n\r\n")
@@ -806,6 +812,8 @@ def _read_head(sock: socket.socket, deadline: Deadline, timeout: float) -> bytes
             while len(taken) < want:
                 chunk = sock.recv(want - len(taken))
                 if not chunk:
+                    if deadline.spent():
+                        raise deadline.exceeded()
                     raise Unreachable(explain("proxy_protocol"), code="proxy_protocol")
                 taken += chunk
         head += taken
