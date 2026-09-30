@@ -274,7 +274,14 @@ def test_the_readiness_probe_does_not_eat_the_installers_stdin():
     src = SH_INSTALLER.read_text(encoding="utf-8")
     probe = [ln for ln in src.splitlines() if "pg_isready" in ln]
     assert probe, "the Postgres readiness probe moved; this test is blind"
-    assert any("/dev/null" in ln for ln in probe), (
+    lines = src.splitlines()
+    at = next(i for i, ln in enumerate(lines) if "pg_isready" in ln)
+    command = " ".join(lines[at:at + 2])
+    assert "-h 127.0.0.1" in command, (
+        "the probe must go over TCP: without -h it answers on the Unix socket of "
+        "the image's temporary init server, and the installer migrates before "
+        "the real server is up (found on a clean VM, 2026-09-30)")
+    assert "/dev/null" in command, (
         "`docker compose exec -T postgres pg_isready` runs without "
         "redirecting stdin, so it eats the answers meant for the account "
         "prompt and the install ends mid-sentence with no message")

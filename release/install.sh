@@ -504,10 +504,17 @@ detail 'waiting for Postgres to report healthy'
 # because a pty does not reach EOF, which is why this stood for so long.
 # Measured on a clean VM, 2026-09-17: one `exec -T` left `read` with
 # nothing, while `compose up -d` left it intact.
+# `-h 127.0.0.1` IS LOAD-BEARING TOO (2026-09-30). On a fresh volume the
+# image runs a TEMPORARY server for its init scripts, reachable only over
+# the Unix socket, then stops it and starts the real one. A probe without
+# -h answers on that socket, so the installer migrated in the gap and died
+# with "the database system is starting up". Over TCP only the real
+# server answers, as the compose healthcheck does.
 PG_READY=0
 for _ in $(seq 1 60); do
   if docker compose -f "$REPO_ROOT/infra/docker-compose.yml" \
-       exec -T postgres pg_isready -U noctornal >/dev/null 2>&1 </dev/null; then
+       exec -T postgres pg_isready -h 127.0.0.1 -U noctornal -d noctornal \
+       >/dev/null 2>&1 </dev/null; then
     good 'Postgres is ready'
     PG_READY=1
     break
