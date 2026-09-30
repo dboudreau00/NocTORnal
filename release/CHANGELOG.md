@@ -1,5 +1,29 @@
 # Changelog
 
+## Alpha 7a: 2026-09-30
+
+A one-fix revision of Alpha 7. It comes from installing the published Alpha 7
+zip on a clean machine (a fresh Ubuntu 24.04 VM) for the first time, which
+the Alpha 7 release had not done.
+
+### The installer no longer races Postgres's first start
+
+On a fresh volume the Postgres image starts a temporary server to run its
+init scripts, reachable only over the Unix socket, then stops it and starts
+the real one. The installer's readiness probe ran `pg_isready` without
+`-h`, so it answered on that socket, and the installer went on to run the
+migrations into "the database system is starting up" and stopped there. The
+probe now goes over TCP, where only the real server answers, as the compose
+healthcheck does. `test_script_invariants` holds the `-h 127.0.0.1` on the
+probe. Only a first install on fresh volumes was affected; anyone whose
+Alpha 7 install stopped with that message should use this release's
+`install.sh`.
+
+Nothing else changes: no migration (Alembic stays at 0124), no new test, no
+behaviour of a running deployment. Still alpha, still not audited, and still
+not lawful to operate against real material until docs/16 L1 to L5 are
+settled outside this codebase.
+
 ## Alpha 7: 2026-09-25
 
 Everything since Alpha 6: the fifteen roadmap features (F1 to F15), the six
