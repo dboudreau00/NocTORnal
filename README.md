@@ -5,7 +5,6 @@
 <img width="544" height="290" alt="Screenshot 2026-07-26 174309" src="https://github.com/user-attachments/assets/0a33d3e3-a547-436a-8c07-b6484482f132" />
 
 
-
 **HUMINT and social network analysis toolkit platform for cybercrime investigation.**
 
 Build the graph of actors, personas, groups and the trust between them,
@@ -30,6 +29,7 @@ sit above its case, which is why a few read GREEN or AMBER.</sub>
 ---
 
 
+### Five blocking items, none of them a software problem
 
 **Legal review is required before any active case load**, and holding this
 material is dangerous in its own right: possession can be an offence, stealer
@@ -40,8 +40,6 @@ published reporting with no personal data. Read
 [Read this before you hold anything](docs/16-legal-and-external.md#read-this-before-you-hold-anything)
 first. Nothing in this repository is legal advice.
 
-### Five blocking items, none of them a software problem
-
 | | What is built | What is assumed, and is not true until somebody makes it true |
 |---|---|---|
 | **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, written with counsel, covering preservation-vs-destruction. Given enough attacker-chosen files, one will eventually contain material whose *possession alone* is an offence. That is the normal failure mode of the problem domain, not a hypothetical. A `REJECTED` sample is **preserved by default**: its encrypted bytes move into the object-locked `noctornal-preserved` bucket under a legal hold, its data key is kept, and getting it back out takes two people, a Security Officer who authorises one named Lead investigator for that one sample, and that investigator. Destroying rejected samples instead is an opt-in the deployment declares (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy`), and a legal hold still refuses it. Which of the two a deployment must do is for counsel. |
@@ -49,7 +47,6 @@ first. Nothing in this repository is legal advice.
 | **L3** | A persona vault that will drive a covert account into a forum | That operating that persona is authorised in each jurisdiction. Accessing a system with credentials registered under a false identity engages computer-misuse law in several jurisdictions regardless of intent. |
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
 | **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and (separately) that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
-
 
 
 ---
@@ -705,13 +702,30 @@ noctornal/
 | **[`release/INSTALL.md`](release/INSTALL.md)** | installing, in detail, with troubleshooting |
 | **[`release/MANUAL.md`](release/MANUAL.md)** | operating it, every pane, every refusal, and what it means |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
+| [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
 | [`docs/00-decisions.md`](docs/00-decisions.md) | why the architecture is the way it is |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | the map of what was built |
+| [`docs/02-architecture.md`](docs/02-architecture.md) | the architecture brief: what was specified, and why |
 | [`docs/01-domain-model.md`](docs/01-domain-model.md) | nodes, edges, selectors, assertions |
 | [`docs/03-graph-analytics.md`](docs/03-graph-analytics.md) | the SNA methodology, and its limits |
+| [`docs/04-collection.md`](docs/04-collection.md) | collection adapters and the aggregation bucket |
 | [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model |
+| [`docs/06-interface.md`](docs/06-interface.md) | the interface design brief |
+| [`docs/07-integrations.md`](docs/07-integrations.md) | integrations and notifications, and the classification check every outbound path makes |
+| [`docs/08-governance.md`](docs/08-governance.md) | governance and tradecraft features |
+| [`docs/09-roadmap.md`](docs/09-roadmap.md) | the ten build phases |
+| [`docs/10-comms-channels.md`](docs/10-comms-channels.md) | communication channels: which identifier is durable on each platform |
+| [`docs/11-malware-handling.md`](docs/11-malware-handling.md) | malware sample handling, not to be switched on until L1 is settled |
+| [`docs/12-ingest-api.md`](docs/12-ingest-api.md) | ingest API keys and feed categorisation |
+| [`docs/13-differentiators.md`](docs/13-differentiators.md) | what this does that the commercial market handles badly |
+| [`docs/14-enhancement-map.md`](docs/14-enhancement-map.md) | the enhancement map the code cites for provenance |
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
 | [`docs/20-outbound-connections.md`](docs/20-outbound-connections.md) | how anything leaves: the address policy, the one client, routes and the egress proxy |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
+| [`QUICKSTART.md`](QUICKSTART.md) | a local development instance, not hardened for real material |
+| [`SECURITY.md`](SECURITY.md) | reporting a vulnerability, and what is not one |
+| [`ROADMAP-REMAINING.md`](ROADMAP-REMAINING.md) | what is left |
+| [`release/CLEAN-VM-INSTALL.md`](release/CLEAN-VM-INSTALL.md) | a recorded clean-VM install, step by step |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
 
