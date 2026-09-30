@@ -80,6 +80,11 @@ Two things sit outside the software and cannot be fixed inside it:
    fact it verifies.** A false declaration produces a working system and
    an unlawful deployment. That is not a vulnerability report; it is a
    deployment decision, and it belongs to whoever signs the deployment off.
+   Legal review is required before any active case load, and a deployment
+   that holds this material is itself a high-value target: a breach would
+   expose investigations, sources, persona identities and the personal data
+   of uninvolved victims. The dangers are listed in
+   [docs/16](docs/16-legal-and-external.md#read-this-before-you-hold-anything).
 2. **Transport.** The application assumes it sits behind TLS termination
    and leaves HSTS to that terminator. Running it on plain HTTP over a
    network is a deployment error, not a defect.

@@ -9,6 +9,14 @@ consequence of each, and a place to write the answer.
 Nothing here is legal advice. It is the list of questions, the facts each
 one turns on, and what the software currently does while it waits.
 
+**Legal review is required before any active case load**, and the material
+this platform holds is dangerous to hold: possession can be an offence, the
+victims in stealer and breach data are people who are not suspects, and the
+store is itself a target. The reasons are listed at the top of
+[docs/16](16-legal-and-external.md#read-this-before-you-hold-anything).
+Until Section A is answered in writing, load synthetic data or published
+reporting with no personal data only.
+
 ## How to use it
 
 1. **Section A** must be answered before the platform processes real

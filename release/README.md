@@ -15,6 +15,16 @@ That is not boilerplate. The software is substantially complete and, on the
 measures an engineer uses, it works. **Those measures do not decide whether
 you may lawfully run it**, and five of the questions that do are open.
 
+**Legal review is required before any active case load.** Holding this
+material is also dangerous in its own right: possession can be an offence,
+stealer and breach data makes you the custodian of thousands of uninvolved
+people, and a store of open investigations is a target for the people it
+describes. Until counsel has worked through `docs/18-legal-review-pack.md`,
+use this only on synthetic data or on published reporting that contains no
+personal data. The section "Read this before you hold anything" at the top
+of `docs/16-legal-and-external.md` lists the dangers. Nothing here is legal
+advice.
+
 ### The five blocking items
 
 Each is a decision for counsel or an accountable operator. None of them is

@@ -125,6 +125,8 @@ Write-Host '  Alpha software. Not audited. Five legal decisions (L1 to L5)' -For
 Write-Host '  gate any use against real material: see "Five blocking items"' -ForegroundColor Yellow
 Write-Host '  in the README.md at the project root. Installing is fine;' -ForegroundColor Yellow
 Write-Host '  pointing it at a real case is not, until those are settled.' -ForegroundColor Yellow
+Write-Host '  Legal review is required before any active case load, and' -ForegroundColor Yellow
+Write-Host '  holding this material is itself dangerous: see docs/16.' -ForegroundColor Yellow
 
 if (-not $RepoRoot) {
     Stop-With 'this does not look like a complete NocTORnal package.' @'

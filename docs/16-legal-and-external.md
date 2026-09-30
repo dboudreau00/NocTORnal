@@ -24,6 +24,79 @@ where legal advice is required.
 
 ---
 
+## Read this before you hold anything
+
+**Legal review is required before any active case load.** An active case
+load is any case that holds material about real people, real victims or
+real infrastructure that is not already public, or that collects from or
+about them: a real investigation, real stealer-log or breach data, a persona
+operated against a real target, captured messages, or a fetch of a real
+attacker's page. Until counsel for each jurisdiction you operate in has
+worked through [docs/18](18-legal-review-pack.md) and the answers are
+written down, use this software only on synthetic data or on published
+reporting that contains no personal data. The software refuses several
+operations until a declaration is recorded, but a declaration is a string it
+stores. It cannot tell whether the declaration is true, and a false one
+produces a working system and an unlawful deployment.
+
+**Holding this information is itself dangerous, to other people and to you.**
+The platform is built to hold exactly the material that most needs care.
+Each of these is a reason to involve counsel before the first real load, not
+after a problem:
+
+1. **Possession can be the offence.** Attacker-chosen files will sooner or
+   later include material that is unlawful to hold whatever the reason, and
+   "I was investigating" is not a defence everywhere. Holding known-material
+   hash sets may also need specific authorisation. Preserving such material
+   and destroying it can each be required, and each can be forbidden, in a
+   different jurisdiction (L1).
+2. **You become the custodian of other people's data.** Stealer logs and
+   breach data describe thousands of people who are not suspects: their
+   credentials, session tokens and personal details. Data-protection and
+   breach-notification duties can attach to you as the holder, and a breach
+   of your own deployment exposes those people a second time (L2).
+3. **You are a target.** A store of open investigations, personas, sources and
+   victim data is worth more to the actors under investigation, and to anyone
+   else, than almost anything else you hold. Compromise can end an
+   operation, expose sources and persona identities, and put people at risk.
+   The store is also the record the other side will want to read.
+4. **Collection can be an offence.** Operating a persona under a false
+   identity, reading a members-only space, capturing a conversation, or
+   fetching or entering anything into an attacker's page can engage
+   computer-misuse, interception, terms-of-service and entrapment law,
+   regardless of intent (L3, L4, L5).
+5. **A graph is a set of allegations.** Grading an assertion does not make it
+   true. Joining a handle to a real person wrongly, or keeping a person in a
+   case longer than a basis exists, can harm an innocent individual and
+   expose you to claims. What you hold may have to be disclosed in
+   proceedings, including material that undermines your own case.
+6. **Retention is a liability, not a convenience.** Keep material for the
+   shortest period the basis supports. A legal hold, a purge obligation and a
+   preservation order can conflict, and the 90 day stealer-log period and the
+   other defaults here are placeholders somebody typed (D3, D4).
+7. **Copies multiply exposure.** Exports, backups, screenshots, reports and
+   lookups carry the classification of what they show. A screenshot of a real
+   case is real case material. Sharing one is a disclosure.
+8. **The people doing the work are exposed too.** Analysts reading attacker
+   material, prohibited content or victim data carry a welfare risk and, for
+   some material, a legal one. Limiting and supporting that exposure is an
+   operator duty (L1).
+9. **A second person limits one person's error, not a shared one.** The
+   two-person controls here stop a single person acting alone. They do not
+   make an unlawful act lawful, and they do not help if both people are
+   wrong in the same way.
+
+**If something you should not hold arrives unexpectedly** (suspected
+prohibited content above all), stop, do not open, copy or forward it, do not
+delete it on your own judgment, and contact counsel and your designated
+person first. The REJECTED path preserves by default for that reason.
+
+Nothing in this document is legal advice. It is a list of reasons to get
+some, from someone qualified in each jurisdiction you operate in (decision
+13 names the United States and Canada, and they differ).
+
+---
+
 ## 🔴 BLOCKING
 
 ### L1: Prohibited content in the sample store

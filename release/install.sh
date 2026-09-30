@@ -110,6 +110,8 @@ printf '  %sAlpha software. Not audited. Five legal decisions (L1 to L5)%s\n' "$
 printf '  %sgate any use against real material: see "Five blocking items"%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sin the README.md at the project root. Installing is fine;%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %spointing it at a real case is not, until those are settled.%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %sLegal review is required before any active case load, and%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %sholding this material is itself dangerous: see docs/16.%s\n' "$C_YELLOW" "$C_OFF"
 
 # ---------------------------------------------------------------------------
 # Locate the application. The release directory may sit inside the source

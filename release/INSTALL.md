@@ -4,6 +4,13 @@
 > in the README first.** Five legal decisions, L1 to L5, gate any use of
 > this software against real material. Installing it is fine; pointing it
 > at a real case is not, until those are settled.
+>
+> **Legal review is required before any active case load**, and holding this
+> material is dangerous in its own right: possession can be an offence, and
+> a store of victim data and open investigations is a target. Until counsel
+> has worked through `docs/18-legal-review-pack.md`, load only synthetic data
+> or published reporting with no personal data. See "Read this before you
+> hold anything" at the top of `docs/16-legal-and-external.md`.
 
 ---
 

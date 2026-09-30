@@ -31,6 +31,15 @@ sit above its case, which is why a few read GREEN or AMBER.</sub>
 
 
 
+**Legal review is required before any active case load**, and holding this
+material is dangerous in its own right: possession can be an offence, stealer
+and breach data makes you the custodian of thousands of uninvolved people,
+and a store of open investigations is a target. Until counsel has worked
+through [docs/18](docs/18-legal-review-pack.md), use only synthetic data or
+published reporting with no personal data. Read
+[Read this before you hold anything](docs/16-legal-and-external.md#read-this-before-you-hold-anything)
+first. Nothing in this repository is legal advice.
+
 ### Five blocking items, none of them a software problem
 
 | | What is built | What is assumed, and is not true until somebody makes it true |
