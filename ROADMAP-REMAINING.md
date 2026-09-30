@@ -2,7 +2,7 @@
 
 **State (2026-09-25):** branch `main`, Alembic head `0124`,
 6095 tests counted as `def test_` functions across the two pytest roots,
-version 0.7.0 single-sourced from `pyproject.toml`. Those four counters are
+version 0.7.1 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
