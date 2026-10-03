@@ -75,6 +75,31 @@ def _head(dest: str) -> tuple[str, str]:
     return commit, when
 
 
+def _is_plain_file_inside(base: str, path: str) -> bool:
+    """A regular file, not a link, whose resolved path stays under `base`
+    (infra-13, 2026-10-03). A pulled repository is somebody else's tree: a
+    `rules/x.yar` that is a symlink to a path on this host would otherwise be
+    read as rule text and stored in a rule set version, where lab members and
+    the activating Security Officer read it as a rule."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    real_base = os.path.realpath(base)
+    try:
+        return os.path.commonpath([real_base, os.path.realpath(path)]) == real_base
+    except ValueError:  # another drive on Windows
+        return False
+
+
+def _remove_link(path: str) -> bool:
+    for remove in (os.unlink, os.rmdir):
+        try:
+            remove(path)
+            return True
+        except OSError:
+            continue
+    return False
+
+
 def _prune_to_rules(dest: str) -> int:
     """Delete everything that is not a .yar/.yara rule file (keeping .git for
     updates), so no live sample, dropper, script or document that a source
@@ -82,15 +107,25 @@ def _prune_to_rules(dest: str) -> int:
 
     This is a hard safety boundary: a rule corpus is TEXT SIGNATURES only.
     Added after StrangerealIntel/DailyIOC shipped live FIN7/Babuk samples that
-    the workstation AV quarantined mid-clone (2026-07-26)."""
+    the workstation AV quarantined mid-clone (2026-07-26).
+
+    A symbolic link is not a rule file whatever it is called, and goes too
+    (infra-13, 2026-10-03): `os.walk` lists a link to a file among the files
+    and a link to a directory among the directories, and neither is a thing
+    a source can legitimately mean a rule corpus to contain."""
     removed = 0
-    for dirpath, _dirnames, filenames in os.walk(dest, topdown=False):
+    for dirpath, dirnames, filenames in os.walk(dest, topdown=False):
         if ".git" in dirpath.replace("\\", "/").split("/"):
             continue
+        for dn in dirnames:
+            path = os.path.join(dirpath, dn)
+            if dn != ".git" and os.path.islink(path) and _remove_link(path):
+                removed += 1
         for fn in filenames:
-            if not fn.lower().endswith((".yar", ".yara")):
+            path = os.path.join(dirpath, fn)
+            if os.path.islink(path) or not fn.lower().endswith((".yar", ".yara")):
                 try:
-                    os.remove(os.path.join(dirpath, fn))
+                    os.remove(path)
                     removed += 1
                 except OSError:
                     pass
@@ -172,8 +207,11 @@ def _iter_files():
             if ".git" in dirnames:
                 dirnames.remove(".git")
             for fn in filenames:
-                if fn.lower().endswith((".yar", ".yara")):
-                    yield name, os.path.join(dirpath, fn)
+                path = os.path.join(dirpath, fn)
+                # Links and anything resolving outside the source are not
+                # rules (infra-13, 2026-10-03; see `_is_plain_file_inside`).
+                if fn.lower().endswith((".yar", ".yara")) and _is_plain_file_inside(base, path):
+                    yield name, path
 
 
 def _product() -> None:
@@ -288,7 +326,11 @@ def _source_bundle(name: str):
         size = os.path.getsize(path)
         if size > MAX_ENTRY_BYTES:
             raise BundleError(f"{rel} is larger than a rule file may be")
-        with open(path, "rb") as fh:
+        # O_NOFOLLOW where the platform has it: the listing above refused a
+        # link, and this refuses one swapped in since (infra-13, 2026-10-03).
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                     | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as fh:
             data = fh.read(MAX_ENTRY_BYTES + 1)
         total += len(data)
         if total > MAX_SOURCE_BYTES:

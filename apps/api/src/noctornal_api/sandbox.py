@@ -108,6 +108,19 @@ MIB = 1 << 20
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _PACKAGE = re.compile(r"^[a-z0-9_]{1,32}$")
 
+#: lab-1 (2026-10-03). With no machine named the worker omits CAPE's
+#: `machine` field and CAPE's scheduler may pick ANY free machine, the live
+#: one included, while the row records no machine and so no sign-off. Once
+#: the operator lists a live machine, EVERY send names its machine (a send
+#: that already needs a second person for its route or exposure too, as found
+#: on verification), so the live one is reachable only through the sign-off
+#: and the sign-off is for the machine it names (0103 pins signoff_required
+#: to the recorded machine_class, so an unnamed row cannot simply be marked
+#: as needing one).
+_UNNAMED_ON_LIVE = ("this sandbox has a live analysis machine, so a send names "
+                    "the machine it runs on. Pick one: a live machine needs a "
+                    "second person's sign-off.")
+
 #: The one sentence the console shows beside a NONE exposure, and the
 #: others, read from here so the card and the policy block agree.
 EXPOSURE_WORDS = {
@@ -400,6 +413,10 @@ def eligibility(conn: psycopg.Connection, sample_id: UUID,
         if not ok:
             return False, ("an unscreened sample is never sent to a third party: "
                            + screening.SAMPLE_MAY_LEAVE_SENTENCES[why])
+    elif not screening.bytes_may_move(conn, sample_id):
+        # lab-2 (2026-10-03): a list imported since the last pass binds a
+        # NONE sandbox too, answered as a sample that is not there.
+        return False, "no such sample"
     return True, "eligible"
 
 
@@ -488,6 +505,11 @@ class SandboxService:
             raise SandboxError("the analysis timeout is from 30 to 1200 seconds")
         signoff = (settings.exposure != "NONE" or route_class == LIVE
                    or machine_class == LIVE)
+        if machine is None and LIVE in settings.machine_classes.values():
+            # Whatever else the send needs a second person for (lab-1, gap
+            # found 2026-10-03): the row would record no machine, CAPE may
+            # pick the live one, and the authoriser's card would not say so.
+            raise SandboxError(_UNNAMED_ON_LIVE)
         note = (note or "").strip() or None
         if signoff:
             if authorised_by is None or not note:
@@ -761,6 +783,10 @@ def _target_changed(row: dict, settings: SandboxSettings) -> str | None:
         return "the network route is no longer offered as it was"
     if row["machine"] and settings.machine_classes.get(row["machine"]) != row["machine_class"]:
         return "the analysis machine is no longer offered as it was"
+    if not row["machine"] and LIVE in settings.machine_classes.values():
+        # lab-1 (2026-10-03): queued, signed off or not, before a live machine
+        # was listed; the approval was for a send that named no machine.
+        return _UNNAMED_ON_LIVE
     return None
 
 

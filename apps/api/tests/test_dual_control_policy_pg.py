@@ -97,6 +97,15 @@ def teardown(c, prefix: str) -> None:
                          AND id NOT IN {held}""")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub} "
                   f"OR user_id IN {sub}")
+        # The entities a merge request names (2026-10-03: a request must name
+        # real ones), with their claims, before the case goes.
+        c.execute("ALTER TABLE core.assertion DISABLE TRIGGER USER")
+        try:
+            c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
+        finally:
+            c.execute("ALTER TABLE core.assertion ENABLE TRIGGER USER")
+        c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
         # A policy pair a failed test left on its throwaway permissions.
         c.execute("ALTER TABLE iam.separated_duty DISABLE TRIGGER "

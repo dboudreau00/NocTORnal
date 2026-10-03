@@ -552,7 +552,7 @@ def test_create_refuses_an_exit_another_persona_holds_whatever_its_status(conn):
     from noctornal_api.collection import BURNED, CollectionError, PersonaVault
 
     actor, _ = h.user(conn, P, roles=("COLLECTOR",))
-    egress = h.egress_profile(conn, P)
+    egress = h.egress_profile(conn, P, persona_capable=True)
     vault = PersonaVault(conn)
     first = vault.create(handle=f"{P}first", platform="TELEGRAM",
                          egress_profile_id=egress, actor_id=actor)

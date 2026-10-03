@@ -65,14 +65,19 @@ from noctornal_api.curation import CurationError, NodeSetService, TagService
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
-    authorize_object,
     element_labels,
     get_conn,
     require,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import (
+    authorize_element,
+    disclosure_mode,
+    withheld_notice,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.projections import DISCLOSURE_COUNT, DISCLOSURE_NONE
 
 router = APIRouter(prefix="/cases/{case_id}/curation", tags=["curation"])
 
@@ -192,16 +197,21 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
     """
     # The element's case and labels as facts (`deps.element_labels`,
     # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
-    # row-level security. Content is read only after the gate.
+    # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
+    # from row-level security; the answer itself is the missing element's
+    # 404 since http_ui-016 (2026-10-03). Content is read only after the
+    # gate.
     facts = element_labels(conn, "node", node_id)
     if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", "no such node in this case")
     # A second gate: it counts a break-glass use only if the route's gate
     # at the case's labels did not (sec-breakglass-double-count, 2026-09-23).
-    authorize_object(conn, user, case_id=case_id,
-                     permission_key="curation.manage", after_case_gate=True,
-                     classification=facts[1], compartments=facts[2])
+    # A refusal at the node's labels is the missing node's 404, its
+    # AUTHZ_DENIED row kept (http_ui-016, 2026-10-03).
+    authorize_element(conn, user, case_id=case_id,
+                      permission_key="curation.manage",
+                      classification=facts[1], compartments=facts[2],
+                      missing_detail="no such node in this case")
     row = conn.execute(
         """SELECT case_id, classification, compartments, deleted_at, merged_into_id
              FROM core.node WHERE id = %s""",
@@ -330,6 +340,9 @@ def list_tags(
     case_id: UUID,
     include_global: bool = Query(
         True, description="Include the shared global taxonomy (case_id IS NULL)"),
+    # Paged like every list (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -367,12 +380,14 @@ def list_tags(
             WHERE t.case_id = %(case_id)s
                OR (%(include_global)s AND t.case_id IS NULL)
             GROUP BY t.id
-            ORDER BY t.case_id NULLS LAST, t.namespace, t.name""",
+            ORDER BY t.case_id NULLS LAST, t.namespace, t.name
+            LIMIT %(limit)s OFFSET %(offset)s""",
         # Named parameters: `case_id` appears twice with different meanings
         # (the count's scope and the row filter) and positional placeholders
         # here would be an easy silent swap.
         {"case_id": case_id, "clearance": clearance,
-         "compartments": compartments, "include_global": include_global},
+         "compartments": compartments, "include_global": include_global,
+         "limit": limit, "offset": offset},
     ).fetchall()
     return [
         {"id": str(r[0]), "scope": _scope(r[1]), "namespace": r[2], "name": r[3],
@@ -466,6 +481,9 @@ def unassign_tag(
             dependencies=[Depends(rate_limit("graph.view"))])
 def tags_on_node(
     case_id: UUID, node_id: UUID,
+    # Paged like every list (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -496,8 +514,8 @@ def tags_on_node(
               -- would be a data defect, but rendering its namespace and
               -- name would make that defect a cross-case disclosure.
               AND (t.case_id = %s OR t.case_id IS NULL)
-            ORDER BY t.namespace, t.name""",
-        (node_id, case_id),
+            ORDER BY t.namespace, t.name LIMIT %s OFFSET %s""",
+        (node_id, case_id, limit, offset),
     ).fetchall()
     return [
         {"id": str(r[0]), "scope": _scope(r[1]), "namespace": r[2], "name": r[3],
@@ -547,6 +565,9 @@ def create_set(
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_sets(
     case_id: UUID,
+    # Paged like every list (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -578,9 +599,10 @@ def list_sets(
                                   AND n.compartments <@ %(compartments)s)
             WHERE s.case_id = %(case_id)s
             GROUP BY s.id
-            ORDER BY s.is_pinned DESC, s.created_at DESC""",
+            ORDER BY s.is_pinned DESC, s.created_at DESC
+            LIMIT %(limit)s OFFSET %(offset)s""",
         {"case_id": case_id, "clearance": clearance,
-         "compartments": compartments},
+         "compartments": compartments, "limit": limit, "offset": offset},
     ).fetchall()
     return [
         {"id": str(r[0]), "name": r[1], "purpose": r[2], "is_pinned": r[3],
@@ -674,6 +696,11 @@ def remove_member(
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_members(
     case_id: UUID, set_id: UUID,
+    # Paged like every list (http_ui-015, 2026-10-03). `members_total` and
+    # `truncated` say when a page is not the whole set, and `withheld`
+    # stays the exact count it was.
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -705,8 +732,8 @@ def list_members(
               AND n.merged_into_id IS NULL
               AND n.classification <= %s::core.tlp
               AND n.compartments <@ %s
-            ORDER BY n.label""",
-        (set_id, case_id, clearance, compartments),
+            ORDER BY n.label LIMIT %s OFFSET %s""",
+        (set_id, case_id, clearance, compartments, limit, offset),
     ).fetchall()
     # Merged-away members are listed SEPARATELY rather than folded into
     # `withheld`.
@@ -724,18 +751,45 @@ def list_members(
     # accumulating entries no one can reach. The label predicates still
     # apply, so a merged-away node above the caller's ceiling stays in
     # `withheld` where it belongs.
+    #
+    # The survivor's id only where the caller may read the survivor
+    # (graph-merged-into-pointer, 2026-10-03, second round): a member folded
+    # into an entity above the caller is an alias of it, which the merge
+    # ledger withholds, so the pointer is null here and the row still says
+    # the member is merged away. The survivor's own labels are tested, not
+    # only row security, so a development connection answers the same.
     merged = conn.execute(
-        """SELECT n.id, n.merged_into_id
+        """SELECT n.id, v.id
              FROM core.node_set_member m
              JOIN core.node n ON n.id = m.node_id
+             LEFT JOIN core.node v
+               ON v.id = n.merged_into_id AND v.case_id = n.case_id
+              AND v.deleted_at IS NULL
+              AND v.classification <= %s::core.tlp
+              AND v.compartments <@ %s
             WHERE m.set_id = %s
               AND n.case_id = %s
               AND n.deleted_at IS NULL
               AND n.merged_into_id IS NOT NULL
               AND n.classification <= %s::core.tlp
-              AND n.compartments <@ %s""",
-        (set_id, case_id, clearance, compartments),
+              AND n.compartments <@ %s
+            ORDER BY n.id LIMIT %s""",
+        (clearance, compartments, set_id, case_id, clearance, compartments, limit),
     ).fetchall()
+    # The two counts the page cannot give (http_ui-015, 2026-10-03), under
+    # the same label predicates, so `withheld` below stays exact when the
+    # lists above are cut at `limit`.
+    visible_total, merged_total = conn.execute(
+        """SELECT count(*) FILTER (WHERE n.merged_into_id IS NULL),
+                  count(*) FILTER (WHERE n.merged_into_id IS NOT NULL)
+             FROM core.node_set_member m
+             JOIN core.node n ON n.id = m.node_id
+            WHERE m.set_id = %s
+              AND n.case_id = %s
+              AND n.deleted_at IS NULL
+              AND n.classification <= %s::core.tlp
+              AND n.compartments <@ %s""",
+        (set_id, case_id, clearance, compartments)).fetchone()
     # A separate count rather than a flag on the rows above: the invisible
     # members' labels are then never read into this process at all, so
     # there is no variable holding a RED label for a later edit to return
@@ -745,17 +799,38 @@ def list_members(
     # count exists to own up to are exactly the ones row-level security
     # hides from the caller's connection, where the count would equal the
     # visible rows and `withheld` would always read 0.
-    with system_connection(SystemPurpose.WITHHELD, reuse=conn) as counter:
-        total = counter.execute(
-            "SELECT count(*) FROM core.node_set_member WHERE set_id = %s", (set_id,)
-        ).fetchone()[0]
+    #
+    # Said only as the case allows (rls-9, 2026-10-03): the count went out
+    # under every withheld_disclosure setting, so a case set to NONE still
+    # told every reader how many hidden entities each working set held. Now
+    # the graph's rule: nothing under NONE (and nothing counted), whether
+    # under PRESENCE, the number under COUNT, with `incomplete` and `mode`
+    # as the graph says them.
+    mode = disclosure_mode(conn, case_id)
+    total = 0
+    if mode != DISCLOSURE_NONE:
+        with system_connection(SystemPurpose.WITHHELD, reuse=conn) as counter:
+            total = counter.execute(
+                "SELECT count(*) FROM core.node_set_member WHERE set_id = %s", (set_id,)
+            ).fetchone()[0]
     members = [
         {"node_id": str(r[0]), "label": r[1], "node_type": r[2],
          "classification": r[3], "note": r[4]}
         for r in rows
     ]
-    merged_away = [{"node_id": str(r[0]), "merged_into_id": str(r[1])}
+    merged_away = [{"node_id": str(r[0]),
+                    "merged_into_id": str(r[1]) if r[1] else None}
                    for r in merged]
-    return {"set_id": str(set_id), "members": members,
+    body = {"set_id": str(set_id), "members": members,
             "merged_away": merged_away,
-            "withheld": total - len(members) - len(merged_away)}
+            "members_total": visible_total,
+            "truncated": (offset + len(members) < visible_total
+                          or len(merged_away) < merged_total)}
+    # exact when the lists above are cut at `limit` (http_ui-015), said only
+    # as the case allows (rls-9)
+    hidden = max(0, total - visible_total - merged_total)
+    body.update(withheld_notice(mode, hidden, noun="withheld"))
+    if mode == DISCLOSURE_COUNT:
+        # The number, nought included, as this route has always said it.
+        body["withheld"] = hidden
+    return body

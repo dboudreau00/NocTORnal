@@ -63,6 +63,7 @@ if _HERE not in sys.path:
 from _env import load_env_local  # noqa: E402
 from psycopg.types.json import Json  # noqa: E402
 from noctornal_api import egress, egress_ledger  # noqa: E402
+from noctornal_api.config import published_credentials  # noqa: E402
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService  # noqa: E402
 from noctornal_api.security import egress_seal  # noqa: E402
 
@@ -237,6 +238,13 @@ def preflight(directory: Path, *, compose=compose_version) -> list[str]:
             if not values.get(key):
                 problems.append(f"{name} has no {key}.")
     for name, values in files.items():
+        # A template value left in place (`replace-me`, which the
+        # database password lines of two of these files ship, and which
+        # agreeing in both files does not make private). Names the variable,
+        # never the value (infra-12, 2026-10-03).
+        for published in published_credentials(values):
+            problems.append(f"{name}: {published.refusal}")
+    for name, values in files.items():
         for key, want in (("NOCTORNAL_EGRESS_CLIENT_KEY", 32),
                           ("NOCTORNAL_EGRESS_FINGERPRINT_KEY", 32),
                           ("NOCTORNAL_EGRESS_SEAL_KEY", 32),
@@ -327,6 +335,12 @@ def adopt(conn, user_id, via, *, ask=input, out=print) -> list[str]:
             f"deployment's own address), any public host on ports "
             f"{', '.join(str(p) for p in passive['allowed_ports'])}, carrying feeds "
             f"labelled up to {passive['ceiling']}")
+        if passive.get("feeds_above_ceiling"):
+            # egress-rss-floor (2026-10-03): nothing above AMBER leaves, so a
+            # feed labelled above it is not carried and is not polled.
+            out("  Some active feeds carry a label above AMBER, which never "
+                "leaves this deployment, so the collector does not poll them: "
+                "collect them by hand, or correct the label if it is wrong.")
     for route in proposal["routes"]:
         out(f"  the {route['name']} route allowing {route['entry']}")
         if route.get("confirm_network"):

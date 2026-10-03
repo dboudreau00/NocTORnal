@@ -26,19 +26,28 @@ mistake is how mistakes stay in a case file.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from noctornal_api.db import SystemPurpose
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     get_conn,
     require,
     require_step_up,
     system_conn,
+    user_ceiling,
+)
+from noctornal_api.http.element_gate import (
+    check_basis_selector,
+    disclosure_mode,
+    gate_element,
+    visible_node_ids,
+    withheld_notice,
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.approvals import (
@@ -48,7 +57,13 @@ from noctornal_api.approvals import (
     policy_mode,
 )
 from noctornal_api.http.limits import rate_limit
-from noctornal_api.merges import MergeError, MergeRecord, MergeService
+from noctornal_api.merges import (
+    MergeCollision,
+    MergeError,
+    MergeRecord,
+    MergeService,
+)
+from noctornal_api.projections import DISCLOSURE_NONE
 
 router = APIRouter(prefix="/cases/{case_id}/merges", tags=["merges"])
 
@@ -118,13 +133,59 @@ def _out(m: MergeRecord) -> MergeOut:
 def history(
     case_id: UUID,
     limit: int = Query(100, ge=1, le=500),
-    _: CurrentUser = Depends(require("case.read")),
+    user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """Every merge in the case, reversed ones included — a reversed merge
     that vanished from the record would hide the fact that somebody once
-    believed these were the same actor."""
-    return {"merges": [_out(m) for m in MergeService(conn).history(case_id, limit)]}
+    believed these were the same actor.
+
+    Every merge THIS READER may see (rls-1, graph-merge-ledger-and-approvals-
+    leak, http_ui-001, 2026-10-03): one whose two entities are both within
+    their labels. The history served every merge, with both node ids and
+    the free reason, to every case reader. The rest are said as the case's
+    withheld_disclosure allows, under `withheld`, never which."""
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    out: dict = {"merges": [_out(m) for m in MergeService(conn).history_for_reader(
+        case_id, limit, clearance=clearance.name, compartments=held)]}
+    mode = disclosure_mode(conn, case_id)
+    hidden = 0
+    if mode != DISCLOSURE_NONE:
+        # Counted on a system connection: row security hides exactly these
+        # merges from the reader's own (0132).
+        with system_connection(SystemPurpose.WITHHELD, reuse=conn) as counter:
+            hidden = MergeService(counter).count_hidden_from_reader(
+                case_id, clearance=clearance.name, compartments=held)
+    notice = withheld_notice(mode, hidden, noun="merges")
+    if notice:
+        out["withheld"] = notice
+    return out
+
+
+def _gate_merge_nodes(conn, user: CurrentUser, case_id: UUID, permission: str,
+                      node_ids, missing_detail: str) -> None:
+    """Both entities of a merge, at their own labels (graph-merge-no-element-
+    label-gate, http_ui-001, 2026-10-03). The merge and its reversal run on a
+    system connection that sees every node, so before this an analyst could
+    merge, or reverse the merge of, an entity they cannot read, by id, and a
+    hidden id answered 201 where a random one answered 409. One 404 now, for
+    an entity that is missing, in another case or above the caller."""
+    for node_id in node_ids:
+        gate_element(conn, user, case_id=case_id, kind="node",
+                     element_id=node_id, permission_key=permission,
+                     missing_detail=missing_detail)
+
+
+def _conflict(conn, user: CurrentUser, case_id: UUID, exc: MergeError) -> Problem:
+    """A merge the service refused, as a 409. A duplicate tie names its third
+    party only to a merger who may read that entity (2026-10-03): the id of
+    one above them, and with it that two ties to it exist, was theirs to read
+    in the refusal."""
+    if (isinstance(exc, MergeCollision)
+            and exc.third_party not in visible_node_ids(
+                conn, user, case_id, [exc.third_party])):
+        return Problem(409, "Conflict", exc.without_third_party())
+    return Problem(409, "Conflict", safe_detail(exc))
 
 
 @router.post("", response_model=MergeOut, status_code=201,
@@ -156,24 +217,41 @@ def merge(
     if body.source_node_id is None or body.target_node_id is None or not body.reason:
         raise Problem(422, "Validation failed",
                       "source_node_id, target_node_id and reason are required")
+    _gate_merge_nodes(conn, user, case_id, "graph.merge",
+                      (body.source_node_id, body.target_node_id),
+                      "no such node in this case")
+    check_basis_selector(conn, user, case_id=case_id,
+                         selector_id=body.basis_selector_id)
     try:
         record = MergeService(sconn).merge(
             case_id=case_id, source_node_id=body.source_node_id,
             target_node_id=body.target_node_id, merged_by=user.user_id,
             reason=body.reason, basis_selector_id=body.basis_selector_id)
     except MergeError as exc:
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    return _out(_as_reader(conn, record))
+        raise _conflict(conn, user, case_id, exc) from exc
+    return _out(_as_reader(conn, record, user))
 
 
-def _as_reader(conn, record: MergeRecord) -> MergeRecord:
+def _as_reader(conn, record: MergeRecord, user: CurrentUser) -> MergeRecord:
     """The record as its reader sees it (S1, 2026-09-25). The merge and its
     reversal run on a system connection and re-point every tie; the counts
     they answer with are read back on the request connection, so a tie
     above the reader is counted nowhere they can see, exactly as the merge
     history counts it (`core.node_merge_edge` is policied since 0123). The
-    audit row keeps the full count for its own readers."""
-    return MergeService(conn).get(record.id) or record
+    audit row keeps the full count for its own readers.
+
+    At the reader's own labels since 2026-10-03, as the history is
+    (`history_for_reader`), so a development stack, whose request
+    connection row security does not filter, answers the same, and a tie
+    to an entity the reader cannot see is not counted either. The gate let
+    the reader past both entities, so the merge is theirs to see; were it
+    not, the counts are withheld rather than the system's full ones
+    returned."""
+    clearance, held = user_ceiling(conn, user.user_id, case_id=record.case_id)
+    seen = MergeService(conn).get_for_reader(
+        record.id, clearance=clearance.name, compartments=held)
+    return seen or replace(record, edges_repointed=0,
+                           edges_self_loop_deleted=0)
 
 
 def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
@@ -212,6 +290,18 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
     except (KeyError, TypeError, ValueError) as exc:
         raise Problem(409, "Conflict",
                       "that approval was not raised for a merge") from exc
+    # The merger must still be able to read both entities when the approval
+    # is spent, as when it was raised (2026-10-03): the payload's ids run on
+    # the system connection otherwise. Before the consume, so a refusal
+    # leaves the approval unspent. The sentence is the one for an approval
+    # that is not there (graph-merge-approval-hidden, second round): a
+    # request that names entities above the caller is not theirs to see, and
+    # a different 404 for it than for a random id would say it exists.
+    _gate_merge_nodes(conn, user, case_id, "graph.merge",
+                      (source_node_id, target_node_id),
+                      "no such approval request in this case")
+    check_basis_selector(conn, user, case_id=case_id,
+                         selector_id=basis_selector_id)
 
     try:
         with sconn.transaction():
@@ -224,13 +314,13 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
     except ApprovalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except MergeError as exc:
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+        raise _conflict(conn, user, case_id, exc) from exc
 
     # Outside the transaction on purpose: this is a convenience join between
     # the approval and its consequence, and failing to record it must not
     # roll back a merge that already succeeded.
     svc.attach_result(body.approval_request_id, record.id)
-    return _out(_as_reader(conn, record))
+    return _out(_as_reader(conn, record, user))
 
 
 @router.post("/{merge_id}/reverse", response_model=MergeOut,
@@ -247,9 +337,15 @@ def reverse(
     record = MergeService(sconn).get(merge_id)
     if record is None or record.case_id != case_id:
         raise Problem(404, "Not found", "no such merge in this case")
+    # graph-merge-ledger-and-approvals-leak, http_ui-001 (2026-10-03): a
+    # reader below either entity reversed a merge they could not see. Its
+    # two entities at their own labels, the same 404 as no merge at all.
+    _gate_merge_nodes(conn, user, case_id, "graph.unmerge",
+                      (record.source_node_id, record.target_node_id),
+                      "no such merge in this case")
     try:
         reversed_ = MergeService(sconn).unmerge(
             merge_id, reversed_by=user.user_id, reason=body.reason)
     except MergeError as exc:
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    return _out(_as_reader(conn, reversed_))
+        raise _conflict(conn, user, case_id, exc) from exc
+    return _out(_as_reader(conn, reversed_, user))

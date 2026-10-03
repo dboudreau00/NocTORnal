@@ -474,10 +474,12 @@ def test_an_under_cleared_caller_cannot_correct_or_retire_a_red_element(
 
     # The ANALYST role does grant the verb, and the case is AMBER, so the
     # case-level `require(...)` passes. Only the element's own label stops
-    # this.
+    # this, and it is answered as the node's absence: a 403 "missing
+    # permission" told a caller holding a leaked id that it named something
+    # in the case (beta review http_ui-016, 2026-10-03).
     assert _patch(client, amber, case_id, "nodes", red,
-                  {"label": "rewritten"}).status_code == 403
-    assert _retire(client, amber, case_id, "nodes", red).status_code == 403
+                  {"label": "rewritten"}).status_code == 404
+    assert _retire(client, amber, case_id, "nodes", red).status_code == 404
 
     assert _node_row(conn, red)[0] == "informant truename"
     assert _node_row(conn, red)[2] is None

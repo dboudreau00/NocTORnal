@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0124.
+-- GENERATED MIRROR of the schema at Alembic revision 0131.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0124
+-- Alembic revision: 0131
 -- =====================================================================
 
 --
@@ -1438,6 +1438,48 @@ BEGIN
 END $$;
 
 --
+-- Name: assertion_supersedes_fixed(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_supersedes_fixed() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'the claim a claim replaces is recorded once, when it is written';
+END
+$$;
+
+--
+-- Name: assertion_supersedes_guard(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_supersedes_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  prior core.assertion%ROWTYPE;
+BEGIN
+  SELECT * INTO prior FROM core.assertion WHERE id = NEW.supersedes_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'a claim that replaces another must name a claim that exists';
+  END IF;
+  IF prior.case_id IS DISTINCT FROM NEW.case_id THEN
+    RAISE EXCEPTION 'a claim replaces only a claim in its own case';
+  END IF;
+  IF prior.node_id IS DISTINCT FROM NEW.node_id
+     OR prior.edge_id IS DISTINCT FROM NEW.edge_id THEN
+    RAISE EXCEPTION 'a claim replaces only a claim about the same entity or tie';
+  END IF;
+  IF prior.retracted_at IS NOT NULL OR prior.superseded_at IS NOT NULL THEN
+    RAISE EXCEPTION 'a retracted or superseded claim is history and is not replaced again';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
 -- Name: block_custody_mutation(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -1911,7 +1953,9 @@ CREATE TABLE core.assertion (
     retraction_reason text,
     created_by uuid NOT NULL,
     lookup_result_id uuid,
+    supersedes_id uuid,
     CONSTRAINT assertion_inference_needs_rationale CHECK (((basis <> ALL (ARRAY['ANALYST_INFERENCE'::core.assertion_basis, 'AUTOMATED_INFERENCE'::core.assertion_basis])) OR (rationale IS NOT NULL))),
+    CONSTRAINT assertion_not_self_superseding CHECK (((supersedes_id IS NULL) OR (supersedes_id <> id))),
     CONSTRAINT assertion_one_subject CHECK ((num_nonnulls(node_id, edge_id) = 1))
 );
 
@@ -1920,6 +1964,12 @@ CREATE TABLE core.assertion (
 --
 
 COMMENT ON COLUMN core.assertion.lookup_result_id IS 'The lookup answer an accepted claim rests on (AUTOMATED_INFERENCE only).';
+
+--
+-- Name: COLUMN assertion.supersedes_id; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.assertion.supersedes_id IS 'The claim this one replaces, set once at insert (migration assertion_supersedes, 2026-10-02). The replaced row carries superseded_at and superseded_by, stamped once from NULL; its own columns are never written again.';
 
 --
 -- Name: tie_grade(core.assertion); Type: FUNCTION; Schema: core; Owner: -
@@ -2460,6 +2510,19 @@ CREATE FUNCTION iam.guard_dual_control_ledger() RETURNS trigger
 BEGIN
   RAISE EXCEPTION 'iam.dual_control_policy_change is append-only: a change is corrected by another change';
 END
+$$;
+
+--
+-- Name: lookup_result_facts(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.lookup_result_facts(p_id uuid) RETURNS TABLE(case_id uuid, classification core.tlp)
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT r.case_id, r.classification
+    FROM ingest.lookup_result r
+   WHERE r.id = p_id
 $$;
 
 --
@@ -3224,7 +3287,8 @@ END $$;
 --
 
 CREATE FUNCTION ingest.lookup_result_dominates() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
 DECLARE r record;
 BEGIN
@@ -3679,6 +3743,104 @@ CREATE FUNCTION notify.announce_notification() RETURNS trigger
                               'op', TG_OP)::text);
           RETURN NULL;
         END $$;
+
+--
+-- Name: enqueue(uuid, uuid, text, smallint, text, text, text, core.tlp, text[], text, uuid, uuid, uuid, jsonb, jsonb); Type: FUNCTION; Schema: notify; Owner: -
+--
+
+CREATE FUNCTION notify.enqueue(p_recipient uuid, p_case uuid, p_kind text, p_priority smallint, p_subject text, p_summary text, p_body text, p_classification core.tlp, p_compartments text[], p_object_type text, p_object_id uuid, p_actor uuid, p_event uuid, p_deliveries jsonb, p_open jsonb) RETURNS TABLE(outcome text, raised_id uuid, raised_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  v_labels text[] := coalesce(p_compartments, '{}'::text[]);
+  v_exempt boolean;
+  v_clr core.tlp;
+  v_held text[];
+  v_cases uuid[];
+  v_ceil jsonb;
+  v_id uuid;
+  v_at timestamptz;
+BEGIN
+  IF p_open IS NOT NULL THEN
+    v_exempt := iam.rls_caller_exempt();
+    IF NOT v_exempt THEN
+      v_clr := iam.rls_clearance();
+      v_held := coalesce(iam.rls_compartments(), '{}'::text[]);
+      v_cases := coalesce(iam.rls_cases(), '{}'::uuid[]);
+      v_ceil := coalesce(iam.rls_ceilings(), '{}'::jsonb);
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM notify.notification n
+         WHERE n.kind = p_kind
+           AND (coalesce((p_open ->> 'anyone')::boolean, false)
+                OR n.recipient_id = p_recipient)
+           AND (NOT coalesce((p_open ->> 'object')::boolean, false)
+                OR (n.object_type IS NOT DISTINCT FROM p_object_type
+                    AND n.object_id IS NOT DISTINCT FROM p_object_id))
+           AND (NOT coalesce((p_open ->> 'case')::boolean, false)
+                OR n.case_id IS NOT DISTINCT FROM p_case)
+           AND (p_open ->> 'within' IS NULL
+                OR n.created_at > pg_catalog.now() - (p_open ->> 'within')::interval)
+           AND CASE WHEN coalesce((p_open ->> 'unread')::boolean, false)
+                    THEN n.read_at IS NULL ELSE n.acknowledged_at IS NULL END
+           AND (v_exempt
+                OR ((n.case_id IS NULL OR n.case_id = ANY (v_cases))
+                    AND (n.classification <= v_clr
+                         OR n.classification <= iam.rls_ceiling_for(v_ceil, n.case_id))
+                    AND n.compartments OPERATOR(pg_catalog.<@) v_held))) THEN
+      RETURN QUERY SELECT 'COALESCED'::text, NULL::uuid, NULL::timestamptz;
+      RETURN;
+    END IF;
+  END IF;
+
+  IF NOT EXISTS (
+        SELECT 1 FROM iam.app_user u
+         WHERE u.id = p_recipient AND u.is_active
+           AND p_classification <= u.tlp_clearance
+           AND v_labels OPERATOR(pg_catalog.<@) coalesce(u.compartments, '{}'::text[]))
+     OR (p_case IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM iam.case_assignment a
+         WHERE a.case_id = p_case AND a.user_id = p_recipient
+           AND (a.expires_at IS NULL OR a.expires_at > pg_catalog.now()))) THEN
+    RETURN QUERY SELECT 'SUPPRESSED'::text, NULL::uuid, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  INSERT INTO notify.notification
+         (recipient_id, case_id, kind, priority, subject, summary, body,
+          classification, compartments, object_type, object_id, actor_id, event_id)
+  VALUES (p_recipient, p_case, p_kind, p_priority, p_subject, p_summary, p_body,
+          p_classification, v_labels, p_object_type, p_object_id, p_actor,
+          coalesce(p_event, pg_catalog.gen_random_uuid()))
+  RETURNING id, created_at INTO v_id, v_at;
+
+  INSERT INTO notify.delivery
+         (notification_id, channel, state, deliver_after, sent_at, detail, cause)
+  SELECT v_id, x.channel,
+         CASE WHEN k.kept_out THEN x.blocked ->> 'state' ELSE x.state END,
+         coalesce(x.deliver_after, pg_catalog.now()),
+         CASE WHEN k.kept_out THEN NULL ELSE x.sent_at END,
+         CASE WHEN k.kept_out THEN x.blocked ->> 'detail' ELSE x.detail END,
+         CASE WHEN k.kept_out THEN x.blocked ->> 'cause' ELSE x.cause END
+    FROM pg_catalog.jsonb_to_recordset(coalesce(p_deliveries, '[]'::jsonb))
+         AS x(channel text, state text, deliver_after timestamptz,
+              sent_at timestamptz, detail text, cause text, blocked jsonb)
+   CROSS JOIN LATERAL (
+         SELECT x.blocked IS NOT NULL AND p_case IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM notify.case_route_block r
+                   WHERE r.case_id = p_case AND r.channel = x.channel) AS kept_out) k
+  ON CONFLICT (notification_id, channel) DO NOTHING;
+
+  RETURN QUERY SELECT 'WRITTEN'::text, v_id, v_at;
+END
+$$;
+
+--
+-- Name: FUNCTION enqueue(p_recipient uuid, p_case uuid, p_kind text, p_priority smallint, p_subject text, p_summary text, p_body text, p_classification core.tlp, p_compartments text[], p_object_type text, p_object_id uuid, p_actor uuid, p_event uuid, p_deliveries jsonb, p_open jsonb); Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON FUNCTION notify.enqueue(p_recipient uuid, p_case uuid, p_kind text, p_priority smallint, p_subject text, p_summary text, p_body text, p_classification core.tlp, p_compartments text[], p_object_type text, p_object_id uuid, p_actor uuid, p_event uuid, p_deliveries jsonb, p_open jsonb) IS 'The one writer of a notification (F51, 2026-10-02): coalescing within the caller''s reach, then the recipient''s eligibility, then the row and its deliveries, in the caller''s transaction. Answers WRITTEN, SUPPRESSED or COALESCED with the new id, never the row.';
 
 --
 -- Name: guard_jira_event(); Type: FUNCTION; Schema: notify; Owner: -
@@ -4717,7 +4879,8 @@ CREATE TABLE collect.watch (
     quiet_hours int4range,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_hit_at timestamp with time zone,
-    CONSTRAINT watch_priority_check CHECK (((priority >= 1) AND (priority <= 5)))
+    CONSTRAINT watch_priority_check CHECK (((priority >= 1) AND (priority <= 5))),
+    CONSTRAINT watch_telegram_chat_typed CHECK ((NOT ((upper(target_kind) = 'TELEGRAM_CHAT'::text) AND (NOT ((target_kind = 'TELEGRAM_CHAT'::text) AND (target_ref ~ '^[cg]:[1-9][0-9]{0,19}$'::text))))))
 );
 
 --
@@ -9357,6 +9520,12 @@ CREATE INDEX assertion_embedding_space_status ON core.assertion_embedding USING 
 CREATE INDEX assertion_node_id_idx ON core.assertion USING btree (node_id) WHERE ((retracted_at IS NULL) AND (superseded_at IS NULL));
 
 --
+-- Name: assertion_replaced_once; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX assertion_replaced_once ON core.assertion USING btree (supersedes_id) WHERE (supersedes_id IS NOT NULL);
+
+--
 -- Name: assertion_source_id_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -10657,6 +10826,18 @@ CREATE TRIGGER assertion_embedding_queued AFTER INSERT ON core.assertion FOR EAC
 --
 
 CREATE CONSTRAINT TRIGGER assertion_protects_element AFTER DELETE OR UPDATE OF node_id, edge_id ON core.assertion DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION core.assertion_protects_element();
+
+--
+-- Name: assertion assertion_supersedes_guarded; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_supersedes_guarded BEFORE INSERT ON core.assertion FOR EACH ROW WHEN ((new.supersedes_id IS NOT NULL)) EXECUTE FUNCTION core.assertion_supersedes_guard();
+
+--
+-- Name: assertion assertion_supersedes_unchanged; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_supersedes_unchanged BEFORE UPDATE OF supersedes_id ON core.assertion FOR EACH ROW WHEN ((old.supersedes_id IS DISTINCT FROM new.supersedes_id)) EXECUTE FUNCTION core.assertion_supersedes_fixed();
 
 --
 -- Name: case case_merge_switch_guarded; Type: TRIGGER; Schema: core; Owner: -
@@ -12191,6 +12372,13 @@ ALTER TABLE ONLY core.assertion
 
 ALTER TABLE ONLY core.assertion
     ADD CONSTRAINT assertion_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES core.assertion(id);
+
+--
+-- Name: assertion assertion_supersedes_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.assertion
+    ADD CONSTRAINT assertion_supersedes_id_fkey FOREIGN KEY (supersedes_id) REFERENCES core.assertion(id);
 
 --
 -- Name: assumption assumption_case_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
@@ -13762,6 +13950,16 @@ CREATE POLICY rls_gate ON collect.forum_post USING ((EXISTS ( SELECT 1
 CREATE POLICY rls_gate ON collect.proposal USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
 
 --
+-- Name: telegram_chat rls_gate; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_gate ON collect.telegram_chat USING ((EXISTS ( SELECT 1
+   FROM collect.source p
+  WHERE ((p.id = telegram_chat.source_id) AND (p.classification <= ( SELECT iam.rls_clearance() AS rls_clearance)))))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM collect.source p
+  WHERE ((p.id = telegram_chat.source_id) AND (p.classification <= ( SELECT iam.rls_clearance() AS rls_clearance))))));
+
+--
 -- Name: telegram_message rls_gate; Type: POLICY; Schema: collect; Owner: -
 --
 
@@ -13790,6 +13988,12 @@ CREATE POLICY rls_gate ON collect.watch_hit USING (((EXISTS ( SELECT 1
   WHERE (p.id = watch_hit.watch_id))) AND (EXISTS ( SELECT 1
    FROM collect.document p
   WHERE (p.id = watch_hit.document_id)))));
+
+--
+-- Name: telegram_chat; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.telegram_chat ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: telegram_message; Type: ROW SECURITY; Schema: collect; Owner: -
@@ -14394,6 +14598,64 @@ CREATE POLICY rls_gate ON deception.email_hop USING ((EXISTS ( SELECT 1
 CREATE POLICY rls_gate ON deception.email_message USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
 
 --
+-- Name: lookup; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.lookup ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: lookup_attempt; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.lookup_attempt ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: lookup_batch; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.lookup_batch ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: lookup_result; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.lookup_result ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: lookup_attempt rls_append; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_append ON ingest.lookup_attempt FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
+   FROM ingest.lookup p
+  WHERE (p.id = lookup_attempt.lookup_id))));
+
+--
+-- Name: lookup rls_gate; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_gate ON ingest.lookup USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))));
+
+--
+-- Name: lookup_batch rls_gate; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_gate ON ingest.lookup_batch USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: lookup_result rls_gate; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_gate ON ingest.lookup_result USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))));
+
+--
+-- Name: lookup_attempt rls_read; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_read ON ingest.lookup_attempt FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM ingest.lookup p
+  WHERE (p.id = lookup_attempt.lookup_id))));
+
+--
 -- Name: detonation; Type: ROW SECURITY; Schema: lab; Owner: -
 --
 
@@ -14598,6 +14860,78 @@ ALTER TABLE lab.yara_ruleset ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE lab.yara_ruleset_version ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: case_route_block; Type: ROW SECURITY; Schema: notify; Owner: -
+--
+
+ALTER TABLE notify.case_route_block ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: delivery; Type: ROW SECURITY; Schema: notify; Owner: -
+--
+
+ALTER TABLE notify.delivery ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: jira_event; Type: ROW SECURITY; Schema: notify; Owner: -
+--
+
+ALTER TABLE notify.jira_event ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: jira_link; Type: ROW SECURITY; Schema: notify; Owner: -
+--
+
+ALTER TABLE notify.jira_link ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: notification; Type: ROW SECURITY; Schema: notify; Owner: -
+--
+
+ALTER TABLE notify.notification ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: case_route_block rls_gate; Type: POLICY; Schema: notify; Owner: -
+--
+
+CREATE POLICY rls_gate ON notify.case_route_block USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: delivery rls_read; Type: POLICY; Schema: notify; Owner: -
+--
+
+CREATE POLICY rls_read ON notify.delivery FOR SELECT USING (((EXISTS ( SELECT 1
+   FROM notify.notification p
+  WHERE (p.id = delivery.notification_id))) AND ((jira_link_id IS NULL) OR (EXISTS ( SELECT 1
+   FROM notify.jira_link p
+  WHERE (p.id = delivery.jira_link_id))))));
+
+--
+-- Name: jira_event rls_read; Type: POLICY; Schema: notify; Owner: -
+--
+
+CREATE POLICY rls_read ON notify.jira_event FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM notify.jira_link p
+  WHERE (p.id = jira_event.link_id))));
+
+--
+-- Name: jira_link rls_read; Type: POLICY; Schema: notify; Owner: -
+--
+
+CREATE POLICY rls_read ON notify.jira_link FOR SELECT USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))));
+
+--
+-- Name: notification rls_read; Type: POLICY; Schema: notify; Owner: -
+--
+
+CREATE POLICY rls_read ON notify.notification FOR SELECT USING (((recipient_id = ( SELECT iam.rls_actor() AS rls_actor)) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND ((case_id IS NULL) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])))));
+
+--
+-- Name: notification rls_update; Type: POLICY; Schema: notify; Owner: -
+--
+
+CREATE POLICY rls_update ON notify.notification FOR UPDATE USING (((recipient_id = ( SELECT iam.rls_actor() AS rls_actor)) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND ((case_id IS NULL) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))))) WITH CHECK (((recipient_id = ( SELECT iam.rls_actor() AS rls_actor)) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND ((case_id IS NULL) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])))));
 
 --
 -- PostgreSQL database dump complete

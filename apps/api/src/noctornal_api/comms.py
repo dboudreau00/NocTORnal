@@ -707,7 +707,13 @@ class CommsService:
                -- predicate has to be restated here for Postgres to infer
                -- it. Without it this is an unhelpful "no unique or
                -- exclusion constraint matching" at runtime.
-               ON CONFLICT (case_id, platform_key, external_ref)
+               --
+               -- Keyed per labels since 0147 (rls-5, 2026-10-03): the row
+               -- this can meet carries the caller's own labels, so it is
+               -- never a capture the caller may not read, and a hidden one
+               -- answers as a missing one does.
+               ON CONFLICT (case_id, platform_key, external_ref,
+                            classification, compartments)
                  WHERE external_ref IS NOT NULL
                DO UPDATE SET title = EXCLUDED.title
                RETURNING id""",

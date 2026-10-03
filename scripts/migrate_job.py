@@ -15,10 +15,15 @@ secrets.env, where the API's boot check refused a published owner password
 for it. F52 moved the DSN into a file only this job reads, so that refusal
 has to be made here or nobody makes it. And on a host whose secrets were
 not moved yet, an empty variable would have reached Alembic as an empty
-DATABASE_URL, whose message is about .env.local and a laptop's shell. Both
-refusals are `config.migration_job_problems`, one sentence each, naming
-the fix and never a value; any refusal exits 1, which keeps every service
-that waits on this job from starting.
+DATABASE_URL, whose message is about .env.local and a laptop's shell. The
+refusals are `config.migration_job_problems`, one line each, naming the fix
+and never a value. The published-credential one is the helper every other
+job makes (`config.refuse_unsafe_job_environment`, infra-12), with the
+owner half switched off because this job is the one that holds the owner's
+DSN. Any refusal exits 1, which keeps every service that waits on this job
+from starting. Alembic's own environment (db/migrations/env.py) makes the
+same published-credential refusal once more when it starts, so a bare
+`alembic` is held to it too; that one exits 2, as every other job's does.
 
 When there is nothing to refuse, DATABASE_URL is replaced in this
 process's environment with the owner's DSN (Alembic and the application
@@ -46,12 +51,12 @@ def main(env=None, *, execvpe=os.execvpe, err=sys.stderr) -> int:
     if not problems and not dsn:
         # Outside production the rules above are off, and there is still
         # nothing to migrate with.
-        problems = [f"{MIGRATION_DSN_ENV} is not set. This job belongs to the "
-                    f"production compose file; a development stack runs "
+        problems = [f"migrate: {MIGRATION_DSN_ENV} is not set. This job belongs to "
+                    f"the production compose file; a development stack runs "
                     f"alembic upgrade head itself."]
     if problems:
         for problem in problems:
-            print(f"migrate: {problem}", file=err)
+            print(problem, file=err)
         return 1
     env["DATABASE_URL"] = dsn
     execvpe("alembic", ["alembic", "upgrade", "head"], env)

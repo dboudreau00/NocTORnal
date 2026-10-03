@@ -155,8 +155,10 @@ readiness row names the gap.
 - *Retention.* Telegram documents take the CHAT_EXPORT rule's clock from
   their capture time. A document cited by a case under legal hold, through
   any version, is never purged; a purged one loses the typed ids and names
-  its capture record held. No route or script sweeps collected documents
-  on its own (docs/17).
+  its capture record held. `scripts/retention_sweep.py` sweeps collected
+  documents past their clock: an operator runs it, dry by default, under a
+  declared authority, and nothing schedules it (infra/production/README.md,
+  Retention sweep; docs/17 F30).
 
 ### General hygiene
 - Randomised intervals with jitter, never a clean cron cadence
@@ -302,3 +304,46 @@ The triage view should default to sorting by watch-hit priority and
 extraction density, items containing several strong selectors first. Bulk
 discard is essential. Cheap keyboard-driven actions (link to case, create
 proposal, discard, escalate) are what make it survivable at volume.
+
+## Watches
+
+A watch is a standing tasking against one source: keywords, selectors and
+patterns, and the case it reports to. The collector matches each collected
+item against its source's active watches inside the item's own savepoint and
+writes a hit that carries its reasons (`matched_on`, a list), never a bare
+score.
+
+**What a reason says.** `keyword:<term>`, `selector:<term>` and
+`regex:<pattern>` are the watch's own term found in the item's text (title and
+body). `author:<id>` and `<label>:<id>` (a forward, a via-bot) are a selector
+equal to a typed id the item carries. A forum post's signature is kept beside
+the post and not in its text (`collect.forum_post`), and is matched on its own:
+`signature_keyword:`, `signature_selector:` and `signature_regex:` say the term
+was found in the signature. A signature is repeated on every post its author
+writes, so a term in it raises a hit on each of those posts (the watch's
+suppression window thins them by thread), and the reason is what tells an
+analyst it is the author's signature that carries the term and not the post.
+
+**A Telegram chat as the target (F47).** A watch of target kind
+`TELEGRAM_CHAT` names its chat in `target_ref` by the typed durable id, `c:<id>`
+or `g:<id>`, never an `@username` (a username is recycled, invariant 9;
+migration 0130 holds the reference to that shape for this kind and no other).
+It fires only on a message collected from that chat, and its reasons begin
+`chat:<id>`. With no keyword, selector or pattern at all it fires on every
+message of that chat: the default suppression window collapses those to one hit
+per chat or topic an hour, and a window of 0 gives one per message. With terms
+it fires on the messages that carry one, and still says which chat. A chat
+watch that names a chat the source does not read, or sits on a source that is
+not a Telegram chat, matches nothing, and the run reports it once as a watch
+warning (PARTIAL), the way it reports a pattern that will not compile. Every
+other target kind keeps the free text it had, and a watch of any other kind with
+no term matches nothing.
+
+**Where it runs.** `collect.watch` and `collect.watch_hit` are under row-level
+security (0124). The poll, a manual run and a pasted capture read the watches
+and write the hits as the COLLECTION system purpose, which sees every case's
+watches; the hit listing and its verbs are the only readers on the request
+connection, and they are scoped to the case. A purge of a document keeps a
+hit's reasons that are the watch's own configuration (its terms and the chat it
+names) and replaces what was read from the document (an author or forward id)
+with `[purged]`.

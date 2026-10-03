@@ -279,7 +279,9 @@ def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
     assert set(nets) == {"noctornal", "edge"}
     assert nets["noctornal"]["ipv4_address"] == doc["x-caddy-ip"]
     assert caddy["ports"] == ["80:80", "443:443"]
-    assert _env_files(caddy) == [("secrets.env", True)]
+    # caddy.env, not secrets.env (infra-5, 2026-10-03): the TLS terminator
+    # holds its three values and none of the platform's secrets.
+    assert _env_files(caddy) == [("caddy.env", True)]
 
 
 def test_the_proxy_is_unpublished_on_its_own_address_with_its_own_env(doc):

@@ -66,6 +66,13 @@ def conn():
         c.execute("ALTER TABLE lab.detonation ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_analysis WHERE sample_id IN {ssub}")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub}")
+        # lab-3 (2026-10-03): a record-only exposed detonation tells the
+        # lead it names, so this suite's notices go before its cases.
+        c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN (SELECT id "
+                  f"FROM notify.notification WHERE recipient_id IN {sub} "
+                  f"OR case_id IN {csub})")
+        c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {sub} "
+                  f"OR case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
         c.execute(f"DELETE FROM iam.session WHERE user_id IN {sub}")

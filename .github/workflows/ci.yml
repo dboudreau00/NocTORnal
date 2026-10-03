@@ -302,11 +302,12 @@ jobs:
             -e REDIS_URL=redis://noctornal_limiter:dev_only_change_me@redis:6379/0 \
             -e ACL_TENANT_PASSWORD=dev_only_change_me \
             -v /tmp/acl-redis-start.sh:/acl-redis-start.sh:ro \
-            redis:7-alpine /bin/sh /acl-redis-start.sh
+            redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
+            /bin/sh /acl-redis-start.sh
           # The compose file's own healthcheck, signed in as the limiter.
           for i in $(seq 1 40); do
-            if docker exec acl-redis redis-cli --no-auth-warning --user noctornal_limiter \
-                 -a dev_only_change_me ping 2>/dev/null | grep -q PONG; then
+            if docker exec -e REDISCLI_AUTH=dev_only_change_me acl-redis \
+                 redis-cli --user noctornal_limiter ping 2>/dev/null | grep -q PONG; then
               echo "ACL Redis ready on attempt ${i}"; exit 0
             fi
             sleep 1
@@ -509,17 +510,19 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
-          # Forks are NOTICED, never fatal. Two rows can claim one
-          # predecessor because `seq` is drawn before the chaining trigger
-          # takes its advisory lock, so concurrent writers produce them
-          # from ordinary traffic -- the development database has 67 in
-          # 60,181 rows. Failing the build on those would make a red tick
-          # mean "somebody wrote to two cases at once", and the first
-          # person to chase one would stop believing the green ones.
+          # A fork is two rows claiming one predecessor. Until migration 0200
+          # (2026-10-03) concurrent writers made them from ordinary traffic,
+          # because `seq` was drawn before the chaining trigger took its
+          # lock, so those are only noticed. A fork whose claimants were all
+          # written since 0200 cannot come from honest traffic and is in
+          # `report.breaks`, so the loop below fails the build on it. This
+          # database is built by the migrations from nothing, so every fork
+          # here is the latter kind.
+          print(f"tail seq {report.tail_seq}, hash {report.tail_row_hash}")
           if report.forks:
               print(f"::warning::{len(report.forks)} audit row(s) share a "
-                    f"predecessor. Concurrent writers, not tampering -- the "
-                    f"chain simply cannot be fully linearised.")
+                    f"predecessor (see the breaks below for any written "
+                    f"after migration 0200).")
           for b in report.breaks:
               print(f"::error::audit chain {b.kind} break at seq {b.seq} "
                     f"({b.action} at {b.occurred_at})")
@@ -573,8 +576,9 @@ jobs:
               sys.exit(1)
           if report.forks:
               print(f"::warning::{len(report.forks)} custody row(s) share a "
-                    f"predecessor. Not counted as tampering, but on a ledger "
-                    f"written by 0024 this should not occur -- investigate.")
+                    f"predecessor. Those from before migration 0200 are not "
+                    f"counted as tampering; any written after it is in the "
+                    f"breaks below.")
           for b in report.breaks:
               print(f"::error::custody chain {b.kind} break at id {b.id} "
                     f"({b.action} on {b.evidence_id} at {b.occurred_at})")

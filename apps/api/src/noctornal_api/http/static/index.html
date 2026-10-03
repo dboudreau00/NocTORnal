@@ -140,6 +140,15 @@
       <span class="label">Display name</span>
       <input id="setup-name" type="text" autocomplete="off" required>
     </label>
+    <!-- http_ui-010 and infra-3 (2026-10-03): shown only when the server
+         says it wants a setup token (NOCTORNAL_SETUP_TOKEN is set). -->
+    <label class="field" id="setup-token-field" hidden>
+      <span class="label">Setup token</span>
+      <input id="setup-token" type="password" autocomplete="off"
+             spellcheck="false" maxlength="512">
+      <span class="help">The value of NOCTORNAL_SETUP_TOKEN on the server.
+        This deployment will not create its first account without it.</span>
+    </label>
     <!-- firstrun-oneclick-wipe (2026-09-22): the operator learned that a
          password would be GENERATED only after it was on screen. Said
          before the button, so the app and a safe place are ready. -->
@@ -2970,7 +2979,10 @@
               document the gate cleared, and only if it matches the preview
               above.
             </p>
-            <!-- These are `egress.Destination`, verbatim. An earlier
+            <!-- These are `routers/reports.RELEASE_DESTINATIONS`, the
+                 `egress.Destination` values a released document can go to,
+                 verbatim (in_app went 2026-10-03: the release refuses it,
+                 evidence-report-release-in-app). An earlier
                  version of this control invented plausible-looking values
                  (INTERNAL / PARTNER_AGENCY / EXTERNAL / PUBLIC) and every
                  release attempt 400'd on "unknown destination", the same
@@ -2982,7 +2994,6 @@
             <label class="field">
               <span class="label">Destination</span>
               <select id="rep-destination" class="select">
-                <option value="in_app">in_app: stays inside the platform</option>
                 <option value="export" selected>export: an analyst saves it as a file</option>
                 <option value="smtp">smtp: email</option>
                 <option value="jira">jira</option>
@@ -2990,9 +3001,10 @@
               </select>
             </label>
             <p class="help">
-              Everything except <code>in_app</code> crosses the boundary
-              into a system with its own access model, which this platform
-              does not control and cannot audit.
+              Each of these crosses the boundary into a system with its own
+              access model, which this platform does not control and cannot
+              audit. Inside the platform, the prepared report above is
+              already where it needs to be.
             </p>
             <label class="field">
               <span class="label">Destination ceiling (optional)</span>
@@ -3799,7 +3811,8 @@
 
             <h2 class="h-sm">Connection log</h2>
             <p class="help">What the egress proxy let out and refused, newest
-              first. Rows you are not cleared to see are counted, not shown.</p>
+              first. Rows you are not cleared to see are counted over the
+              whole log, not shown.</p>
             <div class="row-form egr-log-controls">
               <label class="field">
                 <span class="label">Route</span>
@@ -5166,6 +5179,13 @@
               <div id="fix-label-field" class="field">
                 <label class="label" for="fix-label">Corrected label</label>
                 <input id="fix-label" spellcheck="false" autocomplete="off">
+              </div>
+              <!-- The end date, as a correction rather than a retirement:
+                   the as-of view keeps the past (graph-valid-to-cannot-be-
+                   set-after-creation, 2026-10-03). -->
+              <div id="fix-end-field" class="field">
+                <label class="label" for="fix-valid-to">Stopped being true on (UTC date)</label>
+                <input id="fix-valid-to" type="date">
               </div>
               <div class="row">
                 <label class="field">

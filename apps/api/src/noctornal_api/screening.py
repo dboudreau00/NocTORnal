@@ -400,6 +400,38 @@ def sample_may_leave(conn: psycopg.Connection, sample_id: UUID
     return True, "screened"
 
 
+def bytes_may_move(conn: psycopg.Connection, sample_id: UUID) -> bool:
+    """False when an ACTIVE list matches this sample now, asked just in
+    time by every path that moves or reads its bytes (download, ticket,
+    retrieval, a NONE sandbox, static triage).
+
+    lab-2 (2026-10-03): those paths excluded only screening_outcome =
+    'MATCH', so a list imported while a pass was running (the import's own
+    pass skips on the lock) or past a pass's budget did not bind until a
+    later pass reached the sample, and its bytes were served meanwhile.
+    A sample already screened NO_MATCH at or above the newest active list
+    costs one read; one that is behind costs `screen_digests`' three index
+    lookups. A match is not isolated here (the pass does that, with its
+    custody and notices); the caller refuses as it refuses a sample it
+    cannot see. No active list leaves the answer as it was: True."""
+    row = conn.execute(
+        """SELECT s.screening_outcome, s.screening_list_seq,
+                  (SELECT max(seq) FROM lab.screening_list
+                    WHERE retired_at IS NULL),
+                  s.sha256, s.sha1, s.md5
+             FROM lab.sample s WHERE s.id = %s""", (sample_id,)).fetchone()
+    if row is None:
+        return True
+    outcome, seq, newest, sha256, sha1, md5 = row
+    if outcome == MATCH:
+        return False
+    if newest is None:
+        return True
+    if outcome == NO_MATCH and seq is not None and seq >= newest:
+        return True
+    return screen_digests(conn, sha256=sha256, sha1=sha1, md5=md5).outcome != MATCH
+
+
 def submission_disposition(conn: psycopg.Connection, *, case_id: UUID | None
                            ) -> tuple[str, list[str]]:
     """What a matched SUBMISSION's bytes become: "preserve" or

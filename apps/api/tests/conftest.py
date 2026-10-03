@@ -191,6 +191,18 @@ class InMemorySessionStore(SessionStore):
     def update(self, record: SessionRecord) -> None:
         self.by_hash[record.token_hash] = record
 
+    def slide(self, session_id: UUID, at: datetime, idle_floor: datetime):
+        """Mirrors PgSessionStore.slide: only a live session moves, and
+        never backwards (authz-session-revoke-bypass, 2026-10-03)."""
+        from dataclasses import replace
+        for h, rec in list(self.by_hash.items()):
+            if (rec.id == session_id and rec.revoked_at is None
+                    and rec.expires_at > at and rec.last_seen_at > idle_floor):
+                seen = max(rec.last_seen_at, at)
+                self.by_hash[h] = replace(rec, last_seen_at=seen)
+                return seen
+        return None
+
     def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool:
         from dataclasses import replace
         for h, rec in list(self.by_hash.items()):

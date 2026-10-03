@@ -11,10 +11,15 @@ performance nicety.
 This is the design decision everything else follows from, and it is a
 security decision rather than an architectural preference.
 
-An event says only: *case X changed, kind `node`, operation `INSERT`*. It
-carries no label, no element id, no content. The client's response is to
-refetch through the ordinary REST endpoints, which already apply the
-five-part gate and the label filter.
+An event says only: *case X changed, kind `node`, operation `INSERT`*. The
+message a client receives carries no label, no element id, no content. The
+client's response is to refetch through the ordinary REST endpoints, which
+already apply the five-part gate and the label filter. (Since 0146 the
+NOTIFY payload the SERVER hears also names the labels of what was written,
+so a hint about an element above the subscriber is never sent at all,
+http_ui-012, 2026-10-03; that is the one decision about labels this layer
+makes, it is the gate's own, and the labels go no further than this
+process.)
 
 The alternative — pushing the changed rows — would require this layer to
 re-implement classification and compartment filtering. That filtering has
@@ -103,6 +108,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from uuid import UUID
 
 import psycopg
@@ -118,7 +124,11 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import client_ip
 from noctornal_api.samples import normalise_origin, origin_split, public_origin
-from noctornal_api.security.access import evaluate
+from noctornal_api.security.access import (
+    AccessResolutionError,
+    evaluate,
+    tlp_from_name,
+)
 from noctornal_api.security.sessions import SessionService
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
 
@@ -164,6 +174,58 @@ _MAX_PENDING_PER_PEER = int(os.environ.get(
 #: 2026-09-09 is that a socket waiting it out now holds a counted slot,
 #: so the deadline bounds a budget instead of bounding nothing.
 _HELLO_SECONDS = float(os.environ.get("NOCTORNAL_LIVE_HELLO_SECONDS", "10"))
+
+#: The longest first frame the handshake will parse, in characters
+#: (http_ui-013, 2026-10-03). The hello is `{"token": ..., "case_id": ...}`
+#: and nothing else: a session token is 43 characters and a case id 36, so
+#: a frame this long is no console and no `bootstrap.py session` caller.
+#: It is the one input this process parses BEFORE it knows who sent it, and
+#: the 1 MiB ceiling on HTTP bodies (`http/body_ceiling.py`) never sees a
+#: websocket frame, so without a bound of its own a peer with no session
+#: made the process decode and parse up to the server's whole frame limit
+#: per connection (a 5 MiB hello was read and answered). The bound also
+#: keeps the nesting a JSON parser can be made to walk short of absurd.
+_HELLO_MAX_CHARS = 4096
+
+
+class _UnusableHello(Exception):
+    """The first frame cannot be read as a hello at all. `reason` is the
+    close reason sent with the policy close."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+async def _read_hello(ws: WebSocket):
+    """Read the first frame and decode it, or raise `_UnusableHello`.
+
+    This replaces `ws.receive_json()` (http_ui-013, 2026-10-03). Starlette's
+    version indexes `message["text"]` and calls `json.loads` bare, so a
+    BINARY first frame raised KeyError and a deeply nested one raised
+    RecursionError, neither a `ValueError`, out of the handshake: a logged
+    traceback per connection for a peer that had proved nothing. The first
+    fix covered the shapes that decode (a list, a number, a case id that is
+    not text) and left these two. Reading the message ourselves means the
+    kind of frame and the size are decided before anything is parsed, and
+    every way the parse itself can fail is named here rather than hoped to
+    be a ValueError."""
+    message = await ws.receive()
+    if message.get("type") == "websocket.disconnect":
+        raise WebSocketDisconnect(message.get("code", 1000),
+                                  message.get("reason"))
+    text = message.get("text")
+    if not isinstance(text, str) or len(text) > _HELLO_MAX_CHARS:
+        # A binary frame, or one no hello is long enough to be. The same
+        # close the other well-formed-but-wrong shapes get.
+        raise _UnusableHello("bad hello")
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        # Not JSON, or JSON nested past the interpreter's limit: what a
+        # peer that sent no hello at all is told, as it always was.
+        raise _UnusableHello("no credentials") from exc
+
 
 #: Per-subscriber buffer. A client that cannot keep up is DISCONNECTED
 #: rather than queued indefinitely: these are hints to refetch, so a
@@ -831,18 +893,36 @@ async def _handshake(ws: WebSocket, ip: str | None):
     out was not counted anywhere while it did.
     """
     try:
-        hello = await asyncio.wait_for(ws.receive_json(),
+        hello = await asyncio.wait_for(_read_hello(ws),
                                        timeout=_HELLO_SECONDS)
-    except (TimeoutError, asyncio.TimeoutError, ValueError, WebSocketDisconnect):
+    except (TimeoutError, asyncio.TimeoutError, WebSocketDisconnect):
         # Under uvicorn a close after the peer has already gone raises
         # rather than no-ops; a peer that left before saying hello is not
         # worth a traceback in the server log.
         with contextlib.suppress(Exception):
             await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
         return None
+    except _UnusableHello as unusable:
+        # A binary frame, an over-long one, text that is not JSON, JSON
+        # nested too deep to parse (http_ui-013, 2026-10-03).
+        with contextlib.suppress(Exception):
+            await ws.close(code=_CLOSE_UNAUTHENTICATED, reason=unusable.reason)
+        return None
 
-    frame_token = (hello or {}).get("token")
-    raw_case = (hello or {}).get("case_id")
+    # The hello is untrusted input that arrives before any credential is
+    # checked (http_ui-013, 2026-10-03): a list, a number, or an object
+    # whose case_id is not text raised AttributeError out of this function,
+    # a traceback per connection that a peer with no session could cause.
+    # A JSON null still reads as an empty hello, as it always has.
+    if hello is None:
+        hello = {}
+    if not isinstance(hello, dict) or not isinstance(
+            hello.get("case_id"), (str, type(None))):
+        with contextlib.suppress(Exception):
+            await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="bad hello")
+        return None
+    frame_token = hello.get("token")
+    raw_case = hello.get("case_id")
     # THE COOKIE FIRST, the first frame second, and nothing downstream
     # changes: `__Host-session` holds the RAW session token
     # (`routers/auth._set_session_cookies`), so the string taken from it
@@ -947,6 +1027,10 @@ def _authenticate(token: str, case_id: UUID | None, ip: str | None,
         except Problem:
             return None
         s = service.touch(s)
+        if s is None:
+            # Ended between the read and the slide: refused like any dead
+            # session (authz-session-revoke-bypass, 2026-10-03).
+            return None
         user_id, mfa_at = s.user_id, s.mfa_satisfied_at
         if case_id is not None and not _may_read(conn, user_id, case_id, mfa_at):
             return None
@@ -1000,6 +1084,90 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
     conn = connect_request()
     try:
         return _may_read(conn, user_id, case_id, mfa_at, count_use=False)
+    finally:
+        conn.close()
+
+
+#: The change kinds `core.announce_change` raises, whose payload names the
+#: labels of what the statement wrote (0146).
+_LABELLED_KINDS = frozenset({"node", "edge"})
+
+
+def _labels_readable(conn: psycopg.Connection, user_id: UUID, case_id: UUID,
+                     mfa_at, labels) -> bool:
+    """Whether the subscriber may read at least one element a change hint
+    stands for (http_ui-012, 2026-10-03).
+
+    The hint carries no content, but until this it was delivered for
+    every node and edge write in the case, so an AMBER analyst's console
+    woke whenever a RED or compartmented node was written: a timing
+    channel saying restricted activity happened, and when. 0146 puts the
+    distinct (classification, compartments) pairs a reader would need into
+    the NOTIFY payload (a tie's pair is the join with its endpoints'); each
+    is composed with the case's labels exactly as `deps.effective_labels`
+    composes them and put to the gate, `case.read` asked as a question
+    (`count_use=False`), as `_recheck` asks it. One pair the subscriber may
+    read delivers the hint; none, or labels the trigger could not list
+    (`null`), drops it. The labels never reach the client."""
+    if not isinstance(labels, list) or not labels:
+        return False
+    row = conn.execute(
+        "SELECT classification, compartments FROM iam.case_facts(%s)",
+        (case_id,)).fetchone()
+    if row is None:
+        return False
+    try:
+        case_cls, case_comp = tlp_from_name(row[0]), frozenset(row[1] or [])
+        ctx = PgAccessResolver(conn).resolve(
+            user_id=user_id, case_id=case_id, permission_key="case.read",
+            object_classification=row[0], object_compartments=case_comp,
+            mfa_satisfied_at=mfa_at, count_use=False)
+        for pair in labels:
+            if not (isinstance(pair, list) and len(pair) == 2
+                    and isinstance(pair[0], str)
+                    and isinstance(pair[1], (list, type(None)))):
+                continue
+            try:
+                element_cls = tlp_from_name(pair[0])
+            except (AccessResolutionError, ValueError, KeyError):
+                continue  # a label this build does not know is not readable
+            element = replace(
+                ctx,
+                object_classification=max(case_cls, element_cls),
+                object_compartments=case_comp | frozenset(
+                    c for c in (pair[1] or []) if isinstance(c, str)))
+            if evaluate(element).allowed:
+                return True
+        return False
+    except AccessResolutionError:
+        return False
+
+
+def _change_visible(user_id: UUID, case_id: UUID, mfa_at, labels) -> bool:
+    """`_labels_readable` on a connection of its own."""
+    conn = connect_request()
+    try:
+        return _labels_readable(conn, user_id, case_id, mfa_at, labels)
+    finally:
+        conn.close()
+
+
+def _delivery_verdict(user_id: UUID, case_id: UUID | None, mfa_at,
+                      payload: dict) -> str:
+    """What to do with one hint, on ONE borrowed connection: `"close"` when
+    the subscriber may no longer read the case at all (the per-delivery
+    re-check, `_recheck`), `"drop"` when the hint stands for elements the
+    subscriber may not read, `"send"` otherwise."""
+    if case_id is None:
+        return "send"
+    conn = connect_request()
+    try:
+        if not _may_read(conn, user_id, case_id, mfa_at, count_use=False):
+            return "close"
+        if payload.get("kind") in _LABELLED_KINDS and not _labels_readable(
+                conn, user_id, case_id, mfa_at, payload.get("labels")):
+            return "drop"
+        return "send"
     finally:
         conn.close()
 
@@ -1060,7 +1228,17 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
 
     try:
         while True:
-            if getter is None or getter.done():
+            # Only when there is NO getter, never because the last one is
+            # done (the g45 verification's lost-hint finding, 2026-10-03).
+            # A getter is set to None the moment its result is read, so a
+            # getter that is done HERE finished while the loop was in the
+            # idle branch below (the session check and the ping each
+            # yield), after `wait` had already timed out: its result is a
+            # hint nobody has read. Replacing it threw that hint away, and
+            # the console missed a refetch it had been told to make. The
+            # `wait` below returns at once for a done getter and the loop
+            # reads it.
+            if getter is None:
                 getter = asyncio.create_task(queue.get())
             done, _ = await asyncio.wait(
                 {receiver, getter}, timeout=_PING_SECONDS,
@@ -1085,12 +1263,18 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
                     return
                 # RE-CHECKED PER DELIVERY. A socket outlives an assignment;
                 # F19's headline finding was this shape with a shorter
-                # half-life.
-                if case_id is not None and not await asyncio.to_thread(
-                        _recheck, user_id, case_id, mfa_at):
+                # half-life. The same connection also decides whether the
+                # hint is about anything this subscriber may read, so
+                # nothing is pushed about an element above them
+                # (http_ui-012, 2026-10-03).
+                verdict = await asyncio.to_thread(
+                    _delivery_verdict, user_id, case_id, mfa_at, payload)
+                if verdict == "close":
                     await ws.close(code=_CLOSE_UNAUTHENTICATED,
                                    reason="access changed")
                     return
+                if verdict == "drop":
+                    continue
                 await ws.send_json(message)
                 continue
 
@@ -1125,9 +1309,12 @@ def _drain(listener: psycopg.Connection, seconds: float) -> list[dict]:
 def _relevant(payload: dict, user_id: UUID, case_id: UUID | None) -> dict | None:
     """Filter to what this subscriber asked for and may have.
 
-    Note what is NOT here: any decision about labels. The event carries no
-    content, so there is nothing to filter — the client refetches through
-    the gated endpoints and they decide. That is the point of the design.
+    Note what is NOT here: any decision about labels. This answers "which
+    case and which kind", and the message it builds carries no label. The
+    decision about what the subscriber may be told of is the next step,
+    `_delivery_verdict`, which reads the labels the trigger put in the
+    payload (0146) and never sends them on. The client refetches through
+    the gated endpoints and they decide again.
     """
     kind = payload.get("kind")
     if kind == "notification":

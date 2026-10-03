@@ -150,8 +150,14 @@ def test_integrity_verification_detects_hash_mismatch(conn, case, svc):
     and records hash_verified=false — the tamper alarm."""
     case_id, uid = case
     res = _ingest(svc, case_id, uid, b"will-corrupt-" + uuid4().hex.encode())
-    conn.execute("UPDATE core.evidence SET sha256 = %s WHERE id = %s",
-                 (b"\x00" * 32, res.evidence_id))
+    # Since 0140 the anchors are fixed for every role, so the tamper is an
+    # owner's who disables the guard by name (evidence-integrity-anchors-
+    # mutable, 2026-10-03); verification must still catch it.
+    with conn.transaction():
+        conn.execute("ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed")
+        conn.execute("UPDATE core.evidence SET sha256 = %s WHERE id = %s",
+                     (b"\x00" * 32, res.evidence_id))
+        conn.execute("ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed")
     assert svc.verify_integrity(res.evidence_id, uid) is False
     hv = [e for e in svc.custody_log(res.evidence_id) if e.action == "HASH_VERIFIED"]
     assert hv[-1].hash_verified is False
@@ -170,25 +176,27 @@ def test_dual_hash_blake3_stored_and_checked(conn, case, svc):
 
 def test_read_path_detects_object_tampering(conn, case, svc):
     """The real gap the review found: a swapped object VERSION must not be
-    served with a clean custody entry. view() recomputes and fails closed."""
-    from noctornal_api.evidence import IntegrityError
+    served with a clean custody entry. Since 2026-10-03 (evidence-integrity-
+    anchors-mutable) the exhibit reads the version it was lodged as, so a
+    version written on the key afterwards is never served at all; the
+    legacy path, a row with no recorded version, still recomputes and fails
+    closed (test_g44_evidence_ingest_pg.py)."""
     case_id, uid = case
     import io
     data = b"pristine-" + uuid4().hex.encode()
     res = _ingest(svc, case_id, uid, data)
-    key = conn.execute(
-        "SELECT storage_key FROM core.evidence WHERE id = %s", (res.evidence_id,)
-    ).fetchone()[0]
+    key, version = conn.execute(
+        "SELECT storage_key, storage_version_id FROM core.evidence WHERE id = %s",
+        (res.evidence_id,)).fetchone()
+    assert version, "the version the store kept is recorded at lodging"
     # Swap the object's latest version with different bytes (object lock
     # protects old versions from deletion, not the key from new versions).
     tampered = b"TAMPERED-" + uuid4().hex.encode()
     svc._s._client.put_object(svc._s.bucket, key, io.BytesIO(tampered),
                               length=len(tampered))
-    with pytest.raises(IntegrityError):
-        svc.view(res.evidence_id, uid)
-    # The read raised an integrity alarm in the custody ledger.
-    hv = [e for e in svc.custody_log(res.evidence_id) if e.action == "HASH_VERIFIED"]
-    assert hv and hv[-1].hash_verified is False
+    assert svc._s.get(key) == tampered, "the latest version is the swap"
+    assert svc.view(res.evidence_id, uid) == data, "the swap is never served"
+    assert svc.verify_integrity(res.evidence_id, uid) is True
 
 
 def test_export_refuses_red_classification(conn, case, svc):

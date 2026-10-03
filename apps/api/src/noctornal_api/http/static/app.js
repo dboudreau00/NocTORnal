@@ -67,8 +67,12 @@
  * through `POST /auth/cookie` -- and only when this browser holds no
  * usable session already, because a link must never replace the session
  * the browser has (the server refuses a different account with 409
- * regardless). The token is never logged, never put in a URL by this
- * page, and never rendered.
+ * regardless), and only after the person has been asked: the page names
+ * the account the link carries (`GET /auth/me` on the handed-over token,
+ * which signs nothing in) and signs in only on a yes, because a link made
+ * by anybody holding any session would otherwise sign a signed-out colleague
+ * in as its author (http_ui-017, 2026-10-03). The token is never logged,
+ * never put in a URL by this page, and never rendered.
  *
  * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
  * everything is measured against a PROJECTION — a named, parameterised view.
@@ -1084,6 +1088,9 @@ function authHeaders(method, forceBearer) {
 async function api(path, options) {
   const o = options || {};
   const headers = authHeaders(o.method || 'GET', o.bearer);
+  /* Extra headers a caller names itself (the first-run setup token). Applied
+     over the credential headers, never instead of them. */
+  if (o.headers) Object.assign(headers, o.headers);
   let body;
   if (o.form) {
     body = o.form;                       // let the browser set the boundary
@@ -1159,7 +1166,10 @@ async function _fetch(path, o, headers, body) {
        limit banner both need the number (2026-09-23). */
     const retryAfter = retryAfterSeconds(res.headers.get('Retry-After'), p.detail);
     if (retryAfter !== null) err.retryAfter = retryAfter;
-    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path)) {
+    /* A request that forces its own bearer (the `#token=` hand-off) judges
+       that bearer, as the credential checks do, and says nothing about the
+       session this tab holds (http_ui-017, 2026-10-03). */
+    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path) && !o.bearer) {
       if (state.userId && !state.booting && path !== '/auth/logout') {
         /* Mid-session (expiry-drops-context, 2026-09-22). This used to
            end the session outright: the app was unmounted, the case
@@ -10339,12 +10349,21 @@ function wireAuditVerify() {
       r.checked.toLocaleString() + ' ' + agree(r.checked, 'event', 'events')
       + ' checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + ' to ' + r.last_seq : '')));
-    if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
-    /* Forks are shown as a SEPARATE, quieter line and never as a break.
-       They come from concurrent writers, not from editing, and a real
-       database has them: counting them as tampering made this panel answer
-       BROKEN on untouched history, which is the one answer a tamper-
-       evidence tool cannot afford to get wrong twice. */
+    /* The caveat on EVERY run (2026-10-03), not only a windowed one: the
+       checks are relative, so rows removed from the end, or edited and
+       re-chained, leave the green tick lit. The newest row is shown so an
+       operator can record it where this system cannot write and hand it
+       back as an anchor on a later run. */
+    if (r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    if (r.tail_row_hash) {
+      head.appendChild(el('p', 'help',
+        'Newest row to record: seq ' + r.tail_seq + ', hash ' + r.tail_row_hash));
+    }
+    /* A fork from before migration 0149 is a SEPARATE, quieter line and not
+       a break: the old sequence order let concurrent writers make them, an
+       append-only table cannot be cleaned of them, and counting them as
+       tampering made this panel answer BROKEN on untouched history. One
+       written since is a break, and arrives in `breaks` with its kind. */
     if (r.forks) {
       head.appendChild(el('p', 'help',
         countOf(r.forks, 'row shares', 'rows share') + ' a predecessor. '
@@ -10433,7 +10452,8 @@ function wireElementActions() {
       'links stay in the database, and the act is recorded against your ' +
       'name. But it cannot be undone from the console, and it leaves every ' +
       'view, including as-of queries into the past. To say instead "this ' +
-      'stopped being true in March", set valid_to.');
+      'stopped being true in March", cancel and use Correct... with a date ' +
+      'in Stopped being true on.');
     if (reason === null) return;
     if (!reason.trim()) {
       banner('Not retired', 'A reason is required, exactly as it is for a ' +
@@ -10753,8 +10773,17 @@ function claimLine(a, kind) {
     const v = a.claim_value;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       const keys = a.claim_path ? [a.claim_path] : Object.keys(v);
-      return 'Correction: ' + keys.map((k) =>
-        k + ' → ' + claimValueText(v[k])).join(', ');
+      // The end date reads as a date, not as `valid_to → nothing` and a
+      // raw timestamp (verify round, 2026-10-03). The form writes the end
+      // of a UTC day; anything else is shown as it was recorded.
+      const part = (k) => {
+        if (k !== 'valid_to') return k + ' → ' + claimValueText(v[k]);
+        if (v[k] === null || v[k] === undefined) return 'no end date';
+        const when = String(v[k]);
+        return 'valid until ' + (/T23:59:59/.test(when)
+          ? when.slice(0, 10) : visibleText(when));
+      };
+      return 'Correction: ' + keys.map(part).join(', ');
     }
     return 'Correction: ' + (a.claim_path || 'value') + ' → ' + claimValueText(v);
   }
@@ -10962,6 +10991,10 @@ function renderAssertions(box, all) {
     if (a.external_ref) bits.push('ref ' + visibleText(a.external_ref));
     if (a.retracted_at) bits.push('retracted ' + fmtTime(a.retracted_at));
     if (a.superseded_at) bits.push('superseded ' + fmtTime(a.superseded_at));
+    /* Which claim replaced this one, and which this one replaced
+       (migration 0131): the pair is readable from either card. */
+    if (a.superseded_by) bits.push('replaced by claim ' + shortId(a.superseded_by));
+    if (a.supersedes_id) bits.push('replaces claim ' + shortId(a.supersedes_id));
     const meta = el('div', 'assert-meta', bits.join(' · '));
     meta.title = 'author id ' + a.created_by;
     card.appendChild(meta);
@@ -10990,8 +11023,19 @@ function renderAssertions(box, all) {
          tie stayed drawn on a replaced claim nobody could retract. */
       const others = all.filter(
         (x) => !x.retracted_at && !x.superseded_at && x.id !== a.id);
-      btn.addEventListener('click', () => retractAssertion(a.id, others));
+      btn.addEventListener('click',
+        () => retractAssertion(a.id, others, a.is_correction));
       actions.appendChild(btn);
+      /* Dating a claim that never had a date (docs/00 open question 11,
+         settled 2026-10-02): only where there is none, and by supersession,
+         never by writing the date onto the recorded claim. */
+      if (!a.observed_at) {
+        const dateBtn = el('button', 'btn small', 'Date this claim');
+        dateBtn.type = 'button';
+        dateBtn.title = dateClaimHelp();
+        dateBtn.addEventListener('click', () => openDateClaimForm(a, card));
+        actions.appendChild(dateBtn);
+      }
       card.appendChild(actions);
     }
     // Live claims like this one (F6.4). Outside .assert-actions, which
@@ -11023,7 +11067,7 @@ function renderAssertions(box, all) {
  *  `others`: the element's other unretracted assertions. `kind`: 'node'
  *  or 'edge'. `ties`: for an entity, how many ties the canvas draws at
  *  it. Returns {last, prompt, done}. */
-function retractionWords(others, kind, ties) {
+function retractionWords(others, kind, ties, isCorrection) {
   const what = kind === 'edge' ? 'tie' : 'entity';
   const last = others.length === 0;
   const onlyEdits = !last && others.every((x) => x.is_correction);
@@ -11058,14 +11102,26 @@ function retractionWords(others, kind, ties) {
     done = 'The ' + what + ' remains: ' + n + ' other live assertion'
       + (n === 1 ? '' : 's') + ' still support' + (n === 1 ? 's' : '') + ' it.';
   }
+  /* A correction gives its value back (graph-retracted-correction-stays-
+     in-force, 2026-10-03): the server restores each field it set to the
+     newest live correction of that field, or to what the element held
+     before its first correction. `isCorrection` is the card's flag. */
+  if (isCorrection && !last) {
+    prompt += ' This claim is a correction, so what it set goes back to the '
+      + 'value the remaining claims support: the newest live correction of '
+      + 'the same field, or what the ' + what + ' held before it was first '
+      + 'corrected.';
+    done += ' What the correction set has gone back to the value the '
+      + 'remaining claims support.';
+  }
   return { last: last, prompt: prompt, done: done };
 }
 
-async function retractAssertion(assertionId, others) {
+async function retractAssertion(assertionId, others, isCorrection) {
   const sel = state.selection;
   const kind = sel ? sel.kind : 'node';
   const ties = sel && kind === 'node' ? (state.nodeTies.get(sel.id) || 0) : 0;
-  const words = retractionWords(others, kind, ties);
+  const words = retractionWords(others, kind, ties, isCorrection);
   const reason = window.prompt(
     'Why is this claim being withdrawn? The reason is recorded permanently ' +
     'and cannot be edited.\n\n' + words.prompt);
@@ -11087,6 +11143,109 @@ async function retractAssertion(assertionId, others) {
     await reloadAll();
     banner('Assertion retracted', words.done, 'info');
   } catch (err) { fail(err); }
+}
+
+/* --- Inspector: date a claim that never had a date -----------------------
+ *
+ * Docs/00 open question 11, settled by the owner 2026-10-02. Claims accepted
+ * from Triage before Alpha 6 carry no observation date, so First seen and
+ * Last seen ignore them. Writing a date onto a recorded claim would rewrite
+ * it, and invariant 5 is NOT amended: the date is given by SUPERSESSION. The
+ * analyst names the date and why; the server records a new claim that is the
+ * old one in every other respect, citing it, and stamps the old one
+ * superseded. The old claim is kept as it was recorded (Include retracted
+ * lists it). Offered only on a live claim with no date, and, like Retract,
+ * inside `.assert-actions`, which a read-only case turns off.
+ */
+
+/** The button's hover text. Pure. */
+function dateClaimHelp() {
+  return 'This claim has no observation date, so First seen and Last seen '
+    + 'ignore it. Dating it records a new claim with the date and your '
+    + 'reason, and marks this one superseded. Nothing is rewritten: this '
+    + 'claim stays on record as it was.';
+}
+
+/** What stops the form being sent, as a sentence, or null. `observed` is the
+ *  `datetime-local` value (read as UTC, like every observed-at field).
+ *  Pure, for test_ui_date_claim.py. */
+function dateClaimProblem(observed, rationale) {
+  const at = observedAtUtc(observed);
+  if (!at) return 'Give the date and time the claim was true, in UTC.';
+  if (new Date(at).getTime() > Date.now()) {
+    return 'A claim cannot have been observed later than now.';
+  }
+  if (!String(rationale || '').trim()) {
+    return 'Say why this date is the one. It is recorded as the reason on '
+      + 'the new claim.';
+  }
+  return null;
+}
+
+/** The request body. Only the date and the reason go: the new claim is the
+ *  old one in every other column, and nothing here can change that. Pure. */
+function dateClaimBody(observed, rationale) {
+  return { observed_at: observedAtUtc(observed),
+           rationale: String(rationale).trim() };
+}
+
+/** The banner after a claim is dated. Pure. */
+function dateClaimDoneWords() {
+  return 'The new claim carries the date and your reason. The old claim is '
+    + 'superseded, not changed: it stays on record, and Include retracted '
+    + 'lists it.';
+}
+
+/** Open the form on this claim's card. One form per card. */
+function openDateClaimForm(a, card) {
+  const open = card.querySelector('.date-claim');
+  if (open) {
+    open.querySelector('input').focus();
+    return;
+  }
+  const form = el('form', 'row-form date-claim');
+  form.noValidate = true;
+  const whenField = el('label', 'field');
+  const when = el('input');
+  when.type = 'datetime-local';
+  whenField.append(el('span', 'label', 'Observed at (UTC)'), when);
+  const whyField = el('label', 'field grow');
+  const why = el('input');
+  why.type = 'text';
+  why.autocomplete = 'off';
+  whyField.append(el('span', 'label', 'Why this date'), why);
+  const go = el('button', 'btn small', 'Record the date');
+  go.type = 'submit';
+  const cancel = el('button', 'btn ghost small', 'Cancel');
+  cancel.type = 'button';
+  const msg = el('p', 'msg bad');
+  msg.setAttribute('role', 'alert');
+  msg.hidden = true;
+  form.append(whenField, whyField, go, cancel, msg);
+  cancel.addEventListener('click', () => form.remove());
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setMsg(msg, '');
+    const problem = dateClaimProblem(when.value, why.value);
+    if (problem) {
+      setMsg(msg, problem);
+      return;
+    }
+    go.disabled = true;
+    try {
+      await api(cpath('/assertions/' + a.id + '/supersede'), {
+        method: 'POST', json: dateClaimBody(when.value, why.value),
+      });
+      invalidateAnalytics();
+      await reloadAll();
+      banner('Claim dated', dateClaimDoneWords(), 'info');
+    } catch (err) {
+      go.disabled = false;
+      setMsg(msg, refusalText(err, 'The claim could not be dated.'));
+    }
+  });
+  card.appendChild(form);
+  when.focus();
 }
 
 /* ── inspector: add a claim about the selected tie ─────────────────────
@@ -11285,7 +11444,8 @@ const correction = { kind: null, id: null };
 /** Empty the form. Nothing is graded for the analyst. */
 function resetCorrection() {
   resetGrading('fix');
-  for (const id of ['fix-label', 'fix-rationale', 'fix-ref', 'fix-observed']) {
+  for (const id of ['fix-label', 'fix-valid-to', 'fix-rationale', 'fix-ref',
+                    'fix-observed']) {
     $(id).value = '';
   }
   $('fix-evidence').value = '';
@@ -11322,12 +11482,16 @@ onCaseSwitch(() => {
  *  confidence as last read (unused for an entity). Pure, for
  *  test_correction_form_ui.py. */
 function correctionWords(kind, current) {
+  /* The end date and the restore on retraction (graph-valid-to-cannot-be-
+     set-after-creation and graph-retracted-correction, 2026-10-03). */
   if (kind === 'node') {
     return {
       heading: 'Correct this entity',
       help: 'The corrected label is recorded as a claim with the basis and '
         + 'grading you choose, and the label it replaces stays in the audit '
-        + 'record. Nothing is graded for you.',
+        + 'record; retracting the correction puts it back. A date in Stopped '
+        + 'being true on records when it ended without retiring it, so the '
+        + 'as-of view still shows it before then. Nothing is graded for you.',
       conf: 'Confidence (ICD 203)',
     };
   }
@@ -11338,7 +11502,9 @@ function correctionWords(kind, current) {
       + 'recorded as a claim with its own basis and grading, and a tie takes '
       + 'the highest grade among its live claims, so a correction can raise '
       + 'it. To lower it, add the lower claim under Assertions and retract '
-      + 'the claims graded above it. Nothing is graded for you.',
+      + 'the claims graded above it. A date in Stopped being true on records '
+      + 'when the tie ended instead, graded as you choose, and leaves its '
+      + 'confidence as it is. Nothing is graded for you.',
     conf: 'Tie confidence (ICD 203)',
   };
 }
@@ -11360,9 +11526,33 @@ function openCorrection() {
     const n = nodeById(sel.id);
     $('fix-label').value = n ? n.label : '';
   }
+  if ($('insp-fix').hidden) {
+    /* The end date it holds now, so an unchanged field sends nothing and
+       an emptied one clears it (`correctionEndDate`). */
+    const held = node ? nodeById(sel.id) : e;
+    $('fix-valid-to').value = held && held.valid_to
+      ? new Date(held.valid_to).toISOString().slice(0, 10) : '';
+  }
   showCorrection(true);
   $('fix-form').scrollIntoView({ block: 'nearest' });
   $(node ? 'fix-label' : 'fix-basis').focus();
+}
+
+/** The end date a correction sends, from the Stopped being true on field:
+ *  undefined when it shows the date the element already holds (nothing to
+ *  send), null when it was emptied (the end date is cleared), else the end
+ *  of that UTC day, inclusive, as the create forms write `valid_to`
+ *  (`intervalFrom`). `current` is the stored `valid_to`. Pure, for
+ *  test_review_graph_valid_to_ui.py (graph-valid-to-cannot-be-set-after-
+ *  creation, 2026-10-03). */
+function correctionEndDate(day, current) {
+  const held = current ? new Date(current) : null;
+  const was = held && !Number.isNaN(held.getTime())
+    ? held.toISOString().slice(0, 10) : '';
+  if ((day || '') === was) return undefined;
+  if (!day) return null;
+  const d = new Date(day + 'T23:59:59Z');
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 /** Move what the analyst entered here into the tie's Add a claim form,
@@ -11388,6 +11578,13 @@ async function submitCorrection(event) {
   /* The form's contents belong to one element; never send them for another. */
   if (!sel || sel.kind !== correction.kind || sel.id !== correction.id) return;
   let body;
+  /* The element as last read: its label and its end date, so an end date
+     alone is sent without restating the label, and an unchanged date is
+     not sent at all (graph-valid-to-cannot-be-set-after-creation). */
+  const held = sel.kind === 'node' ? nodeById(sel.id)
+    : (edgeById(sel.id) || relTieCache.get(sel.id) || null);
+  const end = correctionEndDate($('fix-valid-to').value,
+                                held ? held.valid_to : null);
   if (sel.kind === 'node') {
     const label = $('fix-label').value.trim();
     if (!label) {
@@ -11395,14 +11592,19 @@ async function submitCorrection(event) {
       $('fix-label').focus();
       return;
     }
-    body = { label: label };
+    body = end !== undefined && held && label === held.label
+      ? {} : { label: label };
   }
   const ungraded = gradingProblem('fix');
   if (ungraded) { setMsg(errBox, ungraded); return; }
   const assertion = assertionFrom('fix');
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); $('fix-rationale').focus(); return; }
-  if (sel.kind === 'edge') {
+  if (sel.kind === 'edge' && end !== undefined) {
+    /* An end date: the grading grades the date, and the tie's confidence
+       is left where it is, as a weight correction leaves it. */
+    body = {};
+  } else if (sel.kind === 'edge') {
     /* Refused HERE, before anything is sent, when the re-grade would lower
        the tie (final review C14, 2026-09-23): the server refuses it (409),
        since a correction cannot lower a tie past a claim that still
@@ -11421,6 +11623,7 @@ async function submitCorrection(event) {
     }
     body = { confidence: assertion.confidence };
   }
+  if (end !== undefined) body.valid_to = end;
   /* The whole claim, graded by the analyst: the original claim survives,
      so the sequence of assertions is the history of what this element has
      been called (invariant 1). */
@@ -11440,11 +11643,19 @@ async function submitCorrection(event) {
     await reloadAll();
     if (caseChanged(token)) return;
     renderInspector();
-    banner('Correction recorded', sel.kind === 'edge'
+    banner('Correction recorded', body.confidence
       ? tieClaimDoneWords(assertion.confidence, out ? out.confidence : null,
                           !!assertion.evidence_id)
-      : 'Recorded as a claim with the grading you chose. The label it '
-        + 'replaces stays in the audit record.', 'info');
+      : ['Recorded as a claim with the grading you chose.',
+         body.label ? 'The label it replaces stays in the audit record.' : '',
+         end === undefined ? ''
+           : end ? 'The end date is recorded, and the as-of view still shows '
+             + 'it before then.' : 'The end date is cleared.',
+         /* The corrected label is a selector another entity holds. */
+         out && out.selector_owner_id
+           ? selectorLeadWords('selector value', labelOf(out.selector_owner_id))
+           : '']
+        .filter(Boolean).join(' '), 'info');
   } catch (err) {
     if (caseChanged(token)) return;
     inlineProblem(errBox, err);
@@ -12886,6 +13097,17 @@ function selectorHeldWords(selType, ownerLabel, strong) {
     + 'entities with ' + (strong ? 'one strong selector are a merge lead: '
       : 'one selector may be one and the same: ')
     + 'compare them under Entity resolution below.';
+}
+
+/** Another entity this reader can see already holds a selector that a
+ *  correction or an accepted proposal just asked for. The index keeps its
+ *  first owner, so the two are a lead for Entity resolution
+ *  (graph-selector-index-drift, 2026-10-03). Pure. */
+function selectorLeadWords(selType, ownerLabel) {
+  return 'This ' + selType + ' is already recorded against ' + ownerLabel
+    + ', so it stays there and this entity does not hold it. Two entities '
+    + 'with one selector may be one and the same: compare them under Entity '
+    + 'resolution.';
 }
 
 /* ── what a create just made ───────────────────────────────────────────
@@ -14923,6 +15145,36 @@ async function adoptSessionFromFragment() {
     };
   }
 
+  /* ASK BEFORE SIGNING IN (http_ui-017, 2026-10-03). Nothing above made
+     this browser anyone: it holds no session. The link was made by
+     whoever holds a session token, which is not necessarily the person
+     who opened it, and exchanging it quietly signed a colleague whose own
+     session had lapsed in as the link's author, who can read everything
+     they then did. `GET /auth/me` with the handed-over token as the
+     bearer names the account without signing anything in (it sets no
+     cookie), and the person is asked about THAT account by name. Held in
+     memory only for the question, and dropped on a refusal. */
+  let who = null;
+  try {
+    who = await api('/auth/me', { bearer: token });
+  } catch (err) {
+    return signInLinkRefused(err);
+  }
+  /* A half session of the SAME account is not a sign-in: the exchange only
+     re-mints the pair it lost, so there is nothing to ask. A different
+     account is asked about, and the server refuses it with 409 besides. */
+  const repairing = !!(holder && who && holder.user_id === who.user_id);
+  if (!repairing && !window.confirm(signInLinkQuestion(who))) {
+    return {
+      title: 'Sign-in link not used',
+      detail: 'You chose not to sign in as '
+        + visibleText((who && (who.display_name || who.email)) || 'that account')
+        + '. Sign in with your email, password and code, or ask whoever sent '
+        + 'the link for a new one.',
+      kind: 'warn',
+    };
+  }
+
   /* Exchange it ONCE for the cookie pair (`POST /auth/cookie`), forcing
      the bearer so the NEW token is presented and not the cookie. Held in
      memory before the call because a console the browser refuses Secure
@@ -14936,18 +15188,39 @@ async function adoptSessionFromFragment() {
     return null;
   } catch (err) {
     state.token = null;
-    /* To whoever opened the link, who may not be the operator who made it
-       (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
-    const why = err instanceof ApiError && err.status === 401
-      ? 'The link has expired or has already been used.'
-      : (err instanceof ApiError ? (err.detail || err.title) : String(err));
-    return {
-      title: 'Sign-in link not used',
-      detail: why.replace(/\.?$/, '. ') + 'Sign in with your email, '
-        + 'password and code, or ask whoever sent the link for a new one.',
-      kind: 'warn',
-    };
+    return signInLinkRefused(err);
   }
+}
+
+/** The question a `#token=` link asks before it signs this browser in:
+ *  the account by name and address, what signing in means, and that the
+ *  person should only continue if they expected it. Names go through
+ *  `visibleText`, so a display name built to look like somebody else's
+ *  cannot hide its odd characters. */
+function signInLinkQuestion(who) {
+  const w = who || {};
+  const name = visibleText(w.display_name || w.user_id || 'an account');
+  const email = w.email ? ' (' + visibleText(w.email) + ')' : '';
+  return 'This link signs this browser in as ' + name + email + '.\n\n'
+    + 'Everything you do afterwards is recorded against that account, and '
+    + 'its owner can read it. Only continue if you were expecting a link '
+    + 'for it.\n\nSign in as ' + name + '?';
+}
+
+/** The banner for a link that was refused: a stale or used token, another
+ *  account's session, an API that did not answer. To whoever opened the
+ *  link, who may not be the operator who made it
+ *  (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
+function signInLinkRefused(err) {
+  const why = err instanceof ApiError && err.status === 401
+    ? 'The link has expired or has already been used.'
+    : (err instanceof ApiError ? (err.detail || err.title) : String(err));
+  return {
+    title: 'Sign-in link not used',
+    detail: why.replace(/\.?$/, '. ') + 'Sign in with your email, '
+      + 'password and code, or ask whoever sent the link for a new one.',
+    kind: 'warn',
+  };
 }
 
 /** Honour a `#tab=` deep link once the workspace is up.
@@ -15250,8 +15523,18 @@ function paintCasePolicy(p) {
   if (p.dual_control_merge) {
     let said = 'Merges in this case need a second signature.';
     if (may && !p.relax_signers) {
-      said += ' Nobody else on this case can approve turning that off: name '
-        + 'a deputy first.';
+      /* F39 (2026-10-02): somebody else holds the permission but has not
+         held it for the window yet, so say when, not "name a deputy". */
+      if (p.relax_next_eligible) {
+        said += ' Nobody else on this case can approve turning that off yet: '
+          + 'the second person must have held case.update on the case for '
+          + countOf(p.relax_seasoning_days, 'day', 'days') + ', and the first '
+          + 'colleague who does is eligible from '
+          + fmtTime(p.relax_next_eligible) + '.';
+      } else {
+        said += ' Nobody else on this case can approve turning that off: '
+          + 'name a deputy first.';
+      }
     }
     text.textContent = said;
     btn.textContent = 'Stop requiring it';
@@ -15556,6 +15839,12 @@ function approvalRow(a) {
   }
 
   if (a.state === 'PENDING' && !dead) {
+    /* F39 (2026-10-02): a colleague who has not held case.update on the
+       case for the window yet is told the rule and the date before they
+       press Approve; Reject stays available, as everywhere. */
+    if (a.signer_block && !mine) {
+      card.appendChild(el('p', 'help', visibleText(a.signer_block.reason)));
+    }
     card.appendChild(approvalActions(a, title, asker, mine));
   }
 
@@ -15618,6 +15907,10 @@ function approvalActions(a, title, asker, mine) {
     for (const [label, approve] of [['Approve', true], ['Reject', false]]) {
       const b = el('button', 'btn ghost small' + write, label);
       b.type = 'button';
+      if (approve && a.signer_block) {
+        b.disabled = true;
+        b.title = visibleText(a.signer_block.reason);
+      }
       b.addEventListener('click', async () => {
         const note = window.prompt(
           label + ' this request?\n\n' + title + '\nRequested by ' + asker
@@ -16285,6 +16578,14 @@ function showTriageOutcome(p, path, out) {
       ? ', written at TLP:' + level : '';
     line.appendChild(document.createTextNode(
       'Accepted: ' + what + written + '. '));
+    /* The accepted selector is already held by another entity this reader
+       can see: a lead, said where the accept is (graph-selector-index-
+       drift, 2026-10-03). */
+    if (out.selector_owner_id) {
+      const attrs = (p.payload && p.payload.attrs) || {};
+      line.appendChild(document.createTextNode(selectorLeadWords(
+        attrs.selector_type || 'selector', labelOf(out.selector_owner_id)) + ' '));
+    }
     /* Only for a role that can retire it (final review u11, 2026-09-24):
        a REVIEWER's Undo answered 403 from the delete it called, and the
        element stayed. They are told who can take it back instead. */
@@ -21193,7 +21494,10 @@ async function paintPersonaForm(visible) {
   clear(ex);
   /* One persona, one exit, and never an exit a persona-less source reads
      through (docs/04): two identities seen from one address are linked. */
-  for (const e of exits.filter((x) => x.available && !x.sources)) {
+  /* collection-shared-exit (2026-10-03): `persona_available` also counts a
+     source the listing may not name, which `sources` cannot. */
+  for (const e of exits.filter((x) => x.available && !x.sources
+      && x.persona_available !== false)) {
     ex.appendChild(selectOption(e.id, visibleText(e.name)));
   }
   if (!ex.children.length) ex.appendChild(selectOption('', 'No free egress profile'));
@@ -22313,6 +22617,12 @@ function custodyVerdict(r) {
     + agree(r.checked, 'row', 'rows') + ' checked' + span
     + (r.scoped ? ' · scoped to one exhibit' : ' · whole ledger')));
   if (r.caveat) card.appendChild(el('p', 'help warn', r.caveat));
+  /* The newest row of the whole ledger, to record out of band and hand back
+     as an anchor (2026-10-03). */
+  if (r.tail_row_hash) {
+    card.appendChild(el('p', 'help',
+      'Newest row to record: id ' + r.tail_id + ', hash ' + r.tail_row_hash));
+  }
   if (r.forks) {
     card.appendChild(el('p', 'help warn',
       countOf(r.forks, 'fork', 'forks') + '. ' + (r.fork_note || '')));
@@ -22685,7 +22995,9 @@ function renderChannels(view, summary) {
       view.smtp.auth ? 'signs in' : 'no sign-in', 'from ' + view.smtp.from]
       : ['SMTP_HOST is not set'],
     WEBHOOK: view.webhook.configured ? [view.webhook.endpoint,
-      view.webhook.signed ? 'signed' : 'not signed'] : ['no webhook is configured'],
+      view.webhook.signed ? 'signed' + (view.webhook.signature
+        ? ' (' + view.webhook.signature + ')' : '') : 'not signed']
+      : ['no webhook is configured'],
     JIRA: view.jira && view.jira.destination
       ? [view.jira.destination.host, 'project ' + view.jira.destination.project_key]
       : ['no Jira destination'],
@@ -24695,6 +25007,9 @@ function purgeCounts(body) {
     [body.documents_purged || 0, 'document'],
     [body.records_purged || 0, 'ingest record'],
     [body.dead_letters_purged || 0, 'dead letter'],
+    /* Lab samples of the expired case (lab-4, 2026-10-03): disposed of as
+       a rejection is, which the server's warnings say in full. */
+    [body.samples_purged || 0, 'sample'],
   ].filter(([n]) => n > 0)
     .map(([n, noun]) => n + ' ' + noun + (n === 1 ? '' : 's'));
 }
@@ -24964,7 +25279,8 @@ async function loadTombstones() {
 }
 
 const TOMB_NOUN = { evidence: 'exhibit', document: 'document',
-                    ingest_record: 'ingest record', dead_letter: 'dead letter' };
+                    ingest_record: 'ingest record', dead_letter: 'dead letter',
+                    sample: 'sample' };
 /* The rule keys retention.py writes, in words. An unknown key is shown as
    written rather than guessed at. */
 const TOMB_RULE = {
@@ -27905,18 +28221,29 @@ function renderCoParticipationCoverage(body) {
   facts.appendChild(fact('excluded: unresolved',
     cov.participants_excluded_unresolved));
   /* Not-visible is a CLEARANCE fact, not a data-quality one: the network is
-     smaller because of who is asking. Kept distinct for that reason. */
-  facts.appendChild(fact('excluded: not visible to you',
-    cov.participants_excluded_not_visible,
-    cov.participants_excluded_not_visible ? 'warn' : ''));
+     smaller because of who is asking. Kept distinct for that reason. Said
+     only as the case allows (2026-10-03): the number under COUNT, whether
+     under PRESENCE, and nothing at all under NONE, so the fact is drawn only
+     when the server sent something to draw. */
+  const hiddenWhy = cov.withheld;
+  if (typeof cov.participants_excluded_not_visible === 'number') {
+    facts.appendChild(fact('excluded: not visible to you',
+      cov.participants_excluded_not_visible,
+      cov.participants_excluded_not_visible ? 'warn' : ''));
+  } else if (hiddenWhy && hiddenWhy.mode === 'PRESENCE') {
+    facts.appendChild(fact('excluded: not visible to you',
+      hiddenWhy.incomplete ? 'some' : 'none',
+      hiddenWhy.incomplete ? 'warn' : ''));
+  }
   host.appendChild(facts);
 
   for (const room of cov.oversized || []) {
     host.appendChild(el('p', 'help warn',
       'Room ' + visibleText(room.conversation_id)
       + ' on ' + visibleText(room.platform)
-      + ' excluded: ' + room.participants + ' participants ('
-      + room.projectable_participants + ' projectable)'
+      + ' excluded: ' + room.participants + ' participants'
+      + (typeof room.projectable_participants === 'number'
+        ? ' (' + room.projectable_participants + ' projectable)' : '')
       + (room.provenance_class
         ? ' · ' + visibleText(room.provenance_class) : '')));
   }
@@ -29535,7 +29862,10 @@ function authChip(name, result) {
     /* Invariant 12 on screen: "nobody checked" and "it failed" must not
        look the same. */
     const chip = el('span', 'chip subtle', 'not checked');
-    chip.title = 'No Authentication-Results header said anything about '
+    /* http_ui-007 (2026-10-03): a header the sender may have written is
+       not a verdict, so it is kept and not read; the parse gaps say so. */
+    chip.title = 'No Authentication-Results header from one of this '
+      + 'deployment\'s own mail servers said anything about '
       + name + '. That is an absence, not a failure.';
     wrap.appendChild(chip);
     return wrap;
@@ -32297,7 +32627,18 @@ function dualOperationCard(op, you) {
   facts.appendChild(fact('asks', dualRoleNames(op.asks)));
   facts.appendChild(fact('signs second', dualRoleNames(op.signs)));
   facts.appendChild(fact('a signature lasts', dualDuration(op.ttl_seconds)));
+  /* F39 (2026-10-02): the second person on a case's merge switch must have
+     held the permission on the case for a window the deployment sets. */
+  if (op.signer_seasoning) {
+    const s = op.signer_seasoning;
+    facts.appendChild(fact('second person must have held '
+      + visibleText(s.permission) + ' on the case for',
+      s.days ? countOf(s.days, 'day', 'days') : 'no minimum (the rule is off)'));
+  }
   card.appendChild(facts);
+  if (op.signer_seasoning && op.signer_seasoning.problem) {
+    card.appendChild(el('p', 'help', visibleText(op.signer_seasoning.problem)));
+  }
   if (!op.configurable) return card;
   /* Over the viewer's own cases only, and not said at all to someone who
      holds none (2026-09-24). */
@@ -34210,8 +34551,14 @@ async function loadEgressLog() {
   }
   renderList('egr-log', 'egr-log-empty', body.rows || [], egressLogRow);
   const hidden = $('egr-log-hidden');
+  /* egress-ledger-withheld-oracle (2026-10-03): the server counts the hidden
+     rows over the WHOLE log, whatever route, event or window is chosen, so the
+     sentence says so; "and N rows" under a filtered list read as hidden rows
+     that match the filter. */
   hidden.textContent = body.withheld
-    ? 'and ' + countOf(body.withheld, 'row', 'rows') + ' you are not cleared to see' : '';
+    ? 'The whole log also holds ' + countOf(body.withheld, 'row', 'rows')
+      + ' you are not cleared to see. That count ignores the route and event '
+      + 'chosen above.' : '';
   show(hidden, body.withheld > 0);
 }
 
@@ -37370,12 +37717,14 @@ function detonationPanel(s, rows, you, people, sandboxState) {
       btn.disabled = false;
       return;
     }
-    /* The confirmation names the person, from the server's answer: the
-       one thing this record is for is that a named human agreed. */
+    /* The confirmation names the person, from the server's answer. lab-3
+       (2026-10-03): as named by the requester, not as a sign-off, because
+       the named person never acted in the product; they are told. */
     const signer = out.authorised_by_name || out.authorised_by_email;
     await openSample(s.id);
     banner('Detonation recorded', 'Recorded'
-      + (signer ? ', signed off by ' + signer : '')
+      + (signer ? ', naming ' + signer + ' as the person who agreed. They have '
+        + 'not confirmed it in the product and have been told' : '')
       + '. Nothing has been sent anywhere.', 'warn');
   });
   form.appendChild(msg);
@@ -37415,7 +37764,7 @@ function detonationRow(d, after) {
   facts.appendChild(fact('when',
     fmtTime(d.requested_at)));
   if (d.authorised_by) {
-    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'authorised by',
+    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'named as authoriser',
       d.authorised_by_name || d.authorised_by));
   }
   if (d.signed_off_at) {
@@ -37450,7 +37799,7 @@ function detonationRow(d, after) {
 
 const DETONATION_STATUS = {
   PENDING: ['recorded', 'chip'],
-  AUTHORISED: ['recorded, authorised', 'chip'],
+  AUTHORISED: ['recorded, authoriser named', 'chip'],
   AWAITING_SIGNOFF: ['awaiting sign-off', 'chip warn'],
   QUEUED: ['queued', 'chip'],
   SUBMITTED: ['sent', 'chip'],
@@ -37496,8 +37845,13 @@ function sandboxSendForm(s, people, state) {
   form.appendChild(routeField);
   const machines = sb.machines || [];
   const machine = el('select', 'select');
-  opts(machine, [['', 'the sandbox chooses']].concat(machines.map((m) => [m.machine,
-    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])), '');
+  // lab-1 (2026-10-03): with a live machine listed, the API refuses a send
+  // that names none, since the sandbox could choose the live one unsigned.
+  const hasLive = machines.some((m) => m.class === 'LIVE');
+  const isolated = machines.find((m) => m.class !== 'LIVE');
+  opts(machine, (hasLive ? [] : [['', 'the sandbox chooses']]).concat(machines.map((m) => [m.machine,
+    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])),
+  hasLive ? ((isolated || machines[0]).machine) : '');
   const machineField = el('label', 'field');
   machineField.appendChild(el('span', 'label', 'Analysis machine'));
   machineField.appendChild(machine);
@@ -40880,6 +41234,11 @@ async function probeFirstRun() {
   }
   if (!body.needs_setup) return;
   show($('login-form'), false);
+  /* A deployment that wants the operator to prove they hold its setup token
+     says so (http_ui-010 and infra-3, 2026-10-03). In production with no
+     token configured there is no web first-run, so it never reports
+     needs_setup and this card is never reached. */
+  show($('setup-token-field'), !!body.setup_token_required);
   show($('setup-form'), true);
   $('setup-email').focus();
 }
@@ -41570,11 +41929,14 @@ function initSetup() {
     setMsg($('setup-error'), '');
     $('setup-submit').disabled = true;
     try {
+      const token = $('setup-token').value.trim();
       const creds = await api('/setup/first-admin', {
         method: 'POST',
+        headers: token ? { 'X-Setup-Token': token } : undefined,
         json: { email: $('setup-email').value.trim(),
                 display_name: $('setup-name').value.trim() },
       });
+      $('setup-token').value = '';        // never kept on the page
       FIRST_RUN.creds = creds;
       window.addEventListener('beforeunload', guardFirstRun);
       show($('setup-form'), false);

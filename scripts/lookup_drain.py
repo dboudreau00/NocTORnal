@@ -25,8 +25,12 @@ Exit codes: 0 when nothing failed; 1 when a lookup FAILED in this pass or a
 provider had no route out (information, like notify_drain.py: every other
 row was still attempted); 2 when, under NOCTORNAL_ENV=production, a
 credential in the environment carries a published value or the schema
-owner's password or DSN is in it (docs/17 F52, 2026-10-02), before any
-connection and with one line per variable on stderr.
+owner's password or DSN is in it (docs/17 F52 and infra-12, 2026-10-02 and
+2026-10-03), before any connection and with one line per variable on stderr,
+`lookup_drain: refusing to run: <NAME> ...`, naming it and never its value.
+It is the one helper every job calls first
+(`config.refuse_unsafe_job_environment`) and the one code every job gives it
+(`config.JOB_REFUSAL_EXIT`).
 """
 from __future__ import annotations
 
@@ -47,15 +51,16 @@ SWITCH_ENV = "NOCTORNAL_OUTBOUND_LOOKUPS"
 
 
 def main(argv: list[str] | None = None, *, conn=None, service=None) -> int:
-    from noctornal_api.config import refuse_unsafe_job_environment
+    from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
 
-    # docs/17 F52 (2026-10-02): the published-value check this script made
-    # on its own, and since then the schema owner's credential beside it,
-    # through the one helper every cron job calls (config.py).
+    # First, before the switch is echoed or anything is connected to (docs/17
+    # F52 and infra-12, 2026-10-02 and 2026-10-03): the published-value check
+    # this script once made on its own, and the schema owner's credential
+    # beside it, through the one helper every job calls (config.py).
     refusals = refuse_unsafe_job_environment("lookup_drain")
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
-        return 2
+        return JOB_REFUSAL_EXIT
     parser = argparse.ArgumentParser(description="Send the queued outbound lookups once.")
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--max-seconds", type=float, default=240.0)

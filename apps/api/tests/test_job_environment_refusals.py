@@ -9,8 +9,15 @@ password and DSN with no check at all. Held here:
 
 * `config.refuse_unsafe_job_environment` is the one helper, production
   only, one line per variable, never a value, and one refusal per variable;
-* notify_drain, collection_poll, lookup_drain and embed_pass call it before
-  they connect to anything, each with its own documented exit code;
+  it asks for the owner's credential and for a published one, and the
+  migration job, which holds the owner's DSN by design, is asked for the
+  published half alone;
+* notify_drain, collection_poll, lookup_drain and embed_pass call it once,
+  first, before they connect to anything, and all four exit
+  `config.JOB_REFUSAL_EXIT` (2: 1 means a pass ran and failed). Merged from
+  two builds that disagreed on the code (docs/17 F52 gave collection_poll and
+  embed_pass 1; infra-12 gave all four 2) and on the helper that made the
+  published half (`config.refuse_published`, now gone);
 * the Lab's three workers, which call `enforce_environment`, refuse the
   owner's credential through it.
 
@@ -31,9 +38,9 @@ ROOT = Path(__file__).resolve().parents[3]
 OWNER_PASSWORD = "Hq7vX2-owner"
 OWNER_DSN = f"postgresql+psycopg://noctornal:{OWNER_PASSWORD}@postgres:5432/noctornal"
 
-#: (script, the exit code its docstring gives a refusal)
-CRON_JOBS = [("notify_drain", 2), ("collection_poll", 1), ("lookup_drain", 2),
-             ("embed_pass", 1)]
+#: (script, the exit code its docstring gives a refusal): one code for all.
+CRON_JOBS = [(name, config.JOB_REFUSAL_EXIT)
+             for name in ("notify_drain", "collection_poll", "lookup_drain", "embed_pass")]
 LAB_WORKERS = ["lab_triage", "sample_screen", "sandbox_dispatch"]
 
 
@@ -123,6 +130,68 @@ def test_development_is_left_alone():
     assert config.refuse_unsafe_job_environment("notify_drain", env) == []
     del env["NOCTORNAL_ENV"]
     assert config.refuse_unsafe_job_environment("notify_drain", env) == []
+
+
+def test_several_published_credentials_are_one_line_each_naming_no_value():
+    """Said by infra-12's own test before the two helpers were one: the
+    production mode is read however it is spelled, every published variable
+    is named, and a published value is never quoted, nor what surrounds it."""
+    env = {**_production(), "NOCTORNAL_ENV": " Production ",
+           "NOCTORNAL_INGEST_PEPPER": "replace-me-ingest-pepper",
+           "SMTP_PASSWORD": "prefix-dev_only_change_me-suffix"}
+    lines = config.refuse_unsafe_job_environment("embed_pass", env)
+    assert [line.split(" still carries")[0] for line in lines] == [
+        "embed_pass: refusing to run: NOCTORNAL_INGEST_PEPPER",
+        "embed_pass: refusing to run: SMTP_PASSWORD"], lines
+    assert not any("replace-me-ingest-pepper" in line or "prefix" in line for line in lines)
+
+
+def test_the_migration_job_is_not_asked_for_the_owner_half_but_is_for_the_published_half():
+    """The one job that connects as the schema owner holds the owner's DSN
+    because that is its work; a published value anywhere in its environment,
+    the DSN's own password included, still refuses it."""
+    env = {**_production(), config.MIGRATION_DSN_ENV: OWNER_DSN,
+           config.OWNER_PASSWORD_ENV: OWNER_PASSWORD}
+    assert config.refuse_unsafe_job_environment(
+        "migrate", env, holds_owner_credential=True) == []
+    assert len(config.refuse_unsafe_job_environment("migrate", env)) == 2
+    env["SMTP_PASSWORD"] = "replace-me-smtp-password"
+    (line,) = config.refuse_unsafe_job_environment(
+        "migrate", env, holds_owner_credential=True)
+    assert line.startswith("migrate: refusing to run: SMTP_PASSWORD still carries")
+    env = {**_production(), config.MIGRATION_DSN_ENV:
+           "postgresql+psycopg://noctornal:replace-me-owner-password@postgres:5432/noctornal"}
+    (line,) = config.refuse_unsafe_job_environment(
+        "migrate", env, holds_owner_credential=True)
+    assert config.MIGRATION_DSN_ENV in line and "replace-me-owner-password" not in line
+
+
+def test_the_migration_job_problems_come_from_the_same_helper():
+    """`migration_job_problems` asks the whole environment, not the DSN
+    alone, through the helper every other job calls."""
+    env = {"NOCTORNAL_ENV": "production", config.MIGRATION_DSN_ENV: OWNER_DSN,
+           "SMTP_PASSWORD": "replace-me-smtp-password"}
+    (line,) = config.migration_job_problems(env)
+    assert line.startswith("migrate: refusing to run: SMTP_PASSWORD still carries")
+    del env["SMTP_PASSWORD"]
+    assert config.migration_job_problems(env) == []
+
+
+def test_there_is_one_job_helper_and_it_is_called_once_in_each_job():
+    """The merge of two builds left two helpers and two call patterns in each
+    script; a second helper, or a second call, fails here."""
+    assert not hasattr(config, "refuse_published")
+    assert not hasattr(config, "PUBLISHED_REFUSAL_EXIT")
+    for path in ("scripts/notify_drain.py", "scripts/collection_poll.py",
+                 "scripts/lookup_drain.py", "scripts/embed_pass.py",
+                 "db/migrations/env.py"):
+        text = (ROOT / path).read_text(encoding="utf-8")
+        assert text.count("refuse_unsafe_job_environment(") == 1, path
+        assert "refuse_published" not in text and "published_credentials" not in text, path
+    # The migration job reaches the helper through migration_job_problems.
+    job = (ROOT / "scripts" / "migrate_job.py").read_text(encoding="utf-8")
+    assert job.count("migration_job_problems(") == 1
+    assert "refuse_published" not in job
 
 
 # ---------------------------------------------------------------------------
