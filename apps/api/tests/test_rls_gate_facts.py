@@ -84,8 +84,13 @@ def test_an_element_pre_read_happens_before_its_content_read():
     for rel, fn in (("http/routers/graph.py", "_gate_for_change"),
                     ("http/routers/curation.py", "_node_for_write")):
         code = _code(_function(rel, fn))
-        assert code.index("element_labels(") < code.index("authorize_object(") \
+        # The element gate is `element_gate.authorize_element` since the beta
+        # review (2026-10-03), which is `authorize_object` with a refusal at
+        # the element's labels answered as its absence.
+        assert code.index("element_labels(") < code.index("authorize_element(") \
             < code.index("FROM core."), f"{rel}::{fn}"
+    assert "authorize_object(" in _code(
+        _function("http/element_gate.py", "authorize_element"))
 
 
 def test_two_person_and_notification_reads_fail_closed():

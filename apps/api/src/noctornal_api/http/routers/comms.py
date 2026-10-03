@@ -66,8 +66,14 @@ from noctornal_api.http.deps import (
     system_conn,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import (
+    disclosure_mode,
+    gate_element,
+    withheld_notice,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
+from noctornal_api.projections import DISCLOSURE_COUNT
 from noctornal_api.pgp import (
     MAX_KEY_BYTES,
     PgpConflict,
@@ -240,6 +246,16 @@ def bind(
     compartments = frozenset(body.compartments)
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=compartments)
+    # http_ui-008 (2026-10-03): the identity was taken on trust and only the
+    # foreign key checked it, which row security does not filter, so a
+    # binding was attached to another case's node or one above the caller,
+    # and an unknown id was a 500 (201 against 500, an existence oracle for
+    # node ids across the deployment). One 404 for all three.
+    if body.identity_node_id is not None:
+        gate_element(conn, user, case_id=case_id, kind="node",
+                     element_id=body.identity_node_id,
+                     permission_key="comms.bind",
+                     missing_detail="no such node in this case")
     try:
         return CommsService(conn).bind(
             case_id=case_id, platform_key=body.platform_key,
@@ -1126,7 +1142,7 @@ def co_participation(
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
-        return CoParticipationService(
+        out = CoParticipationService(
             conn, clearance=clearance.name, compartments=compartments
         ).project(CoParticipationParams(
             case_id=case_id, min_shared=min_shared,
@@ -1137,3 +1153,29 @@ def co_participation(
             since=since, until=until))
     except CoParticipationError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    _disclose_hidden_participants(out, disclosure_mode(conn, case_id))
+    return out
+
+
+def _disclose_hidden_participants(out: dict, mode: str) -> None:
+    """How many participants resolve to an identity the reader cannot see,
+    said only as the case allows (graph-coparticipation-ignores-withheld-
+    none, 2026-10-03). The count went out under every withheld_disclosure
+    setting, and the filters narrow it to one room, so a case set to NONE
+    still localised hidden identities to a conversation. Now the graph's
+    rule, under `coverage.withheld`: nothing under NONE, whether under
+    PRESENCE, how many under COUNT, which alone keeps the old
+    `participants_excluded_not_visible` key. An oversized room's
+    `projectable_participants` is left out except under COUNT, because it
+    is the room's size less, among others, the hidden members of that one
+    room."""
+    cov = out.get("coverage") or {}
+    hidden = cov.pop("participants_excluded_not_visible", 0)
+    if mode == DISCLOSURE_COUNT:
+        cov["participants_excluded_not_visible"] = hidden
+    else:
+        for room in cov.get("oversized") or []:
+            room.pop("projectable_participants", None)
+    notice = withheld_notice(mode, hidden, noun="participants")
+    if notice:
+        cov["withheld"] = notice

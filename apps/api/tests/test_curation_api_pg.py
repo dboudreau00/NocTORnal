@@ -188,6 +188,15 @@ def _create_case(client, token) -> str:
         "retention_until": str(date(2028, 1, 1)),
         "review_due": str(date(2027, 1, 1))})
     assert r.status_code == 201, r.text
+    # These tests are about the COUNT a set withholds. A new case discloses
+    # PRESENCE only (0030's default), and the member list says only what the
+    # case allows since 2026-10-03 (beta review rls-9), so the case under test
+    # discloses counts. The other two modes are
+    # `test_review_g42_disclosure_pg`'s.
+    from noctornal_api.db import connect
+    with connect() as db:
+        db.execute("UPDATE core.\"case\" SET withheld_disclosure = 'COUNT' "
+                   "WHERE id = %s", (r.json()["id"],))
     return r.json()["id"]
 
 
@@ -846,9 +855,10 @@ def test_an_amber_analyst_cannot_tag_a_red_node(conn, client):
     gate is re-run with the element's own labels -- the CR7 pattern
     `graph.py` uses for assertions.
 
-    403 and not 404 here is deliberate and is the documented ordering: the
-    same-case check has already passed (the node IS in this case, and the
-    caller is assigned to it), so the only failing check is clearance.
+    The refusal was a 403 "missing permission" until 2026-10-03, which told
+    a caller holding a leaked node id that it named something in the case
+    above their clearance (beta review http_ui-016). It is the missing
+    node's own 404 now, with the AUTHZ_DENIED row kept.
     """
     _, owner_email, owner_secret = _make_user(conn, clearance="RED",
                                               global_roles=("CASE_OWNER",))
@@ -868,7 +878,8 @@ def test_an_amber_analyst_cannot_tag_a_red_node(conn, client):
 
     refused = client.post(f"{base}/tags/{tag_id}/nodes", headers=_auth(analyst),
                           json={"node_id": red_node})
-    assert refused.status_code == 403, refused.text
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"] == "no such node in this case"
     # The same analyst CAN curate a node at their own level, so the refusal
     # is the label check and not a broken route.
     assert client.post(f"{base}/tags/{tag_id}/nodes", headers=_auth(analyst),

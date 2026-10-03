@@ -474,8 +474,9 @@ def test_the_route_is_gated_on_both_verbs_and_the_elements_labels(conn, client):
             basis="DIRECT_OBSERVATION", created_by=e["owner"]))
     for claim in (red_claim, undated):
         r = _post(client, session(conn, junior), e["case"], claim)
-        assert r.status_code == 403, r.text
-        assert "missing permission" in r.json()["detail"]
+        # The missing claim's own 404 (beta review http_ui-016, 2026-10-03).
+        assert r.status_code == 404, r.text
+        assert r.json()["detail"] == "no such assertion in this case"
         assert _row(conn, claim)["superseded_at"] is None
     assert _row(conn, old) == before
     assert conn.execute(

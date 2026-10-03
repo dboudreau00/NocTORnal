@@ -388,21 +388,32 @@ def test_the_approvals_listing_names_the_merge_and_its_reach(conn, client):
     case_id = _case(conn, owner)
     _assign(conn, case_id, analyst, "ANALYST", owner)
     a = _node(conn, case_id, owner, "ti4_meridian_crew")
-    b = _node(conn, case_id, owner, "ti4_bastion_crew", "RED")
+    b = _node(conn, case_id, owner, "ti4_bastion_crew")
+    red = _node(conn, case_id, owner, "ti4_red_crew", "RED")
     req = ApprovalService(conn).request(
         operation="node.merge", case_id=case_id,
         payload={"source_node_id": str(a), "target_node_id": str(b),
                  "reason": "renamed", "basis_selector_id": None},
         justification="same crew, renamed", requested_by=owner)
     assert req.approvers_notified == 1
+    # A request that names an entity above the analyst is not listed to them
+    # at all, rather than listed with that entity as None (beta review
+    # http_ui-011, 2026-10-03); test_review_g42_merge_visibility_pg holds it.
+    ApprovalService(conn).request(
+        operation="node.merge", case_id=case_id,
+        payload={"source_node_id": str(a), "target_node_id": str(red),
+                 "reason": "the red one", "basis_selector_id": None},
+        justification="same crew, red handle", requested_by=owner)
 
     r = client.get(f"/api/v1/cases/{case_id}/approvals",
                    headers=_auth(conn, analyst))
     assert r.status_code == 200, r.text
+    assert len(r.json()["approvals"]) == 1, "a request naming a RED entity was listed"
     row = r.json()["approvals"][0]
     assert row["subjects"]["source"] == {"label": "ti4_meridian_crew",
                                          "node_type": "IDENTITY"}
-    assert row["subjects"]["target"] is None, "a RED entity was named"
+    assert row["subjects"]["target"] == {"label": "ti4_bastion_crew",
+                                         "node_type": "IDENTITY"}
     assert row["requested_by_name"] == "Ada Owner"
     assert row["approvers_notified"] == 1
     assert row["operation_description"] == "Fold one entity into another"

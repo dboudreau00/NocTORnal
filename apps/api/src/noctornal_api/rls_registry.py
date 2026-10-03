@@ -67,6 +67,9 @@ HELD = `(SELECT iam.rls_compartments())`:
   who may list, sign or apply them.
 - CUSTOM_WATCH (0124): a case's watches in a readable case; a case-less
   one to every bound user.
+- CUSTOM_MERGE (0132, 2026-10-03): the CASE term AND an EXISTS over
+  `core.node` for the merge's source and for its target, so a merge is
+  visible only where both of its entities are.
 - CUSTOM_NOTICE (a notification, 0126): the recipient's own
   (`recipient_id = (SELECT iam.rls_actor())`), its classification within
   CLR, its compartments held, and when it names a case, that case
@@ -111,7 +114,8 @@ POLICY: dict[str, str] = {
     "core.hypothesis": "CASE",
     "core.assumption": "CASE",
     "core.node_set": "CASE",
-    "core.node_merge": "CASE",
+    # 0132 (2026-10-03): and both of its entities visible.
+    "core.node_merge": "CUSTOM_MERGE",
     "core.hypothesis_evidence": "CHILD",
     "core.node_set_member": "CHILD",
     # 0118 (S1, 2026-09-25): collected documents and what hangs off them,
@@ -173,6 +177,10 @@ POLICY: dict[str, str] = {
     "comms.service_selector": "CUSTOM_STOPLIST",
     # 0123: the rest of the case record. A merge's re-pointed ties are
     # counted at the reader's view (the conservative reading).
+    # core.selector has carried its own labels since 0134 (its owner's, the
+    # floor when it has none) and keys on them; the policy stays the case term
+    # alone (decision 147) and every reader applies the labels itself
+    # (SelectorStore.find_for_reader, the owner test of the others).
     "core.selector": "CASE",
     "core.assertion_embedding": "CHILD",
     "core.evidence_embedding": "CHILD",
