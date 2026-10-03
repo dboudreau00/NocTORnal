@@ -282,13 +282,15 @@ CHANGE_CHANNEL = "noctornal_change"
 #: `iam.element_facts` (S1, 2026-09-25), not joins to `collect.document`
 #: and `comms.contact_block`: under row-level security a LEFT JOIN to a
 #: row the reader may not see reads as no row at all, and the
-#: strictest-of below would then LOWER the proposal to what is left.
+#: strictest-of below would then LOWER the proposal to what is left. The
+#: lookup answer's label comes from `iam.lookup_result_facts` for the same
+#: reason, since the answer went under policy (F51, 2026-10-02).
 _SOURCE_FROM = """
     FROM collect.proposal p
     JOIN core."case" c ON c.id = p.case_id
     LEFT JOIN LATERAL iam.element_facts('document', p.document_id) d ON true
     LEFT JOIN LATERAL iam.element_facts('proposal_block', p.id) b ON true
-    LEFT JOIN ingest.lookup_result lr ON lr.id = p.lookup_result_id"""
+    LEFT JOIN LATERAL iam.lookup_result_facts(p.lookup_result_id) lr ON true"""
 
 _PAYLOAD_CLS = """CASE WHEN p.payload->>'classification' IN
         ('CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED')

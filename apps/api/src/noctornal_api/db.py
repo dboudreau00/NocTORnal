@@ -130,7 +130,12 @@ class SystemPurpose(StrEnum):
     # The poll, a manual run and a pasted capture: each dedupes against every
     # stored document and matches every watch (S1, 2026-09-25).
     COLLECTION = "collection"
-    LOOKUPS = "lookups"                  # the lookup drain
+    # The lookup drain, and an interactive send, a sign-off and the
+    # provider test from the gates on: each stores an answer at the
+    # provider's label and counts every attempt on the provider; a
+    # provider's withdrawal and a batch's cancel, which reach every case's
+    # rows (F51, 2026-10-02).
+    LOOKUPS = "lookups"
     LAB_TRIAGE = "lab_triage"            # static triage and YARA
     # Prohibited-content screening: the worker, and the Security Officer's
     # label-free match list, its counts, a review and a console pass, which
