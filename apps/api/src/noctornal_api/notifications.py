@@ -254,6 +254,10 @@ KINDS: dict[str, Kind] = {
     "DETONATION_SIGNOFF_DECIDED": Kind(
         "DETONATION_SIGNOFF_DECIDED", NORMAL,
         "Your detonation request was signed off or declined"),
+    # lab-3 (2026-10-03): a record-only exposed detonation names you.
+    "DETONATION_NAMED": Kind(
+        "DETONATION_NAMED", NORMAL,
+        "A recorded detonation names you as the person who agreed to it"),
     "SANDBOX_RESULT": Kind(
         "SANDBOX_RESULT", NORMAL, "A sandbox run you requested ended"),
 }
@@ -648,6 +652,14 @@ class NotificationService:
         if "address" in fields and fields["address"] != current.address:
             self._check_address(user_id, channel, fields["address"],
                                 current.address)
+        elif current.address is not None \
+                and single_address_domain(current.address) is None:
+            # egress-notify-address-list (2026-10-03): a list stored before
+            # 0148 is kept (its CHECK is NOT VALID) and never delivered to;
+            # rewriting the row would trip the CHECK, so say what to do.
+            raise NotificationError(
+                "the stored delivery address is not one plain address and is "
+                "no longer used. Set a new address or clear it first.")
         merged = {
             "enabled": fields.get("enabled", current.enabled),
             "min_priority": fields.get("min_priority", current.min_priority),
@@ -726,7 +738,16 @@ class NotificationService:
                     "NOCTORNAL_NOTIFY_ADDRESS_DOMAINS). A subject line here "
                     "carries the case code, and a case code is "
                     "intelligence.")
-            if "@" not in new or new.rsplit("@", 1)[1].lower() not in allowed:
+            # egress-notify-address-list (2026-10-03): one plain address
+            # first, then its domain. The repr is not echoed for a refused
+            # shape: it can carry CR or LF.
+            domain = single_address_domain(new)
+            if domain is None:
+                raise NotificationError(
+                    "a delivery address is one plain address, such as "
+                    "name@agency.example: no list, no display name and no "
+                    "angle brackets.")
+            if domain not in allowed:
                 raise NotificationError(
                     f"{new!r} is not in a domain this deployment permits "
                     f"for notification delivery. Permitted: "
@@ -1095,6 +1116,38 @@ def _validate_timezone(name: str) -> None:
         ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError, KeyError) as exc:
         raise NotificationError(f"unknown timezone {name!r}") from exc
+
+
+#: One plain addr-spec and nothing else: a local part of letters, digits and
+#: '_', '+', "'" and '-' joined by single dots, LDH domain labels. No display
+#: name, no group, no list, no comment, no whitespace, and none of the
+#: characters an MTA reads as ROUTING in a local part: '%' (the percent hack,
+#: which Postfix honours by default, would turn 'x%attacker.example@corp.example'
+#: into a mailbox at attacker.example behind an allowed domain), '!' (a bang
+#: path), '|', '/', '`', '$', '{' and '}' (alias and delivery syntax).
+#: egress-notify-address-list (2026-10-03): the allowlist used to read only
+#: the text after the LAST '@', so 'collector@attacker.example,
+#: me@corp.example' passed and smtplib sent one RCPT per address. A
+#: character that could start a second recipient (',', ';', '<', ':') or a
+#: header line (CR, LF) is outside this pattern, so it is refused by shape.
+#: Migration 0148's CHECK on notify.preference.address spells the same
+#: pattern and a test holds the two equal.
+SINGLE_ADDRESS_PATTERN = (
+    r"[A-Za-z0-9_+'-]+(\.[A-Za-z0-9_+'-]+)*"
+    r"@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
+SINGLE_ADDRESS_MAX = 254
+
+
+def single_address_domain(value: str | None) -> str | None:
+    """The lower-cased domain of `value` when it is exactly one plain
+    address, else None. `re.fullmatch`, never `$`, which would accept a
+    trailing newline."""
+    import re
+    if not isinstance(value, str) or len(value) > SINGLE_ADDRESS_MAX:
+        return None
+    if re.fullmatch(SINGLE_ADDRESS_PATTERN, value) is None:
+        return None
+    return value.rsplit("@", 1)[1].lower()
 
 
 def effective_labels_for_notification(

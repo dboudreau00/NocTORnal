@@ -1246,6 +1246,14 @@ def _credential_presented(request: Request) -> None:
     connection -- exactly as one who sends junk in `Authorization`
     always has.
     """
+    # lab-5 (2026-10-03): the origin split is asked FIRST, as the exhibit
+    # route's `_production_presented` does, so a ticket posted to the
+    # application process is refused before `redeem_download_ticket` spends
+    # it and audits a redemption that served nothing. Configuration only,
+    # so this still opens no connection.
+    split = origin_split()
+    if not split.serves_here:
+        raise Problem(409, "Conflict", split.refusal or "")
     if (request.headers.get("authorization")
             or request.cookies.get(SESSION_COOKIE)
             or request.headers.get("transfer-encoding")):
@@ -1899,11 +1907,18 @@ def request_detonation(
              if body.authorised_by else None)
     return {"id": str(det_id), "mode": "record",
             "submitted": False,
+            # lab-3 (2026-10-03): PENDING, and the named person has not
+            # confirmed anything in the product; they have been told.
+            "status": "PENDING",
+            "authoriser_confirmed": False,
             "authorised_by_name": (named or {}).get("name"),
             "authorised_by_email": (named or {}).get("email"),
             # F14. A record-only request is never sent, whether or not
             # a sandbox is configured.
-            "notice": "Recorded only. This request is never sent anywhere."}
+            "notice": ("Recorded only. This request is never sent anywhere."
+                       + (" The person you named has not confirmed it in the "
+                          "product, and they have been told it names them."
+                          if body.authorised_by else ""))}
 
 
 # ---------------------------------------------------------------------------

@@ -1247,7 +1247,8 @@ class LookupService:
             row = self._c.execute(
                 """SELECT case_id, state, authorised_by, requested_by, signoff_expires_at < now(),
                           provider_id, operation, subject_kind, selector_id, sample_id,
-                          selector_type, query_value, classification, query_fingerprint
+                          selector_type, query_value, classification, query_fingerprint,
+                          exposure_level
                      FROM ingest.lookup WHERE id = %s FOR UPDATE""", (lookup_id,)).fetchone()
             if row is None or row[0] != case_id or row[1] != "AWAITING_SIGNOFF" \
                     or row[2] != user_id:
@@ -1285,6 +1286,17 @@ class LookupService:
                                                      subject.compartments):
                     gate = ("requester_withdrawn", "The requester may no longer send this.",
                             False)
+                elif provider.exposure_level != row[14]:
+                    # egress-lookup-signoff-exposure (2026-10-03): the
+                    # requester confirmed, and this person is signing, the
+                    # exposure the lookup recorded. A provider raised since
+                    # (VENDOR to PUBLIC) is a different disclosure, so the
+                    # drain's own refusal applies here too, whatever
+                    # re-enabled the provider in between.
+                    gate = ("exposure_changed",
+                            f"The exposure of this provider is now "
+                            f"{provider.exposure_level}, and this was asked for at "
+                            f"{row[14]}. The requester must ask again.", False)
                 else:
                     gate = self.gates(subject, provider, row[6], user_id=requester,
                                       fingerprint=bytes(row[13]))

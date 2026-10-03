@@ -102,6 +102,7 @@ from noctornal_api.notifications import (
     WEBHOOK,
     escalate_unacknowledged,
     readable_predicate,
+    single_address_domain,
 )
 from noctornal_api.notify_events import case_reviews_due
 
@@ -973,6 +974,13 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
                 if out.channel == SMTP:
                     if not out.address:
                         raise TransportError("no email address for this recipient")
+                    # egress-notify-address-list (2026-10-03): a list stored
+                    # before the rule existed is undeliverable, never expanded
+                    # into one RCPT per address by smtplib.
+                    if single_address_domain(out.address) is None:
+                        raise TransportError(
+                            "the delivery address is not one plain address, "
+                            "so nothing was sent to it")
                     message = render_email(out, redacted=redacted)
                     if route is None:
                         send_mail(message)

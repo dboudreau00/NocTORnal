@@ -327,6 +327,12 @@ def adopt(conn, user_id, via, *, ask=input, out=print) -> list[str]:
             f"deployment's own address), any public host on ports "
             f"{', '.join(str(p) for p in passive['allowed_ports'])}, carrying feeds "
             f"labelled up to {passive['ceiling']}")
+        if passive.get("feeds_above_ceiling"):
+            # egress-rss-floor (2026-10-03): nothing above AMBER leaves, so a
+            # feed labelled above it is not carried and is not polled.
+            out("  Some active feeds carry a label above AMBER, which never "
+                "leaves this deployment, so the collector does not poll them: "
+                "collect them by hand, or correct the label if it is wrong.")
     for route in proposal["routes"]:
         out(f"  the {route['name']} route allowing {route['entry']}")
         if route.get("confirm_network"):

@@ -701,6 +701,7 @@ def claim(conn: psycopg.Connection, settings: AnalysisSettings, *,
     seed's own samples, and a test's)."""
     from noctornal_api.cases import CONTENT_READ_ONLY_STATES
     from noctornal_api.samples import lab_exclusions_sql, policy_declared
+    from noctornal_api.screening import bytes_may_move
     from noctornal_api.yara_rules import engine_version
     skipped = 0
     while True:
@@ -741,7 +742,11 @@ def claim(conn: psycopg.Connection, settings: AnalysisSettings, *,
             if not declared:
                 refusal = ("no prohibited-content policy is declared; nothing "
                            "was read")
-            elif state == "REJECTED" or not kept:
+            elif state == "REJECTED" or not kept \
+                    or not bytes_may_move(conn, c.sample_id):
+                # lab-2 (2026-10-03): a list imported since the last pass
+                # binds before decryption; the pass isolates it next, so the
+                # card says what it will say then.
                 refusal = "the sample was rejected before triage ran; nothing was read"
             elif case_status in CONTENT_READ_ONLY_STATES:
                 refusal = "the sample's case is closed; nothing was read"

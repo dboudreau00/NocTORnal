@@ -21330,7 +21330,10 @@ async function paintPersonaForm(visible) {
   clear(ex);
   /* One persona, one exit, and never an exit a persona-less source reads
      through (docs/04): two identities seen from one address are linked. */
-  for (const e of exits.filter((x) => x.available && !x.sources)) {
+  /* collection-shared-exit (2026-10-03): `persona_available` also counts a
+     source the listing may not name, which `sources` cannot. */
+  for (const e of exits.filter((x) => x.available && !x.sources
+      && x.persona_available !== false)) {
     ex.appendChild(selectOption(e.id, visibleText(e.name)));
   }
   if (!ex.children.length) ex.appendChild(selectOption('', 'No free egress profile'));
@@ -29674,7 +29677,10 @@ function authChip(name, result) {
     /* Invariant 12 on screen: "nobody checked" and "it failed" must not
        look the same. */
     const chip = el('span', 'chip subtle', 'not checked');
-    chip.title = 'No Authentication-Results header said anything about '
+    /* http_ui-007 (2026-10-03): a header the sender may have written is
+       not a verdict, so it is kept and not read; the parse gaps say so. */
+    chip.title = 'No Authentication-Results header from one of this '
+      + 'deployment\'s own mail servers said anything about '
       + name + '. That is an absence, not a failure.';
     wrap.appendChild(chip);
     return wrap;
@@ -34360,8 +34366,14 @@ async function loadEgressLog() {
   }
   renderList('egr-log', 'egr-log-empty', body.rows || [], egressLogRow);
   const hidden = $('egr-log-hidden');
+  /* egress-ledger-withheld-oracle (2026-10-03): the server counts the hidden
+     rows over the WHOLE log, whatever route, event or window is chosen, so the
+     sentence says so; "and N rows" under a filtered list read as hidden rows
+     that match the filter. */
   hidden.textContent = body.withheld
-    ? 'and ' + countOf(body.withheld, 'row', 'rows') + ' you are not cleared to see' : '';
+    ? 'The whole log also holds ' + countOf(body.withheld, 'row', 'rows')
+      + ' you are not cleared to see. That count ignores the route and event '
+      + 'chosen above.' : '';
   show(hidden, body.withheld > 0);
 }
 
@@ -37520,12 +37532,14 @@ function detonationPanel(s, rows, you, people, sandboxState) {
       btn.disabled = false;
       return;
     }
-    /* The confirmation names the person, from the server's answer: the
-       one thing this record is for is that a named human agreed. */
+    /* The confirmation names the person, from the server's answer. lab-3
+       (2026-10-03): as named by the requester, not as a sign-off, because
+       the named person never acted in the product; they are told. */
     const signer = out.authorised_by_name || out.authorised_by_email;
     await openSample(s.id);
     banner('Detonation recorded', 'Recorded'
-      + (signer ? ', signed off by ' + signer : '')
+      + (signer ? ', naming ' + signer + ' as the person who agreed. They have '
+        + 'not confirmed it in the product and have been told' : '')
       + '. Nothing has been sent anywhere.', 'warn');
   });
   form.appendChild(msg);
@@ -37565,7 +37579,7 @@ function detonationRow(d, after) {
   facts.appendChild(fact('when',
     fmtTime(d.requested_at)));
   if (d.authorised_by) {
-    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'authorised by',
+    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'named as authoriser',
       d.authorised_by_name || d.authorised_by));
   }
   if (d.signed_off_at) {
@@ -37600,7 +37614,7 @@ function detonationRow(d, after) {
 
 const DETONATION_STATUS = {
   PENDING: ['recorded', 'chip'],
-  AUTHORISED: ['recorded, authorised', 'chip'],
+  AUTHORISED: ['recorded, authoriser named', 'chip'],
   AWAITING_SIGNOFF: ['awaiting sign-off', 'chip warn'],
   QUEUED: ['queued', 'chip'],
   SUBMITTED: ['sent', 'chip'],
@@ -37646,8 +37660,13 @@ function sandboxSendForm(s, people, state) {
   form.appendChild(routeField);
   const machines = sb.machines || [];
   const machine = el('select', 'select');
-  opts(machine, [['', 'the sandbox chooses']].concat(machines.map((m) => [m.machine,
-    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])), '');
+  // lab-1 (2026-10-03): with a live machine listed, the API refuses a send
+  // that names none, since the sandbox could choose the live one unsigned.
+  const hasLive = machines.some((m) => m.class === 'LIVE');
+  const isolated = machines.find((m) => m.class !== 'LIVE');
+  opts(machine, (hasLive ? [] : [['', 'the sandbox chooses']]).concat(machines.map((m) => [m.machine,
+    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])),
+  hasLive ? ((isolated || machines[0]).machine) : '');
   const machineField = el('label', 'field');
   machineField.appendChild(el('span', 'label', 'Analysis machine'));
   machineField.appendChild(machine);

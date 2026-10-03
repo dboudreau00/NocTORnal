@@ -1687,9 +1687,12 @@ class SampleService:
             #
             # So the useful message goes only to a caller who could have
             # seen the existing row anyway, and everybody else gets a
-            # refusal that says no more than "not accepted". The caller who
-            # may not see it still cannot store a duplicate, which is the
-            # behaviour that matters.
+            # refusal that says no more than "not accepted". That narrows
+            # the answer; it does not close it (lab-6, 2026-10-03): refused
+            # (409) against accepted (201) is still one bit across a
+            # compartment or label boundary for a caller who holds the file.
+            # It is inherent in content dedupe and is a stated residual in
+            # docs/17, not something this wording solves.
             if _may_see(existing[1], existing[2], visible_to_clearance,
                         visible_to_compartments):
                 raise SampleError(
@@ -3259,7 +3262,17 @@ class SampleService:
                 "is not released through the download.")
         if not row[1]:
             raise SampleError("this sample has no data key; it cannot be read")
+        if not self._listed_now_clear(sample_id):
+            raise SampleError("no such sample")
         return row
+
+    def _listed_now_clear(self, sample_id: UUID) -> bool:
+        """lab-2 (2026-10-03): a list imported since the sample was last
+        screened binds before a ticket is minted or a byte is read, not
+        when a later pass reaches the sample. A caller refuses with `no
+        such sample`, the answer a matched (excluded) sample already gets."""
+        from noctornal_api import screening
+        return screening.bytes_may_move(self._c, sample_id)
 
     # -- the hand-off between the two origins (0061) -----------------------
 
@@ -3840,7 +3853,9 @@ class SampleService:
                  WHERE s.id = %(id)s AND {lab_gate()}""",
             {"id": sample_id,
              **gate_params(clearance, compartments)}).fetchone()
-        if row is None:
+        if row is None or not self._listed_now_clear(sample_id):
+            # lab-2 (2026-10-03): a list imported since the last pass binds
+            # here too, answered as the sample the gate hides.
             self._refuse_retrieval(sample_id, actor_id, "not_visible",
                                    "no such sample", stage=stage,
                                    session_id=session_id, ip_hash=ip_hash)
@@ -4155,17 +4170,27 @@ class SampleService:
                     "the authoriser must be an active lead investigator on "
                     "this sample's case (for a sample with no case, a lead "
                     "investigator) who is cleared to see the sample")
+        # lab-3 (2026-10-03): PENDING whatever the exposure. A VENDOR or
+        # PUBLIC row used to be written AUTHORISED naming a lead
+        # investigator who never acted and was never told; a record-only
+        # row cannot change afterwards (0103's guard), so it records the
+        # requester's word that they agreed, and the named person is told.
         row = self._c.execute(
             """INSERT INTO lab.detonation
                    (sample_id, target, exposure_level, authorised_by,
                     authorisation_note, requested_by, status)
-               VALUES (%s, %s, %s, %s, %s, %s,
-                       CASE WHEN %s = 'NONE' THEN 'PENDING' ELSE 'AUTHORISED' END)
+               VALUES (%s, %s, %s, %s, %s, %s, 'PENDING')
                RETURNING id""",
             (sample_id, target, exposure_level, authorised_by, note,
-             requested_by, exposure_level)).fetchone()
+             requested_by)).fetchone()
         self._access(sample_id, requested_by, "DETONATED",
                      {"target": target, "exposure_level": exposure_level})
+        if exposure_level != "NONE":
+            from noctornal_api import notify_events
+            notify_events.detonation_named(
+                self._c, detonation_id=row[0], sample_id=sample_id,
+                named_id=authorised_by, requester_id=requested_by,
+                target=target, exposure_level=exposure_level)
         return row[0]
 
     # -- reads -------------------------------------------------------------

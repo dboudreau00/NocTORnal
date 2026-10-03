@@ -1053,6 +1053,31 @@ def detonation_signoff_requested(conn: psycopg.Connection, *,
         detonation_id=detonation_id, actor_id=requester_id)
 
 
+def detonation_named(conn: psycopg.Connection, *, detonation_id: UUID,
+                     sample_id: UUID, named_id: UUID, requester_id: UUID,
+                     target: str, exposure_level: str) -> Notification | None:
+    """A record-only VENDOR or PUBLIC detonation names this person as its
+    authoriser (lab-3, 2026-10-03). The record is the requester's word; the
+    named person is told so they can object, which they could not before.
+    Labelled as the sign-off request is, so a person who cannot read the
+    sample is told nothing."""
+    row = _sample_labels(conn, sample_id)
+    code = row[1] if row else None
+    head = (f"{code}: you are named as a detonation's authoriser" if code
+            else "You are named as a detonation's authoriser")
+    where = "a public" if exposure_level == "PUBLIC" else "a vendor"
+    return _detonation_notice(
+        conn, recipient=named_id, sample_id=sample_id,
+        kind="DETONATION_NAMED", subject=head,
+        summary=("A colleague recorded a detonation outside the product and "
+                 "named you as the person who agreed to it."),
+        body=(f"A colleague recorded sending a sample to {target}, {where} "
+              f"sandbox, and named you as the person who agreed. The product "
+              f"did not send it and you were not asked in the product. If you "
+              f"did not agree, tell the case lead: the record stays as written."),
+        detonation_id=detonation_id, actor_id=requester_id)
+
+
 def detonation_signoff_decided(conn: psycopg.Connection, *,
                                detonation_id: UUID, sample_id: UUID,
                                requester_id: UUID, approved: bool,
