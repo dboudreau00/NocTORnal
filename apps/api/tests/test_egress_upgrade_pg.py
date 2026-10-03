@@ -94,7 +94,9 @@ def test_adopt_proposes_what_rss_and_the_relay_always_had(conn, alpha6):
     passive = proposal["passive_default"]
     assert passive["any_public_host"] is True and passive["exit_kind"] == "DIRECT"
     assert {80, 443, 8443} <= set(passive["allowed_ports"])
-    assert passive["ceiling"] == "AMBER_STRICT"
+    # egress-rss-floor (2026-10-03): capped at AMBER; the AMBER_STRICT feed
+    # is a gap, never carried by the passive route.
+    assert passive["ceiling"] == "AMBER" and passive["feeds_above_ceiling"] >= 1
     routes = {r["name"]: r for r in proposal["routes"]}
     assert routes["smtp"]["entry"] == "relay.unit.test@10.1.2.0/24:587"
     assert routes["smtp"]["confirm_network"] is True

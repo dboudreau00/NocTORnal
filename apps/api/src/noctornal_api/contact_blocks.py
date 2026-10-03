@@ -99,7 +99,17 @@ from noctornal_ontology import normalise as _canonical
 #: Stamped on every block. A re-parse under a new version is a deliberate
 #: act, and knowing which parser produced a reading is the difference
 #: between fixing a rule and arguing about a result.
-PARSER_VERSION = "cb-1"
+#:
+#: cb-2 (F37, 2026-10-02): a fingerprint printed the way gpg prints it keeps
+#: all of its hex groups. cb-1 cut the value at the first run of two spaces,
+#: so a line copied from gpg kept 20 of its 40 hex characters. That changes
+#: `block_fingerprint` for a block that carries such a line, so the version
+#: moved with it: two blocks of one text parsed under different versions
+#: carry different fingerprints and are not compared as copies of each other.
+#: Nothing re-reads a stored block (`parse_and_store` returns the first parse
+#: of a text it has already stored in the case), so a block parsed under cb-1
+#: keeps its reading until somebody parses the text again somewhere new.
+PARSER_VERSION = "cb-2"
 
 ROLE_SELF = "SELF"
 ROLE_THIRD_PARTY = "THIRD_PARTY"
@@ -235,6 +245,19 @@ _TRIM_DECORATION = re.compile(r"^[\s\-=_*~#|>•·★☆▪▫\[\(]+|[\s\-=_*~#|
 #: A PGP fingerprint as humans print it: ten groups of four hex.
 _PGP_SPACED = re.compile(
     r"^(?:[0-9a-fA-F]{4}[ \t]+){7,15}[0-9a-fA-F]{4}$")
+#: What gpg prints for a fingerprint, at the start of a value: ten groups of
+#: four hex digits for a v4 key and sixteen for a v5 one, with ANY run of
+#: whitespace between groups. gpg puts two spaces in the middle
+#: ("1234 5678 9ABC DEF0 1234  5678 9ABC DEF0 1234 5678"), which is what the
+#: comment cut below mistook for the start of a comment (F37, 2026-10-02).
+#: The last group may not run on into more hex, so a group of five is not
+#: taken for a group of four.
+_GPG_FPR = re.compile(
+    r"(?:[0-9A-Fa-f]{4}[^\S\r\n]+){15}[0-9A-Fa-f]{4}(?![0-9A-Fa-f])"
+    r"|(?:[0-9A-Fa-f]{4}[^\S\r\n]+){9}[0-9A-Fa-f]{4}(?![0-9A-Fa-f])")
+#: Where a value ends and a comment begins: an arrow, two spaces, a
+#: parenthesis, a double hyphen or a hash, after whitespace.
+_COMMENT_CUT = re.compile(r"\s+[←<←]|\s{2,}|\s+\(|\s+--\s+|\s+#")
 _ONION = re.compile(r"(?:^|//)([a-z2-7]{16}|[a-z2-7]{56})\.onion", re.I)
 _MXID = re.compile(r"^@[^:@\s]+:[^:@\s]+\.[^:@\s]+$")
 
@@ -339,6 +362,30 @@ def _resolve_by_label(label: str | None) -> tuple[str | None, str | None, str] |
             return platform, sel_type, (
                 f"label {label!r} contains the platform term {word!r}")
     return None
+
+
+def _fingerprint_head(value: str, by_label) -> tuple[str, str]:
+    """(the whole hex groups of a fingerprint at the start of `value`, the
+    rest), or ("", value) when the line is not a PGP fingerprint line
+    (F37, 2026-10-02).
+
+    Narrow on purpose. It applies only where the line is a PGP_FPR line: its
+    label says so, or it has no recognised label and so is read by shape
+    (the shape rule resolves ten or sixteen groups of four to PGP_FPR). A
+    line a label resolves to anything else is left to the old cut, so no
+    other selector kind changes. It takes exactly ten or sixteen groups and
+    stops at the last: what follows is cut as it always was, so a comment
+    after the fingerprint ("  (main key)", "  # work") still is one. The text
+    is returned as written, double space and all: `observed_value` is what
+    the block said, and the normaliser that makes the durable value removes
+    every space.
+    """
+    if by_label is not None and by_label[1] != "PGP_FPR":
+        return "", value
+    match = _GPG_FPR.match(value)
+    if match is None:
+        return "", value
+    return match.group(0), value[match.end():]
 
 
 def _resolve_by_shape(value: str) -> tuple[str | None, str | None, str]:
@@ -493,17 +540,23 @@ def parse(text: str) -> list[ParsedEntry]:
         if match and value.startswith("//"):
             label, value = None, line
 
+        by_label = _resolve_by_label(label)
+
         # Trailing prose in parentheses or after an arrow is a comment, not
         # part of the identifier: "vendor@host (OTR only)" must not
         # normalise to a value containing "(OTR only)".
-        value_core = re.split(r"\s+[←<←]|\s{2,}|\s+\(|\s+--\s+|\s+#", value)[0].strip()
+        #
+        # Except inside a PGP fingerprint, whose gpg display has two spaces
+        # in the middle (F37, 2026-10-02): its whole hex groups are kept,
+        # and only what follows them is cut.
+        head, tail = _fingerprint_head(value, by_label)
+        value_core = (head + _COMMENT_CUT.split(tail)[0]).strip()
         value_core = value_core.rstrip(",;")
 
         entry = ParsedEntry(line_no=line_no, observed_value=value_core or value,
                             label=label, role=ROLE_SELF)
 
         # -- what kind of thing is it ------------------------------------
-        by_label = _resolve_by_label(label)
         if by_label is not None:
             platform, sel_type, why = by_label
             entry.platform_key, entry.selector_type = platform, sel_type

@@ -169,7 +169,7 @@ def test_the_migrations_window_and_the_runners_ceiling_are_one_number():
 
     path = (Path(__file__).resolve().parents[3] / "db" / "migrations" / "versions"
             / "0156_persona_act_queue.py")
-    spec = importlib.util.spec_from_file_location("m0155", path)
+    spec = importlib.util.spec_from_file_location("m0156", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     assert migration.MAX_ACT_WINDOW_S == MAX_TTL_S

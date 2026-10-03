@@ -34,7 +34,12 @@ Prints the counters on one line (queued, done, failed, skipped,
 abandoned, left, compiled, compile_failed) and exits 1 when a run FAILED
 or a compile failed for good in this pass. While no prohibited-content
 policy is declared it says so and exits 0 having touched nothing (docs/16
-L1): that is the deployment's state, not this pass's failure.
+L1): that is the deployment's state, not this pass's failure. When the
+isolated analysis worker does not answer, or a production deployment
+configures none, it says so and exits 1 having touched nothing (docs/17
+F42): that is a fault, and the queue waits for it. When the worker fails
+during the pass, the pass stops, prints `interrupted=1` and exits 1; the
+run or compile it was on goes back to the queue with no attempt spent.
 
 `--backfill` decrypts every held sample in the passes that follow. That is
 the operator's decision, never a migration's, and it is recorded as
@@ -91,6 +96,15 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         print(f"refused: {problem}")
         return 1
+    if args.command == "run" and not args.backfill:
+        # F42 (2026-10-02): no isolated worker answering, or production
+        # with none configured, is a fault an operator must see, so exit 1
+        # before a connection is opened; the queue is left as it was.
+        from noctornal_api import analysis_runner
+        refusal = analysis_runner.unavailable()
+        if refusal:
+            print(f"refused: {refusal}")
+            return 1
     conn = connect_system(SystemPurpose.LAB_TRIAGE)
     try:
         if args.backfill:
@@ -112,8 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
     print(" ".join(f"{key}={value}" for key, value in counters.items()))
-    return 1 if counters.get("failed", 0) or counters.get("compile_failed", 0) \
-        else 0
+    # interrupted (F42 review, 2026-10-02): the worker failed mid-pass, a
+    # fault an operator must see, as the refusal before a pass is.
+    return 1 if (counters.get("failed", 0) or counters.get("compile_failed", 0)
+                 or counters.get("interrupted", 0)) else 0
 
 
 if __name__ == "__main__":

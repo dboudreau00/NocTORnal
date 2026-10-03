@@ -86,6 +86,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from _env import load_env_local  # noqa: E402
+from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment  # noqa: E402
 
 load_env_local()
 
@@ -170,6 +171,18 @@ def _start_poll():
 def main(argv: list[str] | None = None, *, conn=None, start_poll=None,
          adapters=None, transport_factory=None,
          stop: threading.Event | None = None, clock=time.monotonic) -> int:
+    # First, before the arguments are read or anything is connected to (docs/17
+    # F52 and infra-12, 2026-10-02 and 2026-10-03): the one helper every job
+    # calls. Under NOCTORNAL_ENV=production a published credential or the
+    # schema owner's refuses the collector, which never receives the owner's
+    # credential (compose gives it secrets.env, egress-client.env and
+    # collector.env only). The persona key half is not asked of it: the key
+    # is the collector's by design, and `refusal()` below makes the
+    # collector's own half. Exit 2, as for every job and as `refusal()` does.
+    refusals = refuse_unsafe_job_environment("collector", holds_persona_key=True)
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--once", action="store_true",
                         help="one pass of the act queue and one poll pass, "

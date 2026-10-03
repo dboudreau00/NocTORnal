@@ -853,11 +853,14 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
     if policy is None:
         return Check(
             "redis_limiter_store", False,
+            # INFO is asked first since the limiter's Redis ACL (2026-10-02),
+            # so UNKNOWN means neither answered, not CONFIG alone.
             f"Redis at {where} answers PING; maxmemory-policy is UNKNOWN because "
-            f"CONFIG GET was refused (managed Redis usually disables CONFIG)",
+            f"neither INFO memory nor CONFIG GET reported it (managed Redis "
+            f"usually disables CONFIG)",
             "confirm out of band that the limiter's Redis runs with "
-            "maxmemory-policy=noeviction, or point REDIS_URL at one that "
-            "answers CONFIG GET (docs/16 C8)")
+            "maxmemory-policy=noeviction, or point REDIS_URL at one whose INFO "
+            "memory reports it (docs/16 C8)")
     if is_evicting_policy(policy):
         # The bundled stack is named for what it runs now. The action said
         # infra/docker-compose.yml sets allkeys-lru, which stopped being true
@@ -935,13 +938,13 @@ def _limiter_prefix() -> bytes:
 
     Read from `RateLimiter`'s own constructor default, which is the value
     `http.limits.build_limiter` builds with, so this cannot drift from what
-    the limiter writes if the default ever changes."""
-    import inspect
+    the limiter writes if the default ever changes. Through
+    `ratelimit_redis.limiter_key_prefix` since 2026-10-02, the reader the
+    production ACL's key pattern is built from, so the census and the ACL
+    mean the same prefix."""
+    from noctornal_api.ratelimit_redis import limiter_key_prefix
 
-    from noctornal_api.ratelimit import RateLimiter
-
-    prefix = inspect.signature(RateLimiter).parameters["key_prefix"].default
-    return f"{prefix}:".encode()
+    return limiter_key_prefix().encode()
 
 
 @dataclass(frozen=True)
@@ -1040,6 +1043,181 @@ def _census(client, prefix: bytes, *, clock=time.monotonic) -> _Census:
                    _other_databases(client, own), len(provider))
 
 
+# ---------------------------------------------------------------------------
+# The limiter's Redis ACL, read over the limiter's own connection
+# (the limiter's Redis ACL, 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# The census above can only report a co-tenant after it has written. Since
+# 2026-10-02 the production Redis prevents one: its ACL disables `default`
+# and gives the limiter a user that reads and writes under its prefix alone
+# and runs its own commands alone (ratelimit_redis.LIMITER_ACL_COMMANDS,
+# which says what three of them can still see). This reads that configuration
+# with ACL WHOAMI and ACL GETUSER over the connection REDIS_URL opens, and
+# nothing else: no probe that a correct ACL would refuse, because every
+# refusal lands in the server's ACL LOG, where a real attempt to get round
+# the ACL has to stand out.
+#
+# Production fails closed on what it reads: the limiter signed in as
+# `default`; `default` enabled, with a password or without one (open, the
+# shape every unauthenticated client is signed in as); the limiter's user
+# holding a key outside its prefix, a channel, a selector, a category or a
+# command it does not send; or an ACL it cannot read. A development Redis
+# has none of this, by design (infra/docker-compose.yml is unchanged), so
+# outside production the row says what it read and passes on the census.
+# What stays invisible is said in the passing evidence: another user the
+# ACL defines can still write here, and it would show only in the census.
+
+@dataclass(frozen=True)
+class _AclUser:
+    """One user's rules as ACL GETUSER states them. Never a password."""
+    enabled: bool
+    nopass: bool
+    keys: tuple[str, ...]       # patterns, with `~` and `%R~`-style marks taken off
+    channels: tuple[str, ...]
+    granted: tuple[str, ...]    # every `+` rule, lowercased: commands and @categories
+    selectors: int
+
+
+@dataclass(frozen=True)
+class _AclPosture:
+    whoami: str | None
+    default: _AclUser | None
+    own: _AclUser | None
+    unreadable: str | None      # why the ACL could not be read; no value in it
+
+
+def _patterns(value, mark: str) -> tuple[str, ...]:
+    """Key or channel patterns from either shape GETUSER has had: one
+    string of `~pat` words (Redis 7) or a list of bare patterns (6.x)."""
+    if value is None:
+        return ()
+    if isinstance(value, (bytes, str)):
+        words = _text(value).split()
+    else:
+        words = [_text(item) for item in value]
+    out = []
+    for word in words:
+        if mark in word and word.split(mark, 1)[0] in ("", "%R", "%W", "%RW"):
+            word = word.split(mark, 1)[1]
+        out.append(word)
+    return tuple(out)
+
+
+def _acl_user(reply) -> _AclUser | None:
+    """Parse a raw ACL GETUSER reply: a RESP3 map or a RESP2 flat list.
+    None when the user does not exist."""
+    if reply is None:
+        return None
+    if isinstance(reply, dict):
+        fields = {_text(k).lower(): v for k, v in reply.items()}
+    elif isinstance(reply, (list, tuple)):
+        fields = {_text(reply[i]).lower(): reply[i + 1]
+                  for i in range(0, len(reply) - 1, 2)}
+    else:
+        raise ValueError("ACL GETUSER answered in a shape this check does not read")
+    flags = {_text(f).lower() for f in (fields.get("flags") or [])}
+    keys = _patterns(fields.get("keys"), "~")
+    if "allkeys" in flags:  # Redis 6.x states ~* as a flag
+        keys = (*keys, "*")
+    channels = _patterns(fields.get("channels"), "&")
+    if "allchannels" in flags:
+        channels = (*channels, "*")
+    words = _text(fields.get("commands") or "").lower().split()
+    granted = [w[1:] for w in words if w.startswith("+")]
+    if "allcommands" in flags:
+        granted.append("@all")
+    return _AclUser("on" in flags, "nopass" in flags, keys, channels,
+                    tuple(granted), len(fields.get("selectors") or []))
+
+
+def _acl_posture(client) -> _AclPosture:
+    """WHOAMI, then GETUSER for `default` and for the limiter's own user,
+    over the limiter's own client and its timeouts. Raw replies, parsed
+    here, so the answer does not depend on which redis-py parses ACL
+    replies how. Any refusal stops the reading and is recorded by kind,
+    without the URL and without a value."""
+    try:
+        whoami = _text(client.execute_command("ACL", "WHOAMI"))
+        default = _acl_user(client.execute_command("ACL", "GETUSER", "default"))
+        own = (default if whoami == "default" else
+               _acl_user(client.execute_command("ACL", "GETUSER", whoami)))
+    except Exception as exc:  # noqa: BLE001 - a refused ACL read is a verdict
+        log.debug("the limiter's ACL could not be read: %s", type(exc).__name__)
+        return _AclPosture(None, None, None,
+                           f"{type(exc).__name__}: {str(exc)[:160]}")
+    return _AclPosture(whoami, default, own, None)
+
+
+def _acl_faults(posture: _AclPosture, prefix: str) -> list[str]:
+    """What, in a production limiter's ACL, is not the isolation the
+    deployment promises. Empty when it is."""
+    from noctornal_api.ratelimit_redis import LIMITER_ACL_COMMANDS
+
+    if posture.unreadable is not None:
+        return [f"its ACL could not be read ({posture.unreadable}), so nothing "
+                f"shows that the server confines it"]
+    faults: list[str] = []
+    if posture.whoami == "default":
+        faults.append("the limiter signs in as the default user, which no rule "
+                      "confines to the limiter's keys or commands")
+    default = posture.default
+    if default is not None and default.enabled:
+        faults.append(
+            "the default user is enabled and asks for no password, so every "
+            "client that reaches this Redis is signed in as it" if default.nopass
+            else "the default user is enabled, so whoever holds its password "
+                 "reaches every key the limiter writes")
+    own = posture.own
+    if own is None and posture.whoami != "default":
+        faults.append(f"ACL GETUSER has no rules for its user {posture.whoami}, so "
+                      f"nothing shows what that user may do")
+    if own is not None and posture.whoami != "default":
+        outside = [k for k in own.keys if not k.startswith(prefix)]
+        extra = sorted(set(own.granted) - set(LIMITER_ACL_COMMANDS))
+        if not own.keys:
+            faults.append(f"its user {posture.whoami} may touch no key, so every "
+                          f"meter write fails")
+        if outside:
+            faults.append(f"its user {posture.whoami} may touch "
+                          f"{count_of(len(outside), 'key pattern', 'key patterns')} "
+                          f"outside {prefix}")
+        if extra:
+            faults.append(f"its user {posture.whoami} may run "
+                          f"{', '.join(extra)}, which the limiter never sends")
+        if own.channels:
+            faults.append(f"its user {posture.whoami} may use pub/sub channels")
+        if own.selectors:
+            faults.append(f"its user {posture.whoami} carries "
+                          f"{count_of(own.selectors, 'selector', 'selectors')} "
+                          f"granting more")
+    return faults
+
+
+def _acl_summary(posture: _AclPosture, prefix: str, faults: list[str]) -> str:
+    """One sentence on what was read, for a row that passes: confined, or
+    (outside production only) what production would fail it on."""
+    from noctornal_api.ratelimit_redis import LIMITER_ACL_COMMANDS
+
+    if faults:
+        return ("Outside production the census alone decides this row, and the "
+                "limiter's Redis is not confined the way production requires: "
+                + "; ".join(faults) + ". That is the development stack's shape")
+    granted = len(set(posture.own.granted)) if posture.own else 0
+    sent = len(LIMITER_ACL_COMMANDS)
+    commands = (f"the {sent} commands it sends" if granted == sent
+                else f"{granted} of the {sent} commands it sends")
+    # "Confines ... to keys under" read as more than the ACL does (review of
+    # 2026-10-02): reads and writes are confined, key NAMES, INFO and other
+    # users' rules are not, so the sentence says which.
+    return (f"The server's ACL lets the limiter's user {posture.whoami} read and "
+            f"write only keys under {prefix} and run only {commands}, and the "
+            f"default user is disabled. That user can still list every key name "
+            f"in its database, read INFO and read any user's ACL rules, which "
+            f"the census and this row use; another user the ACL defines would "
+            f"show only in the key census")
+
+
 def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     """docs/16 C8, the half `redis_limiter_store` cannot answer: does the
     limiter have its Redis to itself? See the block above for what is
@@ -1050,9 +1228,18 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     thing. A walk that cannot finish, or a server that will not answer
     SCAN or INFO, is NOT ok, on the rule `redis_limiter_store` states for
     an unknown eviction policy: the register lists things confirmed.
+
+    Since 2026-10-02 it reads the server's ACL first (the block above
+    `_acl_posture`), and under NOCTORNAL_ENV=production a limiter the ACL
+    does not confine fails the row before the census runs.
     """
+    from noctornal_api.config import ENV_VAR, PRODUCTION
     from noctornal_api.http.limits import redacted_url
-    from noctornal_api.ratelimit_redis import CONNECT_TIMEOUT_S, RedisBackend
+    from noctornal_api.ratelimit_redis import (
+        CONNECT_TIMEOUT_S,
+        LIMITER_ACL_USER,
+        RedisBackend,
+    )
 
     name = "redis_limiter_isolated"
     action = (
@@ -1083,6 +1270,27 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
         # timeouts and no-retry setting (ratelimit_redis.py, point 3): a
         # sick Redis fails this row in a quarter of a second rather than
         # holding the whole register.
+        posture = _acl_posture(backend._redis)
+        faults = _acl_faults(posture, shown)
+        if faults and os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
+            return Check(
+                name, False,
+                f"Redis at {where} answers PING, and its ACL does not confine "
+                f"the limiter to its own keys and commands: "
+                + "; ".join(faults)
+                + ". Anything holding a credential this Redis accepts can then "
+                  "delete the limiter's meters, which admits whoever they were "
+                  "refusing, or fill the instance until every limit that fails "
+                  "closed refuses everyone",
+                f"run the limiter's Redis with an ACL file that disables the "
+                f"default user and gives the limiter its own user, confined to "
+                f"keys under {shown} and the commands "
+                f"ratelimit_redis.LIMITER_ACL_COMMANDS lists, and sign REDIS_URL "
+                f"in as that user. infra/production/compose.yml writes that ACL "
+                f"for the user {LIMITER_ACL_USER}, and sudo ./release/install.sh "
+                f"--production-secrets (release/install.ps1 -ProductionSecrets) "
+                f"writes REDIS_URL to match (docs/16 C8, "
+                f"release/secrets-upgrade/README.md)")
         try:
             census = _census(backend._redis, prefix)
         except Exception as exc:  # noqa: BLE001 - a refused SCAN is a verdict
@@ -1167,7 +1375,8 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
         name, True,
         f"{own}, and no other database on the instance holds a key. A tenant "
         f"that holds no keys right now, or a second server behind the same "
-        f"address, is not visible from here (docs/16 C8)")
+        f"address, is not visible from here (docs/16 C8). "
+        f"{_acl_summary(posture, shown, faults)}")
 
 
 # ---------------------------------------------------------------------------
@@ -2341,8 +2550,10 @@ def _triage_claims_within_labels(conn: psycopg.Connection) -> Check:
 def _triage_claims_dated(conn: psycopg.Connection) -> Check:
     """Claims accepted from Triage before Alpha 6 that cite a document and
     carry no observation date (L2, 2026-09-24). Always passes: a missing
-    date shortens First seen and Last seen and harms nothing else, and the
-    fill waits on the owner's decision about invariant 5."""
+    date shortens First seen and Last seen and harms nothing else. Nothing
+    fills it: invariant 5 is not amended (docs/00 open question 11, settled
+    2026-10-02), and an analyst gives a claim its date by supersession, the
+    inspector's Date this claim."""
     from noctornal_api.legacy_records import undated_count
     n = undated_count(conn)
     if not n:
@@ -2356,7 +2567,9 @@ def _triage_claims_dated(conn: psycopg.Connection) -> Check:
         caveat=(f"First seen and Last seen ignore {agree(n, 'it', 'them')}. "
                 f"python scripts/legacy_records.py --section undated lists "
                 f"{agree(n, 'it', 'them')} with the date each document "
-                f"gives; an analyst adds a dated claim where it matters."))
+                f"gives. An analyst gives a claim its date in the inspector "
+                f"(Date this claim), which supersedes it with a dated claim "
+                f"and leaves the old one on record."))
 # The network boundary (docs/20 section 6.4 and docs/00 decision 68,
 # 2026-09-24). Its PROXY branch is the route provider's own verdict, so the
 # egress proxy fills it without a line here.
@@ -2587,26 +2800,289 @@ def _pgp_key_directory(conn: psycopg.Connection) -> Check:
 _TRIAGE_STALE_MINUTES = 60
 
 
-def _sample_static_analysis(conn: psycopg.Connection) -> Check:
-    """Whether static triage can run here, under which limits, and whether
-    anything is draining its queue (F11 N).
+#: F42 (2026-10-02): what an operator does to put analysis in the worker.
+_WORKER_ACTION = ("run the analysis-worker service from "
+                  "infra/production/compose.yml and set NOCTORNAL_ANALYSIS_SOCKET "
+                  "on api, cron and lab-triage (infra/production/README.md, "
+                  "Analysis worker)")
 
-    Fails on a settings problem, on a child that will not start or whose
-    selftest fails, and when the oldest queued run has waited an hour with
-    no run finishing in that hour ("nothing is running static triage"); a
-    large backfill that is draining does not fail it. Passes with a caveat
-    for what the child can still reach (lab_static's docstring), for
-    platforms that cannot bound its memory, and when YARA is not
-    installed."""
+
+def _analysis_worker(choice, settings) -> tuple[Check | None, str, str]:
+    """The isolated worker's own account, judged: (a failing Check or None,
+    the sentence for the evidence, a caveat). Readiness asks the worker
+    rather than trusting the compose file: its environment's names, how it
+    keeps its children apart, its capabilities, no-new-privileges, a
+    read-only root, its network interfaces, its parser versions and the
+    largest request it takes (F42, 2026-10-02), and since the verify round
+    (2026-10-03) its pids limit, the state a child could leave behind, any
+    slot it has retired and its children's task limit. Every one of those it
+    does not report, or reports wrong, fails the row: the F42 review found a
+    worker with a network interface, or with none reported, passed."""
+    from noctornal_api import analysis_runner, lab_triage
+    from noctornal_api.analysis_worker import (
+        CHILD_MAX_TASKS,
+        SUPERVISOR_CAPABILITIES,
+        pids_ceiling,
+        pids_needed,
+        pids_problem,
+    )
+    from noctornal_api.yara_rules import MAX_COMPILED_BYTES
+    name = "sample_static_analysis"
+    own = ", ".join(sorted(analysis_runner.WORKER_OWN_ENV))
+    try:
+        status = analysis_runner.hello(choice.socket_path)
+    except analysis_runner.WorkerUnavailable:
+        return (Check(name, False,
+                      f"The isolated analysis worker did not answer at "
+                      f"{choice.socket_path}, so static triage and forum "
+                      f"parsing are refused until it does.",
+                      "start the analysis-worker service and read its log "
+                      "(infra/production/README.md, Analysis worker)"), "", "")
+    keys = status.get("environment_keys")
+    keys = keys if isinstance(keys, list) else []
+    foreign = analysis_runner.foreign_environment(keys)
+    if status.get("environment_count") != len(keys):
+        # Fail closed: an environment the worker did not list whole is
+        # one nobody here has read.
+        return (Check(name, False,
+                      "The isolated analysis worker did not list its whole "
+                      "environment, so what it holds cannot be judged.",
+                      "rebuild and restart the analysis-worker service, and "
+                      f"remove every variable from it but its own ({own})"),
+                "", "")
+    if foreign:
+        return (Check(name, False,
+                      f"The isolated analysis worker holds "
+                      f"{count_of(len(foreign), 'setting', 'settings')} that "
+                      f"{agree(len(foreign), 'is', 'are')} not its own ("
+                      f"{', '.join(foreign[:10])}), and a parser exploit "
+                      f"would hold {agree(len(foreign), 'it', 'them')} too.",
+                      "remove every env_file and variable from the "
+                      f"analysis-worker service but its own ({own}), and "
+                      "restart it"), "", "")
+    # F42 review (2026-10-02): the worker may be root (it gives each child
+    # a uid of its own, which needs setuid), so what is judged is whether
+    # its children are kept apart and what the worker itself may do.
+    children = status.get("children")
+    children = children if isinstance(children, dict) else {}
+    uids = children.get("uids")
+    apart = (children.get("isolation") == "own_uid" and isinstance(uids, list)
+             and bool(uids) and len(set(map(str, uids))) == len(uids)
+             and all(isinstance(u, int) and not isinstance(u, bool) and u > 0
+                     and u != status.get("uid") for u in uids))
+    if not apart:
+        return (Check(name, False,
+                      "The isolated analysis worker runs its children as its "
+                      "own user (it was started with --shared-uid, or reports "
+                      "no user of their own), so a compromised child could put "
+                      "itself at the worker's socket and outlive its request.",
+                      "start the analysis-worker service as "
+                      "infra/production/compose.yml does (user 0:10001, "
+                      "cap_add KILL, SETGID and SETUID), without --shared-uid"),
+                "", "")
+    caps = status.get("capabilities")
+    extra = (sorted(str(c)[:32] for c in set(map(str, caps))
+                    - SUPERVISOR_CAPABILITIES)
+             if isinstance(caps, list) else None)
+    if extra is None or extra:
+        return (Check(name, False,
+                      "The isolated analysis worker did not report its "
+                      "capabilities, so what it may do cannot be judged."
+                      if extra is None else
+                      f"The isolated analysis worker holds capabilities beyond "
+                      f"kill, setgid and setuid ({', '.join(extra[:8])}).",
+                      "run the analysis-worker service with cap_drop ALL and "
+                      "cap_add KILL, SETGID and SETUID only, as "
+                      "infra/production/compose.yml does"), "", "")
+    if status.get("no_new_privileges") is not True:
+        return (Check(name, False,
+                      "The isolated analysis worker runs without "
+                      "no-new-privileges, so a child could take a capability "
+                      "back through a setuid program.",
+                      "set security_opt no-new-privileges:true on the "
+                      "analysis-worker service, as "
+                      "infra/production/compose.yml does"), "", "")
+    if status.get("read_only_root") is not True:
+        return (Check(name, False,
+                      "The isolated analysis worker's root filesystem is "
+                      "writable, or it did not say.",
+                      "set read_only: true on the analysis-worker service, as "
+                      "infra/production/compose.yml does"), "", "")
+    # F42 verify round (2026-10-03): the worker's pids limit, the state a
+    # child could leave behind, a lost slot and the children's task limit
+    # were claimed in the report and the hello carried none of them.
+    slots = status.get("concurrency")
+    if isinstance(slots, bool) or not isinstance(slots, int) or slots < 1:
+        return (Check(name, False,
+                      "The isolated analysis worker did not report how many "
+                      "requests it runs at once, so its pids limit cannot be "
+                      "judged.",
+                      "rebuild and restart the analysis-worker service from "
+                      "the same image as the API (up -d --build)"), "", "")
+    pids = pids_problem(status.get("pids_max"), slots)
+    if pids:
+        return (Check(name, False, pids,
+                      f"set pids_limit on the analysis-worker service to a "
+                      f"number from {pids_needed(slots)} to "
+                      f"{pids_ceiling(slots)}, as infra/production/compose.yml "
+                      f"does, and restart it"), "", "")
+    left = status.get("state_left_open")
+    if not isinstance(left, list):
+        return (Check(name, False,
+                      "The isolated analysis worker did not report whether a "
+                      "child can leave state behind that outlives its request.",
+                      "rebuild and restart the analysis-worker service from "
+                      "the same image as the API (up -d --build)"), "", "")
+    if left:
+        shown = ", ".join(sorted(str(n)[:40] for n in left)[:8])
+        return (Check(name, False,
+                      f"The isolated analysis worker lets a child leave state "
+                      f"behind that outlives its request ({shown}), which a "
+                      f"later child could read and which counts against the "
+                      f"worker's memory.",
+                      "run the analysis-worker service with ipc none, the "
+                      "sysctls and the /tmp that only root can write, as "
+                      "infra/production/compose.yml does, and restart it"),
+                "", "")
+    retired = status.get("slots_retired")
+    if isinstance(retired, bool) or not isinstance(retired, int):
+        return (Check(name, False,
+                      "The isolated analysis worker did not report how many "
+                      "of its slots it has retired.",
+                      "rebuild and restart the analysis-worker service from "
+                      "the same image as the API (up -d --build)"), "", "")
+    if retired != 0:
+        return (Check(name, False,
+                      f"The isolated analysis worker has retired {retired} of "
+                      f"its {slots} slots, because a child's user could not be "
+                      f"emptied, and is running at reduced capacity.",
+                      "restart the analysis-worker service and read its log "
+                      "for the user it could not empty"), "", "")
+    if status.get("versions") != lab_triage._parent_versions():
+        return (Check(name, False,
+                      "The isolated analysis worker runs different parser "
+                      "versions from this process, so every answer it gives "
+                      "would be refused.",
+                      "rebuild and restart the analysis-worker service from "
+                      "the same image as the API (up -d --build)"), "", "")
+    cap = status.get("max_request_bytes")
+    need = settings.max_bytes + MAX_COMPILED_BYTES
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < need:
+        return (Check(name, False,
+                      f"The isolated analysis worker takes requests of at most "
+                      f"{(cap if isinstance(cap, int) else 0) >> 20} MiB, and "
+                      f"a YARA scan of a sample at the analysis maximum needs "
+                      f"{need >> 20} MiB, so the largest samples would be "
+                      f"refused.",
+                      "raise NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES on the "
+                      "analysis-worker service, and its memory limit with it"),
+                "", "")
+    interfaces = status.get("network_interfaces")
+    if not isinstance(interfaces, list):
+        return (Check(name, False,
+                      "The isolated analysis worker did not report its network "
+                      "interfaces, so whether it can reach anything cannot be "
+                      "judged.",
+                      "rebuild and restart the analysis-worker service with "
+                      "network_mode none, as infra/production/compose.yml "
+                      "does"), "", "")
+    others = sorted(str(i)[:32] for i in interfaces if i != "lo")
+    if others:
+        return (Check(name, False,
+                      f"The isolated analysis worker has a network interface "
+                      f"besides loopback ({', '.join(others[:5])}), so a parser "
+                      f"exploit in it could reach whatever that network "
+                      f"reaches.",
+                      "run the analysis-worker service with network_mode none, "
+                      "as infra/production/compose.yml does, and restart it"),
+                "", "")
+    tasks = children.get("max_tasks")
+    if (isinstance(tasks, bool) or not isinstance(tasks, int)
+            or not 1 <= tasks <= CHILD_MAX_TASKS):
+        # F42 verify round (2026-10-03): a worker reporting a limit of a
+        # million used to pass, and the evidence then repeated it.
+        return (Check(name, False,
+                      f"The isolated analysis worker did not report a task "
+                      f"limit for its children of at most {CHILD_MAX_TASKS}, "
+                      f"so what one child could start is not bounded.",
+                      "rebuild and restart the analysis-worker service from "
+                      "the same image as the API (up -d --build)"), "", "")
+    caveat = ""
+    words = (f"Analysis runs in the isolated worker at {choice.socket_path}: "
+             f"{count_of(len(keys), 'environment variable', 'environment variables')}, "
+             f"none a secret and none a setting but its own; each child a user "
+             f"of its own with at most {tasks} processes and threads; no "
+             f"network interface but loopback; a pids limit of "
+             f"{status.get('pids_max')} for {slots} slots; no state a child "
+             f"can leave behind.")
+    return None, words, caveat
+
+
+def _sample_static_analysis(conn: psycopg.Connection) -> Check:
+    """Whether static triage and forum parsing can run here, where, under
+    which limits, and whether anything is draining the triage queue (F11
+    N; F42, 2026-10-02).
+
+    Where: in the isolated analysis worker when NOCTORNAL_ANALYSIS_SOCKET
+    names one, which must answer, hold no setting but its own, give each
+    child a user of its own, hold no capability but kill, setgid and
+    setuid, run with no-new-privileges and a read-only root, have no
+    network interface but loopback, run this process's parser versions
+    and take a request as large as the analysis maximum, run under a pids
+    limit that holds its slots and bounds the container, leave no state a
+    child could create behind it and have retired no slot, and whose child
+    must not reach the database host (F42 review, 2026-10-02; the pids
+    limit, the state and the slots, 2026-10-03); otherwise
+    in local child processes. Production with neither setting refuses
+    every analysis and fails here; production that chose the local child
+    (NOCTORNAL_ANALYSIS_LOCAL=1) fails here too, because the residual
+    docs/17 F42 names is then the deployment's, said out loud rather than
+    hidden in a caveat. Development's local child passes with a caveat for
+    what it can still reach (lab_static's docstring).
+
+    Also fails on a settings problem, on a child that will not start or
+    whose selftest fails, and when the oldest queued run has waited an
+    hour with no run finishing in that hour ("nothing is running static
+    triage"); a large backfill that is draining does not fail it. Passes
+    with a caveat for platforms that cannot bound memory, and when YARA is
+    not installed."""
     from urllib.parse import urlsplit
 
-    from noctornal_api import fuzzyhash, lab_static, lab_triage
+    from noctornal_api import analysis_runner, fuzzyhash, lab_static, lab_triage
     from noctornal_api.yara_rules import engine_version
     name = "sample_static_analysis"
     settings, problem = lab_triage.analysis_settings()
     if problem:
         return Check(name, False, problem,
                      "correct the setting it names and restart")
+    from noctornal_api.samples import origin_split
+    if origin_split().serves_here:
+        # The sample origin serves downloads and parses nothing, and it is
+        # given no worker socket (compose.yml): a red row about a runner it
+        # never uses would teach an operator to read past this one (F42,
+        # 2026-10-02).
+        return Check(name, True,
+                     "This process is the sample origin, which analyses "
+                     "nothing; the application's register says where "
+                     "analysis runs.")
+    choice = analysis_runner.runner_choice()
+    if choice.mode == "refused":
+        if choice.reason == analysis_runner.NOT_CONFIGURED:
+            return Check(
+                name, False,
+                "No isolated analysis worker is configured "
+                "(NOCTORNAL_ANALYSIS_SOCKET is not set) in this production "
+                "deployment, so static triage and forum parsing are refused: "
+                "nothing hostile is parsed, and the triage queue waits.",
+                _WORKER_ACTION + "; NOCTORNAL_ANALYSIS_LOCAL=1 would parse in "
+                "this container instead, beside its secrets (docs/17 F42)")
+        return Check(name, False, f"{choice.reason}.",
+                     "correct the setting it names and restart")
+    where, worker_caveat = "", ""
+    if choice.mode == "isolated":
+        failed, where, worker_caveat = _analysis_worker(choice, settings)
+        if failed is not None:
+            return failed
     dsn = urlsplit(os.environ.get("DATABASE_URL", "").replace("+psycopg", ""))
     try:
         probe = {"host": dsn.hostname, "port": dsn.port or 5432} \
@@ -2616,11 +3092,31 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
     try:
         out = lab_triage.selftest(settings, probe=probe)
     except RuntimeError as exc:
+        if choice.mode == "isolated":
+            return Check(name, False,
+                         f"the analysis child in the isolated worker failed its "
+                         f"selftest: {exc}",
+                         "read the analysis-worker service's log")
         return Check(name, False, f"the analysis child failed its selftest: {exc}",
                      "check that this server's Python can run "
                      "python -m noctornal_api.lab_static, and its log")
+    exposure = out.get("exposure") or {}
+    if choice.mode == "isolated":
+        if exposure.get("database_reachable"):
+            return Check(name, False,
+                         f"{where} Its analysis child can open a connection to "
+                         f"the database host, so the worker is not isolated.",
+                         "run the analysis-worker service with network_mode "
+                         "none, as infra/production/compose.yml does")
+        where += " Its analysis child cannot reach the database host."
+    else:
+        where = ("Analysis runs in local child processes on this host"
+                 + (" by explicit choice (NOCTORNAL_ANALYSIS_LOCAL=1)."
+                    if choice.explicit_local else "."))
     caps = out.get("capabilities") or {}
-    kind = caps.get("limits") or lab_static.limits_kind()
+    kind = caps.get("limits")
+    if kind not in lab_static.LIMITS_WORDS:
+        kind = lab_static.limits_kind()
     leaked = [k for k in out.get("environment_keys") or []
               if k.startswith(("NOCTORNAL_", "DATABASE", "MINIO_", "SAMPLE_",
                                "PRESERVE_", "REDIS", "SMTP_"))]
@@ -2641,6 +3137,7 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
                 if t else "never")
     yara = engine_version()
     evidence = (
+        f"{where} "
         f"pefile {caps.get('pefile') or 'not installed'}; {fuzzyhash.TLSH_IMPLEMENTATION}; "
         f"{fuzzyhash.SSDEEP_IMPLEMENTATION}; yara-x {yara or 'not installed'}. "
         f"Limits: {lab_static.LIMITS_WORDS[kind]}. Analysis maximum "
@@ -2652,15 +3149,19 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         + f"; last finished run {fmt(last_done)}.")
     now = datetime.now(timezone.utc)
     stale = timedelta(minutes=_TRIAGE_STALE_MINUTES)
-    if depth and oldest and now - oldest > stale and (
-            last_done is None or now - last_done > stale):
-        return Check(name, False, evidence,
-                     "nothing is running static triage; schedule "
-                     "scripts/lab_triage.py (docs/11)")
-    caveats = []
-    exposure = out.get("exposure") or {}
+    schedule = ("nothing is running static triage; schedule "
+                "scripts/lab_triage.py (docs/11)")
+    stale_queue = bool(depth and oldest and now - oldest > stale and (
+        last_done is None or now - last_done > stale))
+    explicit_local = choice.mode == "local" and choice.production
+    if stale_queue and not explicit_local:
+        return Check(name, False, evidence, schedule)
+    caveats = [worker_caveat] if worker_caveat else []
     reach = []
-    if exposure.get("proc_environ_readable"):
+    # In the worker, /proc/1/environ is the worker's own, which holds
+    # nothing (it refuses to start otherwise, and the hello says so), so
+    # only a local child's read of it is an exposure (F42, 2026-10-02).
+    if exposure.get("proc_environ_readable") and choice.mode == "local":
         reach.append("read the environment of processes running as this "
                      "user, which holds this deployment's secrets")
     if exposure.get("database_reachable"):
@@ -2671,14 +3172,21 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
         caveats.append(
             "The analysis child can " + " and ".join(reach) + ", so a "
             "parser exploit in a hostile sample could do the same. Run the "
-            "analysis in a container with no secrets and no network to "
-            "close this (docs/16).")
+            "analysis-worker service and set NOCTORNAL_ANALYSIS_SOCKET to "
+            "close this (docs/17 F42).")
     if kind != "rlimit":
         caveats.append(f"On this platform the child is bounded by "
                        f"{lab_static.LIMITS_WORDS[kind]}.")
     if yara is None:
         caveats.append("YARA is not installed, so static triage scans with no "
                        "rules: install noctornal-api[yara].")
+    if explicit_local:
+        # Chosen out loud, and still not isolated: the row stays red so a
+        # green register never hides it (F42, 2026-10-02). A stale queue
+        # is said in the same action rather than hiding this one.
+        return Check(name, False, " ".join([evidence] + caveats),
+                     _WORKER_ACTION + ", then unset NOCTORNAL_ANALYSIS_LOCAL "
+                     "(docs/17 F42)" + (f"; and {schedule}" if stale_queue else ""))
     return Check(name, True, evidence, caveat=" ".join(caveats))
 
 
@@ -3166,6 +3674,18 @@ def _telegram_collection(conn: psycopg.Connection) -> Check:
     return Check("telegram_collection", ok, evidence, "" if ok else action)
 
 
+# The deployment-wide sweep of collected documents (docs/17 F30, 2026-10-02).
+# Not blocking and with no CONSEQUENCES entry: a late sweep is a duty
+# overdue, not a decision that has to be settled before material arrives, and
+# the sweep is a script an operator runs, so there is no console target. The
+# verdict, counts only, is `retention_sweep.readiness_verdict`'s.
+def _retention_sweep_current(conn: psycopg.Connection) -> Check:
+    from noctornal_api import retention_sweep
+
+    ok, evidence, action = retention_sweep.readiness_verdict(conn)
+    return Check("retention_sweep_current", ok, evidence, "" if ok else action)
+
+
 def _collector_split(conn: psycopg.Connection) -> Check:
     """A collector process (2026-10-02): the API holds no persona key, a
     collector drains the persona act queue, and every persona credential
@@ -3478,6 +3998,10 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("retention_rules_confirmed", _retention_rules_confirmed,
      "the retention table could not be read; run alembic upgrade head and "
      "then confirm each rule at POST /retention/rules/{category}"),
+    # F30, 2026-10-02. Beside its sibling: the rules say when a document
+    # expires, this says whether anything destroyed the ones that did.
+    ("retention_sweep_current", _retention_sweep_current,
+     "the collected documents could not be read; run alembic upgrade head"),
     ("security_officer_present", _security_officer_present,
      "the role table could not be read; once it can, grant SECURITY_OFFICER "
      "to an active account so break-glass has a reviewer"),

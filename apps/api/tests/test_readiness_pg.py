@@ -48,6 +48,8 @@ EXPECTED_CHECKS = (
     "prohibited_content_policy",
     "sample_origin_configured",
     "retention_rules_confirmed",
+    # F30 (2026-10-02): collected documents past their clock and unswept.
+    "retention_sweep_current",
     "security_officer_present",
     "sys_admin_present",
     "totp_kek_set",

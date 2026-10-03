@@ -67,6 +67,9 @@ HELD = `(SELECT iam.rls_compartments())`:
   who may list, sign or apply them.
 - CUSTOM_WATCH (0124): a case's watches in a readable case; a case-less
   one to every bound user.
+- CUSTOM_MERGE (0132, 2026-10-03): the CASE term AND an EXISTS over
+  `core.node` for the merge's source and for its target, so a merge is
+  visible only where both of its entities are.
 - CUSTOM_NOTICE (a notification, 0126): the recipient's own
   (`recipient_id = (SELECT iam.rls_actor())`), its classification within
   CLR, its compartments held, and when it names a case, that case
@@ -84,12 +87,42 @@ HELD = `(SELECT iam.rls_compartments())`:
   inline, because the source is exempt (the egress proxy reads it) and so
   carries no policy for a CHILD test to lean on; the same reading as
   `collection._SOURCE_VISIBLE`, held to the case-less ceiling.
+- CUSTOM_RECORD (an ingest record, 0154): compartments held, and either
+  attached (the ELEMENT test on its case) or quarantined (no case,
+  `ingest.manage` held globally through an initplan, its classification
+  within CLR); a SELECT and an UPDATE policy.
+- CUSTOM_DEAD_LETTER (0154, read only): compartments held and 0153's one
+  definer predicate `iam.ingest_dead_letter_visible`, which reads the cases
+  the dead letter's batch fed over `record_batch_case_idx` (0152): visible
+  through any of them the reader may read, at that case's ceiling, or, for
+  a batch that fed none, to an `ingest.manage` holder within CLR. Its reach
+  arguments are the caller's initplans and only narrow: every yes is
+  confirmed against the bound actor.
+- CUSTOM_PII_AUTHORISATION (0154): read in a readable case (CASE); granted
+  only by its grantor holding `victim_pii.authorise` globally, in a
+  readable case, dated at the moment it is made; counted only by its
+  grantee, on a live, unrevoked row. The grant is the GLOBAL half of the
+  route's gate: the case half (the permission read off the grantor's one
+  role on that case) is not asked at the database (docs/17, g31
+  verification 2, 2026-10-03).
 - CUSTOM_ACT (a persona act, 0156, 2026-10-02): the requester's own
   (`requested_by = (SELECT iam.rls_actor())`) and its label within CLR, a
   SELECT policy and an INSERT policy that admits only a fresh PENDING row
   (attempts zero, no claimant, no claim time, no result; 2026-10-03). No
   UPDATE or DELETE policy: the collector and the inline runner claim and
   finish an act as the PERSONA_ACTS system purpose.
+
+A table the request role writes only by UPDATE carries its template as a
+SELECT and an UPDATE policy and nothing else, so no INSERT of the request
+role reaches its keys and no DELETE reaches a row: `ingest.record` and
+`ingest.victim_credential` (0154), whose rows are made and destroyed on
+system connections (F51, 2026-10-02).
+
+A policy says which rows, never which columns or values. On
+`ingest.record`, `ingest.victim_credential` and `ingest.pii_authorisation`
+the request role holds UPDATE only on the columns a request writes, and a
+guard trigger holds what those columns may become, as 0109 and 0112 do for
+the session (0155, F51, 2026-10-02).
 
 A table the request role never writes carries its template as a SELECT
 policy alone (`rls_read`), so no INSERT of the request role reaches its
@@ -117,7 +150,8 @@ POLICY: dict[str, str] = {
     "core.hypothesis": "CASE",
     "core.assumption": "CASE",
     "core.node_set": "CASE",
-    "core.node_merge": "CASE",
+    # 0132 (2026-10-03): and both of its entities visible.
+    "core.node_merge": "CUSTOM_MERGE",
     "core.hypothesis_evidence": "CHILD",
     "core.node_set_member": "CHILD",
     # 0118 (S1, 2026-09-25): collected documents and what hangs off them,
@@ -179,6 +213,10 @@ POLICY: dict[str, str] = {
     "comms.service_selector": "CUSTOM_STOPLIST",
     # 0123: the rest of the case record. A merge's re-pointed ties are
     # counted at the reader's view (the conservative reading).
+    # core.selector has carried its own labels since 0134 (its owner's, the
+    # floor when it has none) and keys on them; the policy stays the case term
+    # alone (decision 147) and every reader applies the labels itself
+    # (SelectorStore.find_for_reader, the owner test of the others).
     "core.selector": "CASE",
     "core.assertion_embedding": "CHILD",
     "core.evidence_embedding": "CHILD",
@@ -214,6 +252,14 @@ POLICY: dict[str, str] = {
     # duplicate check runs as a system purpose (TELEGRAM_INTAKE), and the
     # attended acts refuse a write that changed no chat.
     "collect.telegram_chat": "CUSTOM_SOURCE_CHILD",
+    # 0154 (F51, 2026-10-02): the ingest records and what hangs off them. A
+    # parse, a replay, every scoring pass and the fingerprint correlation
+    # run as INGEST; the routes read a record's labels and a batch's cases
+    # as facts (0153), and the queue's copy total is a WITHHELD count.
+    "ingest.record": "CUSTOM_RECORD",
+    "ingest.victim_credential": "CHILD",
+    "ingest.dead_letter": "CUSTOM_DEAD_LETTER",
+    "ingest.pii_authorisation": "CUSTOM_PII_AUTHORISATION",
     # 0156 (A collector process, 2026-10-02): the persona act queue. The
     # API enqueues on the request connection; claims and outcomes are
     # written as PERSONA_ACTS.
@@ -238,9 +284,15 @@ _VOCAB = "reference vocabulary: no case, no label, the same for every reader"
 _CONFIG = "deployment configuration with no case and no label"
 
 EXEMPT: dict[str, str] = {
-    "iam.app_user": _IAM,
-    "iam.session": _IAM + "; the request role keeps UPDATE of four columns on "
-                          "its OWN bound session only (0109, 0112)",
+    # By named column since 0143 (rls-6, 2026-10-03): the password hash, the
+    # sealed TOTP secret and its key id, the recovery hashes and the replay
+    # counter are not granted to the request role at all.
+    "iam.app_user": _IAM + "; the request role reads it by named column, and "
+                           "never the credential columns (0143)",
+    "iam.session": _IAM + "; the request role keeps UPDATE of three columns on "
+                          "its OWN bound session only, the idle window moving "
+                          "forward and a revocation, never step-up "
+                          "(0109, 0112, 0144)",
     "iam.webauthn_credential": _IAM,
     "iam.user_role": _IAM,
     "iam.case_assignment": _IAM,
@@ -313,29 +365,6 @@ DEFERRED: dict[str, str] = {
         "iam.countersign_blocked_by reads it inside a trigger and becomes "
         "SECURITY DEFINER; the out-of-band audit writers keep working as "
         "appends"),
-    "ingest.record": (
-        "CUSTOM (attached: case readable and labels within reach; "
-        "quarantined: ingest.manage held and labels within reach, through "
-        "an initplan). Owed first: the unauthenticated submit "
-        "(routers/ingest.submit, bound to no user), parse_batch, replay, "
-        "score_records and rescore run as a system purpose (they dedupe "
-        "against every record, score against every watch and write rows "
-        "their caller may be below); the queue's triage state, read from "
-        "audit.event, moves with that table"),
-    "ingest.victim_credential": (
-        "CHILD of record, after record; reveal_credential and "
-        "credentials_masked are gated on ingest.pii_authorisation first"),
-    "ingest.dead_letter": (
-        "CUSTOM through one definer predicate backed by an index on "
-        "ingest.record (batch_id, case_id), after record; "
-        "scripts/redact_dead_letters.py is a system purpose already"),
-    "ingest.pii_authorisation": (
-        "CASE template for the Lead investigator's reveal "
-        "(_live_authorisation), and a term admitting a global holder of "
-        "victim_pii.authorise: the Security Officer who grants it holds no "
-        "case assignment (Security Officers read no case content), so "
-        "grant_pii_authorisation and its listing would otherwise be "
-        "refused; with ingest.record"),
 }
 
 #: Trigger functions that read a policied table and stay SECURITY INVOKER,

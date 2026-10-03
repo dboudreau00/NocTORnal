@@ -174,9 +174,12 @@ _PUBLISHED_MARKERS: tuple[tuple[str, str], ...] = (
      f"the development credential {DEV_CREDENTIAL!r}, which is committed to "
      f"this repository in infra/docker-compose.yml, the CI workflow and the "
      f"installers"),
+    # "and the templates beside it" since docs/17 F52 (2026-10-02): the
+    # owner's placeholder now ships in postgres-init.env.example and
+    # migrate.env.example, and the migration job refuses it there.
     ("replace-me",
      "a 'replace-me' placeholder, which infra/production/secrets.env.example "
-     "ships in place of every secret it asks for"),
+     "and the templates beside it ship in place of every secret they ask for"),
     ("not-a-real-one",
      "the throwaway value the test suites and the demo seeders set (it ends "
      "'not-a-real-one')"),
@@ -541,6 +544,20 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
                 f"register would report the prohibited-content policy as "
                 f"declared (docs/16 L1).")
 
+    # The first-run door's token (http_ui-010 and infra-3, 2026-10-03;
+    # `http/setup_token.py`). Optional: unset, a production deployment has
+    # no web first-run at all. But a short one is a lock that opens by
+    # asking, so it is refused here rather than accepted and guessed. The
+    # length is `setup_token.MIN_TOKEN_CHARS`, written out because this
+    # module must not import the HTTP package.
+    setup_token = env.get("NOCTORNAL_SETUP_TOKEN", "").strip()
+    if setup_token and len(setup_token) < 32 and "NOCTORNAL_SETUP_TOKEN" not in already:
+        problems.append(
+            "NOCTORNAL_SETUP_TOKEN is set but shorter than 32 characters, so "
+            "the first-run door it guards could be opened by guessing it: "
+            "generate one with `openssl rand -hex 32`, or leave it unset and "
+            "create the first account with scripts/bootstrap.py create-user.")
+
     # The verdict is `envelope._load_kek`'s, the reader every seal and
     # every open already calls; only the choice of sentence is local, and
     # it is chosen on whether the variable is set rather than by parsing
@@ -761,6 +778,17 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             problems.append(
                 f"{problem}, so {what} would run with limits nobody here "
                 f"decided (the development defaults) or not at all.")
+    # F42, 2026-10-02. Where hostile input is parsed, through the runner's
+    # one reader. Only a value SET and unusable is refused here: an unset
+    # socket in production refuses every analysis at the point of use and
+    # readiness says so, but does not stop the console starting (the F42
+    # decision in docs/00 says why). Named, never quoted.
+    from noctornal_api.analysis_runner import setting_problem
+    runner_problem = setting_problem(env)
+    if runner_problem:
+        problems.append(
+            f"{runner_problem}, so static triage and forum parsing would refuse "
+            f"every request rather than guess where to run.")
 
     # Collection ceilings (docs/00 decision 69, 2026-09-24). A ceiling SET
     # to a label the collector may not read at (invariant 8 caps it at
@@ -786,6 +814,16 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
         problems.append(
             "NOCTORNAL_WEBHOOK_URL is not an https address, so every webhook would "
             "carry case summaries in the clear.")
+    # The webhook signature scheme (F28, 2026-10-02), read by the reader the
+    # sender uses, so this and the drain cannot disagree. The secret is only
+    # asked for once there is a webhook to sign; a value that is neither v1
+    # nor v2 is refused whether or not one is configured.
+    from noctornal_api import transports as _transports
+    _version, _sig_problem = _transports.webhook_signature_version(env)
+    if _sig_problem is None and webhook:
+        _sig_problem = _transports.webhook_signature_problem(env)
+    if _sig_problem is not None:
+        problems.append(_sig_problem)
     for flag, what in (("NOCTORNAL_WEBHOOK_ALLOW_HTTP", "a webhook"),
                        ("NOCTORNAL_JIRA_ALLOW_HTTP", "Jira")):
         if env.get(flag, "").strip():
@@ -856,6 +894,16 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             "from this server's own address with no egress proxy; it exists for "
             "development only.")
 
+    # The second person on a case's merge switch (F39, 2026-10-02), through
+    # its one reader, so the decide route and this cannot disagree about what
+    # a usable value is. A malformed value is held to the default at runtime,
+    # never to 0; this makes the typo visible at the boot. Not quoted.
+    from noctornal_api.approvals import relax_seasoning
+
+    _window, relax_problem = relax_seasoning(env)
+    if relax_problem:
+        problems.append(relax_problem)
+
     # Row-level security (S1, 2026-09-25). Who holds the system role's
     # DSN, which bypasses row security. Named, never quoted.
     problems.extend(_row_security_problems(env))
@@ -863,6 +911,170 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     # A collector process (2026-10-02): who holds the persona key.
     problems.extend(persona_key_problems(env, collector=collector))
 
+    # docs/17 F52 (2026-10-02): the schema owner's credential on a runtime
+    # process. One variable, one refusal: a published value in it has
+    # already been refused above.
+    problems.extend(owner_credential_problems(env, skip=already))
+
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# The schema owner's credential (docs/17 F52, 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# The owner role `noctornal` is the Postgres image's bootstrap superuser:
+# row-level security does not bind it, and it can `ALTER TABLE ... DISABLE
+# TRIGGER` on the append-only audit and custody tables in one statement.
+# Until 2026-10-02 its password (POSTGRES_PASSWORD) and its DSN
+# (NOCTORNAL_MIGRATION_DATABASE_URL) sat in infra/production/secrets.env,
+# which every application service and caddy read, so a process that should
+# hold only the request and system roles could connect as the owner. They
+# now live in postgres-init.env (the database alone) and migrate.env (the
+# migration job alone), and a runtime process that still holds either is
+# refused here rather than trusted to ignore it. The sentence names the fix
+# and never the value.
+OWNER_PASSWORD_ENV = "POSTGRES_PASSWORD"
+MIGRATION_DSN_ENV = "NOCTORNAL_MIGRATION_DATABASE_URL"
+
+#: The installers' upgrade step, named in every sentence that needs it.
+#: With sudo since the 2026-10-02 review of F52: the files it rewrites are
+#: root's, mode 600, so run as anybody else it can read none of them.
+SECRETS_STEP = ("sudo ./release/install.sh --production-secrets (release/install.ps1 "
+                "-ProductionSecrets on Windows)")
+#: The upgrade note every refusal of the old layout points at (2026-10-02).
+SECRETS_UPGRADE_NOTE = "release/secrets-upgrade/README.md"
+
+
+def owner_credential_problems(env: Mapping[str, str] | None = None, *,
+                              skip: frozenset[str] | set[str] = frozenset()
+                              ) -> list[str]:
+    """Refusals for a RUNTIME process holding the schema owner's password or
+    DSN (docs/17 F52). Mode-blind and pure, like `published_credentials`:
+    `verify_environment` applies it in production, and a cron script may
+    call it for its own refusal. Empty counts as unset. A variable in
+    `skip` was refused already, for its value, and is not refused twice."""
+    if env is None:
+        env = os.environ
+    problems: list[str] = []
+    for name, home, reader in (
+            (OWNER_PASSWORD_ENV, "infra/production/postgres-init.env",
+             "the database (at initialisation)"),
+            (MIGRATION_DSN_ENV, "infra/production/migrate.env",
+             "the migration job")):
+        if name not in skip and env.get(name, "").strip():
+            problems.append(
+                f"{name} is set on a runtime process, and it is the schema owner's "
+                f"credential, which row-level security does not bind and which can "
+                f"switch off the append-only triggers on the audit and custody "
+                f"tables; since docs/17 F52 it belongs in {home}, which only "
+                f"{reader} reads, so remove it from this process's environment: for "
+                f"the compose deployment, {SECRETS_STEP} moves it there and keeps a "
+                f"backup ({SECRETS_UPGRADE_NOTE}).")
+    return problems
+
+
+#: The exit status of a job that refuses to run on its environment. One
+#: number for every job, because one helper makes the refusal. It is 2 and
+#: not 1 on purpose: 1 already means a pass RAN and something in it failed (a
+#: poll, a delivery, a lookup, a register refusal), so an alert that reads the
+#: code can tell "this job would not start" from "this job ran and had a bad
+#: pass". `argparse` spends 2 on a usage error too, and the first words of the
+#: line (the job's name, then `refusing to run`) say which it was.
+JOB_REFUSAL_EXIT = 2
+
+
+def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None,
+                                  *, holds_owner_credential: bool = False,
+                                  holds_persona_key: bool = False
+                                  ) -> list[str]:
+    """Why the job `job` must not run here: one line per problem, each led by
+    the job's name, naming variables and never a value. `[]` outside
+    NOCTORNAL_ENV=production, as `verify_environment` is, so a laptop's
+    .env.local and the suites' throwaway values run as they always have.
+
+    The ONE refusal for every job that is not the API, called once, first,
+    before anything is read or connected to, by collection_poll,
+    notify_drain, lookup_drain, embed_pass, the collector
+    (scripts/collector.py) and the migration job (through
+    `migration_job_problems` in scripts/migrate_job.py, and again at the top
+    of db/migrations/env.py, so a bare `alembic` is held to it too). The
+    Lab's workers (lab_triage, sample_screen, sandbox_dispatch) call
+    `enforce_environment`, which makes both of these refusals among the rest
+    and is not called a second time beside this one. A caller prints the
+    lines on stderr and exits `JOB_REFUSAL_EXIT`.
+
+    Two refusals, the two the API makes that every job needs as well (docs/17
+    F52 and infra-12, ROADMAP-REMAINING's "The cron jobs and a published
+    credential", 2026-10-02 and 2026-10-03): a credential somebody has
+    already published, and the schema owner's password or DSN, which no
+    runtime process may hold. Until then notify_drain, collection_poll,
+    embed_pass and the migration job made neither and lookup_drain made the
+    first alone, so a job on the template's placeholders ran beside an API
+    that refused, and a mixed layout (the owner's line still, or again, in
+    secrets.env) started the cron loops holding the owner's credential while
+    the API refused it. One helper, so the jobs cannot drift apart.
+
+    `holds_owner_credential` is for the one job that is the schema owner's
+    by design, the migration job: it holds the owner's DSN because that is
+    what it connects with, so the owner half is not asked of it. The
+    published half is, for every variable it holds, the DSN included.
+
+    A third refusal, from the persona key's split (A collector process,
+    2026-10-02, decision 174): a job that is not the collector holds no
+    persona key and no mark of the collector, and the inline mode that runs
+    persona acts in the API is no setting for any production process
+    (`persona_key_problems`, which `verify_environment` makes for the API
+    too). `holds_persona_key` is for the two jobs that are the key's by
+    design, the collector and the poll it starts as a child: the key half is
+    not asked of them here, and each makes the collector's own half (the mark
+    present and the ring usable) in its own way. Nothing else changes for
+    them: they are refused a published credential and the owner's, as every
+    other job is, and the collector never receives the owner's credential."""
+    if env is None:
+        env = os.environ
+    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+        return []
+    published = published_credentials(env)
+    problems = [p.refusal for p in published]
+    if not holds_owner_credential:
+        problems.extend(owner_credential_problems(
+            env, skip={p.variable for p in published}))
+    if not holds_persona_key:
+        problems.extend(persona_key_problems(env, collector=False))
+    return [f"{job}: refusing to run: {problem}" for problem in problems]
+
+
+def migration_job_problems(env: Mapping[str, str] | None = None) -> list[str]:
+    """Why the production migration job must not run (docs/17 F52): one line
+    per problem, each led by `migrate:`. Returns `[]` outside
+    `NOCTORNAL_ENV=production`, like `verify_environment`.
+
+    The job is the one process that holds the owner's DSN, so the refusal
+    of a published owner password, which the API made while secrets.env
+    carried it, is made here now: otherwise moving the credential out of
+    the API's sight would also have moved it out of the check's. That
+    refusal, and the published half for every other variable the job holds,
+    is `refuse_unsafe_job_environment` with the owner half switched off,
+    the same one every other job makes (infra-12); what is left here is
+    what only this job needs, a DSN to connect with that names a role."""
+    if env is None:
+        env = os.environ
+    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+        return []
+    dsn = env.get(MIGRATION_DSN_ENV, "").strip()
+    if not dsn:
+        return [
+            f"migrate: {MIGRATION_DSN_ENV} is not set for the migration job: since "
+            f"docs/17 F52 (2026-10-02) the schema owner's DSN lives in "
+            f"infra/production/migrate.env, which only this job reads, rather than "
+            f"in secrets.env, and {SECRETS_STEP} moves it there from an older "
+            f"secrets.env and keeps a backup ({SECRETS_UPGRADE_NOTE})."]
+    problems = refuse_unsafe_job_environment("migrate", env, holds_owner_credential=True)
+    if not problems and not _dsn_user(dsn):
+        problems.append(
+            f"migrate: {MIGRATION_DSN_ENV} names no role, so the migration job would "
+            f"connect as whatever the driver defaults to rather than as the schema owner.")
     return problems
 
 
@@ -946,6 +1158,44 @@ def _dsn_user(dsn: str) -> str | None:
         return None
 
 
+#: Role names a request connection must never carry, whatever else is set:
+#: the cluster's default superuser and the schema owner this repository's
+#: compose file creates. A role the DSN names that equals the migration
+#: DSN's or POSTGRES_USER is refused too (`_request_role_problems`).
+_PRIVILEGED_ROLE_NAMES = frozenset({"postgres", "noctornal"})
+
+
+def _request_role_problems(env: Mapping[str, str]) -> list[str]:
+    """Production refuses a request DSN that names the schema owner or a
+    superuser (infra-4, 2026-10-03).
+
+    Row-level security does not bind the owner and an owner may ALTER TABLE
+    ... DISABLE TRIGGER on the audit and custody chains, so a request
+    connection that carries either switches both off for every analyst
+    request while the register shows the deployment running. The system
+    connection already refused exactly that role (`db.connect_system`);
+    this is the same refusal for the request one, from the names alone. What
+    a DSN cannot say (a superuser or a BYPASSRLS role under another name, a
+    member of the owner) is refused at the first request connection by
+    `db.connect_request`, from the catalog. Names variables and never the
+    role."""
+    user = _dsn_user(env.get("DATABASE_URL", ""))
+    if not user:
+        return []
+    owners = {_dsn_user(env.get("NOCTORNAL_MIGRATION_DATABASE_URL", "")),
+              (env.get("POSTGRES_USER", "").strip() or None)}
+    if user in _PRIVILEGED_ROLE_NAMES or user in owners - {None}:
+        return [
+            "DATABASE_URL names the schema owner or a superuser, so row-level "
+            "security filters nothing for any request and the append-only "
+            "triggers on the audit and custody chains can be disabled from "
+            "the request path; point it at noctornal_app and keep the owner "
+            "for NOCTORNAL_MIGRATION_DATABASE_URL alone. A volume initialised "
+            "without NOCTORNAL_APP_DB_PASSWORD has no such role yet: create it "
+            "first (infra/production/README.md, step 2)."]
+    return []
+
+
 def _row_security_problems(env: Mapping[str, str]) -> list[str]:
     """The production refusals row-level security needs (S1).
 
@@ -982,6 +1232,7 @@ def _row_security_problems(env: Mapping[str, str]) -> list[str]:
         problems.append(
             f"{WORKER_DSN_ENV} and DATABASE_URL name the same role, so every "
             f"request would run as the role that bypasses row-level security.")
+    problems.extend(_request_role_problems(env))
     if env.get("NOCTORNAL_WORKER_DB_PASSWORD", "").strip():
         problems.append(
             "NOCTORNAL_WORKER_DB_PASSWORD is set on a runtime process; it is "

@@ -32,27 +32,47 @@ from pydantic import BaseModel, Field
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import get_conn
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import rate_limit, rate_limit_peek
+from noctornal_api.http.setup_token import (
+    door_closed,
+    require_setup_door,
+    token_required,
+)
 from noctornal_api.iam_admin import AdminError, create_first_admin, needs_setup
 
 router = APIRouter(prefix="/setup", tags=["setup"])
 
 
 class FirstAdminBody(BaseModel):
-    email: str = Field(min_length=3)
-    display_name: str = Field(min_length=1)
+    # Bounded (http_ui-005, 2026-10-03): unauthenticated input.
+    email: str = Field(min_length=3, max_length=254)
+    display_name: str = Field(min_length=1, max_length=200)
 
 
 @router.get("/status", response_model=dict,
             dependencies=[Depends(rate_limit("auth.login"))])
 def status(conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """One boolean. Whether accounts EXIST is not a secret — the sign-in
-    page's existence says as much — and nothing else leaks."""
-    return {"needs_setup": needs_setup(conn)}
+    """Whether the first-run door can be used, and whether it needs a
+    token. Whether accounts EXIST is not a secret (the sign-in page's
+    existence says as much) and nothing else leaks.
+
+    `needs_setup` is true only while the door can actually be used
+    (http_ui-010 and infra-3, 2026-10-03): a production deployment with no
+    setup token configured has no web first-run (`http/setup_token.py`), so
+    it never invites the card. `setup_token_required` tells the card to ask
+    for the token."""
+    return {"needs_setup": needs_setup(conn) and not door_closed(),
+            "setup_token_required": token_required()}
 
 
 @router.post("/first-admin", response_model=dict, status_code=201,
-             dependencies=[Depends(rate_limit("auth.login"))])
+             # The token (http_ui-010 and infra-3, 2026-10-03), after the
+             # meters so a guessed token is counted and, as for a password,
+             # refused once the failure meter is spent, and before the body
+             # is validated so a caller without it learns nothing from a 422.
+             dependencies=[Depends(rate_limit("auth.login")),
+                           Depends(rate_limit_peek("auth.login_failed")),
+                           Depends(require_setup_door)])
 def first_admin(
     body: FirstAdminBody,
     conn: psycopg.Connection = Depends(get_conn),

@@ -205,7 +205,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 124 Alembic migrations (Alembic head 0124)
+6. applies all 131 Alembic migrations (Alembic head 0131)
 7. offers to create your first account, printing the password **once** with a QR code to scan (on Windows it prints the `create-user` command to run instead)
 8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
 
@@ -297,7 +297,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **6095 tests** (`def test_`
+With the containers up, expect **no failures** across **6329 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -639,7 +639,7 @@ test named after it.
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
-| **Migrations** | Alembic | 124 revisions (Alembic head 0124), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 131 revisions (Alembic head 0131), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -659,7 +659,7 @@ enforces it.
 
 ### Testing
 
-**6095 tests** (`def test_` functions across two pytest roots, maintained by
+**6329 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -686,7 +686,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   124 Alembic revisions
+│   └── migrations/versions/   131 Alembic revisions
 ├── docs/                      00-20, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
@@ -748,7 +748,7 @@ subsystem; live change push; and the analyst console over all of it.
 
 Deliberately absent, with reasons in [`docs/17`](docs/17-flagged-for-review.md):
 WebAuthn (password + TOTP today), session IP/UA binding by default,
-row-level security on fifteen of its tables (docs/17 F51), perceptual matching of prohibited content, archive
+row-level security on five of its tables (docs/17 F51), perceptual matching of prohibited content, archive
 expansion, an authenticated forum reader, and **any form of live
 interception**.
 

@@ -98,8 +98,26 @@ def _on(conn, case_id) -> None:
                  'WHERE id = %s', (case_id,))
 
 
+def season(conn, case_id, *users, days=8) -> None:
+    """Age each user's assignment on the case past the seasoning window.
+
+    F39 (2026-10-02): the second person on a case's merge switch must have
+    held `case.update` on the case for the window (7 days), read from the
+    assignment's `granted_at`. Every test in this file that has a deputy
+    approve a relax used to rely on a deputy assigned a moment ago, which is
+    exactly the account the rule now refuses, so each of them ages the
+    deputy first, by hand, as the owner-level fixture connection may. A
+    request role cannot do this: its writes to the IAM plane go through the
+    API's own verbs, which set `granted_at = now()`."""
+    conn.execute(
+        "UPDATE iam.case_assignment SET granted_at = now() - make_interval("
+        "days => %s) WHERE case_id = %s AND user_id = ANY(%s)",
+        (days, case_id, list(users)))
+
+
 def _approved_relax(conn, case_id, lead, deputy):
     from noctornal_api.approvals import ApprovalService, relax_payload
+    season(conn, case_id, deputy)
     svc = ApprovalService(conn)
     req = svc.request(operation=RELAX, case_id=case_id,
                       payload=relax_payload(_switch(conn, case_id)[1]),
@@ -284,6 +302,7 @@ def test_turning_merge_control_off_takes_a_second_lead(conn, client):
     assert raised.status_code == 201, raised.text
     assert raised.json()["approvers_notified"] == 1
     rid = raised.json()["id"]
+    season(conn, case_id, deputy_id)    # F39: the deputy is not new to the case
     decided = client.post(f"{API}/cases/{case_id}/approvals/{rid}/decide",
                           headers=deputy, json={"approve": True})
     assert decided.status_code == 200, decided.text
@@ -435,6 +454,7 @@ def test_a_relax_approval_does_not_consume_in_another_case(conn, client):
         _on(conn, case_id)
     raised = _raise_relax(client, lead, case_a, _switch(conn, case_a)[1])
     rid = raised.json()["id"]
+    season(conn, case_a, deputy_id)     # F39: the deputy is not new to case A
     assert client.post(f"{API}/cases/{case_a}/approvals/{rid}/decide",
                        headers=deputy, json={"approve": True}).status_code == 200
     r = _put(client, lead, case_b, dual_control_merge=False,
@@ -463,6 +483,11 @@ def test_the_policy_read_says_the_mode_and_who_could_approve(conn, client):
                         (case_id, user_id, role_key, granted_by)
                     VALUES (%s, %s, 'CASE_OWNER', %s), (%s, %s, 'ANALYST', %s)""",
                  (case_id, low_id, lead_id, case_id, analyst_id, lead_id))
+    # F39 (2026-10-02): relax_signers counts only colleagues who have held
+    # the permission for the window; this test is about who counts by role
+    # and labels, so every candidate is aged past it. The seasoning itself is
+    # test_relax_seasoning_pg.py's.
+    season(conn, case_id, deputy_id, low_id, analyst_id)
     got = client.get(f"{API}/cases/{case_id}/policy",
                      headers=session(conn, lead_id)).json()
     assert got["dual_control_merge_mode"] == "PER_CASE"

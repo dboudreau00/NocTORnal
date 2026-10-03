@@ -190,7 +190,8 @@ def safe_detail(exc: Exception) -> str:
 def install_error_handlers(app) -> None:
     from noctornal_api.cases import CaseError
     from noctornal_api.curation import CurationError
-    from noctornal_api.evidence import EvidenceError, IntegrityError
+    from noctornal_api.evidence import (
+        EvidenceError, ExhibitUnavailable, IntegrityError)
     from noctornal_api.graph import GraphWriteError
     from noctornal_api.security.access import AccessResolutionError
     from noctornal_api.selectors import SelectorError, SelectorOwnerConflict
@@ -217,6 +218,13 @@ def install_error_handlers(app) -> None:
         # A tamper alarm on the evidence read path.
         return problem_response(409, "Integrity check failed", str(exc))
 
+    @app.exception_handler(ExhibitUnavailable)
+    async def _exhibit_unavailable(_: Request, exc: Exception):
+        # Retention destroyed the bytes, or is destroying them now: a plain
+        # answer, and never a tamper alarm (g44-verify-destroyed-exhibit,
+        # 2026-10-03). The sentence is fixed text, not the exception's cause.
+        return problem_response(409, "Exhibit unavailable", str(exc))
+
     @app.exception_handler(EvidenceError)
     async def _evidence(_: Request, exc: Exception):
         return problem_response(400, "Evidence error", safe_detail(exc))
@@ -242,6 +250,23 @@ def install_error_handlers(app) -> None:
         log.warning("row-level security refused a write %s: %s", cid, exc)
         _audit_rls_refused(request, exc, cid)
         return problem_response(403, "Forbidden", f"{RLS_REFUSED_DETAIL} (ref {cid})")
+
+    @app.exception_handler(psycopg.errors.DataError)
+    async def _unstorable_value(_: Request, exc: Exception):
+        """A value the database cannot hold (http_ui-014, 2026-10-03): text
+        with a NUL, a number out of range, a timestamp past year 10000. It
+        is the caller's input, so it is a 422 and not the 500 and the
+        logged traceback it was; `body_ceiling.py` refuses the commonest
+        case (a NUL in a JSON body) before a route parses it, and this is
+        what remains (a query string, a path part). The raw text goes to
+        the log against the reference and never to the caller (rule 1
+        above)."""
+        cid = uuid.uuid4().hex[:12]
+        log.warning("unstorable value %s: %s", cid, exc)
+        return problem_response(
+            422, "Validation failed",
+            f"a value in the request cannot be stored, for example text "
+            f"containing a NUL character or a number out of range (ref {cid})")
 
     @app.exception_handler(SystemContextUnavailable)
     async def _no_system_connection(_: Request, exc: Exception):
@@ -291,8 +316,13 @@ def _audit_rls_refused(request: Request, exc: BaseException, cid: str) -> None:
 
     from noctornal_api.db import connect_request
     actor = getattr(request.state, "noctornal_user_id", None)
+    # The request's own binding, so the database can verify the actor this
+    # row names (0150, evidence-ledger-actor-time-forgeable, 2026-10-03).
+    proof = getattr(request.state, "noctornal_rls_proof", None)
     try:
         with connect_request() as side:
+            if proof:
+                side.execute("SELECT actor, exempt FROM iam.rls_bind(%s)", (proof,))
             side.execute(
                 """INSERT INTO audit.event
                        (actor_id, actor_kind, action, object_type, object_id,

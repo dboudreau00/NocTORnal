@@ -308,6 +308,24 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
 
+        # A name that changes how programs start is left out (g48
+        # verification, 2026-10-03). This loop is data, not script, but it
+        # still set any name, so `PATH`, `PYTHONPATH` or `COMSPEC` in a
+        # handed-over file redirected the next program this script starts.
+        # Not an allow-list on purpose: a new setting would silently stop
+        # loading. The same list is in scripts/_env.py, release/install.sh,
+        # scripts/launch.sh and scripts/open-ui.ps1; a test holds all five
+        # together. -contains and
+        # -like are case-insensitive, as Windows names are.
+        $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4')
+        $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON')
+        $refused = ($refusedExact -contains $name)
+        foreach ($prefix in $refusedPrefixes) { if ($name -like "$prefix*") { $refused = $true } }
+        if ($refused) {
+            Write-Detail "$name ignored: it changes how programs start (set it in your shell if you mean it)"
+            continue
+        }
+
         # `$null -ne`, not `IsNullOrWhiteSpace`. GetEnvironmentVariable
         # returns $null when the variable does not exist and "" when it
         # exists and is empty -- and a variable that is DEFINED AND EMPTY
@@ -333,6 +351,26 @@ if (Test-Path -LiteralPath $EnvLocal) {
     }
 }
 
+# The key store is private to this user from the first byte (infra-9,
+# 2026-10-03). On Windows a new file inherits its folder's ACL, which is
+# every account that can read the project directory, and nothing restricted
+# it afterwards. The file is created empty, restricted, and only then
+# written, so the keys never exist in a file others can read. Not fatal when
+# icacls refuses (a FAT volume, say): the installer says so and goes on,
+# because a stopped install would leave no key store at all.
+function Protect-EnvLocal {
+    param([string] $Path)
+    if ($env:OS -ne 'Windows_NT') { return }
+    try {
+        $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        & icacls.exe $Path /inheritance:r /grant:r "*${sid}:(F)" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE" }
+    }
+    catch {
+        Write-Note "Could not restrict $Path to this user ($($_.Exception.Message)). Do it by hand: icacls `"$Path`" /inheritance:r /grant:r `"%USERNAME%:F`""
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
     $bytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -350,6 +388,9 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
         # keys if it is kept here too. They said only that users would
         # re-enrol their authenticators (Alpha 6 pre-release check,
         # 2026-09-23).
+        # Create it empty and restrict it BEFORE the key is written.
+        New-Item -ItemType File -Path $EnvLocal -Force | Out-Null
+        Protect-EnvLocal -Path $EnvLocal
         $header = @(
             '# NocTORnal local key store. Created by scripts/launch.ps1.',
             '#',

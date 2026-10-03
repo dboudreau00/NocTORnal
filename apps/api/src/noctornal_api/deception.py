@@ -32,7 +32,7 @@ import hashlib
 import ipaddress
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
@@ -575,7 +575,7 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
         # version-dependent set on hostile input. Invariant 12 — the
         # exhibit is still recorded, with the failure attached.
         out.gaps.append({"step": "parse", "reason": f"{type(exc).__name__}: {exc}"})
-        return out
+        return _scrub_unstorable(out)
 
     out.message_id = _header_str(msg, "Message-ID")
     out.subject = _header_str(msg, "Subject")
@@ -636,7 +636,22 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
         # The whole set is still stored in `auth_results_raw`, because a
         # message carrying two of these is itself a finding.
         out.auth_results_raw = " | ".join(str(a) for a in auth_headers)[:8000]
-        _apply_auth_results(out, str(auth_headers[0]))
+        # http_ui-007 (2026-10-03): the FIRST header is the only candidate,
+        # and it is believed only when a trusted MTA wrote it. A message the
+        # receiving server stamped nothing on (forwarded, exported) carries
+        # only the sender's own header, and the sender picks which domain it
+        # says passed.
+        believed, why_not = _auth_results_believed(msg, str(auth_headers[0]), trusted)
+        if believed:
+            _apply_auth_results(out, str(auth_headers[0]))
+        else:
+            out.gaps.append({
+                "step": "authentication_results",
+                "reason": "an Authentication-Results header is present but was "
+                          f"NOT believed: {why_not}. SPF, DKIM and DMARC are "
+                          "recorded as not evaluated and no domain is taken "
+                          "from it; the header itself is kept in "
+                          "auth_results_raw, where it is the sender's claim."})
         if len(auth_headers) > 1:
             out.gaps.append({
                 "step": "authentication_results",
@@ -690,6 +705,60 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
                 out.gaps.append({"step": "url_extraction",
                                  "reason": "capped at 500 URLs"})
                 break
+    return _scrub_unstorable(out)
+
+
+#: What a NUL character is recorded as. Postgres text and jsonb refuse NUL,
+#: and the exhibit keeps the original bytes.
+_NUL_STANDIN = chr(0xFFFD)
+
+
+def _scrub_unstorable(out: ParsedEmail) -> ParsedEmail:
+    """Replace every NUL in what was parsed, and say so in a gap.
+
+    http_ui-009 (2026-10-03): one NUL in a Subject, a Message-ID or a display
+    name (raw, or RFC 2047 encoded as `=?utf-8?b?d2kAcmU=?=`) reached a text
+    column and the route answered 500 after the exhibit was lodged, and every
+    retry the same: the sender chose whether their mail could be analysed.
+    Every string the record is made from is cleaned here, the one place they
+    all pass, so nothing is dropped (invariant 12) and nothing is guessed."""
+    replaced: list[str] = []
+
+    def clean(value, where: str):
+        if isinstance(value, str):
+            if "\x00" in value:
+                replaced.append(where)
+                return value.replace("\x00", _NUL_STANDIN)
+            return value
+        if isinstance(value, list):
+            return [clean(v, where) for v in value]
+        if isinstance(value, dict):
+            return {k: clean(v, f"{where}.{k}") for k, v in value.items()}
+        return value
+
+    for f in fields(out):
+        if f.name == "hops":
+            continue
+        setattr(out, f.name, clean(getattr(out, f.name), f.name))
+    # A Hop is frozen, so a hop that carried one is rebuilt.
+    hops = []
+    for hop in out.hops:
+        changes = {}
+        for f in fields(hop):
+            value = getattr(hop, f.name)
+            cleaned = clean(value, "hops")
+            if cleaned is not value:
+                changes[f.name] = cleaned
+        hops.append(replace(hop, **changes) if changes else hop)
+    out.hops = hops
+    if replaced:
+        names = sorted({w.split(".")[0].split("[")[0] for w in replaced})
+        out.gaps.append({
+            "step": "nul_characters",
+            "reason": ("a NUL character, which cannot be recorded, was "
+                       "replaced with U+FFFD in: " + ", ".join(names)
+                       + ". The exhibit holds the message exactly as "
+                       "received.")})
     return out
 
 
@@ -704,6 +773,66 @@ def _all_addrs(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [a for _, a in getaddresses([raw]) if a][:200]
+
+
+#: A server's name as an authserv-id carries it (RFC 8601 section 2.2): a
+#: dot-atom, here a host name.
+_AUTHSERV_ID = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
+
+
+def _auth_results_believed(msg: EmailMessage, value: str,
+                           trusted: tuple[str, ...] | None) -> tuple[bool, str]:
+    """(believed, why_not) for the first Authentication-Results header.
+
+    Three things must hold, and each is a refusal when it does not:
+
+    1. Its authserv-id (the name before the first `;`) is a host of a
+       trusted MTA (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the same list the
+       Received chain's boundary is read from. With none declared nothing
+       can be attributed to the recipient's own server, which is the answer
+       the infrastructure selectors already give ("unconfigured means
+       unknown").
+    2. The topmost Received header was written by a trusted MTA: the last
+       server to handle the message is ours, so what sits above its Received
+       line was added by it, after it took the message.
+    3. The header sits ABOVE every Received header. An MTA prepends, so a
+       header below one was written before that hop saw the message: by the
+       sender, or by a relay the sender chose. The authserv-id alone is no
+       defence here, because a forger writes the victim organisation's own
+       name into it.
+
+    Anything else is the sender's claim and is not read as a verdict."""
+    suffixes = trusted_mta_suffixes() if trusted is None else tuple(trusted)
+    if not suffixes:
+        return False, ("no trusted MTA is declared (NOCTORNAL_TRUSTED_MTA_HOSTS), "
+                       "so no such header can be attributed to the recipient's "
+                       "own server")
+    words = value.split(";", 1)[0].split()
+    authserv = words[0].lower().rstrip(".") if words else ""
+    if not _AUTHSERV_ID.fullmatch(authserv) or not any(
+            authserv == t or authserv.endswith("." + t) for t in suffixes):
+        return False, ("its authserv-id is not one of this deployment's trusted "
+                       "MTAs, or it names none")
+    try:
+        names = [str(k).lower() for k in msg.keys()]
+        received = [str(h) for h in (msg.get_all("Received") or [])][:_MAX_HEADERS]
+    except Exception:                                         # noqa: BLE001
+        return False, "the message's headers could not be read in order"
+    first_received = next((i for i, n in enumerate(names) if n == "received"), None)
+    if first_received is None or not received:
+        return False, ("the message carries no Received header, so nothing "
+                       "shows where the receiving server's own part begins")
+    top = parse_received_chain(received[:1], suffixes)
+    by_host = (top[0].by_host or "") if top else ""
+    if not any(by_host == t or by_host.endswith("." + t) for t in suffixes):
+        return False, ("the last server to handle the message is not a trusted "
+                       "MTA, so a header on it may have been written by anyone")
+    if names.index("authentication-results") > first_received:
+        return False, ("it sits below a Received header, so it may have been "
+                       "written by the sender or a relay before the receiving "
+                       "server saw the message; only a header above every "
+                       "Received header is believed")
+    return True, ""
 
 
 def _apply_auth_results(out: ParsedEmail, raw: str) -> None:

@@ -12,7 +12,9 @@
 # every file 100644; no `exit` and no `set -u`, because being sourced means
 # both would reach the entrypoint's own shell; the password passed as a psql
 # variable and never pasted into SQL; statement logging off for the session
-# that carries it. The same connection defaults as 10-app-role.sh too, so
+# that carries it, and read by `\getenv` inside psql rather than passed with
+# `--set`, which would put it on psql's command line (infra-10, 2026-10-03).
+# The same connection defaults as 10-app-role.sh too, so
 # CI's step (PGHOST, PGPASSWORD, POSTGRES_USER, POSTGRES_DB) runs it as it
 # runs the other.
 #
@@ -41,8 +43,8 @@ else
 	psql -v ON_ERROR_STOP=1 --no-psqlrc \
 		--username "${_NOC_SUPERUSER}" \
 		--dbname "${_NOC_DB}" \
-		--set=dbname="${_NOC_DB}" \
-		--set=egresspw="${NOCTORNAL_EGRESS_DB_PASSWORD}" <<-'EOSQL'
+		--set=dbname="${_NOC_DB}" <<-'EOSQL'
+		\getenv egresspw NOCTORNAL_EGRESS_DB_PASSWORD
 		-- The password travels through the statement below: keep it out of
 		-- the server log for this session (see 10-app-role.sh).
 		SET log_statement = 'none';

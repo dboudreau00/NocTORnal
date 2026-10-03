@@ -96,6 +96,24 @@ POLICY_INSERT = (f"requested_by = {_ACTOR} AND classification <= {_CLR} "
                  f"AND claimed_by IS NULL AND claimed_at IS NULL "
                  f"AND result IS NULL")
 
+#: The privilege step alone: no runtime role may DELETE an act. The migration
+#: runs it, and `scripts/runtime_roles.py ensure` replays it for a role created
+#: after this revision ran, because 0108's blanket grant hands DELETE back.
+#: (Merged with the hardening work, which added that replay: 0155's
+#: GRANTS_SQL is replayed the same way.)
+GRANTS_SQL = f"""
+DO $noc$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN
+    EXECUTE format('REVOKE DELETE ON collect.persona_act FROM %I', '{APP_ROLE}');
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{WORKER_ROLE}') THEN
+    EXECUTE format('REVOKE DELETE ON collect.persona_act FROM %I', '{WORKER_ROLE}');
+  END IF;
+END
+$noc$;
+"""
+
 UPGRADE_SQL = f"""
 CREATE TABLE collect.persona_act (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -189,17 +207,7 @@ ALTER TABLE collect.persona_act ENABLE ROW LEVEL SECURITY;
 CREATE POLICY rls_read ON collect.persona_act FOR SELECT USING ({POLICY_SELECT});
 CREATE POLICY rls_enqueue ON collect.persona_act FOR INSERT WITH CHECK ({POLICY_INSERT});
 
-DO $noc$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN
-    EXECUTE format('REVOKE DELETE ON collect.persona_act FROM %I', '{APP_ROLE}');
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{WORKER_ROLE}') THEN
-    EXECUTE format('REVOKE DELETE ON collect.persona_act FROM %I', '{WORKER_ROLE}');
-  END IF;
-END
-$noc$;
-"""
+{GRANTS_SQL}"""
 
 DOWNGRADE_SQL = """
 DO $noc$

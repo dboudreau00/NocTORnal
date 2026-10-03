@@ -67,8 +67,12 @@
  * through `POST /auth/cookie` -- and only when this browser holds no
  * usable session already, because a link must never replace the session
  * the browser has (the server refuses a different account with 409
- * regardless). The token is never logged, never put in a URL by this
- * page, and never rendered.
+ * regardless), and only after the person has been asked: the page names
+ * the account the link carries (`GET /auth/me` on the handed-over token,
+ * which signs nothing in) and signs in only on a yes, because a link made
+ * by anybody holding any session would otherwise sign a signed-out colleague
+ * in as its author (http_ui-017, 2026-10-03). The token is never logged,
+ * never put in a URL by this page, and never rendered.
  *
  * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
  * everything is measured against a PROJECTION — a named, parameterised view.
@@ -1084,6 +1088,9 @@ function authHeaders(method, forceBearer) {
 async function api(path, options) {
   const o = options || {};
   const headers = authHeaders(o.method || 'GET', o.bearer);
+  /* Extra headers a caller names itself (the first-run setup token). Applied
+     over the credential headers, never instead of them. */
+  if (o.headers) Object.assign(headers, o.headers);
   let body;
   if (o.form) {
     body = o.form;                       // let the browser set the boundary
@@ -1159,7 +1166,10 @@ async function _fetch(path, o, headers, body) {
        limit banner both need the number (2026-09-23). */
     const retryAfter = retryAfterSeconds(res.headers.get('Retry-After'), p.detail);
     if (retryAfter !== null) err.retryAfter = retryAfter;
-    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path)) {
+    /* A request that forces its own bearer (the `#token=` hand-off) judges
+       that bearer, as the credential checks do, and says nothing about the
+       session this tab holds (http_ui-017, 2026-10-03). */
+    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path) && !o.bearer) {
       if (state.userId && !state.booting && path !== '/auth/logout') {
         /* Mid-session (expiry-drops-context, 2026-09-22). This used to
            end the session outright: the app was unmounted, the case
@@ -10339,12 +10349,21 @@ function wireAuditVerify() {
       r.checked.toLocaleString() + ' ' + agree(r.checked, 'event', 'events')
       + ' checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + ' to ' + r.last_seq : '')));
-    if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
-    /* Forks are shown as a SEPARATE, quieter line and never as a break.
-       They come from concurrent writers, not from editing, and a real
-       database has them: counting them as tampering made this panel answer
-       BROKEN on untouched history, which is the one answer a tamper-
-       evidence tool cannot afford to get wrong twice. */
+    /* The caveat on EVERY run (2026-10-03), not only a windowed one: the
+       checks are relative, so rows removed from the end, or edited and
+       re-chained, leave the green tick lit. The newest row is shown so an
+       operator can record it where this system cannot write and hand it
+       back as an anchor on a later run. */
+    if (r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    if (r.tail_row_hash) {
+      head.appendChild(el('p', 'help',
+        'Newest row to record: seq ' + r.tail_seq + ', hash ' + r.tail_row_hash));
+    }
+    /* A fork from before migration 0149 is a SEPARATE, quieter line and not
+       a break: the old sequence order let concurrent writers make them, an
+       append-only table cannot be cleaned of them, and counting them as
+       tampering made this panel answer BROKEN on untouched history. One
+       written since is a break, and arrives in `breaks` with its kind. */
     if (r.forks) {
       head.appendChild(el('p', 'help',
         countOf(r.forks, 'row shares', 'rows share') + ' a predecessor. '
@@ -10433,7 +10452,8 @@ function wireElementActions() {
       'links stay in the database, and the act is recorded against your ' +
       'name. But it cannot be undone from the console, and it leaves every ' +
       'view, including as-of queries into the past. To say instead "this ' +
-      'stopped being true in March", set valid_to.');
+      'stopped being true in March", cancel and use Correct... with a date ' +
+      'in Stopped being true on.');
     if (reason === null) return;
     if (!reason.trim()) {
       banner('Not retired', 'A reason is required, exactly as it is for a ' +
@@ -10753,8 +10773,17 @@ function claimLine(a, kind) {
     const v = a.claim_value;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       const keys = a.claim_path ? [a.claim_path] : Object.keys(v);
-      return 'Correction: ' + keys.map((k) =>
-        k + ' → ' + claimValueText(v[k])).join(', ');
+      // The end date reads as a date, not as `valid_to → nothing` and a
+      // raw timestamp (verify round, 2026-10-03). The form writes the end
+      // of a UTC day; anything else is shown as it was recorded.
+      const part = (k) => {
+        if (k !== 'valid_to') return k + ' → ' + claimValueText(v[k]);
+        if (v[k] === null || v[k] === undefined) return 'no end date';
+        const when = String(v[k]);
+        return 'valid until ' + (/T23:59:59/.test(when)
+          ? when.slice(0, 10) : visibleText(when));
+      };
+      return 'Correction: ' + keys.map(part).join(', ');
     }
     return 'Correction: ' + (a.claim_path || 'value') + ' → ' + claimValueText(v);
   }
@@ -10962,6 +10991,10 @@ function renderAssertions(box, all) {
     if (a.external_ref) bits.push('ref ' + visibleText(a.external_ref));
     if (a.retracted_at) bits.push('retracted ' + fmtTime(a.retracted_at));
     if (a.superseded_at) bits.push('superseded ' + fmtTime(a.superseded_at));
+    /* Which claim replaced this one, and which this one replaced
+       (migration 0131): the pair is readable from either card. */
+    if (a.superseded_by) bits.push('replaced by claim ' + shortId(a.superseded_by));
+    if (a.supersedes_id) bits.push('replaces claim ' + shortId(a.supersedes_id));
     const meta = el('div', 'assert-meta', bits.join(' · '));
     meta.title = 'author id ' + a.created_by;
     card.appendChild(meta);
@@ -10990,8 +11023,19 @@ function renderAssertions(box, all) {
          tie stayed drawn on a replaced claim nobody could retract. */
       const others = all.filter(
         (x) => !x.retracted_at && !x.superseded_at && x.id !== a.id);
-      btn.addEventListener('click', () => retractAssertion(a.id, others));
+      btn.addEventListener('click',
+        () => retractAssertion(a.id, others, a.is_correction));
       actions.appendChild(btn);
+      /* Dating a claim that never had a date (docs/00 open question 11,
+         settled 2026-10-02): only where there is none, and by supersession,
+         never by writing the date onto the recorded claim. */
+      if (!a.observed_at) {
+        const dateBtn = el('button', 'btn small', 'Date this claim');
+        dateBtn.type = 'button';
+        dateBtn.title = dateClaimHelp();
+        dateBtn.addEventListener('click', () => openDateClaimForm(a, card));
+        actions.appendChild(dateBtn);
+      }
       card.appendChild(actions);
     }
     // Live claims like this one (F6.4). Outside .assert-actions, which
@@ -11023,7 +11067,7 @@ function renderAssertions(box, all) {
  *  `others`: the element's other unretracted assertions. `kind`: 'node'
  *  or 'edge'. `ties`: for an entity, how many ties the canvas draws at
  *  it. Returns {last, prompt, done}. */
-function retractionWords(others, kind, ties) {
+function retractionWords(others, kind, ties, isCorrection) {
   const what = kind === 'edge' ? 'tie' : 'entity';
   const last = others.length === 0;
   const onlyEdits = !last && others.every((x) => x.is_correction);
@@ -11058,14 +11102,26 @@ function retractionWords(others, kind, ties) {
     done = 'The ' + what + ' remains: ' + n + ' other live assertion'
       + (n === 1 ? '' : 's') + ' still support' + (n === 1 ? 's' : '') + ' it.';
   }
+  /* A correction gives its value back (graph-retracted-correction-stays-
+     in-force, 2026-10-03): the server restores each field it set to the
+     newest live correction of that field, or to what the element held
+     before its first correction. `isCorrection` is the card's flag. */
+  if (isCorrection && !last) {
+    prompt += ' This claim is a correction, so what it set goes back to the '
+      + 'value the remaining claims support: the newest live correction of '
+      + 'the same field, or what the ' + what + ' held before it was first '
+      + 'corrected.';
+    done += ' What the correction set has gone back to the value the '
+      + 'remaining claims support.';
+  }
   return { last: last, prompt: prompt, done: done };
 }
 
-async function retractAssertion(assertionId, others) {
+async function retractAssertion(assertionId, others, isCorrection) {
   const sel = state.selection;
   const kind = sel ? sel.kind : 'node';
   const ties = sel && kind === 'node' ? (state.nodeTies.get(sel.id) || 0) : 0;
-  const words = retractionWords(others, kind, ties);
+  const words = retractionWords(others, kind, ties, isCorrection);
   const reason = window.prompt(
     'Why is this claim being withdrawn? The reason is recorded permanently ' +
     'and cannot be edited.\n\n' + words.prompt);
@@ -11087,6 +11143,109 @@ async function retractAssertion(assertionId, others) {
     await reloadAll();
     banner('Assertion retracted', words.done, 'info');
   } catch (err) { fail(err); }
+}
+
+/* --- Inspector: date a claim that never had a date -----------------------
+ *
+ * Docs/00 open question 11, settled by the owner 2026-10-02. Claims accepted
+ * from Triage before Alpha 6 carry no observation date, so First seen and
+ * Last seen ignore them. Writing a date onto a recorded claim would rewrite
+ * it, and invariant 5 is NOT amended: the date is given by SUPERSESSION. The
+ * analyst names the date and why; the server records a new claim that is the
+ * old one in every other respect, citing it, and stamps the old one
+ * superseded. The old claim is kept as it was recorded (Include retracted
+ * lists it). Offered only on a live claim with no date, and, like Retract,
+ * inside `.assert-actions`, which a read-only case turns off.
+ */
+
+/** The button's hover text. Pure. */
+function dateClaimHelp() {
+  return 'This claim has no observation date, so First seen and Last seen '
+    + 'ignore it. Dating it records a new claim with the date and your '
+    + 'reason, and marks this one superseded. Nothing is rewritten: this '
+    + 'claim stays on record as it was.';
+}
+
+/** What stops the form being sent, as a sentence, or null. `observed` is the
+ *  `datetime-local` value (read as UTC, like every observed-at field).
+ *  Pure, for test_ui_date_claim.py. */
+function dateClaimProblem(observed, rationale) {
+  const at = observedAtUtc(observed);
+  if (!at) return 'Give the date and time the claim was true, in UTC.';
+  if (new Date(at).getTime() > Date.now()) {
+    return 'A claim cannot have been observed later than now.';
+  }
+  if (!String(rationale || '').trim()) {
+    return 'Say why this date is the one. It is recorded as the reason on '
+      + 'the new claim.';
+  }
+  return null;
+}
+
+/** The request body. Only the date and the reason go: the new claim is the
+ *  old one in every other column, and nothing here can change that. Pure. */
+function dateClaimBody(observed, rationale) {
+  return { observed_at: observedAtUtc(observed),
+           rationale: String(rationale).trim() };
+}
+
+/** The banner after a claim is dated. Pure. */
+function dateClaimDoneWords() {
+  return 'The new claim carries the date and your reason. The old claim is '
+    + 'superseded, not changed: it stays on record, and Include retracted '
+    + 'lists it.';
+}
+
+/** Open the form on this claim's card. One form per card. */
+function openDateClaimForm(a, card) {
+  const open = card.querySelector('.date-claim');
+  if (open) {
+    open.querySelector('input').focus();
+    return;
+  }
+  const form = el('form', 'row-form date-claim');
+  form.noValidate = true;
+  const whenField = el('label', 'field');
+  const when = el('input');
+  when.type = 'datetime-local';
+  whenField.append(el('span', 'label', 'Observed at (UTC)'), when);
+  const whyField = el('label', 'field grow');
+  const why = el('input');
+  why.type = 'text';
+  why.autocomplete = 'off';
+  whyField.append(el('span', 'label', 'Why this date'), why);
+  const go = el('button', 'btn small', 'Record the date');
+  go.type = 'submit';
+  const cancel = el('button', 'btn ghost small', 'Cancel');
+  cancel.type = 'button';
+  const msg = el('p', 'msg bad');
+  msg.setAttribute('role', 'alert');
+  msg.hidden = true;
+  form.append(whenField, whyField, go, cancel, msg);
+  cancel.addEventListener('click', () => form.remove());
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setMsg(msg, '');
+    const problem = dateClaimProblem(when.value, why.value);
+    if (problem) {
+      setMsg(msg, problem);
+      return;
+    }
+    go.disabled = true;
+    try {
+      await api(cpath('/assertions/' + a.id + '/supersede'), {
+        method: 'POST', json: dateClaimBody(when.value, why.value),
+      });
+      invalidateAnalytics();
+      await reloadAll();
+      banner('Claim dated', dateClaimDoneWords(), 'info');
+    } catch (err) {
+      go.disabled = false;
+      setMsg(msg, refusalText(err, 'The claim could not be dated.'));
+    }
+  });
+  card.appendChild(form);
+  when.focus();
 }
 
 /* ── inspector: add a claim about the selected tie ─────────────────────
@@ -11285,7 +11444,8 @@ const correction = { kind: null, id: null };
 /** Empty the form. Nothing is graded for the analyst. */
 function resetCorrection() {
   resetGrading('fix');
-  for (const id of ['fix-label', 'fix-rationale', 'fix-ref', 'fix-observed']) {
+  for (const id of ['fix-label', 'fix-valid-to', 'fix-rationale', 'fix-ref',
+                    'fix-observed']) {
     $(id).value = '';
   }
   $('fix-evidence').value = '';
@@ -11322,12 +11482,16 @@ onCaseSwitch(() => {
  *  confidence as last read (unused for an entity). Pure, for
  *  test_correction_form_ui.py. */
 function correctionWords(kind, current) {
+  /* The end date and the restore on retraction (graph-valid-to-cannot-be-
+     set-after-creation and graph-retracted-correction, 2026-10-03). */
   if (kind === 'node') {
     return {
       heading: 'Correct this entity',
       help: 'The corrected label is recorded as a claim with the basis and '
         + 'grading you choose, and the label it replaces stays in the audit '
-        + 'record. Nothing is graded for you.',
+        + 'record; retracting the correction puts it back. A date in Stopped '
+        + 'being true on records when it ended without retiring it, so the '
+        + 'as-of view still shows it before then. Nothing is graded for you.',
       conf: 'Confidence (ICD 203)',
     };
   }
@@ -11338,7 +11502,9 @@ function correctionWords(kind, current) {
       + 'recorded as a claim with its own basis and grading, and a tie takes '
       + 'the highest grade among its live claims, so a correction can raise '
       + 'it. To lower it, add the lower claim under Assertions and retract '
-      + 'the claims graded above it. Nothing is graded for you.',
+      + 'the claims graded above it. A date in Stopped being true on records '
+      + 'when the tie ended instead, graded as you choose, and leaves its '
+      + 'confidence as it is. Nothing is graded for you.',
     conf: 'Tie confidence (ICD 203)',
   };
 }
@@ -11360,9 +11526,33 @@ function openCorrection() {
     const n = nodeById(sel.id);
     $('fix-label').value = n ? n.label : '';
   }
+  if ($('insp-fix').hidden) {
+    /* The end date it holds now, so an unchanged field sends nothing and
+       an emptied one clears it (`correctionEndDate`). */
+    const held = node ? nodeById(sel.id) : e;
+    $('fix-valid-to').value = held && held.valid_to
+      ? new Date(held.valid_to).toISOString().slice(0, 10) : '';
+  }
   showCorrection(true);
   $('fix-form').scrollIntoView({ block: 'nearest' });
   $(node ? 'fix-label' : 'fix-basis').focus();
+}
+
+/** The end date a correction sends, from the Stopped being true on field:
+ *  undefined when it shows the date the element already holds (nothing to
+ *  send), null when it was emptied (the end date is cleared), else the end
+ *  of that UTC day, inclusive, as the create forms write `valid_to`
+ *  (`intervalFrom`). `current` is the stored `valid_to`. Pure, for
+ *  test_review_graph_valid_to_ui.py (graph-valid-to-cannot-be-set-after-
+ *  creation, 2026-10-03). */
+function correctionEndDate(day, current) {
+  const held = current ? new Date(current) : null;
+  const was = held && !Number.isNaN(held.getTime())
+    ? held.toISOString().slice(0, 10) : '';
+  if ((day || '') === was) return undefined;
+  if (!day) return null;
+  const d = new Date(day + 'T23:59:59Z');
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 /** Move what the analyst entered here into the tie's Add a claim form,
@@ -11388,6 +11578,13 @@ async function submitCorrection(event) {
   /* The form's contents belong to one element; never send them for another. */
   if (!sel || sel.kind !== correction.kind || sel.id !== correction.id) return;
   let body;
+  /* The element as last read: its label and its end date, so an end date
+     alone is sent without restating the label, and an unchanged date is
+     not sent at all (graph-valid-to-cannot-be-set-after-creation). */
+  const held = sel.kind === 'node' ? nodeById(sel.id)
+    : (edgeById(sel.id) || relTieCache.get(sel.id) || null);
+  const end = correctionEndDate($('fix-valid-to').value,
+                                held ? held.valid_to : null);
   if (sel.kind === 'node') {
     const label = $('fix-label').value.trim();
     if (!label) {
@@ -11395,14 +11592,19 @@ async function submitCorrection(event) {
       $('fix-label').focus();
       return;
     }
-    body = { label: label };
+    body = end !== undefined && held && label === held.label
+      ? {} : { label: label };
   }
   const ungraded = gradingProblem('fix');
   if (ungraded) { setMsg(errBox, ungraded); return; }
   const assertion = assertionFrom('fix');
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); $('fix-rationale').focus(); return; }
-  if (sel.kind === 'edge') {
+  if (sel.kind === 'edge' && end !== undefined) {
+    /* An end date: the grading grades the date, and the tie's confidence
+       is left where it is, as a weight correction leaves it. */
+    body = {};
+  } else if (sel.kind === 'edge') {
     /* Refused HERE, before anything is sent, when the re-grade would lower
        the tie (final review C14, 2026-09-23): the server refuses it (409),
        since a correction cannot lower a tie past a claim that still
@@ -11421,6 +11623,7 @@ async function submitCorrection(event) {
     }
     body = { confidence: assertion.confidence };
   }
+  if (end !== undefined) body.valid_to = end;
   /* The whole claim, graded by the analyst: the original claim survives,
      so the sequence of assertions is the history of what this element has
      been called (invariant 1). */
@@ -11440,11 +11643,19 @@ async function submitCorrection(event) {
     await reloadAll();
     if (caseChanged(token)) return;
     renderInspector();
-    banner('Correction recorded', sel.kind === 'edge'
+    banner('Correction recorded', body.confidence
       ? tieClaimDoneWords(assertion.confidence, out ? out.confidence : null,
                           !!assertion.evidence_id)
-      : 'Recorded as a claim with the grading you chose. The label it '
-        + 'replaces stays in the audit record.', 'info');
+      : ['Recorded as a claim with the grading you chose.',
+         body.label ? 'The label it replaces stays in the audit record.' : '',
+         end === undefined ? ''
+           : end ? 'The end date is recorded, and the as-of view still shows '
+             + 'it before then.' : 'The end date is cleared.',
+         /* The corrected label is a selector another entity holds. */
+         out && out.selector_owner_id
+           ? selectorLeadWords('selector value', labelOf(out.selector_owner_id))
+           : '']
+        .filter(Boolean).join(' '), 'info');
   } catch (err) {
     if (caseChanged(token)) return;
     inlineProblem(errBox, err);
@@ -12886,6 +13097,17 @@ function selectorHeldWords(selType, ownerLabel, strong) {
     + 'entities with ' + (strong ? 'one strong selector are a merge lead: '
       : 'one selector may be one and the same: ')
     + 'compare them under Entity resolution below.';
+}
+
+/** Another entity this reader can see already holds a selector that a
+ *  correction or an accepted proposal just asked for. The index keeps its
+ *  first owner, so the two are a lead for Entity resolution
+ *  (graph-selector-index-drift, 2026-10-03). Pure. */
+function selectorLeadWords(selType, ownerLabel) {
+  return 'This ' + selType + ' is already recorded against ' + ownerLabel
+    + ', so it stays there and this entity does not hold it. Two entities '
+    + 'with one selector may be one and the same: compare them under Entity '
+    + 'resolution.';
 }
 
 /* ── what a create just made ───────────────────────────────────────────
@@ -14767,6 +14989,9 @@ function wire() {
   }
   $('an-kpp-n').addEventListener('change', onKppSizeChange);
   $('an-concor-depth').addEventListener('change', onConcorDepthChange);
+  /* REGE (2026-10-02): the regular-role card's two controls fetch only it. */
+  $('an-rege-roles').addEventListener('change', onRegeChange);
+  $('an-rege-weighting').addEventListener('change', onRegeChange);
   for (const th of document.querySelectorAll('#an-table th[data-sort]')) {
     const b = th.querySelector('button');
     if (b) b.addEventListener('click', () => sortAnalysisBy(th.dataset.sort));
@@ -14923,6 +15148,36 @@ async function adoptSessionFromFragment() {
     };
   }
 
+  /* ASK BEFORE SIGNING IN (http_ui-017, 2026-10-03). Nothing above made
+     this browser anyone: it holds no session. The link was made by
+     whoever holds a session token, which is not necessarily the person
+     who opened it, and exchanging it quietly signed a colleague whose own
+     session had lapsed in as the link's author, who can read everything
+     they then did. `GET /auth/me` with the handed-over token as the
+     bearer names the account without signing anything in (it sets no
+     cookie), and the person is asked about THAT account by name. Held in
+     memory only for the question, and dropped on a refusal. */
+  let who = null;
+  try {
+    who = await api('/auth/me', { bearer: token });
+  } catch (err) {
+    return signInLinkRefused(err);
+  }
+  /* A half session of the SAME account is not a sign-in: the exchange only
+     re-mints the pair it lost, so there is nothing to ask. A different
+     account is asked about, and the server refuses it with 409 besides. */
+  const repairing = !!(holder && who && holder.user_id === who.user_id);
+  if (!repairing && !window.confirm(signInLinkQuestion(who))) {
+    return {
+      title: 'Sign-in link not used',
+      detail: 'You chose not to sign in as '
+        + visibleText((who && (who.display_name || who.email)) || 'that account')
+        + '. Sign in with your email, password and code, or ask whoever sent '
+        + 'the link for a new one.',
+      kind: 'warn',
+    };
+  }
+
   /* Exchange it ONCE for the cookie pair (`POST /auth/cookie`), forcing
      the bearer so the NEW token is presented and not the cookie. Held in
      memory before the call because a console the browser refuses Secure
@@ -14936,18 +15191,39 @@ async function adoptSessionFromFragment() {
     return null;
   } catch (err) {
     state.token = null;
-    /* To whoever opened the link, who may not be the operator who made it
-       (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
-    const why = err instanceof ApiError && err.status === 401
-      ? 'The link has expired or has already been used.'
-      : (err instanceof ApiError ? (err.detail || err.title) : String(err));
-    return {
-      title: 'Sign-in link not used',
-      detail: why.replace(/\.?$/, '. ') + 'Sign in with your email, '
-        + 'password and code, or ask whoever sent the link for a new one.',
-      kind: 'warn',
-    };
+    return signInLinkRefused(err);
   }
+}
+
+/** The question a `#token=` link asks before it signs this browser in:
+ *  the account by name and address, what signing in means, and that the
+ *  person should only continue if they expected it. Names go through
+ *  `visibleText`, so a display name built to look like somebody else's
+ *  cannot hide its odd characters. */
+function signInLinkQuestion(who) {
+  const w = who || {};
+  const name = visibleText(w.display_name || w.user_id || 'an account');
+  const email = w.email ? ' (' + visibleText(w.email) + ')' : '';
+  return 'This link signs this browser in as ' + name + email + '.\n\n'
+    + 'Everything you do afterwards is recorded against that account, and '
+    + 'its owner can read it. Only continue if you were expecting a link '
+    + 'for it.\n\nSign in as ' + name + '?';
+}
+
+/** The banner for a link that was refused: a stale or used token, another
+ *  account's session, an API that did not answer. To whoever opened the
+ *  link, who may not be the operator who made it
+ *  (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
+function signInLinkRefused(err) {
+  const why = err instanceof ApiError && err.status === 401
+    ? 'The link has expired or has already been used.'
+    : (err instanceof ApiError ? (err.detail || err.title) : String(err));
+  return {
+    title: 'Sign-in link not used',
+    detail: why.replace(/\.?$/, '. ') + 'Sign in with your email, '
+      + 'password and code, or ask whoever sent the link for a new one.',
+    kind: 'warn',
+  };
 }
 
 /** Honour a `#tab=` deep link once the workspace is up.
@@ -15250,8 +15526,18 @@ function paintCasePolicy(p) {
   if (p.dual_control_merge) {
     let said = 'Merges in this case need a second signature.';
     if (may && !p.relax_signers) {
-      said += ' Nobody else on this case can approve turning that off: name '
-        + 'a deputy first.';
+      /* F39 (2026-10-02): somebody else holds the permission but has not
+         held it for the window yet, so say when, not "name a deputy". */
+      if (p.relax_next_eligible) {
+        said += ' Nobody else on this case can approve turning that off yet: '
+          + 'the second person must have held case.update on the case for '
+          + countOf(p.relax_seasoning_days, 'day', 'days') + ', and the first '
+          + 'colleague who does is eligible from '
+          + fmtTime(p.relax_next_eligible) + '.';
+      } else {
+        said += ' Nobody else on this case can approve turning that off: '
+          + 'name a deputy first.';
+      }
     }
     text.textContent = said;
     btn.textContent = 'Stop requiring it';
@@ -15556,6 +15842,12 @@ function approvalRow(a) {
   }
 
   if (a.state === 'PENDING' && !dead) {
+    /* F39 (2026-10-02): a colleague who has not held case.update on the
+       case for the window yet is told the rule and the date before they
+       press Approve; Reject stays available, as everywhere. */
+    if (a.signer_block && !mine) {
+      card.appendChild(el('p', 'help', visibleText(a.signer_block.reason)));
+    }
     card.appendChild(approvalActions(a, title, asker, mine));
   }
 
@@ -15618,6 +15910,10 @@ function approvalActions(a, title, asker, mine) {
     for (const [label, approve] of [['Approve', true], ['Reject', false]]) {
       const b = el('button', 'btn ghost small' + write, label);
       b.type = 'button';
+      if (approve && a.signer_block) {
+        b.disabled = true;
+        b.title = visibleText(a.signer_block.reason);
+      }
       b.addEventListener('click', async () => {
         const note = window.prompt(
           label + ' this request?\n\n' + title + '\nRequested by ' + asker
@@ -16285,6 +16581,14 @@ function showTriageOutcome(p, path, out) {
       ? ', written at TLP:' + level : '';
     line.appendChild(document.createTextNode(
       'Accepted: ' + what + written + '. '));
+    /* The accepted selector is already held by another entity this reader
+       can see: a lead, said where the accept is (graph-selector-index-
+       drift, 2026-10-03). */
+    if (out.selector_owner_id) {
+      const attrs = (p.payload && p.payload.attrs) || {};
+      line.appendChild(document.createTextNode(selectorLeadWords(
+        attrs.selector_type || 'selector', labelOf(out.selector_owner_id)) + ' '));
+    }
     /* Only for a role that can retire it (final review u11, 2026-09-24):
        a REVIEWER's Undo answered 403 from the delete it called, and the
        element stayed. They are told who can take it back instead. */
@@ -16796,9 +17100,10 @@ const AN_PROJECTION_CHANGED = 'The projection changed. Run the analysis '
 function analysisFailureText(err, fallback) {
   /* F1 and F2 (2026-09-24): the role analysis and a view with venues
      projected spend budgets of their own, so a throttle there says so
-     rather than blaming the timeline. */
+     rather than blaming the timeline. Regular roles (REGE, 2026-10-02)
+     have one too, and are role analysis in the same words. */
   if (err instanceof ApiError && err.status === 429
-      && /analytics\.(one_mode|concor)/.test(err.detail || '')) {
+      && /analytics\.(one_mode|concor|rege)/.test(err.detail || '')) {
     const m = /retry in (\d+)\s*s/i.exec(err.detail || '');
     const which = /analytics\.one_mode/.test(err.detail || '')
       ? 'Projecting venues to entities' : 'Role analysis';
@@ -16866,6 +17171,9 @@ function blankAnalytics(note) {
   /* The Roles card is one run's too (F1, 2026-09-24). */
   state.analyticsConcor = null;
   state.analyticsConcorAll = {};
+  /* And the regular-role card (REGE, 2026-10-02). */
+  state.analyticsRege = null;
+  state.analyticsRegeAll = {};
   /* A held-back one-mode check was for the run just cleared (F2). */
   if (state.analyticsOneModeTimer) {
     clearTimeout(state.analyticsOneModeTimer);
@@ -16889,7 +17197,7 @@ onCaseSwitch(() => {
   state.analyticsRunning = false;
   $('an-run').disabled = false;
   for (const id of ['an-body', 'an-leads', 'an-kpp', 'an-cohesion', 'an-concor',
-                    'an-balance']) {
+                    'an-rege', 'an-balance']) {
     clear($(id));
   }
   /* Sort, filter and the expanded lead lists are a way of reading ONE
@@ -16979,6 +17287,9 @@ async function runAnalysis() {
        delays or blanks the table. It reads the stored run first and
        computes only when there is none or the graph has moved. */
     loadConcor(false);
+    /* The regular-role card the same way, on its own run and meter (REGE,
+       2026-10-02), so neither role card waits on the other. */
+    loadRege(false);
     /* The open trend is fetched again, not only re-filtered (release
        review u14, 2026-09-24). renderAnalytics re-draws the series fetched
        when Trend was pressed, so the run just computed was missing from the
@@ -17100,10 +17411,14 @@ async function checkAnalysisCurrency() {
   const q = new URLSearchParams(state.analyticsQuery);
   const k = state.analyticsKpp;
   const roles = state.analyticsConcor;
+  /* The regular-role run (REGE, 2026-10-02): the fourth and last run the
+     route takes in one ask. */
+  const regular = state.analyticsRege;
   const asked = (card) => !!(card && card.run_id && !card.error);
   q.append('run_id', a.run_id);
   if (asked(k)) q.append('run_id', k.run_id);
   if (asked(roles)) q.append('run_id', roles.run_id);
+  if (asked(regular)) q.append('run_id', regular.run_id);
   let verdicts = null, note = '';
   try {
     const out = await api(cpath('/analytics/currency?' + q.toString()));
@@ -17126,6 +17441,10 @@ async function checkAnalysisCurrency() {
   if (asked(roles) && state.analyticsConcor === roles) {
     roles.current = verdict(roles.run_id);
     renderConcor();
+  }
+  if (asked(regular) && state.analyticsRege === regular) {
+    regular.current = verdict(regular.run_id);
+    renderRege();
   }
   renderAnalyticsFlags(state.analytics);
   if (current === false) {
@@ -17259,6 +17578,66 @@ async function loadConcor(storedOnly) {
      people, as the key-player set does. */
   state.analyticsConcor = safeLabelsDeep(roles);
   renderConcor();
+}
+
+/* --- the regular-role card: REGE (ROADMAP-REMAINING phase 3, 2026-10-02) --
+ *
+ * The Roles card's shape, on purpose: its own run, stored for each number
+ * of roles and weighting, read first and computed only when there is none
+ * or the graph has moved since. `state.analyticsRegeGen` numbers what may
+ * draw on the card, so a control changed while a reply is out draws only
+ * the answer for the controls on screen, and the case token drops a reply
+ * for a case the analyst has left. */
+
+/** The number of roles or the weighting changed: only this card is
+ *  fetched again. */
+function onRegeChange() {
+  state.analyticsRegeGen = (state.analyticsRegeGen || 0) + 1;
+  state.analyticsRegeAll = {};
+  if (state.analytics) loadRege(false);
+}
+
+async function loadRege(storedOnly) {
+  if (!state.caseId || !state.analytics) return;
+  const roles = Number($('an-rege-roles').value) || 4;
+  const weighting = $('an-rege-weighting').value === 'weight' ? 'weight' : 'presence';
+  const token = caseToken();
+  const gen = state.analyticsGen || 0;
+  const rgen = state.analyticsRegeGen = (state.analyticsRegeGen || 0) + 1;
+  const stale = () => caseChanged(token) || gen !== (state.analyticsGen || 0)
+    || rgen !== state.analyticsRegeGen;
+  const q = new URLSearchParams(state.analyticsQuery);
+  q.set('roles', String(roles));
+  q.set('weighting', weighting);
+  state.analyticsRege = { pending: true, reading: true, roles, weighting };
+  renderRege();
+  let found = null;
+  try {
+    try {
+      const stored = await api(cpath('/analytics/rege/latest?' + q.toString()));
+      if (stale()) return;
+      if (storedOnly || stored.current !== false) found = stored;
+    } catch (err) {
+      if (stale()) return;
+      if (!(err instanceof ApiError && (err.status === 404 || err.status === 403))) {
+        throw err;
+      }
+    }
+    if (!found && storedOnly) found = { missing: true, roles, weighting };
+    if (!found) {
+      state.analyticsRege = { pending: true, roles, weighting };
+      renderRege();
+      found = await api(cpath('/analytics/rege?' + q.toString()));
+    }
+  } catch (err) {
+    if (stale()) return;
+    found = { error: analysisFailureText(err, 'The regular-role request failed.'),
+              roles, weighting };
+  }
+  if (stale()) return;
+  /* De-fang at the boundary: every role names its members. */
+  state.analyticsRege = safeLabelsDeep(found);
+  renderRege();
 }
 
 /* --- rendering ------------------------------------------------------------ */
@@ -17562,6 +17941,7 @@ function renderAnalytics() {
   renderKeyPlayer();
   renderCohesion(a);
   renderConcor();
+  renderRege();
   renderBalance(a);
   syncAnalysisSizeOptions();
   /* The trend's filter is this run's projection, so a trend already open
@@ -18705,6 +19085,231 @@ function renderConcor() {
   box.appendChild(card);
 }
 
+/** Where REGE's roles were cut, in words (REGE, 2026-10-02): the lowest
+ *  similarity at which members were joined, and how alike the closest two
+ *  roles left apart are. 1 means alike in every tie. */
+function regeCutText(cut) {
+  const held = cut ? cut.held_at : null;
+  const next = cut ? cut.next_merge : null;
+  if (held === null || held === undefined) {
+    return next === null || next === undefined ? ''
+      : 'No two entities were alike enough to share a role; the closest two are '
+        + metricNum(next, 2) + ' alike, where 1 is alike in every tie.';
+  }
+  return 'Members were joined down to a similarity of ' + metricNum(held, 2)
+    + ', where 1 is alike in every tie'
+    + (next === null || next === undefined ? '.'
+      : '; the closest two roles left apart are ' + metricNum(next, 2) + ' alike.');
+}
+
+/** One relation's role-to-role densities as a table, CONCOR's image with a
+ *  second mark: a block is regular when every member of the row role sends
+ *  such a tie into the column role and every member of the column role
+ *  receives one, the pattern regular equivalence looks for. Both marks are
+ *  words, and the caption states both cuts, so nothing rests on colour. */
+function regeImageTable(g, rel, numbers) {
+  const d = (g.density || {})[rel.key] || [];
+  const img = (g.image || {})[rel.key] || [];
+  const reg = (g.regular || {})[rel.key] || [];
+  const alpha = (g.alpha || {})[rel.key];
+  const table = el('table', 'table an-image');
+  table.appendChild(el('caption', null, 'Density of ' + rel.label + ' from each role '
+    + '(rows) to each role (columns). Blocks marked tied are at least '
+    + metricNum(alpha, 3) + ', the density of ' + rel.label + ' among these entities; '
+    + 'blocks marked regular have such a tie from every member of the row role and to '
+    + 'every member of the column role.'));
+  const head = el('tr');
+  head.appendChild(el('th', null, 'From / to'));
+  for (const x of numbers) head.appendChild(el('th', null, 'Role ' + x));
+  const thead = el('thead');
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const body = el('tbody');
+  d.forEach((row, i) => {
+    const tr = el('tr');
+    const th = el('th', null, 'Role ' + numbers[i]);
+    th.setAttribute('scope', 'row');
+    tr.appendChild(th);
+    row.forEach((v, j) => {
+      const td = el('td', absentClass(v), metricNum(v, 3));
+      if ((img[i] || [])[j] === 1) {
+        td.classList.add('on-' + rel.key);
+        td.appendChild(el('span', 'an-image-mark', ' tied'));
+      }
+      if ((reg[i] || [])[j] === 1) td.appendChild(el('span', 'an-image-mark', ' regular'));
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  const wrap = el('div', 'scroll-x');
+  wrap.appendChild(table);
+  return wrap;
+}
+
+/** The regular-role card (REGE, ROADMAP-REMAINING phase 3, 2026-10-02):
+ *  roles of entities with the same kinds of ties to the same kinds of
+ *  others, where the cut fell, each role's members and how alike they are,
+ *  the role-to-role image per relation, and every limit the server states.
+ *  A role is worded as a hypothesis throughout: it is a lead about how
+ *  entities sit in this view, never a finding about who they are. */
+function renderRege() {
+  const box = $('an-rege');
+  clear(box);
+  /* A role shown on the graph says so when its run goes stale. */
+  if (state.focus && state.focus.kind === 'set') renderFocusFlag();
+  const r = state.analyticsRege;
+  if (!r || r.missing) {
+    const card = el('div', 'card');
+    card.appendChild(el('p', 'muted small', 'Not computed for this view yet. Regular '
+      + 'roles are their own run, stored for each number of roles and way of counting '
+      + 'ties.'));
+    const btn = el('button', 'btn small', 'Find regular roles');
+    btn.type = 'button';
+    btn.addEventListener('click', () => { loadRege(false); });
+    card.appendChild(btn);
+    box.appendChild(card);
+    return;
+  }
+  if (r.pending) {
+    box.appendChild(el('p', 'muted small', r.reading
+      ? 'Looking for stored regular roles...' : 'Finding regular roles...'));
+    return;
+  }
+  if (r.error) {
+    box.appendChild(el('p', 'muted small', r.error));
+    return;
+  }
+  const g = r.rege || {};
+  const roles = g.roles || [];
+  const numbers = roles.map((x) => x.role);
+  const card = el('div', 'card');
+  if (r.current === false) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', 'The graph has changed since '
+      + 'this regular-role run. Run the analysis again to recompute it.'));
+  }
+  if (r.truncated && r.truncation_note) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', r.truncation_note));
+  }
+  if (r.computed_at) {
+    card.appendChild(el('p', 'muted small', 'From the regular-role run of '
+      + fmtTime(r.computed_at) + ' (' + ageText(r.computed_at) + ').'));
+  }
+  const placed = (r.nodes || []).length;
+  const found = Number(g.roles_found) || roles.length;
+  const asked = Number(g.roles_asked) || found;
+  card.appendChild(el('p', null, 'REGE placed ' + countOf(placed, 'entity with ties',
+    'entities with ties') + ' in ' + countOf(found, 'role', 'roles')
+    + (g.cut && g.cut.fewer_than_asked ? ', of the ' + asked + ' asked for' : '')
+    + '. ' + regeCutText(g.cut)));
+  if (found === 1 && placed > 1) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', 'Every entity with a tie is in one '
+      + 'role. On ties of one kind with no direction, regular equivalence finds nearly '
+      + 'every entity alike: read the direction and valence of the ties before reading '
+      + 'this as a finding.'));
+  } else if (g.cut && g.cut.fewer_than_asked) {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'Fewer roles than asked: entities '
+      + 'alike at the level of the cut are never split to make up the number.'));
+  }
+  if (g.converged === false) {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'REGE stopped after '
+      + countOf(g.rounds, 'round', 'rounds') + ' while similarities were still moving: '
+      + 'more rounds look further out and can separate more entities.'));
+  }
+  if (g.weighting === 'weight') {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'Ties count by weight here, so a '
+      + 'weak tie only partly matches a strong one. Counted as present or absent, the '
+      + 'roles can differ.'));
+    const weightless = Number(g.weightless_ties) || 0;
+    if (weightless) {
+      card.appendChild(el('p', 'muted small', countOf(weightless, 'tie carries',
+        'ties carry') + ' no positive weight and ' + agree(weightless, 'counts', 'count')
+        + ' as absent.'));
+    }
+  }
+  if (g.derived_ties) {
+    card.appendChild(el('p', 'an-flag an-flag-note', g.weighting === 'weight'
+      ? 'With venues projected, a derived tie counts here at its venue weighting.'
+      : 'With venues projected, a derived tie counts here as a whole tie, however many '
+        + 'entities shared the venue.'));
+  }
+  if (r.review_scope && r.review_scope.scope === 'accepted') {
+    card.appendChild(el('p', 'an-flag an-flag-note', reviewScopeText(r.review_scope)));
+  } else if (Number(g.unaccepted_ties)) {
+    const n = Number(g.unaccepted_ties);
+    card.appendChild(el('p', 'an-flag an-flag-note', countOf(n, 'tie', 'ties')
+      + ' in this view ' + agree(n, 'is', 'are') + ' not accepted by a reviewer and '
+      + agree(n, 'shapes', 'shape') + ' these roles like any other. Choose accepted ties '
+      + 'only to see roles that rest on reviewed ties alone.'));
+  }
+  const all = state.analyticsRegeAll || {};
+  for (const role of roles) {
+    const item = el('div', 'an-lead');
+    const line = el('p', 'an-lead-head');
+    line.appendChild(document.createTextNode('Role ' + role.role + ' (' + role.size
+      + '): '));
+    const members = role.members || [];
+    const shown = all[role.role] ? members : members.slice(0, 8);
+    shown.forEach((m, i) => {
+      if (i) line.appendChild(document.createTextNode(', '));
+      line.appendChild(actorButton(m));
+    });
+    if (members.length > shown.length) {
+      line.appendChild(document.createTextNode(', and '
+        + countOf(members.length - shown.length, 'more', 'more') + ' '));
+      const more = el('button', 'btn ghost small', 'Show all ' + members.length);
+      more.type = 'button';
+      more.addEventListener('click', () => {
+        state.analyticsRegeAll = { ...(state.analyticsRegeAll || {}), [role.role]: true };
+        renderRege();
+      });
+      line.appendChild(more);
+    }
+    item.appendChild(line);
+    const lit = new Set(members.map((m) => m.id));
+    const actions = el('p', 'an-graph-actions');
+    const b = graphButton('Show on graph', () => ({
+      label: 'regular role ' + role.role, lit, pairs: pairsWithin(lit), fromRege: true,
+      note: 'Role ' + role.role + ' of the last regular-role run: entities with the same '
+        + 'kinds of ties to the same kinds of others, a hypothesis about how they sit in '
+        + 'this view. They need not share a single contact.',
+    }));
+    b.setAttribute('aria-label', 'Show regular role ' + role.role + ', '
+      + countOf(role.size, 'entity', 'entities') + ', on graph');
+    actions.appendChild(b);
+    item.appendChild(actions);
+    item.appendChild(el('p', 'muted small', role.size > 1
+      ? 'Members are on average ' + metricNum(role.cohesion, 2) + ' alike; the least '
+        + 'alike two, ' + metricNum(role.least_alike, 2) + '.'
+      : 'A role of one: no other entity was alike enough to join it.'));
+    card.appendChild(item);
+  }
+  for (const rel of g.relations || []) {
+    if ((g.density || {})[rel.key]) card.appendChild(regeImageTable(g, rel, numbers));
+  }
+  const noTies = Number((g.no_ties || {}).count) || 0;
+  if (noTies) {
+    card.appendChild(el('p', 'muted small', countOf(noTies, 'entity', 'entities')
+      + ' with no tie in this view ' + agree(noTies, 'has', 'have') + ' no role.'));
+  }
+  const only = g.profile_only || {};
+  if (Number(only.count)) {
+    card.appendChild(el('p', 'muted small', countOf(Number(only.count),
+      'vertex that is not an entity', 'vertices that are not entities') + ' ('
+      + andList((only.types || []).map(typeName)) + ') '
+      + agree(Number(only.count), 'shapes', 'shape') + ' who is alike but '
+      + agree(Number(only.count), 'holds', 'hold') + ' no role.'));
+  }
+  if (g.reading) card.appendChild(el('p', 'muted small', g.reading));
+  const limits = g.limits || [];
+  if (limits.length) {
+    card.appendChild(el('h4', 'h4', 'What these roles can and cannot say'));
+    for (const t of limits) card.appendChild(el('p', 'muted small', t));
+  }
+  if (g.method) card.appendChild(el('p', 'muted small', g.method));
+  box.appendChild(card);
+}
+
 /** Every tie of the projection on screen with both ends in `ids`. */
 function pairsWithin(ids) {
   const out = new Set();
@@ -18835,8 +19440,11 @@ function analysisSizeRaw(n) {
  *  is kept with it, so the flag can say when that run has left the pane
  *  or the graph has moved past it (setFocusSource). */
 function showSetOnGraph(spec) {
+  /* A regular role (REGE, 2026-10-02) is a run of its own, as a CONCOR
+     position is. */
   const from = spec.fromKpp ? state.analyticsKpp
-    : (spec.fromConcor ? state.analyticsConcor : state.analytics);
+    : (spec.fromConcor ? state.analyticsConcor
+      : (spec.fromRege ? state.analyticsRege : state.analytics));
   /* A set grouped over projected venues (F2, 2026-09-24) is drawn on a
      graph that still shows the forums and wallets as recorded, so the flag
      says why the ties that grouped them are not the ties on screen. */
@@ -18847,6 +19455,7 @@ function showSetOnGraph(spec) {
                   hide: spec.hide || null, keep: spec.keep || null,
                   lit: spec.lit || null, pairs: spec.pairs || null,
                   fromKpp: !!spec.fromKpp, fromConcor: !!spec.fromConcor,
+                  fromRege: !!spec.fromRege,
                   runId: (from && from.run_id) || null };
   state.pathIds = null;
   state.pathAnchor = null;
@@ -18868,11 +19477,12 @@ function setFocusSource(f) {
   /* The key player and the Roles card (F1, 2026-09-24) are runs of their
      own, each with its own verdict. */
   const run = f.fromKpp ? state.analyticsKpp
-    : (f.fromConcor ? state.analyticsConcor : state.analytics);
+    : (f.fromConcor ? state.analyticsConcor
+      : (f.fromRege ? state.analyticsRege : state.analytics));
   if (!run || !f.runId || run.run_id !== f.runId) {
     return 'from an analysis run no longer on the Analysis pane';
   }
-  const current = f.fromKpp || f.fromConcor
+  const current = f.fromKpp || f.fromConcor || f.fromRege
     ? run.current
     : (state.analyticsCurrency && state.analyticsCurrency.current);
   if (current === false) return 'from an analysis run the graph has changed since';
@@ -18924,6 +19534,11 @@ function renderInspectorAnalysis(nodeId) {
   const roles = state.analyticsConcor;
   const placed = roles && !roles.error && (roles.nodes || []).find((n) => n.id === nodeId);
   if (placed) text += ' Position ' + placed.position + ' in the role analysis.';
+  /* And its regular role, when that run placed it (REGE, 2026-10-02). */
+  const regular = state.analyticsRege;
+  const cast = regular && !regular.error
+    && (regular.nodes || []).find((n) => n.id === nodeId);
+  if (cast) text += ' Role ' + cast.role + ' by regular equivalence.';
   box.appendChild(document.createTextNode(text + ' '));
   const b = el('button', 'btn ghost small', 'Open the Analysis pane');
   b.type = 'button';
@@ -19714,10 +20329,16 @@ function ingestRow(r) {
           method: 'POST', json: { category: c, reason: why } });
         ING.flash = { id: r.id, text: 'Category corrected to ' + c
           + '. The classifier’s ' + r.category + ' is kept on the row. '
-          + (out.retain_until_kept ? 'The expiry stays '
-            + fmtDate(out.retain_until) + ': a correction never brings it '
-            + 'forward.' : 'The expiry is now ' + fmtDate(out.retain_until)
-            + ', the new category’s clock from arrival.') };
+          + (out.retain_until === null
+            /* A record with no expiry keeps none: a date on it would be a
+               destruction decision, retention's (g31 verification 2,
+               2026-10-03). */
+            ? 'This record has no expiry, and a correction does not give '
+              + 'it one.'
+            : out.retain_until_kept ? 'The expiry stays '
+              + fmtDate(out.retain_until) + ': a correction never brings it '
+              + 'forward.' : 'The expiry is now ' + fmtDate(out.retain_until)
+              + ', the new category’s clock from arrival.') };
         reloadQueues(r);
       },
     }));
@@ -21268,7 +21889,10 @@ async function paintPersonaForm(visible) {
   clear(ex);
   /* One persona, one exit, and never an exit a persona-less source reads
      through (docs/04): two identities seen from one address are linked. */
-  for (const e of exits.filter((x) => x.available && !x.sources)) {
+  /* collection-shared-exit (2026-10-03): `persona_available` also counts a
+     source the listing may not name, which `sources` cannot. */
+  for (const e of exits.filter((x) => x.available && !x.sources
+      && x.persona_available !== false)) {
     ex.appendChild(selectOption(e.id, visibleText(e.name)));
   }
   if (!ex.children.length) ex.appendChild(selectOption('', 'No free egress profile'));
@@ -22388,6 +23012,12 @@ function custodyVerdict(r) {
     + agree(r.checked, 'row', 'rows') + ' checked' + span
     + (r.scoped ? ' · scoped to one exhibit' : ' · whole ledger')));
   if (r.caveat) card.appendChild(el('p', 'help warn', r.caveat));
+  /* The newest row of the whole ledger, to record out of band and hand back
+     as an anchor (2026-10-03). */
+  if (r.tail_row_hash) {
+    card.appendChild(el('p', 'help',
+      'Newest row to record: id ' + r.tail_id + ', hash ' + r.tail_row_hash));
+  }
   if (r.forks) {
     card.appendChild(el('p', 'help warn',
       countOf(r.forks, 'fork', 'forks') + '. ' + (r.fork_note || '')));
@@ -22760,7 +23390,9 @@ function renderChannels(view, summary) {
       view.smtp.auth ? 'signs in' : 'no sign-in', 'from ' + view.smtp.from]
       : ['SMTP_HOST is not set'],
     WEBHOOK: view.webhook.configured ? [view.webhook.endpoint,
-      view.webhook.signed ? 'signed' : 'not signed'] : ['no webhook is configured'],
+      view.webhook.signed ? 'signed' + (view.webhook.signature
+        ? ' (' + view.webhook.signature + ')' : '') : 'not signed']
+      : ['no webhook is configured'],
     JIRA: view.jira && view.jira.destination
       ? [view.jira.destination.host, 'project ' + view.jira.destination.project_key]
       : ['no Jira destination'],
@@ -24306,6 +24938,9 @@ async function loadLatestAnalysis() {
   /* And the stored role analysis after it, on its own, for the same reason
      (F1, 2026-09-24): a stored read never computes. */
   loadConcor(true);
+  /* The stored regular roles too (REGE, 2026-10-02), read and never
+     computed on opening. */
+  loadRege(true);
   /* The open trend is fetched again, as after a Run (u14, 2026-09-24):
      the stored run may be one computed since Trend was pressed, by this
      analyst under another view or by a colleague. */
@@ -24770,6 +25405,9 @@ function purgeCounts(body) {
     [body.documents_purged || 0, 'document'],
     [body.records_purged || 0, 'ingest record'],
     [body.dead_letters_purged || 0, 'dead letter'],
+    /* Lab samples of the expired case (lab-4, 2026-10-03): disposed of as
+       a rejection is, which the server's warnings say in full. */
+    [body.samples_purged || 0, 'sample'],
   ].filter(([n]) => n > 0)
     .map(([n, noun]) => n + ' ' + noun + (n === 1 ? '' : 's'));
 }
@@ -25039,7 +25677,8 @@ async function loadTombstones() {
 }
 
 const TOMB_NOUN = { evidence: 'exhibit', document: 'document',
-                    ingest_record: 'ingest record', dead_letter: 'dead letter' };
+                    ingest_record: 'ingest record', dead_letter: 'dead letter',
+                    sample: 'sample' };
 /* The rule keys retention.py writes, in words. An unknown key is shown as
    written rather than guessed at. */
 const TOMB_RULE = {
@@ -27980,18 +28619,29 @@ function renderCoParticipationCoverage(body) {
   facts.appendChild(fact('excluded: unresolved',
     cov.participants_excluded_unresolved));
   /* Not-visible is a CLEARANCE fact, not a data-quality one: the network is
-     smaller because of who is asking. Kept distinct for that reason. */
-  facts.appendChild(fact('excluded: not visible to you',
-    cov.participants_excluded_not_visible,
-    cov.participants_excluded_not_visible ? 'warn' : ''));
+     smaller because of who is asking. Kept distinct for that reason. Said
+     only as the case allows (2026-10-03): the number under COUNT, whether
+     under PRESENCE, and nothing at all under NONE, so the fact is drawn only
+     when the server sent something to draw. */
+  const hiddenWhy = cov.withheld;
+  if (typeof cov.participants_excluded_not_visible === 'number') {
+    facts.appendChild(fact('excluded: not visible to you',
+      cov.participants_excluded_not_visible,
+      cov.participants_excluded_not_visible ? 'warn' : ''));
+  } else if (hiddenWhy && hiddenWhy.mode === 'PRESENCE') {
+    facts.appendChild(fact('excluded: not visible to you',
+      hiddenWhy.incomplete ? 'some' : 'none',
+      hiddenWhy.incomplete ? 'warn' : ''));
+  }
   host.appendChild(facts);
 
   for (const room of cov.oversized || []) {
     host.appendChild(el('p', 'help warn',
       'Room ' + visibleText(room.conversation_id)
       + ' on ' + visibleText(room.platform)
-      + ' excluded: ' + room.participants + ' participants ('
-      + room.projectable_participants + ' projectable)'
+      + ' excluded: ' + room.participants + ' participants'
+      + (typeof room.projectable_participants === 'number'
+        ? ' (' + room.projectable_participants + ' projectable)' : '')
       + (room.provenance_class
         ? ' · ' + visibleText(room.provenance_class) : '')));
   }
@@ -29610,7 +30260,10 @@ function authChip(name, result) {
     /* Invariant 12 on screen: "nobody checked" and "it failed" must not
        look the same. */
     const chip = el('span', 'chip subtle', 'not checked');
-    chip.title = 'No Authentication-Results header said anything about '
+    /* http_ui-007 (2026-10-03): a header the sender may have written is
+       not a verdict, so it is kept and not read; the parse gaps say so. */
+    chip.title = 'No Authentication-Results header from one of this '
+      + 'deployment\'s own mail servers said anything about '
       + name + '. That is an absence, not a failure.';
     wrap.appendChild(chip);
     return wrap;
@@ -32372,7 +33025,18 @@ function dualOperationCard(op, you) {
   facts.appendChild(fact('asks', dualRoleNames(op.asks)));
   facts.appendChild(fact('signs second', dualRoleNames(op.signs)));
   facts.appendChild(fact('a signature lasts', dualDuration(op.ttl_seconds)));
+  /* F39 (2026-10-02): the second person on a case's merge switch must have
+     held the permission on the case for a window the deployment sets. */
+  if (op.signer_seasoning) {
+    const s = op.signer_seasoning;
+    facts.appendChild(fact('second person must have held '
+      + visibleText(s.permission) + ' on the case for',
+      s.days ? countOf(s.days, 'day', 'days') : 'no minimum (the rule is off)'));
+  }
   card.appendChild(facts);
+  if (op.signer_seasoning && op.signer_seasoning.problem) {
+    card.appendChild(el('p', 'help', visibleText(op.signer_seasoning.problem)));
+  }
   if (!op.configurable) return card;
   /* Over the viewer's own cases only, and not said at all to someone who
      holds none (2026-09-24). */
@@ -34285,8 +34949,14 @@ async function loadEgressLog() {
   }
   renderList('egr-log', 'egr-log-empty', body.rows || [], egressLogRow);
   const hidden = $('egr-log-hidden');
+  /* egress-ledger-withheld-oracle (2026-10-03): the server counts the hidden
+     rows over the WHOLE log, whatever route, event or window is chosen, so the
+     sentence says so; "and N rows" under a filtered list read as hidden rows
+     that match the filter. */
   hidden.textContent = body.withheld
-    ? 'and ' + countOf(body.withheld, 'row', 'rows') + ' you are not cleared to see' : '';
+    ? 'The whole log also holds ' + countOf(body.withheld, 'row', 'rows')
+      + ' you are not cleared to see. That count ignores the route and event '
+      + 'chosen above.' : '';
   show(hidden, body.withheld > 0);
 }
 
@@ -37445,12 +38115,14 @@ function detonationPanel(s, rows, you, people, sandboxState) {
       btn.disabled = false;
       return;
     }
-    /* The confirmation names the person, from the server's answer: the
-       one thing this record is for is that a named human agreed. */
+    /* The confirmation names the person, from the server's answer. lab-3
+       (2026-10-03): as named by the requester, not as a sign-off, because
+       the named person never acted in the product; they are told. */
     const signer = out.authorised_by_name || out.authorised_by_email;
     await openSample(s.id);
     banner('Detonation recorded', 'Recorded'
-      + (signer ? ', signed off by ' + signer : '')
+      + (signer ? ', naming ' + signer + ' as the person who agreed. They have '
+        + 'not confirmed it in the product and have been told' : '')
       + '. Nothing has been sent anywhere.', 'warn');
   });
   form.appendChild(msg);
@@ -37490,7 +38162,7 @@ function detonationRow(d, after) {
   facts.appendChild(fact('when',
     fmtTime(d.requested_at)));
   if (d.authorised_by) {
-    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'authorised by',
+    facts.appendChild(fact(d.mode === 'SUBMIT' ? 'signs off' : 'named as authoriser',
       d.authorised_by_name || d.authorised_by));
   }
   if (d.signed_off_at) {
@@ -37525,7 +38197,7 @@ function detonationRow(d, after) {
 
 const DETONATION_STATUS = {
   PENDING: ['recorded', 'chip'],
-  AUTHORISED: ['recorded, authorised', 'chip'],
+  AUTHORISED: ['recorded, authoriser named', 'chip'],
   AWAITING_SIGNOFF: ['awaiting sign-off', 'chip warn'],
   QUEUED: ['queued', 'chip'],
   SUBMITTED: ['sent', 'chip'],
@@ -37571,8 +38243,13 @@ function sandboxSendForm(s, people, state) {
   form.appendChild(routeField);
   const machines = sb.machines || [];
   const machine = el('select', 'select');
-  opts(machine, [['', 'the sandbox chooses']].concat(machines.map((m) => [m.machine,
-    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])), '');
+  // lab-1 (2026-10-03): with a live machine listed, the API refuses a send
+  // that names none, since the sandbox could choose the live one unsigned.
+  const hasLive = machines.some((m) => m.class === 'LIVE');
+  const isolated = machines.find((m) => m.class !== 'LIVE');
+  opts(machine, (hasLive ? [] : [['', 'the sandbox chooses']]).concat(machines.map((m) => [m.machine,
+    m.machine + (m.class === 'LIVE' ? ': live network attachment' : ': isolated')])),
+  hasLive ? ((isolated || machines[0]).machine) : '');
   const machineField = el('label', 'field');
   machineField.appendChild(el('span', 'label', 'Analysis machine'));
   machineField.appendChild(machine);
@@ -40955,6 +41632,11 @@ async function probeFirstRun() {
   }
   if (!body.needs_setup) return;
   show($('login-form'), false);
+  /* A deployment that wants the operator to prove they hold its setup token
+     says so (http_ui-010 and infra-3, 2026-10-03). In production with no
+     token configured there is no web first-run, so it never reports
+     needs_setup and this card is never reached. */
+  show($('setup-token-field'), !!body.setup_token_required);
   show($('setup-form'), true);
   $('setup-email').focus();
 }
@@ -41645,11 +42327,14 @@ function initSetup() {
     setMsg($('setup-error'), '');
     $('setup-submit').disabled = true;
     try {
+      const token = $('setup-token').value.trim();
       const creds = await api('/setup/first-admin', {
         method: 'POST',
+        headers: token ? { 'X-Setup-Token': token } : undefined,
         json: { email: $('setup-email').value.trim(),
                 display_name: $('setup-name').value.trim() },
       });
+      $('setup-token').value = '';        // never kept on the page
       FIRST_RUN.creds = creds;
       window.addEventListener('beforeunload', guardFirstRun);
       show($('setup-form'), false);

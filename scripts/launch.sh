@@ -229,6 +229,19 @@ if [ -f "$ENV_LOCAL" ]; then
     value="${line#*=}"
     name="$(printf '%s' "$name" | tr -d '[:space:]')"
     [ -n "$name" ] || continue
+    # A name that changes how programs start is left out (g48 verification,
+    # 2026-10-03): this loop is data, not shell, but it still exported any
+    # identifier, so `PYTHONPATH=./evil`, `PATH=./evilbin`, `LD_PRELOAD=` or
+    # `BASH_ENV=` in a handed-over file ran code as this user in the next
+    # python this script starts. Not an allow-list on purpose: a new setting
+    # would silently stop loading. The same list is in release/install.sh,
+    # scripts/_env.py, scripts/launch.ps1 and scripts/open-ui.ps1; a test holds
+    # them together.
+    case "$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')" in
+      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|BASH_*|LD_*|DYLD_*|PYTHON*)
+        detail "$name ignored: it changes how programs start (set it in your shell if you mean it)"
+        continue ;;
+    esac
     value="${value#\"}"; value="${value%\"}"
     value="${value#\'}"; value="${value%\'}"
 
@@ -266,6 +279,11 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
     # security/sealed.py's SEALED_COLUMNS, and what the ingest pepper
     # keys if it is kept here too. They said only that users would re-enrol
     # their authenticators (Alpha 6 pre-release check, 2026-09-23).
+    #
+    # Created under umask 077 (infra-9, 2026-10-03), so the key store is
+    # never readable by anyone else between the write and the chmod below.
+    previous_umask="$(umask)"
+    umask 077
     cat > "$ENV_LOCAL" <<EOF
 # NocTORnal local key store. Created by scripts/launch.sh.
 #
@@ -288,6 +306,7 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
 # on launch.
 NOCTORNAL_TOTP_KEK=$generated
 EOF
+    umask "$previous_umask"
     chmod 600 "$ENV_LOCAL" 2>/dev/null || true
   fi
 

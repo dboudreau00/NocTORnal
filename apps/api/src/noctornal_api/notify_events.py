@@ -134,7 +134,14 @@ def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
 
 def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                        request_id: UUID, operation: str, permission: str,
-                       justification: str, actor_id: UUID) -> int:
+                       justification: str, actor_id: UUID,
+                       # The labels of what the request names (a node.merge
+                       # names two entities): the body quotes the
+                       # justification, so a signer below them is not sent
+                       # it (http_ui-011, 2026-10-03).
+                       element_classification: str | None = None,
+                       element_compartments: frozenset[str] = frozenset(),
+                       ) -> int:
     """Tell everyone on the case who could actually approve it.
 
     Not the case owner, and not everyone assigned: the people who hold the
@@ -182,6 +189,8 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                   f"checked the specific parameters, not that you trust the "
                   f"person asking."),
             classification=classification, compartments=compartments,
+            element_classification=element_classification,
+            element_compartments=element_compartments,
             object_type="approval_request", object_id=request_id,
             actor_id=actor_id)
         if raised is not None:
@@ -1050,6 +1059,31 @@ def detonation_signoff_requested(conn: psycopg.Connection, *,
               f"person who signs it off. Nothing is sent until you approve "
               f"it, and it lapses in 72 hours. Open the Lab: the request is "
               f"listed under Detonations awaiting your sign-off."),
+        detonation_id=detonation_id, actor_id=requester_id)
+
+
+def detonation_named(conn: psycopg.Connection, *, detonation_id: UUID,
+                     sample_id: UUID, named_id: UUID, requester_id: UUID,
+                     target: str, exposure_level: str) -> Notification | None:
+    """A record-only VENDOR or PUBLIC detonation names this person as its
+    authoriser (lab-3, 2026-10-03). The record is the requester's word; the
+    named person is told so they can object, which they could not before.
+    Labelled as the sign-off request is, so a person who cannot read the
+    sample is told nothing."""
+    row = _sample_labels(conn, sample_id)
+    code = row[1] if row else None
+    head = (f"{code}: you are named as a detonation's authoriser" if code
+            else "You are named as a detonation's authoriser")
+    where = "a public" if exposure_level == "PUBLIC" else "a vendor"
+    return _detonation_notice(
+        conn, recipient=named_id, sample_id=sample_id,
+        kind="DETONATION_NAMED", subject=head,
+        summary=("A colleague recorded a detonation outside the product and "
+                 "named you as the person who agreed to it."),
+        body=(f"A colleague recorded sending a sample to {target}, {where} "
+              f"sandbox, and named you as the person who agreed. The product "
+              f"did not send it and you were not asked in the product. If you "
+              f"did not agree, tell the case lead: the record stays as written."),
         detonation_id=detonation_id, actor_id=requester_id)
 
 

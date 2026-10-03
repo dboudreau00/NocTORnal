@@ -81,6 +81,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from noctornal_api import egress, egress_authz, egress_ledger, egress_policy, egress_routes
+from noctornal_api.config import published_credentials
 from noctornal_api.egress_authz import Decision, Refused
 from noctornal_api.egress_policy import (
     PROXY_STATUS,
@@ -119,9 +120,12 @@ REALM = 'Basic realm="noctornal-egress"'
 
 #: The platform's keys, DSNs and store credentials. The proxy talks to the
 #: internet and needs none of them, so it refuses to start holding one.
+#: POSTGRES_PASSWORD beside the owner's DSN since docs/17 F52 (2026-10-02):
+#: both halves of the schema owner's credential, which no runtime process
+#: may hold.
 FORBIDDEN_ENV = ("NOCTORNAL_TOTP_KEK", "NOCTORNAL_TOTP_KEK_RETIRED", "DATABASE_URL",
-                 "NOCTORNAL_MIGRATION_DATABASE_URL", "NOCTORNAL_INGEST_PEPPER",
-                 "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY",
+                 "NOCTORNAL_MIGRATION_DATABASE_URL", "POSTGRES_PASSWORD",
+                 "NOCTORNAL_INGEST_PEPPER", "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY",
                  # The persona key (A collector process, 2026-10-02).
                  "NOCTORNAL_PERSONA_KEK", "NOCTORNAL_PERSONA_KEK_RETIRED")
 
@@ -179,6 +183,13 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
             problems.append(f"This container must not hold {name}: the egress proxy "
                             f"talks to the internet and needs none of the platform's "
                             f"keys.")
+    if production:
+        # The one production process whose environment was never scanned for
+        # values the repository publishes: its own database password in the
+        # template is `replace-me`, which no key-shape check above forces
+        # anyone to edit (infra-12, 2026-10-03). Names the variable, never
+        # the value.
+        problems.extend(p.refusal for p in published_credentials(env))
     try:
         internal = egress_policy.internal_networks(env, production=production)
     except ValueError as exc:

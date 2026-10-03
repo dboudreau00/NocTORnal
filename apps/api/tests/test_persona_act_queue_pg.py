@@ -1444,23 +1444,35 @@ def test_what_an_act_shows_never_carries_its_parameters_or_its_session(conn, api
 _REPLACEMENT = chr(0xFFFD)
 
 
-def test_a_nul_in_free_text_is_cleaned_and_never_a_500(conn, api, world):
+def test_a_nul_in_free_text_is_a_422_and_never_a_500(conn, api, world):
     """U+0000 in a join note or a member reason reached the act's INSERT and
     raised UntranslatableCharacter, so the route answered 500 (verify:g38
-    minor, 2026-10-03). It is replaced by U+FFFD, one for one, the act is
-    queued, and nothing reaches Telegram."""
+    minor, 2026-10-03). Since the merge with the request-layer gate
+    (http_ui-014, 2026-10-03, `http/body_ceiling.py`) a JSON body carrying
+    one is refused with the same 422 every other route gives, before the
+    route parses it, so no act is queued and nothing reaches Telegram. The
+    route's own cleaning to U+FFFD (the model test below) is the second
+    wall, and the answer this test used to hold on its own: the gate's
+    refusal, which tells the analyst to remove the character, is better than
+    quietly changing what they typed."""
+    from noctornal_api.http.body_ceiling import NUL_DETAIL
+
     ch = _member_chat(conn, world)
     api.telegram(tp.fixture_for(dict(ch["spec"], is_member=True), world["uid"]))
+    before = conn.execute("SELECT count(*) FROM collect.persona_act WHERE "
+                          "requested_by = %s", (world["caller"],)).fetchone()[0]
     text = "a valid note\x00 with a nul"
-    wanted = text.replace("\x00", _REPLACEMENT)
     joined = api.client.post(f"{TG}/chats/{ch['source']}/join", headers=world["hdr"],
                              json={"acknowledge_overt": True, "note": text})
-    assert joined.status_code == 202, joined.text
-    assert _act(conn, joined.json()["act"]["id"])["params"] == {"note": wanted}
+    assert joined.status_code == 422, joined.text
+    assert NUL_DETAIL in joined.text
     marked = api.client.post(f"{TG}/chats/{ch['source']}/member", headers=world["hdr"],
                              json={"reason": text})
-    assert marked.status_code == 202, marked.text
-    assert _act(conn, marked.json()["act"]["id"])["params"]["reason"] == wanted
+    assert marked.status_code == 422, marked.text
+    assert NUL_DETAIL in marked.text
+    after = conn.execute("SELECT count(*) FROM collect.persona_act WHERE "
+                         "requested_by = %s", (world["caller"],)).fetchone()[0]
+    assert after == before
     assert api.factory.methods() == []
 
 

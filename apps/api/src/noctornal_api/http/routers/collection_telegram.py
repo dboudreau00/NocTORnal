@@ -88,7 +88,10 @@ def _storable(value: str) -> str:
     swaps it, and a lone surrogate should one ever get here, for U+FFFD, one
     character for one, so the field's own length limits still hold. (A lone
     surrogate in a request body never gets here: pydantic refuses it with a
-    422.)"""
+    422. Neither does a JSON body with a NUL escape, since the request layer
+    refuses one with a 422 before any route parses it, http_ui-014,
+    2026-10-03: `http/body_ceiling.py`. This is what holds for a model built
+    anywhere else, and is the second wall.)"""
     return clean_text(value, len(value)) or ""
 
 

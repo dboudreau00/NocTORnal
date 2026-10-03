@@ -20,6 +20,15 @@
 #   ./release/install.sh --with-telegram  also install the Telegram collection library (optional)
 #   ./release/install.sh --with-yara      also install the YARA scanning library (optional)
 #
+# The production deployment (infra/production, read its README.md first):
+#   sudo ./release/install.sh --production-secrets
+#       brings infra/production's secrets files to this release's layout,
+#       moving the schema owner's credential out of secrets.env and writing
+#       the Redis password and REDIS_URL, with a backup of every file it
+#       changes. Installs and starts nothing. With sudo because the files
+#       are root's, mode 600. Add --dir DIR for another directory. What it
+#       does and the way back: release/secrets-upgrade/README.md.
+#
 set -euo pipefail
 
 # --help prints the comment block above and stops at its end. It was a
@@ -39,12 +48,16 @@ SKIP_LAUNCH=0
 # gap the readiness register shows.
 WITH_TELEGRAM=0
 WITH_YARA=0
+PRODUCTION_STEP=0
+PROD_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --skip-launch) SKIP_LAUNCH=1; shift ;;
     --with-telegram) WITH_TELEGRAM=1; shift ;;
     --with-yara) WITH_YARA=1; shift ;;
+    --production-secrets) PRODUCTION_STEP=1; shift ;;
+    --dir) PROD_DIR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -71,6 +84,66 @@ stop_with() {
 }
 
 RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---------------------------------------------------------------------------
+# --production-secrets (docs/17 F52 and the limiter's Redis ACL, 2026-10-02)
+#
+# A different job from everything below: it touches the production
+# deployment's secrets files and nothing else, so it runs before the
+# Windows refusal (which is about a virtual environment this does not
+# build) and exits. The work is scripts/production_secrets.py, the one
+# implementation install.ps1 calls too, run on the host's own python3: a
+# production host need not have this repository's virtual environment, and
+# the helper imports the standard library alone. It prints names, never a
+# value, and backs up every file before it changes it.
+#
+# Whether the database volume exists decides one thing: an owner password
+# may be generated only for a volume initdb has not run on, because initdb
+# fixes it for good. Docker is asked, and only "no such volume" from an
+# engine that answers counts; anything else passes nothing, and the helper
+# asks the operator to choose the password instead of guessing.
+# ---------------------------------------------------------------------------
+if [[ $PRODUCTION_STEP -eq 1 ]]; then
+  ROOT_DIR="$(dirname "$RELEASE_DIR")"
+  TARGET_DIR="${PROD_DIR:-$ROOT_DIR/infra/production}"
+  step 'Bringing the production secrets files to this release'
+  detail "in $TARGET_DIR"
+  HOST_PY=""
+  for name in python3 python; do
+    command -v "$name" >/dev/null 2>&1 || continue
+    if "$name" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+      HOST_PY="$(command -v "$name")"
+      break
+    fi
+  done
+  [[ -n "$HOST_PY" ]] || stop_with 'Python 3.8 or newer was not found on this host.' \
+    "The production secrets step runs on the host's own python3, with the
+standard library only. Debian/Ubuntu:  sudo apt update && sudo apt install python3"
+  NEW_DATABASE=0
+  if [[ -z "$PROD_DIR" ]] && command -v docker >/dev/null 2>&1 \
+       && docker info >/dev/null 2>&1 \
+       && ! docker volume inspect noctornal-prod_prod-pgdata >/dev/null 2>&1; then
+    NEW_DATABASE=1
+    detail 'Docker has no database volume for this deployment yet'
+  fi
+  set +e
+  if [[ $NEW_DATABASE -eq 1 ]]; then
+    "$HOST_PY" "$ROOT_DIR/scripts/production_secrets.py" --dir "$TARGET_DIR" --new-database \
+      | sed 's/^/    /'
+  else
+    "$HOST_PY" "$ROOT_DIR/scripts/production_secrets.py" --dir "$TARGET_DIR" \
+      | sed 's/^/    /'
+  fi
+  status=${PIPESTATUS[0]}
+  set -e
+  if [[ $status -eq 0 ]]; then
+    good "the production secrets files are in this release's layout"
+    detail 'next: docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
+  else
+    note 'not finished: the lines above say what is left, or why it stopped and what it changed'
+  fi
+  exit "$status"
+fi
 
 # ---------------------------------------------------------------------------
 # Refuse to run on Windows.
@@ -416,6 +489,11 @@ Nothing was written, so re-running this installer is safe."
   # (Alpha 6 pre-release check, 2026-09-23). The header names everything
   # the two secrets protect, from security/sealed.py's SEALED_COLUMNS and
   # ingest.py's HMAC; it named only authenticators and ingest keys.
+  # Private from the first byte (infra-9, 2026-10-03): the file is created
+  # under umask 077, so the key store is never world-readable between this
+  # write and the chmod below, which stays as the belt.
+  PREVIOUS_UMASK="$(umask)"
+  umask 077
   cat > "$ENV_LOCAL" <<EOF
 # Generated by install.sh. Machine-local; never commit this file.
 # BACK IT UP: nothing can recover these three secrets.
@@ -485,6 +563,7 @@ SMTP_HOST=127.0.0.1
 SMTP_PORT=1025
 SMTP_ALLOW_PLAINTEXT=1
 EOF
+  umask "$PREVIOUS_UMASK"
   chmod 600 "$ENV_LOCAL"
   good 'wrote .env.local with fresh random keys (mode 600)'
   note 'Back this file up. Without it every user must re-enrol their'
@@ -492,8 +571,59 @@ EOF
   note 'again. Its header lists what each secret protects.'
 fi
 
-# shellcheck disable=SC1090
-set -a; . "$ENV_LOCAL"; set +a
+# Read .env.local as DATA, never run it (infra-9, 2026-10-03). This line was
+# `set -a; . "$ENV_LOCAL"; set +a`, which EXECUTES the file: a .env.local
+# that was handed over, restored from a backup or edited by hand ran as this
+# user, and a value with a `$`, an `&`, a `;` or a space was mangled or run.
+# launch.sh, scripts/_env.py and launch.ps1 already parse the same file line
+# by line for that reason. The file's value wins over the environment here,
+# as sourcing made it win: this installer migrates and seeds whatever the
+# file names, and an exported DATABASE_URL pointing somewhere else must not
+# receive them. The tests extract this function and run it
+# (apps/api/tests/test_g48_install_env_data.py).
+#
+# A name that changes how programs start is left out (g48 verification,
+# 2026-10-03). Reading the file as data stops it running as shell syntax, but
+# the loop still exported any identifier in it, and the file's value wins over
+# the environment here: `PYTHONPATH=./evil` (with a sitecustomize.py),
+# `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or `BASH_ENV=./evil.sh` ran code as
+# the installing user in the next python or shell the installer starts. Not an
+# allow-list on purpose: a new setting would silently stop loading. The same
+# list is in scripts/_env.py, scripts/launch.sh, scripts/launch.ps1 and
+# scripts/open-ui.ps1, and a test holds them to each other.
+load_env_local_as_data() {
+  local file="$1" line name value upper first=1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ $first -eq 1 ]]; then
+      first=0
+      line="${line#$'\xef\xbb\xbf'}"
+    fi
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ -z "$line" || "$line" == '#'* || "$line" != *=* ]]; then
+      continue
+    fi
+    name="${line%%=*}"
+    value="${line#*=}"
+    name="${name#export[[:space:]]}"
+    name="${name//[[:space:]]/}"
+    if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      continue
+    fi
+    upper="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+    case "$upper" in
+      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|BASH_*|LD_*|DYLD_*|PYTHON*)
+        printf '%s\n' ".env.local: ignored $name, a name that changes how programs start (set it in your shell if you mean it)" >&2
+        continue ;;
+    esac
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"; value="${value%\"}"
+    value="${value#\'}"; value="${value%\'}"
+    export "$name=$value"
+  done < "$file"
+}
+load_env_local_as_data "$ENV_LOCAL"
 
 # The same 127.0.0.1 addresses as the file above, for a .env.local that
 # lacks a line. An existing .env.local is never rewritten, so one written

@@ -3,7 +3,7 @@
 #   docker compose -p noctornal-prod -f infra/production/compose.yml up -d
 #
 # Read infra/production/README.md first: this file cannot start without
-# infra/production/secrets.env beside it, and a correctly configured stack
+# infra/production/secrets.env and caddy.env beside it, and a correctly configured stack
 # still comes up with readiness items red that only a human can close --
 # three of them BLOCKING, in `readiness.BLOCKING_CHECKS`' sense, which is
 # that the collection poll route refuses with 409 while they are open.
@@ -17,12 +17,22 @@
 #     `noctornal_app` is least privilege and is what every runtime process
 #     connects as. The test suite still needs the owner (ten *_pg files run
 #     ALTER TABLE ... DISABLE TRIGGER, which only an owner may do), so this
-#     split exists here and nowhere else.
+#     split exists here and nowhere else. Since docs/17 F52 (2026-10-02)
+#     the owner's credential is not in secrets.env at all: its password is
+#     in postgres-init.env (postgres alone) and its DSN in migrate.env (the
+#     migrate job alone), and every other service holds both blank (the
+#     x-no-owner-credential block below). An older secrets.env is moved by
+#     `sudo ./release/install.sh --production-secrets`
+#     (release/secrets-upgrade/README.md).
 #   * Redis runs `noeviction`, as dev does since the Alpha 6 pre-release
-#     check (2026-09-23), and here it also needs a password and is
-#     reachable only from the compose network. The readiness register
-#     reports any evicting policy as NOT ready for a reason: an evicted
-#     GCRA meter admits the subject it was refusing, with a full burst.
+#     check (2026-09-23), and is reachable only from the compose network.
+#     Here it also runs an ACL (2026-10-02): the default user is disabled
+#     and the limiter's own user reads and writes its own keys alone and
+#     runs its own commands alone (the redis service says what else three
+#     of them can see).
+#     The readiness register reports any evicting policy as NOT ready for a
+#     reason: an evicted GCRA meter admits the subject it was refusing,
+#     with a full burst.
 #   * The evidence bucket gets a COMPLIANCE default retention. Dev keeps
 #     GOVERNANCE 365d because COMPLIANCE cannot be lifted by anyone,
 #     including the root credential, so a dev bucket would become
@@ -106,7 +116,17 @@ x-egress-ip: &egress_ip "172.31.243.11"
 # `./tls` carries MinIO's certificate. Every application service mounts it
 # read-only and builds a CA bundle from it at start -- see the note above
 # the api service. The migration job does not touch object storage and
-# inherits the mount only because it shares this block.
+# inherits the mount only because it shares this block. It does NOT keep
+# this block's env_file: it reads migrate.env alone (docs/17 F52).
+#
+# Every service built from this image runs with no Linux capabilities at all
+# and cannot gain one (infra-5, 2026-10-03). The process is uid 10001 and
+# needs none; dropping the lot takes CAP_NET_RAW (read or spoof a hop on the
+# bridge) out of the bounding set as well, and no-new-privileges closes the
+# setuid route back. A read-only root filesystem is NOT set: the CA bundle
+# below is written to /tmp and the Lab's child processes write there too, and
+# that has not been proved under a tmpfs, so it is left as a stated gap
+# (infra/production/README.md, Hardening).
 x-noctornal-app: &noctornal-app
   build:
     context: ../..
@@ -115,8 +135,26 @@ x-noctornal-app: &noctornal-app
   env_file: [secrets.env]
   networks: [noctornal]
   restart: unless-stopped
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
   volumes:
     - ./tls:/certs:ro
+
+# The schema owner's password and DSN, blanked on every runtime service
+# (docs/17 F52, review of 2026-10-02). They live in postgres-init.env and
+# migrate.env, read by postgres and the migrate job alone, but secrets.env
+# reaches every other service that is not Caddy or the egress proxy, so a
+# line left in it by hand or pasted back would hand the owner's credential to
+# all of them. `environment:` wins over env_file, so these empty values are
+# what each container holds whatever secrets.env says, and the API, the cron
+# jobs and the egress proxy count an empty value as unset. Merged into each
+# service's `environment:` with `<<:`; a test holds that every service but
+# postgres and migrate carries it. Caddy, which reads caddy.env alone
+# (infra-5), and the egress proxy, which reads egress-proxy.env alone, carry
+# it too: a line pasted into either of those files reaches nothing then.
+x-no-owner-credential: &no-owner-credential
+  POSTGRES_PASSWORD: ""
+  NOCTORNAL_MIGRATION_DATABASE_URL: ""
 
 services:
 
@@ -132,20 +170,49 @@ services:
   # entire published surface, and an operator counting open ports should
   # find exactly what the documentation says.
   #
-  # KNOWN WEAKNESS, stated rather than hidden: this container needs exactly
-  # three variables (the two hostnames and the TLS mode) and receives all of
-  # secrets.env, including NOCTORNAL_TOTP_KEK and both database DSNs.
-  # `env_file` has no filter. Narrowing it means listing those three as
-  # `${...}` interpolations, which then makes `--env-file` mandatory on
-  # every compose command -- including `logs` and `ps`, which would
-  # otherwise emit "variable is not set" warnings and teach an operator to
-  # ignore warnings. That trade was made in favour of the quieter command
-  # line; the process most exposed to the internet is the one holding the
-  # secrets it does not use, and that is worth revisiting.
+  # ## What this container holds, and what it can do (infra-5, 2026-10-03)
+  #
+  # It needs exactly three variables (the two hostnames and the TLS mode),
+  # and gets exactly those, from caddy.env, a file of its own. Until
+  # 2026-10-03 it was handed the whole of secrets.env (the KEK, both
+  # database DSNs, the MinIO root credential, the Redis password) on the
+  # reasoning that narrowing `env_file` meant `${...}` interpolation and so
+  # a mandatory `--env-file` on every compose command. That reasoning
+  # applies to interpolation, not to a separate env file, which the egress
+  # keys already use for the same purpose.
+  #
+  # Capabilities: none but NET_BIND_SERVICE, which binds 80 and 443 (the
+  # caddy binary carries it as a file capability, so without it the
+  # container does not exec at all). That takes CAP_NET_RAW away, so a
+  # compromised Caddy cannot read or spoof the plaintext hops on the bridge
+  # (Postgres and Redis speak without TLS here), and CAP_DAC_OVERRIDE and
+  # CAP_CHOWN with it. no-new-privileges closes the setuid route back, and
+  # the root filesystem is read-only: Caddy writes to its two volumes only.
+  #
+  # RESIDUAL, stated rather than hidden: the process is still uid 0 inside
+  # the container, because caddy-data and caddy-config exist already on a
+  # running deployment, owned by root, and a non-root user could not open
+  # the ACME account in them. infra/production/README.md, Hardening, has the
+  # one-time chown that lets an operator add `user:` here. Under
+  # NOCTORNAL_TLS_MODE=internal Caddy also logs "failed to install root
+  # certificate" once at start: it tries to add its local CA to the
+  # container's own trust store, which is read-only here and which nothing
+  # in the container uses. Harmless; it is the price of the read-only root.
+  #
+  # Caddy shares a bridge with Postgres, Redis and MinIO and has a route out
+  # through `edge`: it is the TLS terminator, not a service the egress proxy
+  # fronts (docs/00 decision 68 scopes "the proxy alone reaches out" to the
+  # API, the cron loops and the sample origin).
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
-    env_file: [secrets.env]
+    env_file: [caddy.env]
+    environment:
+      <<: *no-owner-credential
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
     ports:
       - "80:80"
       - "443:443"
@@ -168,24 +235,49 @@ services:
   # ------------------------------------------------------------------------
   # Same image and same tuning flags as infra/docker-compose.yml, so a query
   # plan measured in development means something here.
+  #
+  # Pinned by digest (infra-7, 2026-10-03); infra/production/README.md,
+  # Hardening, says how to move it.
+  #
+  # Capabilities (infra-5): the image's entrypoint starts as root, chowns the
+  # data directory and drops to the postgres user, which is these five and
+  # nothing else (measured: the cluster initialises, the init scripts run and
+  # it serves with them). NET_RAW and the rest are gone.
+  #
+  # Logging (infra-8): a statement slower than log_min_duration_statement is
+  # logged WITH its bind parameters unless the cluster says otherwise, and
+  # only the request role carried that setting, so the system role (every cron
+  # job, sign-in, retention), the egress role and the owner logged third party
+  # text, addresses, hashes and sealed blobs into a log with no label,
+  # retention or access control. Both flags are cluster-wide; the role
+  # settings in db/init/10-app-role.sh stay as the second line. They are in
+  # the command below, and a comment cannot go inside that folded block.
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     restart: unless-stopped
     networks: [noctornal]
-    # postgres-init.env carries NOCTORNAL_EGRESS_DB_PASSWORD for
-    # db/init/20-egress-role.sh, and only this service reads it: secrets.env
-    # reaches every application service and caddy.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    # postgres-init.env carries the passwords only initdb reads: the owner's
+    # POSTGRES_PASSWORD (docs/17 F52, 2026-10-02), the system role's and the
+    # egress role's (db/init/20-egress-role.sh reads NOCTORNAL_EGRESS_DB_PASSWORD).
+    # Only this service reads it: secrets.env reaches every application
+    # service, and MinIO, Redis and this one. Optional to compose so that an
+    # existing volume, which needs none of them, still starts; a NEW volume
+    # without POSTGRES_PASSWORD is refused by the image itself.
     env_file:
       - secrets.env
       - path: postgres-init.env
         required: false
     environment:
       POSTGRES_DB: noctornal
-      # The OWNER role. Alembic runs as this; nothing at runtime does.
-      # POSTGRES_PASSWORD comes from secrets.env and must be the same
-      # password NOCTORNAL_MIGRATION_DATABASE_URL carries -- two
-      # declarations of one secret, which secrets.env.example says out loud
-      # because nothing here can check it.
+      # The OWNER role, and the image's bootstrap superuser. Alembic runs
+      # as this; nothing at runtime does. POSTGRES_PASSWORD comes from
+      # postgres-init.env and must be the password migrate.env's
+      # NOCTORNAL_MIGRATION_DATABASE_URL carries: two declarations of one
+      # secret, which `sudo ./release/install.sh --production-secrets`
+      # compares (release/secrets-upgrade/README.md).
       POSTGRES_USER: noctornal
       POSTGRES_INITDB_ARGS: "--data-checksums"
     command: >
@@ -193,6 +285,8 @@ services:
       -c shared_preload_libraries=pg_stat_statements
       -c pg_stat_statements.track=all
       -c log_min_duration_statement=250
+      -c log_parameter_max_length=0
+      -c log_parameter_max_length_on_error=0
       -c max_connections=200
       -c shared_buffers=512MB
       -c work_mem=32MB
@@ -249,11 +343,74 @@ services:
   # reasons: `docker compose config` prints interpolated values, so the
   # secret would appear in any pasted diagnostic; and the operator would
   # have to export it into their own shell as well as the secrets file.
+  #
+  # ## the ACL, and why isolation is now the server's (2026-10-02)
+  #
+  # Until 2026-10-02 this ran `--requirepass`, which gives the one built-in
+  # user, `default`, a password and every command on every key: whatever
+  # held REDIS_PASSWORD could FLUSHALL the meters or fill the instance, and
+  # readiness's `redis_limiter_isolated` could only report keys somebody
+  # else had written. Now Redis starts with an ACL file in which `default`
+  # is OFF (no password, no command, no key: an unauthenticated client is
+  # refused, it is not signed in as anybody) and `noctornal_limiter` is the
+  # only user. It may read and write keys under `rl:` alone and run exactly
+  # the commands the limiter and its readiness rows send, the rule
+  # ratelimit_redis.limiter_acl_rules() writes (a test holds the text below
+  # equal to it), with no pub/sub channel. Three of those commands reach
+  # past its own keys without reading or writing one, and that is the
+  # whole of what it can see beyond them: SCAN lists every key NAME in its
+  # database (the census counts the ones outside `rl:`), INFO reports the
+  # server's statistics, and ACL GETUSER reads any user's rules and
+  # password hashes (here only its own and the disabled default's).
+  # readiness reads this ACL back over the limiter's own connection and,
+  # in production, fails `redis_limiter_isolated` when it is not this.
+  #
+  # The file is written at every start from REDIS_PASSWORD, as a SHA-256
+  # (`#<hex>`), never the password itself, into /tmp with umask 077, so it
+  # cannot drift from the secrets file and no copy of it outlives the
+  # container. Nothing else is stored with the password, so changing it
+  # costs a restart.
+  #
+  # REDIS_URL is checked as text before the server starts. When it names
+  # this service (host `redis`), a URL that does not sign in as
+  # noctornal_limiter with REDIS_PASSWORD (an older secrets.env's
+  # `redis://:PASSWORD@redis`, which signs in as `default`) would leave
+  # every limit that fails closed refusing everyone, the login among them,
+  # with nothing in the API's log but a refused AUTH. So this service
+  # refuses to start instead, naming the installer step that rewrites the
+  # URL, and api and cron, which wait for it to be healthy, never start on
+  # the broken pair. An empty REDIS_URL, or one naming no host, is refused
+  # the same way: that step writes one. The host is compared in lower case,
+  # as that step reads it (a host name has no case), so `REDIS` and `Redis`
+  # are this service too; compared as typed they started it idle with an
+  # "another host" note and no client (g32 verify of 2026-10-03).
+  #
+  # A REDIS_URL naming ANOTHER host (a Redis of the operator's own, review
+  # of 2026-10-02) is the operator's choice and not this service's to
+  # check: it starts with its ACL and no client, says so on stderr, and the
+  # services waiting on it start. infra/production/README.md, The limiter's
+  # Redis, says what that Redis needs and how to leave this one out. Until
+  # then the start refused it, naming the installer step, which leaves such
+  # a URL alone: an instruction that led back to itself.
+  #
+  # The healthcheck signs in as the limiter: `default` cannot.
+  #
+  # Pinned by digest (infra-7, 2026-10-03). One capability (infra-5): the
+  # command below replaces the image's own start, which is the only thing that
+  # would have switched to the redis user, so this runs as root, and the data
+  # volume is owned by redis. Without DAC_OVERRIDE it cannot open its
+  # append-only directory and exits (measured); with it, and nothing else, it
+  # runs as before minus the rest of root's capabilities.
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     restart: unless-stopped
     networks: [noctornal]
     env_file: [secrets.env]
+    environment:
+      <<: *no-owner-credential
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
     volumes: [prod-redisdata:/data]
     command:
       - /bin/sh
@@ -261,17 +418,52 @@ services:
       - |
         if [ -z "$$REDIS_PASSWORD" ]; then
           echo 'REDIS_PASSWORD is empty: refusing to start.' >&2
-          echo 'redis-server --requirepass "" means NO password at all, and' >&2
-          echo 'this Redis is reachable by every container on the network.' >&2
+          echo 'It is the password of noctornal_limiter, the only user this' >&2
+          echo 'Redis has, and an empty one would let any container in.' >&2
           exit 1
         fi
+        host=$${REDIS_URL#*://}
+        host=$${host%%[/?#]*}
+        host=$${host##*@}
+        host=$${host%:*}
+        host=$$(printf '%s' "$$host" | tr 'A-Z' 'a-z')
+        case "$$REDIS_URL" in
+          "redis://noctornal_limiter:$$REDIS_PASSWORD@"*) ;;
+          *://*)
+            if [ -z "$$host" ] || [ "$$host" = redis ]; then
+              echo 'REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD: refusing to start.' >&2
+              echo 'This Redis disables its default user, so the limiter would be refused and every' >&2
+              echo 'limit that fails closed would refuse everyone. Run sudo ./release/install.sh' >&2
+              echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
+              echo 'rewrites REDIS_URL and keeps a backup (release/secrets-upgrade/README.md).' >&2
+              exit 1
+            fi
+            echo 'REDIS_URL names a Redis on another host, so the limiter does not use this one,' >&2
+            echo 'which starts with its ACL and no client (infra/production/README.md, The' >&2
+            echo "limiter's Redis, says what that Redis needs and how to leave this one out)." >&2
+            ;;
+          *)
+            echo 'REDIS_URL is empty or not a URL: refusing to start. Run sudo ./release/install.sh' >&2
+            echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
+            echo 'writes one that signs in to this Redis (release/secrets-upgrade/README.md).' >&2
+            exit 1
+            ;;
+        esac
+        umask 077
+        hash=$$(printf '%s' "$$REDIS_PASSWORD" | sha256sum | cut -d ' ' -f 1)
+        printf 'user default off resetpass resetkeys resetchannels -@all\n' > /tmp/users.acl
+        printf 'user noctornal_limiter on #%s resetkeys ~rl:* resetchannels -@all +evalsha +script|load +get +set +time +ping +info +dbsize +scan +acl|whoami +acl|getuser\n' "$$hash" >> /tmp/users.acl
         exec redis-server \
           --appendonly yes \
           --maxmemory 1gb \
           --maxmemory-policy noeviction \
-          --requirepass "$$REDIS_PASSWORD"
+          --aclfile /tmp/users.acl
     healthcheck:
-      test: ['CMD-SHELL', 'redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      # REDISCLI_AUTH for the password and --user for the name, not `-a`: a
+      # password given with -a is on the command line of a process that starts
+      # every five seconds, where any local account on the host reads it
+      # (infra-10, 2026-10-03). The user's name is not a secret.
+      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user noctornal_limiter ping | grep -q PONG']
       interval: 5s
       retries: 10
       start_period: 10s
@@ -337,8 +529,10 @@ services:
   # checkable rather than argued: an `exec minio env` on the running
   # container does not name them, and the deprecation warning is gone from
   # the log. It narrows nothing ELSE -- this container still receives the
-  # whole of secrets.env, the same known weakness the caddy note above
-  # states, and for the same reason.
+  # whole of secrets.env: `env_file` has no filter, and narrowing it means
+  # `${...}` interpolation, the trade the note on `environment:` below
+  # describes. Caddy was the one such service that could be given a file of its
+  # own, because its three values are not secrets (infra-5, 2026-10-03).
   #
   # ## why not an `environment:` block, the way the dev file does it
   #
@@ -353,8 +547,8 @@ services:
   # WARN line deep in the log, on the store holding the evidence. Measured,
   # same release. `${MINIO_ROOT_USER:?}` refuses instead, but it refuses
   # `ps` and `logs` too, and an incident is the wrong moment to be arguing
-  # with an environment file. This is the trade the caddy note above makes,
-  # for the same reason.
+  # with an environment file. This is the trade Caddy's old env_file made,
+  # for the same reason, until caddy.env.
   #
   # ## what overriding the entrypoint costs
   #
@@ -382,10 +576,20 @@ services:
     # serving MinIO's community builds to anonymous pullers, so the image is
     # the same pinned build, byte for byte, mirrored to this project's GHCR
     # namespace (NOTICE.md names the upstream source).
-    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z
+    #
+    # By digest as well as by tag (infra-7, 2026-10-03): a tag is whatever
+    # the registry says it is at pull time, and for this one the registry is
+    # a personal namespace. The digest is the one quay.io/minio/minio served
+    # for this release before it stopped, so "byte for byte" is checkable
+    # (docker buildx imagetools inspect on both names).
+    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     restart: unless-stopped
     networks: [noctornal]
     env_file: [secrets.env]
+    environment:
+      <<: *no-owner-credential
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     entrypoint:
       - /bin/sh
       - -c
@@ -536,23 +740,45 @@ services:
   # are not the ones the server started with. `mc alias set` verifies the
   # credentials, so a rejected pair loops here exactly like a refused
   # handshake.
+  #
+  # ## the root credential is not on a command line (infra-10, 2026-10-03)
+  #
+  # The wait below used to be `mc alias set local URL "$MINIO_ROOT_USER"
+  # "$MINIO_ROOT_PASSWORD"`, retried up to sixty times while MinIO starts, on
+  # every `up`: the root password of the evidence store, in the argument list
+  # of a process any local account on the host can read. mc-alias.sh, mounted
+  # beside the certificate, defines the alias through MC_HOST_local instead,
+  # in the process environment, and the wait is `mc ls local`, which also
+  # checks the credentials as `alias set` did. It also puts mc's own config
+  # and the trusted certificate under /tmp: this container has no
+  # capabilities (infra-5) and /root in the mc image is mode 0550, so root
+  # here cannot write the default ~/.mc. The SAMPLE_ and PRESERVE_
+  # service accounts' secret keys are still `--secret-key` arguments of
+  # `mc admin user svcacct add`, which has no other way in; that command runs
+  # once, the first time each account is created (the `svcacct info` guard
+  # skips it after), and the keys reach one bucket each. A stated residual.
   minio-init:
-    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z
+    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on: [minio]
     networks: [noctornal]
     env_file: [secrets.env]
+    environment:
+      <<: *no-owner-credential
     restart: "no"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     volumes:
       - ./tls:/certs:ro
+      - ./mc-alias.sh:/mc-alias.sh:ro
     entrypoint:
       - /bin/sh
       - -c
       - |
         set -e
-        mkdir -p /root/.mc/certs/CAs
-        cp /certs/public.crt /root/.mc/certs/CAs/minio.crt
+        . /mc-alias.sh
+        mc_setup
         attempts=0
-        until mc alias set local https://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+        until mc ls local >/dev/null; do
           attempts=$$((attempts + 1))
           if [ "$$attempts" -ge 60 ]; then
             echo "minio-init: gave up dialling https://minio:9000 after $$attempts tries." >&2
@@ -597,18 +823,30 @@ services:
   # speaks to the database waits for it to succeed.
   #
   # DATABASE_URL is the ONE variable alembic (db/migrations/env.py) and the
-  # application both read, and they must NOT be the same role: secrets.env
-  # points it at `noctornal_app`, so this service replaces it in-process
-  # with NOCTORNAL_MIGRATION_DATABASE_URL.
+  # application both read, and they must NOT be the same role, so
+  # scripts/migrate_job.py sets it in-process from
+  # NOCTORNAL_MIGRATION_DATABASE_URL and execs Alembic.
   #
-  # The swap happens in the command because compose has no way to say "set
+  # ## migrate.env, and nothing else (docs/17 F52, 2026-10-02)
+  #
+  # This job reads migrate.env INSTEAD of secrets.env: Alembic needs the
+  # owner's DSN and nothing else secrets.env holds, and the owner's DSN is
+  # in no other file any service reads. It is optional to compose so that a
+  # host whose secrets were not moved yet still gets as far as this job,
+  # which then refuses in one sentence naming the installer step that moves
+  # them (release/secrets-upgrade/README.md), and every service that waits
+  # on it stays down. `required: true` would instead make compose refuse
+  # every command, `ps` and `logs` included, with a message about a missing
+  # file. migrate_job.py also refuses an owner DSN that still carries a
+  # published value: the API made that refusal while secrets.env carried
+  # the DSN, and no longer sees it.
+  #
+  # The swap happens in a process because compose has no way to say "set
   # DATABASE_URL from the value of another variable in the env_file".
   # Writing `DATABASE_URL: ${NOCTORNAL_MIGRATION_DATABASE_URL}` under
   # `environment:` would work only if the operator also passed
-  # `--env-file infra/production/secrets.env` on every single compose
-  # command, and forgetting it would set DATABASE_URL to the empty string --
-  # which db.py reports as "set but empty", a message written for exactly
-  # this shape of mistake.
+  # `--env-file` on every single compose command, and forgetting it would
+  # set DATABASE_URL to the empty string.
   #
   # `restart: "no"` because a failed migration must STOP the deployment.
   # The API's depends_on below is `service_completed_successfully`, so a
@@ -621,6 +859,9 @@ services:
   # server (see the Dockerfile) and this container serves no HTTP.
   migrate:
     <<: *noctornal-app
+    env_file:
+      - path: migrate.env
+        required: false
     restart: "no"
     healthcheck:
       disable: true
@@ -629,13 +870,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        export DATABASE_URL="$$NOCTORNAL_MIGRATION_DATABASE_URL"
-        exec alembic upgrade head
+    command: ["python", "scripts/migrate_job.py"]
 
   # ------------------------------------------------------------------------
   # The application: REST API, the analyst console at /ui, and the
@@ -733,11 +968,19 @@ services:
       - secrets.env
       - path: egress-client.env
         required: false
+    # The analysis worker's socket, read-only (docs/17 F42): forum pages
+    # polled from the console and an analyst's "run static triage now"
+    # are parsed there, never in this container.
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -748,6 +991,10 @@ services:
       # Started, not healthy: the console must come up while the proxy
       # does not, and say so on the readiness register.
       egress-proxy:
+        condition: service_started
+      # The same for the analysis worker: without it analysis is refused
+      # and readiness says why, but the console still serves.
+      analysis-worker:
         condition: service_started
     command:
       - /bin/sh
@@ -814,6 +1061,7 @@ services:
   sample-origin:
     <<: *noctornal-app
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       # S1 (2026-09-25): the system role's DSN bypasses row-level
       # security, and the process that serves hostile bytes must never hold
@@ -845,22 +1093,26 @@ services:
           --proxy-headers --forwarded-allow-ips "$$NOCTORNAL_TRUSTED_PROXY_IP"
 
   # ------------------------------------------------------------------------
-  # The two things that have to happen on a timer, in a shell loop.
+  # The things that have to happen on a timer, in a shell loop: the
+  # notification drain and the queued outbound lookups. The scheduled
+  # collection poll ran here until 2026-10-02 and now runs in the collector
+  # service below, the one holder of the persona key (decision 174).
   #
-  # There is no worker process and no queue in this build (decision 30):
+  # There is no general worker process and no queue in this build (decision
+  # 30; the collector is the one exception, for persona credentials):
   # `transports.dispatch_due()` and the collection runner are functions you
   # CALL. Until something called them on a schedule, a notification queued
   # at 17:05 went out when an administrator next pressed the button --
   # priority 1 "overrides quiet hours" only if something sends it.
   #
-  # Both are safe to run beside the API, and safe if this loop ever overlaps
-  # itself, because both are guarded by Postgres advisory locks -- at
+  # All of them are safe to run beside the API, and safe if this loop ever
+  # overlaps itself, because each is guarded by Postgres advisory locks, at
   # different granularities, which is worth knowing when reading the log.
   # `dispatch_due` takes ONE lock across the whole drain, so a second copy
   # does nothing and no notification is sent twice. The collection runner
-  # locks PER SOURCE, so a source another runner holds -- a second cron, or
-  # an analyst who pressed Run -- is reported `skipped`, which is not a
-  # failure and does not move the exit code.
+  # (in the collector) locks PER SOURCE, so a source another runner holds (a
+  # second collector, or an analyst who pressed Run) is reported
+  # `skipped`, which is not a failure and does not move the exit code.
   #
   # ## the cadence, described accurately
   #
@@ -870,7 +1122,8 @@ services:
   # passes took, and it drifts.
   #
   # That drift does not matter, and it especially does not matter for the
-  # collection poll, which is NOT a timer for the sources it polls. Each
+  # collection poll (which the collector runs on the same five-minute
+  # resolution), which is NOT a timer for the sources it polls. Each
   # source carries its own `next_due_at`, rolled once with per-source jitter
   # when a run finishes and stored (Alembic 0042). The jitter is there for
   # operational security, not politeness -- docs/04: a collector that polls
@@ -890,16 +1143,41 @@ services:
   # substitution would overwrite `$?` before it was read, and the log would
   # cheerfully report exit=0 for every failure.
   #
+  # ## stopping (infra-11, 2026-10-03)
+  #
+  # The four loop services (this one, lab-triage, lab-cron, embed-pass) used
+  # to be `sh -c 'while true; ...'` as PID 1, which has no handler for
+  # SIGTERM: `docker stop`, `down` and the `up -d --build` of the README's
+  # update procedure waited ten seconds and then SIGKILLed the whole tree,
+  # mid-pass. The jobs are written to finish a pass (a poll already under way
+  # is never abandoned; a send is recorded after it is made), so the kill cut
+  # a persona poll, a sandbox send or an email between its effect and its
+  # record. Now the loop traps TERM and INT, the signal reaches the shell and
+  # not the job (docker signals PID 1 alone), the job in progress finishes,
+  # and the loop ends at the next step instead of starting another; a nap is
+  # a `wait`, which a trapped signal interrupts, so a stop during the
+  # five-minute sleeps is immediate. stop_grace_period is what a pass may take
+  # (the 240 second budgets, one fetch or send in flight, and some slack): a
+  # pass that outlasts it is killed as before. No `init: true`: the shell
+  # handles the signal itself and reaps its own children, and `init` would
+  # depend on docker-init being installed on the host.
+  # apps/api/tests/test_g48_cron_sigterm.py runs these scripts and signals them.
+  #
   # Healthcheck disabled: no HTTP server here (see the Dockerfile).
   cron:
     <<: *noctornal-app
+    stop_grace_period: 330s
     healthcheck:
       disable: true
     env_file:
       - secrets.env
       - path: egress-client.env
         required: false
+    # No analysis worker socket: the collection poll, whose forum pages are
+    # parsed in the worker (docs/17 F42), runs in the collector now, and
+    # neither drain below parses hostile bytes.
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -908,8 +1186,8 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      # Healthy: a poll or a drain through a proxy that cannot answer would
-      # only fail every source and delivery in the pass.
+      # Healthy: a drain through a proxy that cannot answer would only fail
+      # every delivery and lookup in the pass.
       egress-proxy:
         condition: service_healthy
     command:
@@ -918,23 +1196,30 @@ services:
       - |
         cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
-        while true; do
+        stop=
+        trap 'stop=1' TERM INT
+        nap() { sleep "$$1" & wait "$$!"; }
+        while [ -z "$$stop" ]; do
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] notify_drain start"
           python scripts/notify_drain.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] notify_drain exit=$$rc"
-          sleep 150
+          [ -z "$$stop" ] || break
+          nap 150
+          [ -z "$$stop" ] || break
           # The collection poll moved to the collector service below on
           # 2026-10-02 (A collector process): it needs the persona key,
           # which this loop does not hold.
-          # Queued outbound lookups (F15.4, 2026-09-24), with no sleep of
-          # its own, so every job keeps its five-minute cadence. The
-          # cadence is a resolution, not a rate: pacing comes from the
-          # provider windows.
+          # Queued outbound lookups (F15.4, 2026-09-24), straight after the
+          # notification drain's nap with no sleep of their own, so every
+          # job keeps its five-minute cadence. The cadence is a resolution,
+          # not a rate: pacing comes from the provider windows.
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain start"
           python scripts/lookup_drain.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain exit=$$rc"
-          sleep 150
+          [ -z "$$stop" ] || break
+          nap 150
         done
+        echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] stopped on request"
 
   # ------------------------------------------------------------------------
   # The collector (A collector process, 2026-10-02): the ONE service that
@@ -943,7 +1228,11 @@ services:
   # or rebound; a Poll now of a source a persona reads) and the scheduled
   # collection polls (scripts/collection_poll.py, as a child every five
   # minutes, the resolution the cron loop used). The API and the cron loop
-  # hold no persona key, so neither can open a persona credential.
+  # hold no persona key, so neither can open a persona credential. The poll
+  # parses forum pages, so the collector mounts the analysis worker's socket
+  # read-only as the cron loop did when it ran the poll; it holds no schema
+  # owner credential (*no-owner-credential, and scripts/collector.py refuses
+  # one through the same helper every job calls).
   #
   # collector.env carries NOCTORNAL_PERSONA_KEK and nothing else, and only
   # this service reads it. Optional to compose so an upgrade starts and the
@@ -972,11 +1261,18 @@ services:
         required: false
       - path: collector.env
         required: false
+    # The collection poll's forum pages are parsed in the analysis worker
+    # (docs/17 F42); its socket, read-only.
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_COLLECTOR: "1"
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -984,6 +1280,10 @@ services:
         condition: service_healthy
       egress-proxy:
         condition: service_healthy
+      # Started only: a persona act must not wait on it, and a forum source
+      # polled while it is down is refused by name.
+      analysis-worker:
+        condition: service_started
     command:
       - /bin/sh
       - -c
@@ -999,30 +1299,171 @@ services:
   # object store (the CA bundle, as cron) and sends nothing out. A deployment
   # that must share a loop can pass --budget SECONDS instead.
   #
+  # Every step's child runs in the analysis worker below (docs/17 F42,
+  # 2026-10-02), so this container decrypts a sample and hands its bytes
+  # over the socket; it parses none of them. Healthy, not started: a pass
+  # with no worker would only refuse and exit 1.
+  #
   # Healthcheck disabled: no HTTP server here (see the Dockerfile).
   lab-triage:
     <<: *noctornal-app
+    stop_grace_period: 330s
     healthcheck:
       disable: true
     env_file:
       - secrets.env
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
+      analysis-worker:
+        condition: service_healthy
     command:
       - /bin/sh
       - -c
       - |
         cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
-        while true; do
+        stop=
+        trap 'stop=1' TERM INT
+        nap() { sleep "$$1" & wait "$$!"; }
+        while [ -z "$$stop" ]; do
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lab_triage start"
           python scripts/lab_triage.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lab_triage exit=$$rc"
-          sleep 300
+          [ -z "$$stop" ] || break
+          nap 300
         done
+        echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] stopped on request"
+
+  # ------------------------------------------------------------------------
+  # The isolated analysis worker (docs/17 F42, 2026-10-02). Static triage
+  # and forum parsing read bytes written by the people under
+  # investigation; api, collector and lab-triage hand each such read to this
+  # container over a Unix socket, and it starts the same bounded child
+  # they would otherwise have started beside their own secrets
+  # (noctornal_api.analysis_worker).
+  #
+  # Not a task worker, and decision 30 stands: no queue, nothing scheduled,
+  # one request per connection and nothing kept between them (below, and
+  # analysis_worker's docstring, say what is closed and what remains). The
+  # owner chose it on 2026-10-02 to close what a child beside
+  # the application could still reach: on Linux the environment of every
+  # process of the same user, which is all of secrets.env, and the database
+  # over the shared network.
+  #
+  # So, unlike every other application service, it does NOT merge
+  # x-noctornal-app: that block carries secrets.env, the `noctornal`
+  # network and the MinIO certificate, and this service must have none of
+  # them. It repeats the build and the image tag instead (one image, one
+  # dependency set; readiness refuses a worker whose parser versions differ
+  # from the API's).
+  #
+  #   * No env_file, and an environment of its own settings only. The
+  #     worker refuses to start holding any variable it cannot name, and
+  #     readiness asks it what it holds.
+  #   * network_mode none: loopback only, so no route, no DNS and no
+  #     database.
+  #   * A read-only root; no-new-privileges; pids and memory limits.
+  #   * Nothing a child makes outlives its request (F42 verify round,
+  #     2026-10-03). Killing a uid's processes does not remove what they
+  #     left in the kernel or on a writable filesystem, and the worker
+  #     holds no capability that would let it: SysV shared memory (charged
+  #     to this container's memory limit until the worker is killed for it),
+  #     SysV queues and semaphores, POSIX queues, /dev/shm (Docker's 64 MiB
+  #     tmpfs, writable although the root is read-only) and /tmp all lasted
+  #     until the container was removed, and a later child, of any slot,
+  #     could read them. So `ipc: none` gives the container no /dev/shm,
+  #     the four sysctls (the container's own, in its IPC namespace) leave
+  #     a child unable to create a segment, a queue or a semaphore set, and
+  #     /tmp is a tmpfs of root's, mode 0755, that no child's uid can
+  #     write; nothing a child runs writes there (its code is on the root).
+  #     The worker reads each setting from its own process, refuses to
+  #     start unless all are in place, and the readiness row fails when its
+  #     hello says one is open.
+  #   * Each child is a user of its own (F42 review, 2026-10-02). A child
+  #     running as the worker's user could replace the worker's socket, and
+  #     a process it detached outlived its request and answered later ones
+  #     in the worker's place. So the worker starts as root (user 0, group
+  #     10001) holding only KILL, SETGID and SETUID, and runs slot N's child
+  #     as uid 10100+N with no supplementary group, under a task limit,
+  #     killing every process of that uid before the request is answered.
+  #     The worker refuses to start with any other capability, without
+  #     no-new-privileges (a setuid program would hand a child a capability
+  #     back) or as PID 1 (init: true reaps what it kills). uids 10100 to
+  #     10115 must own nothing on the host. analysis_worker's docstring
+  #     says why this and not a pid namespace per request.
+  #   * pids_limit: the worker needs 40 tasks and each slot 20 (a child may
+  #     hold 16), and refuses to start when the limit cannot hold them, so
+  #     raise it with NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY. It refuses as
+  #     well when the limit is absent or more than four times that need (F42
+  #     verify round, 2026-10-03): the child's task limit is the first wall
+  #     and this is the second, and a limit of 100000 is no wall. The hello
+  #     reports it and the readiness row judges it.
+  #   * The socket's volume (analysis-socket, below) is a tmpfs owned by
+  #     root, group 10001, mode 0750: only the worker writes it, a child's
+  #     uid cannot even enter it, and api, collector and lab-triage mount it
+  #     read-only.
+  #
+  # Memory: each running request holds its payload (a YARA scan at the
+  # defaults: a 256 MiB sample and a build of up to 256 MiB), a child
+  # bounded by NOCTORNAL_SAMPLE_ANALYSIS_MEMORY (2 GiB of address space by
+  # default) and its output (8 MiB for a step, up to 256 MiB for a
+  # compile). Two YARA scans at their worst are 2 x (512 MiB + 2 GiB +
+  # 8 MiB), about 5.2 GiB with the worker's own memory; 6g holds that.
+  # Measured on 2026-10-03 with docker: one 256 MiB request peaked the
+  # worker at 286 MiB (a payload is held once while it arrives, not
+  # twice), and two 512 MiB requests at once peaked it at 1.03 GiB and the
+  # whole container at 2.6 GiB. With a 160 MiB limit a child that outgrew
+  # it was killed by the kernel twice, both requests were answered
+  # `crashed`, and the worker went on serving: every child ranks first for
+  # the OOM killer, so a limit that is too small costs a crashed step,
+  # never the worker. It stops holding where the application's own limits
+  # are raised: NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES above its default lets
+  # a caller send more than 512 MiB, and a larger sample cap or a higher
+  # concurrency multiplies the figures above, so raise mem_limit with them.
+  analysis-worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: noctornal-api:0.7.1
+    restart: unless-stopped
+    network_mode: none
+    init: true
+    ipc: none
+    sysctls:
+      kernel.shmmax: 0
+      kernel.msgmni: 0
+      kernel.sem: "0 0 0 0"
+      fs.mqueue.queues_max: 0
+    user: "0:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1m,mode=0755,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    cap_add: [KILL, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 6g
+    memswap_limit: 6g
+    environment:
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
+      NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY: "2"
+    volumes:
+      - analysis-socket:/run/noctornal-analysis
+    command: ["python", "-m", "noctornal_api.analysis_worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "noctornal_api.analysis_worker", "--check"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
   # The Lab's workers (F13 and F14, 2026-09-24): prohibited-content screening
   # and the sandbox dispatch, in a loop of their OWN. A screening pass may
@@ -1038,6 +1479,7 @@ services:
   # for the proxy, as cron does.
   lab-cron:
     <<: *noctornal-app
+    stop_grace_period: 330s
     healthcheck:
       disable: true
     env_file:
@@ -1045,6 +1487,7 @@ services:
       - path: egress-client.env
         required: false
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -1061,15 +1504,21 @@ services:
       - |
         cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
-        while true; do
+        stop=
+        trap 'stop=1' TERM INT
+        nap() { sleep "$$1" & wait "$$!"; }
+        while [ -z "$$stop" ]; do
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sample_screen start"
           python scripts/sample_screen.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sample_screen exit=$$rc"
+          [ -z "$$stop" ] || break
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sandbox_dispatch start"
           python scripts/sandbox_dispatch.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] sandbox_dispatch exit=$$rc"
-          sleep 300
+          [ -z "$$stop" ] || break
+          nap 300
         done
+        echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] stopped on request"
 
   # The similarity pass (F6, 2026-09-25): fills and refreshes the similar
   # wording and similar meaning indexes, 240 seconds of work a pass, in a
@@ -1080,6 +1529,7 @@ services:
   # Healthcheck disabled: no HTTP server here (see the Dockerfile).
   embed-pass:
     <<: *noctornal-app
+    stop_grace_period: 330s
     healthcheck:
       disable: true
     env_file:
@@ -1087,6 +1537,7 @@ services:
       - path: egress-client.env
         required: false
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -1101,12 +1552,17 @@ services:
       - |
         cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
-        while true; do
+        stop=
+        trap 'stop=1' TERM INT
+        nap() { sleep "$$1" & wait "$$!"; }
+        while [ -z "$$stop" ]; do
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] embed_pass start"
           python scripts/embed_pass.py --max-seconds 240; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] embed_pass exit=$$rc"
-          sleep 60
+          [ -z "$$stop" ] || break
+          nap 60
         done
+        echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] stopped on request"
 
   # ------------------------------------------------------------------------
   # The egress proxy (S2, 2026-09-24; docs/00 decision 68). The only
@@ -1138,6 +1594,7 @@ services:
         required: false
     volumes: []
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_LISTEN: "172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -1212,3 +1669,13 @@ volumes:
   prod-miniodata:
   caddy-data:
   caddy-config:
+  # The analysis worker's socket and nothing else (docs/17 F42). A tmpfs,
+  # so nothing survives a host restart, owned by root (the worker) with the
+  # application's group: the worker alone writes it, and its children's
+  # uids cannot enter it (F42 review, 2026-10-02).
+  analysis-socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=10001,mode=0750"

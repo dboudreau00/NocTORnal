@@ -18,9 +18,11 @@ verifier's FROM scratch repro):
     files are excluded at EVERY depth, not just the root. The witnesses come
     from the rule itself and are confirmed by `git check-ignore`, so a rule
     added tomorrow is held to this without anybody editing the test;
-  * the whole of infra/production stays out, every file in it today and any
-    name an operator gives the next one, so a backup or an editor copy of a
-    secret file cannot ride along;
+  * infra/production stays out, every file in it today and any name an
+    operator gives the next one, so a backup or an editor copy of a secret
+    file cannot ride along; the only things let back in are the tracked
+    `.example` templates and the compose file, which hold no secret (the
+    image-context tests of the hardening work hold those in the context);
   * the stray copies an operator really leaves (`.bak`, `.old`, `~`, a swap
     file, a key) are out wherever they land;
   * the deny-list never eats code the image runs.
@@ -215,7 +217,7 @@ def test_the_matcher_reads_docker_patterns_as_docker_does():
 def test_the_dockerignore_has_the_patterns_this_file_assumes():
     """A parse that returned nothing would make every test below vacuous."""
     assert len(PATTERNS) >= 20
-    assert "infra/production/" in PATTERNS
+    assert "infra/production/*" in PATTERNS
     assert "**/.env" in PATTERNS
 
 
@@ -232,18 +234,34 @@ def test_the_gitignored_names_under_infra_production_are_still_read():
         f"the Dockerfile's COPY . /app: {leaked}")
 
 
-def test_the_whole_of_infra_production_stays_out_of_the_image():
+#: What infra/production lets into the image: the tracked templates, which
+#: hold placeholders only, and the compose file. Nothing in the image reads
+#: either; they stay because the image-context tests hold them in, and
+#: because neither holds a secret.
+def _let_in(path: str) -> bool:
+    head, _, name = path.rpartition("/")
+    return head == "infra/production" and (
+        name == "compose.yml" or name.endswith(".env.example"))
+
+
+def test_infra_production_stays_out_of_the_image_but_for_templates_and_compose():
     """Every file in the directory today, tracked or not, and any name an
     operator gives the next one: nothing in the image reads the directory
     (compose bind-mounts what a container needs)."""
     here = ROOT / "infra" / "production"
     present = [p.relative_to(ROOT).as_posix() for p in here.rglob("*") if p.is_file()]
     assert any(p.endswith("compose.yml") for p in present)
-    leaked = [p for p in present if not _excluded(p, PATTERNS)]
+    leaked = [p for p in present if not _let_in(p) and not _excluded(p, PATTERNS)]
     assert not leaked, f"copied into the image: {leaked}"
+    shut_out = [p for p in present if _let_in(p) and _excluded(p, PATTERNS)]
+    assert not shut_out, f"left out of the image, which the image-context tests hold in: {shut_out}"
     for name in ("anything", "anything.txt", "Caddyfile.bak", "tls2/a.crt",
-                 "newsecret", "migrate.env", "a/b/c/d"):
+                 "newsecret", "migrate.env", "a/b/c/d", "collector.env",
+                 "collector.env.old", "compose.yml.bak", "sub/compose.yml",
+                 "sub/secrets.env.example", "tls/public.crt"):
         assert _excluded(f"infra/production/{name}", PATTERNS), name
+    for name in ("compose.yml", "secrets.env.example", "collector.env.example"):
+        assert not _excluded(f"infra/production/{name}", PATTERNS), name
 
 
 @pytest.mark.parametrize("name", STRAYS)

@@ -200,12 +200,22 @@ the exit alone: the site asked for a wait and got one. The exit code is the one 
 job has back to its operator, and a pass that failed every source and
 exited 0 would be a failure reported as nothing at all.
 
-The two share the code on purpose. `argparse` already spends 2 on a usage
-error, and a third number would have to be taught to every crontab, alert
-rule and wrapper script that reads this one -- until then a refusal read
-as a broken source, or the reverse. The log line says which, unmistakably
-and in the first word, and to an alert they mean the same thing: this
-pass did not collect, and it will not start collecting on its own.
+2 when, under NOCTORNAL_ENV=production, the environment is one this job will
+not run on (docs/17 F52 and infra-12, 2026-10-02 and 2026-10-03): a
+credential that carries a value this repository publishes, or the schema
+owner's password or DSN, which no runtime process may hold. The pass prints
+one line per variable on stderr, `collection_poll: refusing to run: <NAME>
+...`, naming the variable and never its value, and touches nothing: it
+refuses before it reads its arguments, connects or asks the register
+anything, which is the one helper every job calls first
+(`config.refuse_unsafe_job_environment`), as the API does at boot.
+
+It is 2 and not 1, the register's code, because 1 here means a pass RAN and
+something in it failed, and an alert should be able to tell that from a job
+that would not start. `argparse` spends 2 on a usage error as well, and the
+first words of the line say which it was; to an alert both mean the same
+thing: this pass did not collect, and it will not start collecting on its
+own. Every job gives this refusal the same code (`config.JOB_REFUSAL_EXIT`).
 
 A non-zero exit does NOT mean the runner stopped: every selected source
 was attempted, and a poll that got as far as its `collection_run` row is
@@ -261,6 +271,7 @@ from noctornal_api.collection import (  # noqa: E402
     PersonaResting,
     SourceRefused,
 )
+from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.readiness import blocking_failures  # noqa: E402
 
@@ -298,6 +309,18 @@ SYSTEM_ACTOR = None
 
 
 def main() -> int:
+    # First, before anything is read or connected to (docs/17 F52 and infra-12,
+    # 2026-10-02 and 2026-10-03): under NOCTORNAL_ENV=production a published
+    # credential or the schema owner's refuses the pass, the same two refusals
+    # every cron job makes through the one helper (config.py); the persona
+    # half is not asked of this job, which runs as the collector's child and
+    # makes the collector's own half below. Before the
+    # arguments are read, and a dry run refuses too, for the reason the
+    # readiness gate below gives. See "The exit code" above for 2.
+    refusals = refuse_unsafe_job_environment("collection_poll", holds_persona_key=True)
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n", 1)[0],
         epilog="Most passes poll nothing. See the module docstring for why "

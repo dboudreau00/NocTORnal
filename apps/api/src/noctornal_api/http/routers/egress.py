@@ -296,7 +296,8 @@ def connections(
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """The connection log within the caller's clearance, newest first, each
-    OPEN paired with its CLOSE, and how many rows were withheld."""
+    OPEN paired with its CLOSE, and how many rows of the whole log were
+    withheld, whatever route, event or window was asked about."""
     if since is not None and since.tzinfo is None:
         raise Problem(422, "Validation failed", "Times are UTC: send an offset.")
     clearance, held = _clearance(conn, user)

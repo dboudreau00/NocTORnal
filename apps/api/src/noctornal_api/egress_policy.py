@@ -394,7 +394,7 @@ _EXPLAIN: dict[str, str] = {
     "persona_not_bound": "the persona is not bound to the egress profile of this route",
     "persona_unavailable": "the persona cannot be used right now",
     "persona_needs_exit": "persona traffic needs an exit other than this host's own address",
-    "profile_shared": "another persona is live on this egress profile",
+    "profile_shared": "another persona, or a public read, is live on this egress profile",
     "authority_missing": "no live collection authority covers this connection",
     "authority_predates_route_change": "the collection authority was confirmed before the route last changed",
     "above_route_ceiling": "the source is classified above what this route may carry",

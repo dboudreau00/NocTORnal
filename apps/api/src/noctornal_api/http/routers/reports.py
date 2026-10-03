@@ -233,6 +233,12 @@ class ReleaseBody(BaseModel):
 
 _EXPORT = "report.export"
 
+#: Where `/release` judges a document going (evidence-report-release-in-app,
+#: 2026-10-03): the destinations outside the platform that a person sends a
+#: finished document to. In order, as the console offers them.
+RELEASE_DESTINATIONS: tuple[Destination, ...] = (
+    Destination.EXPORT, Destination.SMTP, Destination.JIRA, Destination.WEBHOOK)
+
 # The sentence `require_step_up` answers a stale session with, word for
 # word: the console recognises it (app.js `reportNeedsSignIn`), and a test
 # holds the two together.
@@ -313,10 +319,22 @@ def release(
     _known_preset(body.preset)
     try:
         destination = Destination(body.destination)
-    except ValueError as exc:
+    except ValueError:
+        destination = None
+    if destination not in RELEASE_DESTINATIONS:
+        # evidence-report-release-in-app (2026-10-03): the caller chose the
+        # destination from every member, and the gate allows anything to
+        # `in_app`, so a TLP:RED document came back `allowed: true` with a
+        # filename and a REPORT_RELEASED SUCCESS row: the one recorded
+        # decision said a RED report was released. A release is the gated
+        # way OUT, so only a destination outside the platform is judged;
+        # nothing is built or audited for any other.
         raise Problem(400, "Invalid request",
-                      f"unknown destination {body.destination!r}; one of "
-                      f"{', '.join(d.value for d in Destination)}") from exc
+                      f"a report is released to one of "
+                      f"{', '.join(d.value for d in RELEASE_DESTINATIONS)}; "
+                      f"{body.destination!r} is not a destination a released "
+                      f"document goes to. Inside the platform, the prepared "
+                      f"report is already on screen.")
 
     # CR1: the release path had the same hole, and this one hands the
     # result across the boundary.

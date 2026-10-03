@@ -148,6 +148,24 @@ def test_the_collectors_mark_on_another_process_is_refused():
     assert any("marks the collector service alone" in p for p in problems), problems
 
 
+def test_the_boot_makes_the_persona_refusals_and_the_owner_credentials_together():
+    """Two groups' refusals in one list (merged): a production process that
+    holds the persona key AND the schema owner's credential is refused for
+    both, each by name and neither by value. The collector is not asked for
+    the key but never holds the owner's credential either."""
+    owner = "Hq7vX2-owner-password"
+    env = _prod(NOCTORNAL_PERSONA_KEK=KEY_A, POSTGRES_PASSWORD=owner)
+    problems = config.verify_environment(env)
+    assert any("not the collector" in p and "NOCTORNAL_PERSONA_KEK" in p for p in problems)
+    assert any("POSTGRES_PASSWORD is set on a runtime process" in p for p in problems)
+    assert KEY_A not in " ".join(problems) and owner not in " ".join(problems)
+    collector = config.verify_environment(
+        {**env, "NOCTORNAL_COLLECTOR": "1"}, collector=True)
+    assert not any("not the collector" in p for p in collector), collector
+    assert any("POSTGRES_PASSWORD is set on a runtime process" in p for p in collector)
+    assert owner not in " ".join(collector)
+
+
 def test_the_inline_mode_is_refused_in_production_and_ignored_there(monkeypatch):
     problems = config.persona_key_problems(
         _prod(NOCTORNAL_COLLECTOR_INLINE="1"), collector=False)
@@ -182,11 +200,27 @@ def test_the_cron_entries_refuse_a_persona_key():
         config.enforce_persona_key_boundary(_prod(NOCTORNAL_PERSONA_KEK=KEY_A),
                                             collector=False)
     config.enforce_persona_key_boundary(_prod(), collector=False)
-    for script in ("notify_drain.py", "lookup_drain.py"):
+    # The cron entries refuse it through the one helper every job calls
+    # (merged with the hardening work, which made that helper), as one line
+    # on stderr and the one exit code every job gives a refusal.
+    lines = config.refuse_unsafe_job_environment(
+        "notify_drain", _prod(NOCTORNAL_PERSONA_KEK=KEY_A))
+    assert any(line.startswith("notify_drain: refusing to run: ")
+               and "not the collector" in line for line in lines), lines
+    assert KEY_A not in " ".join(lines)
+    for script in ("notify_drain.py", "lookup_drain.py", "embed_pass.py"):
         text = (ROOT / "scripts" / script).read_text(encoding="utf-8")
-        assert "enforce_persona_key_boundary(collector=False)" in text, script
+        assert text.count("refuse_unsafe_job_environment(") == 1, script
+        assert "holds_persona_key" not in text, script
+        assert "enforce_persona_key_boundary" not in text, script
+    # The poll runs as the collector's child and the collector is the key's
+    # holder: neither is asked for the key by the helper, and the poll makes
+    # the collector's own half itself.
     poll = (ROOT / "scripts" / "collection_poll.py").read_text(encoding="utf-8")
     assert "enforce_persona_key_boundary(collector=True)" in poll
+    assert 'refuse_unsafe_job_environment("collection_poll", holds_persona_key=True)' in poll
+    collector = (ROOT / "scripts" / "collector.py").read_text(encoding="utf-8")
+    assert 'refuse_unsafe_job_environment("collector", holds_persona_key=True)' in collector
 
 
 def test_the_suites_persona_key_is_a_published_value():
@@ -340,8 +374,11 @@ def test_the_embed_pass_worker_refuses_to_hold_the_persona_key_in_production(
     ring.setattr(embed_pass, "connect", touched)
     ring.setenv("NOCTORNAL_ENV", "production")
     assert embed_pass.main([]) == 2
-    out = capsys.readouterr().out
-    assert "not the collector" in out and KEY_A not in out
+    captured = capsys.readouterr()
+    # Through the one helper every job calls: stderr, led by the job's name.
+    assert "embed_pass: refusing to run: NOCTORNAL_PERSONA_KEK" in captured.err
+    assert "not the collector" in captured.err
+    assert KEY_A not in captured.out + captured.err
 
 
 def test_the_test_suites_key_is_not_the_totp_one():
