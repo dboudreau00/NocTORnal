@@ -7,12 +7,15 @@ counted on the readiness register:
 - **Undated Triage claims.** Since final review u6 (2026-09-24) an accept
   dates its claim from the cited document. Claims accepted earlier carry
   no `observed_at`, so First seen and Last seen ignore them. Invariant 5
-  (CONVENTIONS.md) says a claim's own columns are never written again, so
-  nothing here fills the date: amending that invariant is the owner's
-  decision, and until it is recorded as one no code path writes
-  `observed_at` on an existing claim. The listing gives each claim the
-  date its document gives, so an analyst can add a dated claim where it
-  matters.
+  (CONVENTIONS.md) says a claim's own columns are never written again, and
+  the owner decided on 2026-10-02 that it is NOT amended (docs/00 open
+  question 11): nothing here fills the date, and no code path writes
+  `observed_at` on an existing claim. An analyst gives a claim its date by
+  supersession (`GraphWriteService.supersede_assertion`, the inspector's
+  Date this claim): a new claim carrying the date and the analyst's
+  rationale and citing the old one, which is stamped superseded and is
+  otherwise as it was recorded, and so leaves this listing. The listing
+  gives each claim the date its document gives.
 - **ATTRIBUTE claims below their material.** Since final review c1 an
   accept refuses an ATTRIBUTE claim onto an entity labelled below what it
   was found in, and since C12 the route refuses an entity in another case.

@@ -45,6 +45,17 @@ them is `dual_control.policy`, a change to the two-person policy itself,
 which an administrator proposes and a DIFFERENT kind of person, a Security
 officer, countersigns (`Operation.approver_permission`).
 
+## The second person on a case's merge switch (F39, 2026-10-02)
+
+`case.policy.relax` carries `signer_assignment_seasoned`: whoever approves
+it must have held `case.update` on the case for `relax_seasoning` days (7
+unless `NOCTORNAL_RELAX_SEASONING_DAYS` says otherwise, 0 off), from the
+assignment's `granted_at` against the database's clock. It is checked where
+the colleague approves (`_refuse_unseasoned_assignment`) and again where the
+approval is spent (`refuse_unseasoned_spend`, judged at `decided_at`). The
+database does not check it: it cannot read the setting, and the approver's
+permission is an API check for every case operation.
+
 ## Out-of-band audit rows, and the one rule they follow
 
 A refusal the caller's transaction must not roll back is written on a
@@ -69,6 +80,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -77,6 +91,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api import notify_events
+from noctornal_api.wording import count_of
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +145,13 @@ class Operation:
     `countersigner_seasoned`: the approver may not sign within the seven
     days after someone else took over their credentials or gave them the
     role that signs (`iam.countersign_blocked_by`).
+
+    `signer_assignment_seasoned` (F39, 2026-10-02): the approver must have
+    held `signer_permission` on the case for the deployment's window
+    (`relax_seasoning`, seven days unless declared otherwise, 0 off), read
+    from the assignment's grant time by the database clock. The other half
+    of the countersigner rule: that one is about an account somebody else
+    touched, this one about a colleague nobody has worked beside yet.
     """
 
     key: str
@@ -142,6 +164,7 @@ class Operation:
     modes: tuple[str, ...] = ("ALWAYS",)
     not_enforced_because: str = ""
     countersigner_seasoned: bool = False
+    signer_assignment_seasoned: bool = False
 
     @property
     def signer_permission(self) -> str:
@@ -219,13 +242,17 @@ OPERATIONS: dict[str, Operation] = {
     # F9b (2026-09-24). Turning a case's merge requirement OFF. The second
     # person is another holder of case.update on the case: a deputy or a
     # second Lead investigator (0028's same-permission rule). Turning it on
-    # takes no approval at all.
+    # takes no approval at all. F39 (2026-10-02): and that person must have
+    # held case.update on the case for the seasoning window, because an
+    # account holding SYS_ADMIN and CASE_OWNER could otherwise create its own
+    # second person and approve at once.
     "case.policy.relax": Operation(
         key="case.policy.relax", permission="case.update",
         ttl=timedelta(hours=24),
         description="Stop requiring a second signature on a case's merges",
         scope="case",
         enforced_at="http/routers/approvals.py::set_policy",
+        signer_assignment_seasoned=True,
     ),
 }
 
@@ -375,6 +402,151 @@ def countersign_block_sentence(block: dict, *, days: int = 7) -> str:
             f"account's credentials, reactivate or unlock it, or give it a "
             f"role that proposes, you may not countersign what that account "
             f"proposes.")
+
+
+# ---------------------------------------------------------------------------
+# The second person on a case's merge switch (F39, 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# Turning a case's merge requirement off takes a second holder of
+# `case.update` on the case (F9b). Until 2026-10-02 an account holding
+# SYS_ADMIN and CASE_OWNER could create that second person, assign it to the
+# case and approve its own relax within the minute. The owner's decision
+# (docs/00 open question 12, answered 2026-10-02) is a seasoning rule
+# modelled on the deployment-wide policy's seven-day countersigner rule: the
+# second person must have held `case.update` on the case for the window.
+# The window is a deployment setting, seven days unless declared, and 0 turns
+# the rule off.
+#
+# The age is the assignment's own `granted_at`, compared with the database's
+# clock inside one statement (`assignment_block`): an API process can neither
+# supply the time that counts nor shorten the wait. `_grant` (cases.py) sets
+# `granted_at = now()` on every re-grant, so a role change or a repeated
+# grant restarts the clock. That is deliberate and fails safe: the colleague
+# waits a window and reads why, and nobody can move the date back.
+
+#: The setting, and the numbers around it.
+RELAX_SEASONING_ENV = "NOCTORNAL_RELAX_SEASONING_DAYS"
+DEFAULT_RELAX_SEASONING_DAYS = 7
+MAX_RELAX_SEASONING_DAYS = 365
+
+
+def relax_seasoning(env: Mapping[str, str] | None = None
+                    ) -> tuple[int, str | None]:
+    """The window in days, and why a declared value was not used, or None.
+
+    The one reader: the decide route, the spend check, the policy read, the
+    Two-person controls screen and the production boot all call it, so they
+    cannot disagree about what a usable value is. Unset or blank is the
+    default. A whole number from 0 to 365 is that number, and 0 is the one
+    way to turn the rule off. Anything else (a word, a sign, a fraction, a
+    year and a day) is NOT 0: it answers the default and a sentence, so a
+    typo can never be the way the rule goes off. The value is not quoted."""
+    source = os.environ if env is None else env
+    raw = str(source.get(RELAX_SEASONING_ENV, "")).strip()
+    if not raw:
+        return DEFAULT_RELAX_SEASONING_DAYS, None
+    if re.fullmatch(r"[0-9]{1,3}", raw) and int(raw) <= MAX_RELAX_SEASONING_DAYS:
+        return int(raw), None
+    return DEFAULT_RELAX_SEASONING_DAYS, (
+        f"{RELAX_SEASONING_ENV} is not a whole number of days from 0 to "
+        f"{MAX_RELAX_SEASONING_DAYS}, so the second person on a case's merge "
+        f"switch is held to the default of "
+        f"{count_of(DEFAULT_RELAX_SEASONING_DAYS, 'day', 'days')}. Declare 0 "
+        f"to turn the rule off; nothing else does.")
+
+
+def relax_seasoning_days(env: Mapping[str, str] | None = None) -> int:
+    return relax_seasoning(env)[0]
+
+
+def assignment_block(conn: psycopg.Connection, signer_id: UUID, case_id: UUID,
+                     permission: str, *, days: int,
+                     as_of: datetime | None = None) -> dict | None:
+    """Why `signer_id` may not yet be the second person on a case's change,
+    or None when they may.
+
+    `kind` is "unassigned" when no live assignment of theirs to the case
+    carries `permission` (judged at `as_of`), and "seasoning" when one does
+    but was granted less than `days` days before `as_of`. `as_of` None is the
+    database's `now()`: the decision itself. A spent approval is judged at
+    its `decided_at`, which the approval guard pinned to the database's
+    clock, so the question at spend is whether they were seasoned WHEN THEY
+    SIGNED. The comparison that decides is made in SQL on purpose, against
+    `now()` or the pinned `as_of`, never against a time this process read
+    off its own clock. `days` 0 is never asked: callers skip the rule."""
+    row = conn.execute(
+        """SELECT ca.granted_at,
+                  ca.granted_at + make_interval(hours => %(days)s::int * 24),
+                  ca.granted_at + make_interval(hours => %(days)s::int * 24)
+                      <= coalesce(%(as_of)s::timestamptz, now()),
+                  r.display_name
+             FROM iam.case_assignment ca
+             JOIN iam.role r ON r.key = ca.role_key
+            WHERE ca.case_id = %(case)s AND ca.user_id = %(signer)s
+              AND (ca.expires_at IS NULL
+                   OR ca.expires_at > coalesce(%(as_of)s::timestamptz, now()))
+              AND EXISTS (SELECT 1 FROM iam.role_permission rp
+                           WHERE rp.role_key = ca.role_key
+                             AND rp.permission_key = %(permission)s)""",
+        {"days": days, "as_of": as_of, "case": case_id, "signer": signer_id,
+         "permission": permission}).fetchone()
+    if row is None:
+        return {"kind": "unassigned", "permission": permission}
+    if row[2]:
+        return None
+    return {"kind": "seasoning", "permission": permission, "granted_at": row[0],
+            "may_sign_after": row[1], "role_name": row[3], "days": days}
+
+
+def assignment_block_sentence(block: dict, *, days: int,
+                              decided_at: datetime | None = None) -> str:
+    """The refusal a not-yet-seasoned second person reads: the rule and the
+    date they become eligible (UTC). With `decided_at`, the sentence for an
+    approval that is being spent, which cannot be used."""
+    window = count_of(days, "day", "days")
+    permission = block["permission"]
+    rule = (f"The second person on a case's merge switch must have held "
+            f"{permission} on the case for at least {window}, so that nobody "
+            f"can create their own second person and approve at once.")
+    if block["kind"] == "unassigned":
+        if decided_at is not None:
+            return (f"This approval cannot be used: its second person did not "
+                    f"hold {permission} on this case when they approved it, "
+                    f"or no longer does. {rule} Ask again.")
+        return (f"You do not hold {permission} on this case, so you cannot be "
+                f"the second person on a change to its merge switch. {rule}")
+    when = utc_text(block["may_sign_after"])
+    granted = utc_text(block["granted_at"])
+    role = block.get("role_name") or "a role that carries it"
+    if decided_at is not None:
+        if block["granted_at"] > decided_at:
+            return (f"This approval cannot be used: its second person was "
+                    f"given the role {role} on this case again on {granted}, "
+                    f"after they approved it, so their {window} start over. "
+                    f"{rule} Ask again once someone who has held it that long "
+                    f"can approve.")
+        return (f"This approval cannot be used: its second person had held "
+                f"{permission} on this case for less than {window} when they "
+                f"approved it (given the role {role} on {granted}). {rule} "
+                f"Ask again.")
+    return (f"You may approve this from {when}: you were given the role "
+            f"{role} on this case on {granted}. {rule} You may still reject "
+            f"it.")
+
+
+def _assignment_refusal_detail(op: Operation, block: dict, days: int) -> dict:
+    """The audit detail of a refused second person: the rule, the window
+    and, for a colleague not yet seasoned, when they were given the role
+    and when they become eligible. No names: the row is about an account."""
+    detail = {"reason": ("assignment_seasoning" if block["kind"] == "seasoning"
+                         else "assignment_missing"),
+              "operation": op.key, "permission": block["permission"],
+              "window_days": days}
+    if block["kind"] == "seasoning":
+        detail["granted_at"] = block["granted_at"].isoformat()
+        detail["may_sign_after"] = block["may_sign_after"].isoformat()
+    return detail
 
 
 def holds_global_permission(conn: psycopg.Connection, user_id: UUID,
@@ -568,7 +740,7 @@ class ApprovalService:
         Self-approval is refused here as well as by the CHECK constraint.
         The constraint is the guarantee; this is the readable error.
 
-        Two refusals are about the PERSON rather than the request, and both
+        Three refusals are about the PERSON rather than the request, and all
         apply to approving only: a refusal is the safe direction and is
         never blocked (F9, 2026-09-24).
 
@@ -580,6 +752,10 @@ class ApprovalService:
           account it created proposed).
         - `countersigner_seasoned`: the seven-day rule, in either
           direction, with the sentence that says who and when.
+        - `signer_assignment_seasoned` (F39, 2026-10-02): the approver must
+          have held the signer's permission on the case for the window
+          (`relax_seasoning`), with the sentence that names the rule and the
+          date they become eligible.
 
         Each refusal is written out of band: the refusal is the detection
         signal, and a caller's rollback must not take it.
@@ -652,7 +828,7 @@ class ApprovalService:
 
     def _refuse_unless_second_person(self, current: ApprovalRequest,
                                      op: Operation, decided_by: UUID) -> None:
-        """The two person-level refusals of `decide`, each audited out of
+        """The three person-level refusals of `decide`, each audited out of
         band as DUAL_CONTROL_COUNTERSIGN_REFUSED (DENIED)."""
         if (op.approver_permission is not None
                 and holds_global_permission(self._c, decided_by, op.permission)):
@@ -666,6 +842,8 @@ class ApprovalService:
                 f"your countersignature would be the same person twice. It "
                 f"has to come from someone who holds {op.signer_permission} "
                 f"and not {op.permission}.")
+        if op.signer_assignment_seasoned and current.case_id is not None:
+            self._refuse_unseasoned_assignment(current, op, decided_by)
         if not op.countersigner_seasoned:
             return
         block = countersign_block(
@@ -685,6 +863,80 @@ class ApprovalService:
              "may_sign_after": block["may_sign_after"].isoformat()})
         raise ApprovalError(countersign_block_sentence(
             block, days=seasoning_days(self._c)))
+
+    def _refuse_unseasoned_assignment(self, current: ApprovalRequest,
+                                      op: Operation, decided_by: UUID) -> None:
+        """F39 (2026-10-02): the approver must have held the signer's
+        permission on the case for the window. Approving only, like the
+        refusals above: nobody is kept from rejecting. Written out of band
+        as DUAL_CONTROL_COUNTERSIGN_REFUSED with its own reason, so one
+        query finds every refusal of a second person. With the window at 0
+        the rule is off and nothing here runs, which is the behaviour of
+        every release before it."""
+        days = relax_seasoning_days()
+        if not days:
+            return
+        block = assignment_block(self._c, decided_by, current.case_id,
+                                 op.signer_permission, days=days)
+        if block is None:
+            return
+        self._record_out_of_band(
+            "DUAL_CONTROL_COUNTERSIGN_REFUSED", decided_by, current.id,
+            current.case_id, _assignment_refusal_detail(op, block, days))
+        raise ApprovalError(assignment_block_sentence(block, days=days))
+
+    def refuse_unseasoned_spend(self, request: ApprovalRequest) -> None:
+        """The same rule, asked again where a decided approval is spent
+        (F39, 2026-10-02), judged at `decided_at`: was the second person
+        seasoned when they signed. It closes what the decide route alone
+        cannot: a window declared after the decision, and an assignment
+        granted again or withdrawn between the decision and the spend.
+        Raises `ApprovalError` with the sentence, after recording it out of
+        band as DUAL_CONTROL_APPLY_REFUSED. Call it BEFORE the transaction
+        that spends the approval (the module's out-of-band rule). Silent for
+        an operation the rule does not cover, for a request not yet decided,
+        and with the window at 0."""
+        op = OPERATIONS.get(request.operation)
+        if (op is None or not op.signer_assignment_seasoned
+                or request.case_id is None or request.decided_by is None
+                or request.decided_at is None):
+            return
+        days = relax_seasoning_days()
+        if not days:
+            return
+        block = assignment_block(self._c, request.decided_by, request.case_id,
+                                 op.signer_permission, days=days,
+                                 as_of=request.decided_at)
+        if block is None:
+            return
+        self._record_out_of_band(
+            "DUAL_CONTROL_APPLY_REFUSED", request.requested_by, request.id,
+            request.case_id, _assignment_refusal_detail(op, block, days))
+        raise ApprovalError(assignment_block_sentence(
+            block, days=days, decided_at=request.decided_at))
+
+    def signer_block_for(self, request: ApprovalRequest,
+                         viewer_id: UUID) -> dict | None:
+        """What stops `viewer_id` approving a waiting request yet, for the
+        listing to say before they try (F39, 2026-10-02): the sentence and
+        the instant they become eligible (None when they hold nothing that
+        would ever qualify). None when nothing stops them, when the rule
+        does not cover the operation, and for the requester, whom the
+        self-approval refusal already answers."""
+        op = OPERATIONS.get(request.operation)
+        if (op is None or not op.signer_assignment_seasoned
+                or request.case_id is None or request.state != PENDING
+                or request.is_expired() or viewer_id == request.requested_by):
+            return None
+        days = relax_seasoning_days()
+        if not days:
+            return None
+        block = assignment_block(self._c, viewer_id, request.case_id,
+                                 op.signer_permission, days=days)
+        if block is None:
+            return None
+        return {"reason": assignment_block_sentence(block, days=days),
+                "may_sign_after": block.get("may_sign_after")}
 
     def withdraw(self, request_id: UUID, *, actor_id: UUID,
                  scope: str | None = None,

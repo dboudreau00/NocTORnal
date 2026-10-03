@@ -43,6 +43,13 @@ class TieReviewUnchanged(GraphWriteError):
     from a double click is not a second decision. See `review_edge`."""
 
 
+class ClaimNotDatable(GraphWriteError):
+    """The claim cannot be given a date by supersession: it is gone, was
+    withdrawn or replaced, or already has one. Its own class so the router
+    answers 409, the request being well formed and in conflict with the
+    state of the claim. See `supersede_assertion`."""
+
+
 def _write_error(exc: psycopg.Error) -> GraphWriteError:
     """Wrap a database failure without copying its text into the message.
 
@@ -158,6 +165,11 @@ class AssertionInput:
     # The lookup answer an accepted claim rests on (F15.3, 2026-09-24;
     # migration 0100). AUTOMATED_INFERENCE only, by a CHECK.
     lookup_result_id: UUID | None = None
+    # The claim this one replaces (migration 0131, 2026-10-02). Written only
+    # by `supersede_assertion`, which stamps the replaced row in the same
+    # transaction; the database refuses one in another case, about another
+    # element, or already withdrawn or replaced.
+    supersedes_id: UUID | None = None
 
 
 class GraphWriteService:
@@ -739,6 +751,110 @@ class GraphWriteService:
         except psycopg.Error as exc:
             raise _write_error(exc) from exc
 
+    def supersede_assertion(
+        self, assertion_id: UUID, *, case_id: UUID, observed_at: datetime,
+        rationale: str, created_by: UUID,
+    ) -> UUID:
+        """Give a claim that never had an observation date one, by
+        SUPERSESSION, and return the new claim's id (2026-10-02; docs/00
+        open question 11, settled by the owner).
+
+        Claims accepted from Triage before Alpha 6 carry no `observed_at`.
+        Writing a date onto one would rewrite a recorded claim, which
+        invariant 5 forbids, and the owner decided it is NOT amended. So the
+        old claim is never written to: a NEW claim is recorded, a copy of it
+        in every column but three (the observation date the analyst gives,
+        the rationale the analyst writes, and the author, who is the analyst)
+        and citing the old one in `supersedes_id`, and the old row is
+        stamped `superseded_at` / `superseded_by`, once, from NULL, which
+        every reader honours. Its own columns are as they were. The same
+        shape as a retraction's marked row, and the mechanism the demo
+        seed's regrade already uses (scripts/seed_showcase.py), with the new
+        claim now citing the old.
+
+        One transaction, the new claim first, so the element is never
+        without a live claim and the 0064 trigger derives a tie from
+        what is live at each statement (the copy grades as the original
+        did, so the tie does not move). The old row is locked first, so
+        two analysts dating one claim cannot both succeed; the unique index
+        on `supersedes_id` is the same refusal if they could.
+
+        Only a claim with NO date is dated this way. A claim that already
+        has one is corrected as every dated claim is: retract it, giving the
+        reason, and record the corrected claim (invariant 5 as decided
+        2026-09-09). Supersession is how a claim gains a field it never had,
+        which is the whole of open question 11, and nothing wider.
+
+        `case_id` is the case the caller was authorised on: a claim of
+        another case is "not found" here, whatever its id.
+        """
+        if not rationale or not rationale.strip():
+            raise GraphWriteError(
+                "say why this date is the one: a replacing claim carries the "
+                "analyst's rationale, and the old claim keeps its own")
+        try:
+            with self._c.transaction():
+                old = self._c.execute(
+                    """SELECT node_id, edge_id, claim_path, claim_value,
+                              basis::text, reliability::text,
+                              credibility::text, confidence::text,
+                              source_id, document_id, evidence_id,
+                              external_ref, lookup_result_id, observed_at,
+                              retracted_at, superseded_at
+                         FROM core.assertion
+                        WHERE id = %s AND case_id = %s
+                          FOR UPDATE""",
+                    (assertion_id, case_id)).fetchone()
+                if old is None:
+                    raise GraphWriteError(
+                        f"assertion {assertion_id} not found in this case")
+                if old[14] is not None or old[15] is not None:
+                    raise ClaimNotDatable(
+                        "This claim has been "
+                        + ("retracted" if old[14] is not None else "replaced")
+                        + ", so it is history and is not dated or replaced.")
+                if old[13] is not None:
+                    raise ClaimNotDatable(
+                        "This claim already has an observation date. A dated "
+                        "claim is corrected by retracting it, giving the "
+                        "reason, and recording the corrected claim.")
+                new_id = self._insert_assertion(
+                    case_id,
+                    AssertionInput(
+                        basis=old[4], created_by=created_by,
+                        reliability=old[5], credibility=old[6],
+                        confidence=old[7], rationale=rationale.strip(),
+                        source_id=old[8], document_id=old[9],
+                        evidence_id=old[10], external_ref=old[11],
+                        observed_at=observed_at, claim_path=old[2],
+                        claim_value=old[3], lookup_result_id=old[12],
+                        supersedes_id=assertion_id),
+                    node_id=old[0], edge_id=old[1])
+                stamped = self._c.execute(
+                    """UPDATE core.assertion
+                          SET superseded_at = now(), superseded_by = %s
+                        WHERE id = %s AND superseded_at IS NULL
+                          AND retracted_at IS NULL""",
+                    (new_id, assertion_id))
+                if stamped.rowcount != 1:
+                    raise ClaimNotDatable(
+                        "This claim was withdrawn or replaced while the date "
+                        "was being recorded, so nothing was written.")
+                return new_id
+        except GraphWriteError:
+            raise
+        except psycopg.errors.UniqueViolation as exc:
+            # The unique index on supersedes_id: somebody else's replacement
+            # of this claim committed first. Authored text, so no cause is
+            # chained (`safe_detail` would replace a message with a cause).
+            if exc.diag.constraint_name != "assertion_replaced_once":
+                raise _write_error(exc) from exc
+            raise ClaimNotDatable(
+                "This claim was replaced while the date was being recorded, "
+                "so nothing was written.") from None
+        except psycopg.Error as exc:
+            raise _write_error(exc) from exc
+
     # -- internal --------------------------------------------------------
     def _insert_assertion(
         self,
@@ -753,14 +869,16 @@ class GraphWriteService:
                    (case_id, node_id, edge_id, claim_path, claim_value,
                     basis, reliability, credibility, confidence,
                     source_id, document_id, evidence_id, external_ref,
-                    rationale, observed_at, created_by, lookup_result_id)
+                    rationale, observed_at, created_by, lookup_result_id,
+                    supersedes_id)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s)
+                       %s, %s)
                RETURNING id""",
             (case_id, node_id, edge_id, a.claim_path,
              Json(a.claim_value) if a.claim_value is not None else None,
              a.basis, a.reliability, a.credibility, a.confidence,
              a.source_id, a.document_id, a.evidence_id, a.external_ref,
              a.rationale, a.observed_at, a.created_by,
-             a.lookup_result_id),  # F15.3
+             a.lookup_result_id,  # F15.3
+             a.supersedes_id),    # 0131
         ).fetchone()[0]

@@ -51,6 +51,8 @@ CONTENT = {
     ("POST", "/cases/{case_id}/nodes/{node_id}/assertions"),
     ("POST", "/cases/{case_id}/edges/{edge_id}/assertions"),
     ("POST", "/cases/{case_id}/assertions/{assertion_id}/retract"),
+    # Dating a claim that never had a date, by supersession (2026-10-02).
+    ("POST", "/cases/{case_id}/assertions/{assertion_id}/supersede"),
     ("PATCH", "/cases/{case_id}/graph/nodes/{node_id}"),
     ("PATCH", "/cases/{case_id}/graph/edges/{edge_id}"),
     ("DELETE", "/cases/{case_id}/graph/nodes/{node_id}"),
@@ -578,6 +580,10 @@ CONSOLE_CONTENT = {
                            ("id", "insp-actions", "btn-retire-element")],
     "retractAssertion": [("drawn", ".assert-actions", "renderAssertions",
                           "'assert-actions'")],
+    # Date this claim sits beside Retract in the same actions row and is
+    # turned off with it (2026-10-02).
+    "openDateClaimForm": [("drawn", ".assert-actions", "renderAssertions",
+                           "'assert-actions'")],
     "addTieClaim": [("id", "insp-claim", "claim-form")],
     # Correct... opens this form from #insp-actions; the form itself is
     # listed too, so one left open when the case closes is turned off.

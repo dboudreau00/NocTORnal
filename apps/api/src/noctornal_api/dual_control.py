@@ -60,6 +60,7 @@ from noctornal_api.approvals import (
     holds_global_permission,
     policy_mode,
     record_out_of_band,
+    relax_seasoning,
     seasoning_days,
     utc_text,
 )
@@ -244,6 +245,14 @@ class DualControlPolicyService:
             }
             if op.configurable and "PER_CASE" in op.modes:
                 item["cases_requiring"] = requiring
+            if op.signer_assignment_seasoned:
+                # F39 (2026-10-02): the window the second person must have
+                # held the permission on the case for, as the decide route
+                # reads it, and why a declared value was not used.
+                window, problem = relax_seasoning()
+                item["signer_seasoning"] = {
+                    "permission": op.signer_permission, "days": window,
+                    "problem": problem}
             operations.append(item)
         return {
             "operations": operations,

@@ -148,6 +148,13 @@ class AssertionOut(BaseModel):
     #: `PATCH /graph/nodes|edges/{id}` rather than a claim about the world
     #: arriving from a source. See `CORRECTION_FIELDS`.
     is_correction: bool = False
+    #: Supersession (2026-10-02, migration 0131). The claim this one replaces
+    #: (it was recorded to give that claim a date it never had), and the
+    #: claim that replaced this one. Ids only: the other card is one click
+    #: away when the reader may see it, and the other claim is about the same
+    #: entity or tie, so it is no wider a disclosure than this row.
+    supersedes_id: str | None = None
+    superseded_by: str | None = None
 
     @property
     def is_live(self) -> bool:
@@ -590,7 +597,7 @@ def _assertions(conn, column: str, element_id: UUID,
                      doc.title,
                      CASE WHEN a.document_id IS NULL THEN src.name
                           ELSE doc.source_name END,
-                     doc.seen
+                     doc.seen, a.supersedes_id, a.superseded_by
                 FROM core.assertion a
                 LEFT JOIN iam.app_user u ON u.id = a.created_by
                 LEFT JOIN core.evidence ev
@@ -635,6 +642,8 @@ def _assertions(conn, column: str, element_id: UUID,
             document_title=(r[20] or "") if r[22] else None,
             source_name=r[21],
             is_correction=is_correction(r[14], r[15]),
+            supersedes_id=str(r[23]) if r[23] else None,
+            superseded_by=str(r[24]) if r[24] else None,
         )
         for r in rows
     ]
