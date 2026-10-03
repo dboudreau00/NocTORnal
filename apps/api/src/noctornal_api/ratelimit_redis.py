@@ -56,6 +56,103 @@ SOCKET_TIMEOUT_S = 0.25
 _EVICTING_PREFIXES = ("allkeys-", "volatile-")
 
 
+# ---------------------------------------------------------------------------
+# The limiter's own Redis user (the limiter's Redis ACL, 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# Until 2026-10-02 the production Redis had one user, `default`, behind a
+# password, so whatever held that password could run every command on every
+# key: FLUSHALL, CONFIG SET, a co-tenant's cache. `redis_limiter_isolated`
+# could only REPORT keys somebody else had written. Isolation is now a
+# property of the server: infra/production/compose.yml starts Redis with an
+# ACL file in which `default` is disabled and this user is the only one, and
+# the user may read and write keys under the limiter's prefix alone and run
+# exactly the commands below. The compose file writes the rule out as text;
+# a test holds that text equal to `limiter_acl_rules()`, so the two cannot
+# drift.
+#
+# What that does NOT confine, stated because "confined to rl:" was read as
+# more than it is (review of 2026-10-02): three of the commands below reach
+# past the limiter's own keys without reading or writing one. SCAN lists
+# every key NAME in the database, INFO reports the server's statistics, and
+# ACL GETUSER reads any user's rules and password hashes. The census and
+# the readiness row need all three, and on the compose file's Redis the
+# only other user is the disabled `default`, which has no hash to read.
+#
+# Each command is here because something in this process sends it, and the
+# readiness row fails a production user granted anything more:
+#
+#   evalsha, script|load   the GCRA script: redis-py's Script sends EVALSHA,
+#                          and SCRIPT LOAD once when the server answers
+#                          NOSCRIPT (a restarted Redis). EVAL is never sent.
+#   get, set, time         what the script calls (ACL binds a script's own
+#                          calls too), and `claim_once`'s SET NX EX.
+#   ping                   `ping`, and redis-py's idle health check.
+#   info                   `maxmemory_policy`, and the census of the other
+#                          databases (INFO keyspace). CONFIG is NOT granted:
+#                          CONFIG GET reads every setting the server has.
+#   dbsize, scan           the census of the limiter's own database, which
+#                          counts key names and reads no value.
+#   acl|whoami,            the readiness row reading this very ACL. GETUSER
+#   acl|getuser            shows any user's rules and password HASHES; the
+#                          only other user here is the disabled `default`,
+#                          which has none.
+#
+# No pub/sub channel and no selector: the limiter publishes nothing. And
+# no CLIENT SETINFO (granted until the review of 2026-10-02): redis-py
+# names its library on every connection unless told not to, and swallows
+# a refusal, so the grant served only to keep two denials per connection
+# out of ACL LOG. `RedisBackend` now tells it not to (`_no_client_setinfo`),
+# which takes a grant away and with it the ACL file's need for Redis 7.2.
+LIMITER_ACL_USER = "noctornal_limiter"
+LIMITER_ACL_COMMANDS: tuple[str, ...] = (
+    "evalsha", "script|load",
+    "get", "set", "time",
+    "ping",
+    "info",
+    "dbsize", "scan",
+    "acl|whoami", "acl|getuser",
+)
+
+
+def _no_client_setinfo() -> dict:
+    """The redis-py keyword that stops CLIENT SETINFO on connect, in the
+    spelling the installed version reads: `driver_info=None` where the
+    client takes it (8.1.0, the pinned version, does), else
+    `lib_name=None, lib_version=None`, the spelling of the 5.0 line that
+    began sending it and that pyproject still admits. Either way no CLIENT
+    command is sent, so the limiter's ACL user needs no grant for one
+    (2026-10-02)."""
+    import inspect
+
+    import redis
+
+    if "driver_info" in inspect.signature(redis.Redis.__init__).parameters:
+        return {"driver_info": None}
+    return {"lib_name": None, "lib_version": None}
+
+
+def limiter_key_prefix() -> str:
+    """`rl:`, the prefix every key the limiter writes starts with, read from
+    `RateLimiter`'s own constructor default (what `build_limiter` builds
+    with), so the ACL cannot confine the limiter to a prefix it no longer
+    writes under."""
+    import inspect
+
+    from noctornal_api.ratelimit import RateLimiter
+
+    prefix = inspect.signature(RateLimiter).parameters["key_prefix"].default
+    return f"{prefix}:"
+
+
+def limiter_acl_rules() -> str:
+    """The ACL rules of `LIMITER_ACL_USER`, after its password: its keys,
+    no channel, and the commands above with everything else taken away."""
+    granted = " ".join(f"+{command}" for command in LIMITER_ACL_COMMANDS)
+    return (f"resetkeys ~{limiter_key_prefix()}* resetchannels "
+            f"-@all {granted}")
+
+
 def is_evicting_policy(policy: str | None) -> bool:
     """True when `policy` is a maxmemory-policy under which Redis may
     delete a rate-limit meter of its own accord.
@@ -145,6 +242,9 @@ class RedisBackend:
                 # is the hang this file exists to avoid.
                 retry_on_timeout=False,
                 decode_responses=False,
+                # No CLIENT SETINFO on connect: the production ACL does not
+                # grant it (the limiter's Redis ACL, review of 2026-10-02).
+                **_no_client_setinfo(),
             )
         self._script = self._redis.register_script(_GCRA_LUA)
 
@@ -199,7 +299,8 @@ class RedisBackend:
             return False
 
     def maxmemory_policy(self) -> str | None:
-        """`CONFIG GET maxmemory-policy`, as text.
+        """The server's maxmemory-policy, as text: from `INFO memory` when
+        the server reports it there, else `CONFIG GET maxmemory-policy`.
 
         Returns the policy name (`"allkeys-lru"`, `"noeviction"`, ...), an
         empty string when the server answered but named no policy, and
@@ -210,6 +311,12 @@ class RedisBackend:
         unknown and the second as fine, and collapsing them would report
         an unverifiable deployment as a verified one.
 
+        INFO first since the limiter's Redis ACL (2026-10-02): the
+        production user may run INFO and not CONFIG, which reads every
+        setting the server holds, and asking CONFIG first would write a
+        denial into the server's ACL LOG on every boot and every readiness
+        call, where a real probe of the ACL should stand out.
+
         Never raises. This is a startup probe, and a probe that can turn
         a boot into an outage is worse than no probe -- the same rule
         `ping` follows.
@@ -218,6 +325,19 @@ class RedisBackend:
         policy, and docs/16 C8 was the only place the eviction risk was
         recorded.
         """
+        try:
+            memory = self._redis.info("memory")
+        except Exception as exc:  # noqa: BLE001 - see docstring: reports, never raises
+            log.debug("INFO memory was refused: %s: %s", type(exc).__name__, exc)
+            memory = None
+        if isinstance(memory, dict):
+            for key, value in memory.items():
+                if isinstance(key, bytes):
+                    key = key.decode("utf-8", errors="replace")
+                if key == "maxmemory_policy":
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8", errors="replace")
+                    return str(value)
         try:
             answer = self._redis.config_get("maxmemory-policy")
         except Exception as exc:  # noqa: BLE001 - see docstring: reports, never raises

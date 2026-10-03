@@ -174,9 +174,12 @@ _PUBLISHED_MARKERS: tuple[tuple[str, str], ...] = (
      f"the development credential {DEV_CREDENTIAL!r}, which is committed to "
      f"this repository in infra/docker-compose.yml, the CI workflow and the "
      f"installers"),
+    # "and the templates beside it" since docs/17 F52 (2026-10-02): the
+    # owner's placeholder now ships in postgres-init.env.example and
+    # migrate.env.example, and the migration job refuses it there.
     ("replace-me",
      "a 'replace-me' placeholder, which infra/production/secrets.env.example "
-     "ships in place of every secret it asks for"),
+     "and the templates beside it ship in place of every secret they ask for"),
     ("not-a-real-one",
      "the throwaway value the test suites and the demo seeders set (it ends "
      "'not-a-real-one')"),
@@ -321,37 +324,6 @@ def published_credentials(env: Mapping[str, str] | None = None) -> list[Publishe
                 "secret, persona credential and sample data key it seals opens "
                 "for anyone who has read the source.")
     return [found[name] for name in sorted(found)]
-
-
-#: The exit status of a job that refuses to run on a published credential.
-#: `argparse` spends 2 on a usage error too, and the first word of the line
-#: below says which it was.
-PUBLISHED_REFUSAL_EXIT = 2
-
-
-def refuse_published(out=print) -> bool:
-    """True, after saying so through `out`, when this process is production
-    and carries a credential this repository has already published.
-
-    The one reader for the jobs that are not the API: `verify_environment`
-    stops the API on the same list, but a cron job, the migration job and
-    the similarity pass start without it and, with the template's
-    placeholders, would run happily beside an API that refuses (infra-12,
-    2026-10-03; until then lookup_drain.py held an inline copy and
-    collection_poll, notify_drain, embed_pass and the migration job held
-    none). Called once, first, by each of them, before anything is
-    connected to. Names variables, never a value; says nothing and
-    answers False in development, where the answer is expected to be yes.
-    """
-    if os.environ.get(ENV_VAR, "").strip().lower() != PRODUCTION:
-        return False
-    published = published_credentials()
-    if not published:
-        return False
-    names = sorted({p.variable for p in published})
-    verb = "carries" if len(names) == 1 else "carry"
-    out(f"refusing to run: {', '.join(names)} {verb} a published value")
-    return True
 
 
 #: The two legal declarations (docs/16 L1). Not credentials, so the scan
@@ -912,6 +884,154 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     # DSN, which bypasses row security. Named, never quoted.
     problems.extend(_row_security_problems(env))
 
+    # docs/17 F52 (2026-10-02): the schema owner's credential on a runtime
+    # process. One variable, one refusal: a published value in it has
+    # already been refused above.
+    problems.extend(owner_credential_problems(env, skip=already))
+
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# The schema owner's credential (docs/17 F52, 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# The owner role `noctornal` is the Postgres image's bootstrap superuser:
+# row-level security does not bind it, and it can `ALTER TABLE ... DISABLE
+# TRIGGER` on the append-only audit and custody tables in one statement.
+# Until 2026-10-02 its password (POSTGRES_PASSWORD) and its DSN
+# (NOCTORNAL_MIGRATION_DATABASE_URL) sat in infra/production/secrets.env,
+# which every application service and caddy read, so a process that should
+# hold only the request and system roles could connect as the owner. They
+# now live in postgres-init.env (the database alone) and migrate.env (the
+# migration job alone), and a runtime process that still holds either is
+# refused here rather than trusted to ignore it. The sentence names the fix
+# and never the value.
+OWNER_PASSWORD_ENV = "POSTGRES_PASSWORD"
+MIGRATION_DSN_ENV = "NOCTORNAL_MIGRATION_DATABASE_URL"
+
+#: The installers' upgrade step, named in every sentence that needs it.
+#: With sudo since the 2026-10-02 review of F52: the files it rewrites are
+#: root's, mode 600, so run as anybody else it can read none of them.
+SECRETS_STEP = ("sudo ./release/install.sh --production-secrets (release/install.ps1 "
+                "-ProductionSecrets on Windows)")
+#: The upgrade note every refusal of the old layout points at (2026-10-02).
+SECRETS_UPGRADE_NOTE = "release/secrets-upgrade/README.md"
+
+
+def owner_credential_problems(env: Mapping[str, str] | None = None, *,
+                              skip: frozenset[str] | set[str] = frozenset()
+                              ) -> list[str]:
+    """Refusals for a RUNTIME process holding the schema owner's password or
+    DSN (docs/17 F52). Mode-blind and pure, like `published_credentials`:
+    `verify_environment` applies it in production, and a cron script may
+    call it for its own refusal. Empty counts as unset. A variable in
+    `skip` was refused already, for its value, and is not refused twice."""
+    if env is None:
+        env = os.environ
+    problems: list[str] = []
+    for name, home, reader in (
+            (OWNER_PASSWORD_ENV, "infra/production/postgres-init.env",
+             "the database (at initialisation)"),
+            (MIGRATION_DSN_ENV, "infra/production/migrate.env",
+             "the migration job")):
+        if name not in skip and env.get(name, "").strip():
+            problems.append(
+                f"{name} is set on a runtime process, and it is the schema owner's "
+                f"credential, which row-level security does not bind and which can "
+                f"switch off the append-only triggers on the audit and custody "
+                f"tables; since docs/17 F52 it belongs in {home}, which only "
+                f"{reader} reads, so remove it from this process's environment: for "
+                f"the compose deployment, {SECRETS_STEP} moves it there and keeps a "
+                f"backup ({SECRETS_UPGRADE_NOTE}).")
+    return problems
+
+
+#: The exit status of a job that refuses to run on its environment. One
+#: number for every job, because one helper makes the refusal. It is 2 and
+#: not 1 on purpose: 1 already means a pass RAN and something in it failed (a
+#: poll, a delivery, a lookup, a register refusal), so an alert that reads the
+#: code can tell "this job would not start" from "this job ran and had a bad
+#: pass". `argparse` spends 2 on a usage error too, and the first words of the
+#: line (the job's name, then `refusing to run`) say which it was.
+JOB_REFUSAL_EXIT = 2
+
+
+def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None,
+                                  *, holds_owner_credential: bool = False
+                                  ) -> list[str]:
+    """Why the job `job` must not run here: one line per problem, each led by
+    the job's name, naming variables and never a value. `[]` outside
+    NOCTORNAL_ENV=production, as `verify_environment` is, so a laptop's
+    .env.local and the suites' throwaway values run as they always have.
+
+    The ONE refusal for every job that is not the API, called once, first,
+    before anything is read or connected to, by collection_poll,
+    notify_drain, lookup_drain, embed_pass and the migration job (through
+    `migration_job_problems` in scripts/migrate_job.py, and again at the top
+    of db/migrations/env.py, so a bare `alembic` is held to it too). The
+    Lab's workers (lab_triage, sample_screen, sandbox_dispatch) call
+    `enforce_environment`, which makes both of these refusals among the rest
+    and is not called a second time beside this one. A caller prints the
+    lines on stderr and exits `JOB_REFUSAL_EXIT`.
+
+    Two refusals, the two the API makes that every job needs as well (docs/17
+    F52 and infra-12, ROADMAP-REMAINING's "The cron jobs and a published
+    credential", 2026-10-02 and 2026-10-03): a credential somebody has
+    already published, and the schema owner's password or DSN, which no
+    runtime process may hold. Until then notify_drain, collection_poll,
+    embed_pass and the migration job made neither and lookup_drain made the
+    first alone, so a job on the template's placeholders ran beside an API
+    that refused, and a mixed layout (the owner's line still, or again, in
+    secrets.env) started the cron loops holding the owner's credential while
+    the API refused it. One helper, so the jobs cannot drift apart.
+
+    `holds_owner_credential` is for the one job that is the schema owner's
+    by design, the migration job: it holds the owner's DSN because that is
+    what it connects with, so the owner half is not asked of it. The
+    published half is, for every variable it holds, the DSN included."""
+    if env is None:
+        env = os.environ
+    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+        return []
+    published = published_credentials(env)
+    problems = [p.refusal for p in published]
+    if not holds_owner_credential:
+        problems.extend(owner_credential_problems(
+            env, skip={p.variable for p in published}))
+    return [f"{job}: refusing to run: {problem}" for problem in problems]
+
+
+def migration_job_problems(env: Mapping[str, str] | None = None) -> list[str]:
+    """Why the production migration job must not run (docs/17 F52): one line
+    per problem, each led by `migrate:`. Returns `[]` outside
+    `NOCTORNAL_ENV=production`, like `verify_environment`.
+
+    The job is the one process that holds the owner's DSN, so the refusal
+    of a published owner password, which the API made while secrets.env
+    carried it, is made here now: otherwise moving the credential out of
+    the API's sight would also have moved it out of the check's. That
+    refusal, and the published half for every other variable the job holds,
+    is `refuse_unsafe_job_environment` with the owner half switched off,
+    the same one every other job makes (infra-12); what is left here is
+    what only this job needs, a DSN to connect with that names a role."""
+    if env is None:
+        env = os.environ
+    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+        return []
+    dsn = env.get(MIGRATION_DSN_ENV, "").strip()
+    if not dsn:
+        return [
+            f"migrate: {MIGRATION_DSN_ENV} is not set for the migration job: since "
+            f"docs/17 F52 (2026-10-02) the schema owner's DSN lives in "
+            f"infra/production/migrate.env, which only this job reads, rather than "
+            f"in secrets.env, and {SECRETS_STEP} moves it there from an older "
+            f"secrets.env and keeps a backup ({SECRETS_UPGRADE_NOTE})."]
+    problems = refuse_unsafe_job_environment("migrate", env, holds_owner_credential=True)
+    if not problems and not _dsn_user(dsn):
+        problems.append(
+            f"migrate: {MIGRATION_DSN_ENV} names no role, so the migration job would "
+            f"connect as whatever the driver defaults to rather than as the schema owner.")
     return problems
 
 

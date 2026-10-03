@@ -28,8 +28,23 @@
 .PARAMETER WithYara
     Also install the YARA scanning library (optional).
 
+.PARAMETER ProductionSecrets
+    For the production deployment (infra/production, read its README.md
+    first): bring its secrets files to this release's layout, moving the
+    schema owner's credential out of secrets.env and writing the Redis
+    password and REDIS_URL, with a backup of every file it changes.
+    Installs and starts nothing. Run it as the user who owns those files.
+    What it does and the way back: release/secrets-upgrade/README.md.
+
+.PARAMETER ProductionDir
+    With -ProductionSecrets: the directory holding secrets.env, when it is
+    not infra\production.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\release\install.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\release\install.ps1 -ProductionSecrets
 #>
 [CmdletBinding()]
 param(
@@ -38,7 +53,10 @@ param(
     # 2026-09-24: the optional extras, installed only when asked for
     # by name, and then a failure stops the install.
     [switch] $WithTelegram,
-    [switch] $WithYara
+    [switch] $WithYara,
+    # docs/17 F52 and the limiter's Redis ACL (2026-10-02).
+    [switch] $ProductionSecrets,
+    [string] $ProductionDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -144,6 +162,72 @@ from the project root.
 }
 Write-Step 'Locating the application'
 Write-Good "found at $RepoRoot"
+
+# ---------------------------------------------------------------------------
+# -ProductionSecrets (docs/17 F52 and the limiter's Redis ACL, 2026-10-02)
+#
+# A different job from everything below: it touches the production
+# deployment's secrets files and nothing else, then exits. The work is
+# scripts/production_secrets.py, the one implementation install.sh calls
+# too, on any Python 3.8 or later with the standard library alone. It
+# prints names, never a value, and backs up every file before it changes
+# it.
+#
+# Mode 600 means nothing on Windows, where chmod only toggles read-only, so
+# each secrets file and backup is then given an ACL naming this user alone,
+# with inheritance cut: the same "readable by its owner and nobody else".
+#
+# An owner password may be generated only for a database volume initdb has
+# not run on, because initdb fixes it for good: Docker is asked, and only
+# "no such volume" from an engine that answers counts.
+# ---------------------------------------------------------------------------
+if ($ProductionSecrets) {
+    $target = if ($ProductionDir) { $ProductionDir } else { Join-Path $RepoRoot 'infra\production' }
+    Write-Step 'Bringing the production secrets files to this release'
+    Write-Detail "in $target"
+    $hostPython = $null
+    foreach ($name in @('python', 'python3', 'py')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+        $probe = Invoke-Capture $cmd.Source @('-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)')
+        if ($probe.Code -eq 0) { $hostPython = $cmd.Source; break }
+    }
+    if (-not $hostPython) {
+        Stop-With 'Python 3.8 or newer was not found.' @'
+The production secrets step runs on any Python 3.8 or later, with the
+standard library only:
+
+    winget install Python.Python.3.12
+
+Then open a NEW terminal and run this again.
+'@
+    }
+    $helperArgs = @((Join-Path $RepoRoot 'scripts\production_secrets.py'), '--dir', $target)
+    if (-not $ProductionDir -and (Get-Command docker -ErrorAction SilentlyContinue) -and
+            (Invoke-Capture 'docker' @('info')).Code -eq 0 -and
+            (Invoke-Capture 'docker' @('volume', 'inspect', 'noctornal-prod_prod-pgdata')).Code -ne 0) {
+        $helperArgs += '--new-database'
+        Write-Detail 'Docker has no database volume for this deployment yet'
+    }
+    & $hostPython @helperArgs | ForEach-Object { Write-Detail $_ }
+    $status = $LASTEXITCODE
+    if ($env:OS -eq 'Windows_NT' -and (Test-Path -LiteralPath $target)) {
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        Get-ChildItem -LiteralPath $target -File | Where-Object {
+            $_.Name -in @('secrets.env', 'postgres-init.env', 'migrate.env') -or $_.Name -like '*.env.backup-*'
+        } | ForEach-Object {
+            $acl = Invoke-Capture 'icacls' @($_.FullName, '/inheritance:r', '/grant:r', "${me}:(F)")
+            if ($acl.Code -ne 0) { Write-Note "could not restrict $($_.Name) to $me; do it by hand" }
+        }
+    }
+    if ($status -eq 0) {
+        Write-Good "the production secrets files are in this release's layout"
+        Write-Detail 'next: docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
+    } else {
+        Write-Note 'not finished: the lines above say what is left, or why it stopped and what it changed'
+    }
+    exit $status
+}
 
 # ---------------------------------------------------------------------------
 # 1. Python

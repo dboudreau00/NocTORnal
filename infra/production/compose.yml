@@ -17,12 +17,22 @@
 #     `noctornal_app` is least privilege and is what every runtime process
 #     connects as. The test suite still needs the owner (ten *_pg files run
 #     ALTER TABLE ... DISABLE TRIGGER, which only an owner may do), so this
-#     split exists here and nowhere else.
+#     split exists here and nowhere else. Since docs/17 F52 (2026-10-02)
+#     the owner's credential is not in secrets.env at all: its password is
+#     in postgres-init.env (postgres alone) and its DSN in migrate.env (the
+#     migrate job alone), and every other service holds both blank (the
+#     x-no-owner-credential block below). An older secrets.env is moved by
+#     `sudo ./release/install.sh --production-secrets`
+#     (release/secrets-upgrade/README.md).
 #   * Redis runs `noeviction`, as dev does since the Alpha 6 pre-release
-#     check (2026-09-23), and here it also needs a password and is
-#     reachable only from the compose network. The readiness register
-#     reports any evicting policy as NOT ready for a reason: an evicted
-#     GCRA meter admits the subject it was refusing, with a full burst.
+#     check (2026-09-23), and is reachable only from the compose network.
+#     Here it also runs an ACL (2026-10-02): the default user is disabled
+#     and the limiter's own user reads and writes its own keys alone and
+#     runs its own commands alone (the redis service says what else three
+#     of them can see).
+#     The readiness register reports any evicting policy as NOT ready for a
+#     reason: an evicted GCRA meter admits the subject it was refusing,
+#     with a full burst.
 #   * The evidence bucket gets a COMPLIANCE default retention. Dev keeps
 #     GOVERNANCE 365d because COMPLIANCE cannot be lifted by anyone,
 #     including the root credential, so a dev bucket would become
@@ -106,7 +116,8 @@ x-egress-ip: &egress_ip "172.31.243.11"
 # `./tls` carries MinIO's certificate. Every application service mounts it
 # read-only and builds a CA bundle from it at start -- see the note above
 # the api service. The migration job does not touch object storage and
-# inherits the mount only because it shares this block.
+# inherits the mount only because it shares this block. It does NOT keep
+# this block's env_file: it reads migrate.env alone (docs/17 F52).
 #
 # Every service built from this image runs with no Linux capabilities at all
 # and cannot gain one (infra-5, 2026-10-03). The process is uid 10001 and
@@ -128,6 +139,22 @@ x-noctornal-app: &noctornal-app
   security_opt: ["no-new-privileges:true"]
   volumes:
     - ./tls:/certs:ro
+
+# The schema owner's password and DSN, blanked on every runtime service
+# (docs/17 F52, review of 2026-10-02). They live in postgres-init.env and
+# migrate.env, read by postgres and the migrate job alone, but secrets.env
+# reaches every other service that is not Caddy or the egress proxy, so a
+# line left in it by hand or pasted back would hand the owner's credential to
+# all of them. `environment:` wins over env_file, so these empty values are
+# what each container holds whatever secrets.env says, and the API, the cron
+# jobs and the egress proxy count an empty value as unset. Merged into each
+# service's `environment:` with `<<:`; a test holds that every service but
+# postgres and migrate carries it. Caddy, which reads caddy.env alone
+# (infra-5), and the egress proxy, which reads egress-proxy.env alone, carry
+# it too: a line pasted into either of those files reaches nothing then.
+x-no-owner-credential: &no-owner-credential
+  POSTGRES_PASSWORD: ""
+  NOCTORNAL_MIGRATION_DATABASE_URL: ""
 
 services:
 
@@ -180,6 +207,8 @@ services:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
     env_file: [caddy.env]
+    environment:
+      <<: *no-owner-credential
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
     security_opt: ["no-new-privileges:true"]
@@ -230,20 +259,25 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     security_opt: ["no-new-privileges:true"]
-    # postgres-init.env carries NOCTORNAL_EGRESS_DB_PASSWORD for
-    # db/init/20-egress-role.sh, and only this service reads it: secrets.env
-    # reaches every application service, and MinIO, Redis and this one.
+    # postgres-init.env carries the passwords only initdb reads: the owner's
+    # POSTGRES_PASSWORD (docs/17 F52, 2026-10-02), the system role's and the
+    # egress role's (db/init/20-egress-role.sh reads NOCTORNAL_EGRESS_DB_PASSWORD).
+    # Only this service reads it: secrets.env reaches every application
+    # service, and MinIO, Redis and this one. Optional to compose so that an
+    # existing volume, which needs none of them, still starts; a NEW volume
+    # without POSTGRES_PASSWORD is refused by the image itself.
     env_file:
       - secrets.env
       - path: postgres-init.env
         required: false
     environment:
       POSTGRES_DB: noctornal
-      # The OWNER role. Alembic runs as this; nothing at runtime does.
-      # POSTGRES_PASSWORD comes from secrets.env and must be the same
-      # password NOCTORNAL_MIGRATION_DATABASE_URL carries -- two
-      # declarations of one secret, which secrets.env.example says out loud
-      # because nothing here can check it.
+      # The OWNER role, and the image's bootstrap superuser. Alembic runs
+      # as this; nothing at runtime does. POSTGRES_PASSWORD comes from
+      # postgres-init.env and must be the password migrate.env's
+      # NOCTORNAL_MIGRATION_DATABASE_URL carries: two declarations of one
+      # secret, which `sudo ./release/install.sh --production-secrets`
+      # compares (release/secrets-upgrade/README.md).
       POSTGRES_USER: noctornal
       POSTGRES_INITDB_ARGS: "--data-checksums"
     command: >
@@ -310,6 +344,57 @@ services:
   # secret would appear in any pasted diagnostic; and the operator would
   # have to export it into their own shell as well as the secrets file.
   #
+  # ## the ACL, and why isolation is now the server's (2026-10-02)
+  #
+  # Until 2026-10-02 this ran `--requirepass`, which gives the one built-in
+  # user, `default`, a password and every command on every key: whatever
+  # held REDIS_PASSWORD could FLUSHALL the meters or fill the instance, and
+  # readiness's `redis_limiter_isolated` could only report keys somebody
+  # else had written. Now Redis starts with an ACL file in which `default`
+  # is OFF (no password, no command, no key: an unauthenticated client is
+  # refused, it is not signed in as anybody) and `noctornal_limiter` is the
+  # only user. It may read and write keys under `rl:` alone and run exactly
+  # the commands the limiter and its readiness rows send, the rule
+  # ratelimit_redis.limiter_acl_rules() writes (a test holds the text below
+  # equal to it), with no pub/sub channel. Three of those commands reach
+  # past its own keys without reading or writing one, and that is the
+  # whole of what it can see beyond them: SCAN lists every key NAME in its
+  # database (the census counts the ones outside `rl:`), INFO reports the
+  # server's statistics, and ACL GETUSER reads any user's rules and
+  # password hashes (here only its own and the disabled default's).
+  # readiness reads this ACL back over the limiter's own connection and,
+  # in production, fails `redis_limiter_isolated` when it is not this.
+  #
+  # The file is written at every start from REDIS_PASSWORD, as a SHA-256
+  # (`#<hex>`), never the password itself, into /tmp with umask 077, so it
+  # cannot drift from the secrets file and no copy of it outlives the
+  # container. Nothing else is stored with the password, so changing it
+  # costs a restart.
+  #
+  # REDIS_URL is checked as text before the server starts. When it names
+  # this service (host `redis`), a URL that does not sign in as
+  # noctornal_limiter with REDIS_PASSWORD (an older secrets.env's
+  # `redis://:PASSWORD@redis`, which signs in as `default`) would leave
+  # every limit that fails closed refusing everyone, the login among them,
+  # with nothing in the API's log but a refused AUTH. So this service
+  # refuses to start instead, naming the installer step that rewrites the
+  # URL, and api and cron, which wait for it to be healthy, never start on
+  # the broken pair. An empty REDIS_URL, or one naming no host, is refused
+  # the same way: that step writes one. The host is compared in lower case,
+  # as that step reads it (a host name has no case), so `REDIS` and `Redis`
+  # are this service too; compared as typed they started it idle with an
+  # "another host" note and no client (g32 verify of 2026-10-03).
+  #
+  # A REDIS_URL naming ANOTHER host (a Redis of the operator's own, review
+  # of 2026-10-02) is the operator's choice and not this service's to
+  # check: it starts with its ACL and no client, says so on stderr, and the
+  # services waiting on it start. infra/production/README.md, The limiter's
+  # Redis, says what that Redis needs and how to leave this one out. Until
+  # then the start refused it, naming the installer step, which leaves such
+  # a URL alone: an instruction that led back to itself.
+  #
+  # The healthcheck signs in as the limiter: `default` cannot.
+  #
   # Pinned by digest (infra-7, 2026-10-03). One capability (infra-5): the
   # command below replaces the image's own start, which is the only thing that
   # would have switched to the redis user, so this runs as root, and the data
@@ -321,6 +406,8 @@ services:
     restart: unless-stopped
     networks: [noctornal]
     env_file: [secrets.env]
+    environment:
+      <<: *no-owner-credential
     cap_drop: [ALL]
     cap_add: [DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
@@ -331,20 +418,52 @@ services:
       - |
         if [ -z "$$REDIS_PASSWORD" ]; then
           echo 'REDIS_PASSWORD is empty: refusing to start.' >&2
-          echo 'redis-server --requirepass "" means NO password at all, and' >&2
-          echo 'this Redis is reachable by every container on the network.' >&2
+          echo 'It is the password of noctornal_limiter, the only user this' >&2
+          echo 'Redis has, and an empty one would let any container in.' >&2
           exit 1
         fi
+        host=$${REDIS_URL#*://}
+        host=$${host%%[/?#]*}
+        host=$${host##*@}
+        host=$${host%:*}
+        host=$$(printf '%s' "$$host" | tr 'A-Z' 'a-z')
+        case "$$REDIS_URL" in
+          "redis://noctornal_limiter:$$REDIS_PASSWORD@"*) ;;
+          *://*)
+            if [ -z "$$host" ] || [ "$$host" = redis ]; then
+              echo 'REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD: refusing to start.' >&2
+              echo 'This Redis disables its default user, so the limiter would be refused and every' >&2
+              echo 'limit that fails closed would refuse everyone. Run sudo ./release/install.sh' >&2
+              echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
+              echo 'rewrites REDIS_URL and keeps a backup (release/secrets-upgrade/README.md).' >&2
+              exit 1
+            fi
+            echo 'REDIS_URL names a Redis on another host, so the limiter does not use this one,' >&2
+            echo 'which starts with its ACL and no client (infra/production/README.md, The' >&2
+            echo "limiter's Redis, says what that Redis needs and how to leave this one out)." >&2
+            ;;
+          *)
+            echo 'REDIS_URL is empty or not a URL: refusing to start. Run sudo ./release/install.sh' >&2
+            echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
+            echo 'writes one that signs in to this Redis (release/secrets-upgrade/README.md).' >&2
+            exit 1
+            ;;
+        esac
+        umask 077
+        hash=$$(printf '%s' "$$REDIS_PASSWORD" | sha256sum | cut -d ' ' -f 1)
+        printf 'user default off resetpass resetkeys resetchannels -@all\n' > /tmp/users.acl
+        printf 'user noctornal_limiter on #%s resetkeys ~rl:* resetchannels -@all +evalsha +script|load +get +set +time +ping +info +dbsize +scan +acl|whoami +acl|getuser\n' "$$hash" >> /tmp/users.acl
         exec redis-server \
           --appendonly yes \
           --maxmemory 1gb \
           --maxmemory-policy noeviction \
-          --requirepass "$$REDIS_PASSWORD"
+          --aclfile /tmp/users.acl
     healthcheck:
-      # REDISCLI_AUTH, not `-a`: a password given with -a is on the command
-      # line of a process that starts every five seconds, where any local
-      # account on the host reads it (infra-10, 2026-10-03).
-      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      # REDISCLI_AUTH for the password and --user for the name, not `-a`: a
+      # password given with -a is on the command line of a process that starts
+      # every five seconds, where any local account on the host reads it
+      # (infra-10, 2026-10-03). The user's name is not a secret.
+      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user noctornal_limiter ping | grep -q PONG']
       interval: 5s
       retries: 10
       start_period: 10s
@@ -467,6 +586,8 @@ services:
     restart: unless-stopped
     networks: [noctornal]
     env_file: [secrets.env]
+    environment:
+      <<: *no-owner-credential
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     entrypoint:
@@ -641,6 +762,8 @@ services:
     depends_on: [minio]
     networks: [noctornal]
     env_file: [secrets.env]
+    environment:
+      <<: *no-owner-credential
     restart: "no"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -700,18 +823,30 @@ services:
   # speaks to the database waits for it to succeed.
   #
   # DATABASE_URL is the ONE variable alembic (db/migrations/env.py) and the
-  # application both read, and they must NOT be the same role: secrets.env
-  # points it at `noctornal_app`, so this service replaces it in-process
-  # with NOCTORNAL_MIGRATION_DATABASE_URL.
+  # application both read, and they must NOT be the same role, so
+  # scripts/migrate_job.py sets it in-process from
+  # NOCTORNAL_MIGRATION_DATABASE_URL and execs Alembic.
   #
-  # The swap happens in the command because compose has no way to say "set
+  # ## migrate.env, and nothing else (docs/17 F52, 2026-10-02)
+  #
+  # This job reads migrate.env INSTEAD of secrets.env: Alembic needs the
+  # owner's DSN and nothing else secrets.env holds, and the owner's DSN is
+  # in no other file any service reads. It is optional to compose so that a
+  # host whose secrets were not moved yet still gets as far as this job,
+  # which then refuses in one sentence naming the installer step that moves
+  # them (release/secrets-upgrade/README.md), and every service that waits
+  # on it stays down. `required: true` would instead make compose refuse
+  # every command, `ps` and `logs` included, with a message about a missing
+  # file. migrate_job.py also refuses an owner DSN that still carries a
+  # published value: the API made that refusal while secrets.env carried
+  # the DSN, and no longer sees it.
+  #
+  # The swap happens in a process because compose has no way to say "set
   # DATABASE_URL from the value of another variable in the env_file".
   # Writing `DATABASE_URL: ${NOCTORNAL_MIGRATION_DATABASE_URL}` under
   # `environment:` would work only if the operator also passed
-  # `--env-file infra/production/secrets.env` on every single compose
-  # command, and forgetting it would set DATABASE_URL to the empty string --
-  # which db.py reports as "set but empty", a message written for exactly
-  # this shape of mistake.
+  # `--env-file` on every single compose command, and forgetting it would
+  # set DATABASE_URL to the empty string.
   #
   # `restart: "no"` because a failed migration must STOP the deployment.
   # The API's depends_on below is `service_completed_successfully`, so a
@@ -724,6 +859,9 @@ services:
   # server (see the Dockerfile) and this container serves no HTTP.
   migrate:
     <<: *noctornal-app
+    env_file:
+      - path: migrate.env
+        required: false
     restart: "no"
     healthcheck:
       disable: true
@@ -732,13 +870,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        export DATABASE_URL="$$NOCTORNAL_MIGRATION_DATABASE_URL"
-        exec alembic upgrade head
+    command: ["python", "scripts/migrate_job.py"]
 
   # ------------------------------------------------------------------------
   # The application: REST API, the analyst console at /ui, and the
@@ -843,6 +975,7 @@ services:
       - ./tls:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
@@ -928,6 +1061,7 @@ services:
   sample-origin:
     <<: *noctornal-app
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       # S1 (2026-09-25): the system role's DSN bypasses row-level
       # security, and the process that serves hostile bytes must never hold
@@ -1040,6 +1174,7 @@ services:
       - ./tls:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -1113,6 +1248,7 @@ services:
       - ./tls:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
@@ -1283,6 +1419,7 @@ services:
       - path: egress-client.env
         required: false
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -1332,6 +1469,7 @@ services:
       - path: egress-client.env
         required: false
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
@@ -1388,6 +1526,7 @@ services:
         required: false
     volumes: []
     environment:
+      <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_LISTEN: "172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"

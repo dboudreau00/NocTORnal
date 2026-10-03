@@ -357,7 +357,9 @@ def test_the_cluster_keeps_bind_parameters_out_of_the_log_for_every_role(path):
 def test_the_redis_healthcheck_passes_the_password_in_the_environment():
     check = _services()["redis"]["healthcheck"]["test"]
     command = check[-1] if isinstance(check, list) else check
-    assert 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping' in command, command
+    # The limiter's own user is named too (docs/17 F52's ACL switches `default` off), as
+    # an option and not a secret: redis-cli has no variable for the name.
+    assert 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user noctornal_limiter ping' in command, command
     assert " -a " not in command
 
 
@@ -675,6 +677,12 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
     script = [
         f"umask {operator_umask}", 'cd "$1"',
         "sudo() { \"$@\"; }; chown() { :; }",     # the operator is not root here
+        # Step 1's last command, the installer step, creates the two files only it knows
+        # (docs/17 F52) from their templates, private; scripts/production_secrets.py does it
+        # for real and test_production_secrets_script.py holds that. Here it is a stand-in.
+        "installer() { ( umask 077; for f in postgres-init migrate; do [ -f infra/production/$f.env ]"
+        " || cp infra/production/$f.env.example infra/production/$f.env; done ); }",
+        "sudo() { if [ \"$1\" = ./release/install.sh ]; then installer; else \"$@\"; fi; }",
         "python() { :; }; docker() { echo stub-dump; }; age() { cat; }",
         # openssl creates the key 0600 whatever the umask and the certificate
         # under the umask: that is the difference this test needs to keep.
@@ -710,7 +718,7 @@ def test_the_modes_the_containers_need_hold_under_either_umask(tmp_path, operato
     assert done.returncode == 0, done.stdout + done.stderr
     prod = tree / "infra" / "production"
     assert (_mode(prod / "secrets.env"), _mode(prod / "caddy.env")) == (0o600, 0o600)
-    for name in ("egress-proxy.env", "egress-client.env", "postgres-init.env"):
+    for name in ("egress-proxy.env", "egress-client.env", "postgres-init.env", "migrate.env"):
         assert _mode(prod / name) == 0o600, name
     assert _mode(prod / "tls") == 0o755
     assert _mode(prod / "tls" / "public.crt") == 0o644
@@ -905,9 +913,12 @@ def test_the_readme_says_how_to_get_the_app_role_on_a_volume_that_was_initialise
     assert "\\password noctornal_app" in block and "\\password noctornal_worker" in block
     # The password is typed at a prompt, never an argument.
     assert "PASSWORD '" not in block and "--password" not in block
-    # It runs in the service compose already gives the owner DSN to, the same way that service does.
+    # It runs in the service compose already gives the owner DSN to, the same way that service does:
+    # the migrate service swaps the owner's DSN in as DATABASE_URL in a script now (docs/17 F52,
+    # scripts/migrate_job.py, which also refuses before it connects), where it was a line of shell.
     migrate = _script("migrate", "command")
-    assert 'export DATABASE_URL="$NOCTORNAL_MIGRATION_DATABASE_URL"' in migrate
+    assert migrate == "scripts/migrate_job.py"
+    assert 'env["DATABASE_URL"] = dsn' in _text(ROOT / "scripts" / "migrate_job.py")
     assert 'DATABASE_URL="$NOCTORNAL_MIGRATION_DATABASE_URL" python scripts/runtime_roles.py' in block
     assert {"migrate", "postgres"} <= set(_services())
     assert "--production" in _text(ROOT / "scripts" / "runtime_roles.py")

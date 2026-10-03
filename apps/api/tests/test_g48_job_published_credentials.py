@@ -5,12 +5,15 @@ credential").
 `config.verify_environment` stops the API on every published value, but the
 cron scripts, the similarity pass and the migration job start without it and
 did not look: with the template's placeholders they ran beside an API that
-refused. `config.refuse_published` is the one helper each of them calls
-first. It is held here three ways: the helper alone, each script (refuses in
-production before connecting to anything, and leaves development alone), and
-the migration job through the real `alembic` command. The egress proxy, whose
-own database password in the template is `replace-me`, and the preflight of
-its env files are held at the bottom.
+refused. `config.refuse_unsafe_job_environment` is the one helper each of them
+calls first (merged with docs/17 F52's: it was `config.refuse_published` here,
+which asked for the published half alone, and now asks for the schema owner's
+credential as well; test_job_environment_refusals.py holds that half). It is
+held here three ways: the helper alone, each script (refuses in production
+before connecting to anything, and leaves development alone), and the migration
+job through the real `alembic` command. The egress proxy, whose own database
+password in the template is `replace-me`, and the preflight of its env files are
+held at the bottom.
 
 Pure: no database is reached (a refusal returns before any connection, and
 the tests make a connection an error).
@@ -59,40 +62,29 @@ def _environment(monkeypatch, **variables: str) -> None:
 
 def test_the_helper_says_nothing_and_refuses_nothing_outside_production(monkeypatch):
     _environment(monkeypatch, NOCTORNAL_INGEST_PEPPER=PUBLISHED)
-    said: list[str] = []
-    assert config.refuse_published(said.append) is False
-    assert said == []
+    assert config.refuse_unsafe_job_environment("job") == []
     _environment(monkeypatch, NOCTORNAL_ENV="development", NOCTORNAL_INGEST_PEPPER=PUBLISHED)
-    assert config.refuse_published(said.append) is False
-    assert said == []
+    assert config.refuse_unsafe_job_environment("job") == []
 
 
 def test_the_helper_refuses_in_production_and_names_variables_never_values(monkeypatch):
     _environment(monkeypatch, NOCTORNAL_ENV=" Production ",
                  NOCTORNAL_INGEST_PEPPER=PUBLISHED,
                  SMTP_PASSWORD="prefix-dev_only_change_me-suffix")
-    said: list[str] = []
-    assert config.refuse_published(said.append) is True
-    assert len(said) == 1
-    line = said[0]
-    assert line.startswith("refusing to run: NOCTORNAL_INGEST_PEPPER, SMTP_PASSWORD carry "), line
-    assert PUBLISHED not in line and "prefix" not in line
-
-
-def test_the_helper_agrees_its_verb_with_one_variable(monkeypatch):
-    _environment(monkeypatch, NOCTORNAL_ENV="production", NOCTORNAL_INGEST_PEPPER=PUBLISHED)
-    said: list[str] = []
-    assert config.refuse_published(said.append) is True
-    assert said == ["refusing to run: NOCTORNAL_INGEST_PEPPER carries a published value"]
+    lines = config.refuse_unsafe_job_environment("job")
+    # One line per variable, led by the job's name, where this build once
+    # said both in a single line; the names are still all there, in order.
+    assert len(lines) == 2, lines
+    assert lines[0].startswith("job: refusing to run: NOCTORNAL_INGEST_PEPPER still carries "), lines
+    assert lines[1].startswith("job: refusing to run: SMTP_PASSWORD still carries "), lines
+    assert all(PUBLISHED not in line and "prefix" not in line for line in lines)
 
 
 def test_the_helper_lets_a_clean_production_environment_through(monkeypatch):
     _environment(monkeypatch, NOCTORNAL_ENV="production",
                  NOCTORNAL_INGEST_PEPPER="9f2c1ad4e6b8a7d3c5e1",
                  DATABASE_URL="postgresql+psycopg://noctornal_app:Xk9pQ7@db:5432/noctornal")
-    said: list[str] = []
-    assert config.refuse_published(said.append) is False
-    assert said == []
+    assert config.refuse_unsafe_job_environment("job") == []
 
 
 # ---------------------------------------------------------------------------
@@ -136,10 +128,12 @@ def test_each_job_refuses_a_published_credential_in_production_before_connecting
     _patch_connect(monkeypatch, module, name)
     monkeypatch.setattr(sys, "argv", sys.argv)
     _environment(monkeypatch, NOCTORNAL_ENV="production", NOCTORNAL_INGEST_PEPPER=PUBLISHED)
-    assert _SCRIPTS[name](module) == config.PUBLISHED_REFUSAL_EXIT == 2
-    out = capsys.readouterr().out
-    assert "refusing to run: NOCTORNAL_INGEST_PEPPER carries a published value" in out
-    assert PUBLISHED not in out
+    assert _SCRIPTS[name](module) == config.JOB_REFUSAL_EXIT == 2
+    seen = capsys.readouterr()
+    # On stderr, one line per variable and led by the job's name, where this
+    # build once printed one line on stdout (the helper that did is gone).
+    assert seen.err.startswith(f"{name}: refusing to run: NOCTORNAL_INGEST_PEPPER still carries "), seen
+    assert PUBLISHED not in seen.out + seen.err
 
 
 @pytest.mark.parametrize("name", sorted(_SCRIPTS))
@@ -157,7 +151,7 @@ def test_each_job_is_unchanged_in_development(name, monkeypatch):
 
 def test_the_lookup_drain_no_longer_carries_its_own_copy():
     text = (ROOT / "scripts" / "lookup_drain.py").read_text(encoding="utf-8")
-    assert "refuse_published" in text and "published_credentials" not in text
+    assert "refuse_unsafe_job_environment" in text and "published_credentials" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +173,8 @@ def _alembic(env_extra: dict[str, str]) -> subprocess.CompletedProcess:
 def test_the_migration_job_refuses_a_published_credential_in_production():
     proc = _alembic({"NOCTORNAL_ENV": "production",
                      "DATABASE_URL": "postgresql+psycopg://noctornal:replace-me-owner@127.0.0.1:1/none"})
-    assert proc.returncode == config.PUBLISHED_REFUSAL_EXIT, (proc.returncode, proc.stderr)
-    assert "alembic: refusing to run: DATABASE_URL carries a published value" in proc.stderr
+    assert proc.returncode == config.JOB_REFUSAL_EXIT, (proc.returncode, proc.stderr)
+    assert "alembic: refusing to run: DATABASE_URL still carries" in proc.stderr
     assert "replace-me-owner" not in proc.stderr and "Traceback" not in proc.stderr
 
 

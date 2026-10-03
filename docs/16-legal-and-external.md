@@ -664,19 +664,34 @@ a reset meter: it admits the subject it was refusing with a full burst.
 Both compose files run Redis with `noeviction`, so at the 1 GB cap it
 refuses writes instead, and each limit falls back to its declared
 `on_backend_failure`. The development file ran `allkeys-lru` until Alpha 6.
-The readiness check `redis_limiter_store` reads the policy with `CONFIG
-GET` and fails on an evicting one, or reports it as unknown where `CONFIG`
-is disabled. `redis_limiter_isolated` counts the keys in the limiter's
-database that are not under its `rl:` prefix, and the keys in the
-instance's other databases, and fails on either; it reads no value and
-reports no key name.
+The readiness check `redis_limiter_store` reads the policy from `INFO
+memory` (`CONFIG GET` only where INFO will not say, since 2026-10-02) and
+fails on an evicting one, or reports it as unknown where neither answers.
+`redis_limiter_isolated` counts the keys in the limiter's database that are
+not under its `rl:` prefix, and the keys in the instance's other databases,
+and fails on either; it reads no value and reports no key name.
+
+Since 2026-10-02 the isolation is also the server's own. The production
+Redis runs an ACL file in which the default user is disabled and the
+limiter's user, `noctornal_limiter`, may read and write keys under `rl:`
+alone and run only the commands the limiter sends
+(`ratelimit_redis.LIMITER_ACL_COMMANDS`), and `REDIS_URL` signs in as that
+user. Three of those commands see past `rl:` without reading or writing a
+key: `SCAN` lists every key name in the database, `INFO` reports the
+server's statistics, and `ACL GETUSER` reads any user's rules and password
+hashes; the census and the readiness row need all three.
+`redis_limiter_isolated` reads the ACL back over the limiter's connection
+(`ACL WHOAMI`, `ACL GETUSER`) and, under `NOCTORNAL_ENV=production`, fails
+when the limiter signs in as `default`, when `default` is enabled, or when
+the limiter's user can reach more than that.
 
 **Confirm** the production deployment gives the limiter its own Redis
 instance, running `noeviction`: `maxmemory` is per instance, so a
-co-tenant in another database fills the same memory. The check sees a
-co-tenant only while it holds keys, and cannot see a second server behind
-the same address. This is a deployment fix, not a code one, and it is the
-kind that gets missed.
+co-tenant in another database fills the same memory. The bundled compose
+file's ACL refuses every other client, but another user added to that ACL
+by hand would be seen only by the key count, while it holds keys, and a
+second server behind the same address is not visible at all. This is a
+deployment fix, not a code one, and it is the kind that gets missed.
 
 ### C9: Sample origin split
 

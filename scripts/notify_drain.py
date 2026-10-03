@@ -37,9 +37,14 @@ failed ones are in the ledger with their reason (GET
 /notifications/deliveries?refused_only=true), and the retryable ones will
 be tried again next run.
 
-Exits 2, having printed `refusing to run: <names> ...` and connected to
-nothing, when NOCTORNAL_ENV=production and a credential in the environment
-carries a value this repository publishes (infra-12, 2026-10-03).
+Exits 2, before any connection, when under NOCTORNAL_ENV=production a
+credential carries a value this repository publishes or the schema owner's
+password or DSN is in the environment (docs/17 F52 and infra-12, 2026-10-02
+and 2026-10-03): the refusal is one line per variable on stderr, `notify_drain:
+refusing to run: <NAME> ...`, naming it and never its value. It is the one
+helper every job calls first (`config.refuse_unsafe_job_environment`) and the
+one code every job gives it (`config.JOB_REFUSAL_EXIT`), 2 and not 1 because 1
+already means a delivery failed in a pass that ran.
 """
 from __future__ import annotations
 
@@ -55,7 +60,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from _env import load_env_local  # noqa: E402
-from noctornal_api.config import PUBLISHED_REFUSAL_EXIT, refuse_published  # noqa: E402
+from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.transports import dispatch_due  # noqa: E402
 
@@ -72,10 +77,15 @@ def connect():
 
 
 def main() -> int:
-    # Before anything is connected to (infra-12, 2026-10-03): a production
-    # cron on a credential this repository publishes refuses, as the API does.
-    if refuse_published():
-        return PUBLISHED_REFUSAL_EXIT
+    # First, before anything is connected to (docs/17 F52 and infra-12,
+    # 2026-10-02 and 2026-10-03): under NOCTORNAL_ENV=production a published
+    # credential or the schema owner's refuses the pass, the same two
+    # refusals every job makes through the one helper (config.py). Exit 2,
+    # not 1: 1 already means a delivery failed in a pass that ran.
+    refusals = refuse_unsafe_job_environment("notify_drain")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     conn = connect()
     try:
         # S2, the egress proxy (2026-09-24). A production cron with

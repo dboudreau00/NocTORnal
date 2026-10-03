@@ -120,9 +120,12 @@ REALM = 'Basic realm="noctornal-egress"'
 
 #: The platform's keys, DSNs and store credentials. The proxy talks to the
 #: internet and needs none of them, so it refuses to start holding one.
+#: POSTGRES_PASSWORD beside the owner's DSN since docs/17 F52 (2026-10-02):
+#: both halves of the schema owner's credential, which no runtime process
+#: may hold.
 FORBIDDEN_ENV = ("NOCTORNAL_TOTP_KEK", "NOCTORNAL_TOTP_KEK_RETIRED", "DATABASE_URL",
-                 "NOCTORNAL_MIGRATION_DATABASE_URL", "NOCTORNAL_INGEST_PEPPER",
-                 "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY")
+                 "NOCTORNAL_MIGRATION_DATABASE_URL", "POSTGRES_PASSWORD",
+                 "NOCTORNAL_INGEST_PEPPER", "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY")
 
 #: Refusals before the credentials held: counted per peer, never chained
 #: row by row (egress_ledger, PREAUTH).
