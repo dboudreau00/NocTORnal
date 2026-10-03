@@ -123,7 +123,7 @@ def test_a_refusal_quotes_no_value():
 def test_nothing_the_deployment_ships_runs_the_sweep(path):
     """Not the production cron loop, nor the other loops, nor an installer or
     launcher: the sweep destroys third-party data and an operator runs it
-    (docs/17 F30; docs/00 decision 157)."""
+    (docs/17 F30; docs/00 decision 171)."""
     assert path.exists(), path
     assert "retention_sweep" not in _live_lines(path), (
         f"{path.relative_to(ROOT)} runs the retention sweep. It is operator-run: "

@@ -1,5 +1,5 @@
 """The collected-document sweep, scripts/retention_sweep.py (docs/17 F30,
-2026-10-02; docs/00 decisions 157 to 159).
+2026-10-02; docs/00 decisions 171 to 173).
 
 A group chat's third-party messages are collected documents with a retention
 clock, and until this sweep nothing destroyed them when it ran out: the
@@ -578,7 +578,7 @@ def test_the_audit_row_carries_counts_and_the_reference_and_no_content(conn, act
 
 def test_the_sweep_leaves_a_due_dead_letter_alone(conn, actor, store, capsys):
     """Dead letters have no case and no sweep, and are not this sweep's: the
-    family set is collected documents (docs/00 decision 158)."""
+    family set is collected documents (docs/00 decision 172)."""
     uid, email = actor
     letter = conn.execute(
         """INSERT INTO ingest.dead_letter
