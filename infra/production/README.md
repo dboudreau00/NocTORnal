@@ -25,7 +25,11 @@ You need:
   is published: Postgres, Redis, MinIO and both application processes are
   reachable only from the compose network.
 * A checkout of this repository on the host. Every command below is run
-  from the repository root.
+  from the repository root. Nothing but the repository belongs in it: that
+  directory is the build context of the one image every service runs, so a
+  stray file there is copied into every container by the next
+  `up -d --build`. In particular a database dump never goes there (see
+  Backups).
 
 Counsel has work to do before an analyst signs in. See
 [What stays red, and what a red check refuses](#what-stays-red-and-what-a-red-check-refuses).
@@ -37,13 +41,30 @@ not, and the collection route refuses to poll until it is done.
 ## 1. Write the secrets file
 
 ```sh
-cp infra/production/secrets.env.example infra/production/secrets.env
+( umask 077
+  cp infra/production/secrets.env.example infra/production/secrets.env
+  cp infra/production/caddy.env.example   infra/production/caddy.env )
 ```
+
+The parentheses are deliberate. The `umask` is there so the two files are
+created private from the first byte, and it must end with the subshell: left
+in force in your shell it would also make everything you create afterwards
+unreadable to the containers (the TLS directory and certificate in step 3,
+and every file a later `git pull` writes, because the image keeps the modes it
+copies). Whatever your shell's own `umask` is, [check the modes
+before you start the stack](#4-start-it).
 
 `secrets.env.example` is the reference for every variable: what it is, and
 what breaks when it is wrong. Work through it top to bottom. Nothing in the
 stack checks that you replaced the placeholders, and several of them fail
 quietly rather than loudly.
+
+`caddy.env` holds the three values the TLS terminator needs (the two
+hostnames and the TLS mode) and nothing else. Caddy is the one process the
+internet reaches before any sign-in, so it does not receive `secrets.env`.
+On a tree from before 2026-10-03 those three lines lived in `secrets.env`:
+copy them into `caddy.env` before `up`. Without the file compose refuses
+the whole stack up front, before it stops anything that is running.
 
 Generate passwords from a URL-safe alphabet, because four of them are
 embedded in URLs and an unencoded `@`, `:`, `/` or `#` silently truncates a
@@ -80,12 +101,25 @@ template), the readiness check `kek_ring_opens_stored_secrets` says
 whether every stored secret still opens, and
 `scripts/rewrap_secrets.py --apply` moves them under the new key.
 
-Then lock the file down. It holds every password in the deployment:
+Then lock the files down. `secrets.env` holds every password in the
+deployment, and the egress files below hold the proxy's keys and database
+password. The subshell's `umask` above created them private; this makes
+them root's:
 
 ```sh
-sudo chown root:root infra/production/secrets.env
-sudo chmod 600      infra/production/secrets.env
+sudo chown root:root infra/production/secrets.env infra/production/caddy.env
+sudo chmod 600       infra/production/secrets.env infra/production/caddy.env
 ```
+
+Every `.env` file in this directory is excluded from the image build
+(`.dockerignore`) and from git (`.gitignore`), and a test holds both lists to
+each other, so a file you add here is not baked into an image. They are still
+plain files on this host.
+
+Do not put a colon in `MINIO_ROOT_USER` or `MINIO_ROOT_PASSWORD`. The
+`minio-init` service hands them to `mc` as a URL, where a colon ends the
+access key, and it refuses a pair with one by name. A password from
+`token_urlsafe` never has one.
 
 > `docker compose config` prints this file's contents, resolved into each
 > service's environment. Do not paste that output into a ticket.
@@ -108,6 +142,26 @@ around the audit and custody chains. The app role is created by
 an empty data directory: changing `NOCTORNAL_APP_DB_PASSWORD` later does
 nothing to an existing cluster, and you have to `ALTER ROLE` by hand.
 
+**A volume that was initialised without that password has no `noctornal_app`
+at all.** There is then nothing for `DATABASE_URL` to name, and production
+refuses to start on the owner or a superuser (the refusal names the
+variable, never the role). Either start from a fresh volume with the password
+set (`down -v` destroys the case file and the evidence, so only where there is
+nothing in it), or repair the running cluster with the repository's own
+script, which creates `noctornal_app` and `noctornal_worker` with no password
+and grants them what the migrations grant:
+
+```sh
+docker compose -p noctornal-prod -f infra/production/compose.yml run --rm --no-deps migrate \
+  sh -c 'DATABASE_URL="$NOCTORNAL_MIGRATION_DATABASE_URL" python scripts/runtime_roles.py ensure --production'
+docker compose -p noctornal-prod -f infra/production/compose.yml exec postgres psql -U noctornal -d noctornal
+#   at the psql prompt:   \password noctornal_app     and      \password noctornal_worker
+```
+
+`\password` asks for the new password at a prompt and hashes it in `psql`, so it
+is on no command line and in no log. Put the same passwords in `DATABASE_URL`
+and `NOCTORNAL_WORKER_DATABASE_URL`, then `up -d`.
+
 ---
 
 ## 3. Give MinIO a certificate
@@ -129,9 +183,24 @@ openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
   -out    infra/production/tls/public.crt \
   -subj   "/CN=minio" \
   -addext "subjectAltName=DNS:minio"
+chmod 755 infra/production/tls
+chmod 644 infra/production/tls/public.crt
 sudo chown root:root infra/production/tls/private.key
 sudo chmod 600       infra/production/tls/private.key
 ```
+
+The two `chmod` lines state the modes instead of trusting your `umask`, and
+they are not decoration. Every container drops all Linux capabilities, so
+root inside one is an ordinary user to the files it is given: it reads only
+what it owns or what `other` may read. The application containers (uid
+10001) read `public.crt`, and MinIO and `minio-init` (root, without
+`DAC_OVERRIDE`) read it too without owning it. Only `private.key` is private,
+and it is root's, which is the one file MinIO opens as its owner. A directory
+or certificate left `0700` or `0600` by a `umask` of `077` breaks the stack
+without saying why: every loop service and the API stop at the
+`cat ... /certs/public.crt` step of their start-up, and MinIO, which cannot
+read its certificate, starts on plain HTTP and the stack never reaches
+"buckets ready".
 
 `DNS:minio` is load-bearing. `minio` is the compose service name, it is
 what `MINIO_ENDPOINT` and `SAMPLE_ENDPOINT` address, and it is the name
@@ -161,6 +230,24 @@ that ships those symlinks.
 ---
 
 ## 4. Start it
+
+First check the modes of the files the containers read from this checkout.
+A clone or a `git pull` made under a restrictive `umask` (some hardened hosts
+default to `077`) leaves them `0600`, and the containers cannot read what they
+do not own: Caddy reads `Caddyfile`, `minio-init` reads `mc-alias.sh`, MinIO and
+the application read the `tls` directory and `public.crt`, and Postgres reads
+`db/init`. This prints nothing when they are right (`private.key` is skipped
+on purpose, it is root's and private):
+
+```sh
+find infra/production/Caddyfile infra/production/mc-alias.sh infra/production/tls db/init \
+  ! -name private.key \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -print
+```
+
+Whatever it names, open up with `chmod go+rX <path>` (a directory needs `x` as
+well as `r`), and run it again after every `git pull`. The image itself does
+not depend on this: the Dockerfile makes everything it copies readable, so a
+checkout made under `077` cannot produce an image the application cannot read.
 
 ```sh
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
@@ -434,11 +521,19 @@ service and Caddy receive. They are in three files beside it:
 
 ```sh
 python scripts/egress_setup.py keygen     # prints every key, once
-cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
-cp infra/production/egress-client.env.example infra/production/egress-client.env
-cp infra/production/postgres-init.env.example infra/production/postgres-init.env
+( umask 077                               # a subshell: the umask must not outlive these three lines
+  cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
+  cp infra/production/egress-client.env.example infra/production/egress-client.env
+  cp infra/production/postgres-init.env.example infra/production/postgres-init.env )
+sudo chown root:root infra/production/egress-proxy.env infra/production/egress-client.env infra/production/postgres-init.env
+sudo chmod 600       infra/production/egress-proxy.env infra/production/egress-client.env infra/production/postgres-init.env
 python scripts/egress_setup.py preflight  # checks all three before you start
 ```
+
+Preflight also refuses a value still carrying a `replace-me` placeholder,
+the database password lines included: the proxy's role password is public in
+this repository until you change it, and agreeing in both files does not make
+it private.
 
 The client key and the fingerprint key must be the same in both env files;
 preflight says so when they are not. **Losing the seal key loses every
@@ -524,38 +619,100 @@ git pull
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
+On a host whose `umask` is `077`, a pull leaves the files it writes `0600`,
+which a container that does not own them cannot read: run the mode check from
+[step 4](#4-start-it) between the two commands. Coming from a tree older than
+2026-10-03, also know that every container now drops its capabilities, so
+`Caddyfile`, `mc-alias.sh`, `tls/public.crt` and `db/init` must be readable by
+`other` (the check says so), and `tls/private.key` must be root's, mode 600.
+
+Every image the stack pulls is pinned by digest (Hardening, below), so an
+update that changes one arrives as a change in this repository, never from a
+registry's idea of what a tag means today.
+
+A restart waits for the passes in progress. The cron, lab-triage, lab-cron
+and embed-pass services stop their loops on the stop signal, let the job that
+is running finish (a persona poll, a sandbox send, an email), and start no
+other; compose gives each up to 5 minutes 30 seconds before it kills one.
+That is why an `up -d --build` can take a few minutes on a busy host.
+
 **Backups, nothing here does this for you.** Three things must be copied
 off this host, together: the database, the evidence and raw buckets, and
-`secrets.env`. Without the buckets a restore gives you a case file whose
-exhibits are missing; without `secrets.env` it gives you one whose sealed
-columns never open again (step 1).
+`secrets.env` with the other env files beside it. Without the buckets a
+restore gives you a case file whose exhibits are missing; without
+`secrets.env` it gives you one whose sealed columns never open again
+(step 1).
+
+**Where a backup goes matters as much as having one.** A dump is the whole
+case database in plaintext: every assertion, document, note and audit row and
+every TLP:AMBER_STRICT and RED row, with only the sealed columns as
+ciphertext, and `pg_dump` runs as the owner role, which row-level security
+does not bind. The mirrored exhibits and raw captures are plaintext as well.
+So a backup is the most sensitive file on this host, and three rules hold:
+
+* **Outside the checkout.** The repository root is the Docker build context,
+  so a dump written there is baked into every container by the next
+  `up -d --build`, and `git add -A` would stage it. `.dockerignore` and
+  `.gitignore` refuse the usual names (`*.sql`, `*.dump`, `noctornal-*`) as a
+  net under this, and a test holds them; the net is not the plan.
+* **Private from the first byte.** A directory only root can enter, and
+  `umask 077` in a subshell that writes (and in the script inside the
+  container that runs `mc`), so no file is ever created readable by anyone
+  else. It is a subshell on purpose: a `umask 077` left in your own shell
+  would make the next `git pull` or certificate you create unreadable to the
+  containers (see step 4).
+* **Encrypted before it reaches a disk.** The dump goes through `age` in the
+  same pipe. With a public key this host holds only the recipient's public
+  half and cannot decrypt its own backups; keep the private half, with the
+  copy of `secrets.env`, somewhere that is not this host. `gpg --symmetric`
+  with `--passphrase-file` (a file mode 0600, never `--passphrase`, which is
+  a command-line argument) does the same job where `age` is not installed.
+  The mirrored objects are not encrypted by anything here: keep that
+  directory on an encrypted volume.
 
 ```sh
-# The database.
-docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
-  sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -U noctornal noctornal' \
-  > noctornal-$(date -u +%Y%m%dT%H%M%SZ).sql
+(   # a subshell, so the umask and pipefail end with it and never reach the
+    # shell you build, pull and edit files in afterwards
+  set -o pipefail    # bash: a failed pg_dump must fail the pipe, not leave a short file
+  umask 077
+  install -d -m 0700 /srv/noctornal-backup
 
-# The object store. Evidence AND raw captures: an exhibit restored
-# without the capture it was derived from has lost half of what makes it
-# an exhibit. /srv/noctornal-backup is yours to choose.
-docker compose -p noctornal-prod -f infra/production/compose.yml \
-  run --rm --no-deps -v /srv/noctornal-backup:/backup \
-  --entrypoint /bin/sh minio-init -c '
-    set -e
-    mkdir -p /root/.mc/certs/CAs
-    cp /certs/public.crt /root/.mc/certs/CAs/minio.crt
-    mc alias set local https://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
-    mc mirror --overwrite "local/$EVIDENCE_BUCKET" /backup/evidence
-    mc mirror --overwrite "local/$INGEST_BUCKET" /backup/raw'
+  # The database: custom format, encrypted in the pipe, never plaintext on disk.
+  # BACKUP_RECIPIENT is the age public key (age1...) of whoever will restore.
+  docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
+    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -Fc -h 127.0.0.1 -U noctornal noctornal' \
+    | age -r "$BACKUP_RECIPIENT" \
+    > /srv/noctornal-backup/noctornal-$(date -u +%Y%m%dT%H%M%SZ).dump.age
+
+  # The object store. Evidence AND raw captures: an exhibit restored
+  # without the capture it was derived from has lost half of what makes it
+  # an exhibit. /srv/noctornal-backup is yours to choose, and must be the
+  # 0700 directory made above, outside this checkout.
+  docker compose -p noctornal-prod -f infra/production/compose.yml \
+    run --rm --no-deps -v /srv/noctornal-backup:/backup \
+    --entrypoint /bin/sh minio-init -c '
+      set -e
+      umask 077
+      . /mc-alias.sh
+      mc_setup
+      mc mirror --overwrite "local/$EVIDENCE_BUCKET" /backup/evidence
+      mc mirror --overwrite "local/$INGEST_BUCKET" /backup/raw'
+)
 ```
+
+The dump is in custom format, so it is restored with `pg_restore`, not
+`psql`. Nothing here verifies a backup: restore one on a scratch host before
+you rely on it.
 
 The second command runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
 network (MinIO publishes no port), the root credentials and bucket names
-from `secrets.env`, and the certificate from step 3, which `mc` trusts
-only once it is copied into its own CA directory. The alias it sets lives
-and dies with that container; nothing on the host defines one.
+from `secrets.env`, the certificate from step 3, and `mc-alias.sh`, which
+gives `mc` the root credential through its environment and trusts that
+certificate. The credential is deliberately not an argument of any command,
+because an argument is readable by every local account on the host for as long
+as its process lives. The alias lives and dies with that container; nothing
+on the host defines one.
 
 **The samples bucket is left out on purpose.** It holds live malware,
 encrypted, and a mirror of it escapes whatever
@@ -712,6 +869,119 @@ what it rested on.
 
 ---
 
+## Hardening, and what is still open
+
+What `compose.yml` does to every container, and what each one keeps:
+
+| Service | Capabilities kept | Why |
+|---|---|---|
+| caddy | `NET_BIND_SERVICE` | binds 80 and 443; the binary carries it as a file capability, so without it the container does not start |
+| postgres | `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID` | the image's entrypoint prepares the data directory as root and drops to the postgres user |
+| redis | `DAC_OVERRIDE` | runs as root over a volume the redis user owns |
+| minio, minio-init, and every application service | none | uid 10001 needs none, and MinIO and `mc` run as root without them |
+
+Every container also has `no-new-privileges`, and Caddy's root filesystem is
+read-only. Dropping `NET_RAW` from all of them takes the raw socket away from
+a compromised container on the shared bridge.
+
+The price is file modes. Without `DAC_OVERRIDE`, root in `caddy`, `minio` and
+`minio-init` is an ordinary user to a bind-mounted file: it reads what it owns
+or what `other` may read, and nothing else. That is why step 3 states the
+modes of `tls/` and `public.crt`, and step 4 checks the rest before `up`. A
+checkout made as a non-root operator under a `umask` of `077` fails closed (Caddy
+and `minio-init` cannot read their files and do not start), not open.
+
+Caddy sends `Strict-Transport-Security` (a year, subdomains included, no
+`preload`) on both hostnames, speaks TLS 1.3 only and does not advertise
+HTTP/3, which is not published. The application leaves HSTS to this
+terminator, so the Caddyfile is the only place it can come from; a test holds
+it there. A client that cannot speak TLS 1.3 cannot reach the console. Under
+`NOCTORNAL_TLS_MODE=internal` Caddy logs "failed to install root
+certificate" once at start: it tries to add its local CA to the container's
+own trust store, which is read-only and which nothing in the container uses.
+
+**Images are pinned by digest**, in `compose.yml` and in the Dockerfile's
+`FROM`, because a tag is whatever its registry says it is at pull time. To
+move one deliberately:
+
+```sh
+docker buildx imagetools inspect caddy:2-alpine        # the digest line is the pin
+```
+
+then put `name:tag@sha256:...` in `compose.yml` (the digest alone is what
+Docker uses; the tag is for the reader) and rebuild. The pinned base image
+does not pick up Debian security updates by itself: move its digest when you
+take a new release, and rebuild with `--pull`. `ghcr.io/dboudreau00/minio` is
+byte for byte the build `quay.io/minio/minio` served for the same release;
+both names resolve to the same digest, which is how that is checked.
+
+**What is still open.** Stated rather than hidden:
+
+* **Caddy still runs as uid 0**, with the capability set above and nothing
+  else. `caddy-data` and `caddy-config` already exist on a running deployment,
+  owned by root, and a non-root Caddy could not open the ACME account in them.
+  To run it unprivileged (Docker 20.10 or later), change the volumes once and
+  add `user:` to the caddy service:
+
+  ```sh
+  docker compose -p noctornal-prod -f infra/production/compose.yml stop caddy
+  docker run --rm -v noctornal-prod_caddy-data:/data -v noctornal-prod_caddy-config:/config \
+    --entrypoint chown caddy:2-alpine -R 10002:10002 /data /config
+  # then, under `caddy:` in compose.yml:   user: "10002:10002"
+  ```
+* **Caddy still has a route out** (`edge`, for ACME) and shares a bridge with
+  Postgres, Redis and MinIO. It is the TLS terminator, not a service the egress
+  proxy fronts.
+* **The Postgres and Redis hops are plaintext** inside the compose network. Only
+  MinIO is TLS here, on the argument that a replayable request signature must
+  not cross the wire. With `NET_RAW` gone a compromised container cannot sniff
+  the bridge, but it has not been made impossible: enabling `sslmode` on Postgres
+  and TLS on Redis is open work.
+* **`./tls`, with MinIO's `private.key`, is mounted into every application
+  container.** Only `public.crt` is needed there; the host's `chmod 600` on the
+  key is what protects it from the application user. Splitting it into a CA
+  directory is open work.
+* **No read-only root filesystem, and no memory or process limits, on the
+  application services.** The CA bundle and the Lab's child processes write to
+  `/tmp`, which has not been proved under a tmpfs, and the limits need a sizing
+  for your host.
+* **Two MinIO service-account secrets are still arguments** of
+  `mc admin user svcacct add`, once, the first time each account is created
+  (the `SAMPLE_` and `PRESERVE_` keys; the root credential and the database role
+  passwords are not). Mount `/proc` with `hidepid=2` on the Docker host if it
+  has other local accounts.
+* **The build context is the checkout, not an export of it.** `.dockerignore`
+  keeps out everything it names (every `.env` file at any depth, every `*.env`
+  file and an editor's copy of one such as `secrets.env.bak`, keys,
+  certificates, dumps and backups), and `.gitignore` carries the same set, but
+  a file with a name no rule knows still reaches the image.
+  Building from `git archive HEAD` removes that class, and needs the compose
+  file's `context` pointed at the export, which this file does not do.
+* **Images and tools that are not digest pinned.** The development stack
+  (`infra/docker-compose.yml`) and the CI workflow's service containers pull by
+  tag, on purpose: they track what a developer's machine and the suite use, and
+  a digest there would only go stale. What each tag resolved to on 2026-10-03,
+  for a reader who wants to compare or to pin one:
+
+  | Image (tag) | Pulled by | Digest on 2026-10-03 |
+  |---|---|---|
+  | `pgvector/pgvector:pg16` | development stack, CI | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
+  | `redis:7-alpine` | development stack, CI | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
+  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack | `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e` |
+  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack | `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727` |
+  | `axllent/mailpit:v1.31.0` | development stack | `sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24` |
+
+  The first four are the digests `compose.yml` pins for production, and a test
+  holds this table to that file, so moving a production pin without updating
+  the table fails the suite. Mailpit is a development mail sink and is not in
+  the production stack. The CI workflow's two actions (`actions/checkout@v4`,
+  `actions/setup-python@v5`) are pinned by tag and the workflow has no
+  `permissions:` block, the installers `pip install` an unpinned `pip`, and the
+  Dockerfile installs whatever `gnupg` Debian ships that day (`docs/17` F34
+  depends on its version).
+
+---
+
 ## What you are NOT getting
 
 * **No high availability.** One host. When it is down, the product is down,
@@ -727,8 +997,8 @@ what it rested on.
   nothing anywhere reads its verdict on a schedule.
 * **No secrets management.** `secrets.env` is a file on disk in plain text.
   There is no Vault, no KMS, and the TOTP key-encrypting key sits in it.
-  Every container built from the application image receives the whole file,
-  and so does Caddy, which needs three of its variables.
+  Every container built from the application image receives the whole file.
+  Caddy does not: it has `caddy.env`, with its three values.
 * **`docs/16` L1-L5 are unresolved.** Prohibited content in the sample
   store, stealer logs and third-party personal data at scale, persona
   operation and computer-misuse exposure, message content capture, and

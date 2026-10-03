@@ -81,6 +81,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from noctornal_api import egress, egress_authz, egress_ledger, egress_policy, egress_routes
+from noctornal_api.config import published_credentials
 from noctornal_api.egress_authz import Decision, Refused
 from noctornal_api.egress_policy import (
     PROXY_STATUS,
@@ -177,6 +178,13 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
             problems.append(f"This container must not hold {name}: the egress proxy "
                             f"talks to the internet and needs none of the platform's "
                             f"keys.")
+    if production:
+        # The one production process whose environment was never scanned for
+        # values the repository publishes: its own database password in the
+        # template is `replace-me`, which no key-shape check above forces
+        # anyone to edit (infra-12, 2026-10-03). Names the variable, never
+        # the value.
+        problems.extend(p.refusal for p in published_credentials(env))
     try:
         internal = egress_policy.internal_networks(env, production=production)
     except ValueError as exc:

@@ -323,6 +323,37 @@ def published_credentials(env: Mapping[str, str] | None = None) -> list[Publishe
     return [found[name] for name in sorted(found)]
 
 
+#: The exit status of a job that refuses to run on a published credential.
+#: `argparse` spends 2 on a usage error too, and the first word of the line
+#: below says which it was.
+PUBLISHED_REFUSAL_EXIT = 2
+
+
+def refuse_published(out=print) -> bool:
+    """True, after saying so through `out`, when this process is production
+    and carries a credential this repository has already published.
+
+    The one reader for the jobs that are not the API: `verify_environment`
+    stops the API on the same list, but a cron job, the migration job and
+    the similarity pass start without it and, with the template's
+    placeholders, would run happily beside an API that refuses (infra-12,
+    2026-10-03; until then lookup_drain.py held an inline copy and
+    collection_poll, notify_drain, embed_pass and the migration job held
+    none). Called once, first, by each of them, before anything is
+    connected to. Names variables, never a value; says nothing and
+    answers False in development, where the answer is expected to be yes.
+    """
+    if os.environ.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+        return False
+    published = published_credentials()
+    if not published:
+        return False
+    names = sorted({p.variable for p in published})
+    verb = "carries" if len(names) == 1 else "carry"
+    out(f"refusing to run: {', '.join(names)} {verb} a published value")
+    return True
+
+
 #: The two legal declarations (docs/16 L1). Not credentials, so the scan
 #: above passes over them, but secrets.env.example ships a placeholder in
 #: both and `samples.policy_declared` accepts any non-empty string, so a
@@ -882,6 +913,44 @@ def _dsn_user(dsn: str) -> str | None:
         return None
 
 
+#: Role names a request connection must never carry, whatever else is set:
+#: the cluster's default superuser and the schema owner this repository's
+#: compose file creates. A role the DSN names that equals the migration
+#: DSN's or POSTGRES_USER is refused too (`_request_role_problems`).
+_PRIVILEGED_ROLE_NAMES = frozenset({"postgres", "noctornal"})
+
+
+def _request_role_problems(env: Mapping[str, str]) -> list[str]:
+    """Production refuses a request DSN that names the schema owner or a
+    superuser (infra-4, 2026-10-03).
+
+    Row-level security does not bind the owner and an owner may ALTER TABLE
+    ... DISABLE TRIGGER on the audit and custody chains, so a request
+    connection that carries either switches both off for every analyst
+    request while the register shows the deployment running. The system
+    connection already refused exactly that role (`db.connect_system`);
+    this is the same refusal for the request one, from the names alone. What
+    a DSN cannot say (a superuser or a BYPASSRLS role under another name, a
+    member of the owner) is refused at the first request connection by
+    `db.connect_request`, from the catalog. Names variables and never the
+    role."""
+    user = _dsn_user(env.get("DATABASE_URL", ""))
+    if not user:
+        return []
+    owners = {_dsn_user(env.get("NOCTORNAL_MIGRATION_DATABASE_URL", "")),
+              (env.get("POSTGRES_USER", "").strip() or None)}
+    if user in _PRIVILEGED_ROLE_NAMES or user in owners - {None}:
+        return [
+            "DATABASE_URL names the schema owner or a superuser, so row-level "
+            "security filters nothing for any request and the append-only "
+            "triggers on the audit and custody chains can be disabled from "
+            "the request path; point it at noctornal_app and keep the owner "
+            "for NOCTORNAL_MIGRATION_DATABASE_URL alone. A volume initialised "
+            "without NOCTORNAL_APP_DB_PASSWORD has no such role yet: create it "
+            "first (infra/production/README.md, step 2)."]
+    return []
+
+
 def _row_security_problems(env: Mapping[str, str]) -> list[str]:
     """The production refusals row-level security needs (S1).
 
@@ -918,6 +987,7 @@ def _row_security_problems(env: Mapping[str, str]) -> list[str]:
         problems.append(
             f"{WORKER_DSN_ENV} and DATABASE_URL name the same role, so every "
             f"request would run as the role that bypasses row-level security.")
+    problems.extend(_request_role_problems(env))
     if env.get("NOCTORNAL_WORKER_DB_PASSWORD", "").strip():
         problems.append(
             "NOCTORNAL_WORKER_DB_PASSWORD is set on a runtime process; it is "

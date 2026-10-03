@@ -353,7 +353,10 @@ def _all_broken() -> dict[str, str]:
     published password, and every other rule fails by omission."""
     return {
         "NOCTORNAL_ENV": "production",
-        "DATABASE_URL": f"postgresql+psycopg://noctornal:{DEV_CREDENTIAL}@db:5432/n",
+        # noctornal_app, not the owner `noctornal`: this fixture is about one
+        # refusal per rule, and a request DSN naming the owner is a refusal of
+        # its own now (infra-4, 2026-10-03; test_g48_request_role_boot.py).
+        "DATABASE_URL": f"postgresql+psycopg://noctornal_app:{DEV_CREDENTIAL}@db:5432/n",
         "MINIO_SECRET_KEY": DEV_CREDENTIAL,
         "NOCTORNAL_RATELIMIT": "off",
         "SMTP_ALLOW_PLAINTEXT": "1",
