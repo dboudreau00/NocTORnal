@@ -81,6 +81,7 @@ import os
 import re
 import smtplib
 import ssl
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -139,6 +140,19 @@ WEBHOOK_MAX_BYTES = 65536
 #: in config, and refused at send time in production whatever it says:
 #: the cron sends, and the cron never ran verify_environment.
 WEBHOOK_ALLOW_HTTP_ENV = "NOCTORNAL_WEBHOOK_ALLOW_HTTP"
+
+#: Which signature scheme the webhook destination speaks (F28, 2026-10-02).
+#: Unset or `v1` is the original: `X-NocTORnal-Signature: sha256=<hex>`, an
+#: HMAC-SHA256 over the exact body, which every existing receiver verifies and
+#: which carries no time. `v2` is opt-in: `X-NocTORnal-Signature-V2:
+#: t=<unix seconds>,v2=<hex>`, an HMAC-SHA256 over `<t>.<body>`. The exact
+#: format and a receiver's replay rules are in docs/07.
+WEBHOOK_SIGNATURE_ENV = "NOCTORNAL_WEBHOOK_SIGNATURE"
+WEBHOOK_SECRET_ENV = "NOCTORNAL_WEBHOOK_SECRET"
+SIGNATURE_V1 = "v1"
+SIGNATURE_V2 = "v2"
+SIGNATURE_HEADER = "X-NocTORnal-Signature"
+SIGNATURE_HEADER_V2 = "X-NocTORnal-Signature-V2"
 
 # --- causes (F8 B1) ---------------------------------------------------------
 
@@ -345,9 +359,64 @@ def webhook_payload(out: Outgoing, *, redacted: bool) -> dict:
 
 def sign(payload: bytes, secret: str) -> str:
     """HMAC-SHA256 over the exact bytes sent, hex, prefixed with the scheme
-    so the algorithm can be rotated without the receiver guessing."""
+    so the algorithm can be rotated without the receiver guessing. This is
+    signature v1 and it is unchanged: no time is in the signed string."""
     return "sha256=" + hmac.new(secret.encode("utf-8"), payload,
                                 hashlib.sha256).hexdigest()
+
+
+def sign_v2(payload: bytes, secret: str, timestamp: int) -> str:
+    """The value of the `X-NocTORnal-Signature-V2` header (F28, 2026-10-02):
+    `t=<unix seconds>,v2=<hex>`, where `<hex>` is the lowercase hex
+    HMAC-SHA256, keyed with the secret's UTF-8 bytes, over the ASCII decimal
+    timestamp, one full stop and the exact body bytes.
+
+    The timestamp is the time of THIS attempt, not of the notification: a
+    retry is signed again, so a receiver's window judges how fresh the post
+    is and its own record of notification ids judges whether it has acted on
+    the notification before. A timestamp in the signed string is what lets a
+    receiver refuse a capture posted again later; the body is JSON that
+    begins with a brace, so a v1 signature (over the body alone) can never be
+    read as a v2 one (over digits first)."""
+    stamp = str(int(timestamp))
+    mac = hmac.new(secret.encode("utf-8"), stamp.encode("ascii") + b"." + payload,
+                   hashlib.sha256).hexdigest()
+    return f"t={stamp},v2={mac}"
+
+
+def webhook_signature_version(env=None) -> tuple[str | None, str | None]:
+    """(version, None) for the webhook destination's signature setting, or
+    (None, the sentence) for a value that is neither v1 nor v2 (F28,
+    2026-10-02).
+
+    Unset is v1: a destination that never heard of v2 sends exactly what it
+    always sent. A value that is neither is a refusal and never a fall back
+    to v1, because a misspelt v2 that quietly sent v1 would drop the
+    timestamp its operator asked for and say nothing."""
+    env = os.environ if env is None else env
+    value = (env.get(WEBHOOK_SIGNATURE_ENV) or "").strip().lower()
+    if value in ("", SIGNATURE_V1):
+        return SIGNATURE_V1, None
+    if value == SIGNATURE_V2:
+        return SIGNATURE_V2, None
+    return None, (f"{WEBHOOK_SIGNATURE_ENV} is not v1 or v2, so it is not known "
+                  f"which signature the webhook should carry.")
+
+
+def webhook_signature_problem(env=None) -> str | None:
+    """The sentence for a webhook signature setting that cannot be used, or
+    None. v2 with no secret is one: there is nothing to sign with, and a
+    timestamp that nothing signs proves nothing, so the delivery is held
+    rather than sent looking signed."""
+    env = os.environ if env is None else env
+    version, problem = webhook_signature_version(env)
+    if problem:
+        return problem
+    if version == SIGNATURE_V2 and not env.get(WEBHOOK_SECRET_ENV):
+        return (f"{WEBHOOK_SIGNATURE_ENV} is v2 and {WEBHOOK_SECRET_ENV} is not set, "
+                f"so there is nothing to sign with, and a timestamp that nothing "
+                f"signs proves nothing.")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +556,12 @@ def route_state(channel: str, conn, *, route_for: Callable | None = None) -> Rou
             return RouteState(name, False, False,
                               "NOCTORNAL_WEBHOOK_URL is not https, and a webhook "
                               "carries case summaries.")
+        # A signature setting that cannot be used HOLDS the channel, as a
+        # missing route does: a configuration gap is not a failed send
+        # (F28, 2026-10-02).
+        signature_problem = webhook_signature_problem()
+        if signature_problem:
+            return RouteState(name, False, False, signature_problem)
         host, port = target.host, target.port
         try:
             declared = (Rule.for_url(url),)
@@ -625,11 +700,21 @@ def send_smtp(message: EmailMessage, *, route) -> None:
                              + pinned_http.redact(str(exc))) from None
 
 
-def send_webhook(url: str, payload: dict, secret: str | None, *, route) -> None:
+def send_webhook(url: str, payload: dict, secret: str | None, *, route,
+                 clock: Callable[[], float] | None = None) -> None:
     """POST the payload through `route` (F8 A3). The body and the HMAC
     signature are exactly as before; no redirect is followed and no
     environment proxy is read. http:// is refused unless the development
-    flag is set, and in production always."""
+    flag is set, and in production always.
+
+    The signature is v1 unless the destination opted into v2 with
+    NOCTORNAL_WEBHOOK_SIGNATURE (F28, 2026-10-02). A v2 delivery carries ONLY
+    the v2 header, never the v1 one beside it: a v1 header is a signature over
+    the body alone, so a delivery that carried both could be posted again
+    forever by anyone who captured it, with the v2 header cut off and the v1
+    one kept, to any receiver that still accepts v1. With one header there is
+    nothing to cut down to. `clock` is the time source, injectable so a test
+    fixes the timestamp; it is seconds since the epoch."""
     try:
         target = split_url(url)
     except Refusal as refusal:
@@ -640,8 +725,19 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route) -> None:
             "summaries; refusing to post them in the clear")
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     headers = {"Content-Type": "application/json"}
+    version, problem = webhook_signature_version()
+    if problem:
+        raise TransportError(problem)
+    if version == SIGNATURE_V2 and not secret:
+        raise TransportError(
+            f"{WEBHOOK_SIGNATURE_ENV} is v2 and there is no webhook secret, so "
+            f"nothing was signed and nothing was sent")
     if secret:
-        headers["X-NocTORnal-Signature"] = sign(body, secret)
+        if version == SIGNATURE_V2:
+            headers[SIGNATURE_HEADER_V2] = sign_v2(
+                body, secret, int((clock or time.time)()))
+        else:
+            headers[SIGNATURE_HEADER] = sign(body, secret)
     try:
         pinned_http.fetch_response(
             url, route=route, method="POST", headers=headers, body=body,

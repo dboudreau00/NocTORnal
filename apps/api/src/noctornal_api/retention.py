@@ -1369,7 +1369,7 @@ class RetentionService:
             """UPDATE collect.watch_hit h
                   SET matched_on = (
                         SELECT coalesce(jsonb_agg(
-                                 CASE WHEN e.v ~ '^(keyword|selector|regex):'
+                                 CASE WHEN e.v ~ '^(keyword|selector|regex|signature_keyword|signature_selector|signature_regex|chat):'
                                       THEN to_jsonb(e.v)
                                       ELSE to_jsonb(split_part(e.v, ':', 1)
                                                     || ':[purged]') END
