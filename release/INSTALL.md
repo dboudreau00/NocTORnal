@@ -278,6 +278,7 @@ The ones worth knowing:
 | `NOCTORNAL_LIVE_MAX_PENDING` | A quarter of the subscriber ceiling (50 by default) of sockets that are open but not yet authenticated, per process. A peer with no session pays for these, so the budget is small, and a full budget is refused before the WebSocket handshake completes so that a refused socket holds nothing. |
 | `NOCTORNAL_LIVE_MAX_PENDING_PER_PEER` | 8 of those per peer address, the same address the rate limiter uses, trusted proxy hops included. |
 | `NOCTORNAL_LIVE_HELLO_SECONDS` | 10 seconds for an accepted socket to send its hello before it is closed and its slot returned. |
+| `NOCTORNAL_RELAX_SEASONING_DAYS` | 7 days: the second person who approves turning off a case's merge requirement must have held `case.update` on that case for at least this long, read from the assignment's grant time by the database clock. `0` turns the rule off and is the only value that does; a value that is not a whole number from 0 to 365 is held to 7 and refused at a production boot. |
 | `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. |
 | `NOCTORNAL_ENABLE_DOCS` | The OpenAPI schema stays off. It publishes the full route inventory of a law-enforcement case system, so it is opt-in. |
 

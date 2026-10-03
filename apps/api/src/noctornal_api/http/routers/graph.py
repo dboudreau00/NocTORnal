@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from noctornal_api.graph import (
     REVIEW_STATES,
     AssertionInput,
+    ClaimNotDatable,
     GraphWriteError,
     GraphWriteService,
     TieConfidenceConflict,
@@ -132,6 +133,22 @@ class AddAssertionBody(AssertionBody):
 
 class RetractBody(BaseModel):
     reason: str = Field(min_length=1)
+
+
+class SupersedeBody(BaseModel):
+    """The date a claim never had, and why that date.
+
+    Nothing else is sent: the replacing claim is the old one in every other
+    column (`GraphWriteService.supersede_assertion`), so a request cannot
+    regrade, rebase or re-aim a claim under cover of dating it."""
+    observed_at: datetime
+    rationale: str = Field(min_length=1)
+
+
+class SupersedeOut(BaseModel):
+    """The new claim, and the old one it replaces."""
+    id: str
+    supersedes: str
 
 
 class IdOut(BaseModel):
@@ -573,6 +590,75 @@ def retract_assertion(
         (user.user_id, assertion_id, case_id, Json({"reason": body.reason})),
     )
     return Response(status_code=204)
+
+
+@router.post("/assertions/{assertion_id}/supersede", response_model=SupersedeOut,
+             status_code=201)
+def supersede_assertion(
+    case_id: UUID, assertion_id: UUID, body: SupersedeBody,
+    user: CurrentUser = Depends(require("assertion.retract")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> SupersedeOut:
+    """Give a claim that never had an observation date one, by supersession
+    (docs/00 open question 11, settled 2026-10-02).
+
+    Claims accepted from Triage before Alpha 6 carry no date, and invariant 5
+    is not amended to let one be written onto them. This records a new claim
+    that carries the date and the analyst's rationale, cites the old one
+    (`supersedes_id`), and stamps the old one superseded: the old row's own
+    columns are never written, the old claim leaves the live graph in the
+    same transaction, and the new one takes its place at the same grade, on
+    the same entity or tie, citing the same material. Only a live claim with
+    no date is dated this way; a dated claim is corrected by a retraction and
+    a new claim, as before.
+
+    Gated on BOTH verbs it uses, `assertion.retract` (a claim leaves the live
+    graph) and `assertion.create` (a claim is recorded), against the
+    element's own labels (CR7), after the case gate, so the break-glass use
+    is counted once. The state refusals come after the gates, so a caller who
+    may not see the claim is told nothing about it.
+    """
+    subject = element_labels(conn, "assertion", assertion_id)
+    if subject is None or subject[0] != case_id:
+        raise Problem(404, "Not found", "no such assertion in this case")
+    for permission in ("assertion.retract", "assertion.create"):
+        authorize_object(conn, user, case_id=case_id, permission_key=permission,
+                         after_case_gate=True, classification=subject[1],
+                         compartments=subject[2])
+    # An offset is required, as `expires_at` on a grant requires one: a
+    # naive time would be read in the database's zone, and this is the
+    # instant First seen and Last seen are drawn from.
+    if body.observed_at.utcoffset() is None:
+        raise Problem(
+            400, "Invalid request",
+            "observed_at has no UTC offset. It is the moment the claim was "
+            "true, so it is not guessed: send an offset-aware timestamp such "
+            "as 2026-03-01T22:30:00Z.")
+    if body.observed_at > datetime.now(timezone.utc):
+        raise Problem(400, "Invalid request",
+                      "observed_at is in the future: a claim cannot have been "
+                      "observed later than now")
+    try:
+        # One transaction, so a claim is never replaced without its audit
+        # row, and never audited without having been replaced.
+        with conn.transaction():
+            new_id = GraphWriteService(conn).supersede_assertion(
+                assertion_id, case_id=case_id, observed_at=body.observed_at,
+                rationale=body.rationale, created_by=user.user_id)
+            conn.execute(
+                """INSERT INTO audit.event
+                       (actor_id, actor_kind, action, object_type, object_id,
+                        case_id, detail)
+                   VALUES (%s, 'USER', 'ASSERTION_SUPERSEDED', 'assertion',
+                           %s, %s, %s)""",
+                (user.user_id, assertion_id, case_id,
+                 Json({"superseded_by": str(new_id),
+                       "observed_at": body.observed_at.isoformat()})))
+    except ClaimNotDatable as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except GraphWriteError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return SupersedeOut(id=str(new_id), supersedes=str(assertion_id))
 
 
 # --- corrections and retirements ----------------------------------------

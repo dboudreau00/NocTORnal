@@ -10962,6 +10962,10 @@ function renderAssertions(box, all) {
     if (a.external_ref) bits.push('ref ' + visibleText(a.external_ref));
     if (a.retracted_at) bits.push('retracted ' + fmtTime(a.retracted_at));
     if (a.superseded_at) bits.push('superseded ' + fmtTime(a.superseded_at));
+    /* Which claim replaced this one, and which this one replaced
+       (migration 0131): the pair is readable from either card. */
+    if (a.superseded_by) bits.push('replaced by claim ' + shortId(a.superseded_by));
+    if (a.supersedes_id) bits.push('replaces claim ' + shortId(a.supersedes_id));
     const meta = el('div', 'assert-meta', bits.join(' · '));
     meta.title = 'author id ' + a.created_by;
     card.appendChild(meta);
@@ -10992,6 +10996,16 @@ function renderAssertions(box, all) {
         (x) => !x.retracted_at && !x.superseded_at && x.id !== a.id);
       btn.addEventListener('click', () => retractAssertion(a.id, others));
       actions.appendChild(btn);
+      /* Dating a claim that never had a date (docs/00 open question 11,
+         settled 2026-10-02): only where there is none, and by supersession,
+         never by writing the date onto the recorded claim. */
+      if (!a.observed_at) {
+        const dateBtn = el('button', 'btn small', 'Date this claim');
+        dateBtn.type = 'button';
+        dateBtn.title = dateClaimHelp();
+        dateBtn.addEventListener('click', () => openDateClaimForm(a, card));
+        actions.appendChild(dateBtn);
+      }
       card.appendChild(actions);
     }
     // Live claims like this one (F6.4). Outside .assert-actions, which
@@ -11087,6 +11101,109 @@ async function retractAssertion(assertionId, others) {
     await reloadAll();
     banner('Assertion retracted', words.done, 'info');
   } catch (err) { fail(err); }
+}
+
+/* --- Inspector: date a claim that never had a date -----------------------
+ *
+ * Docs/00 open question 11, settled by the owner 2026-10-02. Claims accepted
+ * from Triage before Alpha 6 carry no observation date, so First seen and
+ * Last seen ignore them. Writing a date onto a recorded claim would rewrite
+ * it, and invariant 5 is NOT amended: the date is given by SUPERSESSION. The
+ * analyst names the date and why; the server records a new claim that is the
+ * old one in every other respect, citing it, and stamps the old one
+ * superseded. The old claim is kept as it was recorded (Include retracted
+ * lists it). Offered only on a live claim with no date, and, like Retract,
+ * inside `.assert-actions`, which a read-only case turns off.
+ */
+
+/** The button's hover text. Pure. */
+function dateClaimHelp() {
+  return 'This claim has no observation date, so First seen and Last seen '
+    + 'ignore it. Dating it records a new claim with the date and your '
+    + 'reason, and marks this one superseded. Nothing is rewritten: this '
+    + 'claim stays on record as it was.';
+}
+
+/** What stops the form being sent, as a sentence, or null. `observed` is the
+ *  `datetime-local` value (read as UTC, like every observed-at field).
+ *  Pure, for test_ui_date_claim.py. */
+function dateClaimProblem(observed, rationale) {
+  const at = observedAtUtc(observed);
+  if (!at) return 'Give the date and time the claim was true, in UTC.';
+  if (new Date(at).getTime() > Date.now()) {
+    return 'A claim cannot have been observed later than now.';
+  }
+  if (!String(rationale || '').trim()) {
+    return 'Say why this date is the one. It is recorded as the reason on '
+      + 'the new claim.';
+  }
+  return null;
+}
+
+/** The request body. Only the date and the reason go: the new claim is the
+ *  old one in every other column, and nothing here can change that. Pure. */
+function dateClaimBody(observed, rationale) {
+  return { observed_at: observedAtUtc(observed),
+           rationale: String(rationale).trim() };
+}
+
+/** The banner after a claim is dated. Pure. */
+function dateClaimDoneWords() {
+  return 'The new claim carries the date and your reason. The old claim is '
+    + 'superseded, not changed: it stays on record, and Include retracted '
+    + 'lists it.';
+}
+
+/** Open the form on this claim's card. One form per card. */
+function openDateClaimForm(a, card) {
+  const open = card.querySelector('.date-claim');
+  if (open) {
+    open.querySelector('input').focus();
+    return;
+  }
+  const form = el('form', 'row-form date-claim');
+  form.noValidate = true;
+  const whenField = el('label', 'field');
+  const when = el('input');
+  when.type = 'datetime-local';
+  whenField.append(el('span', 'label', 'Observed at (UTC)'), when);
+  const whyField = el('label', 'field grow');
+  const why = el('input');
+  why.type = 'text';
+  why.autocomplete = 'off';
+  whyField.append(el('span', 'label', 'Why this date'), why);
+  const go = el('button', 'btn small', 'Record the date');
+  go.type = 'submit';
+  const cancel = el('button', 'btn ghost small', 'Cancel');
+  cancel.type = 'button';
+  const msg = el('p', 'msg bad');
+  msg.setAttribute('role', 'alert');
+  msg.hidden = true;
+  form.append(whenField, whyField, go, cancel, msg);
+  cancel.addEventListener('click', () => form.remove());
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setMsg(msg, '');
+    const problem = dateClaimProblem(when.value, why.value);
+    if (problem) {
+      setMsg(msg, problem);
+      return;
+    }
+    go.disabled = true;
+    try {
+      await api(cpath('/assertions/' + a.id + '/supersede'), {
+        method: 'POST', json: dateClaimBody(when.value, why.value),
+      });
+      invalidateAnalytics();
+      await reloadAll();
+      banner('Claim dated', dateClaimDoneWords(), 'info');
+    } catch (err) {
+      go.disabled = false;
+      setMsg(msg, refusalText(err, 'The claim could not be dated.'));
+    }
+  });
+  card.appendChild(form);
+  when.focus();
 }
 
 /* ── inspector: add a claim about the selected tie ─────────────────────
@@ -15250,8 +15367,18 @@ function paintCasePolicy(p) {
   if (p.dual_control_merge) {
     let said = 'Merges in this case need a second signature.';
     if (may && !p.relax_signers) {
-      said += ' Nobody else on this case can approve turning that off: name '
-        + 'a deputy first.';
+      /* F39 (2026-10-02): somebody else holds the permission but has not
+         held it for the window yet, so say when, not "name a deputy". */
+      if (p.relax_next_eligible) {
+        said += ' Nobody else on this case can approve turning that off yet: '
+          + 'the second person must have held case.update on the case for '
+          + countOf(p.relax_seasoning_days, 'day', 'days') + ', and the first '
+          + 'colleague who does is eligible from '
+          + fmtTime(p.relax_next_eligible) + '.';
+      } else {
+        said += ' Nobody else on this case can approve turning that off: '
+          + 'name a deputy first.';
+      }
     }
     text.textContent = said;
     btn.textContent = 'Stop requiring it';
@@ -15556,6 +15683,12 @@ function approvalRow(a) {
   }
 
   if (a.state === 'PENDING' && !dead) {
+    /* F39 (2026-10-02): a colleague who has not held case.update on the
+       case for the window yet is told the rule and the date before they
+       press Approve; Reject stays available, as everywhere. */
+    if (a.signer_block && !mine) {
+      card.appendChild(el('p', 'help', visibleText(a.signer_block.reason)));
+    }
     card.appendChild(approvalActions(a, title, asker, mine));
   }
 
@@ -15618,6 +15751,10 @@ function approvalActions(a, title, asker, mine) {
     for (const [label, approve] of [['Approve', true], ['Reject', false]]) {
       const b = el('button', 'btn ghost small' + write, label);
       b.type = 'button';
+      if (approve && a.signer_block) {
+        b.disabled = true;
+        b.title = visibleText(a.signer_block.reason);
+      }
       b.addEventListener('click', async () => {
         const note = window.prompt(
           label + ' this request?\n\n' + title + '\nRequested by ' + asker
@@ -32297,7 +32434,18 @@ function dualOperationCard(op, you) {
   facts.appendChild(fact('asks', dualRoleNames(op.asks)));
   facts.appendChild(fact('signs second', dualRoleNames(op.signs)));
   facts.appendChild(fact('a signature lasts', dualDuration(op.ttl_seconds)));
+  /* F39 (2026-10-02): the second person on a case's merge switch must have
+     held the permission on the case for a window the deployment sets. */
+  if (op.signer_seasoning) {
+    const s = op.signer_seasoning;
+    facts.appendChild(fact('second person must have held '
+      + visibleText(s.permission) + ' on the case for',
+      s.days ? countOf(s.days, 'day', 'days') : 'no minimum (the rule is off)'));
+  }
   card.appendChild(facts);
+  if (op.signer_seasoning && op.signer_seasoning.problem) {
+    card.appendChild(el('p', 'help', visibleText(op.signer_seasoning.problem)));
+  }
   if (!op.configurable) return card;
   /* Over the viewer's own cases only, and not said at all to someone who
      holds none (2026-09-24). */

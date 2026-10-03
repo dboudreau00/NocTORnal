@@ -43,6 +43,7 @@ from noctornal_api.approvals import (
     ApprovalService,
     case_requires_dual_control,
     policy_mode,
+    relax_seasoning_days,
 )
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -251,10 +252,15 @@ def list_approvals(
     names = _names(conn, rows)
     subjects = _merge_subjects(conn, user, case_id, rows)
     reached = _approvers_reached(conn, rows)
+    svc = ApprovalService(conn)
     for item, r in zip(out, rows, strict=True):
         item["requested_by_name"] = names.get(r.requested_by)
         item["decided_by_name"] = names.get(r.decided_by) if r.decided_by else None
         item["subjects"] = subjects.get(r.id)
+        # F39 (2026-10-02): what stops THIS viewer approving it yet, said
+        # before they try. None for every request the seasoning rule does
+        # not cover and for a viewer nothing stops.
+        item["signer_block"] = svc.signer_block_for(r, user.user_id)
         # ux08-triage:approval-reach-warning-dropped (2026-09-23). Reach
         # is not stored on the request, but the notifications it raised
         # are, so a listing can say "nobody was told" for as long as that
@@ -600,6 +606,12 @@ class PolicyOut(BaseModel):
     dual_control_merge_effective: bool = False
     dual_control_merge_epoch: int = 0
     relax_signers: int = 0
+    #: F39 (2026-10-02). The window a second person must have held
+    #: `case.update` on the case for, in days (0: the rule is off), and,
+    #: while nobody counted in `relax_signers` yet qualifies, the instant the
+    #: first colleague does. None when there is no such colleague.
+    relax_seasoning_days: int = 0
+    relax_next_eligible: datetime | None = None
 
 
 _DISCLOSURE = frozenset({"NONE", "PRESENCE", "COUNT"})
@@ -609,23 +621,43 @@ policy_router = APIRouter(prefix="/cases/{case_id}/policy", tags=["approvals"])
 
 
 def _relax_signers(conn: psycopg.Connection, case_id: UUID,
-                   user_id: UUID) -> int:
-    """Active accounts other than the caller, assigned to the case under a
+                   user_id: UUID, *, days: int) -> tuple[int, datetime | None]:
+    """The colleagues who could approve turning the switch off now, and
+    when the first of the others will be able to.
+
+    Active accounts other than the caller, assigned to the case under a
     role carrying the relax operation's signer permission, whose clearance
     and compartments dominate the case: the people who could read the
-    request and decide it."""
-    return conn.execute(
-        """SELECT count(DISTINCT u.id)
-             FROM iam.case_assignment ca
-             JOIN iam.app_user u ON u.id = ca.user_id
-             JOIN iam.role_permission rp ON rp.role_key = ca.role_key
-                                        AND rp.permission_key = %s
-             JOIN core."case" c ON c.id = ca.case_id
-            WHERE ca.case_id = %s AND u.is_active AND u.id <> %s
-              AND (ca.expires_at IS NULL OR ca.expires_at > now())
-              AND c.classification <= u.tlp_clearance
-              AND c.compartments <@ u.compartments""",
-        (OPERATIONS[RELAX].signer_permission, case_id, user_id)).fetchone()[0]
+    request and decide it. Since F39 (2026-10-02) only those whose
+    assignment is `days` days old count (the database's clock, the same
+    comparison `assignment_block` makes); with `days` 0 everyone does. The
+    second figure is the soonest a colleague who does not count yet will:
+    None when somebody counts already, or when nobody else holds the
+    permission."""
+    row = conn.execute(
+        """SELECT count(DISTINCT u.id) FILTER (WHERE seasoned),
+                  min(eligible_from) FILTER (WHERE NOT seasoned)
+             FROM (SELECT u.id,
+                          ca.granted_at + make_interval(hours => %(days)s::int * 24)
+                              AS eligible_from,
+                          (%(days)s::int = 0
+                           OR ca.granted_at
+                              + make_interval(hours => %(days)s::int * 24)
+                              <= now()) AS seasoned
+                     FROM iam.case_assignment ca
+                     JOIN iam.app_user u ON u.id = ca.user_id
+                     JOIN iam.role_permission rp ON rp.role_key = ca.role_key
+                                                AND rp.permission_key = %(perm)s
+                     JOIN core."case" c ON c.id = ca.case_id
+                    WHERE ca.case_id = %(case)s AND u.is_active
+                      AND u.id <> %(me)s
+                      AND (ca.expires_at IS NULL OR ca.expires_at > now())
+                      AND c.classification <= u.tlp_clearance
+                      AND c.compartments <@ u.compartments) u""",
+        {"days": days, "perm": OPERATIONS[RELAX].signer_permission,
+         "case": case_id, "me": user_id}).fetchone()
+    counting = int(row[0])
+    return counting, (None if counting else row[1])
 
 
 def _policy_out(conn: psycopg.Connection, case_id: UUID,
@@ -636,13 +668,16 @@ def _policy_out(conn: psycopg.Connection, case_id: UUID,
         (case_id,)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "case does not exist")
+    days = relax_seasoning_days()
+    signers, next_eligible = _relax_signers(conn, case_id, user_id, days=days)
     return PolicyOut(
         dual_control_merge=bool(row[0]), withheld_disclosure=row[1],
         dual_control_merge_mode=policy_mode(conn, "node.merge"),
         dual_control_merge_effective=case_requires_dual_control(
             conn, case_id, "node.merge"),
         dual_control_merge_epoch=int(row[2]),
-        relax_signers=_relax_signers(conn, case_id, user_id))
+        relax_signers=signers, relax_seasoning_days=days,
+        relax_next_eligible=next_eligible)
 
 
 @policy_router.get("", response_model=PolicyOut)
@@ -672,6 +707,10 @@ def set_policy(
     `case.policy.relax` request raised against the switch as it stands,
     consumed here in the same transaction as the change. The database
     refuses the change without one (migration case_merge_relax_two_people).
+    Since F39 (2026-10-02) that second person must have held `case.update`
+    on the case for the deployment's window (seven days unless declared),
+    which the decide route checks when they approve and this route checks
+    again, at the time they approved, before the approval is spent.
     Turning it ON stays one signature: a tightening that needs a second
     person is one nobody makes. Under a deployment that requires a second
     signature on every merge, a case cannot turn it off at all.
@@ -724,6 +763,13 @@ def set_policy(
         if approval is None or approval.case_id != case_id:
             raise Problem(404, "Not found",
                           "no such approval request in this case")
+        # F39 (2026-10-02): was the second person seasoned when they
+        # signed. Before the transaction, so a refusal recorded out of band
+        # is not rolled back with it (approvals.py, the out-of-band rule).
+        try:
+            svc.refuse_unseasoned_spend(approval)
+        except ApprovalError as exc:
+            raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
     # One literal statement per setting. docs/05: "Parameterised queries
     # only; no string-built SQL anywhere" -- and a column name interpolated

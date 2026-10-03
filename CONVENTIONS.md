@@ -49,7 +49,11 @@ Violating any of these is a bug even if tests pass.
    drops the row. There is nothing to supersede it with, a retraction
    withdraws a claim rather than replacing one. A correction is a new
    assertion. `superseded_at`/`superseded_by` exist (0007) and the read
-   side honours them, but no code path writes them yet.
+   side honours them. One code path writes them (2026-10-02): a claim
+   accepted before it carried an observation date is dated by recording a
+   new claim that cites it (`supersedes_id`, 0131) and stamping the old
+   one once, from NULL (`supersede_assertion`). The old claim's own columns
+   are never written, so the invariant is not amended.
 
 6. **The audit log is append-only.** No code, migration or admin tool
    gains `UPDATE` or `DELETE` on `audit.event`.

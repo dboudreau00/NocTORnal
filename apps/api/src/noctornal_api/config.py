@@ -832,6 +832,16 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
             "from this server's own address with no egress proxy; it exists for "
             "development only.")
 
+    # The second person on a case's merge switch (F39, 2026-10-02), through
+    # its one reader, so the decide route and this cannot disagree about what
+    # a usable value is. A malformed value is held to the default at runtime,
+    # never to 0; this makes the typo visible at the boot. Not quoted.
+    from noctornal_api.approvals import relax_seasoning
+
+    _window, relax_problem = relax_seasoning(env)
+    if relax_problem:
+        problems.append(relax_problem)
+
     # Row-level security (S1, 2026-09-25). Who holds the system role's
     # DSN, which bypasses row security. Named, never quoted.
     problems.extend(_row_security_problems(env))

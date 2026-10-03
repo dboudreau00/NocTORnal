@@ -45,10 +45,12 @@ UNDATED_FOOTER = (
     "Each claim above was accepted from Triage before Alpha 6 and carries no "
     "observation date, so First seen and Last seen ignore it. The date shown "
     "is its document's posting time, or its capture time when the post had "
-    "none. Nothing here writes it: an analyst who wants it counted adds a "
-    "claim to the entity or tie with Observed at set to that date (the "
-    "inspector's Add claim form); the undated claim stays as it was "
-    "recorded.")
+    "none. Nothing here writes it, and nothing writes a date onto a claim "
+    "that was recorded without one. An analyst who wants a claim counted "
+    "opens it in the inspector and chooses Date this claim, giving the date "
+    "and the reason: that records a new claim carrying both and citing this "
+    "one, and marks this one superseded. The old claim stays on record as it "
+    "was recorded, and leaves this list.")
 
 UNDERLABELLED_FOOTER = (
     "Each claim is read by everyone who can read its entity. Retract it from "
