@@ -3170,6 +3170,18 @@ def _telegram_collection(conn: psycopg.Connection) -> Check:
     return Check("telegram_collection", ok, evidence, "" if ok else action)
 
 
+# The deployment-wide sweep of collected documents (docs/17 F30, 2026-10-02).
+# Not blocking and with no CONSEQUENCES entry: a late sweep is a duty
+# overdue, not a decision that has to be settled before material arrives, and
+# the sweep is a script an operator runs, so there is no console target. The
+# verdict, counts only, is `retention_sweep.readiness_verdict`'s.
+def _retention_sweep_current(conn: psycopg.Connection) -> Check:
+    from noctornal_api import retention_sweep
+
+    ok, evidence, action = retention_sweep.readiness_verdict(conn)
+    return Check("retention_sweep_current", ok, evidence, "" if ok else action)
+
+
 # ---------------------------------------------------------------------------
 # Prohibited-content screening (F13, 2026-09-24). Not blocking: holding
 # hash lists may itself be unlawful, so no list loaded must pass.
@@ -3471,6 +3483,10 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     ("retention_rules_confirmed", _retention_rules_confirmed,
      "the retention table could not be read; run alembic upgrade head and "
      "then confirm each rule at POST /retention/rules/{category}"),
+    # F30, 2026-10-02. Beside its sibling: the rules say when a document
+    # expires, this says whether anything destroyed the ones that did.
+    ("retention_sweep_current", _retention_sweep_current,
+     "the collected documents could not be read; run alembic upgrade head"),
     ("security_officer_present", _security_officer_present,
      "the role table could not be read; once it can, grant SECURITY_OFFICER "
      "to an active account so break-glass has a reviewer"),

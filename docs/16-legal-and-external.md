@@ -253,8 +253,10 @@ is required, which is stricter than `comms._NEEDS_AUTHORITY`, where a
 PERSONA_PARTY conversation needs none. A group chat's messages carry
 thousands of uninvolved people's words and typed account ids: they are
 collected documents under the CHAT_EXPORT retention rule, outside case
-minimisation, and no route or script sweeps collected documents yet
-(docs/17). Adding a chat by its id reads up to 500 entries of the persona's
+minimisation. `scripts/retention_sweep.py` sweeps them once past their
+clock, run by an operator under a declared authority and never by the cron
+loop: who runs it, and under which authority, is for counsel and the owner
+(docs/17 F30). Adding a chat by its id reads up to 500 entries of the persona's
 own conversation list to find it; everything but the matched chat is
 dropped in memory and never logged or stored. Media is never downloaded
 (L1).
