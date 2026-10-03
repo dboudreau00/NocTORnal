@@ -30,6 +30,16 @@ shots/
 # gitignored, which means nothing stops it being COPYed into an image.
 infra/production/secrets.env
 
+# S2's three files (the egress proxy's keys and DSN, the API's egress client
+# keys, the egress role's initdb password), kept beside the compose file
+# and gitignored for the same reason. The analysis worker's image is this
+# image (compose.yml), so without these lines whichever of them the operator
+# keeps there would be baked into it, and the worker's "holds no secret"
+# would rest on the file's mode alone: a 0644 file is readable by every
+# child (F42 verify 5, 2026-10-03). `*.env` does not match the tracked
+# `*.env.example` templates.
+infra/production/*.env
+
 # MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
 # this directory into the containers that need it, so nothing is lost by
 # excluding it -- and without this line the private key of the production

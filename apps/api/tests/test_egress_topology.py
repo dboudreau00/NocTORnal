@@ -270,7 +270,11 @@ def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(d
     assert members["exits"] == {"egress-proxy"}
     assert members["models"] == {"egress-proxy"}
     assert members["edge"] == {"caddy", "egress-proxy"}
-    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy"}
+    # The analysis worker joins no network at all (docs/17 F42):
+    # test_analysis_worker_compose.py holds it there.
+    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy",
+                                                    "analysis-worker"}
+    assert not _nets(doc["services"]["analysis-worker"])
 
 
 def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):

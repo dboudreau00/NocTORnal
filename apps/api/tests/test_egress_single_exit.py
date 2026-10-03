@@ -54,6 +54,11 @@ ALLOWED = {
                         "SOCKS5 proxy from route.telethon_proxy() and a connection "
                         "class that refuses any other proxy, a local address or a "
                         "destination outside Telegram's networks (docs/20 section 8.4)",
+    # docs/17 F42 (2026-10-02).
+    "analysis_runner.py": "the client of the isolated analysis worker: a Unix "
+                          "socket on a volume, never a network address",
+    "analysis_worker.py": "the isolated analysis worker's Unix socket listener; "
+                          "the worker has no network at all",
 }
 
 #: Modules part way through their conversion onto the one client, with the
