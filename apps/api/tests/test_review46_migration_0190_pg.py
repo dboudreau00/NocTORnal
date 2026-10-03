@@ -72,7 +72,7 @@ def _constraint(conn):
 
 def test_the_revision_chains_after_the_reserved_head_and_names_one_concern():
     module = _migration(None)
-    assert module.revision == "0148" and module.down_revision == "0131"
+    assert module.revision == "0148" and module.down_revision == "0147"
     assert module.UPGRADE_SQL.count("ADD CONSTRAINT") == 1
 
 
