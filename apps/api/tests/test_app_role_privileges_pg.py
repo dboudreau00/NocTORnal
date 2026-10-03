@@ -161,11 +161,9 @@ def _read_only(table: str) -> bool:
     return table.split(".", 1)[0] in schemas or table in tables
 
 
-def _column_selects() -> dict[str, tuple[str, ...]]:
-    """Tables a later migration made readable by named columns only
-    (`RUNTIME_COLUMN_SELECTS`; 0143 is the first, iam.app_user without
-    its credential columns, rls-6 2026-10-03). Table-level SELECT is
-    false there by design, so reachability is any column's SELECT."""
+def _later_migration_dicts(attr: str) -> dict[str, tuple[str, ...]]:
+    """One dict, `attr`, read from every migration after 0060 the way
+    GUARDED_TABLES is."""
     out: dict[str, tuple[str, ...]] = {}
     for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
         if path.name <= MIGRATION.name:
@@ -173,8 +171,24 @@ def _column_selects() -> dict[str, tuple[str, ...]]:
         spec = importlib.util.spec_from_file_location(f"m{path.stem[:4]}", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        out.update(getattr(module, "RUNTIME_COLUMN_SELECTS", {}))
+        out.update(getattr(module, attr, {}))
     return out
+
+
+def _column_selects() -> dict[str, tuple[str, ...]]:
+    """Tables a later migration made readable by named columns only
+    (`RUNTIME_COLUMN_SELECTS`; 0143 is the first, iam.app_user without
+    its credential columns, rls-6 2026-10-03). Table-level SELECT is
+    false there by design, so reachability is any column's SELECT."""
+    return _later_migration_dicts("RUNTIME_COLUMN_SELECTS")
+
+
+def _runtime_column_updates() -> dict[str, tuple[str, ...]]:
+    """The tables whose UPDATE a later migration narrowed to named columns
+    for the runtime role, with those columns: 0109's two on the IAM plane,
+    and 0155's ingest records, credentials and authorisations (F51,
+    2026-10-02)."""
+    return _later_migration_dicts("RUNTIME_COLUMN_UPDATES")
 
 
 def _scalar(conn, sql, params=None):
@@ -426,6 +440,7 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
     ledgers = set(m.LEDGERS)
     guarded = _guarded_after_0060()
     column_selects = _column_selects()
+    by_column = _runtime_column_updates()
     unreachable = {}
     for table in tables:
         got = _table_privileges(conn, table)
@@ -435,12 +450,42 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
                 (APP_DB_ROLE, table))
         wanted = ("SELECT", "INSERT") if table in ledgers else guarded.get(
             table, ("SELECT", "INSERT", "UPDATE", "DELETE"))
+        if table in by_column:  # 0155: UPDATE by column, checked below
+            wanted = tuple(p for p in wanted if p != "UPDATE")
         if _read_only(table):  # 0109, the IAM plane
             wanted = ("SELECT",)
         missing = [p for p in wanted if not got[p]]
         if missing:
             unreachable[table] = missing
     assert not unreachable, unreachable
+
+
+def test_a_column_confined_table_is_updatable_in_exactly_its_columns(conn):
+    """F51, 2026-10-02: 0155 took table UPDATE on the ingest records, the
+    victims' credentials and the reveal authorisations from the runtime
+    role and gave back only the columns a request writes, because a row
+    policy says which rows and not which columns. No table UPDATE, every
+    declared column, and no other column, on each such table, 0109's two
+    included."""
+    confined = _runtime_column_updates()
+    assert {"ingest.record", "ingest.victim_credential",
+            "ingest.pii_authorisation"} <= set(confined), confined
+    wrong = {}
+    for table, columns in confined.items():
+        if _table_privileges(conn, table)["UPDATE"]:
+            wrong[table] = "table-level UPDATE"
+            continue
+        names = [r[0] for r in conn.execute(
+            """SELECT attname FROM pg_attribute
+                WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped""",
+            (table,)).fetchall()]
+        held = {c for c in names if _scalar(
+            conn, "SELECT has_column_privilege(%s, %s, %s, 'UPDATE')",
+            (APP_DB_ROLE, table, c))}
+        if held != set(columns):
+            wrong[table] = {"extra": sorted(held - set(columns)),
+                            "missing": sorted(set(columns) - held)}
+    assert not wrong, wrong
 
 
 def test_the_version_table_is_readable_and_not_writable(conn):

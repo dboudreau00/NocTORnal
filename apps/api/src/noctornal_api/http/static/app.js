@@ -20329,10 +20329,16 @@ function ingestRow(r) {
           method: 'POST', json: { category: c, reason: why } });
         ING.flash = { id: r.id, text: 'Category corrected to ' + c
           + '. The classifier’s ' + r.category + ' is kept on the row. '
-          + (out.retain_until_kept ? 'The expiry stays '
-            + fmtDate(out.retain_until) + ': a correction never brings it '
-            + 'forward.' : 'The expiry is now ' + fmtDate(out.retain_until)
-            + ', the new category’s clock from arrival.') };
+          + (out.retain_until === null
+            /* A record with no expiry keeps none: a date on it would be a
+               destruction decision, retention's (g31 verification 2,
+               2026-10-03). */
+            ? 'This record has no expiry, and a correction does not give '
+              + 'it one.'
+            : out.retain_until_kept ? 'The expiry stays '
+              + fmtDate(out.retain_until) + ': a correction never brings it '
+              + 'forward.' : 'The expiry is now ' + fmtDate(out.retain_until)
+              + ', the new category’s clock from arrival.') };
         reloadQueues(r);
       },
     }));

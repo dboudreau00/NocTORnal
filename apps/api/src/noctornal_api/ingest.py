@@ -68,6 +68,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.retention import UNRULED_RETAIN_DAYS
 from noctornal_api.security import envelope
 from noctornal_api.wording import agree, count_of
@@ -131,6 +132,16 @@ class AuthorisationRequired(IngestError):
     """Raised when a victim-PII lookup is attempted without a live, logged
     authorisation. Deliberately its own type: the caller has to handle it
     differently from a malformed request."""
+
+
+class _Uncounted(Exception):
+    """A reveal's count changed no row (F51, 2026-10-02): `what` names the
+    row it missed. Private: `reveal_credential` turns it into the refusal
+    the caller already handles, after the transaction has rolled back."""
+
+    def __init__(self, what: str):
+        super().__init__(what)
+        self.what = what
 
 
 def _pepper() -> bytes:
@@ -545,6 +556,16 @@ class IngestService:
         self._clearance = clearance
         self._comp = list(compartments)
 
+    def _on(self, conn: psycopg.Connection) -> IngestService:
+        """This service on `conn`: the same storage and labels, and the
+        same class, so a subclass's overrides still run. Itself when `conn`
+        is already its connection (the owner in development and the suite,
+        where `system_connection` hands the caller's connection back)."""
+        if conn is self._c:
+            return self
+        return type(self)(conn, self._storage, clearance=self._clearance,
+                          compartments=frozenset(self._comp))
+
     # -- the labels a caller reads with ------------------------------------
 
     def _ceiling(self, what: str) -> tuple[str, list[str]]:
@@ -908,7 +929,24 @@ class IngestService:
         batch's raw object, and a repair-and-replay path exists. This said
         "the raw fragment", which the table has not held since the
         redaction landed (README screenshot set review, 2026-09-23).
+
+        On a system connection (F51, 2026-10-02): the parse dedupes against
+        every record in the deployment, writes each record and dead letter
+        at the feed key's label, which may sit above the operator who asked
+        for the parse, and scores against every watch. As the request role
+        the dedupe would miss a record above the operator, and the INSERT
+        of a record above them would be refused, which `_store_record`
+        would have filed as a dead letter: a parse that turned good records
+        into failures because of who pressed the button. The route's gates
+        run on the request connection first.
         """
+        with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
+            return self._on(sconn)._parse_batch(
+                batch_id, raw=raw, case_id=case_id, parser_version=parser_version)
+
+    def _parse_batch(self, batch_id: UUID, *, raw: bytes, case_id: UUID | None,
+                     parser_version: str) -> ParseResult:
+        """`parse_batch`, on the INGEST connection."""
         key = self._c.execute(
             """SELECT k.id, k.declared_category, k.classification_ceiling,
                       k.forced_compartment
@@ -1246,6 +1284,18 @@ class IngestService:
             raise RepairInvalid(
                 "the repair must be one JSON object, the shape a record has. "
                 "Nothing was written.")
+        # On a system connection (F51, 2026-10-02), as a parse is: the
+        # record it makes is deduped against every record and written at the
+        # feed key's label, and the dead letter is locked and marked, which
+        # the request role, reading dead letters only, cannot do. The route
+        # has gated the dead letter and the target case already.
+        with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
+            return self._on(sconn)._replay(dead_letter_id, actor_id=actor_id,
+                                           payload=payload, case_id=case_id)
+
+    def _replay(self, dead_letter_id: UUID, *, actor_id: UUID, payload: dict,
+                case_id: UUID | None) -> UUID:
+        """`replay` from the lock on, on the INGEST connection."""
         # One transaction with the row locked, so two people pressing
         # Replay on the same dead letter make one record, not two. The
         # console offers the action since 2026-09-23 (ux12-feeds:dead-
@@ -1435,18 +1485,41 @@ class IngestService:
                 "this credential's value was not retained; only its metadata "
                 "was ingested")
         value = envelope.decrypt(bytes(row[0]), key_id=row[1])
-        self._c.execute(
-            """UPDATE ingest.victim_credential
-                  SET reveal_count = reveal_count + 1, last_revealed_at = now()
-                WHERE id = %s""", (credential_id,))
-        self._c.execute(
-            "UPDATE ingest.pii_authorisation SET query_count = query_count + 1 "
-            "WHERE id = %s", (authorisation,))
-        self._audit(case_id, actor_id, "PII_REVEALED", {
-            "credential_id": str(credential_id),
-            "authorisation_id": str(authorisation),
-            "reason": reason.strip(),
-        })
+        # Both counts and the audit row commit together or not at all, and a
+        # count that changed no row refuses the reveal (F51, 2026-10-02).
+        # Under row-level security an UPDATE of a row the caller can no
+        # longer reach changes nothing and says nothing: a credential raised
+        # above them mid-request, or an authorisation revoked or lapsed
+        # between the check above and its count (0154 counts only a live
+        # one). A value whose reveal was not counted is never returned.
+        try:
+            with self._c.transaction():
+                if self._c.execute(
+                        """UPDATE ingest.victim_credential
+                              SET reveal_count = reveal_count + 1,
+                                  last_revealed_at = now()
+                            WHERE id = %s""", (credential_id,)).rowcount != 1:
+                    raise _Uncounted("credential")
+                if self._c.execute(
+                        "UPDATE ingest.pii_authorisation "
+                        "SET query_count = query_count + 1 WHERE id = %s",
+                        (authorisation,)).rowcount != 1:
+                    raise _Uncounted("authorisation")
+                self._audit(case_id, actor_id, "PII_REVEALED", {
+                    "credential_id": str(credential_id),
+                    "authorisation_id": str(authorisation),
+                    "reason": reason.strip(),
+                })
+        except _Uncounted as exc:
+            if exc.what == "credential":
+                raise IngestError("no such credential") from None
+            self._audit(case_id, actor_id, "PII_REVEAL_REFUSED",
+                        {"credential_id": str(credential_id),
+                         "reason": "the authorisation lapsed before the reveal "
+                                   "was counted"})
+            raise AuthorisationRequired(
+                "the authorisation for this case lapsed or was revoked before "
+                "the reveal was counted. Nothing was revealed.") from None
         return value
 
     def search_by_fingerprint(self, value: str, *, actor_id: UUID,
@@ -1474,16 +1547,24 @@ class IngestService:
         # the fact is not the same as not asking: the count, the timing and
         # the audit event were all computed over the whole corpus, so the
         # disclosure had already happened by the time the filter ran.
-        rows = self._c.execute(
-            """SELECT vc.id, vc.kind, vc.service_domain, r.category,
-                      r.created_at, r.case_id
-                 FROM ingest.victim_credential vc
-                 JOIN ingest.record r ON r.id = vc.record_id
-                WHERE vc.value_fingerprint = %s AND r.purged_at IS NULL
-                  AND r.classification <= %s::core.tlp
-                  AND r.compartments <@ %s
-                ORDER BY r.created_at DESC LIMIT 100""",
-            (fingerprint, clearance, compartments)).fetchall()
+        #
+        # On a system connection (F51, 2026-10-02): the correlation answers
+        # across the corpus at the caller's labels, quarantine included, and
+        # the route narrows it to the caller's cases and quarantine as it
+        # always has. As the request role a quarantined record would drop
+        # out for every caller but the operator, and the audited hit count
+        # would shrink with it.
+        with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
+            rows = sconn.execute(
+                """SELECT vc.id, vc.kind, vc.service_domain, r.category,
+                          r.created_at, r.case_id
+                     FROM ingest.victim_credential vc
+                     JOIN ingest.record r ON r.id = vc.record_id
+                    WHERE vc.value_fingerprint = %s AND r.purged_at IS NULL
+                      AND r.classification <= %s::core.tlp
+                      AND r.compartments <@ %s
+                    ORDER BY r.created_at DESC LIMIT 100""",
+                (fingerprint, clearance, compartments)).fetchall()
         self._audit(case_id, actor_id, "PII_CORRELATED",
                     {"hits": len(rows)})
         return [{"id": str(r[0]), "kind": r[1], "service_domain": r[2],
@@ -1500,8 +1581,11 @@ class IngestService:
         generic combo list should sink silently to the bottom. Volume is
         the enemy, and a queue nobody can prioritise is a queue nobody
         reads.
+
+        On the INGEST connection, as `score_records` (F51, 2026-10-02).
         """
-        return self._score(record_id, {})[0]
+        with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
+            return self._on(sconn)._score(record_id, {})[0]
 
     def _watches_for(self, case_id: UUID | None, cache: dict) -> list:
         """The watch list a record in `case_id` scores against, read once
@@ -1529,7 +1613,6 @@ class IngestService:
             # operator is not on, and under row-level security the request
             # role would score it against the operator's cases alone and
             # store that lower score as the record's.
-            from noctornal_api.db import SystemPurpose, system_connection
             with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
                 cache[case_id] = sconn.execute(
                     """SELECT w.id, w.name, w.case_id, s.selector
@@ -1610,10 +1693,24 @@ class IngestService:
         analyst pressed Rescore on it, so "a record containing a watched
         selector should surface in seconds" (docs/12) held only for records
         somebody had already found.
+
+        On a system connection (F51, 2026-10-02). A pass reads and writes
+        each record whatever its caller may read (a parse scores records at
+        the feed key's label, above the operator), scores against every
+        watch, and tells the case's owner about a hit in a case the caller
+        may not be on: as the request role a record above the caller would
+        keep its old score with nothing said, and an ingest operator off the
+        case would raise no FEED_SELECTOR_HIT at all. Every caller has
+        gated the records it names on the request connection first.
         """
         ids = [UUID(str(r)) for r in record_ids]
         if not ids:
             return {"scored": 0, "changed": 0, "newly_hit": 0}
+        with system_connection(SystemPurpose.INGEST, reuse=self._c) as sconn:
+            return self._on(sconn)._score_records(ids, actor_id=actor_id)
+
+    def _score_records(self, ids: list[UUID], *, actor_id: UUID | None) -> dict:
+        """`score_records`, on the INGEST connection."""
         before = {
             r[0]: (float(r[1]), int((r[2] or {}).get("watched_selector_hits")
                                     or 0))
@@ -1654,6 +1751,14 @@ class IngestService:
         A failure here is logged and swallowed: the score is written and
         the record is at the top of the queue, and a notification that
         could not be raised must not undo that or fail the parse.
+
+        It runs only from `_score_records`, on the INGEST connection that
+        `score_records` opens (F51, 2026-10-02), and that connection is
+        what lets it work for a scorer who is not on the case: row security
+        does not bind it, so the record and the case row are both read
+        whoever pressed the button. On the scorer's own connection the
+        record and the case would both be hidden from an ingest operator
+        off the case, and the owner would never be told.
         """
         from noctornal_api.notifications import NotificationService
 
@@ -1833,7 +1938,10 @@ class IngestService:
         - the expiry is the NEW category's clock counted from arrival, and
           a correction never brings it FORWARD. Shortening a retention
           period is a destruction decision, which belongs to retention and
-          purge where a legal hold is checked, not to a relabel.
+          purge where a legal hold is checked, not to a relabel. A record
+          with NO expiry (NULL, which retention reads as never due) keeps
+          none: giving it a date is the same decision (g31 verification 2,
+          2026-10-03).
         """
         category = (category or "").strip().upper()
         if category not in CATEGORIES:
@@ -1856,25 +1964,40 @@ class IngestService:
             "SELECT retain_days FROM core.retention_rule WHERE category = %s",
             (category,)).fetchone()
         by_rule = created_at + timedelta(days=rule[0] if rule else 365)
-        until = by_rule if retain_until is None else max(retain_until, by_rule)
-        self._c.execute(
+        # A correction that changed no row is refused, never audited as made
+        # (F51, 2026-10-02): under row-level security a record raised above
+        # the caller since `_record_row` read it is one this UPDATE silently
+        # misses. The expiry is the greater of the STORED one and the rule's,
+        # decided in the statement (g31 verification 2, 2026-10-03): a
+        # concurrent correction may have extended it since `_record_row`
+        # read it, and 0155's guard judges a write against the current row,
+        # so a value computed from the earlier read raised a raw 42501 the
+        # API answers with a 500. NULL stays NULL (greatest() would skip it
+        # and hand the record a date).
+        written = self._c.execute(
             """UPDATE ingest.record
                   SET category = %s, category_source = 'ANALYST',
-                      category_confidence = 1, retain_until = %s
-                WHERE id = %s""", (category, until, record_id))
+                      category_confidence = 1,
+                      retain_until = CASE WHEN retain_until IS NULL THEN NULL
+                                          ELSE greatest(retain_until, %s) END
+                WHERE id = %s RETURNING retain_until""",
+            (category, by_rule, record_id))
+        if written.rowcount != 1:
+            raise IngestError("no such record")
+        until = written.fetchone()[0]
         self._audit(case_id, actor_id, "INGEST_CATEGORY_CORRECTED", {
             "from": {"category": was, "confidence": float(confidence),
                      "source": source},
             "to": category, "reason": reason,
             "retain_until": {
                 "was": retain_until.isoformat() if retain_until else None,
-                "now": until.isoformat()}},
+                "now": until.isoformat() if until else None}},
             object_id=record_id)
         self.score_records([record_id], actor_id=actor_id)
         return {"record_id": str(record_id), "category": category,
                 "previous": {"category": was, "confidence": float(confidence),
                              "source": source},
-                "retain_until": until.isoformat(),
+                "retain_until": until.isoformat() if until else None,
                 "retain_until_kept": until == retain_until}
 
     # -- internals ---------------------------------------------------------

@@ -32,6 +32,11 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
    0109, then the two later revisions that take columns back from it
    (0143: the credential columns of iam.app_user; 0144: the step-up column
    of iam.session) when the database is at or past them.
+   Then 0155's column grants on the ingest records, credentials and
+   authorisations when it is at or past 0155 (`grant`). 0108's replay hands
+   both roles table UPDATE on every table, so without the 0155 step a role
+   created after that revision ran would get back the columns it took away
+   (F51, 2026-10-02).
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -106,18 +111,9 @@ def _at_or_past(conn, revision: str) -> bool:
     return bool(row and row[0] >= revision)
 
 
-def ensure(conn) -> int:
-    superuser = conn.execute(
-        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]
-    if not superuser:
-        print("The connected role is not a superuser, so it cannot create a role "
-              "with BYPASSRLS. Ask one to run:")
-        for statement in create_statements():
-            print(f"  {statement}")
-        print("then run this command again.")
-        return 1
-    for statement in create_statements():
-        conn.execute(statement)
+def grant(conn) -> None:
+    """Step 3: replay the migrations' runtime grants on this database, in
+    chain order, each only once the database has reached it."""
     grants = _migration("0108")
     conn.execute(grants.grants_sql(APP_ROLE))
     conn.execute(grants.grants_sql(WORKER_ROLE))
@@ -138,6 +134,24 @@ def ensure(conn) -> int:
     for revision in ("0143", "0144"):
         if _at_or_past(conn, revision):
             conn.execute(_migration(revision).PRIVILEGES_SQL)
+    # 0155's GRANTS_SQL only: its guards are created once, by the migration.
+    if _at_or_past(conn, "0155"):
+        conn.execute(_migration("0155").GRANTS_SQL)
+
+
+def ensure(conn) -> int:
+    superuser = conn.execute(
+        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]
+    if not superuser:
+        print("The connected role is not a superuser, so it cannot create a role "
+              "with BYPASSRLS. Ask one to run:")
+        for statement in create_statements():
+            print(f"  {statement}")
+        print("then run this command again.")
+        return 1
+    for statement in create_statements():
+        conn.execute(statement)
+    grant(conn)
     print(f"{APP_ROLE} and {WORKER_ROLE} exist and are granted on this database.")
     print(f"NOCTORNAL_APP_DB_ROLE={APP_ROLE}")
     print(f"NOCTORNAL_WORKER_DB_ROLE={WORKER_ROLE}")
