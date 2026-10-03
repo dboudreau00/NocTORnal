@@ -23,7 +23,14 @@ from fastapi import APIRouter, Depends, Query
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
-from noctornal_api.http.deps import CurrentUser, current_user, get_conn, require_global
+from noctornal_api.db import SystemPurpose
+from noctornal_api.http.deps import (
+    CurrentUser,
+    current_user,
+    get_conn,
+    require_global,
+    system_conn,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.notifications import (
@@ -295,6 +302,11 @@ class DrainOut(BaseModel):
 def dispatch(
     user: CurrentUser = Depends(require_global("integration.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The drain the cron runs, on the same system connection (F51,
+    # 2026-10-02): it sends every recipient's due rows, withdraws, revokes
+    # and escalates, and as the administrator's request role it would see
+    # only the administrator's own notifications and send nothing else.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY)),
 ) -> DrainOut:
     """Drain the outbox once.
 
@@ -314,7 +326,7 @@ def dispatch(
     caller and the counters. The cron drain writes nothing, as before.
     """
     from noctornal_api.transports import dispatch_due
-    counters = dispatch_due(conn)
+    counters = dispatch_due(sconn)
     _audit(conn, user.user_id, "NOTIFY_DRAIN_RUN", "notify_outbox", None, counters)
     return DrainOut(**counters)
 
@@ -433,7 +445,10 @@ def deliveries(
     before: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     _: CurrentUser = Depends(require_global("integration.manage")),
-    conn: psycopg.Connection = Depends(get_conn),
+    # The ledger spans every recipient (F51, 2026-10-02): as the request
+    # role it would list the administrator's own deliveries and nothing
+    # else.
+    conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> dict:
     """Read the delivery ledger back, newest first, a page at a time.
 
@@ -536,7 +551,8 @@ def deliveries(
 def deliveries_summary(
     hours: int = Query(24, ge=1, le=720),
     _: CurrentUser = Depends(require_global("integration.manage")),
-    conn: psycopg.Connection = Depends(get_conn),
+    # Counts across every recipient (F51, 2026-10-02).
+    conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> dict:
     """Per-channel health over a window, and the outbox (F8). Counts
     only: no subject, no recipient."""
@@ -642,7 +658,9 @@ _OPTED_IN = """(d.channel <> 'JIRA' OR coalesce((
 def requeue(
     delivery_id: UUID,
     user: CurrentUser = Depends(require_global("integration.manage")),
-    conn: psycopg.Connection = Depends(get_conn),
+    # Any recipient's delivery, read, requeued and audited in one
+    # transaction on one connection (F51, 2026-10-02).
+    conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> DeliveryOut:
     """Put a FAILED or backing-off delivery back in the outbox (F8).
     Attempts start again at zero, because a requeue after a fix that kept
@@ -723,7 +741,8 @@ BULK_REQUEUE_MAX = 1000
 def requeue_bulk(
     body: BulkRequeueIn,
     user: CurrentUser = Depends(require_global("integration.manage")),
-    conn: psycopg.Connection = Depends(get_conn),
+    # Every recipient's failed deliveries of the channel (F51, 2026-10-02).
+    conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> dict:
     """Every FAILED delivery of one channel since a time, at most thirty
     days back and a thousand rows, by the same rule as one requeue."""

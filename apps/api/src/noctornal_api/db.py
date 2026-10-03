@@ -122,7 +122,11 @@ class SystemPurpose(StrEnum):
     READINESS = "readiness"
     AUDIT_VERIFY = "audit_verify"        # the audit and custody chain walks
     LAB_PROPOSE = "lab_propose"          # the Lab proposes into a case it is not on
-    NOTIFY = "notify"                    # the outbox drain
+    NOTIFY = "notify"                    # the outbox drain, cron or Drain now
+    # The delivery ledger, its requeue and the Jira destination's
+    # administration: an administrator's view across every recipient and
+    # case, which names no content (F51, 2026-10-02).
+    NOTIFY_ADMIN = "notify_admin"
     # The poll, a manual run and a pasted capture: each dedupes against every
     # stored document and matches every watch (S1, 2026-09-25).
     COLLECTION = "collection"

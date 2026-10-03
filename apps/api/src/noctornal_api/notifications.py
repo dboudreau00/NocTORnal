@@ -25,7 +25,12 @@ the access gate, and does not follow anyone home.
    and compartments are checked at WRITE time against the notification's own
    labels. Writing a row nobody may read is not a safe default -- it puts
    case content in a table keyed by a user who has no business with it, and
-   relies on the read filter forever after.
+   relies on the read filter forever after. Since F51 (2026-10-02) the
+   database makes that check: `notify.enqueue` (0125) is the one writer of a
+   notification, a definer that checks the RECIPIENT whoever calls it,
+   because row-level security shows a notification to its recipient alone
+   (0126) and the caller, who is somebody else, can no longer write or
+   read the row itself.
 3. **Quiet hours defer, they do not drop.** A deferred delivery has a
    `deliver_after` in the future and is still a row. Priority 1 ignores
    them, which is the only reason quiet hours are acceptable at all.
@@ -88,6 +93,12 @@ SENT = "SENT"
 FAILED = "FAILED"
 REFUSED = "REFUSED"
 SUPPRESSED = "SUPPRESSED"
+
+# What one raise did (`NotificationService.enqueue`, F51 2026-10-02): the
+# row was written, or it was suppressed (SUPPRESSED, above), or an open
+# notice already covered it.
+WRITTEN = "WRITTEN"
+COALESCED = "COALESCED"
 
 # Priority 1 is the only level that overrides quiet hours and skips digest.
 # Kept to three levels deliberately: a scale with five gets used as five,
@@ -297,23 +308,69 @@ class Preference:
     address: str | None
 
 
+@dataclass(frozen=True)
+class OpenNotice:
+    """Write nothing when an open notice already covers this one.
+
+    F51 (2026-10-02). The producers that coalesce (one open integrity
+    alarm per exhibit, one suspension notice per persona, one screening
+    alert per officer per hour) used to read `notify.notification`
+    themselves before raising. Those rows are other people's, which row
+    security hides from the caller, so the check now runs inside
+    `notify.enqueue`, as the definer, in the same statement as the write.
+    It counts a notice only within the caller's own reach (0125).
+
+    Always matched on the kind. `anyone`: any recipient's notice, not only
+    this recipient's. `same_object` and `same_case`: the same object, the
+    same case. `within`: raised that recently. `unread`: open means unread,
+    not unacknowledged."""
+
+    anyone: bool = False
+    same_object: bool = False
+    same_case: bool = False
+    within: timedelta | None = None
+    unread: bool = False
+
+    def as_json(self) -> dict:
+        out: dict = {"anyone": self.anyone, "object": self.same_object,
+                     "case": self.same_case, "unread": self.unread}
+        if self.within is not None:
+            out["within"] = f"{int(self.within.total_seconds())} seconds"
+        return out
+
+
+@dataclass(frozen=True)
+class Raised:
+    """What one raise did: WRITTEN with the notice, SUPPRESSED (the
+    recipient is the actor, or may not read it), or COALESCED."""
+
+    outcome: str
+    notification: Notification | None
+
+
 class NotificationService:
     def __init__(self, conn: psycopg.Connection):
         self._c = conn
 
     # -- raising ----------------------------------------------------------
 
-    def notify(self, *, recipient_id: UUID, kind: str, subject: str,
-               summary: str, body: str, classification: str,
-               case_id: UUID | None = None,
-               compartments: frozenset[str] = frozenset(),
-               object_type: str | None = None, object_id: UUID | None = None,
-               actor_id: UUID | None = None,
-               priority: int | None = None,
-               element_classification: str | None = None,
-               element_compartments: frozenset[str] = frozenset(),
-               event_id: UUID | None = None,
-               ) -> Notification | None:
+    def notify(self, **kw) -> Notification | None:
+        """Raise one notification and queue its deliveries: `enqueue`,
+        answering the notice or None."""
+        return self.enqueue(**kw).notification
+
+    def enqueue(self, *, recipient_id: UUID, kind: str, subject: str,
+                summary: str, body: str, classification: str,
+                case_id: UUID | None = None,
+                compartments: frozenset[str] = frozenset(),
+                object_type: str | None = None, object_id: UUID | None = None,
+                actor_id: UUID | None = None,
+                priority: int | None = None,
+                element_classification: str | None = None,
+                element_compartments: frozenset[str] = frozenset(),
+                event_id: UUID | None = None,
+                open_notice: OpenNotice | None = None,
+                ) -> Raised:
         """Raise one notification and queue its deliveries.
 
         `event_id` groups the rows one event fans out to (F8, 2026-09-24):
@@ -334,15 +391,22 @@ class NotificationService:
         notification about a raised element — and the label is what decides
         whether the summary may go out by email.
 
-        Returns None when the notification was suppressed -- which is a
-        normal outcome, not an error: telling somebody what they just did,
-        or telling somebody something they are not cleared to read, are both
-        things this refuses to do.
+        Suppressed is a normal outcome, not an error: telling somebody what
+        they just did, or telling somebody something they are not cleared to
+        read, are both things this refuses to do. `notify` answers None for
+        it; `enqueue` says which (`Raised`).
 
         Call it INSIDE the transaction that performs the action. A merge
         that succeeded and a notification that did not is a case owner who
         never finds out; a notification that survived a rolled-back merge is
         worse.
+
+        The row is written by `notify.enqueue` (0125), in this transaction,
+        never by an INSERT here (F51, 2026-10-02). The recipient is
+        somebody else, and row-level security shows a notification to its
+        recipient alone, so the caller's own INSERT ... RETURNING would be
+        refused. The function checks suppression 2 against the recipient,
+        applies `open_notice`, and answers the new id, never the row.
         """
         spec = KINDS.get(kind)
         if spec is None:
@@ -364,40 +428,50 @@ class NotificationService:
 
         # Suppression 1: never tell someone what they just did.
         if actor_id is not None and actor_id == recipient_id:
-            return None
+            return Raised(SUPPRESSED, None)
 
-        # Suppression 2: never write a row the recipient could not read.
-        if not self._recipient_may_read(recipient_id, classification,
-                                        compartments, case_id):
-            return None
-
-        row = self._c.execute(
-            """INSERT INTO notify.notification
-                   (recipient_id, case_id, kind, priority, subject, summary,
-                    body, classification, compartments, object_type, object_id,
-                    actor_id, event_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       coalesce(%s, gen_random_uuid()))
-               RETURNING """ + _COLUMNS,
-            (recipient_id, case_id, kind, priority or spec.default_priority,
-             subject.strip(), summary.strip(), body, classification,
-             sorted(compartments), object_type, object_id, actor_id, event_id),
+        level = priority or spec.default_priority
+        subject, summary = subject.strip(), summary.strip()
+        plan = self._plan(recipient_id, case_id, kind, level)
+        # Suppression 2 and the coalescing happen in the function, as the
+        # definer, against the recipient's labels and assignment.
+        outcome, raised_id, raised_at = self._c.execute(
+            """SELECT outcome, raised_id, raised_at
+                 FROM notify.enqueue(%s::uuid, %s::uuid, %s, %s::smallint, %s, %s, %s,
+                                     %s::core.tlp, %s::text[], %s, %s::uuid, %s::uuid,
+                                     %s::uuid, %s::jsonb, %s::jsonb)""",
+            (recipient_id, case_id, kind, level, subject, summary, body,
+             classification, sorted(compartments), object_type, object_id,
+             actor_id, event_id, Json(plan),
+             Json(open_notice.as_json()) if open_notice is not None else None),
         ).fetchone()
-        record = _record(row)
-        self._queue_deliveries(record)
-        return record
+        if outcome != WRITTEN:
+            return Raised(outcome, None)
+        return Raised(WRITTEN, Notification(
+            id=raised_id, recipient_id=recipient_id, case_id=case_id, kind=kind,
+            priority=level, subject=subject, summary=summary, body=body,
+            classification=classification, compartments=frozenset(compartments),
+            object_type=object_type, object_id=object_id, actor_id=actor_id,
+            created_at=raised_at, read_at=None, acknowledged_at=None))
 
     def notify_case_owner(self, case_id: UUID, **kw) -> Notification | None:
         """docs/01 asks for a case-owner notification on merge by name.
         Resolving the owner here rather than at the call site means a caller
         cannot get it subtly wrong -- the deputy is NOT notified, because two
         people told about every merge is two people who mute it."""
+        return self.enqueue_case_owner(case_id, **kw).notification
+
+    def enqueue_case_owner(self, case_id: UUID, **kw) -> Raised:
+        """`notify_case_owner`, saying what happened."""
+        # The owner as a lock fact (F51, 2026-10-02), whoever is asking: a
+        # caller the case row is hidden from (a Lab analyst, an ingest
+        # operator, a screening pass) still tells its owner, and the
+        # function then decides whether the owner may read it.
         row = self._c.execute(
-            'SELECT owner_user_id FROM core."case" WHERE id = %s',
-            (case_id,)).fetchone()
-        if row is None:
-            return None
-        return self.notify(recipient_id=row[0], case_id=case_id, **kw)
+            "SELECT owner_user_id FROM iam.case_facts(%s)", (case_id,)).fetchone()
+        if row is None or row[0] is None:
+            return Raised(SUPPRESSED, None)
+        return self.enqueue(recipient_id=row[0], case_id=case_id, **kw)
 
     # -- reading ----------------------------------------------------------
 
@@ -671,50 +745,24 @@ class NotificationService:
 
     # -- internals --------------------------------------------------------
 
-    def _recipient_may_read(self, recipient_id: UUID, classification: str,
-                            compartments: frozenset[str],
-                            case_id: UUID | None) -> bool:
-        """Suppression 2, at WRITE time: the same rule `readable_predicate`
-        applies at read time.
+    def _plan(self, recipient_id: UUID, case_id: UUID | None, kind: str,
+              priority: int) -> list[dict]:
+        """One delivery row per channel, for `notify.enqueue` to write with
+        the notice (F51, 2026-10-02: the rows used to be inserted here,
+        after the notice, and the caller can no longer see the notice they
+        hang off). IN_APP is written already SENT: the notification row IS
+        the in-app delivery, and a PENDING in-app row would be a queue entry
+        for something that has already happened.
 
-        Both are needed and neither is redundant. The read filter protects
-        against a clearance or an assignment revoked *after* the row was
-        written; this one stops the row existing at all when the recipient
-        already could not read it. Writing a notification nobody may read
-        puts case content in a table keyed by a user with no business with
-        it and then relies on the read filter forever after — and the read
-        filter is precisely the thing that turned out to be missing half its
-        rule.
-        """
-        row = self._c.execute(
-            "SELECT tlp_clearance, compartments, is_active "
-            "FROM iam.app_user WHERE id = %s", (recipient_id,)).fetchone()
-        if row is None or not row[2]:
-            return False
-        try:
-            clearance = tlp_from_name(row[0])
-            level = tlp_from_name(classification)
-        except Exception:  # noqa: BLE001 - an unparseable label is a denial
-            return False
-        if level > clearance:
-            return False
-        if not compartments <= frozenset(row[1] or []):
-            return False
-        if case_id is None:
-            return True
-        assigned = self._c.execute(
-            """SELECT 1 FROM iam.case_assignment
-                WHERE case_id = %s AND user_id = %s
-                  AND (expires_at IS NULL OR expires_at > now())""",
-            (case_id, recipient_id)).fetchone()
-        return assigned is not None
-
-    def _queue_deliveries(self, n: Notification) -> None:
-        """One PENDING row per eligible channel. IN_APP is written already
-        SENT: the notification row IS the in-app delivery, and a PENDING
-        in-app row would be a queue entry for something that has already
-        happened."""
-        prefs = self.preferences(n.recipient_id)
+        Suppression 2 is the function's now: the recipient's clearance,
+        compartments and assignment are checked there, as the definer, and
+        a recipient who may not read the notice gets no row, so none of
+        this plan is written.
+        Both it and `readable_predicate` are needed and neither is
+        redundant: the read filter covers a clearance or an assignment
+        revoked AFTER the row was written; the write check stops the row
+        existing at all when the recipient already could not read it."""
+        prefs = self.preferences(recipient_id)
         # THE DATABASE'S CLOCK, not this process's.
         #
         # `deliver_after` written here is compared in `transports.due()`
@@ -738,76 +786,78 @@ class NotificationService:
         # built on this value. One clock, and it has to be the one the
         # reader uses.
         now = self._c.execute("SELECT now()").fetchone()[0]
+        plan: list[dict] = []
         for channel, pref in prefs.items():
             if channel == IN_APP:
-                self._insert_delivery(n.id, IN_APP, SENT, now, sent_at=now)
+                plan.append(_planned(IN_APP, SENT, now, sent_at=now))
                 continue
             if not pref.enabled:
-                self._insert_delivery(
-                    n.id, channel, SUPPRESSED, now,
+                plan.append(_planned(
+                    channel, SUPPRESSED, now,
                     detail="channel disabled by the recipient",
-                    cause="RECIPIENT_DISABLED")
+                    cause="RECIPIENT_DISABLED"))
                 continue
-            if n.priority > pref.min_priority:
-                self._insert_delivery(
-                    n.id, channel, SUPPRESSED, now,
-                    detail=f"priority {n.priority} is below the "
+            if priority > pref.min_priority:
+                plan.append(_planned(
+                    channel, SUPPRESSED, now,
+                    detail=f"priority {priority} is below the "
                            f"recipient's threshold for {channel}",
-                    cause="BELOW_THRESHOLD")
+                    cause="BELOW_THRESHOLD"))
                 continue
             if channel == JIRA:
-                self._queue_jira(n, now)
+                plan.append(self._jira_planned(kind, case_id, now))
                 continue
-            self._insert_delivery(
-                n.id, channel, PENDING, deliver_after(n.priority, pref, now))
+            plan.append(_planned(channel, PENDING, deliver_after(priority, pref, now)))
+        return plan
 
-    def _queue_jira(self, n: Notification, now: datetime) -> None:
+    def _jira_planned(self, kind: str, case_id: UUID | None,
+                      now: datetime) -> dict:
         """Jira's queue-time rules (F7, 2026-09-24), after the
         recipient's own two: a case-less notification is never routed
         (policy countersignatures, officer escalations, screening alerts);
         nothing goes while no destination is live; a kind nobody routed is
         never routable (jira.JIRA_TASKS is an allowlist); a case its owner
         keeps out stays out. Otherwise PENDING at the database's now():
-        quiet hours and the digest do not apply to a work item."""
+        quiet hours and the digest do not apply to a work item.
+
+        The owner's veto is applied by `notify.enqueue`, as the definer
+        (F51, 2026-10-02): the caller may not be on the case (a Lab
+        analyst's detonation, an ingest operator's selector hit), and row
+        security would show it no veto at all, so the PENDING row carries
+        the row it becomes when the case is kept out."""
         from noctornal_api import jira  # jira imports transports, which imports this
 
-        if n.case_id is None:
-            self._insert_delivery(
-                n.id, JIRA, SUPPRESSED, now,
-                detail="Jira takes work items about a case, and this "
-                       "notification concerns none", cause="CASELESS")
-            return
+        if case_id is None:
+            return _planned(JIRA, SUPPRESSED, now,
+                            detail="Jira takes work items about a case, and this "
+                                   "notification concerns none", cause="CASELESS")
         routing = jira.routing(self._c)
         if routing is None:
-            self._insert_delivery(n.id, JIRA, SUPPRESSED, now,
-                                  detail="no Jira destination is active",
-                                  cause="DESTINATION_OFF")
-            return
-        if not jira.routable(n.kind) or n.kind not in routing.kinds:
-            self._insert_delivery(
-                n.id, JIRA, SUPPRESSED, now,
-                detail=f"an administrator has not routed {n.kind} to Jira",
-                cause="KIND_NOT_ROUTED")
-            return
-        if jira.case_blocked(self._c, n.case_id):
-            self._insert_delivery(
-                n.id, JIRA, SUPPRESSED, now,
-                detail="the case owner keeps this case's notifications out of Jira",
-                cause="CASE_NOT_ROUTED")
-            return
-        self._insert_delivery(n.id, JIRA, PENDING, now)
+            return _planned(JIRA, SUPPRESSED, now,
+                            detail="no Jira destination is active",
+                            cause="DESTINATION_OFF")
+        if not jira.routable(kind) or kind not in routing.kinds:
+            return _planned(JIRA, SUPPRESSED, now,
+                            detail=f"an administrator has not routed {kind} to Jira",
+                            cause="KIND_NOT_ROUTED")
+        return _planned(JIRA, PENDING, now, kept_out={
+            "state": SUPPRESSED, "cause": "CASE_NOT_ROUTED",
+            "detail": "the case owner keeps this case's notifications out of Jira"})
 
-    def _insert_delivery(self, notification_id: UUID, channel: str, state: str,
-                         after: datetime, *, sent_at: datetime | None = None,
-                         detail: str | None = None,
-                         cause: str | None = None) -> None:
-        self._c.execute(
-            """INSERT INTO notify.delivery
-                   (notification_id, channel, state, deliver_after, sent_at,
-                    detail, cause)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (notification_id, channel) DO NOTHING""",
-            (notification_id, channel, state, after, sent_at, detail, cause))
+
+def _planned(channel: str, state: str, after: datetime, *,
+             sent_at: datetime | None = None, detail: str | None = None,
+             cause: str | None = None, kept_out: dict | None = None) -> dict:
+    """One element of the plan `notify.enqueue` reads with
+    jsonb_to_recordset: times as ISO text, which it reads back as
+    timestamptz. `kept_out` is the row a delivery becomes when the case's
+    owner keeps the case off this channel."""
+    row: dict = {"channel": channel, "state": state, "deliver_after": after.isoformat(),
+                 "sent_at": sent_at.isoformat() if sent_at else None,
+                 "detail": detail, "cause": cause}
+    if kept_out is not None:
+        row["blocked"] = kept_out
+    return row
 
 
 def _require_transport(channel: str, conn: psycopg.Connection | None = None) -> None:

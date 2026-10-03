@@ -67,10 +67,24 @@ HELD = `(SELECT iam.rls_compartments())`:
   who may list, sign or apply them.
 - CUSTOM_WATCH (0124): a case's watches in a readable case; a case-less
   one to every bound user.
+- CUSTOM_NOTICE (a notification, 0126): the recipient's own
+  (`recipient_id = (SELECT iam.rls_actor())`), its classification within
+  CLR, its compartments held, and when it names a case, that case
+  readable; a SELECT and an UPDATE policy only. A notice is written for
+  someone else, so its one writer is the definer `notify.enqueue` (0125),
+  which checks the recipient instead of the writer and answers an id,
+  never the row.
 - CUSTOM_DOCUMENT (a case-less row with its own labels, 0118):
   `classification <= CLR AND compartments <@ HELD`. No case term, so no
   case-scoped grant raises it: a row that belongs to no case is held to
   the reader's case-less ceiling, as every collection view holds it.
+
+A table the request role never writes carries its template as a SELECT
+policy alone (`rls_read`), so no INSERT of the request role reaches its
+unique keys and no UPDATE or DELETE reaches a row: `notify.delivery`,
+`notify.jira_link` and `notify.jira_event` (0126), which only
+`notify.enqueue` and the NOTIFY and NOTIFY_ADMIN system purposes write
+(F51, 2026-10-02).
 
 A trigger function that reads a policied table must be SECURITY DEFINER
 with `SET search_path = pg_catalog, <its schemas>, pg_temp` (0113), or it
@@ -165,6 +179,15 @@ POLICY: dict[str, str] = {
     # every watch as system purposes (COLLECTION, INGEST).
     "collect.watch": "CUSTOM_WATCH",
     "collect.watch_hit": "CHILD",
+    # 0126 (F51, 2026-10-02): notifications and what they reached. Every
+    # notice is raised through notify.enqueue (0125); the drain runs as
+    # NOTIFY, and the delivery ledger and Jira's administration as
+    # NOTIFY_ADMIN.
+    "notify.notification": "CUSTOM_NOTICE",
+    "notify.delivery": "CHILD",
+    "notify.case_route_block": "CASE",
+    "notify.jira_link": "CASE_LABELLED",
+    "notify.jira_event": "CHILD",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -299,25 +322,6 @@ DEFERRED: dict[str, str] = {
     "ingest.lookup_attempt": "CHILD of lookup, with it",
     "ingest.lookup_batch": "CASE template, with ingest.lookup",
     "ingest.lookup_result": "CASE_LABELLED, with ingest.lookup",
-    "notify.notification": (
-        "CUSTOM (the recipient's own, within their labels). Owed first: "
-        "NotificationService.notify writes a row for SOMEONE ELSE with "
-        "INSERT ... RETURNING, reads the recipient's unread rows to coalesce "
-        "(notify_events._open_alert) and inserts its deliveries, all inside "
-        "the caller's transaction; under a recipient policy each is refused "
-        "or blind. The write moves into one SECURITY DEFINER enqueue "
-        "function (recipient eligibility checked in SQL, no RETURNING of "
-        "the row), or onto the NOTIFY purpose with the caller's atomicity "
-        "given up on purpose; the transports and the Jira sender are the "
-        "drain's (NOTIFY, JIRA) already"),
-    "notify.delivery": "CHILD of notification, with it",
-    "notify.case_route_block": (
-        "CASE template, with notify.notification: the transports read it "
-        "on the drain"),
-    "notify.jira_link": (
-        "CASE_LABELLED, with notify.notification: the Jira sender writes it "
-        "on the drain, and the case's Integrations view reads it"),
-    "notify.jira_event": "CHILD of jira_link, with it",
 }
 
 #: Trigger functions that read a policied table and stay SECURITY INVOKER,
