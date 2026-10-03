@@ -630,13 +630,21 @@ class RetentionService:
     def purge_due(self, *, actor_id: UUID, authority: str,
                   case_id: UUID | None = None,
                   as_of: datetime | None = None,
-                  dry_run: bool = False) -> PurgeResult:
+                  dry_run: bool = False,
+                  kinds: frozenset[str] | None = None) -> PurgeResult:
         """Destroy what is expired and not held, and write the tombstone.
 
         `authority` is mandatory and free text: the schedule, the policy
         reference, the instruction. A destruction whose authority nobody
         recorded cannot be defended later, and "the job ran" is not an
         authority.
+
+        `kinds` (F30, 2026-10-02) narrows the sweep to the named
+        `DueItem.object_type` values and nothing else; None, the default,
+        is every family exactly as before. It exists for
+        `retention_sweep.py`, which must reach collected documents (the one
+        family no case-scoped route can) without also destroying every
+        case's exhibits under a tombstone that names no case.
         """
         if not authority or not authority.strip():
             raise RetentionError(
@@ -683,6 +691,8 @@ class RetentionService:
                 f"clock.")
 
         items = self.due(case_id=case_id, as_of=as_of)
+        if kinds is not None:
+            items = [i for i in items if i.object_type in kinds]
         actionable = [i for i in items if not i.held]
         result.held_back = sum(1 for i in items
                                if i.held and i.object_type != "document")
@@ -1268,6 +1278,30 @@ class RetentionService:
                    AND d.retain_until <= %s
                    AND ({_DOCUMENT_HELD_SQL}) IS NOT NULL""",
             (now,)).fetchone()[0]
+
+    def document_backlog(self, as_of: datetime | None = None
+                         ) -> tuple[int, int, datetime | None]:
+        """(collected documents past their clock, how many of those no hold
+        keeps, the oldest deadline among those), counts and a date only
+        (F30, 2026-10-02).
+
+        The hold is `_DOCUMENT_HELD_SQL`, the one predicate `due()` and the
+        purge's recheck read, so what the sweep's dry run and the readiness
+        row report is what the sweep would act on: a second statement of the
+        rule could drift from it, and a count that disagrees with the act is
+        the failure this module is written against. Uncapped on purpose (a
+        LIMITed list would hide a backlog in its limit); the predicate is
+        evaluated only for rows already past their clock, so a deployment
+        with nothing due pays for one index range scan."""
+        now = as_of or datetime.now(timezone.utc)
+        row = self._c.execute(
+            f"""SELECT count(*), count(*) FILTER (WHERE held.reason IS NULL),
+                       min(d.retain_until) FILTER (WHERE held.reason IS NULL)
+                  FROM collect.document d
+                  CROSS JOIN LATERAL (SELECT {_DOCUMENT_HELD_SQL} AS reason) held
+                 WHERE d.purged_at IS NULL AND d.retain_until IS NOT NULL
+                   AND d.retain_until <= %s""", (now,)).fetchone()
+        return int(row[0]), int(row[1]), row[2]
 
     def _purge_documents(self, ids: list[UUID], *, authority: str,
                          actor_id: UUID, result: "PurgeResult") -> None:

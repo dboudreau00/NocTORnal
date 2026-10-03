@@ -155,8 +155,10 @@ readiness row names the gap.
 - *Retention.* Telegram documents take the CHAT_EXPORT rule's clock from
   their capture time. A document cited by a case under legal hold, through
   any version, is never purged; a purged one loses the typed ids and names
-  its capture record held. No route or script sweeps collected documents
-  on its own (docs/17).
+  its capture record held. `scripts/retention_sweep.py` sweeps collected
+  documents past their clock: an operator runs it, dry by default, under a
+  declared authority, and nothing schedules it (infra/production/README.md,
+  Retention sweep; docs/17 F30).
 
 ### General hygiene
 - Randomised intervals with jitter, never a clean cron cadence
