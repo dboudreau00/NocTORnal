@@ -5167,6 +5167,13 @@
                 <label class="label" for="fix-label">Corrected label</label>
                 <input id="fix-label" spellcheck="false" autocomplete="off">
               </div>
+              <!-- The end date, as a correction rather than a retirement:
+                   the as-of view keeps the past (graph-valid-to-cannot-be-
+                   set-after-creation, 2026-10-03). -->
+              <div id="fix-end-field" class="field">
+                <label class="label" for="fix-valid-to">Stopped being true on (UTC date)</label>
+                <input id="fix-valid-to" type="date">
+              </div>
               <div class="row">
                 <label class="field">
                   <span class="label">Basis</span>

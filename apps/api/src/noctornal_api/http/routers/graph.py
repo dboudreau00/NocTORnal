@@ -18,7 +18,9 @@ file, and they are not interchangeable:
   every read path filters on, so it leaves the live graph AND every as-of
   view.
 - **`valid_to`** — it stopped being true in the WORLD. An as-of query into
-  the period when it WAS true must still show it, and does.
+  the period when it WAS true must still show it, and does. Given at
+  creation, or later by a correction (`PATCH` with `valid_to`, review
+  2026-10-03).
 
 None of the three destroys a row.
 """
@@ -33,6 +35,7 @@ from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from noctornal_api.graph import (
+    KEEP,
     REVIEW_STATES,
     AssertionInput,
     ClaimNotDatable,
@@ -52,7 +55,11 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
-from noctornal_api.selectors import SelectorStore
+from noctornal_api.selectors import (
+    CREDENTIAL_REFUSAL,
+    SelectorStore,
+    carries_credential,
+)
 from noctornal_api.wording import count_of
 from noctornal_ontology import SELECTOR_TYPES, normalise, refusal
 
@@ -284,6 +291,10 @@ def _selector_for(node_type: str, selector_type: str | None, label: str):
                       f"unknown selector type {selector_type!r}")
     if not normalise(st.key, label).strip():
         raise Problem(400, "Invalid request", refusal(st.key, label))
+    # graph-url-selector-keeps-credentials (2026-10-03): a link's password
+    # or token would be the entity's label, on the graph and in reports.
+    if carries_credential(st.key, label):
+        raise Problem(400, "Invalid request", CREDENTIAL_REFUSAL)
     return st
 
 
@@ -413,6 +424,10 @@ def check_new_node(
     norm = normalise(st.key, label)
     if not norm.strip():
         out.selector_refusal = refusal(st.key, label)
+        return out
+    if carries_credential(st.key, label):
+        # The form says before Create what create refuses (2026-10-03).
+        out.selector_refusal = CREDENTIAL_REFUSAL
         return out
     out.selector_norm = norm
     owner = conn.execute(
@@ -575,7 +590,7 @@ def retract_assertion(
                          permission_key="assertion.retract", after_case_gate=True,
                          classification=subject[1], compartments=subject[2])
     try:
-        GraphWriteService(conn).retract_assertion(
+        restoration = GraphWriteService(conn).retract_assertion(
             assertion_id, retracted_by=user.user_id, reason=body.reason,
             at=datetime.now(timezone.utc),
         )
@@ -583,11 +598,20 @@ def retract_assertion(
         # Already retracted, or gone. Saying so is better than a silent
         # 204 that leaves a burned source live in the projection.
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    # A retracted correction gave its fields back to the values the live
+    # claims support; the audit row names them, and any whose value before
+    # the first correction was never recorded (graph-retracted-correction,
+    # 2026-10-03). The values themselves are in the claims.
+    detail = {"reason": body.reason}
+    if restoration and restoration.restored:
+        detail["restored"] = list(restoration.restored)
+    if restoration and restoration.unknown:
+        detail["not_restored"] = list(restoration.unknown)
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
            VALUES (%s, 'USER', 'ASSERTION_RETRACTED', 'assertion', %s, %s, %s)""",
-        (user.user_id, assertion_id, case_id, Json({"reason": body.reason})),
+        (user.user_id, assertion_id, case_id, Json(detail)),
     )
     return Response(status_code=204)
 
@@ -816,6 +840,34 @@ def _claim_path(changed: dict) -> str | None:
     return next(iter(changed)) if len(changed) == 1 else None
 
 
+def _valid_to_given(body: BaseModel):
+    """The end date a correction sets: KEEP when the body leaves it out,
+    None when it sends null (the end date is cleared), else the time
+    (graph-valid-to-cannot-be-set-after-creation, 2026-10-03). An offset is
+    required, as for a supersession's date: a naive time would be read in
+    the database's zone, and this is the instant the as-of view and trust
+    decay are drawn from."""
+    if "valid_to" not in body.model_fields_set:
+        return KEEP
+    end = body.valid_to
+    if end is not None and end.utcoffset() is None:
+        raise Problem(
+            400, "Invalid request",
+            "valid_to has no UTC offset. It is the moment this stopped being "
+            "true, so it is not guessed: send an offset-aware timestamp such "
+            "as 2026-03-01T00:00:00Z.")
+    return end
+
+
+def _previous_valid_to(conn: psycopg.Connection, table: str,
+                       element_id: UUID) -> str | None:
+    """The end date a correction is about to replace, for its audit row."""
+    assert table in ("node", "edge")      # literal, never client input
+    row = conn.execute(f"SELECT valid_to FROM core.{table} WHERE id = %s",
+                       (element_id,)).fetchone()
+    return row[0].isoformat() if row and row[0] is not None else None
+
+
 class UpdateNodeBody(BaseModel):
     """A correction to a node, with the assertion that justifies it.
 
@@ -829,6 +881,11 @@ class UpdateNodeBody(BaseModel):
     """
     label: str | None = None
     attrs: dict | None = None
+    # When the entity stopped being true in the world: a correction like
+    # any other, so the as-of view keeps the past and nothing is retired.
+    # Sent as null, it clears the end date; left out, it is unchanged
+    # (graph-valid-to-cannot-be-set-after-creation, 2026-10-03).
+    valid_to: datetime | None = None
     # A correction records a claim, so it is graded like one: required,
     # with no defaults (gap-api-grade-required, 2026-09-23).
     assertion: AssertionBody
@@ -847,6 +904,8 @@ class UpdateEdgeBody(BaseModel):
     weight: float | None = Field(default=None, ge=0, le=9_999_999_999.9999)
     confidence: str | None = None      # validated by the service against the DB enum
     attrs: dict | None = None
+    # As on UpdateNodeBody: when the tie stopped being true, null to clear.
+    valid_to: datetime | None = None
     # Required, as on UpdateNodeBody. A re-grade sends the same value here
     # and in `confidence`: see update_edge.
     assertion: AssertionBody
@@ -882,7 +941,13 @@ def update_node(
     `attrs` REPLACES the attribute object wholesale. See `UpdateNodeBody`.
 
     The previous label and attributes are written to `audit.event.detail`,
-    because this endpoint overwrites the columns that held them.
+    because this endpoint overwrites the columns that held them, and to
+    the correction's own `prior_value`, so retracting the correction puts
+    back what the remaining claims support (graph-retracted-correction,
+    2026-10-03). `valid_to` (null clears it) records when the entity
+    stopped being true. A corrected selector label moves the selector
+    index, and `selector_owner_id` names another visible entity already
+    holding the new value, a merge lead (graph-selector-index-drift).
 
     Not editable here: classification and compartments (an egress decision,
     invariant 8, not a typo fix) and `node_type`.
@@ -892,17 +957,22 @@ def update_node(
         permission_key="graph.node.update")
     _check_evidence(conn, case_id, body.assertion.evidence_id)
 
+    end = _valid_to_given(body)
     changed: dict = {}
     if body.label is not None:
         changed["label"] = body.label
     if body.attrs is not None:
         changed["attrs"] = body.attrs
+    if end is not KEEP:
+        changed["valid_to"] = end.isoformat() if end is not None else None
     # An empty change set is refused by the service, not silently accepted
     # (invariant 12) — it raises before writing anything, so no assertion is
     # left behind claiming a correction that did not happen.
 
     previous = {key: (old_label if key == "label" else old_attrs)
-                for key in changed}
+                for key in changed if key != "valid_to"}
+    if end is not KEEP:
+        previous["valid_to"] = _previous_valid_to(conn, "node", node_id)
 
     # No try/except around GraphWriteError: `install_error_handlers`
     # already maps it to a 400 THROUGH `_safe_detail`, which is what keeps a
@@ -910,12 +980,12 @@ def update_node(
     # line numbers — out of the response. Catching it here to re-raise
     # `Problem(400, ..., str(exc))` would hand exactly that to the client.
     with conn.transaction():
-        GraphWriteService(conn).update_node(
+        lead = GraphWriteService(conn).update_node(
             node_id, case_id=case_id,
             assertion=_assertion(body.assertion, user.user_id,
                                  claim_path=_claim_path(changed),
                                  claim_value=changed or None),
-            label=body.label, attrs=body.attrs,
+            label=body.label, attrs=body.attrs, valid_to=end,
         )
         _audit_change(conn, user, case_id, action="NODE_UPDATED",
                       object_type="node", object_id=node_id,
@@ -924,6 +994,11 @@ def update_node(
     return {
         "node_id": str(node_id),
         "updated": sorted(changed),
+        # The corrected selector is already held by another entity the
+        # caller can see: a merge lead, as on create (graph-selector-index-
+        # drift, 2026-10-03). An owner the caller cannot see is not named.
+        "selector_owner_id": (str(lead) if lead is not None and _node_visible(
+            conn, user, case_id, lead) else None),
         # A node merged into another is excluded from every projection, so
         # a correction to it will not appear on the canvas. Saying so beats
         # a 200 the analyst reads as "done" and then cannot see (invariant
@@ -983,6 +1058,7 @@ def update_edge(
         permission_key="graph.edge.update")
     _check_evidence(conn, case_id, body.assertion.evidence_id)
 
+    end = _valid_to_given(body)
     changed: dict = {}
     if body.weight is not None:
         changed["weight"] = body.weight
@@ -990,6 +1066,8 @@ def update_edge(
         changed["confidence"] = body.confidence
     if body.attrs is not None:
         changed["attrs"] = body.attrs
+    if end is not KEEP:
+        changed["valid_to"] = end.isoformat() if end is not None else None
 
     # `weight` comes back from numeric(14,4) as a Decimal, which json.dumps
     # cannot serialise — and rounding it to a float to get it into the audit
@@ -997,6 +1075,8 @@ def update_edge(
     # CONVENTIONS: weights are numeric, never float.
     previous = {"weight": str(old_weight), "confidence": old_confidence,
                 "attrs": old_attrs}
+    if end is not KEEP:
+        previous["valid_to"] = _previous_valid_to(conn, "edge", edge_id)
     previous = {key: previous[key] for key in changed}
 
     try:
@@ -1007,6 +1087,7 @@ def update_edge(
                                      claim_path=_claim_path(changed),
                                      claim_value=changed or None),
                 weight=body.weight, confidence=body.confidence, attrs=body.attrs,
+                valid_to=end,
             )
             _audit_change(conn, user, case_id, action="EDGE_UPDATED",
                           object_type="edge", object_id=edge_id,
@@ -1064,6 +1145,9 @@ def soft_delete_node(
     in the case file. The `reason` and the previous label go to the audit
     log. To say instead "this stopped being true in March", set `valid_to`
     — that is temporal validity and it must not be conflated with this.
+    It is set with a correction, `PATCH .../graph/nodes/{id}` with
+    `valid_to` (graph-valid-to-cannot-be-set-after-creation, 2026-10-03;
+    until then no endpoint could set it after creation).
     """
     label, _attrs, merged_into_id = _gate_for_change(
         conn, user, case_id=case_id, table="node", element_id=node_id,

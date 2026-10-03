@@ -80,6 +80,14 @@ def _migration(prefix: str):
     return module
 
 
+def _migration_named(stem: str):
+    path = next(VERSIONS.glob(f"*_{stem}.py"))
+    spec = importlib.util.spec_from_file_location(f"m_{stem}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def create_statements() -> list[str]:
     out = []
     for role, attributes in ROLE_ATTRIBUTES.items():
@@ -113,6 +121,14 @@ def ensure(conn) -> int:
     conn.execute(grants.grants_sql(WORKER_ROLE))
     if _at_or_past(conn, "0109"):
         conn.execute(_migration("0109").UPGRADE_SQL)
+    # 0108's blanket grant hands back UPDATE and DELETE on core.assertion;
+    # the claims guard takes them off again (graph-assertion-claims-mutable,
+    # 2026-10-03). Found by name and read for its own revision id, so
+    # renumbering it when the branches are merged cannot break this replay
+    # (verify round, 2026-10-03).
+    guard = _migration_named("assertion_marked_once")
+    if _at_or_past(conn, guard.revision):
+        conn.execute(guard.GRANTS_SQL)
     print(f"{APP_ROLE} and {WORKER_ROLE} exist and are granted on this database.")
     print(f"NOCTORNAL_APP_DB_ROLE={APP_ROLE}")
     print(f"NOCTORNAL_WORKER_DB_ROLE={WORKER_ROLE}")

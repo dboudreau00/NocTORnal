@@ -10433,7 +10433,8 @@ function wireElementActions() {
       'links stay in the database, and the act is recorded against your ' +
       'name. But it cannot be undone from the console, and it leaves every ' +
       'view, including as-of queries into the past. To say instead "this ' +
-      'stopped being true in March", set valid_to.');
+      'stopped being true in March", cancel and use Correct... with a date ' +
+      'in Stopped being true on.');
     if (reason === null) return;
     if (!reason.trim()) {
       banner('Not retired', 'A reason is required, exactly as it is for a ' +
@@ -10753,8 +10754,17 @@ function claimLine(a, kind) {
     const v = a.claim_value;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       const keys = a.claim_path ? [a.claim_path] : Object.keys(v);
-      return 'Correction: ' + keys.map((k) =>
-        k + ' → ' + claimValueText(v[k])).join(', ');
+      // The end date reads as a date, not as `valid_to → nothing` and a
+      // raw timestamp (verify round, 2026-10-03). The form writes the end
+      // of a UTC day; anything else is shown as it was recorded.
+      const part = (k) => {
+        if (k !== 'valid_to') return k + ' → ' + claimValueText(v[k]);
+        if (v[k] === null || v[k] === undefined) return 'no end date';
+        const when = String(v[k]);
+        return 'valid until ' + (/T23:59:59/.test(when)
+          ? when.slice(0, 10) : visibleText(when));
+      };
+      return 'Correction: ' + keys.map(part).join(', ');
     }
     return 'Correction: ' + (a.claim_path || 'value') + ' → ' + claimValueText(v);
   }
@@ -10994,7 +11004,8 @@ function renderAssertions(box, all) {
          tie stayed drawn on a replaced claim nobody could retract. */
       const others = all.filter(
         (x) => !x.retracted_at && !x.superseded_at && x.id !== a.id);
-      btn.addEventListener('click', () => retractAssertion(a.id, others));
+      btn.addEventListener('click',
+        () => retractAssertion(a.id, others, a.is_correction));
       actions.appendChild(btn);
       /* Dating a claim that never had a date (docs/00 open question 11,
          settled 2026-10-02): only where there is none, and by supersession,
@@ -11037,7 +11048,7 @@ function renderAssertions(box, all) {
  *  `others`: the element's other unretracted assertions. `kind`: 'node'
  *  or 'edge'. `ties`: for an entity, how many ties the canvas draws at
  *  it. Returns {last, prompt, done}. */
-function retractionWords(others, kind, ties) {
+function retractionWords(others, kind, ties, isCorrection) {
   const what = kind === 'edge' ? 'tie' : 'entity';
   const last = others.length === 0;
   const onlyEdits = !last && others.every((x) => x.is_correction);
@@ -11072,14 +11083,26 @@ function retractionWords(others, kind, ties) {
     done = 'The ' + what + ' remains: ' + n + ' other live assertion'
       + (n === 1 ? '' : 's') + ' still support' + (n === 1 ? 's' : '') + ' it.';
   }
+  /* A correction gives its value back (graph-retracted-correction-stays-
+     in-force, 2026-10-03): the server restores each field it set to the
+     newest live correction of that field, or to what the element held
+     before its first correction. `isCorrection` is the card's flag. */
+  if (isCorrection && !last) {
+    prompt += ' This claim is a correction, so what it set goes back to the '
+      + 'value the remaining claims support: the newest live correction of '
+      + 'the same field, or what the ' + what + ' held before it was first '
+      + 'corrected.';
+    done += ' What the correction set has gone back to the value the '
+      + 'remaining claims support.';
+  }
   return { last: last, prompt: prompt, done: done };
 }
 
-async function retractAssertion(assertionId, others) {
+async function retractAssertion(assertionId, others, isCorrection) {
   const sel = state.selection;
   const kind = sel ? sel.kind : 'node';
   const ties = sel && kind === 'node' ? (state.nodeTies.get(sel.id) || 0) : 0;
-  const words = retractionWords(others, kind, ties);
+  const words = retractionWords(others, kind, ties, isCorrection);
   const reason = window.prompt(
     'Why is this claim being withdrawn? The reason is recorded permanently ' +
     'and cannot be edited.\n\n' + words.prompt);
@@ -11402,7 +11425,8 @@ const correction = { kind: null, id: null };
 /** Empty the form. Nothing is graded for the analyst. */
 function resetCorrection() {
   resetGrading('fix');
-  for (const id of ['fix-label', 'fix-rationale', 'fix-ref', 'fix-observed']) {
+  for (const id of ['fix-label', 'fix-valid-to', 'fix-rationale', 'fix-ref',
+                    'fix-observed']) {
     $(id).value = '';
   }
   $('fix-evidence').value = '';
@@ -11439,12 +11463,16 @@ onCaseSwitch(() => {
  *  confidence as last read (unused for an entity). Pure, for
  *  test_correction_form_ui.py. */
 function correctionWords(kind, current) {
+  /* The end date and the restore on retraction (graph-valid-to-cannot-be-
+     set-after-creation and graph-retracted-correction, 2026-10-03). */
   if (kind === 'node') {
     return {
       heading: 'Correct this entity',
       help: 'The corrected label is recorded as a claim with the basis and '
         + 'grading you choose, and the label it replaces stays in the audit '
-        + 'record. Nothing is graded for you.',
+        + 'record; retracting the correction puts it back. A date in Stopped '
+        + 'being true on records when it ended without retiring it, so the '
+        + 'as-of view still shows it before then. Nothing is graded for you.',
       conf: 'Confidence (ICD 203)',
     };
   }
@@ -11455,7 +11483,9 @@ function correctionWords(kind, current) {
       + 'recorded as a claim with its own basis and grading, and a tie takes '
       + 'the highest grade among its live claims, so a correction can raise '
       + 'it. To lower it, add the lower claim under Assertions and retract '
-      + 'the claims graded above it. Nothing is graded for you.',
+      + 'the claims graded above it. A date in Stopped being true on records '
+      + 'when the tie ended instead, graded as you choose, and leaves its '
+      + 'confidence as it is. Nothing is graded for you.',
     conf: 'Tie confidence (ICD 203)',
   };
 }
@@ -11477,9 +11507,33 @@ function openCorrection() {
     const n = nodeById(sel.id);
     $('fix-label').value = n ? n.label : '';
   }
+  if ($('insp-fix').hidden) {
+    /* The end date it holds now, so an unchanged field sends nothing and
+       an emptied one clears it (`correctionEndDate`). */
+    const held = node ? nodeById(sel.id) : e;
+    $('fix-valid-to').value = held && held.valid_to
+      ? new Date(held.valid_to).toISOString().slice(0, 10) : '';
+  }
   showCorrection(true);
   $('fix-form').scrollIntoView({ block: 'nearest' });
   $(node ? 'fix-label' : 'fix-basis').focus();
+}
+
+/** The end date a correction sends, from the Stopped being true on field:
+ *  undefined when it shows the date the element already holds (nothing to
+ *  send), null when it was emptied (the end date is cleared), else the end
+ *  of that UTC day, inclusive, as the create forms write `valid_to`
+ *  (`intervalFrom`). `current` is the stored `valid_to`. Pure, for
+ *  test_review_graph_valid_to_ui.py (graph-valid-to-cannot-be-set-after-
+ *  creation, 2026-10-03). */
+function correctionEndDate(day, current) {
+  const held = current ? new Date(current) : null;
+  const was = held && !Number.isNaN(held.getTime())
+    ? held.toISOString().slice(0, 10) : '';
+  if ((day || '') === was) return undefined;
+  if (!day) return null;
+  const d = new Date(day + 'T23:59:59Z');
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 /** Move what the analyst entered here into the tie's Add a claim form,
@@ -11505,6 +11559,13 @@ async function submitCorrection(event) {
   /* The form's contents belong to one element; never send them for another. */
   if (!sel || sel.kind !== correction.kind || sel.id !== correction.id) return;
   let body;
+  /* The element as last read: its label and its end date, so an end date
+     alone is sent without restating the label, and an unchanged date is
+     not sent at all (graph-valid-to-cannot-be-set-after-creation). */
+  const held = sel.kind === 'node' ? nodeById(sel.id)
+    : (edgeById(sel.id) || relTieCache.get(sel.id) || null);
+  const end = correctionEndDate($('fix-valid-to').value,
+                                held ? held.valid_to : null);
   if (sel.kind === 'node') {
     const label = $('fix-label').value.trim();
     if (!label) {
@@ -11512,14 +11573,19 @@ async function submitCorrection(event) {
       $('fix-label').focus();
       return;
     }
-    body = { label: label };
+    body = end !== undefined && held && label === held.label
+      ? {} : { label: label };
   }
   const ungraded = gradingProblem('fix');
   if (ungraded) { setMsg(errBox, ungraded); return; }
   const assertion = assertionFrom('fix');
   const problem = rationaleProblem(assertion);
   if (problem) { setMsg(errBox, problem); $('fix-rationale').focus(); return; }
-  if (sel.kind === 'edge') {
+  if (sel.kind === 'edge' && end !== undefined) {
+    /* An end date: the grading grades the date, and the tie's confidence
+       is left where it is, as a weight correction leaves it. */
+    body = {};
+  } else if (sel.kind === 'edge') {
     /* Refused HERE, before anything is sent, when the re-grade would lower
        the tie (final review C14, 2026-09-23): the server refuses it (409),
        since a correction cannot lower a tie past a claim that still
@@ -11538,6 +11604,7 @@ async function submitCorrection(event) {
     }
     body = { confidence: assertion.confidence };
   }
+  if (end !== undefined) body.valid_to = end;
   /* The whole claim, graded by the analyst: the original claim survives,
      so the sequence of assertions is the history of what this element has
      been called (invariant 1). */
@@ -11557,11 +11624,19 @@ async function submitCorrection(event) {
     await reloadAll();
     if (caseChanged(token)) return;
     renderInspector();
-    banner('Correction recorded', sel.kind === 'edge'
+    banner('Correction recorded', body.confidence
       ? tieClaimDoneWords(assertion.confidence, out ? out.confidence : null,
                           !!assertion.evidence_id)
-      : 'Recorded as a claim with the grading you chose. The label it '
-        + 'replaces stays in the audit record.', 'info');
+      : ['Recorded as a claim with the grading you chose.',
+         body.label ? 'The label it replaces stays in the audit record.' : '',
+         end === undefined ? ''
+           : end ? 'The end date is recorded, and the as-of view still shows '
+             + 'it before then.' : 'The end date is cleared.',
+         /* The corrected label is a selector another entity holds. */
+         out && out.selector_owner_id
+           ? selectorLeadWords('selector value', labelOf(out.selector_owner_id))
+           : '']
+        .filter(Boolean).join(' '), 'info');
   } catch (err) {
     if (caseChanged(token)) return;
     inlineProblem(errBox, err);
@@ -13003,6 +13078,17 @@ function selectorHeldWords(selType, ownerLabel, strong) {
     + 'entities with ' + (strong ? 'one strong selector are a merge lead: '
       : 'one selector may be one and the same: ')
     + 'compare them under Entity resolution below.';
+}
+
+/** Another entity this reader can see already holds a selector that a
+ *  correction or an accepted proposal just asked for. The index keeps its
+ *  first owner, so the two are a lead for Entity resolution
+ *  (graph-selector-index-drift, 2026-10-03). Pure. */
+function selectorLeadWords(selType, ownerLabel) {
+  return 'This ' + selType + ' is already recorded against ' + ownerLabel
+    + ', so it stays there and this entity does not hold it. Two entities '
+    + 'with one selector may be one and the same: compare them under Entity '
+    + 'resolution.';
 }
 
 /* ── what a create just made ───────────────────────────────────────────
@@ -16422,6 +16508,14 @@ function showTriageOutcome(p, path, out) {
       ? ', written at TLP:' + level : '';
     line.appendChild(document.createTextNode(
       'Accepted: ' + what + written + '. '));
+    /* The accepted selector is already held by another entity this reader
+       can see: a lead, said where the accept is (graph-selector-index-
+       drift, 2026-10-03). */
+    if (out.selector_owner_id) {
+      const attrs = (p.payload && p.payload.attrs) || {};
+      line.appendChild(document.createTextNode(selectorLeadWords(
+        attrs.selector_type || 'selector', labelOf(out.selector_owner_id)) + ' '));
+    }
     /* Only for a role that can retire it (final review u11, 2026-09-24):
        a REVIEWER's Undo answered 403 from the delete it called, and the
        element stayed. They are told who can take it back instead. */

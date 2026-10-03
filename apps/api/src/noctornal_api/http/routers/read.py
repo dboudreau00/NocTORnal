@@ -168,7 +168,8 @@ class AssertionOut(BaseModel):
 #: Attribute claims from triage and the contact-block parser use dotted
 #: paths ('attrs.role', 'comms.tox'), so the two cannot be confused.
 #: test_evidenced_pg.py pins this set to the two request bodies.
-CORRECTION_FIELDS = frozenset({"label", "attrs", "weight", "confidence"})
+CORRECTION_FIELDS = frozenset({"label", "attrs", "weight", "confidence",
+                               "valid_to"})
 
 
 def is_correction(claim_path: str | None, claim_value: Any) -> bool:

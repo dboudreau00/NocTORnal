@@ -22,6 +22,8 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.db import SystemPurpose, system_connection
+from noctornal_api.selectors import SelectorError, SelectorStore, label_is_selector
+from noctornal_ontology.normalisers import redact_url_credentials
 
 
 class GraphWriteError(Exception):
@@ -74,6 +76,22 @@ def _write_error(exc: psycopg.Error) -> GraphWriteError:
     """
     return GraphWriteError(
         f"the database refused this write ({type(exc).__name__})")
+
+
+def _refuse_credential_attrs(attrs: dict | None) -> None:
+    """Refuse an entity whose `attrs.raw_value` or `attrs.value` (the
+    selector as it was written, copied there by an accepted proposal)
+    carries a URL's password or token. Every path that writes it should have redacted it first; this
+    is the one writer, so a path that did not is refused rather than
+    recorded (graph-url-selector-keeps-credentials, 2026-10-03, verify
+    round: a lab extraction's raw value reached `core.node.attrs`). The
+    message names no value."""
+    for key in ("raw_value", "value"):
+        found = (attrs or {}).get(key)
+        if isinstance(found, str) and redact_url_credentials(found) != found:
+            raise GraphWriteError(
+                f"attrs.{key} carries a password, token or key, which the "
+                f"graph does not record. Enter it without them.")
 
 
 #: ICD-203 analytic confidence, mirroring the `core.analytic_confidence`
@@ -170,6 +188,45 @@ class AssertionInput:
     # transaction; the database refuses one in another case, about another
     # element, or already withdrawn or replaced.
     supersedes_id: UUID | None = None
+    # On a correction, the value of each field it changes as the element
+    # held it just before (migration 0136). Set by `update_node` and
+    # `update_edge` from the row they lock, never by a caller, so that
+    # retracting the correction can restore the supported value
+    # (graph-retracted-correction-stays-in-force, 2026-10-03).
+    prior_value: dict | None = None
+
+
+class _Keep:
+    """A field this correction leaves alone. `valid_to=None` CLEARS the end
+    date, so "not given" needs a value of its own."""
+
+    def __repr__(self) -> str:
+        return "KEEP"
+
+
+#: Passed for `valid_to` when the correction does not change it.
+KEEP = _Keep()
+
+#: The fields a correction can change, as `routers.read.CORRECTION_FIELDS`
+#: names them (a test holds the two equal), and per element the ones a
+#: retraction restores. `confidence` is not restored by hand: the tie's
+#: confidence is derived from its live claims by the 0064 trigger, so
+#: retracting a re-grade already moves it.
+CORRECTION_KEYS = frozenset({"label", "attrs", "weight", "confidence",
+                             "valid_to"})
+RESTORED_FIELDS = {"node": ("label", "attrs", "valid_to"),
+                   "edge": ("weight", "attrs", "valid_to")}
+
+
+@dataclass(frozen=True)
+class Restoration:
+    """What a retraction put back on its element. `restored` names the
+    fields set to the value the remaining live claims support; `unknown`
+    names those left as they were because the value before the first
+    correction was never recorded (a correction made before migration
+    0136)."""
+    restored: tuple[str, ...] = ()
+    unknown: tuple[str, ...] = ()
 
 
 class GraphWriteService:
@@ -191,6 +248,7 @@ class GraphWriteService:
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
     ) -> UUID:
+        _refuse_credential_attrs(attrs)
         try:
             with self._c.transaction():
                 node_id = self._c.execute(
@@ -322,8 +380,11 @@ class GraphWriteService:
         assertion: AssertionInput,
         label: str | None = None,
         attrs: dict | None = None,
-    ) -> None:
-        """Correct a node's label and/or attributes, with a reason.
+        valid_to: datetime | None | _Keep = KEEP,
+    ) -> UUID | None:
+        """Correct a node's label, attributes and/or end date, with a
+        reason. Returns another live entity that already holds the
+        corrected label as its selector (a merge lead), or None.
 
         `case_id` is checked, not trusted: the caller supplies both, and a
         node id from another case must not be editable by passing the
@@ -333,27 +394,84 @@ class GraphWriteService:
         There is deliberately no `updated_by`: the actor is
         `assertion.created_by`. Two parameters for one fact can disagree,
         and then the audit trail and the assertion name different people.
+
+        The claim records the values it replaces (`prior_value`, 0136), read
+        from the row it locks, so retracting it restores what the remaining
+        claims support (graph-retracted-correction-stays-in-force,
+        2026-10-03). `valid_to` (KEEP to leave it, None to clear it) says
+        the entity stopped being true at that moment, the non-destructive
+        alternative to retiring it (graph-valid-to-cannot-be-set-after,
+        2026-10-03). A corrected label of an entity whose label IS its
+        selector moves the selector index with it, refused with the
+        ontology's reason when it is not a selector of that type
+        (graph-selector-index-drift, 2026-10-03).
         """
-        if label is None and attrs is None:
-            raise GraphWriteError("nothing to update: pass label and/or attrs")
+        if label is None and attrs is None and valid_to is KEEP:
+            raise GraphWriteError(
+                "nothing to update: pass label, attrs and/or valid_to")
         if label is not None and not label.strip():
             raise GraphWriteError("label cannot be blank")
+        _refuse_credential_attrs(attrs)
         try:
             with self._c.transaction():
+                # The values this correction replaces are read from the row
+                # it locks, so a concurrent correction cannot slip between
+                # the read and the write. NO KEY UPDATE, the lock the
+                # UPDATE below takes anyway, so an assertion being added to
+                # this entity (a key-share lock) is not made to wait.
+                old = self._c.execute(
+                    """SELECT label, attrs, valid_from, valid_to, node_type
+                         FROM core.node
+                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL
+                          FOR NO KEY UPDATE""",
+                    (node_id, case_id),
+                ).fetchone()
+                if old is None:
+                    raise GraphWriteError(
+                        f"node {node_id} not found in this case, or already "
+                        f"deleted")
+                old_label, old_attrs, valid_from, old_valid_to, node_type = old
+                if (isinstance(valid_to, datetime) and valid_from is not None
+                        and valid_to < valid_from):
+                    raise GraphWriteError("valid_to is before valid_from")
+                prior: dict = {}
+                if label is not None:
+                    prior["label"] = old_label
+                if attrs is not None:
+                    prior["attrs"] = old_attrs
+                if valid_to is not KEEP:
+                    prior["valid_to"] = _iso(old_valid_to)
                 cur = self._c.execute(
                     """UPDATE core.node
                           SET label = COALESCE(%s, label),
                               attrs = COALESCE(%s::jsonb, attrs),
+                              valid_to = CASE WHEN %s THEN %s::timestamptz
+                                              ELSE valid_to END,
                               updated_at = now()
                         WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
                     (label, Json(attrs) if attrs is not None else None,
+                     valid_to is not KEEP,
+                     valid_to if isinstance(valid_to, datetime) else None,
                      node_id, case_id),
                 )
                 if cur.rowcount == 0:
                     raise GraphWriteError(
                         f"node {node_id} not found in this case, or already "
                         f"deleted")
-                self._insert_assertion(case_id, assertion, node_id=node_id)
+                self._insert_assertion(
+                    case_id, replace(assertion, prior_value=prior),
+                    node_id=node_id)
+                lead = None
+                if label is not None and label_is_selector(node_type, old_attrs):
+                    try:
+                        lead = SelectorStore(self._c).follow_label(
+                            case_id=case_id, node_id=node_id,
+                            old_label=old_label, new_label=label,
+                            declared_type=(old_attrs or {}).get("selector_type"))
+                    except SelectorError as exc:
+                        # The ontology's own sentence, authored text.
+                        raise GraphWriteError(str(exc)) from None
+                return lead
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
@@ -368,8 +486,14 @@ class GraphWriteService:
         weight: float | None = None,
         confidence: str | None = None,
         attrs: dict | None = None,
+        valid_to: datetime | None | _Keep = KEEP,
     ) -> None:
-        """Correct an edge's weight, confidence and/or attributes.
+        """Correct an edge's weight, confidence, attributes and/or end date.
+
+        As `update_node`, the claim records the values it replaces
+        (`prior_value`) from the row it locks, and `valid_to` (KEEP to
+        leave it, None to clear it) is the date the tie stopped being true
+        (review 2026-10-03).
 
         `sign` is NOT editable: flipping a vouch into an accusation is not a
         correction, it is a different claim about the relationship, and the
@@ -423,9 +547,11 @@ class GraphWriteService:
         concurrent retraction and then answered from the snapshot it had
         started with, refusing a correction the committed state allowed.
         """
-        if weight is None and confidence is None and attrs is None:
+        if (weight is None and confidence is None and attrs is None
+                and valid_to is KEEP):
             raise GraphWriteError(
-                "nothing to update: pass weight, confidence and/or attrs")
+                "nothing to update: pass weight, confidence, attrs and/or "
+                "valid_to")
         if confidence is not None and confidence not in _CONFIDENCE:
             raise GraphWriteError(
                 f"confidence must be one of {sorted(_CONFIDENCE)}")
@@ -438,7 +564,8 @@ class GraphWriteService:
                 # key-share lock from an assertion's foreign key must not be
                 # waited on here.
                 found = self._c.execute(
-                    """SELECT 1 FROM core.edge
+                    """SELECT weight, attrs, valid_from, valid_to
+                         FROM core.edge
                         WHERE id = %s AND case_id = %s AND deleted_at IS NULL
                           FOR NO KEY UPDATE""",
                     (edge_id, case_id),
@@ -447,16 +574,35 @@ class GraphWriteService:
                     raise GraphWriteError(
                         f"edge {edge_id} not found in this case, or already "
                         f"deleted")
+                old_weight, old_attrs, valid_from, old_valid_to = found
+                if (isinstance(valid_to, datetime) and valid_from is not None
+                        and valid_to < valid_from):
+                    raise GraphWriteError("valid_to is before valid_from")
+                # The weight as text: numeric(14,4) comes back a Decimal,
+                # and a float would corrupt the value this keeps.
+                prior: dict = {}
+                if weight is not None:
+                    prior["weight"] = str(old_weight)
+                if attrs is not None:
+                    prior["attrs"] = old_attrs
+                if valid_to is not KEEP:
+                    prior["valid_to"] = _iso(old_valid_to)
                 self._c.execute(
                     """UPDATE core.edge
                           SET weight = COALESCE(%s, weight),
                               attrs = COALESCE(%s::jsonb, attrs),
+                              valid_to = CASE WHEN %s THEN %s::timestamptz
+                                              ELSE valid_to END,
                               updated_at = now()
                         WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
                     (weight, Json(attrs) if attrs is not None else None,
+                     valid_to is not KEEP,
+                     valid_to if isinstance(valid_to, datetime) else None,
                      edge_id, case_id),
                 )
-                self._insert_assertion(case_id, assertion, edge_id=edge_id)
+                self._insert_assertion(
+                    case_id, replace(assertion, prior_value=prior or None),
+                    edge_id=edge_id)
                 if confidence is not None:
                     self._refuse_if_outvoted(edge_id, confidence,
                                              assertion.created_by)
@@ -534,13 +680,14 @@ class GraphWriteService:
             node_id, case_id, clearance, compartments)
         try:
             with self._c.transaction():
-                cur = self._c.execute(
+                retired = self._c.execute(
                     """UPDATE core.node
                           SET deleted_at = %s, deleted_by = %s, updated_at = now()
-                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL""",
+                        WHERE id = %s AND case_id = %s AND deleted_at IS NULL
+                        RETURNING label""",
                     (at, deleted_by, node_id, case_id),
-                )
-                if cur.rowcount == 0:
+                ).fetchone()
+                if retired is None:
                     raise GraphWriteError(
                         f"node {node_id} not found in this case, or already "
                         f"deleted")
@@ -551,6 +698,13 @@ class GraphWriteService:
                           AND (src_node_id = %s OR dst_node_id = %s)""",
                     (at, deleted_by, case_id, node_id, node_id),
                 )
+                # Its selectors go free in the same transaction, so the
+                # entity recorded in its place holds them and the index
+                # stops pointing at a retired one (graph-selector-index-
+                # drift, 2026-10-03).
+                SelectorStore(self._c).release_node(case_id=case_id,
+                                                    node_id=node_id,
+                                                    label=retired[0])
                 return edges.rowcount
         except GraphWriteError:
             raise
@@ -720,8 +874,8 @@ class GraphWriteService:
 
     def retract_assertion(
         self, assertion_id: UUID, *, retracted_by: UUID, reason: str, at: datetime
-    ) -> None:
-        """Retract (never delete) an assertion.
+    ) -> Restoration:
+        """Retract (never delete) an assertion, and return what it put back.
 
         Invariant 5, as decided 2026-09-09: this is a MARKED ROW, not a
         supersession. One UPDATE stamps `retracted_at`/`retracted_by`/
@@ -729,7 +883,17 @@ class GraphWriteService:
         claim itself is never rewritten; the projection drops the row.
         There is nothing to supersede it with — a retraction withdraws a
         claim rather than replacing one, and a correction is a new
-        assertion."""
+        assertion.
+
+        **A retracted CORRECTION gives its value back**, in the same
+        transaction (graph-retracted-correction-stays-in-force,
+        2026-10-03). A correction writes its value onto the element, and
+        every reader reads the element, so withdrawing the claim used to
+        leave the value standing on nothing. Each field it set returns to
+        the value the remaining live claims support: the newest live
+        correction of that field, or, when none is left, the value the
+        element held before its first correction of it. See
+        `_restore_after_retraction`."""
         try:
             with self._c.transaction():
                 cur = self._c.execute(
@@ -746,10 +910,153 @@ class GraphWriteService:
                     raise GraphWriteError(
                         f"assertion {assertion_id} not found or already retracted"
                     )
+                return self._restore_after_retraction(assertion_id)
         except GraphWriteError:
             raise
         except psycopg.Error as exc:
             raise _write_error(exc) from exc
+
+    def _restore_after_retraction(self, assertion_id: UUID) -> Restoration:
+        """Put back what a just-retracted correction had set.
+
+        "Supported" is read from the claims, never from the element: for
+        each field the correction set, the newest correction of that field
+        still live (neither retracted nor superseded) gives the value;
+        when none is left, the oldest correction of the field gives it,
+        through the `prior_value` it recorded, which is the value the
+        element was created with. A copy made by `supersede_assertion`
+        ranks at its original's time, so dating an old correction does not
+        make it the newest.
+
+        A correction recorded before migration 0136 has no prior value.
+        When it is the oldest of its field and nothing live remains, the
+        original value is not known, the field is left as it is, and the
+        caller is told (`Restoration.unknown`); the retraction itself
+        still stands, because a withdrawn source is never kept live by a
+        missing record.
+
+        The element is locked first, as `update_edge` locks it, so two
+        retractions at once are ordered and the second reads the first's
+        result. A restored label follows the selector index, without the
+        refusal a new label gets (`SelectorStore.follow_label`).
+        """
+        row = self._c.execute(
+            """SELECT node_id, edge_id, claim_path, claim_value
+                 FROM core.assertion WHERE id = %s""",
+            (assertion_id,)).fetchone()
+        if row is None:
+            return Restoration()
+        node_id, edge_id, path, value = row
+        if not isinstance(value, dict) or not value:
+            return Restoration()
+        if path is not None and path not in CORRECTION_KEYS:
+            return Restoration()
+        if path is None and not set(value) <= CORRECTION_KEYS:
+            return Restoration()
+        kind = "node" if node_id is not None else "edge"
+        element = node_id if node_id is not None else edge_id
+        fields = [f for f in RESTORED_FIELDS[kind] if f in value]
+        if not fields:
+            return Restoration()
+        if kind == "node":
+            current = self._c.execute(
+                """SELECT case_id, label, node_type, attrs, deleted_at
+                     FROM core.node WHERE id = %s FOR NO KEY UPDATE""",
+                (element,)).fetchone()
+            column = "node_id"
+        else:
+            current = self._c.execute(
+                "SELECT case_id FROM core.edge WHERE id = %s FOR NO KEY UPDATE",
+                (element,)).fetchone()
+            column = "edge_id"
+        if current is None:
+            return Restoration()
+        restored: list[str] = []
+        unknown: list[str] = []
+        for field_name in fields:
+            found, target = self._supported_value(column, element, field_name)
+            if not found or not self._set_field(kind, element, field_name,
+                                                target):
+                unknown.append(field_name)
+                continue
+            restored.append(field_name)
+            if (field_name == "label" and current[4] is None
+                    and label_is_selector(current[2], current[3])
+                    and target != current[1]):
+                SelectorStore(self._c).follow_label(
+                    case_id=current[0], node_id=element,
+                    old_label=current[1], new_label=target,
+                    declared_type=(current[3] or {}).get("selector_type"),
+                    strict=False)
+        return Restoration(tuple(restored), tuple(unknown))
+
+    def _supported_value(self, column: str, element: UUID,
+                         field_name: str) -> tuple[bool, object]:
+        """(known, value) of one field as the element's live claims support
+        it. See `_restore_after_retraction`. `column` is a literal."""
+        assert column in ("node_id", "edge_id")
+        live, has_live, first_prior = self._c.execute(
+            f"""WITH c AS (
+                  SELECT a.claim_value -> %(f)s AS v, a.prior_value,
+                         a.retracted_at IS NULL AND a.superseded_at IS NULL
+                           AS is_live,
+                         coalesce(o.recorded_at, a.recorded_at) AS ranked_at,
+                         a.recorded_at
+                    FROM core.assertion a
+                    LEFT JOIN core.assertion o ON o.id = a.supersedes_id
+                   WHERE a.{column} = %(el)s
+                     AND jsonb_typeof(a.claim_value) = 'object'
+                     AND a.claim_value ? %(f)s
+                     AND (a.claim_path = %(f)s
+                          OR (a.claim_path IS NULL
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM jsonb_object_keys(a.claim_value) k
+                                   WHERE k <> ALL(%(keys)s::text[])))))
+                SELECT (SELECT v FROM c WHERE is_live
+                         ORDER BY ranked_at DESC, recorded_at DESC LIMIT 1),
+                       EXISTS (SELECT 1 FROM c WHERE is_live),
+                       (SELECT prior_value FROM c
+                         ORDER BY ranked_at, recorded_at LIMIT 1)""",
+            {"f": field_name, "el": element, "keys": sorted(CORRECTION_KEYS)},
+        ).fetchone()
+        if has_live:
+            return True, live
+        if isinstance(first_prior, dict) and field_name in first_prior:
+            return True, first_prior[field_name]
+        return False, None
+
+    def _set_field(self, kind: str, element: UUID, field_name: str,
+                   value: object) -> bool:
+        """Write one restored value onto the element; False when the value
+        is not one the column can hold (nothing is written then), or carries
+        a password, token or key in a URL: a withdrawn correction's prior
+        value must not put onto the graph what the graph no longer keeps
+        (graph-url-selector-keeps-credentials, 2026-10-03)."""
+        if kind == "node" and field_name == "label":
+            if not isinstance(value, str) or not value.strip():
+                return False
+            if _carries_credential(value):
+                return False
+            sql, arg = "label = %s", value
+        elif field_name == "attrs":
+            if not isinstance(value, dict) or _carries_credential(value):
+                return False
+            sql, arg = "attrs = %s::jsonb", Json(value)
+        elif field_name == "valid_to":
+            if value is not None and not isinstance(value, str):
+                return False
+            sql, arg = "valid_to = %s::timestamptz", value
+        elif kind == "edge" and field_name == "weight":
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return False
+            sql, arg = "weight = %s::numeric", str(value)
+        else:
+            return False
+        table = "core.node" if kind == "node" else "core.edge"   # literal
+        self._c.execute(
+            f"UPDATE {table} SET {sql}, updated_at = now() WHERE id = %s",
+            (arg, element))
+        return True
 
     def supersede_assertion(
         self, assertion_id: UUID, *, case_id: UUID, observed_at: datetime,
@@ -800,7 +1107,7 @@ class GraphWriteService:
                               credibility::text, confidence::text,
                               source_id, document_id, evidence_id,
                               external_ref, lookup_result_id, observed_at,
-                              retracted_at, superseded_at
+                              retracted_at, superseded_at, prior_value
                          FROM core.assertion
                         WHERE id = %s AND case_id = %s
                           FOR UPDATE""",
@@ -828,7 +1135,10 @@ class GraphWriteService:
                         evidence_id=old[10], external_ref=old[11],
                         observed_at=observed_at, claim_path=old[2],
                         claim_value=old[3], lookup_result_id=old[12],
-                        supersedes_id=assertion_id),
+                        supersedes_id=assertion_id,
+                        # A dated correction still knows what it replaced
+                        # (graph-retracted-correction, 2026-10-03).
+                        prior_value=old[16]),
                     node_id=old[0], edge_id=old[1])
                 stamped = self._c.execute(
                     """UPDATE core.assertion
@@ -870,9 +1180,9 @@ class GraphWriteService:
                     basis, reliability, credibility, confidence,
                     source_id, document_id, evidence_id, external_ref,
                     rationale, observed_at, created_by, lookup_result_id,
-                    supersedes_id)
+                    supersedes_id, prior_value)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s, %s)
+                       %s, %s, %s)
                RETURNING id""",
             (case_id, node_id, edge_id, a.claim_path,
              Json(a.claim_value) if a.claim_value is not None else None,
@@ -880,5 +1190,23 @@ class GraphWriteService:
              a.source_id, a.document_id, a.evidence_id, a.external_ref,
              a.rationale, a.observed_at, a.created_by,
              a.lookup_result_id,  # F15.3
-             a.supersedes_id),    # 0131
+             a.supersedes_id,     # 0131
+             Json(a.prior_value) if a.prior_value else None),  # 0136
         ).fetchone()[0]
+
+
+def _iso(value: datetime | None) -> str | None:
+    """A timestamp as a claim's JSON holds it."""
+    return value.isoformat() if value is not None else None
+
+
+def _carries_credential(value: object) -> bool:
+    """Whether a string, or any string inside a list or dict, quotes a URL
+    with userinfo or a credential-bearing query value."""
+    if isinstance(value, str):
+        return redact_url_credentials(value) != value
+    if isinstance(value, dict):
+        return any(_carries_credential(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_carries_credential(v) for v in value)
+    return False
