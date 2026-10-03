@@ -60,18 +60,27 @@ rows through the trigger and asserts the chain verifies, so an edit to the
 trigger that this file does not match turns the suite red rather than
 silently reporting corruption.
 
-## `id` ORDER IS NOT CHAIN ORDER
+## `id` ORDER WAS NOT CHAIN ORDER until 0149
 
-`core.evidence_custody.id` is a `bigserial`, drawn from `nextval()` when
-the row is constructed — BEFORE the BEFORE-INSERT trigger takes the
-advisory lock. Two concurrent writers can therefore be handed ids 10 and
-11 and acquire the lock in the opposite order, and the row holding the
-LOWER id then chains off the row holding the HIGHER one. The linked list
-is sound; the numbering does not follow it. `audit_verify.py` shipped an
-adjacency check on `seq` once and accused 68 honest rows on the
-development database. So the link is verified here as what it is — a
-linked list, by following `prev_hash` to a real `row_hash` — and `id` is
-used only for reporting and ordering the output.
+`core.evidence_custody.id` is a `bigserial`. Until 0149 it was drawn from
+`nextval()` when the row was constructed, BEFORE the BEFORE-INSERT trigger
+took the advisory lock. Two concurrent writers could therefore be handed ids
+10 and 11 and acquire the lock in the opposite order, and the row holding the
+LOWER id then chained off the row holding the HIGHER id. The linked list was
+sound; the numbering did not follow it. `audit_verify.py` shipped an
+adjacency check on `seq` once and accused 68 honest rows on the development
+database. So the link is verified here as what it is, a linked list, by
+following `prev_hash` to a real `row_hash`, and `id` is used for reporting,
+ordering the output and the fork boundary.
+
+Since 0149 the trigger takes the lock and THEN draws the id and reads the
+tail, so id order is chain order. `core.custody_chain_ordered_after()` is the
+largest id that existed when 0149 ran. A fork whose claimants are all above
+it cannot come from honest traffic and is reported as a `FORK` break; one
+with a claimant at or below it is legacy, and only listed. A dead-end row is
+one whose removal orphans nothing, so with the table owner's rights it could
+be deleted while the ledger still read intact; after the boundary a dead end
+cannot arise.
 
 ## The checks are separate on purpose
 
@@ -79,12 +88,13 @@ used only for reporting and ordering the output.
   using the `prev_hash` it stores. A row *edited in place*.
 - **LINK** — `prev_hash` names a `row_hash` no row has. A predecessor
   *removed*.
-- **FORK** — two or more rows claim the same predecessor. Reported
-  separately and NOT counted as tampering, for the reasons
-  `audit_verify.ChainReport.intact` gives at length: it is not proof of
-  editing, an append-only table cannot be cleaned of legacy ones, and
-  folding it into `intact` recreates the cry-wolf failure. On a chain
-  written by 0024 a fork should not occur, so one deserves investigation.
+- **FORK**: two or more rows claim the same predecessor. A fork with a
+  claimant at or below the 0149 boundary is legacy: reported separately
+  and NOT counted as tampering, for the reasons
+  `audit_verify.ChainReport.intact` gives at length (an append-only table
+  cannot be cleaned of it, and folding it into `intact` recreates the
+  cry-wolf failure). A fork whose claimants are all above the boundary is
+  a break: since 0149 honest traffic cannot make one.
 - **GENESIS / NO_GENESIS** — how many rows claim to be first. Exactly one
   is an anchored chain; more than one is the shape a truncation leaves
   (delete the first k rows, re-anchor row k+1, and every relative check
@@ -120,10 +130,13 @@ that reads only the table.
 
 All three want the same missing thing: an EXTERNAL ANCHOR, recorded
 somewhere the ledger's owner cannot reach and compared on the next run.
-`CustodyReport.tail_row_hash` is the value to record — the newest row's
-hash, which necessarily changes whenever the tail does — but **this
-module does not persist it and nothing else does yet**, so until an
-operator or a job stores it out of band, a tail deletion goes undetected.
+`CustodyReport.tail_id` and `tail_row_hash` are the values to record, the
+newest row's id and hash, which necessarily change whenever the tail does.
+**This module does not persist them and nothing else does**: an operator
+or a job stores them out of band and hands them back as a
+`CustodyAnchor`, which turns a removed or rewritten anchored row into an
+`ANCHOR_*` break (2026-10-03). Until somebody does, a tail deletion goes
+undetected, and every report says so.
 
 ## Exactly what IS caught, by position
 
@@ -182,18 +195,47 @@ class CustodyBreak:
     evidence_id: UUID | None
     occurred_at: datetime | None
     action: str
-    #: LINK / CONTENT, '+'-joined when both; FORK in `forks`; GENESIS and
-    #: NO_GENESIS for the whole-chain findings.
+    #: LINK / CONTENT, '+'-joined when both; FORK for a fork whose claimants
+    #: are all above the 0149 boundary (all forks are listed in `forks`);
+    #: GENESIS and NO_GENESIS for the whole-chain findings; and the anchor
+    #: findings ANCHOR_MISSING, ANCHOR_REWRITTEN and ANCHOR_MOVED.
     kind: str
     actor_id: UUID | None
 
 
 @dataclass(frozen=True)
+class CustodyAnchor:
+    """The newest custody row's `id` and hex `row_hash` from an earlier run,
+    kept somewhere this system cannot write."""
+    id: int
+    row_hash: str
+
+    def __post_init__(self) -> None:
+        if (len(self.row_hash) != 64
+                or any(c not in "0123456789abcdef" for c in self.row_hash)):
+            raise ValueError("an anchor hash is 64 lowercase hex characters")
+
+
+@dataclass(frozen=True)
+class CustodyAnchorResult:
+    """What became of a recorded anchor: HELD, MISSING (no row has that hash
+    or that id), REWRITTEN (a row with that id has another hash) or MOVED
+    (that hash is here under another id)."""
+    anchor: CustodyAnchor
+    status: str
+    found_id: int | None
+    rows_since: int | None
+
+
+@dataclass(frozen=True)
 class CustodyReport:
     checked: int
-    #: Evidence of TAMPERING: LINK, CONTENT, GENESIS, NO_GENESIS.
+    #: Evidence of TAMPERING: LINK, CONTENT, FORK above the boundary,
+    #: GENESIS, NO_GENESIS and a failed anchor.
     breaks: tuple[CustodyBreak, ...]
-    #: Rows sharing a predecessor. Reported, not counted -- see `intact`.
+    #: Every row sharing a predecessor, legacy and new. Those with a claimant
+    #: at or below `fork_boundary` are not counted as tampering (see
+    #: `intact`); one whose claimants are all above it is also in `breaks`.
     forks: tuple[CustodyBreak, ...]
     first_id: int | None
     last_id: int | None
@@ -224,8 +266,18 @@ class CustodyReport:
     #: docstring describes, and it only works if somebody records it OUT OF
     #: BAND and compares it on the next run. Added 2026-09-02; nothing in
     #: this tree persists it yet, so a caller that merely reads it past is
-    #: no better protected than before.
+    #: no better protected than before. The anchor check below is what makes
+    #: a recorded value useful.
     tail_row_hash: str | None = None
+    #: The id of that newest row, and the rows in the whole ledger, so a
+    #: caller can record the pair and watch the count only ever grow.
+    tail_id: int | None = None
+    total_rows: int = 0
+    #: `core.custody_chain_ordered_after()`, or None on a database that has
+    #: not run 0149.
+    fork_boundary: int | None = None
+    #: What became of the anchor the caller supplied, or None.
+    anchor: CustodyAnchorResult | None = None
 
     @property
     def intact(self) -> bool:
@@ -237,8 +289,9 @@ class CustodyReport:
         that ARE here and never about rows that are not. Compare
         `tail_row_hash` against a value recorded out of band for that.
 
-        Forks are excluded for the reasons `audit_verify.ChainReport.intact`
-        records; they are surfaced with their own count.
+        A fork is a break only above the 0149 boundary, for the reasons
+        `audit_verify.ChainReport.intact` records; older ones are surfaced
+        with their own count.
 
         An EMPTY result USUALLY returns True, and the caller is expected to
         read `checked` too: an exhibit with no custody rows, or a fresh
@@ -273,6 +326,7 @@ def verify_custody_chain(
     conn: psycopg.Connection,
     *,
     evidence_id: UUID | None = None,
+    anchor: CustodyAnchor | None = None,
 ) -> CustodyReport:
     """Recompute the custody chain and return every row that does not verify.
 
@@ -291,9 +345,10 @@ def verify_custody_chain(
     NO result from this function is a completeness proof, scoped or not:
     the checks are relative, and rows deleted from the END of the ledger
     leave nothing behind to disagree with. `tail_row_hash` is returned so
-    that the one defence which does work -- recording the tail out of band
-    and comparing it next time -- is at least possible; this function does
-    not persist it.
+    that the one defence which does work, recording the tail out of band and
+    comparing it next time, is possible: hand the recorded `(id, row_hash)`
+    back as `anchor` and a row that was removed or rewritten since is an
+    `ANCHOR_*` break. This function does not persist it.
     """
     where = "WHERE c.evidence_id = %(evidence_id)s" if evidence_id is not None else ""
 
@@ -321,7 +376,7 @@ def verify_custody_chain(
     ), claims AS (
         -- Also whole-table: a fork is a fork whether or not both claimants
         -- belong to the exhibit being reported.
-        SELECT prev_hash, COUNT(*) AS claimants
+        SELECT prev_hash, COUNT(*) AS claimants, MIN(id) AS lowest
           FROM core.evidence_custody WHERE prev_hash IS NOT NULL
          GROUP BY prev_hash
     )
@@ -334,13 +389,18 @@ def verify_custody_chain(
            -- Both claimants are reported; which is the intruder is not
            -- something this can decide.
            COALESCE(cl.claimants > 1, false) AS forked,
+           COALESCE(cl.claimants > 1 AND cl.lowest > %(boundary)s::bigint, false)
+               AS fresh_fork,
            (s.row_hash IS DISTINCT FROM s.recomputed) AS content_broken
       FROM scoped s
       LEFT JOIN hashes h ON h.row_hash = s.prev_hash
       LEFT JOIN claims cl ON cl.prev_hash = s.prev_hash
      ORDER BY s.id
     """
-    params: dict = {}
+    # `fresh_fork` in the query is a fork whose claimants are ALL above the
+    # 0149 boundary: honest traffic cannot make one. No boundary, no such fork.
+    boundary = _fork_boundary(conn)
+    params: dict = {"boundary": boundary}
     if evidence_id is not None:
         params["evidence_id"] = evidence_id
 
@@ -378,7 +438,7 @@ def verify_custody_chain(
     # to. Added 2026-09-02 alongside the docstring that admits the blind
     # spot; before that the report offered no way to detect one at all.
     tail = conn.execute(
-        "SELECT encode(row_hash, 'hex') FROM core.evidence_custody "
+        "SELECT encode(row_hash, 'hex'), id FROM core.evidence_custody "
         "ORDER BY id DESC LIMIT 1").fetchone()
 
     if total and not genesis:
@@ -394,7 +454,7 @@ def verify_custody_chain(
                 id=g_id, evidence_id=g_ev, occurred_at=g_at, action=g_action,
                 kind="GENESIS", actor_id=g_actor))
 
-    for row_id, ev, action, actor_id, occurred_at, link, fork, content in rows:
+    for row_id, ev, action, actor_id, occurred_at, link, fork, fresh, content in rows:
         if not (link or fork or content):
             continue
         parts = []
@@ -406,11 +466,24 @@ def verify_custody_chain(
             breaks.append(CustodyBreak(
                 id=row_id, evidence_id=ev, occurred_at=occurred_at,
                 action=action, kind="+".join(parts), actor_id=actor_id))
-        # A FORK IS NOT REPORTED AS TAMPERING -- see CustodyReport.intact.
         if fork:
-            forks.append(CustodyBreak(
+            row = CustodyBreak(
                 id=row_id, evidence_id=ev, occurred_at=occurred_at,
-                action=action, kind="FORK", actor_id=actor_id))
+                action=action, kind="FORK", actor_id=actor_id)
+            forks.append(row)
+            # A fork written since 0149 is a break (see CustodyReport.intact);
+            # one with a claimant at or below the boundary is legacy.
+            if fresh:
+                breaks.append(row)
+
+    result = None
+    if anchor is not None:
+        result = _check_anchor(conn, anchor)
+        if result.status != "HELD":
+            breaks.append(CustodyBreak(
+                id=anchor.id, evidence_id=None, occurred_at=None,
+                action="(anchored row)", kind="ANCHOR_" + result.status,
+                actor_id=None))
 
     return CustodyReport(
         checked=len(rows),
@@ -421,4 +494,42 @@ def verify_custody_chain(
         genesis_count=len(genesis),
         evidence_id=evidence_id,
         tail_row_hash=tail[0] if tail else None,
+        tail_id=tail[1] if tail else None,
+        total_rows=total,
+        fork_boundary=boundary,
+        anchor=result,
     )
+
+
+def _fork_boundary(conn: psycopg.Connection) -> int | None:
+    """`core.custody_chain_ordered_after()`, or None on a database that has
+    not run 0149. Asked in two steps because a call to a function that does
+    not exist fails when the statement is parsed, branch taken or not."""
+    present = conn.execute(
+        "SELECT to_regprocedure('core.custody_chain_ordered_after()') IS NOT NULL"
+    ).fetchone()[0]
+    if not present:
+        return None
+    return conn.execute("SELECT core.custody_chain_ordered_after()").fetchone()[0]
+
+
+def _check_anchor(conn: psycopg.Connection,
+                  anchor: CustodyAnchor) -> CustodyAnchorResult:
+    """Is the recorded row still here, where it was? Each hash covers its
+    predecessor's, so a HELD anchor vouches for every row before it and says
+    nothing about the rows after it: record a newer one."""
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM core.evidence_custody WHERE row_hash = decode(%s, 'hex') "
+        "ORDER BY id", (anchor.row_hash,)).fetchall()]
+    if anchor.id in ids:
+        since = conn.execute(
+            "SELECT count(*) FROM core.evidence_custody WHERE id > %s",
+            (anchor.id,)).fetchone()[0]
+        return CustodyAnchorResult(anchor, "HELD", anchor.id, since)
+    if ids:
+        return CustodyAnchorResult(anchor, "MOVED", ids[0], None)
+    there = conn.execute(
+        "SELECT 1 FROM core.evidence_custody WHERE id = %s",
+        (anchor.id,)).fetchone()
+    return CustodyAnchorResult(
+        anchor, "REWRITTEN" if there else "MISSING", None, None)

@@ -485,6 +485,46 @@ def test_an_approval_is_refused_when_the_colleague_has_left_the_case(
     assert _switch(conn, case_id)[0] is True
 
 
+@pytest.mark.parametrize("posture", ["owner", "request role"])
+def test_a_second_person_who_presents_the_approval_is_named_in_the_apply_refusal(
+        conn, client, monkeypatch, posture):
+    """g49v-apply-refusal-row-lost (2026-10-03). The lead raised the request
+    and the deputy decided it, and it is the DEPUTY who presents the approval
+    to spend it. The refusal row is about that attempt: it names the deputy,
+    keeps the requester in its detail, and exists under the request role too.
+    It used to name the requester, who did not act; under the request role the
+    database refuses an actor the connection is not bound to, so the row was
+    lost and the log was the only place the refusal appeared."""
+    from noctornal_api.approvals import ApprovalService
+    from noctornal_api.db import ASSUME_ROLE_ENV
+    if posture == "request role":
+        if not os.environ.get("NOCTORNAL_APP_DB_ROLE"):
+            pytest.skip("needs the request role (scripts/runtime_roles.py ensure)")
+        monkeypatch.setenv(ASSUME_ROLE_ENV, "1")
+    else:
+        monkeypatch.delenv(ASSUME_ROLE_ENV, raising=False)
+    monkeypatch.setenv(ENV, "0")
+    lead_id, deputy_id, case_id, lead, rid, decided = _approved_over_http(
+        conn, client, deputy_aged=False)
+    assert decided.status_code == 200, decided.text
+    monkeypatch.setenv(ENV, "7")
+    deputy = session(conn, deputy_id)
+    off = _put(client, deputy, case_id, dual_control_merge=False,
+               approval_request_id=rid)
+    assert off.status_code == 409, off.text
+    assert off.json()["detail"].startswith(
+        "This approval cannot be used: its second person had held case.update")
+    assert ApprovalService(conn).get(rid).state == "APPROVED"
+    assert _switch(conn, case_id)[0] is True
+    (outcome, row_case, actor, detail), = _refusals(
+        conn, rid, "DUAL_CONTROL_APPLY_REFUSED")
+    assert (outcome, row_case) == ("DENIED", case_id)
+    assert actor == deputy_id, "the row names the person who tried to spend it"
+    assert detail["requested_by"] == str(lead_id)
+    assert detail["reason"] == "assignment_seasoning"
+    assert "unverified_actor_id" not in detail
+
+
 def test_a_seasoned_approval_is_spent_as_before(conn, client):
     lead_id, deputy_id, case_id, lead, rid, decided = _approved_over_http(
         conn, client, deputy_aged=True)

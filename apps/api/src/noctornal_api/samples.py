@@ -3475,6 +3475,14 @@ class SampleService:
                             sample_id=sample_id, outcome="DENIED",
                             ip_hash=ip_hash, detail={"reason": reason})
             raise SampleError(_TICKET_REFUSED)
+        # The ticket is spent, so the connection can be bound to its holder
+        # and the rows below keep the holder as their actor: the database
+        # attributes a request-role row only to the user its connection is
+        # bound to (0150, evidence-ledger-actor-time-forgeable, 2026-10-03).
+        # A holder whose account is no longer active binds to nobody, and
+        # that row is demoted to an unverified claim in its detail.
+        from noctornal_api.db import bind_ticket
+        bind_ticket(self._c, presented)
         if not hmac.compare_digest(bytes(row[3]), digest):
             # Cannot fire against the predicate above, and that is the
             # point of writing it: the equality that granted this row was

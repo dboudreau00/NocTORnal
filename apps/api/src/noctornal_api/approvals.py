@@ -902,7 +902,8 @@ class ApprovalService:
             current.case_id, _assignment_refusal_detail(op, block, days))
         raise ApprovalError(assignment_block_sentence(block, days=days))
 
-    def refuse_unseasoned_spend(self, request: ApprovalRequest) -> None:
+    def refuse_unseasoned_spend(self, request: ApprovalRequest, *,
+                                actor_id: UUID) -> None:
         """The same rule, asked again where a decided approval is spent
         (F39, 2026-10-02), judged at `decided_at`: was the second person
         seasoned when they signed. It closes what the decide route alone
@@ -912,7 +913,16 @@ class ApprovalService:
         band as DUAL_CONTROL_APPLY_REFUSED. Call it BEFORE the transaction
         that spends the approval (the module's out-of-band rule). Silent for
         an operation the rule does not cover, for a request not yet decided,
-        and with the window at 0."""
+        and with the window at 0.
+
+        `actor_id` is whoever is spending it: the row is about that person's
+        attempt, and the requester is not always the one who presents the
+        approval (the second person may). Naming the requester attributed an
+        act to someone who did not take it, and since 0150 the database
+        refuses a row that names a user other than the one the connection is
+        bound to, so the row was lost (g49v-apply-refusal-row-lost,
+        2026-10-03).
+        The requester stays in the detail."""
         op = OPERATIONS.get(request.operation)
         if (op is None or not op.signer_assignment_seasoned
                 or request.case_id is None or request.decided_by is None
@@ -927,8 +937,10 @@ class ApprovalService:
         if block is None:
             return
         self._record_out_of_band(
-            "DUAL_CONTROL_APPLY_REFUSED", request.requested_by, request.id,
-            request.case_id, _assignment_refusal_detail(op, block, days))
+            "DUAL_CONTROL_APPLY_REFUSED", actor_id, request.id,
+            request.case_id,
+            {**_assignment_refusal_detail(op, block, days),
+             "requested_by": str(request.requested_by)})
         raise ApprovalError(assignment_block_sentence(
             block, days=days, decided_at=request.decided_at))
 
@@ -1357,6 +1369,36 @@ def holds_audit_chain_lock(conn: psycopg.Connection) -> bool:
     return bool(conn.execute(_HOLDS_CHAIN_LOCK).fetchone()[0])
 
 
+def _claims(actor_id, detail: dict):
+    """The attributions `record_out_of_band` tries, in order
+    (g49v-apply-refusal-row-lost, 2026-10-03): as asked, then, when the
+    database will not vouch for the actor, the same row demoted exactly as
+    `audit.pin_attribution()` demotes a claim nobody can verify (0150): no
+    actor, the claim kept in `detail.unverified_actor_id`. A refusal row is
+    the record that an attempt was made, and a writer that named the wrong
+    person is no reason to lose it."""
+    yield actor_id, detail
+    if actor_id is not None:
+        yield None, {**detail, "unverified_actor_id": str(actor_id)}
+
+
+def _write_first_vouched(claims, write, action: str, object_id) -> None:
+    """Call `write(claim)` for each claim until one is accepted. Only the
+    database's refusal to attribute the row (insufficient_privilege, from the
+    audit trigger) moves on to the next claim; the last claim's refusal and
+    every other error are the caller's to log."""
+    for number, claim in enumerate(claims):
+        try:
+            write(claim)
+            return
+        except psycopg.errors.InsufficientPrivilege:
+            if number == len(claims) - 1:
+                raise
+            log.warning(
+                "%s for %s names a user its connection is not bound to; "
+                "recording it without an actor", action, object_id)
+
+
 def record_out_of_band(conn: psycopg.Connection, *, action: str, actor_id,
                        object_type: str, object_id, case_id,
                        detail: dict) -> None:
@@ -1367,32 +1409,66 @@ def record_out_of_band(conn: psycopg.Connection, *, action: str, actor_id,
     very caller, so the row goes on `conn` and a warning says it will not
     survive that caller's rollback. Never raises: the refusal the row
     records stands whether or not it was recorded, and losing the record
-    of an attempt must never become a way to make the attempt succeed."""
-    params = (actor_id, action, object_type, object_id, case_id, Json(detail))
+    of an attempt must never become a way to make the attempt succeed.
+
+    A request-role connection is bound to one user, and since 0150 the
+    database refuses a row that names another (a forgery, or a writer that
+    named the wrong person). That refusal must not cost the row: it is
+    written again without an actor and with the claim in the detail
+    (g49v-apply-refusal-row-lost, 2026-10-03), the shape the database itself
+    gives a claim from a connection bound to nobody. On the caller's own
+    connection each attempt runs in a savepoint, so a refused one does not
+    abort the caller's transaction."""
     statement = """INSERT INTO audit.event
                        (actor_id, actor_kind, action, object_type, object_id,
                         case_id, outcome, detail)
                    VALUES (%s, 'USER', %s, %s, %s, %s, 'DENIED', %s)"""
+    claims = list(_claims(actor_id, detail))
+
+    def params(claim) -> tuple:
+        who, body = claim
+        return (who, action, object_type, object_id, case_id, Json(body))
+
     try:
-        if holds_audit_chain_lock(conn):
-            log.warning(
-                "%s for %s written on the caller's connection: it already "
-                "holds the audit chain, so the row goes with its transaction",
-                action, object_id)
-            conn.execute(statement, params)
-            return
+        holding = holds_audit_chain_lock(conn)
     except psycopg.Error:
         log.exception("could not inspect the caller's locks before %s",
                       action)
-    # The request role, as the request's own connection is (S1): an
-    # audit append needs nothing more.
-    from noctornal_api.db import connect_request as connect
+        holding = False
+    if holding:
+        log.warning(
+            "%s for %s written on the caller's connection: it already "
+            "holds the audit chain, so the row goes with its transaction",
+            action, object_id)
 
-    try:
-        with connect() as side:
+        def on_caller(claim) -> None:
+            with conn.transaction():
+                conn.execute(statement, params(claim))
+
+        try:
+            _write_first_vouched(claims, on_caller, action, object_id)
+        except Exception:  # noqa: BLE001 - see the docstring
+            log.exception("could not record %s for %s on the caller's "
+                          "connection", action, object_id)
+        return
+    # A connection of the caller's own kind (S1; 0150): the request role for a
+    # request, the system role for a system caller. An audit append needs
+    # nothing more.
+    from noctornal_api.db import bind_like, connect_like
+
+    def on_side_connection(claim) -> None:
+        with connect_like(conn) as side:
+            # Bound to the caller's own session, so the database can verify
+            # the actor this row names; otherwise the audit trigger demotes it
+            # to an unverified claim in detail (0150, evidence-ledger-actor-
+            # time-forgeable, 2026-10-03).
+            bind_like(side, conn)
             side.execute("SELECT set_config('lock_timeout', %s, false)",
                          (_SIDE_LOCK_TIMEOUT,))
-            side.execute(statement, params)
+            side.execute(statement, params(claim))
+
+    try:
+        _write_first_vouched(claims, on_side_connection, action, object_id)
     except psycopg.errors.LockNotAvailable:
         log.exception("%s for %s was not recorded: the audit chain stayed "
                       "locked for %s", action, object_id, _SIDE_LOCK_TIMEOUT)

@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
-from noctornal_api.db import SystemPurpose, system_connection
+from noctornal_api.db import SystemContextUnavailable, SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     COOKIE_ATTRS,
     CSRF_COOKIE,
@@ -25,6 +25,7 @@ from noctornal_api.http.deps import (
     CurrentUser,
     current_user,
     get_conn,
+    note_system_fallback,
     session_token,
 )
 from noctornal_api.http.errors import Problem
@@ -327,8 +328,18 @@ def logout(request: Request,
     user would evict their other devices; that is a separate, deliberate
     capability (password change, admin kill-all)."""
     SessionService(PgSessionStore(conn)).revoke(user.session_id, "logout")
-    _audit(conn, "AUTH_LOGOUT", user.user_id, {"session_id": str(user.session_id)},
-           request)
+    # The revoke ended this connection's binding, and the database attributes
+    # a request-role row only to the user its connection is bound to (0150,
+    # 2026-10-03), so the sign-out is written by the system role, as sign-in
+    # is. With none to hand the row is written here and demoted, not lost.
+    try:
+        with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
+            _audit(sconn, "AUTH_LOGOUT", user.user_id,
+                   {"session_id": str(user.session_id)}, request)
+    except SystemContextUnavailable as exc:
+        note_system_fallback(exc, "AUTH_LOGOUT")
+        _audit(conn, "AUTH_LOGOUT", user.user_id,
+               {"session_id": str(user.session_id)}, request)
     response = Response(status_code=204)
     # Clear the cookies so the browser stops presenting a dead token. With
     # the attributes they were SET with: until 2026-09-09 this was

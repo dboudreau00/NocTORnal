@@ -1526,6 +1526,15 @@ class EvidenceService:
             failed = list(decision.failed_checks)
         except AccessResolutionError:
             failed = ["account_inactive"]
+        # The decision is made on a connection that is not bound yet, as
+        # above. The ticket is spent, so bind it to its holder now and the
+        # rows below keep the holder as their actor: the database attributes
+        # a request-role row only to the user its connection is bound to
+        # (0150, evidence-ledger-actor-time-forgeable, 2026-10-03). A holder
+        # whose account is no longer active binds to nobody, and that row is
+        # demoted to an unverified claim in its detail.
+        from noctornal_api.db import bind_ticket
+        bind_ticket(self._c, presented)
         if failed:
             self._audit("EVIDENCE_PRODUCTION_TICKET_REFUSED", holder,
                         evidence_id, case_id,

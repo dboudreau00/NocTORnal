@@ -316,8 +316,13 @@ def _audit_rls_refused(request: Request, exc: BaseException, cid: str) -> None:
 
     from noctornal_api.db import connect_request
     actor = getattr(request.state, "noctornal_user_id", None)
+    # The request's own binding, so the database can verify the actor this
+    # row names (0150, evidence-ledger-actor-time-forgeable, 2026-10-03).
+    proof = getattr(request.state, "noctornal_rls_proof", None)
     try:
         with connect_request() as side:
+            if proof:
+                side.execute("SELECT actor, exempt FROM iam.rls_bind(%s)", (proof,))
             side.execute(
                 """INSERT INTO audit.event
                        (actor_id, actor_kind, action, object_type, object_id,

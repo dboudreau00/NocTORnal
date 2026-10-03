@@ -10349,12 +10349,21 @@ function wireAuditVerify() {
       r.checked.toLocaleString() + ' ' + agree(r.checked, 'event', 'events')
       + ' checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + ' to ' + r.last_seq : '')));
-    if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
-    /* Forks are shown as a SEPARATE, quieter line and never as a break.
-       They come from concurrent writers, not from editing, and a real
-       database has them: counting them as tampering made this panel answer
-       BROKEN on untouched history, which is the one answer a tamper-
-       evidence tool cannot afford to get wrong twice. */
+    /* The caveat on EVERY run (2026-10-03), not only a windowed one: the
+       checks are relative, so rows removed from the end, or edited and
+       re-chained, leave the green tick lit. The newest row is shown so an
+       operator can record it where this system cannot write and hand it
+       back as an anchor on a later run. */
+    if (r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    if (r.tail_row_hash) {
+      head.appendChild(el('p', 'help',
+        'Newest row to record: seq ' + r.tail_seq + ', hash ' + r.tail_row_hash));
+    }
+    /* A fork from before migration 0149 is a SEPARATE, quieter line and not
+       a break: the old sequence order let concurrent writers make them, an
+       append-only table cannot be cleaned of them, and counting them as
+       tampering made this panel answer BROKEN on untouched history. One
+       written since is a break, and arrives in `breaks` with its kind. */
     if (r.forks) {
       head.appendChild(el('p', 'help',
         countOf(r.forks, 'row shares', 'rows share') + ' a predecessor. '
@@ -22608,6 +22617,12 @@ function custodyVerdict(r) {
     + agree(r.checked, 'row', 'rows') + ' checked' + span
     + (r.scoped ? ' · scoped to one exhibit' : ' · whole ledger')));
   if (r.caveat) card.appendChild(el('p', 'help warn', r.caveat));
+  /* The newest row of the whole ledger, to record out of band and hand back
+     as an anchor (2026-10-03). */
+  if (r.tail_row_hash) {
+    card.appendChild(el('p', 'help',
+      'Newest row to record: id ' + r.tail_id + ', hash ' + r.tail_row_hash));
+  }
   if (r.forks) {
     card.appendChild(el('p', 'help warn',
       countOf(r.forks, 'fork', 'forks') + '. ' + (r.fork_note || '')));
