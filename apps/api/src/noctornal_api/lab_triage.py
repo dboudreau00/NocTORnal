@@ -1213,9 +1213,8 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                 fz = _step_child("fuzzy", data, settings, STEP_GAPS["fuzzy"])
         if "yara" in c.steps:
             yara = _yara_step(conn, c, data)
-        data = None
         try:
-            return _write_results(conn, c, pe, fz, yara, nbytes, settings)
+            status = _write_results(conn, c, pe, fz, yara, nbytes, settings)
         except _Discard:
             return "ABANDONED"
         except psycopg.errors.LockNotAvailable:
@@ -1228,6 +1227,14 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
             _finish(conn, c, "FAILED",
                     f"{RESULTS_REASON} ({type(exc).__name__})", retry=False)
             return "FAILED"
+        if status == "DONE":
+            # Archive expansion (phase 8, 2026-10-02): the same verified
+            # plaintext, once the run's findings are on the record, so a
+            # parent rejected mid-run never gains members. The plaintext is
+            # held until here for that one reader and dropped below.
+            from noctornal_api import lab_archive
+            lab_archive.expand_after_triage(conn, storage, c, data, settings)
+        return status
     finally:
         data = None
         try:
@@ -1384,8 +1391,11 @@ def compile_worst_s(settings: AnalysisSettings) -> float:
 
 def run_worst_s(settings: AnalysisSettings, open_versions: int) -> float:
     """The longest one run can take: its pe and fuzzy children and one
-    YARA child per open rule set version, each to its wall limit."""
-    return (2 + open_versions) * (settings.timeout_s + WALL_GRACE_S)
+    YARA child per open rule set version, each to its wall limit, and the
+    archive expansion child's (phase 8, 2026-10-02)."""
+    from noctornal_api import lab_archive
+    return ((2 + open_versions) * (settings.timeout_s + WALL_GRACE_S)
+            + lab_archive.wall_s())
 
 
 def compile_pending(conn: psycopg.Connection, settings: AnalysisSettings, *,

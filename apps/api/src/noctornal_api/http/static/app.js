@@ -35599,6 +35599,10 @@ async function openSample(id, opener) {
   // F11 M and F12 J. The static-triage run, its findings, YARA, and
   // the samples like this one.
   body.appendChild(sampleTriagePanel(s, data, you));
+  // Phase 8 (2026-10-02). The archive this sample was cut from, or the
+  // members cut from it, and what the expansion refused.
+  const tree = archivePanel(s, data);
+  if (tree) body.appendChild(tree);
   body.appendChild(similarPanel(s));
 
   /* --- the lab's own work: assign, then record what was found. */
@@ -35614,7 +35618,7 @@ async function openSample(id, opener) {
      YARA rows; any other machine row (a sandbox run, F14) stays here,
      named by what produced it. */
   const listed = (data.analyses || []).filter((a) => !(a.origin === 'machine'
-    && (a.kind === 'STATIC' || a.kind === 'YARA')));
+    && (a.kind === 'STATIC' || a.kind === 'YARA' || a.kind === 'ARCHIVE')));
   if (!listed.length) {
     anal.appendChild(el('p', 'muted', 'Nothing recorded yet.'));
   } else {
@@ -36242,6 +36246,93 @@ function sampleTriagePanel(s, data, you) {
   }
   box.appendChild(msg);
   box.appendChild(yaraSection(s, data, you));
+  return box;
+}
+
+/* Phase 8 (2026-10-02). A sample's place in an archive tree: the archive
+   it was cut from (or that it came from one the reader cannot see), the
+   members cut from it, each opening as a sample of its own, and every
+   entry the expansion refused with its reason, from the machine ARCHIVE
+   finding. Every name here is a member's own, so each reaches the page
+   through textContent and nothing else. Returns null for a sample that is
+   neither a member nor an archive. */
+function archivePanel(s, data) {
+  const tree = data.archive || {};
+  const finding = (data.analyses || []).find((a) => a.origin === 'machine'
+    && a.kind === 'ARCHIVE');
+  const gap = (s.triage_gaps || []).find((g) => gapStep(g) === 'archive_expansion');
+  const isArchive = !!finding || (tree.members || []).length > 0
+    || (gap && gapStatus(gap) !== 'not_applicable');
+  if (!s.parent_sample_id && !isArchive) return null;
+  const box = el('div', 'card sub archive-panel');
+  box.appendChild(el('h3', 'h-xs', 'Archive'));
+  if (s.parent_sample_id) {
+    const parent = tree.parent || {};
+    const line = el('p', 'help');
+    if (parent.hidden || !parent.id) {
+      line.textContent = 'Cut from an archive sample you cannot see, at path '
+        + (s.archive_path || 'unknown') + '.';
+      box.appendChild(line);
+    } else {
+      line.textContent = 'Cut from archive sample ' + shortHash(parent.sha256)
+        + ' at path ' + (s.archive_path || 'unknown') + '.';
+      box.appendChild(line);
+      const open = el('button', 'btn tiny', 'Open the archive');
+      open.type = 'button';
+      open.addEventListener('click', () => openSample(parent.id));
+      box.appendChild(open);
+    }
+  }
+  if (!isArchive) return box;
+  const f = (finding && finding.findings) || {};
+  if (gap && gapStatus(gap) !== 'not_applicable') {
+    const status = el('p', 'why ' + (gapStatus(gap) === 'pending' ? 'muted' : 'bad'));
+    status.textContent = 'Expansion ' + (GAP_STATUS_WORDS[gapStatus(gap)]
+      || gapStatus(gap)) + ': ' + (gap.reason || 'no reason was recorded');
+    box.appendChild(status);
+  } else if (finding) {
+    const counts = f.counts || {};
+    box.appendChild(el('p', 'help', 'Expanded '
+      + (fmtTime(finding.created_at)) + ': '
+      + countOf(counts.stored || 0, 'member stored', 'members stored')
+      + ', ' + countOf((f.refused || []).length, 'entry refused', 'entries refused')
+      + (f.stopped ? '. ' + f.stopped : '.')));
+  }
+  const members = tree.members || [];
+  if (members.length) {
+    const ul = el('ul', 'rules archive-members');
+    for (const m of members) {
+      const li = el('li');
+      const open = el('button', 'btn tiny', m.archive_path || 'unnamed member');
+      open.type = 'button';
+      open.title = 'Open this member as a sample of its own.';
+      open.addEventListener('click', () => openSample(m.id));
+      li.appendChild(open);
+      li.appendChild(document.createTextNode(' ' + humanBytes(m.byte_size)
+        + ', ' + (m.file_type || 'unrecognised') + ', '
+        + (SAMPLE_STATE_WORDS[m.state] || String(m.state || '').toLowerCase())
+        + (m.screening_outcome === 'MATCH' ? ', screening matched' : '')));
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+  } else if (finding && !(f.refusal)) {
+    /* Nothing you may see: a member above your labels is not counted
+       here, as a tie above a reader is not (decision 149). */
+    box.appendChild(el('p', 'muted', 'No member you can see was stored.'));
+  }
+  const refused = f.refused || [];
+  if (refused.length) {
+    box.appendChild(el('p', 'fact-k', 'Refused'));
+    const ul = el('ul', 'rules archive-refused');
+    for (const r of refused) {
+      const li = el('li');
+      li.appendChild(el('code', 'mono', r.path || 'unnamed entry'));
+      li.appendChild(document.createTextNode(': ' + (r.reason
+        || 'no reason was recorded')));
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+  }
   return box;
 }
 

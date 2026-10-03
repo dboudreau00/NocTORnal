@@ -150,6 +150,9 @@ BOUND_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("comms", "pgp_key_acquisition", "compartments", "array"),
     # A document's similarity vectors carry its keys (F6.1, 2026-09-24).
     ("collect", "document_embedding", "read_compartments", "array"),
+    # A collection source carries the keys everything it collects is read
+    # under (F43, 0163, 2026-10-02).
+    ("collect", "source", "compartments", "array"),
 )
 
 #: What an administrator calls the rows of each table, (one, many), for
@@ -183,6 +186,8 @@ NOUNS: dict[tuple[str, str], tuple[str, str]] = {
     # F6.1.
     ("collect", "document_embedding"): ("similarity index row",
                                         "similarity index rows"),
+    # F43, 0163.
+    ("collect", "source"): ("collection source", "collection sources"),
 }
 
 #: The column that names a row to a person, where there is one, so the

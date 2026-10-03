@@ -322,9 +322,10 @@ def test_a_chat_added_between_the_check_and_the_insert_answers_the_same(
     real = telegram_service._existing_chat
     calls: list = []
 
-    def late(conn, durable_id, clearance):
+    def late(conn, durable_id, clearance, compartments=None):
         calls.append(durable_id)
-        return None if len(calls) == 1 else real(conn, durable_id, clearance)
+        return (None if len(calls) == 1
+                else real(conn, durable_id, clearance, compartments))
 
     monkeypatch.setattr(telegram_service, "_existing_chat", late)
     _use(api, tf.FakeFactory(tp.fixture_for(spec, w["uid"])))
@@ -466,8 +467,8 @@ def test_a_mark_changes_chat_and_source_together_or_neither(owner, api, monkeypa
     raised = tp.chat(owner, P, persona_id=w["persona"], resolved_by=w["recorder"])
     real = telegram_service._chat_row
 
-    def read_then_raised(conn, source_id, clearance):
-        chat = real(conn, source_id, clearance)
+    def read_then_raised(conn, source_id, clearance, compartments=None):
+        chat = real(conn, source_id, clearance, compartments)
         _as_owner("UPDATE collect.source SET classification = 'RED' WHERE id = %s",
                   (source_id,))
         return chat
@@ -599,3 +600,68 @@ def test_the_poll_reads_and_writes_a_chat_above_every_user_as_the_system_role(
         (ch["source"],)).fetchone()
     assert row == (4242, pid, True, True, None, True)
     assert _audits(owner, "TELEGRAM_CHAT_MIGRATED", ch["source"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# The source's compartments (docs/17 F43, 0164, 2026-10-02)
+# ---------------------------------------------------------------------------
+
+def test_a_chat_under_a_compartmented_source_is_hidden_from_a_reader_who_lacks_the_key(owner):
+    """0164 restates 0129's policy with the source's compartments held: a
+    chat under a compartmented source is seen and written only by a bound
+    user who holds the key, whatever their clearance; the worker and the
+    owner still see it; the policy stays initplans."""
+    key = f"RLSTG{uuid.uuid4().hex[:6].upper()}"
+    holder = s.user(owner, "RED", (key,), prefix=P)
+    lacking = s.user(owner, "RED", prefix=P)
+    pid, _e, _uid = tp.persona(owner, P)
+    plain = tp.chat(owner, P, persona_id=pid, resolved_by=holder)
+    locked = tp.chat(owner, P, persona_id=pid, resolved_by=holder)
+    owner.execute("UPDATE collect.source SET compartments = %s WHERE id = %s",
+                  ([key], locked["source"]))
+    ids = [plain["source"], locked["source"]]
+    mine = "SELECT source_id FROM collect.telegram_chat WHERE source_id = ANY(%s)"
+    try:
+        _chat_compartment_checks(owner, key, plain, locked, ids, mine, holder, lacking)
+    finally:
+        # The source outlives the test (an authority may name it); its key
+        # must not, or 0163's downgrade refuses the suite's round trip.
+        owner.execute("UPDATE collect.source SET compartments = '{}' WHERE id = %s",
+                      (locked["source"],))
+
+
+def _chat_compartment_checks(owner, key, plain, locked, ids, mine, holder, lacking):
+    _, raw = s.session(owner, lacking)
+    app = s.app_conn(raw)
+    try:
+        assert _ids(app, mine, (ids,)) == {plain["source"]}
+        assert app.execute("UPDATE collect.telegram_chat SET is_forum = true "
+                           "WHERE source_id = %s", (locked["source"],)).rowcount == 0
+        assert s.per_row_definer_calls(app, mine, (ids,)) == []
+        # A global break-glass raises the ceiling and never the compartments.
+        s.break_glass(owner, lacking, "RED")
+        assert _ids(app, mine, (ids,)) == {plain["source"]}
+    finally:
+        app.close()
+    _, raw = s.session(owner, holder)
+    app = s.app_conn(raw)
+    try:
+        assert _ids(app, mine, (ids,)) == set(ids)
+        assert app.execute("UPDATE collect.telegram_chat SET is_forum = true "
+                           "WHERE source_id = %s", (locked["source"],)).rowcount == 1
+    finally:
+        app.close()
+    worker = _worker()
+    try:
+        assert _ids(worker, mine, (ids,)) == set(ids)
+    finally:
+        worker.close()
+    # The listing route reads the same rule (collection._SOURCE_VISIBLE_HELD).
+    from noctornal_api.telegram_service import TelegramChats
+    chats = TelegramChats(owner)
+    seen = {c["source_id"] for c in chats.listing(clearance="RED",
+                                                  compartments=frozenset())["chats"]}
+    assert str(locked["source"]) not in seen and str(plain["source"]) in seen
+    seen = {c["source_id"] for c in chats.listing(clearance="RED",
+                                                  compartments=frozenset({key}))["chats"]}
+    assert str(locked["source"]) in seen

@@ -175,7 +175,10 @@ def main(argv: list[str] | None = None) -> int:
     print(line)
     if "skipped" in counters:
         return 0
-    return 1 if counters.get("pending", 0) or counters.get("behind", 0) else 0
+    # An archive tree left half isolated is as unfinished as a behind pass
+    # (g40 verify blocker 1, 2026-10-03).
+    return 1 if (counters.get("pending", 0) or counters.get("behind", 0)
+                 or counters.get("trees_open", 0)) else 0
 
 
 if __name__ == "__main__":

@@ -203,6 +203,7 @@ from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 # hashing function would mean two places to get the encoding wrong.
 from noctornal_api.config import SAMPLE_CAP_ENV, declared_cap
 from noctornal_api.security.tokens import hash_token
+from noctornal_api.wording import agree, count_of
 
 log = logging.getLogger("noctornal.samples")
 
@@ -902,6 +903,8 @@ _MAGIC: list[tuple[bytes, str]] = [
     (b"Rar!\x1a\x07", "RAR"),
     (b"7z\xbc\xaf\x27\x1c", "7-Zip"),
     (b"\x1f\x8b", "gzip"),
+    (b"BZh", "bzip2"),               # phase 8, 2026-10-02: a tar.bz2
+    (b"\xfd7zXZ\x00", "xz"),         # phase 8, 2026-10-02: a tar.xz
     (b"%PDF-", "PDF"),
     (b"\xd0\xcf\x11\xe0", "OLE compound (legacy Office)"),
     (b"#!", "script with shebang"),
@@ -943,6 +946,10 @@ def file_type_of(data: bytes) -> str:
     for magic, label in _MAGIC:
         if data.startswith(magic):
             return label
+    # A tar's magic sits at offset 257, not at the start (phase 8,
+    # 2026-10-02): a plain tar is typed so the expansion can see it.
+    if len(data) > 262 and data[257:262] == b"ustar":
+        return "tar"
     return "unknown"
 
 
@@ -965,12 +972,42 @@ DERIVED_GAP_STEPS = ("prohibited_content_screening",
                      "prohibited_content_perceptual",
                      "prohibited_content_archive_members")
 
+def _archive_members_gap(gaps: list[dict], triage_gaps,
+                         unscreened: int | None | bool) -> list[dict]:
+    """The derived "archive members were not compared" gap of one archive,
+    given its stored gaps and what its finished expansion recorded:
+    `False` when no expansion finished (pending, failed, refused, or one
+    that never ran), None when a finished one does not say, else how many
+    entries were refused with bytes behind them.
+
+    Dropped only when the expansion finished and left nothing uncompared;
+    reworded to a count when it left some; kept as it is otherwise (g40
+    verify major 3, 2026-10-03)."""
+    pending = any(isinstance(g, dict) and g.get("step") == "archive_expansion"
+                  for g in triage_gaps or [])
+    if pending or unscreened is False or unscreened is None:
+        return gaps
+    kept = [g for g in gaps
+            if g.get("step") != "prohibited_content_archive_members"]
+    if unscreened == 0:
+        return kept
+    return kept + [{
+        "step": "prohibited_content_archive_members",
+        "status": "unavailable",
+        "reason": (f"{count_of(unscreened, 'entry', 'entries')} of this "
+                   f"archive could not be stored as samples and "
+                   f"{agree(unscreened, 'was', 'were')} not compared; the "
+                   f"members that were stored were each compared on their "
+                   f"own")}]
+
+
 #: Who a machine analysis row says produced it, by kind (F11-core F). The
 #: sandbox (F14) is 'SANDBOX'.
 MACHINE_PRODUCERS: dict[str, str] = {
     "STATIC": "NocTORnal static triage",
     "YARA": "YARA scan",
     "SANDBOX": "CAPEv2 sandbox",  # F14, 2026-09-24.
+    "ARCHIVE": "NocTORnal archive expansion",  # phase 8, 2026-10-02 (0160).
 }
 #: Where a proposal made from an analysis says it came from, by the row's
 #: (origin, machine kind). The sandbox (F14) is ('machine', 'SANDBOX').
@@ -982,6 +1019,11 @@ PROPOSAL_ORIGINS: dict[tuple[str, str | None], str] = {
 #: The two stores a sample's bytes are read from.
 STORE_WORKING = "working"
 STORE_PRESERVATION = "preservation"
+#: The file types that are archives (phase 8, 2026-10-02): expanded, or
+#: refused by name, after static triage. One list, read by `triage` and by
+#: screening's derived gap.
+ARCHIVE_FILE_TYPES = frozenset({"ZIP or OOXML", "RAR", "7-Zip", "gzip",
+                                "bzip2", "xz", "tar"})
 
 
 def triage(data: bytes) -> Triage:
@@ -999,15 +1041,23 @@ def triage(data: bytes) -> Triage:
     """
     gaps = [{"step": step, "status": "pending", "reason": PENDING_REASON}
             for step in STATIC_STEPS]
-    gaps.append({"step": "archive_expansion", "status": "unavailable",
-                 "reason": "not built: an expander without depth and ratio "
-                           "caps is a zip bomb waiting to be sent one"})
+    # Archive expansion (phase 8, 2026-10-02): pending for every archive
+    # kind the Lab types, expanded or refused by name after static triage
+    # (lab_archive; the unsupported kinds are refused there, in words).
+    file_type = file_type_of(data)
+    if file_type in ARCHIVE_FILE_TYPES:
+        gaps.append({"step": "archive_expansion", "status": "pending",
+                     "reason": "archive expansion runs after static triage, "
+                               "in a bounded child process"})
+    else:
+        gaps.append({"step": "archive_expansion", "status": "not_applicable",
+                     "reason": "not an archive of a kind this build expands"})
     return Triage(
         sha256=hashlib.sha256(data).digest(),
         sha1=hashlib.sha1(data).digest(),
         md5=hashlib.md5(data).digest(),
         byte_size=len(data),
-        file_type=file_type_of(data),
+        file_type=file_type,
         entropy=round(shannon_entropy(data), 4),
         gaps=gaps,
     )
@@ -1492,6 +1542,10 @@ class Sample:
     screening_outcome: str = "NOT_SCREENED"
     screened_at: datetime | None = None
     screening_bytes_absent_at: datetime | None = None
+    #: Archive expansion (phase 8, 2026-10-02; migration 0158): the archive
+    #: sample this one was cut from, and its path inside it. Both or neither.
+    parent_sample_id: UUID | None = None
+    archive_path: str | None = None
 
     @property
     def bytes_disposition(self) -> str:
@@ -1573,8 +1627,17 @@ class SampleService:
                compartments: frozenset[str] = frozenset(),
                visible_to_clearance: str | None = None,
                visible_to_compartments: frozenset[str] = frozenset(),
+               parent_sample_id: UUID | None = None,
+               archive_path: str | None = None,
                ) -> Sample:
         """Land a sample in QUARANTINE, run static triage, encrypt at rest.
+
+        `parent_sample_id` and `archive_path` (phase 8, 2026-10-02) make
+        the submission a MEMBER of an archive sample: the expansion
+        (`lab_archive`) brings a member in through this very path, so it
+        gets the upload's envelope, screening, custody, triage queue and
+        rules, plus the two columns and a SYSTEM custody row saying it was
+        expanded rather than submitted by the person named.
 
         Refuses outright unless a prohibited-content policy has been
         declared. That refusal is the whole reason this phase was blocked,
@@ -1652,7 +1715,8 @@ class SampleService:
                 data, result, verdict, submitted_by=submitted_by,
                 case_id=case_id, original_filename=original_filename,
                 source_note=source_note, classification=classification,
-                compartments=compartments, policy_reference=detail)
+                compartments=compartments, policy_reference=detail,
+                parent_sample_id=parent_sample_id, archive_path=archive_path)
 
         existing = self._c.execute(
             """SELECT s.id, greatest(s.classification,
@@ -1739,17 +1803,18 @@ class SampleService:
                         data_key_ciphertext, data_key_id, state, file_type,
                         entropy, triage_gaps, submitted_by, source_note,
                         classification, compartments, screening_outcome,
-                        screened_at, screening_list_seq)
+                        screened_at, screening_list_seq,
+                        parent_sample_id, archive_path)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            'QUARANTINED', %s, %s, %s, %s, %s, %s, %s, %s,
-                           CASE WHEN %s THEN now() END, %s)
+                           CASE WHEN %s THEN now() END, %s, %s, %s)
                    RETURNING """ + _RETURNING,
                 (case_id, result.sha256, result.sha1, result.md5,
                  original_filename, result.byte_size, storage_key, bucket,
                  key_blob, key_id, result.file_type, result.entropy,
                  Json(result.gaps), submitted_by, source_note, classification,
                  sorted(compartments), verdict.outcome, screened,
-                 verdict.list_seq),
+                 verdict.list_seq, parent_sample_id, archive_path),
             ).fetchone()
             sample = _record(row)
             if screened:
@@ -1767,8 +1832,18 @@ class SampleService:
                      verdict.list_seq))
             if self._storage is not None:
                 self._storage.put(storage_key, ciphertext)
-            self._access(sample.id, submitted_by, "VIEWED_META",
-                         {"event": "submitted", "policy_reference": detail})
+            if parent_sample_id is not None:
+                # Cut from an archive by the product, on nobody's request:
+                # a SYSTEM row, which 0078 allows for VIEWED_META, naming
+                # the archive and the path (phase 8, 2026-10-02).
+                self._access(sample.id, None, "VIEWED_META",
+                             {"event": "expanded",
+                              "parent_sample_id": str(parent_sample_id),
+                              "archive_path": archive_path,
+                              "policy_reference": detail})
+            else:
+                self._access(sample.id, submitted_by, "VIEWED_META",
+                             {"event": "submitted", "policy_reference": detail})
             # Queued in the same transaction as the row (F11, 2026-09-24):
             # a sample that exists always has its triage coming, and one
             # rolled back leaves no run behind. The run itself happens
@@ -2541,7 +2616,8 @@ class SampleService:
                             "officers_notified": officers_notified})
 
     def reject_by_screening(self, sample_id: UUID, *, verdict, trigger: str,
-                            actor_id: UUID | None) -> dict:
+                            actor_id: UUID | None, cascade: bool = True,
+                            extra: dict | None = None) -> dict:
         """Isolate a HELD sample that matched: one transaction, no bytes
         moved (the worker's `preserve_screened` moves them).
 
@@ -2550,13 +2626,19 @@ class SampleService:
         waiting detonations refused and sent ones named; live preservation
         authorisations void by derivation; the alerts; the result; the
         audit row last. A sample already matched gets a result saying so
-        and the (coalesced) officer alert, and nothing else changes."""
+        and the (coalesced) officer alert, and nothing else changes.
+
+        Archive expansion (phase 8, 2026-10-02): with `cascade`, a match
+        on a member of an archive tree isolates the archive and every
+        other member afterwards (`lab_archive.isolate_tree`), each
+        through this method with the cascade off and `extra` naming the
+        sample the match was found on."""
         result_id = uuid4()
         try:
             with self._c.transaction():
                 (state, outcome, preserved_key, key_len, case_id, _absent,
                  sha256) = self._lock_for_screening(sample_id)
-                detail: dict = {}
+                detail: dict = dict(extra or {})
                 if outcome == "MATCH":
                     disposition = "ALREADY_ISOLATED"
                 else:
@@ -2600,6 +2682,18 @@ class SampleService:
                     officers_notified=notified, detail=detail)
         except psycopg.errors.LockNotAvailable:
             raise _row_busy() from None
+        if cascade:
+            # On EVERY call, including one that found the sample already
+            # isolated (g40 verify blocker 1, 2026-10-03): the cascade is
+            # idempotent, and a first call that committed this row and then
+            # met a busy sibling must be finishable by the next call. The
+            # earlier "only the first time" skip left the archive and the
+            # other members visible for good once a sibling was locked for
+            # five seconds. `lab_archive.complete_isolations` (the
+            # screening pass) is the backstop when nobody calls again.
+            from noctornal_api.lab_archive import isolate_tree
+            isolate_tree(self, sample_id, verdict=verdict, trigger=trigger,
+                         actor_id=actor_id)
         return {"result_id": result_id, "disposition": disposition,
                 "alert_outcome": alert, "officers_notified": notified}
 
@@ -2608,7 +2702,9 @@ class SampleService:
                             original_filename: str | None,
                             source_note: str | None, classification: str,
                             compartments: frozenset[str],
-                            policy_reference: str) -> None:
+                            policy_reference: str,
+                            parent_sample_id: UUID | None = None,
+                            archive_path: str | None = None) -> None:
         """A submission that matched. Always raises ProhibitedContentMatch.
 
         An existing row with this sha256 is isolated as a held sample (or,
@@ -2666,17 +2762,19 @@ class SampleService:
                             reject_reason, file_type, entropy, triage_gaps,
                             submitted_by, source_note, classification,
                             compartments, screening_outcome, screened_at,
-                            screening_list_seq)
+                            screening_list_seq, parent_sample_id,
+                            archive_path)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                                'REJECTED', %s, %s, %s, %s, %s, %s, %s, %s,
-                               'MATCH', now(), %s)
+                               'MATCH', now(), %s, %s, %s)
                        RETURNING id""",
                     (case_id, result.sha256, result.sha1, result.md5,
                      original_filename, result.byte_size, storage_key, bucket,
                      key_blob, key_id, screening.SCREENING_REJECT_REASON,
                      result.file_type, result.entropy, Json(result.gaps),
                      submitted_by, source_note, classification,
-                     sorted(compartments), verdict.list_seq)).fetchone()
+                     sorted(compartments), verdict.list_seq,
+                     parent_sample_id, archive_path)).fetchone()
                 sample_id = row[0]
                 if ciphertext is not None:
                     # The row is already REJECTED and MATCH, so no reader
@@ -4664,10 +4762,45 @@ class SampleService:
         F13 (2026-09-24): from the sample's screening outcome and file
         type, never stored, because a later import changes them. Not
         screened says nothing was compared; screened says exact hashes
-        only; a container says its members were not compared."""
+        only; a container says its members were not compared.
+
+        Phase 8 (2026-10-02), corrected 2026-10-03 (g40 verify major 3):
+        once an archive is expanded its members are samples, each screened
+        on its own, so "members were not compared" stops being true FOR
+        THOSE MEMBERS. It stays true for an entry that was refused with
+        bytes behind it (a traversal name, an encrypted member, one over a
+        cap) and for a whole archive that was refused, failed, is pending
+        or was never expanded (a sample from before the expansion existed).
+        So the gap is dropped only on the record of a finished expansion
+        that left nothing uncompared, and otherwise says how many entries
+        were not."""
         from noctornal_api.screening import screening_gaps
-        return {str(s.id): screening_gaps(s.screening_outcome, s.file_type)
-                for s in samples}
+        archives = [s.id for s in samples if s.file_type in ARCHIVE_FILE_TYPES]
+        finished = self._finished_expansions(archives) if archives else {}
+        out = {}
+        for s in samples:
+            gaps = screening_gaps(s.screening_outcome, s.file_type)
+            if s.file_type in ARCHIVE_FILE_TYPES:
+                gaps = _archive_members_gap(
+                    gaps, s.triage_gaps, finished.get(str(s.id), False))
+            out[str(s.id)] = gaps
+        return out
+
+    def _finished_expansions(self, ids: list[UUID]) -> dict[str, int | None]:
+        """Per archive whose expansion ran to its end (a finding with
+        neither a refusal nor a failure), how many entries were refused
+        with bytes behind them: None when the finding does not say."""
+        rows = self._c.execute(
+            """SELECT DISTINCT ON (sample_id) sample_id::text,
+                      findings #>> '{counts,unscreened}'
+                 FROM lab.sample_analysis
+                WHERE sample_id = ANY(%s::uuid[]) AND kind = 'ARCHIVE'
+                  AND findings ->> 'failure' IS NULL
+                  AND findings ->> 'refusal' IS NULL
+                ORDER BY sample_id, created_at DESC""",
+            ([str(i) for i in ids],)).fetchall()
+        return {r[0]: (int(r[1]) if r[1] is not None and r[1].isdigit()
+                       else None) for r in rows}
 
     def static_triage_summaries(self, ids) -> dict[str, dict]:
         """The latest static-triage run of each sample in a page, for the
@@ -4792,6 +4925,9 @@ SAMPLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("screening_outcome", "screening_outcome"),
     ("screened_at", "screened_at"),
     ("screening_bytes_absent_at", "screening_bytes_absent_at"),
+    # Archive expansion (phase 8, 2026-10-02; migration 0158).
+    ("parent_sample_id", "parent_sample_id"),
+    ("archive_path", "archive_path"),
 )
 #: The field names in select order, with `key_destroyed` last: it is not a
 #: column but a boolean computed from one (below).

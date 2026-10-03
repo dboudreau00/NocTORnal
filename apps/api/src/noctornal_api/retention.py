@@ -1445,8 +1445,9 @@ class RetentionService:
                 WHERE d.id = %s AND d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
                   AND s.classification <= %s::core.tlp
-                  AND d.compartments <@ %s::text[]""",
-            (document_id, clearance, clearance, held)).fetchone()
+                  AND d.compartments <@ %s::text[]
+                  AND s.compartments <@ %s::text[]""",
+            (document_id, clearance, clearance, held, held)).fetchone()
         if row is None:
             raise RetentionNotFound(
                 "no such document, or it is above your clearance")

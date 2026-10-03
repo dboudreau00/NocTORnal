@@ -652,8 +652,9 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
     visibility predicate reads), AMBER when there is none, so a manager that
     predicate hides from the persona is never told about it: the
     notification service refuses a recipient below the label (suppression
-    2). When collect.source gains compartments through the compartment
-    contract, the union of those sources' compartments goes on it too. One
+    2). Since F43 (g40 verify major 5d, 2026-10-03) the union of those
+    sources' compartments is on it too, so a manager who does not hold every
+    key of a source the persona reads is not told about it either. One
     unacknowledged notification per persona at a time, the integrity
     alarm's guard: a platform refusing a credential on every poll must not
     ring a phone on every poll. Returns how many were raised.
@@ -666,12 +667,15 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
     row = conn.execute(
         """SELECT a.handle, a.platform_uid,
                   (SELECT max(s.classification)::text FROM collect.source s
+                    WHERE s.id = a.source_id OR s.collection_account_id = a.id),
+                  (SELECT coalesce(array_agg(DISTINCT k), '{}')
+                     FROM collect.source s, unnest(s.compartments) AS k
                     WHERE s.id = a.source_id OR s.collection_account_id = a.id)
              FROM collect.collection_account a WHERE a.id = %s""",
         (persona_id,)).fetchone()
     if row is None:
         return 0
-    handle, uid, label = row
+    handle, uid, label, keys = row
     svc = NotificationService(conn)
     raised = 0
     guard: OpenNotice | None = OpenNotice(anyone=True, same_object=True)
@@ -685,7 +689,7 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
             body=(f"Persona {handle} ({uid or 'no account id recorded'}) "
                   f"was locked: {reason}\n\nOpen Feeds, Sources, "
                   f"Personas."),
-            classification=label or "AMBER", compartments=frozenset(),
+            classification=label or "AMBER", compartments=frozenset(keys or ()),
             object_type="collection_account",
             object_id=persona_id, open_notice=guard)
         if result.outcome == COALESCED:

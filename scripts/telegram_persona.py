@@ -250,6 +250,15 @@ def _clearance(conn, user_id) -> str:
     return user_ceiling(conn, user_id)[0].name
 
 
+def _held(conn, user_id) -> frozenset:
+    """The operator's own compartments: a persona bound to a source filed
+    under a key they do not hold is as missing to them as one above their
+    ceiling (F43; g40 verify major 5, 2026-10-03)."""
+    from noctornal_api.http.deps import user_ceiling
+
+    return user_ceiling(conn, user_id)[1]
+
+
 def enrol(conn, persona_id: UUID, *, actor_id: UUID, replace: bool) -> str:
     from noctornal_api.telegram import (
         TelegramPasswordNeeded,
@@ -271,6 +280,7 @@ def enrol(conn, persona_id: UUID, *, actor_id: UUID, replace: bool) -> str:
         raise Refused(" ".join(problems))
     with enrolment_session(conn, persona_id, actor_id=actor_id,
                            clearance=_clearance(conn, actor_id),
+                           compartments=_held(conn, actor_id),
                            purpose="enrol") as ctx:
         api_id_text = input("api_id: ").strip()
         phone = input("Phone number: ").strip()
@@ -357,6 +367,7 @@ def import_session(conn, persona_id: UUID, *, actor_id: UUID, replace: bool,
                       "data-centre networks, so it is not imported.")
     with enrolment_session(conn, persona_id, actor_id=actor_id,
                            clearance=_clearance(conn, actor_id),
+                           compartments=_held(conn, actor_id),
                            purpose="import") as ctx:
         async def check(transport):
             me = await transport.open()
@@ -392,6 +403,7 @@ def logout(conn, persona_id: UUID, *, actor_id: UUID, reason: str,
     try:
         with persona_session(conn, persona_id, actor_id=actor_id,
                              clearance=_clearance(conn, actor_id),
+                             compartments=_held(conn, actor_id),
                              purpose="logout", source_id=None,
                              need="PUBLIC_READ", platform="TELEGRAM",
                              stopping=True, needs_secret=True) as ctx:
