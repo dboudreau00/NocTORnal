@@ -145,6 +145,17 @@ apps/api/.venv/
 .git/
 .github/
 
+# Local agent briefs: a developer's own instructions to a coding agent, never
+# part of an image, and gitignored for the same reason. Kept out of the build
+# context at every depth so the .gitignore entries stay safe to commit
+# (test_dockerignore_secrets holds the two lists to each other).
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+**/CLAUDE.md
+**/CLAUDE.local.md
+**/.claude/
+
 # Build artefacts of a DIFFERENT distribution channel. `release/` is the
 # hand-installer path (install.sh / INSTALL.md), which a container
 # deployment does not use, and the packaged zip is a copy of the whole
