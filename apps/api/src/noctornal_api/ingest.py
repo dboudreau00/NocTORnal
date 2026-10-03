@@ -1072,7 +1072,7 @@ class IngestService:
             (content_sha,)).fetchone()
         duplicate_of = exact[0] if exact else self._near_duplicate(fingerprint)
 
-        retain_until = self._retain_until(category)
+        retain_until = self._case_capped(self._retain_until(category), case_id)
         row = self._c.execute(
             """INSERT INTO ingest.record
                    (batch_id, case_id, category, category_confidence,
@@ -1116,6 +1116,26 @@ class IngestService:
         # (ux15-report:unruled-categories-invisible, 2026-09-23).
         days = row[0] if row else UNRULED_RETAIN_DAYS
         return datetime.now(timezone.utc) + timedelta(days=days)
+
+    def _case_capped(self, until: datetime, case_id: UUID | None) -> datetime:
+        """The category clock, never later than the case's own retention
+        instant (00:00 UTC on its retention day) when the record arrives in
+        a case. A category clock may only SHORTEN (retention.py rule 2,
+        docs/00 decision 50); it was stamped from the rule alone, so a
+        CHAT_EXPORT in a case kept two more months was stamped 670 days past
+        it (evidence-category-clock-outlives-case, 2026-10-03). The sweep
+        takes the earlier of the two as well, so a case this connection
+        cannot read, or a record attached later, is still covered."""
+        if case_id is None:
+            return until
+        row = self._c.execute(
+            'SELECT retention_until FROM core."case" WHERE id = %s',
+            (case_id,)).fetchone()
+        if row is None or row[0] is None:
+            return until
+        case_instant = datetime.combine(row[0], datetime.min.time(),
+                                        tzinfo=timezone.utc)
+        return min(until, case_instant)
 
     def _dead_letter_retention(self, declared_category: str | None) -> datetime:
         """90 days by default, not 365.

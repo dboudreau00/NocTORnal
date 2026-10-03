@@ -136,6 +136,18 @@ class _StorageOutcome:
     locked: int = 0
     failed: int = 0
     warnings: tuple[str, ...] = ()
+    #: Exhibits that came under a legal hold, their own or their case's,
+    #: between the sweep and the purge's row locks, and were not touched
+    #: (evidence-purge-hold-race, 2026-10-03). Not in the three counts.
+    held: tuple = ()
+    #: Exhibits another purge destroyed first, found under the same locks.
+    gone: tuple = ()
+
+
+#: The most exhibits one out-of-schedule purge may name. Its rows and their
+#: case stay locked while the object store deletes them one by one
+#: (evidence-purge-stalls-audit-chain, 2026-10-03).
+MAX_OUT_OF_SCHEDULE = 200
 
 
 class RetentionError(Exception):
@@ -235,6 +247,9 @@ class PurgeResult:
     lookups_purged: int = 0
     lookup_results_purged: int = 0
     lookup_batches_purged: int = 0
+    #: Lab samples of an expired case taken out of the working store the way
+    #: the deployment disposes of a rejected sample (lab-4, 2026-10-03).
+    samples_purged: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -381,14 +396,23 @@ def _citations_sql() -> str:
         for i, leg in enumerate(legs))
 
 
+def _versions_sql(alias: str, other: str = "v") -> str:
+    """True when `other` is a version of the document `alias`: the same
+    source and external id, or the document itself when it has none. One
+    spelling for the hold predicate and the case-hold lift gate, so the two
+    cannot disagree about which rows a citation holds."""
+    return (f"(({alias}.external_id IS NULL AND {other}.id = {alias}.id) OR "
+            f"({alias}.external_id IS NOT NULL "
+            f"AND {other}.source_id = {alias}.source_id "
+            f"AND {other}.external_id = {alias}.external_id))")
+
+
 def _held_sql(alias: str = "d") -> str:
     """The hold reason of the document `alias`, or NULL: over EVERY version
     of it (the same source and external id; the document itself when it
     has none), a document-level hold, then a citing case under hold, then an
     unretracted assertion's pin. The case is never named or counted."""
-    versions = (f"(({alias}.external_id IS NULL AND v.id = {alias}.id) OR "
-                f"({alias}.external_id IS NOT NULL AND v.source_id = {alias}.source_id "
-                f"AND v.external_id = {alias}.external_id))")
+    versions = _versions_sql(alias)
     cited = _citations_sql()
     return (
         f"CASE WHEN EXISTS (SELECT 1 FROM collect.document v WHERE {versions} "
@@ -414,6 +438,18 @@ _NO_DOCUMENT_RAW_STORE = (
     "while their markup stays in the bucket.")
 
 
+def _ceiling_parts(ceiling: tuple) -> tuple[str, list[str]]:
+    """(clearance name, sorted compartments) of a (clearance, compartments)
+    ceiling. An unknown label raises rather than passes: a ceiling that
+    cannot be read covers nothing."""
+    from noctornal_api.security.access import tlp_from_name
+
+    clearance, held = ceiling
+    clearance = clearance if isinstance(clearance, str) else clearance.name
+    tlp_from_name(clearance)
+    return clearance, sorted(set(held or ()))
+
+
 class RetentionNotFound(RetentionError):
     """The document does not exist, is purged, or sits above the caller's
     labels, indistinguishably: a 404."""
@@ -425,13 +461,18 @@ class RetentionConflict(RetentionError):
 
 class RetentionService:
     def __init__(self, conn: psycopg.Connection, storage=None,
-                 document_raw=None):
+                 document_raw=None, sample_stores=None):
         self._c = conn
         self._storage = storage
         # The store collected raw markup is deleted from when its
         # document is purged. None refuses a purge whose documents carry
         # markup, rather than recording a destruction that did not happen.
         self._document_raw = document_raw
+        # lab-4 (2026-10-03): a zero-argument callable returning (sample
+        # store, preservation store or None), called only when a purge has
+        # samples to dispose of, so a case without any needs no sample
+        # credentials. None leaves due samples due, and says so.
+        self._sample_stores = sample_stores
 
     # -- rules -------------------------------------------------------------
 
@@ -567,20 +608,37 @@ class RetentionService:
         # hold that stopped at the schema boundary would be a hold with a
         # gap in it, and the material on the ingest side is the material
         # most likely to be the subject of one.
+        #
+        # A category clock only ever SHORTENS (rule 2 above): a record
+        # attached to a case falls due at the earlier of its category stamp
+        # and the case's own retention instant, 00:00 UTC on that day.
+        # evidence-category-clock-outlives-case (2026-10-03): the sweep read
+        # the stamp alone and the stamp was the rule alone, so a CHAT_EXPORT
+        # in a case kept two more months was held 670 days past it. Read
+        # here, so a record attached later, or a case whose date is brought
+        # forward, is covered too.
         records = self._c.execute(
-            """SELECT r.id, r.case_id, r.retain_until, r.category,
-                      coalesce(c.legal_hold, false)
+            """SELECT r.id, r.case_id, d.deadline, r.category,
+                      coalesce(c.legal_hold, false),
+                      d.deadline < r.retain_until
                  FROM ingest.record r
                  LEFT JOIN core."case" c ON c.id = r.case_id
+                 CROSS JOIN LATERAL (
+                   SELECT CASE WHEN c.retention_until IS NULL THEN r.retain_until
+                               ELSE least(r.retain_until,
+                                          c.retention_until::timestamp
+                                            AT TIME ZONE 'UTC') END AS deadline) d
                 WHERE r.purged_at IS NULL AND r.retain_until IS NOT NULL
-                  AND r.retain_until <= %s
+                  AND d.deadline <= %s
                   AND (%s::uuid IS NULL OR r.case_id = %s)
-                ORDER BY r.retain_until LIMIT %s""",
+                ORDER BY d.deadline LIMIT %s""",
             (now, case_id, case_id, limit)).fetchall()
         for row in records:
             items.append(DueItem(
                 object_type="ingest_record", object_id=row[0], case_id=row[1],
-                deadline=row[2], rule=f"retention_rule[{row[3]}]",
+                deadline=row[2],
+                rule=("case.retention_until" if row[5]
+                      else f"retention_rule[{row[3]}]"),
                 held=bool(row[4]),
                 hold_reason="case-level legal hold" if row[4] else None,
                 category=row[3]))
@@ -623,7 +681,32 @@ class RetentionService:
                                               tzinfo=timezone.utc),
                     rule="case.retention_until", held=bool(row[3]),
                     hold_reason="case-level legal hold" if row[3] else None))
+        items.extend(self._due_samples(case_id, now, limit))
         return items
+
+    def _due_samples(self, case_id: UUID | None, now: datetime,
+                     limit: int) -> list[DueItem]:
+        """Lab samples still in the working store whose case's retention has
+        expired, held ones flagged. lab-4 (2026-10-03): docs/11 says a record
+        case's sample leaves only through the retention purge, and nothing
+        here selected one, so a purged case's live malware stayed
+        downloadable for ever. A sample with no case has no case clock."""
+        rows = self._c.execute(
+            """SELECT s.id, s.case_id, c.retention_until, s.legal_hold,
+                      c.legal_hold
+                 FROM lab.sample s JOIN core."case" c ON c.id = s.case_id
+                WHERE s.state <> 'REJECTED' AND c.retention_until <= %s::date
+                  AND (%s::uuid IS NULL OR s.case_id = %s)
+                ORDER BY c.retention_until LIMIT %s""",
+            (now, case_id, case_id, limit)).fetchall()
+        return [DueItem(
+            object_type="sample", object_id=r[0], case_id=r[1],
+            deadline=datetime.combine(r[2], datetime.min.time(),
+                                      tzinfo=timezone.utc),
+            rule="case.retention_until", held=bool(r[3] or r[4]),
+            hold_reason=("sample-level legal hold" if r[3]
+                         else "case-level legal hold" if r[4] else None))
+            for r in rows]
 
     # -- purge -------------------------------------------------------------
 
@@ -715,6 +798,9 @@ class RetentionService:
                       if i.object_type == "lookup_result"]
         batch_ids = [i.object_id for i in actionable
                      if i.object_type == "lookup_batch"]
+        # lab-4 (2026-10-03).
+        sample_ids = [i.object_id for i in actionable
+                      if i.object_type == "sample"]
         touched = ([case_id] if case_id else
                    [i.case_id for i in actionable if i.case_id is not None])
 
@@ -742,6 +828,7 @@ class RetentionService:
             result.lookups_purged = len(lookup_ids)
             result.lookup_results_purged = len(result_ids)
             result.lookup_batches_purged = len(batch_ids)
+            result.samples_purged = len(sample_ids)
             self._jira_note(result, touched, actor_id=actor_id, dry_run=True)
             return result
         if not actionable:
@@ -763,9 +850,43 @@ class RetentionService:
                 raise RetentionError(_NO_DOCUMENT_RAW_STORE)
 
         with self._c.transaction():
+            if case_id is not None and self._case_held_now(case_id):
+                # The case's hold, read under a share lock on its row, so a
+                # case hold placed since the sweep keeps everything the case
+                # clock governs; a hold placed after this waits for the
+                # purge to commit (evidence-purge-hold-race,
+                # evidence-case-hold-unreachable, 2026-10-03).
+                kept = (len(evidence_ids) + len(record_ids) + len(lookup_ids)
+                        + len(result_ids) + len(batch_ids) + len(sample_ids))
+                result.held_back += kept
+                result.warnings.append(
+                    f"the case came under a legal hold between the sweep and "
+                    f"the purge, so nothing it holds was destroyed "
+                    f"({count_of(kept, 'item', 'items')} kept).")
+                evidence_ids, record_ids, sample_ids = [], [], []
+                lookup_ids, result_ids, batch_ids = [], [], []
             if evidence_ids:
                 storage = self._purge_evidence(evidence_ids)
                 outcome = storage.outcome
+                if storage.held:
+                    # Reread under the rows' locks (evidence-purge-hold-race,
+                    # 2026-10-03): a hold placed since the sweep keeps its
+                    # exhibit, and is never acknowledged on one destroyed.
+                    kept = len(storage.held)
+                    result.held_back += kept
+                    result.warnings.append(
+                        f"{count_of(kept, 'exhibit', 'exhibits')} came under a "
+                        f"legal hold between the sweep and the purge and "
+                        f"{agree(kept, 'was', 'were')} kept.")
+                    held_ids = set(storage.held)
+                    evidence_ids = [i for i in evidence_ids if i not in held_ids]
+                if storage.gone:
+                    gone = set(storage.gone)
+                    result.warnings.append(
+                        f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
+                        f"already destroyed by another purge and "
+                        f"{agree(len(gone), 'was', 'were')} skipped.")
+                    evidence_ids = [i for i in evidence_ids if i not in gone]
                 result.evidence_purged = len(evidence_ids)
                 # All three counts, always. Until 2026-09-02 `storage_failed`
                 # was only copied when the batch verdict was FAILED, so a
@@ -823,10 +944,12 @@ class RetentionService:
                         "nothing asked the object store. Do not report this "
                         "as a destruction.")
 
-                result.tombstones.append(self._tombstone(
-                    case_id=case_id, object_type="evidence",
-                    ids=evidence_ids, authority=authority, actor_id=actor_id,
-                    rule="case.retention_until", storage_outcome=outcome))
+                if evidence_ids:
+                    result.tombstones.append(self._tombstone(
+                        case_id=case_id, object_type="evidence",
+                        ids=evidence_ids, authority=authority,
+                        actor_id=actor_id, rule="case.retention_until",
+                        storage_outcome=outcome))
 
             if document_ids:
                 # The row survives; the CONTENT does not. Keeping the row
@@ -890,6 +1013,14 @@ class RetentionService:
             self._purge_lookups(result, lookup_ids, result_ids, batch_ids,
                                 case_id=case_id, authority=authority,
                                 actor_id=actor_id)
+        if sample_ids:
+            # After the transaction, each sample in its own: the disposition
+            # is a network copy and delete, and must not run while this
+            # purge's audit rows hold the chain's global lock (lab-4,
+            # 2026-10-03).
+            self._purge_samples(sample_ids, authority=authority,
+                                actor_id=actor_id, case_id=case_id,
+                                result=result)
         self._jira_note(result, touched, actor_id=actor_id, dry_run=False)
         return result
 
@@ -910,6 +1041,11 @@ class RetentionService:
 
         if not evidence_ids:
             raise RetentionError("nothing selected")
+        if len(evidence_ids) > MAX_OUT_OF_SCHEDULE:
+            raise RetentionError(
+                f"an out-of-schedule purge names at most {MAX_OUT_OF_SCHEDULE} "
+                f"exhibits, because their rows stay locked while each is "
+                f"destroyed. Split the destruction into several approvals.")
         held = self._c.execute(
             """SELECT count(*) FROM core.evidence e
                  JOIN core."case" c ON c.id = e.case_id
@@ -920,8 +1056,9 @@ class RetentionService:
             # does not also burn somebody's signature.
             raise RetentionError(
                 f"{held} of the selected exhibits are under legal hold. A "
-                f"hold overrides all deletion, everywhere. Lift "
-                f"the hold first, with its own authority.")
+                f"hold overrides all deletion, everywhere. Lift the hold "
+                f"first: that takes a written reason from somebody cleared "
+                f"for the exhibit, and it is audited.")
 
         payload = {"case_id": str(case_id),
                    "evidence_ids": sorted(str(e) for e in evidence_ids),
@@ -929,11 +1066,33 @@ class RetentionService:
         result = PurgeResult()
         try:
             with self._c.transaction():
+                # The order is the fix for two findings (2026-10-03).
+                # evidence-purge-hold-race: the rows and their case are
+                # locked and the holds reread before any byte is destroyed,
+                # and a hold that arrived since the check above refuses the
+                # whole purge. evidence-purge-stalls-audit-chain: the
+                # approval used to be spent FIRST, and spending it writes an
+                # audit row, which holds the chain's global lock to COMMIT,
+                # so every audited write in the deployment waited out the
+                # store deletes. Now the approval is checked and locked
+                # without an audit row, the bytes go, and the spend and the
+                # tombstone, the only audited writes, come last. The spend
+                # still commits with the destruction, and cannot fail once
+                # its row is locked.
+                self._lock_approval(approval_request_id, actor_id=actor_id,
+                                    case_id=case_id, payload=payload)
+                storage = self._purge_evidence(evidence_ids, refuse_held=True)
                 ApprovalService(self._c).consume(
                     approval_request_id, actor_id=actor_id,
                     operation="evidence.purge", case_id=case_id,
                     payload=payload)
-                storage = self._purge_evidence(evidence_ids)
+                if storage.gone:
+                    gone = set(storage.gone)
+                    result.warnings.append(
+                        f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
+                        f"already destroyed by another purge and "
+                        f"{agree(len(gone), 'was', 'were')} skipped.")
+                    evidence_ids = [i for i in evidence_ids if i not in gone]
                 result.evidence_purged = len(evidence_ids)
                 # Refusal counts, not the batch size -- and on the one path
                 # that writes an out-of-schedule tombstone, which is the
@@ -983,12 +1142,13 @@ class RetentionService:
                         f"one. A tombstone recording the refusal was "
                         f"written. Do not report this as a completed "
                         f"destruction.")
-                result.tombstones.append(self._tombstone(
-                    case_id=case_id, object_type="evidence",
-                    ids=evidence_ids, authority=authority, actor_id=actor_id,
-                    rule="out-of-schedule",
-                    approval_request_id=approval_request_id,
-                    storage_outcome=storage.outcome))
+                if evidence_ids:
+                    result.tombstones.append(self._tombstone(
+                        case_id=case_id, object_type="evidence",
+                        ids=evidence_ids, authority=authority,
+                        actor_id=actor_id, rule="out-of-schedule",
+                        approval_request_id=approval_request_id,
+                        storage_outcome=storage.outcome))
         except ApprovalError as exc:
             raise RetentionError(str(exc)) from exc
         # F7: the early destruction most likely
@@ -1007,6 +1167,108 @@ class RetentionService:
         note = jira.purge_note(self._c, case_ids, actor_id=actor_id, dry_run=dry_run)
         if note:
             result.warnings.append(note)
+
+    def _case_held_now(self, case_id: UUID) -> bool:
+        """The case's legal hold, read under a share lock on its row: a hold
+        written before this waited for nobody and is seen, one written after
+        waits for the caller's transaction to commit (evidence-purge-hold-race,
+        2026-10-03). Only inside a transaction."""
+        row = self._c.execute(
+            'SELECT legal_hold FROM core."case" WHERE id = %s FOR SHARE',
+            (case_id,)).fetchone()
+        return bool(row and row[0])
+
+    def _lock_approval(self, request_id: UUID, *, actor_id: UUID,
+                       case_id: UUID, payload: dict) -> None:
+        """The out-of-schedule approval, verified and locked FOR UPDATE
+        without spending it, so nothing is destroyed on an approval that
+        would then fail to spend, and no audit row (and so no chain lock) is
+        written before the store deletes (evidence-purge-stalls-audit-chain,
+        2026-10-03). A request that does not qualify is handed to `consume`,
+        which refuses with its one sentence and records why on a connection
+        of its own: this transaction has audited nothing yet."""
+        from noctornal_api.approvals import ApprovalService, payload_hash
+
+        row = self._c.execute(
+            """SELECT 1 FROM core.approval_request
+                WHERE id = %s AND state = 'APPROVED' AND expires_at > now()
+                  AND requested_by = %s AND operation = 'evidence.purge'
+                  AND case_id IS NOT DISTINCT FROM %s AND payload_hash = %s
+                FOR UPDATE""",
+            (request_id, actor_id, case_id,
+             payload_hash("evidence.purge", case_id, payload))).fetchone()
+        if row is None:
+            ApprovalService(self._c).consume(
+                request_id, actor_id=actor_id, operation="evidence.purge",
+                case_id=case_id, payload=payload)
+            raise RetentionError("this approval cannot be used for this "
+                                 "operation")
+
+    def _purge_samples(self, sample_ids: list[UUID], *, authority: str,
+                       actor_id: UUID, case_id: UUID | None,
+                       result: PurgeResult) -> None:
+        """lab-4 (2026-10-03): an expired case's samples leave the working
+        store the way this deployment disposes of a rejected sample
+        (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`: preserved under a legal
+        hold by default, or destroyed), through `SampleService.reject`, the
+        one path that disposes of a sample, which rereads every hold under
+        the sample's row lock. Its refusal for a read-only case does not
+        apply here: docs/11 names this purge as the way a closed case's
+        material leaves. A sample that cannot be disposed of stays due and
+        is named in a warning; one tombstone per disposition records the
+        rest."""
+        from noctornal_api.samples import (
+            DESTROY,
+            SampleError,
+            SampleService,
+            rejected_sample_disposition,
+        )
+
+        class _ForRetention(SampleService):
+            def _refuse_if_case_read_only(self, sample_id):  # noqa: ARG002
+                return None
+
+        try:
+            disposition = rejected_sample_disposition()
+            if self._sample_stores is None:
+                raise SampleError("no sample store is configured for this purge")
+            storage, preservation = self._sample_stores()
+        except Exception as exc:  # noqa: BLE001 - reported, and the samples stay due
+            result.warnings.append(
+                f"{count_of(len(sample_ids), 'sample', 'samples')} of this "
+                f"case {agree(len(sample_ids), 'is', 'are')} due and "
+                f"{agree(len(sample_ids), 'was', 'were')} not disposed of: "
+                f"{exc} {agree(len(sample_ids), 'It stays', 'They stay')} in "
+                f"the Lab and due, so the next purge tries again.")
+            return
+        service = _ForRetention(self._c, storage, preservation)
+        reason = f"Retention purge under: {authority.strip()}"
+        done: list[UUID] = []
+        for sample_id in sample_ids:
+            try:
+                service.reject(sample_id, actor_id=actor_id, reason=reason,
+                               purge_bytes=True)
+            except SampleError as exc:
+                result.warnings.append(
+                    f"sample {sample_id} was not disposed of and stays due: "
+                    f"{exc}")
+                continue
+            done.append(sample_id)
+        result.samples_purged = len(done)
+        if not done:
+            return
+        destroyed = disposition == DESTROY
+        if not destroyed:
+            result.warnings.append(
+                f"{count_of(len(done), 'sample was', 'samples were')} moved "
+                f"into the preservation store under a legal hold, as this "
+                f"deployment disposes of rejected samples: out of the Lab "
+                f"and no longer downloadable, but not destroyed.")
+        result.tombstones.append(self._tombstone(
+            case_id=case_id, object_type="sample", ids=done,
+            authority=authority, actor_id=actor_id,
+            rule="case.retention_until",
+            storage_outcome=STORAGE_DELETED if destroyed else STORAGE_NA))
 
     def _purge_lookups(self, result: PurgeResult, lookup_ids, result_ids, batch_ids,
                        *, case_id, authority: str, actor_id: UUID) -> None:
@@ -1063,8 +1325,23 @@ class RetentionService:
                 authority=authority, actor_id=actor_id,
                 rule="case.retention_until", storage_outcome=STORAGE_NA))
 
-    def _purge_evidence(self, ids: list[UUID]) -> "_StorageOutcome":
+    def _purge_evidence(self, ids: list[UUID], *,
+                        refuse_held: bool = False) -> "_StorageOutcome":
         """Ask the object store, then mark ONLY the rows whose bytes went.
+
+        ## The holds are reread under locks (evidence-purge-hold-race, 2026-10-03)
+
+        The holds were read once, by `due()` or the out-of-schedule check,
+        before this ran; then every object was deleted and the rows marked,
+        and a hold placed in between was acknowledged to the officer and
+        destroyed anyway. Now each exhibit is locked FOR UPDATE, with its
+        case FOR SHARE, and its holds are reread under those locks BEFORE its
+        delete (`_claim_for_destruction`): a hold already written keeps its
+        exhibit (returned in `held`, or the whole call refused when
+        `refuse_held`), and a hold written later waits for this transaction
+        and then finds the exhibit destroyed (`set_legal_hold` refuses a
+        purged row; 0142 refuses it in the database too). The document leg
+        has done the same since decision 74.
 
         Until 2026-09-02 this marked every row `purged_at` up front and
         then asked the store, on the theory that the store's answer
@@ -1121,9 +1398,6 @@ class RetentionService:
         production) is asked through `delete()`, and its exception, if any,
         is classified by `_is_retention_refusal`.
         """
-        rows = self._c.execute(
-            "SELECT id, storage_key FROM core.evidence WHERE id = ANY(%s)",
-            (ids,)).fetchall()
         if self._storage is None and ids:
             # REFUSE. NOT_APPLICABLE is a lie for evidence.
             # (`and ids`: with nothing to destroy there is nothing to
@@ -1132,7 +1406,7 @@ class RetentionService:
             # confusion.)
             #
             # `core.evidence.storage_key` is NOT NULL and `EvidenceService
-            # .ingest` writes the bytes before inserting the row, so every
+            # .ingest` commits a row only with its bytes stored, so every
             # exhibit HAS an object and the question always applies. This
             # branch used to `return STORAGE_NA`, and because both
             # governance routers construct `RetentionService(conn)` with no
@@ -1157,6 +1431,13 @@ class RetentionService:
                 "bytes cannot be destroyed. Refusing rather than marking "
                 "the rows purged and writing a tombstone that says the "
                 "material is gone while it is still in the bucket.")
+        # Locked, then reread, before EACH exhibit is destroyed (see the
+        # docstring): `rows` claims them one at a time, so the check and
+        # the delete it permits sit under one lock.
+        held_ids: list[UUID] = []
+        gone_ids: list[UUID] = []
+        rows = self._claim_for_destruction(ids, refuse_held=refuse_held,
+                                           held=held_ids, gone=gone_ids)
         # COUNTED, not collapsed. This loop used to set a single verdict for
         # the whole batch and the caller then recorded
         # `storage_locked = len(evidence_ids)` -- the BATCH SIZE. One refusal
@@ -1264,7 +1545,60 @@ class RetentionService:
             outcome = STORAGE_DELETED
         return _StorageOutcome(outcome=outcome, deleted=deleted,
                                locked=locked, failed=failed,
-                               warnings=tuple(warnings))
+                               warnings=tuple(warnings), held=tuple(held_ids),
+                               gone=tuple(gone_ids))
+
+    def _claim_for_destruction(self, ids: list[UUID], *, refuse_held: bool,
+                               held: list, gone: list):
+        """Yield `(id, storage_key)` for each exhibit that may be destroyed
+        now, having locked it and its case and read its holds under those
+        locks (evidence-purge-hold-race, 2026-10-03). The caller destroys
+        what it is handed before asking for the next, so every delete is
+        preceded by a read of the holds that nobody can change until the
+        transaction ends: a hold already written is seen and keeps its
+        exhibit, one written after waits for the transaction and then finds
+        the exhibit destroyed (`set_legal_hold` refuses a purged row, and
+        0142 refuses it in the database).
+
+        Scheduled sweep (`refuse_held` False): one exhibit at a time, in id
+        order. A court order entered while the sweep is part way through
+        lands at once on every exhibit the sweep has not reached, and is
+        honoured there; it waits only on the exhibits already locked.
+
+        Out-of-schedule purge (`refuse_held` True): every row and case
+        locked first, in the same order, and the whole batch refused if any
+        of it came under a hold since the check that preceded the approval,
+        so nothing is destroyed and the approval is not spent. Case rows
+        before exhibit rows, each in id order, so two transactions never
+        take them in opposite orders. `core.evidence.case_id` is fixed once
+        lodged (0140), so reading it unlocked to find the cases is safe."""
+        wanted = sorted(set(ids))
+        batches = [wanted] if refuse_held else [[i] for i in wanted]
+        for batch in batches:
+            self._c.execute(
+                """SELECT c.id FROM core."case" c
+                    WHERE c.id IN (SELECT e.case_id FROM core.evidence e
+                                    WHERE e.id = ANY(%s))
+                    ORDER BY c.id FOR SHARE""", (batch,))
+            self._c.execute(
+                "SELECT id FROM core.evidence WHERE id = ANY(%s) "
+                "ORDER BY id FOR UPDATE", (batch,))
+            current = self._c.execute(
+                """SELECT e.id, e.storage_key, e.purged_at IS NOT NULL,
+                          e.legal_hold OR c.legal_hold
+                     FROM core.evidence e JOIN core."case" c ON c.id = e.case_id
+                    WHERE e.id = ANY(%s) ORDER BY e.id""", (batch,)).fetchall()
+            gone.extend(r[0] for r in current if r[2])
+            held.extend(r[0] for r in current if r[3] and not r[2])
+            if held and refuse_held:
+                raise RetentionError(
+                    f"{len(held)} of the selected exhibits came under a legal "
+                    f"hold since this purge was checked. A hold "
+                    f"overrides all deletion: nothing was destroyed and the "
+                    f"approval was not spent.")
+            for r in current:
+                if not r[2] and not r[3]:
+                    yield r[0], r[1]
 
     # -- collected documents (2026-09-24; docs/00 decision 74) --------------
 
@@ -1574,28 +1908,177 @@ class RetentionService:
     def set_legal_hold(self, evidence_id: UUID, *, actor_id: UUID,
                        on: bool, reason: str | None) -> None:
         """A hold overrides all deletion, everywhere. Lifting one is as
-        consequential as applying one, so both are audited and applying one
-        requires a reason."""
-        if on and not (reason or "").strip():
+        consequential as applying one: it is what makes a later purge
+        lawful. So both need a reason, as a document hold does, and the
+        audit keeps the reason it replaces.
+
+        evidence-hold-lift-below-label (2026-10-03): a lift needed no reason
+        at all, and the route did not look at the exhibit's own labels, so a
+        lead cleared below an exhibit could release a court hold on it in
+        one request. The route now gates a lift on the exhibit's labels;
+        this refuses a lift without a reason.
+
+        evidence-purge-hold-race (2026-10-03): the row is locked first, so a
+        hold sent while a purge holds the row waits for it, and a destroyed
+        exhibit is refused rather than reported held."""
+        reason = (reason or "").strip()
+        if len(reason) < 5:
             raise RetentionError(
-                "a legal hold has to say what it rests on: a hold nobody can "
-                "attribute is a hold nobody can lift")
-        cur = self._c.execute(
-            "UPDATE core.evidence SET legal_hold = %s, legal_hold_reason = %s "
-            "WHERE id = %s",
-            (on, (reason or "").strip() or None if on else None, evidence_id))
-        # A hold that changed no row is refused, never audited as
-        # applied (S1, 2026-09-25). Under row-level security a blind UPDATE
-        # on a row the connection cannot see changes nothing and reports
-        # nothing; the route now runs this on a system connection, and this
-        # check is what keeps "held" from ever being said of an exhibit that
-        # is not.
-        if cur.rowcount != 1:
+                "a legal hold has to say what it rests on, placed or lifted: "
+                "a hold nobody can attribute is a hold nobody can lift, and "
+                "a lift nobody can attribute makes a purge nobody can defend")
+        with self._c.transaction():
+            prior = self._c.execute(
+                """SELECT case_id, legal_hold, legal_hold_reason
+                     FROM core.evidence WHERE id = %s FOR UPDATE""",
+                (evidence_id,)).fetchone()
+            cur = self._c.execute(
+                "UPDATE core.evidence SET legal_hold = %s, legal_hold_reason = %s "
+                "WHERE id = %s AND purged_at IS NULL",
+                (on, reason if on else None, evidence_id))
+            # A hold that changed no row is refused, never audited as
+            # applied (S1, 2026-09-25). Under row-level security a blind
+            # UPDATE on a row the connection cannot see changes nothing and
+            # reports nothing; the route now runs this on a system
+            # connection, and this check is what keeps "held" from ever
+            # being said of an exhibit that is not, or that a purge has
+            # destroyed.
+            if cur.rowcount != 1:
+                raise RetentionError(
+                    "no such exhibit, or it has been destroyed, so no legal "
+                    "hold was placed or lifted")
+            self._audit(prior[0], actor_id,
+                        "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
+                        {"evidence_id": str(evidence_id), "reason": reason,
+                         "prior_on": bool(prior[1]),
+                         "prior_reason": prior[2]})
+
+    def set_case_legal_hold(self, case_id: UUID, *, actor_id: UUID,
+                            on: bool, reason: str | None,
+                            lifter_ceiling: tuple | None = None,
+                            document_ceiling: tuple | None = None) -> dict:
+        """Hold, or release, everything a case governs: its exhibits (those
+        lodged later too), the ingest records attached to it, its lookups,
+        answers and batches, its samples, and the collected documents it
+        cites. Every leg of the purge already reads `core.case.legal_hold`.
+
+        evidence-case-hold-unreachable (2026-10-03): nothing in the product
+        wrote the column, so a preservation order covering a case could not
+        be honoured; only the tests set it. A reason is required both ways,
+        the audit keeps the one replaced, and the row is locked first, so a
+        hold sent while a purge of the case runs waits for it (the purge
+        holds the row FOR SHARE).
+
+        PLACING a hold is open to whoever holds `retention.manage` on the
+        case: preservation never waits for a clearance. LIFTING one is what
+        makes everything under it destroyable, so `lifter_ceiling`, the
+        lifter's (clearance, compartments) on this case, must cover
+        everything the case holds; with none given, or with anything above
+        it, the hold stays and nothing is changed. Otherwise a lead cleared
+        below an exhibit could release a court hold on it through the case,
+        which is what evidence-hold-lift-below-label closed for the exhibit
+        itself. The refusal says the same thing whatever lies above the
+        lifter, and names nothing of it.
+
+        g44-case-hold-lift-documents (2026-10-03): the collected documents
+        the case cites are held only through the case, and carry labels of
+        their own, so they count too. `document_ceiling` is the lifter's
+        ceiling OUTSIDE this case (no case-scoped break-glass grant): a
+        collected document is read under the account's own clearance, never
+        the case's, so a grant scoped to this case must not let somebody
+        release a document they cannot open. Left out it is the case
+        ceiling, which can only be the wider of the two."""
+        reason = (reason or "").strip()
+        if len(reason) < 5:
             raise RetentionError(
-                "no such exhibit, so no legal hold was placed or lifted")
-        self._audit(None, actor_id,
-                    "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
-                    {"evidence_id": str(evidence_id), "reason": reason})
+                "a legal hold has to say what it rests on, placed or lifted: "
+                "a hold nobody can attribute is a hold nobody can lift")
+        with self._c.transaction():
+            prior = self._c.execute(
+                """SELECT legal_hold, legal_hold_reason FROM core."case"
+                    WHERE id = %s FOR UPDATE""", (case_id,)).fetchone()
+            if prior is None:
+                raise RetentionNotFound("no such case")
+            if not on and not self._ceiling_covers_case(
+                    case_id, lifter_ceiling, document_ceiling):
+                raise RetentionError(
+                    "a case-level hold is lifted only by somebody cleared for "
+                    "everything the case holds, and you are not. The hold "
+                    "stays; ask a colleague cleared for the whole case. "
+                    "Nothing was changed.")
+            self._c.execute(
+                """UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s
+                    WHERE id = %s""", (on, reason if on else None, case_id))
+            self._audit(case_id, actor_id,
+                        "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
+                        {"case_id": str(case_id), "scope": "case",
+                         "reason": reason, "prior_on": bool(prior[0]),
+                         "prior_reason": prior[1]})
+        return {"case_id": str(case_id), "legal_hold": bool(on),
+                "legal_hold_reason": reason if on else None}
+
+    def _ceiling_covers_case(self, case_id: UUID, ceiling: tuple | None,
+                             document_ceiling: tuple | None = None) -> bool:
+        """Whether a (clearance, compartments) ceiling covers every live
+        exhibit, ingest record, sample, lookup and lookup answer the case
+        holds, and `document_ceiling` (the ceiling when none is given) every
+        live collected document it cites. Read on the connection this
+        service runs on, which is a system connection: the point is to see
+        what is above the lifter. No ceiling is False (fail closed).
+
+        g44-case-hold-lift-documents (2026-10-03): the documents were left
+        out ("held through the case that cites them, not by labels here"),
+        so a lead cleared below a RED document lifted the case hold alone and
+        the deployment-wide document sweep could then destroy it. A document
+        counts when the case cites it through any registered citation
+        (`_citations_sql`, the one list the hold predicate reads) or cites
+        another version of it: a citation of any version holds them all
+        (`_versions_sql`). Cited and not above the ceiling, or already
+        purged, is not counted."""
+        if ceiling is None:
+            return False
+        clearance, held = _ceiling_parts(ceiling)
+        doc_clearance, doc_held = (
+            (clearance, held) if document_ceiling is None
+            else _ceiling_parts(document_ceiling))
+        above = self._c.execute(
+            f"""WITH cited AS (
+                  SELECT DISTINCT c.document_id AS id
+                    FROM ({_citations_sql()}) c WHERE c.case_id = %(c)s),
+                held_documents AS (
+                  SELECT v.id FROM collect.document v
+                    JOIN cited ON cited.id = v.id
+                  UNION
+                  SELECT s.id FROM collect.document v
+                    JOIN cited ON cited.id = v.id
+                    JOIN collect.document s ON {_versions_sql("v", "s")})
+               SELECT
+                 (SELECT count(*) FROM core.evidence e
+                   WHERE e.case_id = %(c)s AND e.purged_at IS NULL
+                     AND (e.classification > %(l)s::core.tlp
+                          OR NOT e.compartments <@ %(h)s::text[]))
+               + (SELECT count(*) FROM ingest.record r
+                   WHERE r.case_id = %(c)s AND r.purged_at IS NULL
+                     AND (r.classification > %(l)s::core.tlp
+                          OR NOT r.compartments <@ %(h)s::text[]))
+               + (SELECT count(*) FROM lab.sample s
+                   WHERE s.case_id = %(c)s AND s.state <> 'REJECTED'
+                     AND (s.classification > %(l)s::core.tlp
+                          OR NOT s.compartments <@ %(h)s::text[]))
+               + (SELECT count(*) FROM ingest.lookup k
+                   WHERE k.case_id = %(c)s AND k.purged_at IS NULL
+                     AND k.classification > %(l)s::core.tlp)
+               + (SELECT count(*) FROM ingest.lookup_result k
+                   WHERE k.case_id = %(c)s AND k.purged_at IS NULL
+                     AND k.classification > %(l)s::core.tlp)
+               + (SELECT count(*) FROM collect.document d
+                   WHERE d.id IN (SELECT id FROM held_documents)
+                     AND d.purged_at IS NULL
+                     AND (d.classification > %(dl)s::core.tlp
+                          OR NOT d.compartments <@ %(dh)s::text[]))""",
+            {"c": case_id, "l": clearance, "h": held,
+             "dl": doc_clearance, "dh": doc_held}).fetchone()[0]
+        return above == 0
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
                detail: dict) -> None:

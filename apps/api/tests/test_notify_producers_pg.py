@@ -196,8 +196,14 @@ def _owner_case_and_tampered_exhibit(conn, client):
     # Doctor the recorded hash: the bytes in WORM storage cannot be changed,
     # which is the point of WORM, so the mismatch is manufactured on the
     # other side of the comparison.
-    conn.execute("UPDATE core.evidence SET sha256 = %s WHERE id = %s",
-                 (b"\x00" * 32, UUID(ev_id)))
+    # Since 0140 the anchors are fixed for every role, so this is an owner's
+    # tamper with the guard disabled by name (evidence-integrity-anchors-
+    # mutable, 2026-10-03).
+    with conn.transaction():
+        conn.execute("ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed")
+        conn.execute("UPDATE core.evidence SET sha256 = %s WHERE id = %s",
+                     (b"\x00" * 32, UUID(ev_id)))
+        conn.execute("ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed")
     return owner, UUID(case_id), UUID(ev_id)
 
 

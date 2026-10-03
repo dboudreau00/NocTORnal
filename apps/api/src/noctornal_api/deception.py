@@ -32,7 +32,7 @@ import hashlib
 import ipaddress
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
@@ -575,7 +575,7 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
         # version-dependent set on hostile input. Invariant 12 — the
         # exhibit is still recorded, with the failure attached.
         out.gaps.append({"step": "parse", "reason": f"{type(exc).__name__}: {exc}"})
-        return out
+        return _scrub_unstorable(out)
 
     out.message_id = _header_str(msg, "Message-ID")
     out.subject = _header_str(msg, "Subject")
@@ -690,6 +690,60 @@ def parse_eml(data: bytes, *, trusted: tuple[str, ...] | None = None) -> ParsedE
                 out.gaps.append({"step": "url_extraction",
                                  "reason": "capped at 500 URLs"})
                 break
+    return _scrub_unstorable(out)
+
+
+#: What a NUL character is recorded as. Postgres text and jsonb refuse NUL,
+#: and the exhibit keeps the original bytes.
+_NUL_STANDIN = chr(0xFFFD)
+
+
+def _scrub_unstorable(out: ParsedEmail) -> ParsedEmail:
+    """Replace every NUL in what was parsed, and say so in a gap.
+
+    http_ui-009 (2026-10-03): one NUL in a Subject, a Message-ID or a display
+    name (raw, or RFC 2047 encoded as `=?utf-8?b?d2kAcmU=?=`) reached a text
+    column and the route answered 500 after the exhibit was lodged, and every
+    retry the same: the sender chose whether their mail could be analysed.
+    Every string the record is made from is cleaned here, the one place they
+    all pass, so nothing is dropped (invariant 12) and nothing is guessed."""
+    replaced: list[str] = []
+
+    def clean(value, where: str):
+        if isinstance(value, str):
+            if "\x00" in value:
+                replaced.append(where)
+                return value.replace("\x00", _NUL_STANDIN)
+            return value
+        if isinstance(value, list):
+            return [clean(v, where) for v in value]
+        if isinstance(value, dict):
+            return {k: clean(v, f"{where}.{k}") for k, v in value.items()}
+        return value
+
+    for f in fields(out):
+        if f.name == "hops":
+            continue
+        setattr(out, f.name, clean(getattr(out, f.name), f.name))
+    # A Hop is frozen, so a hop that carried one is rebuilt.
+    hops = []
+    for hop in out.hops:
+        changes = {}
+        for f in fields(hop):
+            value = getattr(hop, f.name)
+            cleaned = clean(value, "hops")
+            if cleaned is not value:
+                changes[f.name] = cleaned
+        hops.append(replace(hop, **changes) if changes else hop)
+    out.hops = hops
+    if replaced:
+        names = sorted({w.split(".")[0].split("[")[0] for w in replaced})
+        out.gaps.append({
+            "step": "nul_characters",
+            "reason": ("a NUL character, which cannot be recorded, was "
+                       "replaced with U+FFFD in: " + ", ".join(names)
+                       + ". The exhibit holds the message exactly as "
+                       "received.")})
     return out
 
 

@@ -187,6 +187,10 @@ NOT_CONTENT = {
         "cancelling queued sends sends nothing",
     ("PUT", "/cases/{case_id}/notify-routing"):
         "keeping a case out of Jira: governance, and wanted most on a closed case",
+    # evidence-case-hold-unreachable (2026-10-03).
+    ("POST", "/retention/cases/{case_id}/legal-hold"):
+        "a hold on everything a case governs: preservation does not wait for "
+        "a reopening, and is wanted most on a closed case",
 }
 
 #: Gated on the REQUESTED operation's own verb (`approvals.OPERATIONS`): a

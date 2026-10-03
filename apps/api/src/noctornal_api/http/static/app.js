@@ -24928,6 +24928,9 @@ function purgeCounts(body) {
     [body.documents_purged || 0, 'document'],
     [body.records_purged || 0, 'ingest record'],
     [body.dead_letters_purged || 0, 'dead letter'],
+    /* Lab samples of the expired case (lab-4, 2026-10-03): disposed of as
+       a rejection is, which the server's warnings say in full. */
+    [body.samples_purged || 0, 'sample'],
   ].filter(([n]) => n > 0)
     .map(([n, noun]) => n + ' ' + noun + (n === 1 ? '' : 's'));
 }
@@ -25197,7 +25200,8 @@ async function loadTombstones() {
 }
 
 const TOMB_NOUN = { evidence: 'exhibit', document: 'document',
-                    ingest_record: 'ingest record', dead_letter: 'dead letter' };
+                    ingest_record: 'ingest record', dead_letter: 'dead letter',
+                    sample: 'sample' };
 /* The rule keys retention.py writes, in words. An unknown key is shown as
    written rather than guessed at. */
 const TOMB_RULE = {

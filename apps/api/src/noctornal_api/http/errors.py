@@ -190,7 +190,8 @@ def safe_detail(exc: Exception) -> str:
 def install_error_handlers(app) -> None:
     from noctornal_api.cases import CaseError
     from noctornal_api.curation import CurationError
-    from noctornal_api.evidence import EvidenceError, IntegrityError
+    from noctornal_api.evidence import (
+        EvidenceError, ExhibitUnavailable, IntegrityError)
     from noctornal_api.graph import GraphWriteError
     from noctornal_api.security.access import AccessResolutionError
     from noctornal_api.selectors import SelectorError, SelectorOwnerConflict
@@ -216,6 +217,13 @@ def install_error_handlers(app) -> None:
     async def _integrity(_: Request, exc: Exception):
         # A tamper alarm on the evidence read path.
         return problem_response(409, "Integrity check failed", str(exc))
+
+    @app.exception_handler(ExhibitUnavailable)
+    async def _exhibit_unavailable(_: Request, exc: Exception):
+        # Retention destroyed the bytes, or is destroying them now: a plain
+        # answer, and never a tamper alarm (g44-verify-destroyed-exhibit,
+        # 2026-10-03). The sentence is fixed text, not the exception's cause.
+        return problem_response(409, "Exhibit unavailable", str(exc))
 
     @app.exception_handler(EvidenceError)
     async def _evidence(_: Request, exc: Exception):
