@@ -7,8 +7,8 @@ schemas is in exactly one of three maps:
   policy follows (migrations 0114, 0116 and 0118 onwards hold the SQL,
   each as frozen text). Every reader of the table
   has been converted: gate inputs read facts (`iam.case_facts`,
-  `iam.element_facts`), work that must see every row runs on a system
-  connection (`db.SystemPurpose`).
+  `iam.element_facts`, `iam.lookup_result_facts`), work that must see
+  every row runs on a system connection (`db.SystemPurpose`).
 - `EXEMPT`: never under a policy, with the reason. The IAM plane is the
   policies' own input and is read-only to the request role instead (0109);
   the collection plane is read by the egress proxy's role, which is subject
@@ -165,6 +165,16 @@ POLICY: dict[str, str] = {
     # every watch as system purposes (COLLECTION, INGEST).
     "collect.watch": "CUSTOM_WATCH",
     "collect.watch_hit": "CHILD",
+    # 0128 (F51, 2026-10-02): the lookup ledger. An interactive send, a
+    # sign-off and the provider test run from the gates on as LOOKUPS, as
+    # the drain does, and what the requester is shown is read back at their
+    # labels; the answer's label is read through iam.lookup_result_facts
+    # (0127). A provider test's canary has no case, so no request role sees
+    # it. The attempts are append-only, so their CHILD test is a ledger's.
+    "ingest.lookup": "CASE_LABELLED",
+    "ingest.lookup_result": "CASE_LABELLED",
+    "ingest.lookup_attempt": "LEDGER_CHILD",
+    "ingest.lookup_batch": "CASE",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -288,17 +298,6 @@ DEFERRED: dict[str, str] = {
         "case assignment (Security Officers read no case content), so "
         "grant_pii_authorisation and its listing would otherwise be "
         "refused; with ingest.record"),
-    "ingest.lookup": (
-        "CASE_LABELLED, with case-less canary rows for the provider test. "
-        "Owed first: an interactive request (routers/lookups.request) sends, "
-        "stores the answer at a label the provider decides (up to RED) and "
-        "raises proposals on the REQUEST connection, and the answer row's "
-        "INSERT ... RETURNING would be refused for a requester below it; "
-        "that path runs as the LOOKUPS purpose, as the drain does. Its "
-        "entity and sample label joins read facts since 2026-09-25"),
-    "ingest.lookup_attempt": "CHILD of lookup, with it",
-    "ingest.lookup_batch": "CASE template, with ingest.lookup",
-    "ingest.lookup_result": "CASE_LABELLED, with ingest.lookup",
     "notify.notification": (
         "CUSTOM (the recipient's own, within their labels). Owed first: "
         "NotificationService.notify writes a row for SOMEONE ELSE with "

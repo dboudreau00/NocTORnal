@@ -41,7 +41,7 @@ import os
 import re
 import urllib.parse
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
@@ -51,6 +51,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api import egress_policy, lookup_adapters, pinned_http
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.egress import RouteUnavailable
 from noctornal_api.egress_policy import Refusal, RoutePolicy, Rule
 from noctornal_api.security import envelope
@@ -490,6 +491,10 @@ class ProviderRegistry:
         self._c = conn
         self._route_for = route_for
 
+    def _on(self, conn: psycopg.Connection) -> ProviderRegistry:
+        """This registry on `conn` (a LOOKUPS connection, F51, 2026-10-02)."""
+        return self if conn is self._c else ProviderRegistry(conn, route_for=self._route_for)
+
     # -- reads ------------------------------------------------------------------
 
     @staticmethod
@@ -779,33 +784,41 @@ class ProviderRegistry:
         if not sets:
             return p
         cols = ", ".join(f"{k} = %s" for k in sets)
+        # A move withdraws every case's waiting and queued lookups of this
+        # provider, which the administrator holds no assignment to see, so
+        # the update then runs as the LOOKUPS purpose, on one connection
+        # (F51, 2026-10-02).
+        withdraw = moved or redetermine
         try:
-            with self._c.transaction():
+            with (system_connection(SystemPurpose.LOOKUPS, reuse=self._c) if withdraw
+                  else nullcontext(self._c)) as conn, conn.transaction():
+                registry = self._on(conn)
                 if moved or "exposure_level" in sets:
                     # An open change was asked about the destination and the
                     # level as they stood; neither stands now.
-                    self._c.execute(
+                    conn.execute(
                         """UPDATE ingest.provider_exposure_change
                               SET decision = 'EXPIRED', decided_at = now(),
                                   decision_note = 'the provider''s destination or exposure '
                                                   'changed after this was asked'
                             WHERE provider_id = %s AND decision IS NULL""", (provider_id,))
-                self._c.execute(f"UPDATE ingest.provider SET {cols}, updated_at = now() "
-                                f"WHERE id = %s", (*sets.values(), provider_id))
+                conn.execute(f"UPDATE ingest.provider SET {cols}, updated_at = now() "
+                             f"WHERE id = %s", (*sets.values(), provider_id))
                 if clear_reason:
-                    ProviderVault(self._c).clear(provider_id, actor_id=actor_id,
-                                                 reason=clear_reason)
+                    ProviderVault(conn).clear(provider_id, actor_id=actor_id,
+                                              reason=clear_reason)
                 if "display_name" in sets:
-                    self._c.execute("UPDATE collect.source SET name = %s WHERE id = %s",
-                                    (sets["display_name"], p.source_id))
+                    conn.execute("UPDATE collect.source SET name = %s WHERE id = %s",
+                                 (sets["display_name"], p.source_id))
                 if "exposure_level" in sets:
-                    _audit(self._c, "PROVIDER_EXPOSURE_CHANGED", actor_id=actor_id,
+                    _audit(conn, "PROVIDER_EXPOSURE_CHANGED", actor_id=actor_id,
                            object_id=provider_id,
                            detail={"old": p.exposure_level, "new": sets["exposure_level"]})
-                if moved or redetermine:
-                    after = self.require(provider_id)
-                    self._withdraw_queued(provider_id, "the provider's destination changed")
-                    _audit(self._c, "PROVIDER_DESTINATION_CHANGED", actor_id=actor_id,
+                if withdraw:
+                    after = registry.require(provider_id)
+                    self._withdraw_queued(conn, provider_id,
+                                          "the provider's destination changed")
+                    _audit(conn, "PROVIDER_DESTINATION_CHANGED", actor_id=actor_id,
                            object_id=provider_id,
                            detail={"from": p.origin, "to": after.origin,
                                    "private_cidr": (str(after.private_cidr)
@@ -814,10 +827,10 @@ class ProviderRegistry:
                     if after.needs_exposure_approval:
                         basis = (_check_basis(changes["exposure_basis"])
                                  if changes.get("exposure_basis") else after.exposure_basis)
-                        self._open_change(after, from_level="PUBLIC",
-                                          to_level=after.exposure_level, basis=basis,
-                                          actor_id=actor_id)
-                _audit(self._c, "PROVIDER_UPDATED", actor_id=actor_id, object_id=provider_id,
+                        registry._open_change(after, from_level="PUBLIC",
+                                              to_level=after.exposure_level, basis=basis,
+                                              actor_id=actor_id)
+                _audit(conn, "PROVIDER_UPDATED", actor_id=actor_id, object_id=provider_id,
                        detail={"fields": sorted(sets)})
         except (psycopg.errors.CheckViolation, psycopg.errors.RaiseException) as exc:
             raise ProviderError(_first_line(exc)) from None
@@ -869,20 +882,28 @@ class ProviderRegistry:
         p = self.require(provider_id)
         if p.retired_at is not None:
             raise ProviderError("A retired provider is final.", status=409)
-        with self._c.transaction():
-            self._c.execute(sql, (provider_id,))
-            if action == "PROVIDER_DISABLED":
-                self._withdraw_queued(provider_id, "the provider was withdrawn")
-            _audit(self._c, action, actor_id=actor_id, object_id=provider_id,
+        # A disable withdraws every case's waiting and queued lookups, which
+        # the administrator holds no assignment to see, so it runs as the
+        # LOOKUPS purpose, the provider's change and the withdrawal on one
+        # connection so they commit together (F51, 2026-10-02).
+        withdraw = action == "PROVIDER_DISABLED"
+        with (system_connection(SystemPurpose.LOOKUPS, reuse=self._c) if withdraw
+              else nullcontext(self._c)) as conn, conn.transaction():
+            conn.execute(sql, (provider_id,))
+            if withdraw:
+                self._withdraw_queued(conn, provider_id, "the provider was withdrawn")
+            _audit(conn, action, actor_id=actor_id, object_id=provider_id,
                    detail={"reason": reason.strip()})
         return self.require(provider_id)
 
-    def _withdraw_queued(self, provider_id: UUID, why: str) -> int:
+    @staticmethod
+    def _withdraw_queued(conn: psycopg.Connection, provider_id: UUID, why: str) -> int:
         """Queued rows of a disabled or retired provider are cancelled, never
-        left to send months later."""
-        if self._c.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0] is None:
+        left to send months later: every case's, so `conn` is a LOOKUPS
+        connection (F51, 2026-10-02)."""
+        if conn.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0] is None:
             return 0
-        return len(self._c.execute(
+        return len(conn.execute(
             """UPDATE ingest.lookup SET state = 'CANCELLED', refusal = %s
                 WHERE provider_id = %s AND state IN ('QUEUED', 'AWAITING_SIGNOFF')
                RETURNING id""", (why, provider_id)).fetchall())
@@ -904,36 +925,40 @@ class ProviderRegistry:
         p = self.require(provider_id)
         if p.retired_at is not None:
             raise ProviderError("A retired provider is final.", status=409)
-        with self._c.transaction():
-            change = self._c.execute(
+        # As a disable: every case's waiting and queued lookups are
+        # withdrawn, so the retirement runs as the LOOKUPS purpose, on one
+        # connection (F51, 2026-10-02).
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as conn, \
+                conn.transaction():
+            change = conn.execute(
                 """SELECT id, requested_by FROM ingest.provider_exposure_change
                     WHERE provider_id = %s AND decision IS NULL""", (provider_id,)).fetchone()
             if change is not None:
                 if change[1] == actor_id:
-                    self._c.execute(
+                    conn.execute(
                         """UPDATE ingest.provider_exposure_change
                               SET decision = 'WITHDRAWN', decided_by = %s, decided_at = now(),
                                   decision_note = 'the provider was retired'
                             WHERE id = %s""", (actor_id, change[0]))
                 else:
-                    self._c.execute(
+                    conn.execute(
                         """UPDATE ingest.provider_exposure_change
                               SET decision = 'EXPIRED', decided_at = now(),
                                   decision_note = 'the provider was retired'
                             WHERE id = %s""", (change[0],))
-            self._withdraw_queued(provider_id, "the provider was retired")
-            self._c.execute(
+            self._withdraw_queued(conn, provider_id, "the provider was retired")
+            conn.execute(
                 """UPDATE ingest.provider
                       SET enabled = false, secret_ciphertext = NULL, secret_key_id = NULL,
                           secret_origin = NULL, secret_set_at = NULL, secret_set_by = NULL,
                           rotate_by = NULL, retired_at = now(), retired_by = %s,
                           retired_reason = %s, updated_at = now()
                     WHERE id = %s""", (actor_id, reason.strip(), provider_id))
-            self._c.execute(
+            conn.execute(
                 """UPDATE collect.source SET notes = coalesce(notes || ' ', '')
                           || 'Retired: ' || %s WHERE id = %s""",
                 (reason.strip()[:200], p.source_id))
-            _audit(self._c, "PROVIDER_RETIRED", actor_id=actor_id, object_id=provider_id,
+            _audit(conn, "PROVIDER_RETIRED", actor_id=actor_id, object_id=provider_id,
                    detail={"provider": p.key, "reason": reason.strip()})
         return self.require(provider_id)
 
@@ -1030,18 +1055,23 @@ class ProviderRegistry:
                                 "lapsed; ask again for the address the provider names "
                                 "now.", status=409)
         try:
-            with self._c.transaction():
+            # An approval cancels every case's sign-offs waiting on this
+            # provider, which the administrator holds no assignment to see,
+            # so the decision runs as the LOOKUPS purpose, on one connection
+            # (F51, 2026-10-02).
+            with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as conn, \
+                    conn.transaction():
                 if not approve:
-                    self._c.execute(
+                    conn.execute(
                         """UPDATE ingest.provider_exposure_change
                               SET decision = 'DECLINED', decided_by = %s, decided_at = now(),
                                   decision_note = %s WHERE id = %s""",
                         (actor_id, (note or "").strip() or None, change_id))
-                    _audit(self._c, "PROVIDER_EXPOSURE_CHANGE_DECLINED", actor_id=actor_id,
+                    _audit(conn, "PROVIDER_EXPOSURE_CHANGE_DECLINED", actor_id=actor_id,
                            object_id=provider_id, detail={"change_id": str(change_id)})
                     return self.require(provider_id)
                 to_level = row[2]
-                self._c.execute(
+                conn.execute(
                     """UPDATE ingest.provider_exposure_change
                           SET decision = 'APPROVED', decided_by = %s, decided_at = now(),
                               decision_note = %s WHERE id = %s""",
@@ -1049,7 +1079,7 @@ class ProviderRegistry:
                 ceiling = p.classification_ceiling
                 if _TLP_ORDER.index(ceiling) > _TLP_ORDER.index(MAX_CEILING[to_level]):
                     ceiling = MAX_CEILING[to_level]
-                self._c.execute(
+                conn.execute(
                     """UPDATE ingest.provider
                           SET exposure_level = %s, exposure_basis = %s,
                               exposure_determined_by = %s, exposure_determined_at = now(),
@@ -1060,13 +1090,13 @@ class ProviderRegistry:
                         WHERE id = %s""",
                     (to_level, row[3], row[1], ceiling, row[8], to_level, provider_id))
                 cancelled = 0
-                if self._c.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0]:
-                    cancelled = len(self._c.execute(
+                if conn.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0]:
+                    cancelled = len(conn.execute(
                         """UPDATE ingest.lookup SET state = 'CANCELLED',
                                   refusal = 'the provider''s exposure changed'
                             WHERE provider_id = %s AND state = 'AWAITING_SIGNOFF'
                            RETURNING id""", (provider_id,)).fetchall())
-                _audit(self._c, "PROVIDER_EXPOSURE_LOWERED", actor_id=actor_id,
+                _audit(conn, "PROVIDER_EXPOSURE_LOWERED", actor_id=actor_id,
                        object_id=provider_id,
                        detail={"from": row[6], "to": to_level, "requested_by": str(row[1]),
                                "approved_by": str(actor_id),
@@ -1093,16 +1123,21 @@ class ProviderRegistry:
     # -- counts, and counts only ------------------------------------------------------
 
     def usage(self, provider_id: UUID) -> dict:
+        """Counts across every case and the provider tests, for the
+        administrator who runs the provider, as the LOOKUPS purpose (F51,
+        2026-10-02): their own view holds no case's lookups, and a usage
+        panel that counted only those would read as idle. Counts only."""
         p = self.require(provider_id)
         from noctornal_api import lookups
-        windows = lookups.window_counts(self._c, p)
-        states = {r[0]: int(r[1]) for r in self._c.execute(
-            """SELECT state, count(*) FROM ingest.lookup
-                WHERE provider_id = %s AND requested_at > now() - interval '24 hours'
-                GROUP BY 1""", (provider_id,)).fetchall()}
-        awaiting = self._c.execute(
-            "SELECT count(*) FROM ingest.lookup WHERE provider_id = %s "
-            "AND state = 'AWAITING_SIGNOFF'", (provider_id,)).fetchone()[0]
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as conn:
+            windows = lookups.window_counts(conn, p)
+            states = {r[0]: int(r[1]) for r in conn.execute(
+                """SELECT state, count(*) FROM ingest.lookup
+                    WHERE provider_id = %s AND requested_at > now() - interval '24 hours'
+                    GROUP BY 1""", (provider_id,)).fetchall()}
+            awaiting = conn.execute(
+                "SELECT count(*) FROM ingest.lookup WHERE provider_id = %s "
+                "AND state = 'AWAITING_SIGNOFF'", (provider_id,)).fetchone()[0]
         return {"windows": windows, "last_24h_by_state": states,
                 "awaiting_signoff": int(awaiting)}
 
