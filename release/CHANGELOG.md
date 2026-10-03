@@ -1,5 +1,346 @@
 # Changelog
 
+## Alpha 8: 2026-10-03
+
+The part of the beta build that had merged when the owner stopped it,
+released as it stood. Row-level security covers ten more tables, the
+notification tables, the lookup ledger and Telegram chats, so it stands on
+76 and five remain (F51). Five flagged items are closed: a persona is
+refused at creation on a profile that cannot carry persona traffic (F35), a
+run's warnings keep a typed Telegram id (F36), a fingerprint copied from gpg
+parses in a contact block (F37), the webhook has an opt-in signature with a
+timestamp (F28), and watches match forum signatures and Telegram chats
+(F47). The owner settled two questions on 2026-10-02: the second person who
+turns off a case's merge switch must have held `case.update` on the case
+for seven days, and an undated legacy claim is dated by superseding it,
+never by writing onto it (F39, open questions 11 and 12). An operator-run
+script sweeps collected documents past their clock (F30). The decisions
+this release took are docs/00 152 to 174.
+
+The rest of that build was stopped before it merged and is not in this
+release: row-level security on the last five tables (the audit log and the
+ingest record family), the schema owner's password out of the runtime
+services (F52), Redis isolation enforced by an ACL, the cron scripts' check
+for a published credential, an isolated worker for the analysis children
+(F42), the persona vault split into a collector process (which the owner
+decided on 2026-10-02, decision 174), REGE, archive expansion, the
+authenticated forum path, source compartments (F43), and a first run of the
+Telegram adapter against Telegram (F31). ROADMAP-REMAINING.md lists each.
+An adversarial review of the build on 2026-10-03 kept 82 findings, 16 of
+them high, and none is fixed here; Known and not fixed, below, names them.
+
+Still alpha, still not audited, and still not lawful to operate against
+real material until docs/16 L1 to L5 are settled outside this codebase.
+Legal review is required before any active case load. Alpha 7a stands at
+Alembic 0124, so an upgrade applies seven revisions, 0125 to 0131; none
+rewrites an existing row, and 0130 refuses to upgrade while a watch written
+by hand names a Telegram chat by anything but its typed id. The readiness
+register grows from 43 checks to 44, the new one not blocking. The steps an
+existing deployment takes are the next subsection.
+
+FIGURES_PENDING
+
+### Upgrading from Alpha 7a
+
+**1. Stop the API and every cron loop, and back up.** As the Alpha 7 notes
+say: the API, the sample origin, and on a production stack `cron` and the
+Lab loops, then the database, the buckets and `.env.local` (or
+`secrets.env`). 0126, 0128 and 0129 put tables under row security, and each
+holds an ACCESS EXCLUSIVE lock on its tables until its revision commits;
+they scan nothing, so the lock is short, but each first waits for every
+open transaction on those tables. 0130 validates a new CHECK over
+`collect.watch`, and 0131 adds a column, a CHECK and a unique index to
+`core.assertion`, so it scans the claims table under an ACCESS EXCLUSIVE
+lock: on a large case file that is the longest step.
+
+**2. Get the code and reinstall.** No dependency changed, and
+`constraints.txt` is as Alpha 7a left it.
+
+**3. Apply the migrations.** `alembic upgrade head` from the repository
+root, as the schema owner, as before. What each does:
+
+- **0125** adds `notify.enqueue`, a definer function that is now the only
+  writer of a notification for someone else. No data changes. Its downgrade
+  drops it; take the code back with the schema, because this release raises
+  every notice through it.
+- **0126** puts the five notification tables under row security: a notice
+  is its recipient's own, and the delivery ledger, the Jira links and their
+  events are read-only to the request role. No data changes.
+- **0127** adds `iam.lookup_result_facts`, which answers the label of a
+  lookup's answer whatever the caller may see. No data changes.
+- **0128** puts the four lookup tables under row security and makes the
+  trigger function `ingest.lookup_result_dominates` a definer. No data
+  changes; its downgrade restores the function exactly.
+- **0129** puts `collect.telegram_chat` under row security. No data
+  changes.
+- **0130** adds a CHECK that a watch of target kind `TELEGRAM_CHAT` names a
+  typed chat id (`c:<id>` or `g:<id>`). **It refuses to upgrade**, naming
+  the count, while a watch already says TELEGRAM_CHAT, in any spelling,
+  without one. Nothing in the product creates a watch, so only a row
+  written by hand can stop it: correct that row first. Its downgrade drops
+  the constraint.
+- **0131** adds `core.assertion.supersedes_id`, set once at insert, with a
+  guard that a replacement is in the same case, about the same entity or
+  tie, and replaces a live claim. Nothing is backfilled. Its downgrade drops
+  the column, and every replaced claim keeps `superseded_by`, so the pairs
+  stay readable.
+
+Every notification is now written by `notify.enqueue`. A tool or test that
+inserts into `notify.notification` directly still works as the schema
+owner, and is refused as `noctornal_app`.
+
+**4. Settings.** A stack needs none of the new ones to start.
+
+- `NOCTORNAL_WEBHOOK_SIGNATURE`: unset or `v1`, the default, signs exactly
+  as before. `v2` sends `X-NocTORnal-Signature-V2`, a timestamp signed with
+  the body, with no v1 header beside it, and needs
+  `NOCTORNAL_WEBHOOK_SECRET`. An unknown value, or `v2` with no secret,
+  holds webhook deliveries and refuses a production start. It is read on
+  every delivery, so the cron needs no restart. Move the receiver first:
+  docs/07 gives the order, the replay window and a verifier.
+- `NOCTORNAL_RELAX_SEASONING_DAYS`: 7 when unset or blank, otherwise a
+  whole number from 0 to 365, and 0 turns the rule off and nothing else
+  does. Any other value is held to 7 and refused at a production boot,
+  naming the variable and never the value.
+- `NOCTORNAL_RETENTION_SWEEP_AUTHORITY` and
+  `NOCTORNAL_RETENTION_SWEEP_ACTOR` are read by `scripts/retention_sweep.py`
+  alone. The authority is required for a real sweep, and the actor may be
+  given as `--actor` instead. Pass them with `-e` for the run: they do not
+  belong in `secrets.env`, which every container reads.
+
+`infra/production/secrets.env.example` lists the first two, commented out,
+and `release/INSTALL.md` describes the seasoning window.
+
+**5. The two new system purposes.** TELEGRAM_INTAKE (a new Telegram chat's
+duplicate check) and NOTIFY_ADMIN (the delivery ledger, its requeue, the
+Jira destination's administration and the overview's Jira card) run on the
+system connection like every other purpose: as `noctornal_worker` through
+`NOCTORNAL_WORKER_DATABASE_URL` in production, which Alpha 7 already
+requires, and as `DATABASE_URL`'s own role in development. There is nothing
+to create or grant. Drain now (`POST /api/v1/notifications/dispatch`) now
+drains on the NOTIFY purpose, as the cron does, and writes its audit row on
+the request connection as before.
+
+**6. Start, and read the readiness register.** One row is new,
+`retention_sweep_current`, not blocking. It is red when a collected
+document no hold keeps has been past its clock for more than seven days,
+which on a deployment that has read Telegram or forums under a confirmed
+retention rule may be at once. Run `scripts/retention_sweep.py` dry to see
+what it would destroy, and read docs/17 F30 before running it for real.
+`row_level_security_enforced` now covers the ten new tables too.
+
+**7. Tell the people who use it.**
+
+- Turning a case's merge switch off now takes a second Lead investigator
+  who has held `case.update` on the case for seven days, unless the
+  deployment declares another window. The approvals list and the case's
+  policy say when a colleague becomes eligible; rejecting is never blocked.
+- An undated Triage claim can be dated in the inspector (Date this claim):
+  a new claim carrying the date and the analyst's reason cites the old one,
+  and the old one is superseded, not rewritten.
+- A persona is refused at creation on an egress profile that cannot carry
+  persona traffic, in the sentence the egress proxy gives.
+- Contact blocks parsed from now on read a fingerprint copied from gpg
+  whole (parser version cb-2). Blocks parsed before keep their reading, and
+  docs/17 lists them under data that should not be trusted.
+- A colleague below a lookup's label who tries to cancel it gets 404, as
+  for a missing lookup, where it got 403. A batch's cancel answers the
+  number of rows the canceller can read, and the audit row keeps the full
+  count.
+- A notice about a case since raised above its recipient is hidden with the
+  case, and a recipient removed from a case can no longer acknowledge its
+  old notices by id.
+- A Telegram chat added by two people at once answers the second as the
+  duplicate check does, where it answered 500. A join, membership check,
+  member mark or rebind whose chat was raised above the caller during the
+  act answers as a missing chat and records nothing.
+- Script clients. `POST /api/v1/cases/{id}/assertions/{id}/supersede` is
+  new. Assertion reads carry `supersedes_id` and `superseded_by`. `GET
+  /api/v1/cases/{id}/policy` carries `relax_seasoning_days` and
+  `relax_next_eligible`, the case's approvals list carries `signer_block`,
+  and the two-person overview carries `signer_seasoning`. The webhook card
+  reports its signature scheme.
+
+### Row-level security on ten more tables (F51)
+
+Row-level security now stands behind the access gate on 76 tables. The
+notification tables, the lookup ledger and Telegram chats joined it on
+2026-10-02 (Alembic 0125 to 0129, docs/00 decisions 152 to 163). Five
+tables are still outside it, each with the work it needs named in
+`rls_registry.py` and docs/17 F51: the audit log, and the ingest records,
+victim credentials, dead letters and PII authorisations. On those, a
+statement injected into a request still reaches every row the request role
+can.
+
+**Notifications.** A notification is its recipient's own at the database.
+Every notification is raised through one definer function,
+`notify.enqueue`, inside the transaction of the act it reports: it checks
+the recipient rather than the writer, keeps one open alarm per exhibit and
+one alert per officer per hour as before, applies a case owner's Jira veto
+even for a caller who is not on the case, and never hands the row back. The
+delivery ledger and the Jira links are read-only to the request role. Drain
+now runs the drain the way the cron does, and the delivery ledger, its
+requeue and Jira's administration see every recipient and case through a
+new system purpose.
+
+**The lookup ledger.** A lookup and its answer are read at their own labels
+in a case the reader may read, an attempt where its lookup is, and a batch
+in its case. A provider test's canary belongs to no case and is no
+request's to read. An interactive lookup, a sign-off and the provider test
+run from the gates on as the LOOKUPS system purpose, as the drain already
+did, so an answer is still stored at the label the provider decides and its
+proposals still raised. The person who asked is shown exactly what they
+were shown before, with the answer withheld above their clearance. The
+quota, the cache and the value check still count every row, so nothing is
+sent past a vendor's limit or sent twice. A batch's cancel and a provider's
+disable, move, lowering and retirement still withdraw every case's waiting
+and queued lookups.
+
+**Telegram chats.** The request role sees a chat only where its source is
+within the reader's case-less ceiling, tested inline because the source
+table stays exempt for the egress proxy. Adding a chat checks for a
+duplicate as the new TELEGRAM_INTAKE system purpose, so a chat already
+added under a source above the adder still answers exactly as an
+unresolvable reference, and a chat added between that check and the insert
+is answered by the same check, where it answered with a server error.
+Joining, checking membership, marking as a member chat and rebinding refuse
+a write that changed no chat, so an act whose chat was raised above its
+caller during the act answers as a missing chat and records nothing.
+
+### Five flagged items closed (F35, F36, F37, F28, F47)
+
+A persona is refused at creation on an egress profile that cannot carry
+persona traffic (no exit, this host's own address, or the passive default),
+in the egress proxy's own sentence. A skipped item's warning names a
+Telegram message or a forum post by its id again: the redactor had read
+`c:123/45` and `post:1001` as `user:password`. A fingerprint copied from
+gpg now parses whole in a contact block, and the parser version is cb-2;
+blocks parsed under cb-1 keep their reading and are not paired with the
+same text parsed under cb-2 (docs/17 lists them). The webhook has an opt-in
+signature v2 (`X-NocTORnal-Signature-V2: t=<unix seconds>,v2=<hex>` over
+`<t>.<body>`, `NOCTORNAL_WEBHOOK_SIGNATURE=v2`, with no v1 header beside
+it); docs/07 gives the receiver's replay window, the order to move in and a
+verifier that a test runs, and v1 is unchanged. Watches match a forum
+post's signature, with reasons `signature_keyword:`, `signature_selector:`
+and `signature_regex:`, and can target a Telegram chat (`TELEGRAM_CHAT`,
+reasons lead with `chat:<id>`); Alembic 0130 holds that kind's reference to
+a typed chat id. No route or console form creates a watch yet (docs/17
+F53).
+
+### Two owner questions settled (F39, open questions 11 and 12)
+
+The second person who approves turning off a case's merge requirement must
+now have held `case.update` on that case for at least seven days, read from
+the assignment's grant time by the database clock, so an account holding
+SYS_ADMIN and CASE_OWNER can no longer create its own second person and
+approve at once. The window is `NOCTORNAL_RELAX_SEASONING_DAYS`. The
+refusal names the rule and the date the colleague becomes eligible, the
+policy read and the approvals list say so beforehand, and the approval is
+checked again where it is spent. Administration, Two-person controls shows
+the window. Not covered: an administrator who resets the credentials of a
+colleague who is already seasoned and signs in as them (docs/05).
+
+A claim accepted from Triage before Alpha 6 with no observation date is now
+dated by supersession: the inspector's Date this claim records a new claim
+carrying the date and the analyst's reason and citing the old one, and
+marks the old one superseded, so nothing is written onto a recorded claim
+and invariant 5 is not amended (Alembic 0131). The undated claims are still
+listed by `scripts/legacy_records.py` and counted by `triage_claims_dated`
+until an analyst dates them.
+
+### Collected documents past their clock can be swept (F30)
+
+A Telegram group's messages and a forum's posts are collected documents
+with a retention clock, and no case-scoped route could reach them, so
+nothing destroyed them when it ran out. `scripts/retention_sweep.py` does:
+the same purge as every other family, with its legal hold checks on the
+document and on every case that cites it, for collected documents only,
+clearing a backlog bigger than one pass in a single run. It is dry by
+default. A real run needs `--apply`, an authority reference declared in
+`NOCTORNAL_RETENTION_SWEEP_AUTHORITY` (recorded on every tombstone and in
+one `RETENTION_SWEEP` audit event of counts, refused when missing or a
+placeholder, never verified, as the L1 policy reference is) and a named
+active account that holds `retention.purge`. It is not in the production
+cron loop, a test holds that, and infra/production/README.md says how to
+schedule it once the owner has decided who runs it under which authority
+(docs/16 L4). A new readiness row, `retention_sweep_current`, counts
+documents past their clock and unswept and fails after seven days; it names
+none. No migration. `RetentionService.purge_due` gains a `kinds` argument,
+and its default is every family as before. Dead letters and ingest records
+attached to no case are still swept by nothing (docs/17 F55).
+
+### The documents since Alpha 7a
+
+Two documentation changes reached `main` on 2026-09-30, after Alpha 7a was
+tagged, and are released here. docs/16 opens with "Read this before you
+hold anything": why possession, the custody of victim data, collection and
+retention are each dangerous, what to do when something unlawful arrives,
+and that real use needs counsel first. The README, the release README,
+INSTALL, SECURITY, docs/18 and both installer banners point to it. The
+README's documentation table now names every document, the legal register
+included, and docs/00 no longer cites a docs/15 that is not published.
+
+### Known and not fixed
+
+**Stopped before it merged.** Each of these was in progress when the build
+stopped, and none is in this release: row-level security on the audit log
+and the ingest record family (docs/17 F51); the schema owner's password out
+of the runtime services (F52); Redis isolation enforced by an ACL; the cron
+scripts' check for a published credential; an isolated worker for the
+analysis children (F42); the persona vault split into a collector process
+(docs/00 decision 174); REGE; archive expansion; the authenticated forum
+path and source compartments (F43); and a test of a persona's run, act and
+stop through the real egress listener. The Telegram adapter has still
+never met Telegram (F31).
+
+**The 2026-10-03 review.** An adversarial review of the beta build at
+commit 718f92d, each area's findings put to a second reader who tried to
+refute them, kept 82 of 84 findings: 16 high, 25 medium and 41 low, none
+critical. None of them is
+fixed in this release; fixes were in progress when the build stopped. The
+one exception is rls-10, a low finding that three documents gave stale
+table counts, which this release's documents correct. The high findings,
+in plain words:
+
+- merge history and merge approvals disclose hidden entities' ids and the
+  merger's reason to any case reader, and merge and unmerge never check the
+  entities' own labels, so a member below an entity can merge it away and
+  bring its ties into view;
+- recording a selector tells an analyst whether a hidden entity holds an
+  identifier, and which entity;
+- a lead cleared below an exhibit can lift its legal hold, alone and with
+  no reason; nothing in the product can place a case-level hold; and a hold
+  placed while a purge runs is ignored;
+- a report can include material created before its case was raised, and
+  leave at the lower mark;
+- a notification address can be a list that escapes the domain allowlist;
+- a sandbox send can skip its second person;
+- unauthenticated requests can flood the audit log, and there is no request
+  body ceiling;
+- a failed login records the submitted email, unbounded, in the audit log;
+- the documented backup writes a plaintext dump of the case database into
+  the Docker build context, and the documented update builds it into the
+  image.
+
+Among the medium findings: exhibit integrity is checked against columns the
+request role can rewrite; the audit and custody chains fork under ordinary
+concurrent writes; the request role can read every account's password hash;
+invariant 5 is held by the application and not by the database; the
+uniqueness rule on ties reveals hidden ties; feeds labelled RED are polled
+without the egress floor; and the first-run route can be reached by an
+internet caller before the operator. docs/17, "Open from the 2026-10-03
+review", lists every high and medium finding with its area and id.
+Reproduction steps are not published while they are open.
+
+**Also recorded in docs/17 and not fixed:** dead letters and caseless
+ingest records are swept by nothing (F55); no route creates a watch (F53);
+the object stores are reached outside the egress routes (F41); collected
+documents carry no compartments unless captured (F43); and the analysis
+children are bounded, not isolated (F42).
+
+Legal review is required before any active case load. docs/16 L1 to L5 are
+still open, and nothing in this release settles them.
+
 ## Alpha 7a: 2026-09-30
 
 A one-fix revision of Alpha 7. It comes from installing the published Alpha 7

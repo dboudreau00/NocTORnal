@@ -9,7 +9,7 @@ and a collected document belongs to no case, and no script called
 messages outlived their clock for as long as nobody decided how a sweep is
 run, by whom and under which authority (docs/16 L4).
 
-## What this module decides (docs/00 decisions 157 to 159)
+## What this module decides (docs/00 decisions 171 to 173)
 
 **It is run by an operator, never by the cron loop.** `scripts/
 retention_sweep.py` is dry by default, and a real run needs an explicit flag
