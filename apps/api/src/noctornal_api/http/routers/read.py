@@ -322,6 +322,11 @@ def get_node(
 def node_assertions(
     case_id: UUID, node_id: UUID,
     include_retracted: bool = Query(False),
+    # Paged like every list (http_ui-015, 2026-10-03): a node can gather
+    # any number of claims through ordinary writes, and the inspector
+    # fetched them whole on every selection.
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[AssertionOut]:
@@ -336,12 +341,17 @@ def node_assertions(
                        clearance, compartments,
                        doc_clearance=doc_clearance,
                        doc_compartments=doc_compartments,
+                       limit=limit, offset=offset,
                        **_may_name(conn, user, case_id))
 
 
 @router.get("/nodes/{node_id}/evidence", response_model=list[ElementEvidenceOut])
 def node_evidence(
     case_id: UUID, node_id: UUID,
+    # Paged (http_ui-015, 2026-10-03): the answer, by exhibit, is cut at
+    # `limit`; the scan behind it is the element's own links.
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("evidence.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[ElementEvidenceOut]:
@@ -349,12 +359,15 @@ def node_evidence(
     if not _visible_node(conn, case_id, node_id, clearance, compartments):
         raise Problem(404, "Not found", "node does not exist in this case")
     return _element_evidence(conn, "node_id", node_id, case_id,
-                             clearance, compartments)
+                             clearance, compartments)[offset:offset + limit]
 
 
 @router.get("/nodes/{node_id}/selectors", response_model=list[dict])
 def node_selectors(
     case_id: UUID, node_id: UUID,
+    # Paged (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -369,8 +382,8 @@ def node_selectors(
         """SELECT selector_type, raw_value, norm_value, observation_cnt,
                   first_seen, last_seen, id
              FROM core.selector WHERE node_id = %s AND case_id = %s
-            ORDER BY selector_type""",
-        (node_id, case_id),
+            ORDER BY selector_type LIMIT %s OFFSET %s""",
+        (node_id, case_id, limit, offset),
     ).fetchall()
     return [{"selector_type": r[0], "raw_value": r[1], "norm_value": r[2],
              "observation_cnt": r[3],
@@ -387,6 +400,9 @@ def node_selectors(
 @router.get("/edges", response_model=list[EdgeOut])
 def list_edges(
     case_id: UUID,
+    # le=2000 is the one deliberate exception to the 1000 cap on this router
+    # (CONVENTIONS.md, http_ui-015, 2026-10-03): the console draws a whole
+    # case from this list and asks for 2000.
     limit: int = Query(500, ge=1, le=2000),
     include_inferred: bool = Query(True),
     node_id: UUID | None = Query(None),
@@ -436,6 +452,9 @@ def list_edges(
 def edge_assertions(
     case_id: UUID, edge_id: UUID,
     include_retracted: bool = Query(False),
+    # Paged (http_ui-015, 2026-10-03), as node_assertions.
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[AssertionOut]:
@@ -448,12 +467,16 @@ def edge_assertions(
                        clearance, compartments,
                        doc_clearance=doc_clearance,
                        doc_compartments=doc_compartments,
+                       limit=limit, offset=offset,
                        **_may_name(conn, user, case_id))
 
 
 @router.get("/edges/{edge_id}/evidence", response_model=list[ElementEvidenceOut])
 def edge_evidence(
     case_id: UUID, edge_id: UUID,
+    # Paged (http_ui-015, 2026-10-03), as node_evidence.
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("evidence.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[ElementEvidenceOut]:
@@ -461,7 +484,7 @@ def edge_evidence(
     if not _visible_edge(conn, case_id, edge_id, clearance, compartments):
         raise Problem(404, "Not found", "edge does not exist in this case")
     return _element_evidence(conn, "edge_id", edge_id, case_id,
-                             clearance, compartments)
+                             clearance, compartments)[offset:offset + limit]
 
 
 # --- evidence listing ---------------------------------------------------
@@ -568,7 +591,8 @@ def _assertions(conn, column: str, element_id: UUID,
                 compartments: list[str], *, doc_clearance: str,
                 doc_compartments: list[str],
                 may_see_exhibits: bool = False,
-                may_see_documents: bool = False) -> list[AssertionOut]:
+                may_see_documents: bool = False,
+                limit: int = 1000, offset: int = 0) -> list[AssertionOut]:
     # `column` is a literal chosen by the caller (never client input), so
     # the interpolation cannot be influenced from outside.
     #
@@ -621,12 +645,12 @@ def _assertions(conn, column: str, element_id: UUID,
                WHERE a.{column} = %s"""
     if not include_retracted:
         sql += " AND a.retracted_at IS NULL AND a.superseded_at IS NULL"
-    sql += " ORDER BY a.recorded_at DESC"
+    sql += " ORDER BY a.recorded_at DESC LIMIT %s OFFSET %s"
     rows = conn.execute(sql, (
         may_see_exhibits, clearance, compartments,
         may_see_documents, doc_clearance, doc_clearance, doc_compartments,
         may_see_documents, doc_clearance,
-        element_id)).fetchall()
+        element_id, limit, offset)).fetchall()
     return [
         AssertionOut(
             id=str(r[0]), basis=r[1], reliability=r[2], credibility=r[3],

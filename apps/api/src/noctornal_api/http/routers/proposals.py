@@ -37,6 +37,7 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
+from noctornal_api.http.body_ceiling import raise_body_ceiling
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.http.routers.graph import _node_visible
 from noctornal_api.proposals import (
@@ -303,6 +304,9 @@ class CaptureBody(BaseModel):
 # queue nobody works.
 @router.post("/capture", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("capture"))])
+# A 1,000,000 character paste, JSON-escaped, runs past the default body
+# ceiling (http_ui-005, 2026-10-03).
+@raise_body_ceiling(8 * 1024 * 1024, what="a pasted capture")
 def capture(
     case_id: UUID, body: CaptureBody,
     user: CurrentUser = Depends(require("evidence.upload")),

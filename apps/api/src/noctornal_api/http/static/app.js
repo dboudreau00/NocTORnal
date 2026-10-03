@@ -67,8 +67,12 @@
  * through `POST /auth/cookie` -- and only when this browser holds no
  * usable session already, because a link must never replace the session
  * the browser has (the server refuses a different account with 409
- * regardless). The token is never logged, never put in a URL by this
- * page, and never rendered.
+ * regardless), and only after the person has been asked: the page names
+ * the account the link carries (`GET /auth/me` on the handed-over token,
+ * which signs nothing in) and signs in only on a yes, because a link made
+ * by anybody holding any session would otherwise sign a signed-out colleague
+ * in as its author (http_ui-017, 2026-10-03). The token is never logged,
+ * never put in a URL by this page, and never rendered.
  *
  * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
  * everything is measured against a PROJECTION — a named, parameterised view.
@@ -1084,6 +1088,9 @@ function authHeaders(method, forceBearer) {
 async function api(path, options) {
   const o = options || {};
   const headers = authHeaders(o.method || 'GET', o.bearer);
+  /* Extra headers a caller names itself (the first-run setup token). Applied
+     over the credential headers, never instead of them. */
+  if (o.headers) Object.assign(headers, o.headers);
   let body;
   if (o.form) {
     body = o.form;                       // let the browser set the boundary
@@ -1159,7 +1166,10 @@ async function _fetch(path, o, headers, body) {
        limit banner both need the number (2026-09-23). */
     const retryAfter = retryAfterSeconds(res.headers.get('Retry-After'), p.detail);
     if (retryAfter !== null) err.retryAfter = retryAfter;
-    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path)) {
+    /* A request that forces its own bearer (the `#token=` hand-off) judges
+       that bearer, as the credential checks do, and says nothing about the
+       session this tab holds (http_ui-017, 2026-10-03). */
+    if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path) && !o.bearer) {
       if (state.userId && !state.booting && path !== '/auth/logout') {
         /* Mid-session (expiry-drops-context, 2026-09-22). This used to
            end the session outright: the app was unmounted, the case
@@ -15126,6 +15136,36 @@ async function adoptSessionFromFragment() {
     };
   }
 
+  /* ASK BEFORE SIGNING IN (http_ui-017, 2026-10-03). Nothing above made
+     this browser anyone: it holds no session. The link was made by
+     whoever holds a session token, which is not necessarily the person
+     who opened it, and exchanging it quietly signed a colleague whose own
+     session had lapsed in as the link's author, who can read everything
+     they then did. `GET /auth/me` with the handed-over token as the
+     bearer names the account without signing anything in (it sets no
+     cookie), and the person is asked about THAT account by name. Held in
+     memory only for the question, and dropped on a refusal. */
+  let who = null;
+  try {
+    who = await api('/auth/me', { bearer: token });
+  } catch (err) {
+    return signInLinkRefused(err);
+  }
+  /* A half session of the SAME account is not a sign-in: the exchange only
+     re-mints the pair it lost, so there is nothing to ask. A different
+     account is asked about, and the server refuses it with 409 besides. */
+  const repairing = !!(holder && who && holder.user_id === who.user_id);
+  if (!repairing && !window.confirm(signInLinkQuestion(who))) {
+    return {
+      title: 'Sign-in link not used',
+      detail: 'You chose not to sign in as '
+        + visibleText((who && (who.display_name || who.email)) || 'that account')
+        + '. Sign in with your email, password and code, or ask whoever sent '
+        + 'the link for a new one.',
+      kind: 'warn',
+    };
+  }
+
   /* Exchange it ONCE for the cookie pair (`POST /auth/cookie`), forcing
      the bearer so the NEW token is presented and not the cookie. Held in
      memory before the call because a console the browser refuses Secure
@@ -15139,18 +15179,39 @@ async function adoptSessionFromFragment() {
     return null;
   } catch (err) {
     state.token = null;
-    /* To whoever opened the link, who may not be the operator who made it
-       (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
-    const why = err instanceof ApiError && err.status === 401
-      ? 'The link has expired or has already been used.'
-      : (err instanceof ApiError ? (err.detail || err.title) : String(err));
-    return {
-      title: 'Sign-in link not used',
-      detail: why.replace(/\.?$/, '. ') + 'Sign in with your email, '
-        + 'password and code, or ask whoever sent the link for a new one.',
-      kind: 'warn',
-    };
+    return signInLinkRefused(err);
   }
+}
+
+/** The question a `#token=` link asks before it signs this browser in:
+ *  the account by name and address, what signing in means, and that the
+ *  person should only continue if they expected it. Names go through
+ *  `visibleText`, so a display name built to look like somebody else's
+ *  cannot hide its odd characters. */
+function signInLinkQuestion(who) {
+  const w = who || {};
+  const name = visibleText(w.display_name || w.user_id || 'an account');
+  const email = w.email ? ' (' + visibleText(w.email) + ')' : '';
+  return 'This link signs this browser in as ' + name + email + '.\n\n'
+    + 'Everything you do afterwards is recorded against that account, and '
+    + 'its owner can read it. Only continue if you were expecting a link '
+    + 'for it.\n\nSign in as ' + name + '?';
+}
+
+/** The banner for a link that was refused: a stale or used token, another
+ *  account's session, an API that did not answer. To whoever opened the
+ *  link, who may not be the operator who made it
+ *  (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
+function signInLinkRefused(err) {
+  const why = err instanceof ApiError && err.status === 401
+    ? 'The link has expired or has already been used.'
+    : (err instanceof ApiError ? (err.detail || err.title) : String(err));
+  return {
+    title: 'Sign-in link not used',
+    detail: why.replace(/\.?$/, '. ') + 'Sign in with your email, '
+      + 'password and code, or ask whoever sent the link for a new one.',
+    kind: 'warn',
+  };
 }
 
 /** Honour a `#tab=` deep link once the workspace is up.
@@ -41139,6 +41200,11 @@ async function probeFirstRun() {
   }
   if (!body.needs_setup) return;
   show($('login-form'), false);
+  /* A deployment that wants the operator to prove they hold its setup token
+     says so (http_ui-010 and infra-3, 2026-10-03). In production with no
+     token configured there is no web first-run, so it never reports
+     needs_setup and this card is never reached. */
+  show($('setup-token-field'), !!body.setup_token_required);
   show($('setup-form'), true);
   $('setup-email').focus();
 }
@@ -41829,11 +41895,14 @@ function initSetup() {
     setMsg($('setup-error'), '');
     $('setup-submit').disabled = true;
     try {
+      const token = $('setup-token').value.trim();
       const creds = await api('/setup/first-admin', {
         method: 'POST',
+        headers: token ? { 'X-Setup-Token': token } : undefined,
         json: { email: $('setup-email').value.trim(),
                 display_name: $('setup-name').value.trim() },
       });
+      $('setup-token').value = '';        // never kept on the page
       FIRST_RUN.creds = creds;
       window.addEventListener('beforeunload', guardFirstRun);
       show($('setup-form'), false);

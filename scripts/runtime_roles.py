@@ -29,7 +29,9 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
 3. On THIS database: the runtime grants for both roles (0108's
    `grants_sql`, the shape 0060 set plus every later revoke), then 0109's
    IAM-plane lockdown for the request role when the database is at or past
-   0109.
+   0109, then the two later revisions that take columns back from it
+   (0143: the credential columns of iam.app_user; 0144: the step-up column
+   of iam.session) when the database is at or past them.
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -129,6 +131,13 @@ def ensure(conn) -> int:
     guard = _migration_named("assertion_marked_once")
     if _at_or_past(conn, guard.revision):
         conn.execute(guard.GRANTS_SQL)
+
+    # 0108's grants hand table SELECT back on iam.app_user and 0109's the
+    # mfa_satisfied_at UPDATE, so the two revisions that take them away
+    # are replayed after them (rls-6 and rls-7, 2026-10-03).
+    for revision in ("0143", "0144"):
+        if _at_or_past(conn, revision):
+            conn.execute(_migration(revision).PRIVILEGES_SQL)
     print(f"{APP_ROLE} and {WORKER_ROLE} exist and are granted on this database.")
     print(f"NOCTORNAL_APP_DB_ROLE={APP_ROLE}")
     print(f"NOCTORNAL_WORKER_DB_ROLE={WORKER_ROLE}")

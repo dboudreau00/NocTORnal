@@ -340,6 +340,9 @@ def list_tags(
     case_id: UUID,
     include_global: bool = Query(
         True, description="Include the shared global taxonomy (case_id IS NULL)"),
+    # Paged like every list (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -377,12 +380,14 @@ def list_tags(
             WHERE t.case_id = %(case_id)s
                OR (%(include_global)s AND t.case_id IS NULL)
             GROUP BY t.id
-            ORDER BY t.case_id NULLS LAST, t.namespace, t.name""",
+            ORDER BY t.case_id NULLS LAST, t.namespace, t.name
+            LIMIT %(limit)s OFFSET %(offset)s""",
         # Named parameters: `case_id` appears twice with different meanings
         # (the count's scope and the row filter) and positional placeholders
         # here would be an easy silent swap.
         {"case_id": case_id, "clearance": clearance,
-         "compartments": compartments, "include_global": include_global},
+         "compartments": compartments, "include_global": include_global,
+         "limit": limit, "offset": offset},
     ).fetchall()
     return [
         {"id": str(r[0]), "scope": _scope(r[1]), "namespace": r[2], "name": r[3],
@@ -476,6 +481,9 @@ def unassign_tag(
             dependencies=[Depends(rate_limit("graph.view"))])
 def tags_on_node(
     case_id: UUID, node_id: UUID,
+    # Paged like every list (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -506,8 +514,8 @@ def tags_on_node(
               -- would be a data defect, but rendering its namespace and
               -- name would make that defect a cross-case disclosure.
               AND (t.case_id = %s OR t.case_id IS NULL)
-            ORDER BY t.namespace, t.name""",
-        (node_id, case_id),
+            ORDER BY t.namespace, t.name LIMIT %s OFFSET %s""",
+        (node_id, case_id, limit, offset),
     ).fetchall()
     return [
         {"id": str(r[0]), "scope": _scope(r[1]), "namespace": r[2], "name": r[3],
@@ -557,6 +565,9 @@ def create_set(
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_sets(
     case_id: UUID,
+    # Paged like every list (http_ui-015, 2026-10-03).
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> list[dict]:
@@ -588,9 +599,10 @@ def list_sets(
                                   AND n.compartments <@ %(compartments)s)
             WHERE s.case_id = %(case_id)s
             GROUP BY s.id
-            ORDER BY s.is_pinned DESC, s.created_at DESC""",
+            ORDER BY s.is_pinned DESC, s.created_at DESC
+            LIMIT %(limit)s OFFSET %(offset)s""",
         {"case_id": case_id, "clearance": clearance,
-         "compartments": compartments},
+         "compartments": compartments, "limit": limit, "offset": offset},
     ).fetchall()
     return [
         {"id": str(r[0]), "name": r[1], "purpose": r[2], "is_pinned": r[3],
@@ -684,6 +696,11 @@ def remove_member(
             dependencies=[Depends(rate_limit("graph.view"))])
 def list_members(
     case_id: UUID, set_id: UUID,
+    # Paged like every list (http_ui-015, 2026-10-03). `members_total` and
+    # `truncated` say when a page is not the whole set, and `withheld`
+    # stays the exact count it was.
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -715,8 +732,8 @@ def list_members(
               AND n.merged_into_id IS NULL
               AND n.classification <= %s::core.tlp
               AND n.compartments <@ %s
-            ORDER BY n.label""",
-        (set_id, case_id, clearance, compartments),
+            ORDER BY n.label LIMIT %s OFFSET %s""",
+        (set_id, case_id, clearance, compartments, limit, offset),
     ).fetchall()
     # Merged-away members are listed SEPARATELY rather than folded into
     # `withheld`.
@@ -755,9 +772,24 @@ def list_members(
               AND n.deleted_at IS NULL
               AND n.merged_into_id IS NOT NULL
               AND n.classification <= %s::core.tlp
-              AND n.compartments <@ %s""",
-        (clearance, compartments, set_id, case_id, clearance, compartments),
+              AND n.compartments <@ %s
+            ORDER BY n.id LIMIT %s""",
+        (clearance, compartments, set_id, case_id, clearance, compartments, limit),
     ).fetchall()
+    # The two counts the page cannot give (http_ui-015, 2026-10-03), under
+    # the same label predicates, so `withheld` below stays exact when the
+    # lists above are cut at `limit`.
+    visible_total, merged_total = conn.execute(
+        """SELECT count(*) FILTER (WHERE n.merged_into_id IS NULL),
+                  count(*) FILTER (WHERE n.merged_into_id IS NOT NULL)
+             FROM core.node_set_member m
+             JOIN core.node n ON n.id = m.node_id
+            WHERE m.set_id = %s
+              AND n.case_id = %s
+              AND n.deleted_at IS NULL
+              AND n.classification <= %s::core.tlp
+              AND n.compartments <@ %s""",
+        (set_id, case_id, clearance, compartments)).fetchone()
     # A separate count rather than a flag on the rows above: the invisible
     # members' labels are then never read into this process at all, so
     # there is no variable holding a RED label for a later edit to return
@@ -790,8 +822,13 @@ def list_members(
                     "merged_into_id": str(r[1]) if r[1] else None}
                    for r in merged]
     body = {"set_id": str(set_id), "members": members,
-            "merged_away": merged_away}
-    hidden = max(0, total - len(members) - len(merged_away))
+            "merged_away": merged_away,
+            "members_total": visible_total,
+            "truncated": (offset + len(members) < visible_total
+                          or len(merged_away) < merged_total)}
+    # exact when the lists above are cut at `limit` (http_ui-015), said only
+    # as the case allows (rls-9)
+    hidden = max(0, total - visible_total - merged_total)
     body.update(withheld_notice(mode, hidden, noun="withheld"))
     if mode == DISCLOSURE_COUNT:
         # The number, nought included, as this route has always said it.

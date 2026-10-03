@@ -251,6 +251,23 @@ def install_error_handlers(app) -> None:
         _audit_rls_refused(request, exc, cid)
         return problem_response(403, "Forbidden", f"{RLS_REFUSED_DETAIL} (ref {cid})")
 
+    @app.exception_handler(psycopg.errors.DataError)
+    async def _unstorable_value(_: Request, exc: Exception):
+        """A value the database cannot hold (http_ui-014, 2026-10-03): text
+        with a NUL, a number out of range, a timestamp past year 10000. It
+        is the caller's input, so it is a 422 and not the 500 and the
+        logged traceback it was; `body_ceiling.py` refuses the commonest
+        case (a NUL in a JSON body) before a route parses it, and this is
+        what remains (a query string, a path part). The raw text goes to
+        the log against the reference and never to the caller (rule 1
+        above)."""
+        cid = uuid.uuid4().hex[:12]
+        log.warning("unstorable value %s: %s", cid, exc)
+        return problem_response(
+            422, "Validation failed",
+            f"a value in the request cannot be stored, for example text "
+            f"containing a NUL character or a number out of range (ref {cid})")
+
     @app.exception_handler(SystemContextUnavailable)
     async def _no_system_connection(_: Request, exc: Exception):
         log.error("system connection unavailable: %s", exc)

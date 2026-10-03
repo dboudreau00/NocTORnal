@@ -67,7 +67,10 @@ def test_a_working_set_says_what_it_withholds_as_the_case_allows(owner, client):
 
     none = members(w.analyst, "NONE")
     assert [m["node_id"] for m in none["members"]] == [str(visible)]
-    assert set(none) == {"set_id", "members", "merged_away"}
+    # members_total and truncated are the page's own fields (http_ui-015), not
+    # a statement about what is withheld
+    assert set(none) == {"set_id", "members", "merged_away", "members_total",
+                         "truncated"}
     presence = members(w.analyst, "PRESENCE")
     assert (presence["incomplete"], presence["mode"]) == (True, "PRESENCE")
     assert "withheld" not in presence
@@ -76,7 +79,8 @@ def test_a_working_set_says_what_it_withholds_as_the_case_allows(owner, client):
         True, "COUNT", 2)
     # A reader shown every member is told nothing was withheld, under COUNT.
     assert members(w.boss, "COUNT")["withheld"] == 0
-    assert set(members(w.boss, "NONE")) == {"set_id", "members", "merged_away"}
+    assert set(members(w.boss, "NONE")) == {"set_id", "members", "merged_away",
+                                            "members_total", "truncated"}
 
 
 # --- co-participation (graph-coparticipation-ignores-withheld-none) ----------

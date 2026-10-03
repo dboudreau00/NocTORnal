@@ -140,6 +140,15 @@
       <span class="label">Display name</span>
       <input id="setup-name" type="text" autocomplete="off" required>
     </label>
+    <!-- http_ui-010 and infra-3 (2026-10-03): shown only when the server
+         says it wants a setup token (NOCTORNAL_SETUP_TOKEN is set). -->
+    <label class="field" id="setup-token-field" hidden>
+      <span class="label">Setup token</span>
+      <input id="setup-token" type="password" autocomplete="off"
+             spellcheck="false" maxlength="512">
+      <span class="help">The value of NOCTORNAL_SETUP_TOKEN on the server.
+        This deployment will not create its first account without it.</span>
+    </label>
     <!-- firstrun-oneclick-wipe (2026-09-22): the operator learned that a
          password would be GENERATED only after it was on screen. Said
          before the button, so the app and a safe place are ready. -->

@@ -261,6 +261,23 @@ def create_app() -> FastAPI:
     # next test's first request.
     app.state.limiter = build_limiter()
 
+    # The closed first-run door (g45 verification, 2026-10-03), registered
+    # before everything else so it is the innermost wrapper, inside the
+    # body ceiling too: a closed door answers as an unknown path does
+    # BEFORE the body is read, or a 413 or a 422 would tell the two apart.
+    # Its path is the route's own, read from the router, so the two cannot
+    # drift.
+    from noctornal_api.http.setup_token import install_closed_setup_door
+    install_closed_setup_door(app, API_PREFIX + next(
+        r.path for r in setup.router.routes
+        if getattr(r, "endpoint", None) is setup.first_admin))
+
+    # The body ceiling (http_ui-005, 2026-10-03), registered next so it
+    # is the innermost wrapper but one: the limiter still counts the
+    # request and the 413 still leaves through the security headers.
+    from noctornal_api.http.body_ceiling import install_body_ceiling
+    install_body_ceiling(app)
+
     # Registered BEFORE _headers, which makes _headers the outer wrapper.
     # Order matters for a reason that is easy to get backwards: the last
     # middleware registered runs first, so registering the limiter last
