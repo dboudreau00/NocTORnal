@@ -22685,7 +22685,9 @@ function renderChannels(view, summary) {
       view.smtp.auth ? 'signs in' : 'no sign-in', 'from ' + view.smtp.from]
       : ['SMTP_HOST is not set'],
     WEBHOOK: view.webhook.configured ? [view.webhook.endpoint,
-      view.webhook.signed ? 'signed' : 'not signed'] : ['no webhook is configured'],
+      view.webhook.signed ? 'signed' + (view.webhook.signature
+        ? ' (' + view.webhook.signature + ')' : '') : 'not signed']
+      : ['no webhook is configured'],
     JIRA: view.jira && view.jira.destination
       ? [view.jira.destination.host, 'project ' + view.jira.destination.project_key]
       : ['no Jira destination'],

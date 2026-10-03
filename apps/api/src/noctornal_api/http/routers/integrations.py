@@ -83,6 +83,8 @@ def overview(
             "configured": url is not None,
             "endpoint": transports.redact_endpoint(url) if url else None,
             "signed": bool(os.environ.get("NOCTORNAL_WEBHOOK_SECRET")),
+            # v1 or v2, null when the setting is neither (the route says why).
+            "signature": transports.webhook_signature_version()[0],
             "ceiling": os.environ.get("NOCTORNAL_WEBHOOK_CEILING") or None,
             "route": hook_state.as_dict(),
             "route_words": transports.route_line(hook_state) if url else None,

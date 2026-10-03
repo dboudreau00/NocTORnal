@@ -114,6 +114,7 @@ from noctornal_api.egress_policy import (
     PUBLIC_POLICY,
     EgressRoute,
 )
+from noctornal_api.egress_policy import explain as egress_sentence
 
 # The collector's old names for what moved to egress_policy.py and
 # pinned_http.py (docs/20 section 5, 2026-09-24), kept as the SAME
@@ -446,6 +447,29 @@ class Lease:
         return "Lease(value=[REDACTED])"
 
 
+def persona_exit_refusal(exit_kind: str | None, is_passive_default: bool) -> str:
+    """The sentence for an egress profile that cannot carry persona traffic
+    (F35, 2026-10-02).
+
+    The words are the egress proxy's own, from `egress_policy.explain`, so a
+    persona refused here and a persona refused at the proxy are told the
+    same thing and the two cannot drift: no exit at all is `no_exit`, this
+    host's own address is `persona_needs_exit`, and the passive default,
+    which serves feeds and web runs and never a persona, is
+    `passive_route_misused`. The order is the order the proxy asks in. The
+    last line is a profile `persona_capable` refuses for a reason this
+    function does not know (the generated column grew a term): it fails
+    closed with the nearest sentence rather than letting the persona through.
+    """
+    if exit_kind is None:
+        return egress_sentence("no_exit")
+    if exit_kind == "DIRECT":
+        return egress_sentence("persona_needs_exit")
+    if is_passive_default:
+        return egress_sentence("passive_route_misused")
+    return egress_sentence("persona_needs_exit")
+
+
 class PersonaVault:
     """Envelope-encrypted persona credentials.
 
@@ -481,7 +505,14 @@ class PersonaVault:
         competent site and a burnt persona's exit is the one a site has
         already noticed. That is why a burnt persona keeps its exit for
         good rather than freeing it (2026-09-24): there is no status that
-        hands an exit on."""
+        hands an exit on.
+
+        A profile that cannot carry persona traffic (`persona_capable` is
+        false: no exit, this host's own address, or the passive default) is
+        refused here, with the proxy's own sentence (F35, 2026-10-02).
+        Before this the persona was created, the readiness register flagged
+        it and the proxy refused every connection it made, so an operator
+        believed a persona was ready that could never leave."""
         handle = (handle or "").strip()
         if not 2 <= len(handle) <= 64:
             raise CollectionError("A handle is between 2 and 64 characters.")
@@ -489,7 +520,8 @@ class PersonaVault:
             raise CollectionError(
                 f"No persona can be an account on {platform!r}.")
         profile = self._c.execute(
-            "SELECT is_active FROM collect.egress_profile WHERE id = %s",
+            "SELECT is_active, persona_capable, exit_kind, is_passive_default "
+            "FROM collect.egress_profile WHERE id = %s",
             (egress_profile_id,)).fetchone()
         if profile is None or not profile[0]:
             raise CollectionNotFound(
@@ -503,6 +535,8 @@ class PersonaVault:
                 "This egress profile already carries a persona. Two personas "
                 "sharing an exit can be linked by any competent site, so one "
                 "persona, one egress profile.")
+        if not profile[1]:
+            raise CollectionError(persona_exit_refusal(profile[2], profile[3]))
         from psycopg.types.json import Jsonb
         row = self._c.execute(
             """INSERT INTO collect.collection_account
@@ -1112,6 +1146,17 @@ class RunWarning:
     kind: str
     text: str
 
+
+#: The one watch target kind the matcher acts on (F47, 2026-10-02).
+#: `collect.watch.target_kind` is free text (0010's comment lists BOARD,
+#: THREAD, USER, CHANNEL, FEED and SEARCH, and nothing reads them: a watch
+#: matches what its SOURCE collects). A TELEGRAM_CHAT watch names its chat by
+#: the typed id in `target_ref` (0130 holds that to `c:<id>` or `g:<id>`),
+#: fires only on messages collected from that chat, says so in its reasons
+#: (`chat:<id>` first), and with no keyword, selector or pattern fires on every
+#: message there, which is what "watch this chat" means and what the column's
+#: own comment ("NULL keywords = capture everything from the target") meant.
+WATCH_TELEGRAM_CHAT = "TELEGRAM_CHAT"
 
 PARSER_DRIFT = "PARSER_DRIFT"
 ITEM_SKIPPED = "ITEM_SKIPPED"
@@ -2748,6 +2793,7 @@ class CollectionService:
         unclocked: set[str] = set()
         raw_gaps = {"unconfigured": 0, "refused": 0}
         broken: dict[tuple[UUID, str], str] = {}
+        misaimed: dict[UUID, str] = {}
         with self._c.transaction():
             watches = self._watches(source.id)
             for item in items:
@@ -2780,7 +2826,8 @@ class CollectionService:
                                     document_id=document_id,
                                     inserted=inserted)
                         hits = self._match_watches(
-                            source.id, result.run_id, clean, watches, broken)
+                            source.id, result.run_id, clean, watches, broken,
+                            misaimed)
                 except _ItemInvalid as exc:
                     warnings.append(RunWarning(ITEM_SKIPPED, (
                         f"Item {_item_label(item)} was skipped: {exc}")))
@@ -2821,6 +2868,11 @@ class CollectionService:
                 f"watch {wid} has a regex that will not compile and therefore "
                 f"matches nothing: {reason} (pattern {redact(pat)[:120]!r})"))
                 for (wid, pat), reason in broken.items())
+            # A watch aimed at a chat this source does not read (F47,
+            # 2026-10-02) is as silent as a regex that will not compile, and
+            # is reported the same way, once per run.
+            warnings.extend(RunWarning(WATCH_PATTERN, f"watch {wid} {reason}.")
+                            for wid, reason in misaimed.items())
             if raw_gaps["unconfigured"]:
                 n = raw_gaps["unconfigured"]
                 warnings.append(RunWarning(RAW_NOT_KEPT, (
@@ -3073,15 +3125,22 @@ class CollectionService:
             (source_id, wanted[:5000])).rowcount
 
     def _watches(self, source_id: UUID) -> list[tuple]:
+        """The active watches of one source, on the collector's connection:
+        `collect.watch` is under row-level security (0124) and the poll, a
+        manual run and a pasted capture read it as the COLLECTION system
+        purpose, which sees every case's watches. The target kind and
+        reference ride along (F47, 2026-10-02) so the matcher can scope a
+        chat watch without a second read."""
         return self._c.execute(
             """SELECT id, case_id, keywords, selector_watch, regexes,
-                      priority, suppress_window_s
+                      priority, suppress_window_s, target_kind, target_ref
                  FROM collect.watch
                 WHERE source_id = %s AND is_active""", (source_id,)).fetchall()
 
     def _match_watches(self, source_id: UUID, run_id: UUID, item: Item,
                        watches: list[tuple],
-                       broken: dict[tuple[UUID, str], str]) -> int:
+                       broken: dict[tuple[UUID, str], str],
+                       misaimed: dict[UUID, str] | None = None) -> int:
         """Keyword, selector and regex matching into `watch_hit`, for ONE
         item, inside its savepoint (2026-09-24).
 
@@ -3098,8 +3157,27 @@ class CollectionService:
         re-fetched after its suppression window never raises a unique
         violation and never wedges the source. Purged documents are never
         matched. A broken pattern is reported once per run in `broken`.
+
+        F47 (2026-10-02), two things beside the item's text. A forum post's
+        signature is kept beside it, not in its text, and is matched on its
+        own: a reason reads `signature_keyword:`, `signature_selector:` or
+        `signature_regex:` so the analyst can tell a post that says a thing
+        from an author whose signature does, and a signature repeated on every
+        post of an author raises a hit on each (the thread's suppression
+        window thins them). And a watch of target kind TELEGRAM_CHAT fires
+        only on a message collected from the chat it names, with `chat:<id>`
+        leading its reasons; with no term of any kind it fires on every
+        message of that chat. A chat watch that names another chat, or
+        meets an item that is no Telegram message, matches nothing and is
+        reported once per run in `misaimed`.
         """
         haystack = f"{item.title or ''}\n{item.body}".lower()
+        meta = item.meta if isinstance(item.meta, dict) else {}
+        forum = meta.get("forum")
+        signature = forum.get("signature") if isinstance(forum, dict) else None
+        sig_haystack = signature.lower() if isinstance(signature, str) else ""
+        telegram = meta.get("telegram_message")
+        chat = telegram.get("chat_durable_id") if isinstance(telegram, dict) else None
         uid = (item.author_uid or "").strip()
         match_ids = item.meta.get("match_ids") if isinstance(item.meta, dict) else None
         typed = []
@@ -3111,14 +3189,27 @@ class CollectionService:
         document = None
         for watch in watches:
             (watch_id, _case_id, keywords, selectors, regexes, priority,
-             suppress) = watch
+             suppress, target_kind, target_ref) = watch
             matched: list[str] = []
+            chat_watch = target_kind == WATCH_TELEGRAM_CHAT
+            if chat_watch and (not isinstance(chat, str) or chat != target_ref):
+                if misaimed is not None:
+                    misaimed[watch_id] = (
+                        f"targets Telegram chat {target_ref} and this source "
+                        + ("reads another chat" if isinstance(chat, str)
+                           else "reads no Telegram chat")
+                        + ", so it matches nothing here")
+                continue
             for needle in (keywords or []):
                 if needle and needle.lower() in haystack:
                     matched.append(f"keyword:{needle}")
+                if needle and sig_haystack and needle.lower() in sig_haystack:
+                    matched.append(f"signature_keyword:{needle}")
             for needle in (selectors or []):
                 if needle and needle.lower() in haystack:
                     matched.append(f"selector:{needle}")
+                if needle and sig_haystack and needle.lower() in sig_haystack:
+                    matched.append(f"signature_selector:{needle}")
                 exact = (needle or "").strip()
                 if exact and uid and exact == uid:
                     matched.append(f"author:{uid}")
@@ -3129,6 +3220,9 @@ class CollectionService:
                 try:
                     if pattern and re.search(pattern, haystack, re.I):
                         matched.append(f"regex:{pattern}")
+                    if (pattern and sig_haystack
+                            and re.search(pattern, sig_haystack, re.I)):
+                        matched.append(f"signature_regex:{pattern}")
                 except re.error as exc:
                     # A watch with a broken pattern must not stop the other
                     # watches from matching, and must not be SILENT: a watch
@@ -3138,6 +3232,14 @@ class CollectionService:
                     # in the pattern, and this string is stored.
                     broken[(watch_id, pattern)] = redact(str(exc))[:200]
                     continue
+            if chat_watch:
+                # The chat leads, and a watch with no term at all is a watch
+                # on the chat itself: it fires on every message there. A
+                # watch with terms fires only when one of them matched.
+                named = any(n for n in (*(keywords or ()), *(selectors or ()),
+                                        *(regexes or ())))
+                if matched or not named:
+                    matched.insert(0, f"chat:{target_ref}")
             if not matched:
                 continue
             if document is None:
@@ -3997,13 +4099,40 @@ def _str(value) -> str | None:
     return str(value) if value is not None else None
 
 
+#: The ids our own adapters write for an item, exactly: a Telegram message,
+#: `c:<chat>/<message>` for a channel or a supergroup and
+#: `g:<chat>/<message>@u:<persona>` for a basic group, whose message ids belong
+#: to one account (`TelegramAdapter._external_id`); and a forum post or member,
+#: `post:<n>` and `member:<n>` (`forum_parse.post_ref`, `member_ref`, ids below
+#: 2**53). ASCII digits only and nothing around them, matched with fullmatch.
+#: Held to the adapters' own writers by test_item_label_typed_ids (F36,
+#: 2026-10-02).
+_TYPED_ITEM_ID = re.compile(
+    r"[cg]:[1-9][0-9]{0,19}/[1-9][0-9]{0,19}(?:@u:[1-9][0-9]{0,19})?"
+    r"|(?:post|member):[1-9][0-9]{0,15}")
+
+
 def _item_label(item) -> str:
     """An item's id for a warning: redacted and short, because the id is
-    the site's text and the warning is stored."""
+    the site's text and the warning is stored.
+
+    The ids our own adapters write are the one shape kept as they are (F36,
+    2026-10-02). The redactor reads `c:123/45` or `post:1001` alone on a line
+    as `user:password` and masks it, so a warning said "Item 'c:[REDACTED]'
+    was skipped" and the analyst could not tell which message it meant. The
+    exemption is the whole string being that shape, which is digits and fixed
+    separators and carries nothing a site could smuggle a credential in, and
+    it is withheld when the string is a secret live right now (a persona's
+    credential that happens to have the shape is still masked by the exact
+    layer). Anything else, a longer string that merely contains one
+    included, goes through `redact` as before."""
     external = getattr(item, "external_id", None)
     if not isinstance(external, str) or not external:
         return "with no id"
-    return repr(redact(external.replace("\x00", "�"))[:120])
+    text = external.replace("\x00", "�")
+    if _TYPED_ITEM_ID.fullmatch(text) and not pinned_http.live_secret_in(text):
+        return repr(text)
+    return repr(redact(text)[:120])
 
 
 def _persona_ref(persona: dict | None) -> dict | None:

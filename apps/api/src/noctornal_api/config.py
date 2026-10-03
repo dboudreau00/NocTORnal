@@ -762,6 +762,16 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
         problems.append(
             "NOCTORNAL_WEBHOOK_URL is not an https address, so every webhook would "
             "carry case summaries in the clear.")
+    # The webhook signature scheme (F28, 2026-10-02), read by the reader the
+    # sender uses, so this and the drain cannot disagree. The secret is only
+    # asked for once there is a webhook to sign; a value that is neither v1
+    # nor v2 is refused whether or not one is configured.
+    from noctornal_api import transports as _transports
+    _version, _sig_problem = _transports.webhook_signature_version(env)
+    if _sig_problem is None and webhook:
+        _sig_problem = _transports.webhook_signature_problem(env)
+    if _sig_problem is not None:
+        problems.append(_sig_problem)
     for flag, what in (("NOCTORNAL_WEBHOOK_ALLOW_HTTP", "a webhook"),
                        ("NOCTORNAL_JIRA_ALLOW_HTTP", "Jira")):
         if env.get(flag, "").strip():
