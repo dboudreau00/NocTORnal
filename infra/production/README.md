@@ -26,6 +26,8 @@ You need:
   reachable only from the compose network.
 * A checkout of this repository on the host. Every command below is run
   from the repository root.
+* `python3`, 3.8 or later, for the installer step that writes the secrets
+  files (it uses the standard library alone).
 
 Counsel has work to do before an analyst signs in. See
 [What stays red, and what a red check refuses](#what-stays-red-and-what-a-red-check-refuses).
@@ -34,16 +36,56 @@ not, and the collection route refuses to poll until it is done.
 
 ---
 
-## 1. Write the secrets file
+## 1. Write the secrets files
 
 ```sh
 cp infra/production/secrets.env.example infra/production/secrets.env
+sudo ./release/install.sh --production-secrets
 ```
 
+The second command (`release\install.ps1 -ProductionSecrets` on Windows,
+as the user who owns the files) needs only a `python3` on the host. It
+runs with `sudo` because the files it writes are root's and mode 600,
+which the lock-down below makes all of them, and run as anybody else it
+cannot read them; edit them afterwards with `sudoedit`. It creates
+`postgres-init.env` and `migrate.env` beside `secrets.env` from their
+templates, mode 600, and writes the secrets that are machine-chosen and
+must agree across files:
+
+* the **Redis password** and `REDIS_URL`, which signs in as the limiter's
+  own Redis user (see [The limiter's Redis](#the-limiters-redis));
+* the **schema owner's password**, into `postgres-init.env` and inside
+  `migrate.env`'s DSN, but only when Docker says the database volume does
+  not exist yet. initdb fixes the owner's password for good, so on a host
+  where it cannot tell, the command asks you to choose it instead.
+
+It prints the name of everything it changed and never a value, and exits
+non-zero while something is left for you, saying what. Run it again after
+you have done that; it changes only what still needs changing.
+
+Three files, because three different readers must hold three different
+things:
+
+| File | Read by | Holds |
+|---|---|---|
+| `secrets.env` | every application service, and Caddy | everything below that a running process needs |
+| `postgres-init.env` | postgres alone | the passwords initdb takes: the owner's `POSTGRES_PASSWORD`, the system role's, the egress role's |
+| `migrate.env` | the migrate job alone | `NOCTORNAL_MIGRATION_DATABASE_URL`, the owner's DSN |
+
+The owner `noctornal` is the Postgres image's bootstrap superuser. Row-level
+security does not bind it, and it can switch off the append-only triggers
+on the audit and custody tables in one statement, so its credential is in
+no file a running service reads (`docs/17` F52). `compose.yml` hands every
+service but postgres and the migrate job both variables empty, whatever
+`secrets.env` says; the API and the cron jobs refuse to run holding either;
+and the migrate job refuses to run without its DSN, or with one still
+carrying a placeholder. Moving an existing deployment to this layout is
+[release/secrets-upgrade/README.md](../../release/secrets-upgrade/README.md).
+
 `secrets.env.example` is the reference for every variable: what it is, and
-what breaks when it is wrong. Work through it top to bottom. Nothing in the
-stack checks that you replaced the placeholders, and several of them fail
-quietly rather than loudly.
+what breaks when it is wrong. Work through it top to bottom. The API
+refuses to start on a placeholder it can recognise, and several other
+values fail quietly rather than loudly.
 
 Generate passwords from a URL-safe alphabet, because four of them are
 embedded in URLs and an unencoded `@`, `:`, `/` or `#` silently truncates a
@@ -80,24 +122,29 @@ template), the readiness check `kek_ring_opens_stored_secrets` says
 whether every stored secret still opens, and
 `scripts/rewrap_secrets.py --apply` moves them under the new key.
 
-Then lock the file down. It holds every password in the deployment:
+Then lock the files down. Between them they hold every password in the
+deployment. The installer step creates the files it writes mode 600, owned
+by whoever ran it, which with `sudo` is root already:
 
 ```sh
-sudo chown root:root infra/production/secrets.env
-sudo chmod 600      infra/production/secrets.env
+sudo chown root:root infra/production/secrets.env infra/production/postgres-init.env infra/production/migrate.env
+sudo chmod 600      infra/production/secrets.env infra/production/postgres-init.env infra/production/migrate.env
 ```
 
-> `docker compose config` prints this file's contents, resolved into each
+> `docker compose config` prints these files' contents, resolved into each
 > service's environment. Do not paste that output into a ticket.
 
 ---
 
 ## 2. Check the two passwords that are written twice
 
-`POSTGRES_PASSWORD` also appears inside `NOCTORNAL_MIGRATION_DATABASE_URL`,
-and `NOCTORNAL_APP_DB_PASSWORD` also appears inside `DATABASE_URL`. Nothing
-compares them. A mismatch surfaces on first boot as the migration job
-failing to authenticate, which reads like a bug in the migration.
+`POSTGRES_PASSWORD` (`postgres-init.env`) also appears inside
+`NOCTORNAL_MIGRATION_DATABASE_URL` (`migrate.env`), and
+`NOCTORNAL_APP_DB_PASSWORD` also appears inside `DATABASE_URL`. The
+installer step compares the first pair and says so when they differ;
+nothing compares the second. A mismatch surfaces on first boot as the
+migration job failing to authenticate, which reads like a bug in the
+migration.
 
 There are two Postgres roles on purpose. `noctornal` owns the schema and is
 the only thing that ever runs Alembic. `noctornal_app` is least privilege,
@@ -313,9 +360,12 @@ carries a value this repository, its CI or MinIO publishes (a `replace-me`
 placeholder, the development password, a key of one repeated byte, a Redis
 URL with no password); in this deployment the API refuses to start on any
 of them, so it is green whenever you can read it. `redis_limiter_isolated`
-counts keys in the limiter's Redis that are not under its `rl:` prefix, and
-keys in that instance's other databases, without reading a value; it is
-green on this compose file's Redis, which nothing else uses.
+reads the limiter's Redis ACL over the limiter's own connection, and
+counts keys in that Redis that are not under its `rl:` prefix, and keys in
+that instance's other databases, without reading a value. In production it
+fails when the ACL does not confine the limiter (see
+[The limiter's Redis](#the-limiters-redis)); it is green on this compose
+file's Redis, which nothing else uses.
 
 **1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
@@ -361,6 +411,71 @@ the clear on the day STARTTLS fails.
 
 ---
 
+## The limiter's Redis
+
+Redis holds the rate limiter's meters and nothing else, and since
+2026-10-02 that is a property of the server rather than a hope. The
+`redis` service builds an ACL file at every start from `REDIS_PASSWORD`
+(stored as its SHA-256, never the password) in which:
+
+* the **default user is off**: no password, no command, no key. A client
+  that does not sign in is refused, not signed in as anybody;
+* **`noctornal_limiter`** is the only user. It may read and write keys
+  under `rl:` and no other, use no pub/sub channel, and run exactly the
+  commands the limiter and its readiness rows send
+  (`ratelimit_redis.LIMITER_ACL_COMMANDS` lists each with the reason it is
+  there). It cannot `FLUSHALL`, `CONFIG SET`, `KEYS`, `DEL` or read or
+  write a key outside `rl:`.
+
+What that does not confine, so nobody reads more into it: three of those
+commands reach past the limiter's own keys without reading or writing one.
+`SCAN` lists every key **name** in its database (the readiness census
+counts the ones outside `rl:`), `INFO` reports the server's statistics,
+and `ACL GETUSER` reads any user's rules and password hashes, which here
+means its own and the disabled default's, neither of which has a hash
+anybody else could use.
+
+`REDIS_URL` must sign in as that user with that password:
+`redis://noctornal_limiter:PASSWORD@redis:6379/0`. While `REDIS_URL` names
+this service (host `redis`), the `redis` service compares the two as text
+and refuses to start when they disagree, because a URL with no user name
+signs in as the disabled default user and every limit that fails closed,
+the login among them, would then refuse everyone. The installer step
+writes both. Changing the password costs a restart and nothing else: no
+data is stored with it.
+
+`redis_limiter_isolated` reads this ACL back over the limiter's own
+connection (`ACL WHOAMI`, `ACL GETUSER`) and, under
+`NOCTORNAL_ENV=production`, fails when the limiter signs in as `default`,
+when the default user is enabled (open with no password, or behind one),
+or when the limiter's user holds a key outside `rl:`, a channel, a
+selector, a category or a command it does not send. What it cannot see,
+it says: another user the ACL defines would show only in its key census.
+
+### A Redis of your own instead
+
+Point `REDIS_URL` at it, on any host but `redis`. Give it the same shape:
+a user for the limiter with the rules above
+(`ratelimit_redis.limiter_acl_rules()` returns them), `default` disabled,
+`noeviction`, and that user named in `REDIS_URL`. `redis_limiter_isolated` holds it to that
+in production, and `redis_limiter_store` to the eviction policy.
+
+Nothing here checks that Redis for you before it is used: the installer
+step leaves a `REDIS_URL` naming another host alone and says so, and the
+bundled `redis` service, seeing it, starts with its own ACL and no client
+and says that on its log. It still starts because api, cron, lab-cron and
+the sample origin wait for it to be healthy, and an idle Redis costs one
+container. To leave it out, add `--scale redis=0` to every `up`; services
+that wait on a service scaled to nothing do not wait for it:
+
+```sh
+docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build --scale redis=0
+```
+
+An `up` without the flag starts it again, idle, and nothing else changes.
+
+---
+
 ## Egress: the only way out
 
 In this deployment the `noctornal` network is internal. The API, the cron
@@ -399,13 +514,15 @@ service and Caddy receive. They are in three files beside it:
 |---|---|---|
 | `egress-proxy.env` | the egress proxy alone | its database URL, the client key, the seal key, the fingerprint key |
 | `egress-client.env` | api and cron | the client key, the fingerprint key, the seal key's public half |
-| `postgres-init.env` | postgres alone | `NOCTORNAL_EGRESS_DB_PASSWORD`, for `db/init/20-egress-role.sh` |
+| `postgres-init.env` | postgres alone | `NOCTORNAL_EGRESS_DB_PASSWORD`, for `db/init/20-egress-role.sh`, beside the owner's and the system role's passwords (step 1) |
 
 ```sh
 python scripts/egress_setup.py keygen     # prints every key, once
 cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
 cp infra/production/egress-client.env.example infra/production/egress-client.env
-cp infra/production/postgres-init.env.example infra/production/postgres-init.env
+# postgres-init.env exists since step 1: set NOCTORNAL_EGRESS_DB_PASSWORD in
+# it, and do not copy its template over it, which would put a placeholder
+# where the owner's password is.
 python scripts/egress_setup.py preflight  # checks all three before you start
 ```
 
@@ -484,20 +601,26 @@ not a reason to stop draining), so a persistent non-zero every five minutes
 is the thing to look at. The failed deliveries are in the ledger with their
 reasons at `GET /api/v1/notifications/deliveries?refused_only=true`.
 
-**Updating.** Pull the code, then rebuild and restart. The migration job
-runs again on every `up`, so a release carrying migrations applies them
-before the API starts:
+**Updating.** Pull the code, bring the secrets files to the new release,
+then rebuild and restart. The migration job runs again on every `up`, so a
+release carrying migrations applies them before the API starts:
 
 ```sh
 git pull
+sudo ./release/install.sh --production-secrets
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
+The middle step changes nothing when there is nothing to change. From a
+release before 2026-10-02 it is required: see [Upgrading](#upgrading) and
+[release/secrets-upgrade/README.md](../../release/secrets-upgrade/README.md).
+
 **Backups, nothing here does this for you.** Three things must be copied
 off this host, together: the database, the evidence and raw buckets, and
-`secrets.env`. Without the buckets a restore gives you a case file whose
-exhibits are missing; without `secrets.env` it gives you one whose sealed
-columns never open again (step 1).
+the env files beside the compose file (`secrets.env`, `postgres-init.env`,
+`migrate.env` and the two egress files). Without the buckets a restore
+gives you a case file whose exhibits are missing; without `secrets.env` it
+gives you one whose sealed columns never open again (step 1).
 
 ```sh
 # The database.
@@ -553,8 +676,9 @@ the legal hold, and not the object version each preserved sample's row
 names, which is the version a retrieval reads. Nothing in this release
 restores one.
 
-Copy `secrets.env` every time you copy the database, and keep it as
-carefully as the dump: together they open every sealed column.
+Copy the env files every time you copy the database, and keep them as
+carefully as the dump: together they open every sealed column, and
+`migrate.env` holds the owner's DSN.
 
 **Stopping.**
 
@@ -569,6 +693,60 @@ hostname per week). The evidence bucket's objects are written under a
 COMPLIANCE object lock, which nobody can lift, including the root
 credential: destroying the volume is the only way to remove them, which is
 the property evidence is supposed to have.
+
+---
+
+## Upgrading
+
+### From a release before 2026-10-02: the owner's credential and Redis
+
+[release/secrets-upgrade/README.md](../../release/secrets-upgrade/README.md)
+is the whole procedure, with what stops and what it says. In short, two
+things moved, and an existing deployment that is not brought along stops
+at boot, on purpose and with a sentence saying how to fix it:
+
+* `POSTGRES_PASSWORD` and `NOCTORNAL_MIGRATION_DATABASE_URL` left
+  `secrets.env` (`docs/17` F52). The migrate job now reads `migrate.env`
+  alone and refuses without it. Every other service holds both blank
+  whatever `secrets.env` says, and the API and the cron jobs refuse to run
+  holding either.
+* Redis runs an ACL with the default user disabled, so a `REDIS_URL`
+  naming the bundled `redis` service must sign in as `noctornal_limiter`.
+  The `redis` service refuses to start while it does not.
+
+One command does both, before `up`, with `sudo` because the files are
+root's, mode 600:
+
+```sh
+git pull
+sudo ./release/install.sh --production-secrets      # release\install.ps1 -ProductionSecrets on Windows
+docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+```
+
+It moves the two lines out of `secrets.env` into `postgres-init.env` and
+`migrate.env` (creating them from their templates if they are not there),
+keeps the Redis password if it is URL-safe and rewrites `REDIS_URL` to sign
+in with it as `noctornal_limiter`, and prints what it did by name, never by
+value. A destination that already holds a different owner password is a
+refusal, and nothing is written: keep the one the database was initialised
+with, delete the other line, and run it again. So is a file it may not
+read, in one sentence naming the file: run it with `sudo`.
+
+**The way back.** Before it changes a file it copies it to
+`NAME.backup-UTCSTAMP` beside it, mode 600, gitignored and kept out of the
+image. To return to the previous release, copy each backup over its file
+and check that release out; the new compose file refuses the old layout
+by design, so both have to go back together:
+
+```sh
+cd infra/production
+for f in secrets.env postgres-init.env migrate.env; do
+  [ -f "$f.backup-STAMP" ] && cp -p "$f.backup-STAMP" "$f"
+done
+```
+
+A `migrate.env` the command created has no backup and is simply unused by
+the older release. Nothing in the database changes in either direction.
 
 ---
 
@@ -588,7 +766,9 @@ the property evidence is supposed to have.
 * **No secrets management.** `secrets.env` is a file on disk in plain text.
   There is no Vault, no KMS, and the TOTP key-encrypting key sits in it.
   Every container built from the application image receives the whole file,
-  and so does Caddy, which needs three of its variables.
+  and so does Caddy, which needs three of its variables. The schema owner's
+  credential is the one thing kept out of it (`postgres-init.env` and
+  `migrate.env`, each read by one service).
 * **`docs/16` L1-L5 are unresolved.** Prohibited content in the sample
   store, stealer logs and third-party personal data at scale, persona
   operation and computer-misuse exposure, message content capture, and

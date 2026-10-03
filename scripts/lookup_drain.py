@@ -24,7 +24,9 @@ switch says: it sends nothing.
 Exit codes: 0 when nothing failed; 1 when a lookup FAILED in this pass or a
 provider had no route out (information, like notify_drain.py: every other
 row was still attempted); 2 when, under NOCTORNAL_ENV=production, a
-credential in the environment carries a published value.
+credential in the environment carries a published value or the schema
+owner's password or DSN is in it (docs/17 F52, 2026-10-02), before any
+connection and with one line per variable on stderr.
 """
 from __future__ import annotations
 
@@ -45,6 +47,15 @@ SWITCH_ENV = "NOCTORNAL_OUTBOUND_LOOKUPS"
 
 
 def main(argv: list[str] | None = None, *, conn=None, service=None) -> int:
+    from noctornal_api.config import refuse_unsafe_job_environment
+
+    # docs/17 F52 (2026-10-02): the published-value check this script made
+    # on its own, and since then the schema owner's credential beside it,
+    # through the one helper every cron job calls (config.py).
+    refusals = refuse_unsafe_job_environment("lookup_drain")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(description="Send the queued outbound lookups once.")
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--max-seconds", type=float, default=240.0)
@@ -52,16 +63,9 @@ def main(argv: list[str] | None = None, *, conn=None, service=None) -> int:
     args = parser.parse_args(argv)
 
     from noctornal_api import lookups, providers
-    from noctornal_api.config import ENV_VAR, PRODUCTION, published_credentials
     from noctornal_api.db import SystemPurpose, connect_system
 
     print(f"{SWITCH_ENV}={os.environ.get(SWITCH_ENV, '')}")
-    if os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
-        published = published_credentials()
-        if published:
-            names = ", ".join(sorted({p.variable for p in published}))
-            print(f"refusing to run: {names} carry a published value")
-            return 2
     own = conn is None
     conn = conn or connect_system(SystemPurpose.LOOKUPS)
     try:

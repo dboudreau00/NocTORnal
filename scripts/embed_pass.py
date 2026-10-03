@@ -50,7 +50,9 @@ is not a failure.
 
 1 when any item FAILED, or when a configured MEANING role was refused
 (readiness, configuration, unrouted, route refused, no authority, an
-endpoint error, a changed model); 0 otherwise. A retired index
+endpoint error, a changed model), or when under NOCTORNAL_ENV=production
+the environment carries a published credential or the schema owner's
+(docs/17 F52, 2026-10-02, refused before any connection); 0 otherwise. A retired index
 (refused=retired) is an administrator's choice, not a failure.
 """
 from __future__ import annotations
@@ -66,6 +68,7 @@ if _HERE not in sys.path:
 
 from _env import load_env_local  # noqa: E402
 from noctornal_api import embedders  # noqa: E402
+from noctornal_api.config import refuse_unsafe_job_environment  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.embeddings import EmbeddingService  # noqa: E402
 
@@ -94,6 +97,14 @@ _TABLE_BYTES = """SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0)
 
 
 def main(argv: list[str] | None = None) -> int:
+    # docs/17 F52 (2026-10-02): under NOCTORNAL_ENV=production a published
+    # credential or the schema owner's, refused before any connection, the
+    # same two refusals every cron job makes (config.py). Exit 1, the code
+    # a refused configuration already has here (see "Exit code" above).
+    refusals = refuse_unsafe_job_environment("embed_pass")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description="Fill the similarity indexes.")
     parser.add_argument("--role", choices=("wording", "meaning", "all"), default="all")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,

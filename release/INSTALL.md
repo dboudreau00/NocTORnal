@@ -283,6 +283,43 @@ The ones worth knowing:
 
 ---
 
+## A production deployment
+
+Everything above installs a development stack on this machine. A
+deployment other people use is `infra/production/` (one host, Docker
+Compose, TLS, an egress proxy), and `infra/production/README.md` is its
+procedure. The installers do one job there, on the host's own `python3`
+(3.8 or later, no virtual environment), and start nothing:
+
+```bash
+sudo ./release/install.sh --production-secrets
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\release\install.ps1 -ProductionSecrets
+```
+
+With `sudo` on Linux, because those files are root's, mode 600, and run as
+anybody else it can read none of them; on Windows, run it as the user who
+owns them. A file it may not read is one sentence naming the file.
+
+It writes and checks the secrets files beside the compose file. The schema
+owner's credential goes in `postgres-init.env` and `migrate.env`, each
+read by one service, and never in `secrets.env`, which every service and
+Caddy read (`docs/17` F52). The rate limiter's Redis gets a password and a
+`REDIS_URL` that signs in as the limiter's own user, the only one that
+Redis has. It prints the name of each change and never a value, and keeps
+a backup of every file before it changes it.
+
+Run it after every `git pull`, before `up`. From a release before
+2026-10-02 it is required: it moves the owner's credential out of an
+existing `secrets.env`, and until it has, the migrate job and Redis each
+refuse to start with a sentence naming it, and nothing that waits on them
+starts. [secrets-upgrade/README.md](secrets-upgrade/README.md) is that
+upgrade step by step, with the way back.
+
+---
+
 ## Troubleshooting
 
 **"port 8000 is already in use"**: an earlier copy of the API is still

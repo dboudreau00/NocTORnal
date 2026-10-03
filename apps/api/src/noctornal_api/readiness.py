@@ -853,11 +853,14 @@ def _redis_limiter_store(conn: psycopg.Connection) -> Check:
     if policy is None:
         return Check(
             "redis_limiter_store", False,
+            # INFO is asked first since the limiter's Redis ACL (2026-10-02),
+            # so UNKNOWN means neither answered, not CONFIG alone.
             f"Redis at {where} answers PING; maxmemory-policy is UNKNOWN because "
-            f"CONFIG GET was refused (managed Redis usually disables CONFIG)",
+            f"neither INFO memory nor CONFIG GET reported it (managed Redis "
+            f"usually disables CONFIG)",
             "confirm out of band that the limiter's Redis runs with "
-            "maxmemory-policy=noeviction, or point REDIS_URL at one that "
-            "answers CONFIG GET (docs/16 C8)")
+            "maxmemory-policy=noeviction, or point REDIS_URL at one whose INFO "
+            "memory reports it (docs/16 C8)")
     if is_evicting_policy(policy):
         # The bundled stack is named for what it runs now. The action said
         # infra/docker-compose.yml sets allkeys-lru, which stopped being true
@@ -935,13 +938,13 @@ def _limiter_prefix() -> bytes:
 
     Read from `RateLimiter`'s own constructor default, which is the value
     `http.limits.build_limiter` builds with, so this cannot drift from what
-    the limiter writes if the default ever changes."""
-    import inspect
+    the limiter writes if the default ever changes. Through
+    `ratelimit_redis.limiter_key_prefix` since 2026-10-02, the reader the
+    production ACL's key pattern is built from, so the census and the ACL
+    mean the same prefix."""
+    from noctornal_api.ratelimit_redis import limiter_key_prefix
 
-    from noctornal_api.ratelimit import RateLimiter
-
-    prefix = inspect.signature(RateLimiter).parameters["key_prefix"].default
-    return f"{prefix}:".encode()
+    return limiter_key_prefix().encode()
 
 
 @dataclass(frozen=True)
@@ -1040,6 +1043,181 @@ def _census(client, prefix: bytes, *, clock=time.monotonic) -> _Census:
                    _other_databases(client, own), len(provider))
 
 
+# ---------------------------------------------------------------------------
+# The limiter's Redis ACL, read over the limiter's own connection
+# (the limiter's Redis ACL, 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# The census above can only report a co-tenant after it has written. Since
+# 2026-10-02 the production Redis prevents one: its ACL disables `default`
+# and gives the limiter a user that reads and writes under its prefix alone
+# and runs its own commands alone (ratelimit_redis.LIMITER_ACL_COMMANDS,
+# which says what three of them can still see). This reads that configuration
+# with ACL WHOAMI and ACL GETUSER over the connection REDIS_URL opens, and
+# nothing else: no probe that a correct ACL would refuse, because every
+# refusal lands in the server's ACL LOG, where a real attempt to get round
+# the ACL has to stand out.
+#
+# Production fails closed on what it reads: the limiter signed in as
+# `default`; `default` enabled, with a password or without one (open, the
+# shape every unauthenticated client is signed in as); the limiter's user
+# holding a key outside its prefix, a channel, a selector, a category or a
+# command it does not send; or an ACL it cannot read. A development Redis
+# has none of this, by design (infra/docker-compose.yml is unchanged), so
+# outside production the row says what it read and passes on the census.
+# What stays invisible is said in the passing evidence: another user the
+# ACL defines can still write here, and it would show only in the census.
+
+@dataclass(frozen=True)
+class _AclUser:
+    """One user's rules as ACL GETUSER states them. Never a password."""
+    enabled: bool
+    nopass: bool
+    keys: tuple[str, ...]       # patterns, with `~` and `%R~`-style marks taken off
+    channels: tuple[str, ...]
+    granted: tuple[str, ...]    # every `+` rule, lowercased: commands and @categories
+    selectors: int
+
+
+@dataclass(frozen=True)
+class _AclPosture:
+    whoami: str | None
+    default: _AclUser | None
+    own: _AclUser | None
+    unreadable: str | None      # why the ACL could not be read; no value in it
+
+
+def _patterns(value, mark: str) -> tuple[str, ...]:
+    """Key or channel patterns from either shape GETUSER has had: one
+    string of `~pat` words (Redis 7) or a list of bare patterns (6.x)."""
+    if value is None:
+        return ()
+    if isinstance(value, (bytes, str)):
+        words = _text(value).split()
+    else:
+        words = [_text(item) for item in value]
+    out = []
+    for word in words:
+        if mark in word and word.split(mark, 1)[0] in ("", "%R", "%W", "%RW"):
+            word = word.split(mark, 1)[1]
+        out.append(word)
+    return tuple(out)
+
+
+def _acl_user(reply) -> _AclUser | None:
+    """Parse a raw ACL GETUSER reply: a RESP3 map or a RESP2 flat list.
+    None when the user does not exist."""
+    if reply is None:
+        return None
+    if isinstance(reply, dict):
+        fields = {_text(k).lower(): v for k, v in reply.items()}
+    elif isinstance(reply, (list, tuple)):
+        fields = {_text(reply[i]).lower(): reply[i + 1]
+                  for i in range(0, len(reply) - 1, 2)}
+    else:
+        raise ValueError("ACL GETUSER answered in a shape this check does not read")
+    flags = {_text(f).lower() for f in (fields.get("flags") or [])}
+    keys = _patterns(fields.get("keys"), "~")
+    if "allkeys" in flags:  # Redis 6.x states ~* as a flag
+        keys = (*keys, "*")
+    channels = _patterns(fields.get("channels"), "&")
+    if "allchannels" in flags:
+        channels = (*channels, "*")
+    words = _text(fields.get("commands") or "").lower().split()
+    granted = [w[1:] for w in words if w.startswith("+")]
+    if "allcommands" in flags:
+        granted.append("@all")
+    return _AclUser("on" in flags, "nopass" in flags, keys, channels,
+                    tuple(granted), len(fields.get("selectors") or []))
+
+
+def _acl_posture(client) -> _AclPosture:
+    """WHOAMI, then GETUSER for `default` and for the limiter's own user,
+    over the limiter's own client and its timeouts. Raw replies, parsed
+    here, so the answer does not depend on which redis-py parses ACL
+    replies how. Any refusal stops the reading and is recorded by kind,
+    without the URL and without a value."""
+    try:
+        whoami = _text(client.execute_command("ACL", "WHOAMI"))
+        default = _acl_user(client.execute_command("ACL", "GETUSER", "default"))
+        own = (default if whoami == "default" else
+               _acl_user(client.execute_command("ACL", "GETUSER", whoami)))
+    except Exception as exc:  # noqa: BLE001 - a refused ACL read is a verdict
+        log.debug("the limiter's ACL could not be read: %s", type(exc).__name__)
+        return _AclPosture(None, None, None,
+                           f"{type(exc).__name__}: {str(exc)[:160]}")
+    return _AclPosture(whoami, default, own, None)
+
+
+def _acl_faults(posture: _AclPosture, prefix: str) -> list[str]:
+    """What, in a production limiter's ACL, is not the isolation the
+    deployment promises. Empty when it is."""
+    from noctornal_api.ratelimit_redis import LIMITER_ACL_COMMANDS
+
+    if posture.unreadable is not None:
+        return [f"its ACL could not be read ({posture.unreadable}), so nothing "
+                f"shows that the server confines it"]
+    faults: list[str] = []
+    if posture.whoami == "default":
+        faults.append("the limiter signs in as the default user, which no rule "
+                      "confines to the limiter's keys or commands")
+    default = posture.default
+    if default is not None and default.enabled:
+        faults.append(
+            "the default user is enabled and asks for no password, so every "
+            "client that reaches this Redis is signed in as it" if default.nopass
+            else "the default user is enabled, so whoever holds its password "
+                 "reaches every key the limiter writes")
+    own = posture.own
+    if own is None and posture.whoami != "default":
+        faults.append(f"ACL GETUSER has no rules for its user {posture.whoami}, so "
+                      f"nothing shows what that user may do")
+    if own is not None and posture.whoami != "default":
+        outside = [k for k in own.keys if not k.startswith(prefix)]
+        extra = sorted(set(own.granted) - set(LIMITER_ACL_COMMANDS))
+        if not own.keys:
+            faults.append(f"its user {posture.whoami} may touch no key, so every "
+                          f"meter write fails")
+        if outside:
+            faults.append(f"its user {posture.whoami} may touch "
+                          f"{count_of(len(outside), 'key pattern', 'key patterns')} "
+                          f"outside {prefix}")
+        if extra:
+            faults.append(f"its user {posture.whoami} may run "
+                          f"{', '.join(extra)}, which the limiter never sends")
+        if own.channels:
+            faults.append(f"its user {posture.whoami} may use pub/sub channels")
+        if own.selectors:
+            faults.append(f"its user {posture.whoami} carries "
+                          f"{count_of(own.selectors, 'selector', 'selectors')} "
+                          f"granting more")
+    return faults
+
+
+def _acl_summary(posture: _AclPosture, prefix: str, faults: list[str]) -> str:
+    """One sentence on what was read, for a row that passes: confined, or
+    (outside production only) what production would fail it on."""
+    from noctornal_api.ratelimit_redis import LIMITER_ACL_COMMANDS
+
+    if faults:
+        return ("Outside production the census alone decides this row, and the "
+                "limiter's Redis is not confined the way production requires: "
+                + "; ".join(faults) + ". That is the development stack's shape")
+    granted = len(set(posture.own.granted)) if posture.own else 0
+    sent = len(LIMITER_ACL_COMMANDS)
+    commands = (f"the {sent} commands it sends" if granted == sent
+                else f"{granted} of the {sent} commands it sends")
+    # "Confines ... to keys under" read as more than the ACL does (review of
+    # 2026-10-02): reads and writes are confined, key NAMES, INFO and other
+    # users' rules are not, so the sentence says which.
+    return (f"The server's ACL lets the limiter's user {posture.whoami} read and "
+            f"write only keys under {prefix} and run only {commands}, and the "
+            f"default user is disabled. That user can still list every key name "
+            f"in its database, read INFO and read any user's ACL rules, which "
+            f"the census and this row use; another user the ACL defines would "
+            f"show only in the key census")
+
+
 def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     """docs/16 C8, the half `redis_limiter_store` cannot answer: does the
     limiter have its Redis to itself? See the block above for what is
@@ -1050,9 +1228,18 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     thing. A walk that cannot finish, or a server that will not answer
     SCAN or INFO, is NOT ok, on the rule `redis_limiter_store` states for
     an unknown eviction policy: the register lists things confirmed.
+
+    Since 2026-10-02 it reads the server's ACL first (the block above
+    `_acl_posture`), and under NOCTORNAL_ENV=production a limiter the ACL
+    does not confine fails the row before the census runs.
     """
+    from noctornal_api.config import ENV_VAR, PRODUCTION
     from noctornal_api.http.limits import redacted_url
-    from noctornal_api.ratelimit_redis import CONNECT_TIMEOUT_S, RedisBackend
+    from noctornal_api.ratelimit_redis import (
+        CONNECT_TIMEOUT_S,
+        LIMITER_ACL_USER,
+        RedisBackend,
+    )
 
     name = "redis_limiter_isolated"
     action = (
@@ -1083,6 +1270,27 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
         # timeouts and no-retry setting (ratelimit_redis.py, point 3): a
         # sick Redis fails this row in a quarter of a second rather than
         # holding the whole register.
+        posture = _acl_posture(backend._redis)
+        faults = _acl_faults(posture, shown)
+        if faults and os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
+            return Check(
+                name, False,
+                f"Redis at {where} answers PING, and its ACL does not confine "
+                f"the limiter to its own keys and commands: "
+                + "; ".join(faults)
+                + ". Anything holding a credential this Redis accepts can then "
+                  "delete the limiter's meters, which admits whoever they were "
+                  "refusing, or fill the instance until every limit that fails "
+                  "closed refuses everyone",
+                f"run the limiter's Redis with an ACL file that disables the "
+                f"default user and gives the limiter its own user, confined to "
+                f"keys under {shown} and the commands "
+                f"ratelimit_redis.LIMITER_ACL_COMMANDS lists, and sign REDIS_URL "
+                f"in as that user. infra/production/compose.yml writes that ACL "
+                f"for the user {LIMITER_ACL_USER}, and sudo ./release/install.sh "
+                f"--production-secrets (release/install.ps1 -ProductionSecrets) "
+                f"writes REDIS_URL to match (docs/16 C8, "
+                f"release/secrets-upgrade/README.md)")
         try:
             census = _census(backend._redis, prefix)
         except Exception as exc:  # noqa: BLE001 - a refused SCAN is a verdict
@@ -1167,7 +1375,8 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
         name, True,
         f"{own}, and no other database on the instance holds a key. A tenant "
         f"that holds no keys right now, or a second server behind the same "
-        f"address, is not visible from here (docs/16 C8)")
+        f"address, is not visible from here (docs/16 C8). "
+        f"{_acl_summary(posture, shown, faults)}")
 
 
 # ---------------------------------------------------------------------------

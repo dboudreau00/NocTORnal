@@ -244,9 +244,11 @@ def test_the_script_exits_one_when_a_send_failed(conn, capsys):
 
 
 def test_the_script_refuses_published_credentials_in_production(monkeypatch, capsys):
+    """Through config.refuse_unsafe_job_environment since docs/17 F52
+    (2026-10-02), on a real published value rather than a stub of the
+    reader: CI's KEK, 32 'A' bytes."""
     from noctornal_api import config
     monkeypatch.setenv(config.ENV_VAR, config.PRODUCTION)
-    monkeypatch.setattr(config, "published_credentials",
-                        lambda: [type("P", (), {"variable": "NOCTORNAL_TOTP_KEK"})()])
+    monkeypatch.setenv("NOCTORNAL_TOTP_KEK", "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=")
     assert _script().main([]) == 2
-    assert "NOCTORNAL_TOTP_KEK" in capsys.readouterr().out
+    assert "lookup_drain: refusing to run: NOCTORNAL_TOTP_KEK" in capsys.readouterr().err

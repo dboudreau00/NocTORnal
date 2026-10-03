@@ -30,6 +30,19 @@ shots/
 # gitignored, which means nothing stops it being COPYed into an image.
 infra/production/secrets.env
 
+# And so do the others, every one of them gitignored and none of them
+# excluded here until docs/17 F52 (2026-10-02) found it: postgres-init.env
+# (the owner's, the system role's and the egress role's passwords),
+# migrate.env (the owner's DSN), both egress files and the backups
+# scripts/production_secrets.py takes. Each was baked into the image every
+# runtime container runs, so a process meant to hold the request role
+# could read the owner's DSN off its own disk. Every env file and every
+# backup of one, by pattern, so the next file added here is covered; the
+# tracked templates hold placeholders only and stay out too, since
+# nothing in the image reads them.
+infra/production/*.env
+infra/production/*.env.*
+
 # MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
 # this directory into the containers that need it, so nothing is lost by
 # excluding it -- and without this line the private key of the production

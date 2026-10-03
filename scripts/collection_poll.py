@@ -190,7 +190,9 @@ all, and therefore has nowhere else to be read.
 1 when a poll FAILED in this pass, when a poll was BLOCKED (a person is
 needed: an authority to confirm, an exit to bind, a suspended persona to
 replace), when a source is too long for the pass, or when the pass was
-REFUSED on the readiness register, 0 otherwise. A RATE_LIMITED poll leaves
+REFUSED on the readiness register or, under NOCTORNAL_ENV=production, on
+its own environment (a published credential, or the schema owner's, which
+no runtime process may hold: docs/17 F52, 2026-10-02), 0 otherwise. A RATE_LIMITED poll leaves
 the exit alone: the site asked for a wait and got one. The exit code is the one channel a cron
 job has back to its operator, and a pass that failed every source and
 exited 0 would be a failure reported as nothing at all.
@@ -256,6 +258,7 @@ from noctornal_api.collection import (  # noqa: E402
     PersonaResting,
     SourceRefused,
 )
+from noctornal_api.config import refuse_unsafe_job_environment  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.readiness import blocking_failures  # noqa: E402
 
@@ -293,6 +296,14 @@ SYSTEM_ACTOR = None
 
 
 def main() -> int:
+    # docs/17 F52 (2026-10-02): under NOCTORNAL_ENV=production a published
+    # credential or the schema owner's, refused before anything else, the
+    # same two refusals every cron job makes (config.py). Exit 1, the
+    # code a register refusal shares (see "The exit code" above).
+    refusals = refuse_unsafe_job_environment("collection_poll")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n", 1)[0],
         epilog="Most passes poll nothing. See the module docstring for why "

@@ -36,6 +36,11 @@ does NOT mean the drain stopped: every due delivery was attempted, the
 failed ones are in the ledger with their reason (GET
 /notifications/deliveries?refused_only=true), and the retryable ones will
 be tried again next run.
+
+Exits 2, before any connection, when under NOCTORNAL_ENV=production a
+credential carries a published value or the schema owner's password or
+DSN is in the environment (docs/17 F52, 2026-10-02): the refusal is one
+line per variable on stderr, naming it and never its value.
 """
 from __future__ import annotations
 
@@ -51,6 +56,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from _env import load_env_local  # noqa: E402
+from noctornal_api.config import refuse_unsafe_job_environment  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.transports import dispatch_due  # noqa: E402
 
@@ -67,6 +73,14 @@ def connect():
 
 
 def main() -> int:
+    # docs/17 F52 (2026-10-02): under NOCTORNAL_ENV=production a published
+    # credential or the schema owner's, refused before any connection, the
+    # same two refusals every cron job makes (config.py). Exit 2, not 1:
+    # 1 already means a delivery failed in a pass that ran.
+    refusals = refuse_unsafe_job_environment("notify_drain")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return 2
     conn = connect()
     try:
         # S2, the egress proxy (2026-09-24). A production cron with
