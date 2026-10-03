@@ -124,6 +124,12 @@ KINDS: dict[str, ActKind] = {
                                _MANAGE),
     "SOURCE_POLL": ActKind("Poll a source a persona reads",
                            (("collection.run", False),)),
+    # A stop, asked by the persona's stop route before it writes the stop:
+    # the board's own sign-out needs the sealed session, which only the
+    # collector can open, so the API asks and waits a bounded time (merged
+    # with the authenticated forum path, 2026-10-03; migration 0165).
+    "FORUM_SIGN_OUT": ActKind("Sign a forum persona out of its boards",
+                              (("collection_account.manage", False),)),
 }
 
 SESSION_ENDED = ("The session that asked for this act ended before the collector "
@@ -499,9 +505,11 @@ def _requeue(status_conn, act: dict, seconds: int) -> dict:
     return again or act
 
 
-def _recheck(conn, act: dict) -> str:
+def _recheck(conn, act: dict) -> tuple[str, frozenset[str]]:
     """The collector's half: the person who asked, now. Returns their
-    ceiling's name. Every refusal is the gate's own sentence."""
+    ceiling's name and the compartments they hold now (F43: a source filed
+    under a key they no longer hold is a missing one to the act, as it is to
+    the route). Every refusal is the gate's own sentence."""
     from noctornal_api.http.deps import CurrentUser, authorize_global, user_ceiling
     from noctornal_api.http.errors import Problem
     from noctornal_api.http.routers.collection import refuse_unready
@@ -525,22 +533,22 @@ def _recheck(conn, act: dict) -> str:
         for permission, force in KINDS[act["kind"]].permissions:
             authorize_global(conn, user, permission, force_step_up=force)
         refuse_unready(conn)
-        clearance, _held = user_ceiling(conn, act["requested_by"])
+        clearance, held = user_ceiling(conn, act["requested_by"])
     except Problem as exc:
         raise _Refusal(exc.status, exc.title, exc.detail) from None
     if tlp_from_name(act["classification"]) > clearance:
         raise _Refusal(403, "Forbidden", LABEL_ABOVE)
-    return clearance.name
+    return clearance.name, frozenset(held or ())
 
 
 def _uuid(value) -> UUID | None:
     return UUID(str(value)) if value else None
 
 
-def _execute(conn, act: dict, *, clearance: str, adapters, transport_factory,
-             sleep) -> dict:
+def _execute(conn, act: dict, *, clearance: str, compartments=None, adapters,
+             transport_factory, sleep) -> dict:
     """Exactly the code the route ran before 2026-10-02, as the person who
-    asked, at their ceiling now."""
+    asked, at their ceiling and with their compartments now."""
     p = act["params"]
     kind = act["kind"]
     actor = act["requested_by"]
@@ -554,8 +562,26 @@ def _execute(conn, act: dict, *, clearance: str, adapters, transport_factory,
             result = CollectionService(sconn, adapters).run_once(
                 act["source_id"], actor_id=actor,
                 persona_id=_uuid(p.get("persona_id")),
-                watch_id=_uuid(p.get("watch_id")), clearance=clearance)
+                watch_id=_uuid(p.get("watch_id")), clearance=clearance,
+                compartments=compartments)
         return run_body(result)
+    if kind == "FORUM_SIGN_OUT":
+        from noctornal_api import forum_member
+
+        # A stop, in the collector, the one process that opens the sealed
+        # session: through the persona's own route, once per board, then the
+        # sessions are cleared whatever the boards answered.
+        with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
+            out = forum_member.sign_out_persona(
+                sconn, UUID(str(p["persona_id"])), actor_id=actor,
+                clearance=clearance, compartments=compartments)
+        return {"persona_id": out["persona_id"],
+                "signed_out": out["signed_out"], "cleared": out["cleared"],
+                "notice": ("The persona was signed out of its forum, and its "
+                           "session cleared.")
+                if any(s["reached"] for s in out["signed_out"]) else
+                ("The forum's own sign-out was not reached; the session this "
+                 "product held was cleared.")}
     from noctornal_api.telegram_service import TelegramChats
 
     chats = TelegramChats(conn, adapters=adapters,
@@ -568,27 +594,30 @@ def _execute(conn, act: dict, *, clearance: str, adapters, transport_factory,
             default_reliability=p["default_reliability"],
             access_mode=p["access_mode"], poll_interval_s=int(p["poll_interval_s"]),
             jitter_pct=int(p["jitter_pct"]), max_rps=float(p["max_rps"]),
-            actor_id=actor, clearance=clearance)
+            actor_id=actor, clearance=clearance,
+            compartments=tuple(p.get("compartments") or ()),
+            held_compartments=compartments)
     if kind == "TELEGRAM_JOIN":
         return chats.join(source_id, note=p["note"], actor_id=actor,
-                          clearance=clearance)
+                          clearance=clearance, compartments=compartments)
     if kind == "TELEGRAM_MEMBERSHIP":
         return chats.check_membership(source_id, actor_id=actor,
-                                      clearance=clearance)
+                                      clearance=clearance,
+                                      compartments=compartments)
     if kind == "TELEGRAM_MARK_MEMBER":
         return chats.mark_member(source_id, reason=p["reason"], actor_id=actor,
-                                 clearance=clearance)
+                                 clearance=clearance, compartments=compartments)
     if kind == "TELEGRAM_REBIND":
         return chats.rebind(source_id, persona_id=UUID(p["persona_id"]),
                             reason=p["reason"], actor_id=actor,
-                            clearance=clearance)
+                            clearance=clearance, compartments=compartments)
     raise ValueError(f"no runner for persona act {kind!r}")
 
 
 def _problem_for(kind: str, exc: Exception) -> dict:
     """The route's own answer for an outcome, through the route's own
     mapping, so the queue cannot drift from what the route said."""
-    if kind == "SOURCE_POLL":
+    if kind in ("SOURCE_POLL", "FORUM_SIGN_OUT"):
         from noctornal_api.http.routers.collection import run_problem
         problem = run_problem(exc)
     else:
@@ -614,12 +643,14 @@ def _run_claimed(status_conn, work_conn, act: dict, *, adapters,
     kind = act["kind"]
     try:
         if collector:
-            clearance = _recheck(work_conn, act)
+            clearance, held = _recheck(work_conn, act)
         else:
             from noctornal_api.http.deps import user_ceiling
-            clearance = user_ceiling(work_conn, act["requested_by"])[0].name
-        body = _execute(work_conn, act, clearance=clearance, adapters=adapters,
-                        transport_factory=transport_factory, sleep=sleep)
+            ceiling, keys = user_ceiling(work_conn, act["requested_by"])
+            clearance, held = ceiling.name, frozenset(keys or ())
+        body = _execute(work_conn, act, clearance=clearance, compartments=held,
+                        adapters=adapters, transport_factory=transport_factory,
+                        sleep=sleep)
     except _Refusal as refusal:
         state = "REFUSED" if refusal.problem["status"] < 500 else "FAILED"
         return _finish(status_conn, act, state, problem=refusal.problem), None
@@ -725,13 +756,14 @@ def drain(conn: psycopg.Connection, *, instance: str, limit: int = 20,
 
 
 def served_body(conn: psycopg.Connection, act: dict, *, clearance: str,
-                adapters=None) -> dict:
+                adapters=None, compartments=None) -> dict:
     """A finished act's body as the route answers it, its chat read again
-    at the reader's ceiling now; left out when the chat is above them."""
+    at the reader's ceiling and compartments now; left out when the chat is
+    above them or filed under a key they do not hold (F43)."""
     from noctornal_api.collection import CollectionNotFound
 
     body = dict((act.get("result") or {}).get("body") or {})
-    if act["kind"] == "SOURCE_POLL":
+    if act["kind"] in ("SOURCE_POLL", "FORUM_SIGN_OUT"):
         return body
     from noctornal_api.telegram_service import TelegramChats
 
@@ -740,7 +772,7 @@ def served_body(conn: psycopg.Connection, act: dict, *, clearance: str,
     if source:
         try:
             body["chat"] = TelegramChats(conn, adapters=adapters).view(
-                UUID(str(source)), clearance)
+                UUID(str(source)), clearance, compartments)
         except CollectionNotFound:
             pass
     return body

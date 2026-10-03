@@ -220,6 +220,10 @@ _SIGKILL = getattr(signal, "SIGKILL", 9)
 KIND_ARGV: dict[str, list[str]] = {
     "lab_static": [sys.executable, "-m", "noctornal_api.lab_static"],
     "forum_parse": [sys.executable, "-m", "noctornal_api.forum_parse"],
+    # Archive expansion's child (phase 8, merged 2026-10-03): it writes no
+    # path, so the worker's tmpfs of one MiB and its read-only root are all
+    # it needs.
+    "lab_archive_child": [sys.executable, "-m", "noctornal_api.lab_archive_child"],
 }
 
 

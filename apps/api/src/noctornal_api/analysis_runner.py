@@ -518,12 +518,18 @@ MAGIC = b"NAW1"
 FRAME_HEADER_CAP = 64 * 1024
 #: The child modules the worker starts, by name. A peer names a kind; it
 #: never names a program.
-KINDS = ("lab_static", "forum_parse")
+#: `lab_archive_child` is archive expansion's (phase 8, merged 2026-10-03):
+#: it reads an archive from stdin and answers its members, with no path
+#: written, under the same limits and failure kinds as the others.
+KINDS = ("lab_static", "forum_parse", "lab_archive_child")
 HELLO = "hello"
 MAX_PAYLOADS = 4
-#: The largest output the worker hands back, whatever a request asks: a
-#: compiled YARA build, the largest answer any child gives (yara_rules).
-MAX_OUTPUT_BYTES = 256 * MIB
+#: The largest output the worker hands back, whatever a request asks: the
+#: archive child's members (its default 256 MiB of them, and a line of report
+#: for each, `lab_archive.stdout_cap`) are the largest answer any child
+#: gives, above a compiled YARA build (yara_rules). `lab_archive.
+#: archive_settings` refuses a setting that would ask for more, by name.
+MAX_OUTPUT_BYTES = 320 * MIB
 MAX_WALL_S = 3700.0
 CONNECT_TIMEOUT_S = 5.0
 #: The longest either side waits for the next byte of something it was

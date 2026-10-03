@@ -173,14 +173,17 @@ def _act(conn, user, kind: str, *, source_id: UUID | None, classification: str,
                       adapters=adapters, factory=factory)
 
 
-def _chat_label(conn, source_id: UUID, clearance: str) -> str:
+def _chat_label(conn, source_id: UUID, clearance: str,
+                compartments=None) -> str:
     """The chat's source label, at which its act is held; a chat the
-    caller may not see answers exactly as a missing one, before anything
-    is queued."""
+    caller may not see (its label above them, or a compartment they do not
+    hold, F43) answers exactly as a missing one, before anything is
+    queued."""
     from noctornal_api.telegram_service import _chat_row
 
     try:
-        return _chat_row(conn, source_id, clearance)["classification"]
+        return _chat_row(conn, source_id, clearance,
+                         compartments)["classification"]
     except CollectionNotFound as exc:
         raise _problem(exc) from None
 
@@ -204,10 +207,11 @@ def persona_window(
     """A Telegram persona's active hours in UTC, or none. Outside them the
     persona rests and its chats wait. 404 for a persona the caller may not
     see."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return set_window(conn, persona_id, body.active_window_utc,
-                          actor_id=user.user_id, clearance=clearance.name)
+                          actor_id=user.user_id, clearance=clearance.name,
+                          compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -245,6 +249,10 @@ class ChatCreate(BaseModel):
     poll_interval_s: int = Field(default=1800, ge=300, le=7 * 86400)
     jitter_pct: int = Field(default=25, ge=0, le=50)
     max_rps: float = Field(default=0.2, ge=0.05, le=1.0)
+    #: F43 (g40 verify major 5b, 2026-10-03): the compartments the chat's
+    #: source and everything it collects are filed under; the creator must
+    #: hold each. Until now this route could not set them.
+    compartments: list[str] = Field(default_factory=list, max_length=32)
 
 
 @router.post("/chats", response_model=dict, status_code=201,
@@ -262,7 +270,7 @@ def create_chat(
     persona. A reference Telegram does not resolve and a chat already added
     by somebody the caller cannot see answer the same."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     # Everything that needs no key and no network is refused here, before
     # anything is queued (verify:g38, 2026-10-03): a private invite link is
     # a bearer join credential, and the queue's rows are never deleted, so
@@ -271,7 +279,9 @@ def create_chat(
     # queued, never the text typed.
     try:
         parsed = check_create_request(body.ref, body.access_mode,
-                                      body.classification)
+                                      body.classification,
+                                      compartments=body.compartments,
+                                      held_compartments=held)
     except CollectionError as exc:
         raise _problem(exc) from None
     params = body.model_dump()
@@ -309,9 +319,9 @@ def join_chat(
     authority target confirmed first."""
     authorize_global(conn, user, "collection.run", force_step_up=True)
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     return _act(conn, user, "TELEGRAM_JOIN", source_id=source_id,
-                classification=_chat_label(conn, source_id, clearance.name),
+                classification=_chat_label(conn, source_id, clearance.name, held),
                 params={"note": body.note}, adapters=adapters, factory=factory)
 
 
@@ -338,9 +348,9 @@ def rebind_chat(
     """Read a chat through another Telegram persona, resolved through that
     persona first."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     return _act(conn, user, "TELEGRAM_REBIND", source_id=source_id,
-                classification=_chat_label(conn, source_id, clearance.name),
+                classification=_chat_label(conn, source_id, clearance.name, held),
                 params={"persona_id": body.persona_id, "reason": body.reason},
                 adapters=adapters, factory=factory)
 
@@ -359,11 +369,11 @@ def mark_member_chat(
     """Mark a public chat as a member chat (never back), then check the
     persona's membership without joining."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     # The mark and the check run together, where the persona key is
     # (2026-10-02); act_problem says the mark stood when the check refused.
     return _act(conn, user, "TELEGRAM_MARK_MEMBER", source_id=source_id,
-                classification=_chat_label(conn, source_id, clearance.name),
+                classification=_chat_label(conn, source_id, clearance.name, held),
                 params={"reason": body.reason}, adapters=adapters,
                 factory=factory)
 
@@ -381,18 +391,18 @@ def check_membership(
     """Whether Telegram reports the persona a member of a member chat. Reads
     the persona's own view of the chat and never joins."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     return _act(conn, user, "TELEGRAM_MEMBERSHIP", source_id=source_id,
-                classification=_chat_label(conn, source_id, clearance.name),
+                classification=_chat_label(conn, source_id, clearance.name, held),
                 params={}, adapters=adapters, factory=factory)
 
 
 def _set_active(source_id, body, user, conn, adapters, active: bool) -> dict:
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return _chats(conn, adapters, None).set_active(
             source_id, active=active, reason=body.reason, actor_id=user.user_id,
-            clearance=clearance.name)
+            clearance=clearance.name, compartments=held)
     except CollectionError as exc:
         raise _problem(exc) from None
 

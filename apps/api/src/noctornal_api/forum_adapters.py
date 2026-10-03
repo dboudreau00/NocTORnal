@@ -693,8 +693,11 @@ class MyBBAdapter(ForumAdapter):
 
 
 def forum_registry() -> dict[str, Adapter]:
-    """The two entries collection.default_adapters() registers."""
-    return {"xenforo": XenForoAdapter(), "mybb": MyBBAdapter()}
+    """The four entries collection.default_adapters() registers: the two
+    public readers, and the two member readers (the authenticated forum
+    path, 2026-10-02, forum_member)."""
+    from noctornal_api.forum_member import member_registry
+    return {"xenforo": XenForoAdapter(), "mybb": MyBBAdapter(), **member_registry()}
 
 
 # ---------------------------------------------------------------------------
@@ -1141,7 +1144,10 @@ def forum_details(conn: psycopg.Connection, document_id: UUID, *,
     row = conn.execute(
         """SELECT d.id, s.kind::text, d.category, d.external_id,
                   fp.signature_text, fp.quoted_post_refs, fp.reactions,
-                  fp.observed_at, fm.profile, fm.observed_at
+                  fp.observed_at, fm.profile, fm.observed_at,
+                  coalesce(fp.provenance, fm.provenance),
+                  coalesce(fp.collection_account_id, fm.collection_account_id),
+                  coalesce(fp.authority_id, fm.authority_id)
              FROM collect.document d
              JOIN collect.source s ON s.id = d.source_id
              LEFT JOIN collect.forum_post fp ON fp.document_id = d.id
@@ -1150,23 +1156,32 @@ def forum_details(conn: psycopg.Connection, document_id: UUID, *,
               AND d.classification <= %s::core.tlp
               AND s.classification <= %s::core.tlp
               AND d.compartments <@ %s::text[]
+              AND s.compartments <@ %s::text[]
               AND (fp.document_id IS NOT NULL OR fm.document_id IS NOT NULL)""",
-        (document_id, clearance, clearance, sorted(compartments))).fetchone()
+        (document_id, clearance, clearance, sorted(compartments),
+         sorted(compartments))).fetchone()
     if row is None:
         raise CollectionNotFound(
             "no such forum document, or it is above your clearance")
+    # The authenticated forum path (2026-10-02, 0162): how the page was
+    # read, and by which persona under which authority when as a member.
+    read_as = {"provenance": row[10] or "PUBLIC",
+               "persona_id": str(row[11]) if row[11] else None,
+               "authority_id": str(row[12]) if row[12] else None}
     if row[8] is not None:
         return {"document_id": str(row[0]), "kind": "member",
                 "source_kind": row[1], "external_id": row[3],
                 "profile": dict(row[8] or {}),
-                "observed_at": row[9].isoformat() if row[9] else None}
+                "observed_at": row[9].isoformat() if row[9] else None,
+                **read_as}
     return {"document_id": str(row[0]), "kind": "post", "source_kind": row[1],
             "external_id": row[3], "signature_text": row[4],
             "quoted_post_refs": list(row[5] or []),
             "reactions": dict(row[6] or {}),
             "observed_at": row[7].isoformat() if row[7] else None,
             "note": ("The signature is repeated on every post its author writes: "
-                     "it describes the author, and is not an observation per post.")}
+                     "it describes the author, and is not an observation per post."),
+            **read_as}
 
 
 # ---------------------------------------------------------------------------

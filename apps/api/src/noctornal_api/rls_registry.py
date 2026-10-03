@@ -81,12 +81,13 @@ HELD = `(SELECT iam.rls_compartments())`:
   `classification <= CLR AND compartments <@ HELD`. No case term, so no
   case-scoped grant raises it: a row that belongs to no case is held to
   the reader's case-less ceiling, as every collection view holds it.
-- CUSTOM_SOURCE_CHILD (a row of an exempt `collect.source`, 0129):
-  `EXISTS (SELECT 1 FROM collect.source p WHERE p.id = <table>.source_id
-  AND p.classification <= CLR)`. The CHILD test with the source's label
-  inline, because the source is exempt (the egress proxy reads it) and so
-  carries no policy for a CHILD test to lean on; the same reading as
-  `collection._SOURCE_VISIBLE`, held to the case-less ceiling.
+- CUSTOM_SOURCE_CHILD (a row of an exempt `collect.source`, 0129, restated
+  by 0164): `EXISTS (SELECT 1 FROM collect.source p WHERE p.id =
+  <table>.source_id AND p.classification <= CLR AND p.compartments <@
+  HELD)`. The CHILD test with the source's label and compartments inline,
+  because the source is exempt (the egress proxy reads it) and so carries
+  no policy for a CHILD test to lean on; the same reading as
+  `collection._SOURCE_VISIBLE_HELD`, held to the case-less ceiling.
 - CUSTOM_RECORD (an ingest record, 0154): compartments held, and either
   attached (the ELEMENT test on its case) or quarantined (no case,
   `ingest.manage` held globally through an initplan, its classification
@@ -250,7 +251,8 @@ POLICY: dict[str, str] = {
     "ingest.lookup_batch": "CASE",
     # 0129 (F51, 2026-10-02): which Telegram chat a source is. A new chat's
     # duplicate check runs as a system purpose (TELEGRAM_INTAKE), and the
-    # attended acts refuse a write that changed no chat.
+    # attended acts refuse a write that changed no chat. 0164 (F43) restates
+    # the policy with the source's compartments held.
     "collect.telegram_chat": "CUSTOM_SOURCE_CHILD",
     # 0154 (F51, 2026-10-02): the ingest records and what hangs off them. A
     # parse, a replay, every scoring pass and the fingerprint correlation

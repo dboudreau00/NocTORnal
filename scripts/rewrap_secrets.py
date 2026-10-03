@@ -161,6 +161,7 @@ def _persona(args) -> int:
     from noctornal_api.security.persona_sealed import (
         inventory,
         move_and_rewrap,
+        reseal_sessions,
         sealed_before_split,
     )
     from noctornal_api.wording import count_of
@@ -215,13 +216,23 @@ def _persona(args) -> int:
     print(f"  {report.table:32} moved {report.recovered}, re-sealed "
           f"{report.rewrapped}, skipped {report.skipped}, unopenable "
           f"{report.unopenable}")
+    # A forum persona's session cookies seal under the same ring: re-sealed
+    # with the credentials, or cleared when sealed before the ring existed.
+    sessions, session_cleared = reseal_sessions(conn)
+    print(f"  {sessions.table:32} re-sealed {sessions.rewrapped}, cleared "
+          f"{session_cleared}, skipped {sessions.skipped}, unopenable "
+          f"{sessions.unopenable}")
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
            VALUES (NULL, 'SYSTEM', 'PERSONA_KEK_REWRAP', 'kek', NULL, NULL, %s)""",
         (Json({"active_key_id": active, "moved": report.recovered,
                "rewrapped": report.rewrapped, "skipped": report.skipped,
-               "unopenable": report.unopenable}),))
+               "unopenable": report.unopenable,
+               "sessions": {"rewrapped": sessions.rewrapped,
+                            "cleared": session_cleared,
+                            "skipped": sessions.skipped,
+                            "unopenable": sessions.unopenable}}),))
     if report.unopenable:
         print(f"\n{report.unopenable} persona credentials open under nothing held "
               f"here and were left as found; the readiness row collector_split "

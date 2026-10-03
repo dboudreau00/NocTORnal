@@ -638,19 +638,25 @@ def _assertions(conn, column: str, element_id: UUID,
                         AND d.purged_at IS NULL
                         AND d.classification <= %s::core.tlp
                         AND s.classification <= %s::core.tlp
-                        AND d.compartments <@ %s::text[]) doc ON true
+                        AND d.compartments <@ %s::text[]
+                        AND s.compartments <@ %s::text[]) doc ON true
                 LEFT JOIN collect.source src
                        ON %s AND src.id = a.source_id
                       AND src.classification <= %s::core.tlp
+                      AND src.compartments <@ %s::text[]
                WHERE a.{column} = %s"""
     if not include_retracted:
         sql += " AND a.retracted_at IS NULL AND a.superseded_at IS NULL"
     sql += " ORDER BY a.recorded_at DESC LIMIT %s OFFSET %s"
+    # F43 (2026-10-02): the source's own compartments, on both legs, held
+    # to the reader's as the document's are.
     rows = conn.execute(sql, (
         may_see_exhibits, clearance, compartments,
         may_see_documents, doc_clearance, doc_clearance, doc_compartments,
-        may_see_documents, doc_clearance,
+        doc_compartments,
+        may_see_documents, doc_clearance, doc_compartments,
         element_id, limit, offset)).fetchall()
+
     return [
         AssertionOut(
             id=str(r[0]), basis=r[1], reliability=r[2], credibility=r[3],

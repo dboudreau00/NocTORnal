@@ -78,8 +78,10 @@ def test_the_hash_search_posts_the_value_in_the_body():
 
 def test_the_analysis_list_omits_machine_static_and_yara_rows():
     card = _fn("openSample")
+    # The machine ARCHIVE row (phase 8, 2026-10-02) is drawn by the archive
+    # panel, as STATIC and YARA are drawn by the triage panel.
     assert ("!(a.origin === 'machine'\n    && (a.kind === 'STATIC' || "
-            "a.kind === 'YARA'))") in card
+            "a.kind === 'YARA' || a.kind === 'ARCHIVE'))") in card
 
 
 def test_the_row_says_when_triage_is_waiting_or_failed():

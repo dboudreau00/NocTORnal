@@ -70,9 +70,9 @@ def act_answer(conn: psycopg.Connection, user: CurrentUser, *, kind: str,
         _raise_problem(act)
     if body is not None:
         return body
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     return persona_acts.served_body(conn, act, clearance=clearance.name,
-                                    adapters=adapters)
+                                    adapters=adapters, compartments=held)
 
 
 @router.get("", response_model=dict)
@@ -101,7 +101,7 @@ def get_act(
 ) -> dict:
     """One of the caller's acts. Once it has run, `body` is what the route
     answers for it, or `problem` the refusal it gives."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     act = persona_acts.read(conn, act_id, user_id=user.user_id,
                             clearance=clearance.name)
     if act is None:
@@ -109,7 +109,7 @@ def get_act(
     body = None
     if act["status"] == "DONE":
         body = persona_acts.served_body(conn, act, clearance=clearance.name,
-                                        adapters=adapters)
+                                        adapters=adapters, compartments=held)
     return {"act": persona_acts.public(act), "body": body,
             "problem": (act.get("result") or {}).get("problem")
             if act["status"] in persona_acts.FINISHED and act["status"] != "DONE"

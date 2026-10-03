@@ -1121,6 +1121,7 @@ class ContactBlockService:
                   AND d.classification <= %(cls)s::core.tlp
                   AND s.classification <= %(cls)s::core.tlp
                   AND d.compartments <@ (c.compartments || %(ks)s::text[])
+                  AND s.compartments <@ (c.compartments || %(ks)s::text[])
                   AND (EXISTS (SELECT 1 FROM collect.proposal p
                                 WHERE p.document_id = d.id
                                   AND p.case_id = c.id)

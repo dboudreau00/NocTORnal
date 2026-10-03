@@ -7,6 +7,13 @@ seals. `collect.collection_account.secret_ciphertext` left that list on
 (persona_envelope.py), which in production only the collector holds, so the
 API's readiness register could not open one if it tried and must not try.
 
+A persona's forum session (`session_ciphertext`, 0161, the authenticated
+forum path) seals under the same ring and is listed beside the credential
+(2026-10-03). It is a credential of the same standing and is NOT a second
+inventory: it is disposable (a persona whose session cannot be opened signs
+in again), so the readers below that count and open credentials leave it
+out, and `reseal_sessions` moves it with the credentials when the ring turns.
+
 Four readers here, one per process that has a question:
 
 - `key_groups` counts rows by key id and opens nothing. The API's readiness
@@ -40,9 +47,13 @@ from noctornal_api.security.sealed import SAMPLE_ROWS, RewrapReport, SealedGroup
 #: The persona ring's one sealed column (table, ciphertext, key id).
 PERSONA_SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("collect.collection_account", "secret_ciphertext", "secret_key_id"),
+    # A forum persona's session cookies, one sealed jar per board origin
+    # (forum_session.py): NULL once the persona stops.
+    ("collect.collection_account", "session_ciphertext", "session_key_id"),
 )
 
 _TABLE, _CIPHER, _KID = PERSONA_SEALED_COLUMNS[0]
+_S_TABLE, _S_CIPHER, _S_KID = PERSONA_SEALED_COLUMNS[1]
 
 
 @dataclass(frozen=True)
@@ -177,3 +188,51 @@ def move_and_rewrap(conn: psycopg.Connection, *, batch: int = 200) -> RewrapRepo
                 report.recovered += 1
             else:
                 report.rewrapped += 1
+
+
+def reseal_sessions(conn: psycopg.Connection, *,
+                    batch: int = 200) -> tuple[RewrapReport, int]:
+    """Every sealed forum session under the ACTIVE persona key: (report,
+    cleared). A session under a retired persona key is re-sealed (`rewrapped`);
+    one recorded under a TOTP ring id is CLEARED, never moved, because no
+    release sealed a session that way and the persona simply signs in
+    again; one nothing here opens is counted and left as found. A
+    compare-and-set on the ciphertext, row by row, as `move_and_rewrap`."""
+    active = persona_envelope.active_key_id()
+    report = RewrapReport(f"{_S_TABLE} (forum sessions)")
+    cleared = 0
+    last = None
+    while True:
+        rows = conn.execute(
+            f"SELECT id, {_S_CIPHER}, {_S_KID} FROM {_S_TABLE} "
+            f"WHERE octet_length({_S_CIPHER}) > 0 "
+            f"AND COALESCE({_S_KID}, %s) <> %s "
+            f"AND (%s::uuid IS NULL OR id > %s) ORDER BY id LIMIT %s",
+            (envelope.DEFAULT_KEY_ID, active, last, last, batch)).fetchall()
+        if not rows:
+            return report, cleared
+        for row_id, blob, key_id in rows:
+            last = row_id
+            blob = bytes(blob)
+            if not persona_envelope.is_persona_key_id(key_id):
+                cur = conn.execute(
+                    f"UPDATE {_S_TABLE} SET {_S_CIPHER} = NULL, {_S_KID} = NULL, "
+                    f"session_sealed_at = NULL "
+                    f"WHERE id = %s AND {_S_CIPHER} = %s", (row_id, blob))
+                cleared += cur.rowcount
+                continue
+            try:
+                plaintext = persona_envelope.decrypt(blob, key_id=key_id)
+            except persona_envelope.UNOPENABLE:
+                report.unopenable += 1
+                continue
+            new_blob, new_id = persona_envelope.encrypt(plaintext)
+            del plaintext
+            cur = conn.execute(
+                f"UPDATE {_S_TABLE} SET {_S_CIPHER} = %s, {_S_KID} = %s "
+                f"WHERE id = %s AND {_S_CIPHER} = %s",
+                (new_blob, new_id, row_id, blob))
+            if cur.rowcount == 1:
+                report.rewrapped += 1
+            else:
+                report.skipped += 1

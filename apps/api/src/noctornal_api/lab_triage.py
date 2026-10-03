@@ -1095,6 +1095,7 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                 settings: AnalysisSettings) -> str:
     """Steps 2 to 6 for one claimed run. Returns its final status, or
     INTERRUPTED when the sandbox failed under one of its children."""
+    from noctornal_api import lab_archive
     from noctornal_api.samples import SampleIntegrityError, SampleService
     data = None
     try:
@@ -1115,6 +1116,7 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
         nbytes = len(data)
         _write_scanned(conn, c, nbytes)
         pe = fz = yara = None
+        archive = None
         try:
             if "pe" in c.steps:
                 pe = _step_child("pe", data, settings, STEP_GAPS["pe"])
@@ -1129,19 +1131,26 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                     fz = _step_child("fuzzy", data, settings, STEP_GAPS["fuzzy"])
             if "yara" in c.steps:
                 yara = _yara_step(conn, c, data)
+            # Archive expansion's child (phase 8, 2026-10-02), through the
+            # SAME runner as every step above, so the sandbox failing under
+            # it interrupts the run the same way: nothing it found is
+            # written, the run waits for the worker at the same attempt, and
+            # the archive is never read as expanded or as clean. Only the
+            # child is asked here; the members become samples below, once
+            # the findings are on the record.
+            archive = lab_archive.prefetch(conn, c, data, settings)
         except AnalysisInterrupted as stop:
             # Nothing it found is written: the whole run waits for the
             # worker, at the same attempt (F42 review, 2026-10-02).
-            data = None
+            data = archive = None
             log.warning("static triage run %s waits for the worker: %s",
                         c.id, stop.failure)
             _finish(conn, c, "FAILED", CHILD_FAILURES[stop.failure],
                     retry=True, spend_attempt=False,
                     outcome={"interrupted": stop.failure})
             return INTERRUPTED
-        data = None
         try:
-            return _write_results(conn, c, pe, fz, yara, nbytes, settings)
+            status = _write_results(conn, c, pe, fz, yara, nbytes, settings)
         except _Discard:
             return "ABANDONED"
         except psycopg.errors.LockNotAvailable:
@@ -1154,6 +1163,14 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
             _finish(conn, c, "FAILED",
                     f"{RESULTS_REASON} ({type(exc).__name__})", retry=False)
             return "FAILED"
+        if status == "DONE":
+            # Archive expansion (phase 8, 2026-10-02): the same verified
+            # plaintext, once the run's findings are on the record, so a
+            # parent rejected mid-run never gains members. The plaintext is
+            # held until here for that one reader and dropped below.
+            lab_archive.expand_after_triage(conn, storage, c, data, settings,
+                                            child=archive)
+        return status
     finally:
         data = None
         try:
@@ -1336,8 +1353,11 @@ def compile_worst_s(settings: AnalysisSettings) -> float:
 
 def run_worst_s(settings: AnalysisSettings, open_versions: int) -> float:
     """The longest one run can take: its pe and fuzzy children and one
-    YARA child per open rule set version, each to its wall limit."""
-    return (2 + open_versions) * (settings.timeout_s + WALL_GRACE_S)
+    YARA child per open rule set version, each to its wall limit, and the
+    archive expansion child's (phase 8, 2026-10-02)."""
+    from noctornal_api import lab_archive
+    return ((2 + open_versions) * (settings.timeout_s + WALL_GRACE_S)
+            + lab_archive.wall_s())
 
 
 def compile_pending(conn: psycopg.Connection, settings: AnalysisSettings, *,

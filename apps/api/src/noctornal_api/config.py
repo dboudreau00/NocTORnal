@@ -769,10 +769,13 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     # F11 and F12, 2026-09-24. The static-triage and YARA settings,
     # through their one reader each, so the runner, readiness and this
     # cannot disagree about what is usable. Named, never quoted.
+    from noctornal_api.lab_archive import archive_settings
     from noctornal_api.lab_triage import analysis_settings
     from noctornal_api.yara_rules import yara_settings
     for reader, what in ((analysis_settings, "static triage"),
-                         (yara_settings, "YARA scanning")):
+                         (yara_settings, "YARA scanning"),
+                         # phase 8, 2026-10-02: the expansion's caps.
+                         (archive_settings, "archive expansion")):
         _settings, problem = reader(env)
         if problem:
             problems.append(

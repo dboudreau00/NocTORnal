@@ -45,6 +45,9 @@ SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # (F15.2), 2026-09-24. Both are zero bytes or NULL once destroyed.
     ("notify.jira_destination", "credential_ciphertext", "credential_key_id"),
     ("ingest.provider", "secret_ciphertext", "secret_key_id"),
+    # A persona's forum session cookies (collect.collection_account.
+    # session_ciphertext, 0161) are not here either: sealed as the credential
+    # is, under the persona ring, so security/persona_sealed.py lists it.
 )
 
 #: How many rows of one (table, key id) group the readiness check opens:

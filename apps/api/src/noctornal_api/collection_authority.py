@@ -66,6 +66,7 @@ from noctornal_api.collection import (
     CollectionError,
     CollectionNotFound,
     _attr,
+    _held,
     _utc,
     default_adapters,
 )
@@ -470,15 +471,21 @@ class CollectionAuthorityService:
                 out[s.id] = sentence
         return out
 
-    def uncovered_sources(self, *, clearance: str | None = None) -> list[dict]:
+    def uncovered_sources(self, *, clearance: str | None = None,
+                          compartments=None) -> list[dict]:
         """Active sources whose adapter requires an authority and that no
         live confirmed target covers: [{id, name, sentence}]."""
-        from noctornal_api.collection import _SOURCE_COLUMNS, _SOURCE_VISIBLE, _row_to_source
+        from noctornal_api.collection import (
+            _SOURCE_COLUMNS,
+            _SOURCE_VISIBLE_HELD,
+            _held,
+            _row_to_source,
+        )
 
         rows = self._c.execute(
             f"SELECT {_SOURCE_COLUMNS} FROM collect.source s "
-            f"WHERE s.is_active AND {_SOURCE_VISIBLE}",
-            {"clearance": clearance}).fetchall()
+            f"WHERE s.is_active AND {_SOURCE_VISIBLE_HELD}",
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
         sources = [_row_to_source(r) for r in rows]
         sources = [s for s in sources
                    if (a := self._adapters.get(s.parser_key)) is not None
@@ -537,19 +544,27 @@ class CollectionAuthorityService:
                         "valid_until": _iso(best.valid_until) if state != "NONE" else None}
         return out
 
-    def states_for_personas(self, ids: list[UUID], *, clearance: str | None
-                            ) -> dict[UUID, dict]:
+    def states_for_personas(self, ids: list[UUID], *, clearance: str | None,
+                            compartments=None) -> dict[UUID, dict]:
         """{persona id: {state, scope, valid_until}}: the LIVE authority
-        first, else the latest recorded, among those within `clearance`."""
+        first, else the latest recorded, among those within `clearance` and
+        with no target under a compartment the reader does not hold."""
         if not ids:
             return {}
         rows = self._c.execute(
-            """SELECT collection_account_id, scope, valid_from, valid_until,
-                      confirmed_at, revoked_at, recorded_at
-                 FROM collect.collection_authority
-                WHERE collection_account_id = ANY(%s)
-                  AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)""",
-            (list(ids), clearance, clearance)).fetchall()
+            """SELECT a.collection_account_id, a.scope, a.valid_from,
+                      a.valid_until, a.confirmed_at, a.revoked_at, a.recorded_at
+                 FROM collect.collection_authority a
+                WHERE a.collection_account_id = ANY(%(ids)s)
+                  AND (%(clearance)s::core.tlp IS NULL
+                       OR (a.classification <= %(clearance)s::core.tlp
+                           AND NOT EXISTS (
+                               SELECT 1 FROM collect.collection_authority_target t
+                                 JOIN collect.source s ON s.id = t.source_id
+                                WHERE t.authority_id = a.id
+                                  AND NOT s.compartments <@ %(held)s::text[])))""",
+            {"ids": list(ids), "clearance": clearance,
+             "held": _held(compartments)}).fetchall()
         now = datetime.now(timezone.utc)
         best: dict[UUID, tuple] = {}
         for pid, scope, vfrom, vuntil, confirmed, revoked, recorded in rows:
@@ -562,30 +577,36 @@ class CollectionAuthorityService:
 
     # -- recording ---------------------------------------------------------
 
-    def _visible_persona(self, persona_id: UUID, clearance: str | None) -> None:
+    def _visible_persona(self, persona_id: UUID, clearance: str | None,
+                         compartments=None) -> None:
         row = self._c.execute(
             f"SELECT 1 FROM collect.collection_account a "
             f"WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}",
-            {"id": persona_id, "clearance": clearance}).fetchone()
+            {"id": persona_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchone()
         if row is None:
             raise CollectionNotFound("no such persona, or it is above your clearance")
 
     def _target_sources(self, source_ids: list[UUID], *, persona_id,
-                        classification: str, clearance: str | None) -> list[tuple]:
+                        classification: str, clearance: str | None,
+                        compartments=None) -> list[tuple]:
         """Each source, visible to the caller, read by an authority adapter,
         labelled no higher than the authority, and bound as the authority
-        covers."""
+        covers. A source filed under a compartment the caller does not
+        hold (F43, 2026-10-02) is as absent as one above their ceiling."""
         from noctornal_api.security.access import tlp_from_name
 
         rows = []
         label = tlp_from_name(classification)
         limit = _rank(clearance)
+        held = frozenset(compartments or ())
         for sid in source_ids:
             row = self._c.execute(
                 """SELECT id, classification::text, parser_key,
-                          collection_account_id
+                          collection_account_id, compartments
                      FROM collect.source WHERE id = %s""", (sid,)).fetchone()
-            if row is None or (limit is not None and _rank(row[1]) > limit):
+            if row is None or (limit is not None and (
+                    _rank(row[1]) > limit or not frozenset(row[4] or []) <= held)):
                 raise CollectionNotFound(
                     "no such source, or it is above your clearance")
             adapter = self._adapters.get(row[2])
@@ -613,7 +634,7 @@ class CollectionAuthorityService:
                member_authority_ref: str | None, target_description: str,
                valid_from: datetime, valid_until: datetime,
                source_ids: list[UUID], recorded_by: UUID,
-               clearance: str | None) -> dict:
+               clearance: str | None, compartments=None) -> dict:
         """Record an authority and its first sources, as the first person.
         Checked before the database's own CHECKs, so a refusal is a
         sentence rather than a constraint name."""
@@ -665,10 +686,11 @@ class CollectionAuthorityService:
                 "jurisdiction, the legal basis and what it covers, in more "
                 "than 20 characters.")
         if persona_id is not None:
-            self._visible_persona(persona_id, clearance)
+            self._visible_persona(persona_id, clearance, compartments)
         with self._c.transaction():
             self._target_sources(ids, persona_id=persona_id,
-                                 classification=label.name, clearance=clearance)
+                                 classification=label.name, clearance=clearance,
+                                 compartments=compartments)
             authority_id = self._c.execute(
                 """INSERT INTO collect.collection_authority
                        (collection_account_id, scope, classification,
@@ -697,9 +719,11 @@ class CollectionAuthorityService:
             from noctornal_api import notify_events
             notify_events.collection_authority_pending(
                 self._c, authority_id=authority_id, actor_id=recorded_by)
-        return self.view(authority_id, clearance=clearance)
+        return self.view(authority_id, clearance=clearance,
+                         compartments=compartments)
 
-    def _authority(self, authority_id: UUID, clearance: str | None) -> tuple:
+    def _authority(self, authority_id: UUID, clearance: str | None,
+                   compartments=None) -> tuple:
         row = self._c.execute(
             """SELECT id, collection_account_id, recorded_by, confirmed_at,
                       revoked_at, valid_until, classification::text, scope
@@ -707,17 +731,37 @@ class CollectionAuthorityService:
                 WHERE id = %s
                   AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)""",
             (authority_id, clearance, clearance)).fetchone()
-        if row is None:
+        if row is None or self._walled([authority_id], clearance, compartments):
             raise CollectionNotFound(
                 "no such authority, or it is above your clearance")
         return row
 
+    def _walled(self, authority_ids: list[UUID], clearance: str | None,
+                compartments=None) -> set[UUID]:
+        """The authorities with a target under a compartment the reader does
+        not hold (g40 verify major 5e, 2026-10-03). Such an authority is
+        withheld whole, like one above the reader's ceiling: its free text
+        (what it covers, its member reference, its persona) names what the
+        compartment protects, and hiding only the targets array left that
+        text readable. A NULL clearance is the worker's and walls nothing."""
+        if clearance is None or not authority_ids:
+            return set()
+        rows = self._c.execute(
+            """SELECT DISTINCT t.authority_id
+                 FROM collect.collection_authority_target t
+                 JOIN collect.source s ON s.id = t.source_id
+                WHERE t.authority_id = ANY(%s)
+                  AND NOT s.compartments <@ %s::text[]""",
+            (list(authority_ids), _held(compartments))).fetchall()
+        return {r[0] for r in rows}
+
     def add_targets(self, authority_id: UUID, *, source_ids: list[UUID],
-                    added_by: UUID, clearance: str | None) -> dict:
+                    added_by: UUID, clearance: str | None,
+                    compartments=None) -> dict:
         """More sources under an authority. Each waits for a second person,
         and the officers are told, so a new target never waits
         silently."""
-        row = self._authority(authority_id, clearance)
+        row = self._authority(authority_id, clearance, compartments)
         if row[4] is not None:
             raise AuthorityError("This authority is revoked.")
         if row[5] <= datetime.now(timezone.utc):
@@ -727,7 +771,8 @@ class CollectionAuthorityService:
             raise CollectionError("Add between 1 and 100 sources at once.")
         with self._c.transaction():
             self._target_sources(ids, persona_id=row[1],
-                                 classification=row[6], clearance=clearance)
+                                 classification=row[6], clearance=clearance,
+                                 compartments=compartments)
             for sid in ids:
                 taken = self._c.execute(
                     """SELECT 1 FROM collect.collection_authority_target
@@ -745,17 +790,19 @@ class CollectionAuthorityService:
             from noctornal_api import notify_events
             notify_events.collection_authority_pending(
                 self._c, authority_id=authority_id, actor_id=added_by)
-        return self.view(authority_id, clearance=clearance)
+        return self.view(authority_id, clearance=clearance,
+                         compartments=compartments)
 
     def confirm(self, authority_id: UUID, *, confirmed_by: UUID, note: str,
-                target_ids: list[UUID], clearance: str | None) -> dict:
+                target_ids: list[UUID], clearance: str | None,
+                compartments=None) -> dict:
         """The second person. The authority (if it is still unconfirmed)
         and each listed target, in one transaction. Nobody confirms what
         they recorded or added, or what they cannot see."""
         note = (note or "").strip()
         if not 5 <= len(note) <= 1000:
             raise CollectionError("A confirmation says what was checked, in 5 to 1000 characters.")
-        row = self._authority(authority_id, clearance)
+        row = self._authority(authority_id, clearance, compartments)
         if row[2] == confirmed_by:
             raise AuthorityError(
                 "Two people: you recorded this authority, so somebody else "
@@ -765,16 +812,21 @@ class CollectionAuthorityService:
         if row[5] <= datetime.now(timezone.utc):
             raise AuthorityError("This authority has expired.")
         limit = _rank(clearance)
+        held = frozenset(compartments or ())
         targets = []
         for tid in dict.fromkeys(target_ids or []):
             target = self._c.execute(
                 """SELECT t.id, t.added_by, t.confirmed_at, t.revoked_at,
-                          s.classification::text
+                          s.classification::text, s.compartments
                      FROM collect.collection_authority_target t
                      JOIN collect.source s ON s.id = t.source_id
                     WHERE t.id = %s AND t.authority_id = %s""",
                 (tid, authority_id)).fetchone()
-            if target is None or (limit is not None and _rank(target[4]) > limit):
+            # F43 (2026-10-02): a target under a compartment the confirmer
+            # does not hold is as absent as one above their ceiling.
+            if target is None or (limit is not None and (
+                    _rank(target[4]) > limit
+                    or not frozenset(target[5] or []) <= held)):
                 raise CollectionNotFound(
                     "no such source under this authority, or it is above your "
                     "clearance")
@@ -807,13 +859,16 @@ class CollectionAuthorityService:
             self._audit(confirmed_by, "COLLECTION_AUTHORITY_CONFIRMED",
                         authority_id,
                         {"target_ids": [str(t) for t in targets], "note": note})
-        return self.view(authority_id, clearance=clearance)
+        return self.view(authority_id, clearance=clearance,
+                         compartments=compartments)
 
     def revoke(self, authority_id: UUID, *, revoked_by: UUID, reason: str,
-               by_role: str, clearance: str | None) -> dict:
-        """Either side may stop an authority at any time."""
+               by_role: str, clearance: str | None, compartments=None) -> dict:
+        """Either side may stop an authority at any time. One that covers a
+        source under a compartment the caller does not hold is as missing
+        to them as one above their ceiling: only a holder stops it."""
         reason = _reason(reason)
-        row = self._authority(authority_id, clearance)
+        row = self._authority(authority_id, clearance, compartments)
         if row[4] is not None:
             raise AuthorityError("This authority is revoked already.")
         self._c.execute(
@@ -823,22 +878,27 @@ class CollectionAuthorityService:
             (revoked_by, reason, authority_id))
         self._audit(revoked_by, "COLLECTION_AUTHORITY_REVOKED", authority_id,
                     {"reason": reason, "by_role": by_role})
-        return self.view(authority_id, clearance=clearance)
+        return self.view(authority_id, clearance=clearance,
+                         compartments=compartments)
 
     def revoke_target(self, target_id: UUID, *, revoked_by: UUID, reason: str,
-                      by_role: str, clearance: str | None) -> dict:
+                      by_role: str, clearance: str | None,
+                      compartments=None) -> dict:
         """Either side may take one source out from under an authority."""
         reason = _reason(reason)
         row = self._c.execute(
-            """SELECT t.authority_id, t.revoked_at, s.classification::text
+            """SELECT t.authority_id, t.revoked_at, s.classification::text,
+                      s.compartments
                  FROM collect.collection_authority_target t
                  JOIN collect.source s ON s.id = t.source_id
                 WHERE t.id = %s""", (target_id,)).fetchone()
         limit = _rank(clearance)
-        if row is None or (limit is not None and _rank(row[2]) > limit):
+        if row is None or (limit is not None and (
+                _rank(row[2]) > limit
+                or not frozenset(row[3] or []) <= frozenset(compartments or ()))):
             raise CollectionNotFound(
                 "no such source under an authority, or it is above your clearance")
-        self._authority(row[0], clearance)
+        self._authority(row[0], clearance, compartments)
         if row[1] is not None:
             raise AuthorityError("That source is no longer under this authority.")
         self._c.execute(
@@ -849,7 +909,8 @@ class CollectionAuthorityService:
         self._audit(revoked_by, "COLLECTION_AUTHORITY_TARGET_REVOKED", row[0],
                     {"target_id": str(target_id), "reason": reason,
                      "by_role": by_role})
-        return self.view(row[0], clearance=clearance)
+        return self.view(row[0], clearance=clearance,
+                         compartments=compartments)
 
     # -- reading -----------------------------------------------------------
 
@@ -867,7 +928,8 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
                              WHERE (vs.id = a2.source_id
                                     OR vs.collection_account_id = a2.id)
                                AND %(clearance)s::core.tlp IS NOT NULL
-                               AND vs.classification > %(clearance)s::core.tlp))
+                               AND (vs.classification > %(clearance)s::core.tlp
+                                    OR NOT vs.compartments <@ %(held)s::text[])))
        END
   FROM collect.collection_authority a
   LEFT JOIN collect.collection_account p ON p.id = a.collection_account_id
@@ -877,10 +939,11 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
  WHERE (%(clearance)s::core.tlp IS NULL
         OR a.classification <= %(clearance)s::core.tlp)"""
 
-    def _targets(self, authority_ids: list[UUID], clearance: str | None
-                 ) -> tuple[dict[UUID, list[dict]], set[UUID]]:
+    def _targets(self, authority_ids: list[UUID], clearance: str | None,
+                 compartments=None) -> tuple[dict[UUID, list[dict]], set[UUID]]:
         """Each authority's targets the caller may see, and the ids of the
-        authorities with a target above the caller's ceiling."""
+        authorities with a target above the caller's ceiling or under a
+        compartment they do not hold (F43, 2026-10-02)."""
         rows = self._c.execute(
             """SELECT t.id, t.authority_id, t.source_id, s.name, s.kind::text,
                       t.target_base_url, s.base_url, t.target_egress_profile_id,
@@ -892,7 +955,9 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
                                WHERE (vs.id = pa.source_id
                                       OR vs.collection_account_id = pa.id)
                                  AND %(clearance)s::core.tlp IS NOT NULL
-                                 AND vs.classification > %(clearance)s::core.tlp)
+                                 AND (vs.classification > %(clearance)s::core.tlp
+                                      OR NOT vs.compartments <@ %(held)s::text[])),
+                      s.compartments
                  FROM collect.collection_authority_target t
                  JOIN collect.collection_authority a ON a.id = t.authority_id
                  JOIN collect.source s ON s.id = t.source_id
@@ -903,14 +968,17 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
                         ON pa.id = a.collection_account_id
                 WHERE t.authority_id = ANY(%(ids)s)
                 ORDER BY t.added_at""",
-            {"ids": list(authority_ids), "clearance": clearance}).fetchall()
+            {"ids": list(authority_ids), "clearance": clearance,
+             "held": _held(compartments)}).fetchall()
         import urllib.parse
 
         limit = _rank(clearance)
+        held = frozenset(compartments or ())
         out: dict[UUID, list[dict]] = {}
         hidden: set[UUID] = set()
         for r in rows:
-            if limit is not None and _rank(r[14]) > limit:
+            if limit is not None and (_rank(r[14]) > limit
+                                      or not frozenset(r[18] or []) <= held):
                 hidden.add(r[1])
                 continue
             snapshot_host = None
@@ -937,9 +1005,12 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
                 "added_by_name": r[13]})
         return out, hidden
 
-    def _views(self, rows, clearance: str | None) -> list[dict]:
+    def _views(self, rows, clearance: str | None, compartments=None) -> list[dict]:
         now = datetime.now(timezone.utc)
-        targets, hidden = self._targets([r[0] for r in rows], clearance)
+        walled = self._walled([r[0] for r in rows], clearance, compartments)
+        rows = [r for r in rows if r[0] not in walled]
+        targets, hidden = self._targets([r[0] for r in rows], clearance,
+                                        compartments)
         # F5.3 (2026-09-24). A Telegram target has no address, so the
         # confirmer is shown which chat it is and how it is read.
         from noctornal_api.telegram_service import attach_target_chats
@@ -970,54 +1041,71 @@ SELECT a.id, a.collection_account_id, p.handle, a.scope,
             })
         return views
 
-    def view(self, authority_id: UUID, *, clearance: str | None) -> dict:
-        row = self._c.execute(self._VIEW_SQL + " AND a.id = %(id)s",
-                              {"clearance": clearance, "id": authority_id}).fetchone()
-        if row is None:
+    def view(self, authority_id: UUID, *, clearance: str | None,
+             compartments=None) -> dict:
+        row = self._c.execute(
+            self._VIEW_SQL + " AND a.id = %(id)s",
+            {"clearance": clearance, "id": authority_id,
+             "held": _held(compartments)}).fetchone()
+        views = self._views([row], clearance, compartments) if row else []
+        if not views:
             raise CollectionNotFound(
                 "no such authority, or it is above your clearance")
-        return self._views([row], clearance)[0]
+        return views[0]
 
-    def _withheld(self, clearance: str | None, persona_id: UUID | None = None) -> bool:
+    def _withheld(self, clearance: str | None, persona_id: UUID | None = None,
+                  compartments=None) -> bool:
+        """Whether some authority is withheld whole from this reader: one
+        above their ceiling, or one with a target under a compartment they
+        do not hold. A bit, never a count (docs/16 D2, PRESENCE)."""
         if clearance is None:
             return False
         return self._c.execute(
-            """SELECT EXISTS (SELECT 1 FROM collect.collection_authority
-                               WHERE classification > %s::core.tlp
-                                 AND (%s::uuid IS NULL
-                                      OR collection_account_id = %s))""",
-            (clearance, persona_id, persona_id)).fetchone()[0]
+            """SELECT EXISTS (
+                   SELECT 1 FROM collect.collection_authority a
+                    WHERE (%(persona)s::uuid IS NULL
+                           OR a.collection_account_id = %(persona)s)
+                      AND (a.classification > %(clearance)s::core.tlp
+                           OR EXISTS (
+                               SELECT 1 FROM collect.collection_authority_target t
+                                 JOIN collect.source s ON s.id = t.source_id
+                                WHERE t.authority_id = a.id
+                                  AND NOT s.compartments <@ %(held)s::text[])))""",
+            {"clearance": clearance, "persona": persona_id,
+             "held": _held(compartments)}).fetchone()[0]
 
     def listing(self, *, clearance: str | None, persona_id: UUID | None = None,
-                state: str | None = None) -> dict:
+                state: str | None = None, compartments=None) -> dict:
         """Every authority the caller may see, newest first. Rows above the
         caller's clearance are withheld whole, and `withheld` says only
         that some were, never how many (docs/16 D2, PRESENCE)."""
         rows = self._c.execute(
             self._VIEW_SQL + " AND (%(persona)s::uuid IS NULL "
             "OR a.collection_account_id = %(persona)s) ORDER BY a.recorded_at DESC",
-            {"clearance": clearance, "persona": persona_id}).fetchall()
-        views = self._views(rows, clearance)
+            {"clearance": clearance, "persona": persona_id,
+             "held": _held(compartments)}).fetchall()
+        views = self._views(rows, clearance, compartments)
         if state:
             views = [v for v in views if v["state"] == state]
         return {"authorities": views,
-                "withheld": self._withheld(clearance, persona_id)}
+                "withheld": self._withheld(clearance, persona_id, compartments)}
 
-    def review(self, *, clearance: str | None) -> dict:
+    def review(self, *, clearance: str | None, compartments=None) -> dict:
         """The confirmer's queue: `pending` (unconfirmed authorities, or live
         ones with sources waiting, not revoked and not expired, oldest
         first) and `live` (so the officer can find what to revoke)."""
         rows = self._c.execute(
             self._VIEW_SQL + " AND a.revoked_at IS NULL AND a.valid_until > now()"
-            " ORDER BY a.recorded_at", {"clearance": clearance}).fetchall()
-        views = self._views(rows, clearance)
+            " ORDER BY a.recorded_at",
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
+        views = self._views(rows, clearance, compartments)
         pending = [v for v in views
                    if v["state"] in ("PENDING", "NOT_YET_VALID", "LIVE")
                    and (v["confirmed_at"] is None
                         or any(t["state"] == "PENDING" for t in v["targets"]))]
         live = [v for v in views if v["state"] == "LIVE"]
         return {"pending": pending, "live": live,
-                "withheld": self._withheld(clearance)}
+                "withheld": self._withheld(clearance, None, compartments)}
 
     def _audit(self, actor_id: UUID, action: str, authority_id: UUID,
                detail: dict) -> None:
