@@ -84,6 +84,36 @@ HELD = `(SELECT iam.rls_compartments())`:
   inline, because the source is exempt (the egress proxy reads it) and so
   carries no policy for a CHILD test to lean on; the same reading as
   `collection._SOURCE_VISIBLE`, held to the case-less ceiling.
+- CUSTOM_RECORD (an ingest record, 0154): compartments held, and either
+  attached (the ELEMENT test on its case) or quarantined (no case,
+  `ingest.manage` held globally through an initplan, its classification
+  within CLR); a SELECT and an UPDATE policy.
+- CUSTOM_DEAD_LETTER (0154, read only): compartments held and 0153's one
+  definer predicate `iam.ingest_dead_letter_visible`, which reads the cases
+  the dead letter's batch fed over `record_batch_case_idx` (0152): visible
+  through any of them the reader may read, at that case's ceiling, or, for
+  a batch that fed none, to an `ingest.manage` holder within CLR. Its reach
+  arguments are the caller's initplans and only narrow: every yes is
+  confirmed against the bound actor.
+- CUSTOM_PII_AUTHORISATION (0154): read in a readable case (CASE); granted
+  only by its grantor holding `victim_pii.authorise` globally, in a
+  readable case, dated at the moment it is made; counted only by its
+  grantee, on a live, unrevoked row. The grant is the GLOBAL half of the
+  route's gate: the case half (the permission read off the grantor's one
+  role on that case) is not asked at the database (docs/17, g31
+  verification 2, 2026-10-03).
+
+A table the request role writes only by UPDATE carries its template as a
+SELECT and an UPDATE policy and nothing else, so no INSERT of the request
+role reaches its keys and no DELETE reaches a row: `ingest.record` and
+`ingest.victim_credential` (0154), whose rows are made and destroyed on
+system connections (F51, 2026-10-02).
+
+A policy says which rows, never which columns or values. On
+`ingest.record`, `ingest.victim_credential` and `ingest.pii_authorisation`
+the request role holds UPDATE only on the columns a request writes, and a
+guard trigger holds what those columns may become, as 0109 and 0112 do for
+the session (0155, F51, 2026-10-02).
 
 A table the request role never writes carries its template as a SELECT
 policy alone (`rls_read`), so no INSERT of the request role reaches its
@@ -208,6 +238,14 @@ POLICY: dict[str, str] = {
     # duplicate check runs as a system purpose (TELEGRAM_INTAKE), and the
     # attended acts refuse a write that changed no chat.
     "collect.telegram_chat": "CUSTOM_SOURCE_CHILD",
+    # 0154 (F51, 2026-10-02): the ingest records and what hangs off them. A
+    # parse, a replay, every scoring pass and the fingerprint correlation
+    # run as INGEST; the routes read a record's labels and a batch's cases
+    # as facts (0153), and the queue's copy total is a WITHHELD count.
+    "ingest.record": "CUSTOM_RECORD",
+    "ingest.victim_credential": "CHILD",
+    "ingest.dead_letter": "CUSTOM_DEAD_LETTER",
+    "ingest.pii_authorisation": "CUSTOM_PII_AUTHORISATION",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -298,29 +336,6 @@ DEFERRED: dict[str, str] = {
         "iam.countersign_blocked_by reads it inside a trigger and becomes "
         "SECURITY DEFINER; the out-of-band audit writers keep working as "
         "appends"),
-    "ingest.record": (
-        "CUSTOM (attached: case readable and labels within reach; "
-        "quarantined: ingest.manage held and labels within reach, through "
-        "an initplan). Owed first: the unauthenticated submit "
-        "(routers/ingest.submit, bound to no user), parse_batch, replay, "
-        "score_records and rescore run as a system purpose (they dedupe "
-        "against every record, score against every watch and write rows "
-        "their caller may be below); the queue's triage state, read from "
-        "audit.event, moves with that table"),
-    "ingest.victim_credential": (
-        "CHILD of record, after record; reveal_credential and "
-        "credentials_masked are gated on ingest.pii_authorisation first"),
-    "ingest.dead_letter": (
-        "CUSTOM through one definer predicate backed by an index on "
-        "ingest.record (batch_id, case_id), after record; "
-        "scripts/redact_dead_letters.py is a system purpose already"),
-    "ingest.pii_authorisation": (
-        "CASE template for the Lead investigator's reveal "
-        "(_live_authorisation), and a term admitting a global holder of "
-        "victim_pii.authorise: the Security Officer who grants it holds no "
-        "case assignment (Security Officers read no case content), so "
-        "grant_pii_authorisation and its listing would otherwise be "
-        "refused; with ingest.record"),
 }
 
 #: Trigger functions that read a policied table and stay SECURITY INVOKER,

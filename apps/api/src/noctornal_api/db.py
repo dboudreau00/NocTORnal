@@ -154,6 +154,10 @@ class SystemPurpose(StrEnum):
     MINIMISATION = "minimisation"
     # Ingest scoring's watch list: a quarantined record scores against every
     # watch in the deployment (S1, 2026-09-25).
+    # And, since ingest.record is policied (0154), a batch's parse, a dead
+    # letter's replay, every scoring pass and the fingerprint correlation:
+    # each dedupes or answers across every record and writes rows at the
+    # feed key's label, which may sit above its caller (F51, 2026-10-02).
     INGEST = "ingest"
     SANDBOX = "sandbox"                  # detonation dispatch and polling
     # The embedding pass, and an index's registration, activation, recheck

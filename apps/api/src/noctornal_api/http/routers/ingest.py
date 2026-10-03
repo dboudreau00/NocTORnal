@@ -43,6 +43,7 @@ import psycopg
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     CurrentUser,
     audit_auth_event,
@@ -129,10 +130,14 @@ def _own_record(conn: psycopg.Connection, record_id: UUID) -> tuple:
     `ingest.read` verb. Reproduced live: a GREEN, unassigned analyst
     listed the credential inventory of an AMBER_STRICT compartmented
     record.
+
+    Read as a fact (F51, 2026-10-02): under row-level security a record
+    above the caller in a case they work would otherwise be absent, and the
+    gate would never refuse it and audit the refusal (decision 141).
     """
     row = conn.execute(
         """SELECT case_id, classification, compartments
-             FROM ingest.record WHERE id = %s""", (record_id,)).fetchone()
+             FROM iam.ingest_record_facts(%s)""", (record_id,)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "no such record")
     return row[0], row[1], frozenset(row[2] or [])
@@ -652,11 +657,14 @@ def dead_letters(
         # cases. 404 either way: "that key exists but fed nobody you read"
         # is a disclosure about the deployment's feeds (deps.py rule 2),
         # and it is the answer `/records` gives for a case off-scope.
+        # The batch's cases as a fact (F51, 2026-10-02): a feed into the
+        # caller's case whose records sit above them still fed that case.
         fed = conn.execute(
             """SELECT 1 FROM ingest.batch b
-                 JOIN ingest.record r ON r.batch_id = b.id
-                WHERE b.api_key_id = %s AND r.case_id = ANY(%s::uuid[])
-                LIMIT 1""", (api_key_id, allowed)).fetchone()
+                CROSS JOIN LATERAL iam.ingest_batch_reach(b.id, %s::uuid[]) f
+                WHERE b.api_key_id = %s
+                  AND pg_catalog.cardinality(f.cases) > 0
+                LIMIT 1""", (allowed, api_key_id)).fetchone()
         if fed is None:
             raise Problem(404, "Not found", "no such key")
 
@@ -670,28 +678,29 @@ def dead_letters(
     # says which is which, and `scripts/redact_dead_letters.py` is the
     # repair. Never render `raw_fragment` as HTML -- invariant 10's
     # reasoning applies to any attacker-controlled bytes, not only samples.
+    #
+    # The cases each row's batch fed, and whether it fed none, are read as
+    # facts (`iam.ingest_batch_reach`, F51, 2026-10-02), never through the
+    # record policy: a batch whose records sit above the caller would read
+    # as feeding nothing, and another case's feed failures would be listed
+    # to the operator as unattached. `fed_scope` is within `allowed`, so the
+    # cases asked of `allowed` answer both.
     clearance, compartments = user_ceiling(conn, user.user_id)
     rows = conn.execute(
         """SELECT dl.id, dl.batch_id, dl.error_class, dl.error_detail,
                   dl.occurred_at, dl.replayed_at, dl.resolution,
                   dl.raw_fragment, dl.redacted, dl.classification,
                   dl.retain_until, k.name, k.key_id,
-                  ARRAY(SELECT DISTINCT r.case_id FROM ingest.record r
-                         WHERE r.batch_id = dl.batch_id
-                           AND r.case_id = ANY(%s::uuid[])),
+                  fed.cases,
                   dl.compartments, dl.api_key_id
              FROM ingest.dead_letter dl
              LEFT JOIN ingest.api_key k ON k.id = dl.api_key_id
+             CROSS JOIN LATERAL iam.ingest_batch_reach(dl.batch_id, %s::uuid[]) fed
             WHERE (%s::uuid IS NULL OR dl.api_key_id = %s)
               AND dl.purged_at IS NULL
               AND dl.classification <= %s::core.tlp
               AND dl.compartments <@ %s
-              AND (EXISTS (SELECT 1 FROM ingest.record r
-                            WHERE r.batch_id = dl.batch_id
-                              AND r.case_id = ANY(%s::uuid[]))
-                   OR (%s AND NOT EXISTS (SELECT 1 FROM ingest.record r
-                                           WHERE r.batch_id = dl.batch_id
-                                             AND r.case_id IS NOT NULL)))
+              AND (fed.cases && %s::uuid[] OR (%s AND fed.unattached))
             ORDER BY dl.occurred_at DESC LIMIT %s""",
         (allowed, api_key_id, api_key_id, clearance.name, list(compartments),
          fed_scope, with_unattached, limit)).fetchall()
@@ -793,7 +802,10 @@ class _Reach(NamedTuple):
     how: str | None
     classification: str | None = None
     compartments: frozenset[str] = frozenset()
-    #: Every case a record of its batch went to: the dead letter's own.
+    #: Every case a record of its batch went to that the caller may read:
+    #: the dead letter's own, as far as the caller can see (F51,
+    #: 2026-10-02). Enough for the move check, whose target case has
+    #: passed the gate and so is one of them if the batch fed it.
     fed: tuple[UUID, ...] = ()
     #: Those of `fed` the caller reads it through (`how == "case"`).
     seen: tuple[UUID, ...] = ()
@@ -809,19 +821,26 @@ def _dead_letter_reach(conn: psycopg.Connection, user: CurrentUser,
 
     Asked as questions (`_case_allows`), so nothing here counts a
     break-glass use: `replay` counts once, at the gate that lets the
-    replay through (r2 c5, 2026-09-24)."""
+    replay through (r2 c5, 2026-09-24).
+
+    The batch's cases are read as a fact (F51, 2026-10-02), never through
+    the record policy, under which a batch whose records sit above the
+    caller would read as feeding no case and its dead letter as the
+    operator's. Whether it fed none at all is told only to the operator."""
     row = conn.execute(
-        """SELECT dl.classification, dl.compartments,
-                  ARRAY(SELECT DISTINCT r.case_id FROM ingest.record r
-                         WHERE r.batch_id = dl.batch_id
-                           AND r.case_id IS NOT NULL)
+        """SELECT dl.classification, dl.compartments, fed.cases, fed.unattached
              FROM ingest.dead_letter dl
+             CROSS JOIN LATERAL iam.ingest_batch_reach(dl.batch_id, NULL) fed
             WHERE dl.id = %s AND dl.purged_at IS NULL""",
         (dead_letter_id,)).fetchone()
     if row is None:
         return _Reach(None)
     labels = (row[0], frozenset(row[1] or []))
     fed = tuple(row[2] or ())
+    if not fed and not row[3]:
+        # It fed a case, none of them the caller's: the listing would not
+        # show it, and it is nobody's quarantine.
+        return _Reach(None, *labels)
     if fed:
         seen = tuple(case for case in fed
                      if _case_allows(conn, user, case, "ingest.read",
@@ -989,6 +1008,12 @@ def replay(
 #: table for the page's copies, since nothing indexed `duplicate_of`; it is
 #: an index lookup on `record_duplicate_of_idx` since L4 (2026-09-24,
 #: migration 0072), as is a record's own copies (`_COPIES_SQL`).
+#:
+#: **The total is counted apart (F51, 2026-10-02).** Under row-level
+#: security this projection reads only the copies the caller may read, so
+#: `dup` counts the readable ones and column 16 is a placeholder:
+#: `duplicate_count`, the total with the copies the caller cannot see, is
+#: `_copy_totals`, a WITHHELD count over the page's own ids.
 def _queue_sql(where: str, tail: str = "") -> str:
     """The queue projection over the records `where` selects.
 
@@ -1003,7 +1028,6 @@ def _queue_sql(where: str, tail: str = "") -> str:
               {tail}),
         dup AS MATERIALIZED (
              SELECT d.duplicate_of AS primary_id, dk.name,
-                    count(*) AS total,
                     count(*) FILTER (
                         WHERE d.purged_at IS NULL
                           AND d.classification <= %(clearance)s::core.tlp
@@ -1022,7 +1046,7 @@ def _queue_sql(where: str, tail: str = "") -> str:
                k.name, k.key_id,
                (SELECT count(*) FROM ingest.victim_credential vc
                  WHERE vc.record_id = r.id),
-               coalesce(dupx.total, 0)::bigint,
+               NULL::bigint,
                dupx.feeds, dupx.seen::bigint,
                prim.received_at, prim.feed, prim.visible,
                tri.detail, tri.occurred_at, tri.actor,
@@ -1032,8 +1056,7 @@ def _queue_sql(where: str, tail: str = "") -> str:
           JOIN ingest.batch b ON b.id = r.batch_id
           JOIN ingest.api_key k ON k.id = b.api_key_id
           LEFT JOIN LATERAL (
-                SELECT sum(x.total) AS total,
-                       array_agg(x.name ORDER BY x.name)
+                SELECT array_agg(x.name ORDER BY x.name)
                            FILTER (WHERE x.seen > 0) AS feeds,
                        coalesce(sum(x.seen), 0) AS seen,
                        coalesce(jsonb_agg(jsonb_build_object(
@@ -1131,7 +1154,23 @@ def _visible_detail(detail: dict | None, record_case: UUID | None,
     return detail
 
 
-def _queue_row(r, allowed: set[str] | None = None) -> dict:
+def _copy_totals(conn: psycopg.Connection, record_ids: list) -> dict:
+    """Every folded copy of each record, the ones the caller cannot see
+    included: `duplicate_count` is the total, as it always was, and the
+    console says how much of it is unseen (F51, 2026-10-02). A WITHHELD
+    count on a system connection, over ids the caller's own read returned,
+    so it names no record the caller could not already read."""
+    if not record_ids:
+        return {}
+    with system_connection(SystemPurpose.WITHHELD, reuse=conn) as sconn:
+        return {row[0]: int(row[1]) for row in sconn.execute(
+            """SELECT duplicate_of, count(*) FROM ingest.record
+                WHERE duplicate_of = ANY(%s::uuid[])
+                GROUP BY duplicate_of""", (list(record_ids),)).fetchall()}
+
+
+def _queue_row(r, allowed: set[str] | None = None,
+               copies: dict | None = None) -> dict:
     triage = r[22] or {}
     corrected = r[25] or None
     return {
@@ -1151,7 +1190,7 @@ def _queue_row(r, allowed: set[str] | None = None) -> dict:
         "received_at": r[12].isoformat() if r[12] else None,
         "feed": r[13], "key_id": r[14],
         "credential_count": r[15],
-        "duplicate_count": r[16],
+        "duplicate_count": (copies or {}).get(r[0], 0),
         # Which feeds sent the folded copies the caller may read, and how
         # many of the copies that is. A copy from the row's own feed is a
         # resend, not a second source.
@@ -1306,7 +1345,9 @@ def records(
                       dupes=include_duplicates, triage=triage_state,
                       limit=limit)).fetchall()
     seen = {str(c) for c in allowed}
-    return {"records": [_queue_row(r, seen) for r in rows], "count": len(rows),
+    copies = _copy_totals(conn, [r[0] for r in rows])
+    return {"records": [_queue_row(r, seen, copies) for r in rows],
+            "count": len(rows),
             "facets": _facets(conn, scope, clearance, compartments),
             "notice": (
                 "Near-duplicates are folded, not dropped, and duplicate_count "
@@ -1349,7 +1390,9 @@ def quarantine(
         _queue_params(allowed, True, clearance, compartments,
                       limit=limit)).fetchall()
     seen = {str(c) for c in allowed}
-    return {"records": [_queue_row(r, seen) for r in rows], "count": len(rows),
+    copies = _copy_totals(conn, [r[0] for r in rows])
+    return {"records": [_queue_row(r, seen, copies) for r in rows],
+            "count": len(rows),
             "notice": ("Unattached material. Attaching it to a case is what "
                        "puts it under that case's authority and review "
                        "clock; until then it expires on the category's.")}
@@ -1391,7 +1434,7 @@ def record_detail(
     if row is None:
         raise Problem(404, "Not found", "no such record")
     seen = {str(c) for c in allowed}
-    out = _queue_row(row, seen)
+    out = _queue_row(row, seen, _copy_totals(conn, [row[0]]))
     batch = conn.execute(
         """SELECT b.id, b.received_at, b.raw_bytes, b.raw_sha256,
                   b.detected_format, b.content_type, b.parsed_at,

@@ -178,6 +178,10 @@ def _own_evidence(conn: psycopg.Connection, evidence_id: UUID) -> UUID:
 def rules(
     user: CurrentUser = Depends(require_global("retention.read")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The live records per category are counted on a system connection
+    # (F51, 2026-10-02): a category whose records all sit above the officer
+    # would otherwise read as not in use, and its missing rule as no gap.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Every per-category rule, and which of them nobody has confirmed.
 
@@ -207,7 +211,7 @@ def rules(
                              if rule.confirmed_at else None),
         })
     unconfirmed = [r["category"] for r in out if r["is_placeholder"]]
-    in_use = _categories_in_use(conn, user, {c: r for c, r in found})
+    in_use = _categories_in_use(conn, user, {c: r for c, r in found}, sconn)
     unruled = [c["category"] for c in in_use if not c["has_rule"]]
     # The console prints this notice as it stands, so it says "rules" or
     # "rule" and names no design document: "6 rule(s) ... (docs/16 D3)"
@@ -231,7 +235,7 @@ def rules(
 
 
 def _categories_in_use(conn: psycopg.Connection, user: CurrentUser,
-                       rules: dict) -> list[dict]:
+                       rules: dict, sconn: psycopg.Connection) -> list[dict]:
     """Every ingest category with live records on the caller's cases, with
     the clock it actually runs on.
 
@@ -258,7 +262,9 @@ def _categories_in_use(conn: psycopg.Connection, user: CurrentUser,
              if _allowed_on_case(conn, user, r[0], "retention.read")]
     if not scope:
         return []
-    rows = conn.execute(
+    # `sconn` (F51, 2026-10-02): every live record on the officer's cases,
+    # whatever its own labels, as the deadline list counts them.
+    rows = sconn.execute(
         """SELECT category, count(*), min(retain_until)
              FROM ingest.record
             WHERE purged_at IS NULL AND case_id = ANY(%s)
@@ -303,6 +309,10 @@ def confirm_rule(
     category: str, body: ConfirmRuleBody,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The records the confirmation does not reach are counted on a system
+    # connection (F51, 2026-10-02), so a record above the officer is in the
+    # count it is told about rather than silently left out.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Replace a placeholder with a decision, and record who made it.
 
@@ -335,7 +345,7 @@ def confirm_rule(
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     scope = _authorised_cases(conn, user, "retention.read")
-    unchanged = conn.execute(
+    unchanged = sconn.execute(
         """SELECT count(*) FROM ingest.record
             WHERE category = %s AND purged_at IS NULL
               AND retain_until IS NOT NULL AND case_id = ANY(%s)""",

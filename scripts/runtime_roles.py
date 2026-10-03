@@ -29,7 +29,11 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
 3. On THIS database: the runtime grants for both roles (0108's
    `grants_sql`, the shape 0060 set plus every later revoke), then 0109's
    IAM-plane lockdown for the request role when the database is at or past
-   0109.
+   0109, then 0155's column grants on the ingest records, credentials and
+   authorisations when it is at or past 0155 (`grant`). 0108's replay hands
+   both roles table UPDATE on every table, so without the 0155 step a role
+   created after that revision ran would get back the columns it took away
+   (F51, 2026-10-02).
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -96,6 +100,19 @@ def _at_or_past(conn, revision: str) -> bool:
     return bool(row and row[0] >= revision)
 
 
+def grant(conn) -> None:
+    """Step 3: replay the migrations' runtime grants on this database, in
+    chain order, each only once the database has reached it."""
+    grants = _migration("0108")
+    conn.execute(grants.grants_sql(APP_ROLE))
+    conn.execute(grants.grants_sql(WORKER_ROLE))
+    if _at_or_past(conn, "0109"):
+        conn.execute(_migration("0109").UPGRADE_SQL)
+    # 0155's GRANTS_SQL only: its guards are created once, by the migration.
+    if _at_or_past(conn, "0155"):
+        conn.execute(_migration("0155").GRANTS_SQL)
+
+
 def ensure(conn) -> int:
     superuser = conn.execute(
         "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]
@@ -108,11 +125,7 @@ def ensure(conn) -> int:
         return 1
     for statement in create_statements():
         conn.execute(statement)
-    grants = _migration("0108")
-    conn.execute(grants.grants_sql(APP_ROLE))
-    conn.execute(grants.grants_sql(WORKER_ROLE))
-    if _at_or_past(conn, "0109"):
-        conn.execute(_migration("0109").UPGRADE_SQL)
+    grant(conn)
     print(f"{APP_ROLE} and {WORKER_ROLE} exist and are granted on this database.")
     print(f"NOCTORNAL_APP_DB_ROLE={APP_ROLE}")
     print(f"NOCTORNAL_WORKER_DB_ROLE={WORKER_ROLE}")
