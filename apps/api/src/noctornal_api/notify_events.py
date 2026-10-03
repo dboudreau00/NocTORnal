@@ -134,7 +134,14 @@ def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
 
 def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                        request_id: UUID, operation: str, permission: str,
-                       justification: str, actor_id: UUID) -> int:
+                       justification: str, actor_id: UUID,
+                       # The labels of what the request names (a node.merge
+                       # names two entities): the body quotes the
+                       # justification, so a signer below them is not sent
+                       # it (http_ui-011, 2026-10-03).
+                       element_classification: str | None = None,
+                       element_compartments: frozenset[str] = frozenset(),
+                       ) -> int:
     """Tell everyone on the case who could actually approve it.
 
     Not the case owner, and not everyone assigned: the people who hold the
@@ -182,6 +189,8 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                   f"checked the specific parameters, not that you trust the "
                   f"person asking."),
             classification=classification, compartments=compartments,
+            element_classification=element_classification,
+            element_compartments=element_compartments,
             object_type="approval_request", object_id=request_id,
             actor_id=actor_id)
         if raised is not None:

@@ -91,6 +91,16 @@ _CONFIDENCE = frozenset({"LOW", "MODERATE", "HIGH"})
 #: belongs to the model's own history, not to a reviewer's hand.
 REVIEW_STATES = ("ACCEPTED", "DISPUTED", "PROPOSED")
 
+#: The refusal of a retirement over material above the caller, kept in one
+#: place since 2026-10-03 because a second guard (a live merge into the
+#: entity whose merged side the caller cannot see) must answer in exactly
+#: these words, so the two cannot be told apart.
+HIDDEN_TIES_REFUSAL = (
+    "this entity carries ties that are above your clearance or "
+    "outside your compartments. Retiring it would remove them "
+    "too, so the whole operation is refused rather than done "
+    "half-way. Someone cleared for those ties has to do it.")
+
 #: The basis that marks a claim as a machine's. A tie founded on it is born
 #: PROPOSED; any other founding basis is a person's own assertion and is
 #: born ACCEPTED. See `create_edge`.
@@ -599,21 +609,29 @@ class GraphWriteService:
         # the answer is always zero, the retirement goes ahead, and the
         # cascade below retires only the visible edges: the outcome this
         # docstring rejects (the node-retirement anti-join).
+        #
+        # A tie whose OTHER end is above the caller counts too
+        # (graph-edge-endpoints-not-gated, 2026-10-03): an AMBER-labelled tie
+        # to a RED entity passed the test on the tie's own labels, so the
+        # cascade retired a tie the caller could not see and `edges_retired`
+        # counted it, localising a hidden tie to this entity.
         with system_connection(SystemPurpose.GRAPH_GUARD, reuse=self._c) as counter:
             blocked = counter.execute(
-                """SELECT count(*) FROM core.edge
-                    WHERE case_id = %s AND deleted_at IS NULL
-                      AND (src_node_id = %s OR dst_node_id = %s)
-                      AND NOT (classification <= %s::core.tlp
-                               AND compartments <@ %s)""",
-                (case_id, node_id, node_id, clearance, list(compartments)),
+                """SELECT count(*) FROM core.edge e
+                     JOIN core.node o
+                       ON o.id = CASE WHEN e.src_node_id = %s
+                                      THEN e.dst_node_id ELSE e.src_node_id END
+                    WHERE e.case_id = %s AND e.deleted_at IS NULL
+                      AND (e.src_node_id = %s OR e.dst_node_id = %s)
+                      AND NOT (e.classification <= %s::core.tlp
+                               AND e.compartments <@ %s
+                               AND o.classification <= %s::core.tlp
+                               AND o.compartments <@ %s)""",
+                (node_id, case_id, node_id, node_id, clearance,
+                 list(compartments), clearance, list(compartments)),
             ).fetchone()[0]
         if blocked:
-            raise GraphWriteError(
-                "this entity carries ties that are above your clearance or "
-                "outside your compartments. Retiring it would remove them "
-                "too, so the whole operation is refused rather than done "
-                "half-way. Someone cleared for those ties has to do it.")
+            raise GraphWriteError(HIDDEN_TIES_REFUSAL)
 
     def soft_delete_edge(
         self,

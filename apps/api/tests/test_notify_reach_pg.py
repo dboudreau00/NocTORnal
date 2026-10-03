@@ -56,6 +56,13 @@ def conn():
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM core.approval_request WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
+        # The entities a merge request names (2026-10-03), with their claims.
+        c.execute("ALTER TABLE core.assertion DISABLE TRIGGER USER")
+        try:
+            c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
+        finally:
+            c.execute("ALTER TABLE core.assertion ENABLE TRIGGER USER")
+        c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
         c.execute(f"DELETE FROM iam.session WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {sub}")
@@ -140,14 +147,28 @@ def _assign(conn, case_id, user_id, role, granted_by):
            VALUES (%s, %s, %s, %s)""", (case_id, user_id, role, granted_by))
 
 
-def _payload() -> dict:
-    return {"source_node_id": str(uuid4()), "target_node_id": str(uuid4()),
+def _node(client, token, case_id, label) -> str:
+    r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
+        "node_type": "IDENTITY", "label": label,
+        "assertion": {"basis": "DIRECT_OBSERVATION", "reliability": "A",
+                      "credibility": "1", "confidence": "HIGH"}})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _payload(source: str, target: str) -> dict:
+    return {"source_node_id": source, "target_node_id": target,
             "reason": "same PGP fingerprint", "basis_selector_id": None}
 
 
 def _request(client, token, case_id):
+    # Two entities of the case the requester may merge: a request naming an
+    # id that is missing or above the requester is refused since the beta
+    # review (http_ui-011, 2026-10-03), so these tests name real ones.
+    a = _node(client, token, case_id, f"reach-{uuid4().hex[:6]}-a")
+    b = _node(client, token, case_id, f"reach-{uuid4().hex[:6]}-b")
     return client.post(f"/api/v1/cases/{case_id}/approvals", headers=_auth(token),
-                       json={"operation": "node.merge", "payload": _payload(),
+                       json={"operation": "node.merge", "payload": _payload(a, b),
                              "justification": "two handles, one fingerprint"})
 
 

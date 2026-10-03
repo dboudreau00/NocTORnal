@@ -653,6 +653,15 @@ def payload_hash(operation: str, case_id: UUID | None, payload: dict) -> bytes:
     return hashlib.sha256(material.encode("utf-8")).digest()
 
 
+#: A payload key read as a uuid, or NULL when it is not one, so a malformed
+#: legacy payload counts as naming nothing rather than failing the read
+#: (2026-10-03). `{key}` is a literal chosen in this module.
+_PAYLOAD_UUID = (
+    "(CASE WHEN r.payload->>'{key}' ~* "
+    "'^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$' "
+    "THEN (r.payload->>'{key}')::uuid END)")
+
+
 class ApprovalService:
     def __init__(self, conn: psycopg.Connection):
         self._c = conn
@@ -660,7 +669,13 @@ class ApprovalService:
     # -- lifecycle --------------------------------------------------------
 
     def request(self, *, operation: str, case_id: UUID | None, payload: dict,
-                justification: str, requested_by: UUID) -> ApprovalRequest:
+                justification: str, requested_by: UUID,
+                # The labels of what the payload names, when it names case
+                # elements: the signers' notice quotes the justification,
+                # so it is labelled at least this high (2026-10-03).
+                element_classification: str | None = None,
+                element_compartments: frozenset[str] = frozenset(),
+                ) -> ApprovalRequest:
         op = self._operation(operation)
         # F9 (2026-09-24): a case operation raised with no case would be
         # told to nobody and decided by nobody, and a deployment-wide one
@@ -717,7 +732,9 @@ class ApprovalService:
                 reach = notify_events.approval_requested(
                     self._c, case_id=case_id, request_id=record.id,
                     operation=operation, permission=op.signer_permission,
-                    justification=record.justification, actor_id=requested_by)
+                    justification=record.justification, actor_id=requested_by,
+                    element_classification=element_classification,
+                    element_compartments=element_compartments)
             else:
                 reach = notify_events.global_approval_requested(
                     self._c, request_id=record.id, operation=operation,
@@ -1071,7 +1088,10 @@ class ApprovalService:
         Only over cases whose labels the person dominates; the step-up
         half is checked when they sign. Case operations only, with the
         signer's permission (F9, 2026-09-24); the deployment-wide ones are
-        `awaiting_global_signature`."""
+        `awaiting_global_signature`.
+
+        A merge request is the signer's to count only when they may see both
+        of its entities, as the listing shows it (http_ui-011, 2026-10-03)."""
         pairs = [(k, op.signer_permission) for k, op in OPERATIONS.items()
                  if op.scope == "case"]
         rows = self._c.execute(
@@ -1090,9 +1110,21 @@ class ApprovalService:
                   AND rp.permission_key = o.permission
                 WHERE r.state = 'PENDING' AND r.expires_at > now()
                   AND r.requested_by <> %s
+                  AND (r.operation <> 'node.merge' OR (
+                       EXISTS (SELECT 1 FROM core.node n
+                                WHERE n.id = """ + _PAYLOAD_UUID.format(key="source_node_id") + """
+                                  AND n.case_id = r.case_id
+                                  AND n.classification <= %s::core.tlp
+                                  AND n.compartments <@ %s::text[])
+                   AND EXISTS (SELECT 1 FROM core.node n
+                                WHERE n.id = """ + _PAYLOAD_UUID.format(key="target_node_id") + """
+                                  AND n.case_id = r.case_id
+                                  AND n.classification <= %s::core.tlp
+                                  AND n.compartments <@ %s::text[])))
                 GROUP BY r.case_id""",
             (clearance, sorted(compartments),
-             [p[0] for p in pairs], [p[1] for p in pairs], user_id, user_id),
+             [p[0] for p in pairs], [p[1] for p in pairs], user_id, user_id,
+             clearance, sorted(compartments), clearance, sorted(compartments)),
         ).fetchall()
         return {str(r[0]): r[1] for r in rows}
 

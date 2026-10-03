@@ -28044,18 +28044,29 @@ function renderCoParticipationCoverage(body) {
   facts.appendChild(fact('excluded: unresolved',
     cov.participants_excluded_unresolved));
   /* Not-visible is a CLEARANCE fact, not a data-quality one: the network is
-     smaller because of who is asking. Kept distinct for that reason. */
-  facts.appendChild(fact('excluded: not visible to you',
-    cov.participants_excluded_not_visible,
-    cov.participants_excluded_not_visible ? 'warn' : ''));
+     smaller because of who is asking. Kept distinct for that reason. Said
+     only as the case allows (2026-10-03): the number under COUNT, whether
+     under PRESENCE, and nothing at all under NONE, so the fact is drawn only
+     when the server sent something to draw. */
+  const hiddenWhy = cov.withheld;
+  if (typeof cov.participants_excluded_not_visible === 'number') {
+    facts.appendChild(fact('excluded: not visible to you',
+      cov.participants_excluded_not_visible,
+      cov.participants_excluded_not_visible ? 'warn' : ''));
+  } else if (hiddenWhy && hiddenWhy.mode === 'PRESENCE') {
+    facts.appendChild(fact('excluded: not visible to you',
+      hiddenWhy.incomplete ? 'some' : 'none',
+      hiddenWhy.incomplete ? 'warn' : ''));
+  }
   host.appendChild(facts);
 
   for (const room of cov.oversized || []) {
     host.appendChild(el('p', 'help warn',
       'Room ' + visibleText(room.conversation_id)
       + ' on ' + visibleText(room.platform)
-      + ' excluded: ' + room.participants + ' participants ('
-      + room.projectable_participants + ' projectable)'
+      + ' excluded: ' + room.participants + ' participants'
+      + (typeof room.projectable_participants === 'number'
+        ? ' (' + room.projectable_participants + ' projectable)' : '')
       + (room.provenance_class
         ? ' · ' + visibleText(room.provenance_class) : '')));
   }
