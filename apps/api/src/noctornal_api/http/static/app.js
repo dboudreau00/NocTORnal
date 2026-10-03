@@ -10339,12 +10339,19 @@ function wireAuditVerify() {
       r.checked.toLocaleString() + ' ' + agree(r.checked, 'event', 'events')
       + ' checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + ' to ' + r.last_seq : '')));
-    if (r.windowed && r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
-    /* Forks are shown as a SEPARATE, quieter line and never as a break.
-       They come from concurrent writers, not from editing, and a real
-       database has them: counting them as tampering made this panel answer
-       BROKEN on untouched history, which is the one answer a tamper-
-       evidence tool cannot afford to get wrong twice. */
+    /* The caveat on EVERY answer (2026-10-03): what INTACT cannot see is
+       true of every run, not only a windowed one. */
+    if (r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
+    /* The newest row, to record somewhere the database cannot reach and
+       send back as anchor_seq and anchor_hash on a later check. */
+    if (r.tail_seq) {
+      head.appendChild(el('p', 'help',
+        'Newest row: seq ' + r.tail_seq + ', hash ' + r.tail_row_hash));
+    }
+    /* Forks written before the chain drew its sequence inside its lock
+       are history, a separate quieter line: a real database has them and
+       the log cannot be cleaned of them. A fork written since is a break
+       and comes with the list below (kind FORK). */
     if (r.forks) {
       head.appendChild(el('p', 'help',
         countOf(r.forks, 'row shares', 'rows share') + ' a predecessor. '

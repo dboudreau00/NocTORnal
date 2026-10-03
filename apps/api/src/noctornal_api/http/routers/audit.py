@@ -34,10 +34,11 @@ from uuid import UUID
 import psycopg
 from fastapi import APIRouter, Depends, Query
 
-from noctornal_api.audit_verify import verify_chain
+from noctornal_api.audit_verify import BLIND_SPOTS, verify_chain
 from noctornal_api.custody_verify import verify_custody_chain
 from noctornal_api.db import SystemPurpose
 from noctornal_api.http.deps import CurrentUser, get_conn, require_global, system_conn
+from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/audit", tags=["audit"])
@@ -50,6 +51,14 @@ def verify(
         None, ge=1, le=200_000,
         description="check only the most recent N events; omit for the "
                     "whole chain"),
+    anchor_seq: int | None = Query(
+        None, ge=1,
+        description="the tail_seq recorded from an earlier check; with "
+                    "anchor_hash, fails the check when that row is gone or "
+                    "has changed"),
+    anchor_hash: str | None = Query(
+        None, pattern=r"^[0-9a-f]{64}$",
+        description="the tail_row_hash recorded with anchor_seq"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
     # A verifier that sees part of a chain reports breaks that are not
@@ -64,48 +73,65 @@ def verify(
 
     The response distinguishes LINK (a predecessor removed) from CONTENT
     (a row edited in place), because they point an investigator in
-    different directions — and reports FORKS separately from both, because
-    they are an artefact of concurrent writers rather than evidence of
-    tampering, and counting them as breaks made this answer BROKEN on
-    untampered history.
+    different directions. A fork claimed by a row written since 0153 is a
+    break too (FORK), because the chain trigger reads its tail inside its
+    lock, refuses a transaction that is not READ COMMITTED, and honest
+    traffic cannot fork the chain; forks between older rows are listed and
+    not counted.
+
+    Every answer carries `caveat`, which says what `intact` cannot see: rows
+    removed from the end, and a rewrite that recomputes every later hash.
+    `tail_seq` and `tail_row_hash` are the values to record somewhere this
+    database cannot reach; pass them back as `anchor_seq` and `anchor_hash`
+    and the check fails when that row is gone or has changed.
     """
-    report = verify_chain(chain, limit=limit)
+    if (anchor_seq is None) != (anchor_hash is None):
+        raise Problem(422, "Invalid field",
+                      "anchor_seq and anchor_hash go together: send both "
+                      "or neither")
+    report = verify_chain(
+        chain, limit=limit,
+        anchor=(anchor_seq, anchor_hash) if anchor_seq is not None else None)
     return {
         "intact": report.intact,
         "checked": report.checked,
         "first_seq": report.first_seq,
         "last_seq": report.last_seq,
+        # The whole log's size and newest row, window or not: the values to
+        # record out of band (see `caveat`).
+        "rows": report.rows,
+        "tail_seq": report.tail_seq,
+        "tail_row_hash": report.tail_row_hash,
+        # The anchor the caller sent and whether the log still holds it,
+        # or null when none was sent.
+        "anchor": ({"seq": report.anchor.seq,
+                    "row_hash": report.anchor.row_hash,
+                    "held": report.anchor.held}
+                   if report.anchor is not None else None),
         # Stated explicitly so "intact: true, checked: 0" can never be read
         # as a pass. An empty audit table is a legitimately intact chain
         # and also evidence of nothing.
         "windowed": limit is not None,
-        # The caveat DESCRIBES THE ACTUAL BLIND SPOT, which is not the one
-        # it originally claimed. It said a windowed run "cannot see a
-        # deletion that straddles the window boundary" -- that was true of
-        # the first implementation, and stopped being true when `hashes`
-        # and `claims` were widened to the whole table. Leaving it would
-        # have had an officer distrust a result that is in fact exact, and
-        # a caveat nobody can reproduce is how the honest ones stop being
-        # read.
-        "caveat": (
-            "Windowed: LINK, FORK and CONTENT are each exact for the rows "
-            "reported, because the predecessor lookup covers the whole "
-            "table. What a window cannot tell you is whether rows OUTSIDE "
-            "it verify. Run without `limit` for that."
-        ) if limit is not None else None,
-        # Forks are NOT tampering -- see ChainReport.intact. Reported so an
-        # officer knows the chain is not linearisable, which weakens the
-        # guarantee, without being told the log was edited.
+        # On EVERY answer, because the blind spots are true of every run,
+        # not only a windowed one. A window adds one sentence: LINK, FORK
+        # and CONTENT are each exact for the rows reported, because the
+        # predecessor lookup covers the whole table, and what a window
+        # cannot tell you is whether rows OUTSIDE it verify.
+        "caveat": BLIND_SPOTS + (
+            " Windowed: the checks are exact for the rows reported, but a "
+            "window cannot tell you whether rows outside it verify. Run "
+            "without `limit` for that." if limit is not None else ""),
         "forks": len(report.forks),
+        # The forks that are breaks (written since 0153), and the boundary.
+        "forks_since_fix": report.forks_since_fix,
+        "fork_boundary_seq": report.fork_boundary_seq,
         "fork_note": (
-            "Rows sharing a predecessor. Still not evidence of editing, and "
-            "still not counted as tampering, but no longer explained away "
-            "as normal concurrency. Measured on this code, the chaining "
-            "trigger's advisory lock DOES serialise concurrent writers and a "
-            "multi-row insert chains correctly, so a fork is not known to be "
-            "reachable by ordinary traffic. Treat one as worth "
-            "investigating: what it means for certain is that the chain "
-            "cannot be fully linearised."
+            "Rows sharing a predecessor. Those claimed by a row written "
+            "since the chain began drawing its sequence inside its lock "
+            "(0153) are listed in `breaks` as FORK and make the chain "
+            "not intact: nothing honest does that. The others predate the "
+            "fix, are history, and are not counted: the log is append-only "
+            "and cannot be cleaned of them."
         ) if report.forks else None,
         # How many rows claim to be the chain's first. Always reported, like
         # `checked`: 1 is the answer that says the chain is anchored, and
@@ -233,13 +259,15 @@ def verify_custody(
         # is worth investigating; until 2026-09-02 the response handed her
         # nothing to investigate WITH, which is how a note stops being read.
         "fork_ids": [b.id for b in report.forks],
+        "forks_since_fix": report.forks_since_fix,
+        "fork_boundary_id": report.fork_boundary_id,
         "fork_note": (
-            "Rows sharing a predecessor. Not counted as tampering, for the "
-            "reasons /audit/verify gives. But on a ledger written by 0024, "
-            "whose advisory lock serialises writers, a fork is not known to "
-            "be reachable by ordinary traffic and is worth investigating. "
-            "What it means for certain is that the chain cannot be fully "
-            "linearised."
+            "Rows sharing a predecessor. Those claimed by a row written "
+            "since the ledger began drawing its id inside its chain lock "
+            "(0153) are listed in `breaks` as FORK and make the ledger not "
+            "intact. The others predate the fix, are history, and are not "
+            "counted: the ledger is append-only and cannot be cleaned of "
+            "them."
         ) if report.forks else None,
         # Always whole-ledger, always reported: 1 says the chain is anchored,
         # and only an explicit number distinguishes that from "not looked at".

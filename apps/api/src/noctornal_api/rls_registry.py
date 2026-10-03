@@ -84,6 +84,23 @@ HELD = `(SELECT iam.rls_compartments())`:
   inline, because the source is exempt (the egress proxy reads it) and so
   carries no policy for a CHILD test to lean on; the same reading as
   `collection._SOURCE_VISIBLE`, held to the case-less ceiling.
+- CUSTOM_AUDIT (the audit log, 0168): a SELECT policy, `case_id = ANY
+  (CASES)`, or a case-less row the reader wrote, or `audit.read` held
+  globally, or a case-less `ingest` row under a global `ingest.manage`;
+  and an INSERT policy `WITH CHECK (actor_id IS NULL OR actor_id =
+  (SELECT iam.rls_actor()))`: every writer appends, but a request writes
+  only rows that name nobody or the user it is bound to (the first draft
+  was `WITH CHECK (true)` and let a bound analyst write history in another
+  user's name; 2026-10-03), plus the four ticket events (a download or
+  production ticket spent or refused on the sample origin, which runs no
+  session) naming the holder of the ticket the connection presents
+  (`iam.rls_ticket_holder()`), and never the chain's boundary marker
+  (`AUDIT_CHAIN_SERIALISED`, 0153). No UPDATE or DELETE privilege or policy
+  (invariant 6).
+- CUSTOM_CUSTODY (the custody ledger, 0114 and 0154): the LEDGER_CHILD
+  SELECT policy and an INSERT policy that adds `actor_id = (SELECT
+  iam.rls_actor())` to the child test, so a custody row names the user who
+  wrote it. The column is NOT NULL, so there is no unattributed row to allow.
 
 A table the request role never writes carries its template as a SELECT
 policy alone (`rls_read`), so no INSERT of the request role reaches its
@@ -106,7 +123,7 @@ POLICY: dict[str, str] = {
     "core.evidence": "ELEMENT",
     "core.assertion": "CUSTOM_ASSERTION",
     "core.evidence_link": "CHILD",
-    "core.evidence_custody": "LEDGER_CHILD",
+    "core.evidence_custody": "CUSTOM_CUSTODY",
     # 0116: the analysis built on them.
     "core.hypothesis": "CASE",
     "core.assumption": "CASE",
@@ -208,6 +225,11 @@ POLICY: dict[str, str] = {
     # duplicate check runs as a system purpose (TELEGRAM_INTAKE), and the
     # attended acts refuse a write that changed no chat.
     "collect.telegram_chat": "CUSTOM_SOURCE_CHILD",
+    # 0168 (F51, 2026-10-02): the audit log. The chain and the countersign
+    # rule read it as the definer (0166), the Lab's last screening pass is
+    # a fact (0167), and every other reader is classified by function in
+    # test_rls_audit_paths.py.
+    "audit.event": "CUSTOM_AUDIT",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -282,22 +304,6 @@ EXEMPT: dict[str, str] = {
 
 #: Will carry a policy; not yet. Each reason names what is owed first.
 DEFERRED: dict[str, str] = {
-    "audit.event": (
-        "CUSTOM, not system-only (S1, 2026-09-25): a case member reads the "
-        "case's timeline, review history and ingest triage state from it on "
-        "the request connection, so a system-only read would move every one "
-        "of those readers off row security rather than under it. The policy: "
-        "SELECT where the case is readable, or the row is the actor's own "
-        "case-less row, or audit.read is held globally (the officer's "
-        "search), or it is an ingest row and ingest.manage is held; INSERT "
-        "always (append-only, every writer appends). Owed first: about 100 "
-        "readers in 53 modules; audit_verify and custody_verify move to "
-        "AUDIT_VERIFY (the chain walk must see every row); "
-        "IngestService.attach_record copies the latest triage state onto a "
-        "case-scoped row (quarantine rows carry no case); "
-        "iam.countersign_blocked_by reads it inside a trigger and becomes "
-        "SECURITY DEFINER; the out-of-band audit writers keep working as "
-        "appends"),
     "ingest.record": (
         "CUSTOM (attached: case readable and labels within reach; "
         "quarantined: ingest.manage held and labels within reach, through "
@@ -340,6 +346,9 @@ INVOKER_TRIGGER_FUNCTIONS: dict[str, str] = {
     "iam.check_dual_control_change": (
         "fires on iam.dual_control_policy_change writes, which only a system "
         "connection makes (0109), so it reads every approval as it is"),
+    # F51, 2026-10-02: names the audit log only in the sentence it raises.
+    "audit.block_mutation": (
+        "refuses every change to the audit log; reads nothing"),
 }
 
 

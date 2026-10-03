@@ -57,53 +57,80 @@ A chain can break in distinct ways and they mean different things:
 Reporting them as one boolean would lose exactly the information an
 investigator needs first.
 
-## `seq` ORDER IS NOT CHAIN ORDER, and assuming it was made this verifier
-## report 68 breaks on an honest database
+## `seq` order is chain order since 0153, and was not before
 
-The first version of this module checked the link by comparing each row's
-`prev_hash` to `LAG(row_hash) OVER (ORDER BY seq)`. That is wrong, and it
-is wrong in the most damaging direction available to a tamper-evidence
-tool: it accused intact history.
+Until 0153 `audit.event.seq` was a `bigserial` drawn BEFORE the chaining
+trigger took its advisory lock, so two concurrent writers could be handed
+7445 and 7446 and take the lock in the opposite order: the row holding the
+LOWER seq chained off the row holding the HIGHER one. The linked list stayed
+sound and the numbering did not follow it. The first version of this module
+compared each row's `prev_hash` to `LAG(row_hash) OVER (ORDER BY seq)` and
+accused 68 honest rows on the development database, so the link is verified
+as what it is, a linked list, by following `prev_hash` to a real `row_hash`.
+`seq` is used for reporting and windowing, and is the chain's order for
+every row written since 0153.
 
-`audit.event.seq` is a `bigserial`. Its value comes from `nextval()` when
-the row is constructed, which happens **before** the BEFORE-INSERT trigger
-runs and therefore before `audit.chain_hash()` takes its advisory lock. So
-two concurrent writers can be handed seq 7445 and 7446, then acquire the
-lock in the opposite order — and the row holding the LOWER seq chains off
-the row holding the HIGHER one. Nothing is corrupt; the linked list is
-perfectly sound; the numbering simply does not follow it.
+## A fork is a break from 0153 on
 
-Observed on the development database: 60,181 rows, 68 reported "breaks",
-every one of them a pair of adjacent AUTH_FAILED rows whose seq order and
-chain order disagreed. Had this shipped, the first person to run it would
-have been told the audit trail was tampered with, and the second would
-have learned to ignore the tool.
+Two rows claiming one predecessor was the visible trace of that race. This
+module counted it as not tampering, on the stated ground that ordinary
+traffic could not fork the chain, and a 2026-08-10 erratum here said the
+same. Both were wrong: with the sequence drawn before the lock, ordinary
+concurrent traffic forks the chain (reproduced on 2026-10-03: four writers in
+parallel forked it in 8 rounds of 10), and the dead-end row of a fork can be
+deleted with the answer still `intact`.
 
-So the link is now verified as what it actually is — **a linked list** —
-by following `prev_hash` to a real `row_hash` rather than to a positional
-neighbour. `seq` is used only for reporting and windowing.
+0153 takes the lock first, draws the sequence inside it and reads the true
+tail, and refuses a transaction that is not READ COMMITTED (the one level at
+which that tail read is stale, and one a request may choose for itself,
+verify:g37 tail-read-isolation, 2026-10-03), so nothing honest forks the
+chain, and the verifier splits the forks by age:
 
-## A FORK is reported, but it is NOT tampering
+- a fork whose claimant was written before the boundary row 0153 appended
+  (`AUDIT_CHAIN_SERIALISED`, the latest of them) is history: reported,
+  listed, and not counted, because the table is append-only and a deployment
+  cannot clean it;
+- a fork claimed by a row newer than the boundary is a FORK break and turns
+  `intact` False.
 
-Two rows claiming one predecessor is what 0013's advisory lock exists to
-prevent, and it does not entirely: `seq` is drawn from `nextval()` before
-the trigger runs, so concurrent writers can still chain off one tail. The
-development database carries 67 such forks in 60,181 rows, all from
-ordinary traffic.
+A database born at 0153 has no boundary row and no older rows, and every
+fork in it counts.
 
-So forks are counted and listed SEPARATELY and do not make `intact`
-false. Folding them in meant the endpoint answered BROKEN on untampered
-history — the one thing a tamper-evidence tool must never do, and the
-second time this module made that mistake (the first was assuming `seq`
-order was chain order). See `ChainReport.intact`.
+## What `intact` cannot see, and what to do about it
+
+Every check here is relative: a row is accused because another row
+disagrees with it. Two things leave nothing to disagree with:
+
+- **Rows removed from the END.** Nothing names the newest row as its
+  predecessor, so deleting the last k rows orphans nothing. One DELETE, no
+  hashing, and the answer is `intact`.
+- **A re-chain.** The hash is plain SHA-256 and its expression is in this
+  repository, so whoever owns the database can edit row k and recompute
+  every later hash. The result agrees with itself.
+
+Both need rights on the table that the runtime role does not hold, but the
+schema owner's password still reaches the runtime services (docs/17 F52).
+The defence has to live where the owner cannot reach: record
+`ChainReport.tail_seq` and `tail_row_hash` somewhere this database cannot
+(a ticket, a signed message, an operator's notebook; `scripts/audit_anchor.py`
+prints them) and pass them back as `anchor`. The check then fails with a
+`ANCHOR` break if the row at that seq is gone or its hash changed, which a
+truncation below it and a re-chain through it both do. Rows newer than the
+anchor are covered by the next one: record a new anchor on a schedule.
+Until somebody does, `intact` means only that the rows present agree with
+each other, and `BLIND_SPOTS` is what every answer says so in words.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
 import psycopg
+
+#: A row hash as `encode(row_hash, 'hex')` renders it.
+_HEX_HASH = re.compile(r"[0-9a-f]{64}")
 
 #: The canonical hash input, character-for-character from
 #: `audit.chain_hash()` in 0013, with `NEW.` replaced by the row alias.
@@ -146,14 +173,41 @@ class ChainBreak:
     case_id: UUID | None
 
 
+#: The action of the row 0153 appends, on a database that already had audit
+#: rows, when the chain started drawing its sequence inside the lock. The
+#: latest such row is the fork boundary.
+FORK_MARKER_ACTION = "AUDIT_CHAIN_SERIALISED"
+
+#: What `intact` does not say. Part of every answer, the endpoint's and the
+#: console's, so the green tick is never read as more than it is.
+BLIND_SPOTS = (
+    "Intact means the rows that are here agree with each other. It cannot "
+    "see rows removed from the end of the log, and it cannot see a rewrite "
+    "that recomputes every later hash: the hash is unkeyed, and whoever "
+    "owns the database can recompute it. Record tail_seq and tail_row_hash "
+    "somewhere this database cannot reach, and pass them back as anchor_seq "
+    "and anchor_hash on a later check. The check then fails if the row at "
+    "that seq is gone or has changed."
+)
+
+
+@dataclass(frozen=True)
+class AnchorCheck:
+    """A recorded anchor and whether the log still holds it."""
+    seq: int
+    row_hash: str
+    held: bool
+
+
 @dataclass(frozen=True)
 class ChainReport:
     checked: int
-    #: Evidence of TAMPERING: LINK (a predecessor removed) and CONTENT (a
-    #: row edited). These are what `intact` is about.
+    #: Evidence of TAMPERING: LINK (a predecessor removed), CONTENT (a row
+    #: edited), a FORK claimed by a row newer than `fork_boundary_seq`, and
+    #: an ANCHOR that no longer holds. These are what `intact` is about.
     breaks: tuple[ChainBreak, ...]
-    #: Rows sharing a predecessor. Reported separately and deliberately NOT
-    #: counted as tampering -- see `intact`.
+    #: Every row sharing a predecessor, old and new. The ones newer than
+    #: the boundary are also in `breaks`; the older ones are history.
     forks: tuple[ChainBreak, ...]
     first_seq: int | None
     last_seq: int | None
@@ -161,63 +215,35 @@ class ChainReport:
     #: is 1 -- like `checked` -- so a caller can tell "anchored" from
     #: "nobody looked", which a bare `intact` cannot express.
     genesis_count: int = 0
+    #: Whole table, whatever window was asked for: how many rows, and the
+    #: newest one's seq and hash (hex). The value to record out of band
+    #: (`BLIND_SPOTS`).
+    rows: int = 0
+    tail_seq: int | None = None
+    tail_row_hash: str | None = None
+    #: The seq of the row 0153 appended, or 0 on a database born after it.
+    #: A fork claimed by a row newer than this is a break.
+    fork_boundary_seq: int = 0
+    #: The anchor the caller supplied and whether it held, else None.
+    anchor: AnchorCheck | None = None
 
     @property
     def intact(self) -> bool:
-        """No evidence of TAMPERING among the rows examined.
+        """The rows examined agree with each other and with every anchor
+        supplied.
 
-        ## Forks do not make a chain "broken", and treating them as such
-        ## made this endpoint cry wolf on every real database
+        NOT "nothing was removed". Rows deleted from the end of the log, and
+        a rewrite that recomputes every later hash, leave a chain that
+        agrees with itself (see `BLIND_SPOTS` and the module docstring);
+        only an anchor recorded outside the database tells them apart.
 
-        A fork is two rows claiming one predecessor.
-
-        > **THIS PARAGRAPH WAS WRONG AND IS CORRECTED (2026-08-10).** It
-        > said the advisory lock "does not entirely" prevent forks, that
-        > `seq` coming from `nextval()` before the trigger lets two writers
-        > chain off the same tail, and that the 67 forks on the development
-        > database were "an artefact of the WRITER, reproducible by
-        > ordinary traffic". Three experiments say otherwise:
-        >
-        > - **Concurrency is serialised.** With one transaction holding the
-        >   xact advisory lock mid-INSERT, a second connection's INSERT
-        >   blocks until it is released — measured, it sat on the lock for
-        >   a full 2.5s `statement_timeout` rather than proceeding.
-        > - **A multi-row INSERT does not fork.** `INSERT … SELECT` over
-        >   three rows produced three DISTINCT predecessors: the BEFORE
-        >   trigger fires per row and sees the rows already inserted by its
-        >   own statement.
-        > - **The chain is clean.** 3,947 rows, one genesis, zero forks.
-        >
-        > No production code writes `prev_hash` or `row_hash` — the trigger
-        > owns both — and all three triggers are enabled. So a fork is NOT
-        > known to be reachable by ordinary traffic, and the 67 were most
-        > likely the same artefact as the 68 "breaks" this module reported
-        > before the `seq`-ordering bug was fixed, counted by a verifier
-        > that was itself wrong.
-        >
-        > **The split below is kept anyway, deliberately.** A fork still is
-        > not proof of tampering, legacy databases may carry real ones that
-        > cannot be cleaned up (the table is append-only), and re-arming it
-        > into `intact` on a deployment that has them recreates exactly the
-        > cry-wolf failure described below. What changes is the standing of
-        > a fork: it is no longer explained away as normal. **On a chain
-        > written by this code a fork should not occur, so one deserves
-        > investigation** rather than the reassurance this docstring used
-        > to offer. Re-arming it is a decision for a deployment that has
-        > verified its own history, not a default.
-
-        Counting those as breaks meant `/audit/verify` answered BROKEN on
-        untampered history, which is the same failure this module already
-        made once with `seq` ordering and is the only failure a
-        tamper-evidence tool cannot afford: an officer who is told the log
-        is compromised, investigates, finds nothing, and never trusts the
-        button again.
-
-        So `intact` is about LINK and CONTENT — a row removed, a row
-        edited. Forks are surfaced separately, with their own count and
-        their own explanation, because they are worth knowing (a forked
-        chain cannot be linearised, which weakens the guarantee) without
-        being an accusation.
+        A fork is a break when a row written since 0153 claims a
+        predecessor another row also claims, because the chain trigger
+        reads the tail inside its lock, refuses a transaction that is not
+        READ COMMITTED, and honest traffic cannot do that.
+        A fork between rows written before 0153 is history, reported in
+        `forks` and not counted: the table is append-only, and counting it
+        would answer BROKEN on a chain nobody tampered with.
 
         An EMPTY audit table returns True, and the caller is expected to
         read `checked` too: a fresh database genuinely has an intact
@@ -227,12 +253,20 @@ class ChainReport:
         """
         return not self.breaks
 
+    @property
+    def forks_since_fix(self) -> int:
+        """How many of `forks` are newer than the boundary (the ones that
+        are breaks)."""
+        return sum(1 for f in self.forks if f.seq > self.fork_boundary_seq)
+
 
 def verify_chain(
     conn: psycopg.Connection,
     *,
     limit: int | None = None,
     since_seq: int | None = None,
+    anchor: tuple[int, str] | None = None,
+    fork_boundary_seq: int | None = None,
 ) -> ChainReport:
     """Recompute the chain and return every row that does not verify.
 
@@ -240,16 +274,26 @@ def verify_chain(
     for the rows it reports: the predecessor and fork lookups run over the
     whole table, not the window, so a windowed run cannot produce a false
     orphan at its own boundary. What a window does not tell you is whether
-    rows outside it verify.
+    rows outside it verify. (An earlier version built those lookups from
+    the window and had a boundary blind spot, and accused the oldest row of
+    every windowed run; both are gone.)
 
-    (An earlier version built those lookups from the window and therefore
-    DID have a boundary blind spot — worse, it accused the oldest row in
-    every windowed run. Both are gone; the docstring is kept honest because
-    a stale caveat teaches people to discount the accurate ones.)
+    `anchor` is a (seq, hex row_hash) pair the caller recorded from an
+    earlier run's `tail_seq` and `tail_row_hash`. When the log no longer
+    holds that row, an ANCHOR break is added: a truncation below it and a
+    re-chain through it both leave a log that disagrees with the record.
 
-    Ordering is by `seq`, the chain's own order, never by `occurred_at` —
-    a clock adjustment must not be able to reorder the verification.
+    `fork_boundary_seq` overrides the boundary the log carries (the
+    `AUDIT_CHAIN_SERIALISED` row; 0 when there is none). Tests use it; the
+    endpoint does not.
+
+    Ordering is by `seq`, never by `occurred_at`: a clock adjustment must
+    not be able to reorder the verification.
     """
+    if anchor is not None:
+        anchor_seq, anchor_hash = anchor
+        if not _HEX_HASH.fullmatch(anchor_hash or ""):
+            raise ValueError("an anchor hash is 64 lower-case hex characters")
     where = "WHERE e.seq > %(since)s" if since_seq is not None else ""
     window = "ORDER BY e.seq DESC LIMIT %(limit)s" if limit is not None else              "ORDER BY e.seq"
 
@@ -316,31 +360,33 @@ def verify_chain(
     breaks: list[ChainBreak] = []
     forks: list[ChainBreak] = []
 
-    # ── the anchor ────────────────────────────────────────────────────
+    # The genesis anchor: where does the chain START? Every check above is
+    # relative, and the LINK check exempts a NULL predecessor by
+    # construction, so a row inserted with `prev_hash NULL` is an unlinked
+    # island that passes every one of them (the CONTENT check even blesses
+    # it, because its hash input is the literal 'GENESIS'). Two rows
+    # claiming to be first is the shape of a truncation: delete the first k
+    # rows, re-genesis row k+1, and the chain reads intact.
     #
-    # Every check above is RELATIVE: it asks whether each row agrees with
-    # its predecessor. None of them asks where the chain STARTS, and the
-    # LINK check exempts a NULL predecessor by construction -- so a row
-    # inserted with `prev_hash NULL` is an unlinked island that passes
-    # every test, and the CONTENT check actively blesses it, because the
-    # hash input for such a row is the literal string 'GENESIS' (see
-    # `_HASH_EXPR`). The fork check cannot see it either: it filters
-    # `prev_hash IS NOT NULL`, and SQL NULL never equals NULL in the join.
-    #
-    # Two rows claiming to be first is therefore invisible today, and that
-    # is the shape of a truncation: delete the first k rows, re-genesis row
-    # k+1, and the chain reports INTACT with history simply starting later.
-    #
-    # This is queried over the WHOLE table and reported at REPORT level,
-    # never per-row, for the same reason `hashes` and `claims` are
-    # whole-table: the true genesis is almost never inside a `limit`
-    # window, so a windowed check would answer "no genesis" on every
-    # windowed run -- the false accusation this module has already made
-    # twice and cannot afford a third time.
+    # Queried over the WHOLE table and reported at REPORT level, never per
+    # row: the true genesis is almost never inside a `limit` window, so a
+    # windowed check would answer "no genesis" on every windowed run, a
+    # false accusation this module has already made twice.
     genesis = conn.execute(
         "SELECT seq, occurred_at, action, actor_id, case_id "
         "FROM audit.event WHERE prev_hash IS NULL ORDER BY seq").fetchall()
     total = conn.execute("SELECT count(*) FROM audit.event").fetchone()[0]
+    # The newest row of the WHOLE log, scoped never: the value to record out
+    # of band (BLIND_SPOTS).
+    tail = conn.execute(
+        "SELECT seq, encode(row_hash, 'hex') FROM audit.event "
+        "ORDER BY seq DESC LIMIT 1").fetchone()
+    boundary = fork_boundary_seq
+    if boundary is None:
+        boundary = conn.execute(
+            "SELECT coalesce(max(seq), 0) FROM audit.event "
+            "WHERE action = %s AND object_type = 'audit'",
+            (FORK_MARKER_ACTION,)).fetchone()[0]
 
     if total and not genesis:
         # The first row is gone. Nothing else can detect this: every
@@ -349,10 +395,10 @@ def verify_chain(
             seq=0, occurred_at=None, action="(chain has no first row)",
             kind="NO_GENESIS", actor_id=None, case_id=None))
     elif len(genesis) > 1:
-        # Unlike a fork, this is NOT reachable by honest traffic: 0013
-        # writes a NULL predecessor only into an empty table, under the
-        # advisory lock, and no application code writes prev_hash at all.
-        # So it goes in `breaks` and turns `intact` False.
+        # Not reachable by honest traffic: the trigger writes a NULL
+        # predecessor only into an empty table, under the advisory lock,
+        # and no application code writes prev_hash at all. So it goes in
+        # `breaks` and turns `intact` False.
         for g_seq, g_at, g_action, g_actor, g_case in genesis:
             breaks.append(ChainBreak(
                 seq=g_seq, occurred_at=g_at, action=g_action,
@@ -366,16 +412,37 @@ def verify_chain(
             parts.append("LINK")
         if content:
             parts.append("CONTENT")
+        # A fork claimed by a row written since 0153 is a break: the chain
+        # trigger reads the tail inside its lock and refuses any transaction
+        # that is not READ COMMITTED (the stale-tail level a request could
+        # choose), so nothing honest does this. A fork between older rows is
+        # history (see `intact`).
+        if fork and seq > boundary:
+            parts.append("FORK")
         if parts:
             breaks.append(ChainBreak(
                 seq=seq, occurred_at=occurred_at, action=action,
                 kind="+".join(parts), actor_id=actor_id, case_id=case_id))
-        # A FORK IS NOT REPORTED AS TAMPERING, and this is the whole point
-        # of the split -- see ChainReport.intact.
         if fork:
             forks.append(ChainBreak(
                 seq=seq, occurred_at=occurred_at, action=action, kind="FORK",
                 actor_id=actor_id, case_id=case_id))
+
+    anchor_check = None
+    if anchor is not None:
+        held = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM audit.event "
+            "WHERE seq = %s AND row_hash = decode(%s, 'hex'))",
+            (anchor_seq, anchor_hash)).fetchone()[0]
+        anchor_check = AnchorCheck(anchor_seq, anchor_hash, bool(held))
+        if not held:
+            # Either the row is gone (a truncation below the anchor) or its
+            # hash changed (a re-chain through it): the log no longer
+            # matches what was recorded.
+            breaks.append(ChainBreak(
+                seq=anchor_seq, occurred_at=None,
+                action="(the recorded anchor row is missing or has changed)",
+                kind="ANCHOR", actor_id=None, case_id=None))
 
     return ChainReport(
         checked=len(rows),
@@ -384,4 +451,9 @@ def verify_chain(
         first_seq=rows[0][0] if rows else None,
         last_seq=rows[-1][0] if rows else None,
         genesis_count=len(genesis),
+        rows=total,
+        tail_seq=tail[0] if tail else None,
+        tail_row_hash=tail[1] if tail else None,
+        fork_boundary_seq=boundary,
+        anchor=anchor_check,
     )

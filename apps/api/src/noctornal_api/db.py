@@ -155,6 +155,12 @@ class SystemPurpose(StrEnum):
     # Ingest scoring's watch list: a quarantined record scores against every
     # watch in the deployment (S1, 2026-09-25).
     INGEST = "ingest"
+    # An audit row that names a user the connection is not bound to: a
+    # sign-in or session refusal written before the connection is bound or
+    # after its session ended, and a refusal written out of band on a
+    # connection of its own. The request role may append only a row that
+    # names nobody or the user it is bound to (0168, 2026-10-03).
+    AUDIT_APPEND = "audit_append"
     SANDBOX = "sandbox"                  # detonation dispatch and polling
     # The embedding pass, and an index's registration, activation, recheck
     # and retirement, which queue and sweep every item (S1, 2026-09-25).
@@ -177,6 +183,12 @@ class RlsBinding:
 #: Whether a connection is exempt from row security, remembered per
 #: connection (a connection's role does not change after it is handed out).
 _EXEMPT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+#: The user each connection was last bound to by `bind_session` or
+#: `bind_ticket`, as the database answered it (None: bound to nobody). Read
+#: by `bound_actor`, which decides where an audit row naming a user may be
+#: written (0168, 2026-10-03).
+_BOUND: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 #: Exempt: a superuser, a BYPASSRLS role, or a member of the owner. Read
 #: from the catalog, not from 0111's iam.rls_caller_exempt(), so asking works
@@ -297,6 +309,7 @@ def bind_session(conn: psycopg.Connection, raw_token: str) -> RlsBinding:
                        (rls_proof(raw_token),)).fetchone()
     binding = RlsBinding(row[0], bool(row[1]))
     _EXEMPT[conn] = binding.exempt
+    _BOUND[conn] = binding.actor
     return binding
 
 
@@ -307,4 +320,31 @@ def bind_ticket(conn: psycopg.Connection, raw_ticket: str) -> RlsBinding:
                        (raw_ticket,)).fetchone()
     binding = RlsBinding(row[0], bool(row[1]))
     _EXEMPT[conn] = binding.exempt
+    _BOUND[conn] = binding.actor
     return binding
+
+
+def present_ticket(conn, raw_ticket: str) -> None:
+    """Declare the ticket this connection is redeeming, before the events
+    about its holder are written (0168, 2026-10-03).
+
+    The sample origin spends a ticket on a connection bound to nobody (a
+    spent ticket binds only afterwards, `bind_ticket`), and writes audit rows
+    naming the holder, spent or refused. Row security on the log accepts the
+    four ticket events naming a user from a connection that presents that
+    user's ticket, so this sets the proof and nothing else: it binds nobody,
+    and a connection that is not a database connection (a test double) is
+    left alone."""
+    if isinstance(conn, psycopg.Connection):
+        conn.execute("SELECT set_config('noctornal.rls_ticket', %s, false)",
+                     (raw_ticket or "",))
+
+
+def bound_actor(conn) -> UUID | None:
+    """Who `conn` was last bound to, or None when it was never bound or was
+    bound to nobody. The database decides what a connection may append
+    (0168: a row naming a user is accepted only from that user's own
+    binding); this is only where the application writes the row."""
+    if not isinstance(conn, psycopg.Connection):
+        return None
+    return _BOUND.get(conn)

@@ -47,6 +47,7 @@ from minio.commonconfig import COMPLIANCE
 from minio.error import S3Error
 from minio.retention import Retention
 
+from noctornal_api.db import present_ticket
 from noctornal_api.egress import NEVER_EGRESS
 # The Lab's ticket, reused for an exhibit (0068): its lifetime, and its
 # sampled counter for strings that match no ticket. Private to samples.py
@@ -689,8 +690,10 @@ class EvidenceService:
         # acquired_at, when the caller gives none, is stamped by the
         # DATABASE inside the INSERT below: COALESCE(..., now()) in the same
         # transaction as the ACQUIRED custody row, whose occurred_at the
-        # custody trigger pins to now() (migration 0024). Both are then the
-        # one transaction timestamp. Until 2026-09-23 it was self._now(),
+        # custody trigger pins to the clock at its append (migration 0153,
+        # 2026-10-03; it was now(), 0024). So acquired_at is the start of
+        # the transaction and the ACQUIRED row a few milliseconds later,
+        # never earlier. Until 2026-09-23 it was self._now(),
         # the API host's clock, read before the object store put: a
         # database clock behind the host showed an exhibit "acquired" a
         # minute AFTER its own ACQUIRED, VIEWED and HASH_VERIFIED rows
@@ -1142,6 +1145,12 @@ class EvidenceService:
         from noctornal_api.stores import PgAccessResolver
 
         digest = hash_token(presented or "")
+        # The ticket this connection is redeeming, declared before any row
+        # about its holder is written: the log accepts the four ticket
+        # events naming a user from a connection that presents that user's
+        # ticket, and this connection is bound to nobody until the ticket
+        # is spent (0168, 2026-10-03).
+        present_ticket(self._c, presented)
         # The exhibit's case through `iam.element_facts` (S1,
         # 2026-09-25). The sample origin spends the ticket BEFORE anybody is
         # bound, and an unbound connection sees no exhibit under row-level

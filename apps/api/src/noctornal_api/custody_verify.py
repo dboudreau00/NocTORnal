@@ -60,18 +60,19 @@ rows through the trigger and asserts the chain verifies, so an edit to the
 trigger that this file does not match turns the suite red rather than
 silently reporting corruption.
 
-## `id` ORDER IS NOT CHAIN ORDER
+## `id` order is chain order since 0153, and was not before
 
-`core.evidence_custody.id` is a `bigserial`, drawn from `nextval()` when
-the row is constructed — BEFORE the BEFORE-INSERT trigger takes the
-advisory lock. Two concurrent writers can therefore be handed ids 10 and
+Until 0153 `core.evidence_custody.id` was a `bigserial`, drawn from
+`nextval()` when the row is constructed, BEFORE the BEFORE-INSERT trigger
+took the advisory lock. Two concurrent writers could be handed ids 10 and
 11 and acquire the lock in the opposite order, and the row holding the
-LOWER id then chains off the row holding the HIGHER one. The linked list
-is sound; the numbering does not follow it. `audit_verify.py` shipped an
-adjacency check on `seq` once and accused 68 honest rows on the
-development database. So the link is verified here as what it is — a
-linked list, by following `prev_hash` to a real `row_hash` — and `id` is
-used only for reporting and ordering the output.
+LOWER id then chained off the row holding the HIGHER one. The linked list
+stayed sound and the numbering did not follow it. `audit_verify.py` shipped
+an adjacency check on `seq` once and accused 68 honest rows on the
+development database, so the link is verified here as what it is, a linked
+list, by following `prev_hash` to a real `row_hash`, and `id` is used for
+reporting and ordering the output. 0153 draws the id inside the lock, so it
+is the chain's order for every row written since.
 
 ## The checks are separate on purpose
 
@@ -79,12 +80,18 @@ used only for reporting and ordering the output.
   using the `prev_hash` it stores. A row *edited in place*.
 - **LINK** — `prev_hash` names a `row_hash` no row has. A predecessor
   *removed*.
-- **FORK** — two or more rows claim the same predecessor. Reported
-  separately and NOT counted as tampering, for the reasons
-  `audit_verify.ChainReport.intact` gives at length: it is not proof of
-  editing, an append-only table cannot be cleaned of legacy ones, and
-  folding it into `intact` recreates the cry-wolf failure. On a chain
-  written by 0024 a fork should not occur, so one deserves investigation.
+- **FORK**: two or more rows claim the same predecessor. Before 0153 this
+  was the trace of the draw-before-lock race above, and was reported but
+  not counted on the ground that honest traffic could not make one; that
+  ground was wrong, and a fork's dead-end row could be deleted with the
+  answer still `intact` (evidence-audit-chain-forks, 2026-10-03). Since
+  0153 the chain trigger reads the tail inside its lock and refuses a
+  transaction that is not READ COMMITTED (a stale tail is what forks it), so a fork
+  claimed by a row newer than the boundary (`fork_boundary_id`, recorded in
+  the `AUDIT_CHAIN_SERIALISED` audit row) is a break. Forks between older
+  rows stay listed and are not counted: the table is append-only and
+  cannot be cleaned of them. `audit_verify.ChainReport.intact` has the
+  whole account.
 - **GENESIS / NO_GENESIS** — how many rows claim to be first. Exactly one
   is an anchored chain; more than one is the shape a truncation leaves
   (delete the first k rows, re-anchor row k+1, and every relative check
@@ -191,9 +198,11 @@ class CustodyBreak:
 @dataclass(frozen=True)
 class CustodyReport:
     checked: int
-    #: Evidence of TAMPERING: LINK, CONTENT, GENESIS, NO_GENESIS.
+    #: Evidence of TAMPERING: LINK, CONTENT, GENESIS, NO_GENESIS, and a FORK
+    #: claimed by a row newer than `fork_boundary_id`.
     breaks: tuple[CustodyBreak, ...]
-    #: Rows sharing a predecessor. Reported, not counted -- see `intact`.
+    #: Every row sharing a predecessor, old and new. The newer ones are also
+    #: in `breaks`; the older ones are history (see `intact`).
     forks: tuple[CustodyBreak, ...]
     first_id: int | None
     last_id: int | None
@@ -226,6 +235,16 @@ class CustodyReport:
     #: this tree persists it yet, so a caller that merely reads it past is
     #: no better protected than before.
     tail_row_hash: str | None = None
+    #: The newest custody id when 0153 began drawing the id inside the
+    #: chain lock (0 on a ledger born after it). A fork claimed by a row
+    #: with a newer id is a break; older forks are history.
+    fork_boundary_id: int = 0
+
+    @property
+    def forks_since_fix(self) -> int:
+        """How many of `forks` are newer than the boundary (the ones that
+        are breaks)."""
+        return sum(1 for f in self.forks if f.id > self.fork_boundary_id)
 
     @property
     def intact(self) -> bool:
@@ -237,8 +256,10 @@ class CustodyReport:
         that ARE here and never about rows that are not. Compare
         `tail_row_hash` against a value recorded out of band for that.
 
-        Forks are excluded for the reasons `audit_verify.ChainReport.intact`
-        records; they are surfaced with their own count.
+        A fork is a break when a row written since 0153 claims a
+        predecessor another row also claims, and history (listed in
+        `forks`, not counted) when both rows predate it: see
+        `audit_verify.ChainReport.intact`.
 
         An EMPTY result USUALLY returns True, and the caller is expected to
         read `checked` too: an exhibit with no custody rows, or a fresh
@@ -394,6 +415,15 @@ def verify_custody_chain(
                 id=g_id, evidence_id=g_ev, occurred_at=g_at, action=g_action,
                 kind="GENESIS", actor_id=g_actor))
 
+    # The fork boundary: the newest custody id when 0153 started drawing
+    # the id inside the chain lock, as the `AUDIT_CHAIN_SERIALISED` row
+    # recorded it (0 where there is none: a ledger born at 0153). A fork
+    # claimed by a row newer than it is a break; older ones are history.
+    boundary = conn.execute(
+        "SELECT coalesce((SELECT (detail ->> 'custody_boundary_id')::bigint "
+        "FROM audit.event WHERE action = 'AUDIT_CHAIN_SERIALISED' "
+        "AND object_type = 'audit' ORDER BY seq DESC LIMIT 1), 0)").fetchone()[0]
+
     for row_id, ev, action, actor_id, occurred_at, link, fork, content in rows:
         if not (link or fork or content):
             continue
@@ -402,11 +432,17 @@ def verify_custody_chain(
             parts.append("LINK")
         if content:
             parts.append("CONTENT")
+        # A fork claimed by a row written since 0153 is a break: the chain
+        # trigger reads the tail inside its lock and refuses any transaction
+        # that is not READ COMMITTED (the stale-tail level a request could
+        # choose), so nothing honest does this. A fork between older rows is
+        # history (see `intact`).
+        if fork and row_id > boundary:
+            parts.append("FORK")
         if parts:
             breaks.append(CustodyBreak(
                 id=row_id, evidence_id=ev, occurred_at=occurred_at,
                 action=action, kind="+".join(parts), actor_id=actor_id))
-        # A FORK IS NOT REPORTED AS TAMPERING -- see CustodyReport.intact.
         if fork:
             forks.append(CustodyBreak(
                 id=row_id, evidence_id=ev, occurred_at=occurred_at,
@@ -421,4 +457,5 @@ def verify_custody_chain(
         genesis_count=len(genesis),
         evidence_id=evidence_id,
         tail_row_hash=tail[0] if tail else None,
+        fork_boundary_id=boundary,
     )

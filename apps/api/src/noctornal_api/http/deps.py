@@ -30,6 +30,7 @@ import hmac
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import UUID
 
 import psycopg
@@ -40,6 +41,7 @@ from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.db import (
     SystemPurpose,
     bind_session,
+    bound_actor,
     connect_request,
     system_connection,
 )
@@ -259,6 +261,26 @@ def refuse_unbound_session(conn, session, *, ip: str | None,
     return True
 
 
+@contextmanager
+def audit_append_connection(conn, actor_id) -> Iterator[psycopg.Connection]:
+    """The connection an audit row naming `actor_id` is appended on.
+
+    Row security on the log (0168, 2026-10-03) accepts a row from the
+    request role only when it names nobody or the user the connection is
+    bound to, so a request cannot write history in another user's name. A
+    few events are about a user the connection is not bound to: a session
+    refused before the connection is bound to it, a binding that failed,
+    a sign-out whose session has just ended. They are appended on `conn`
+    itself when it is exempt or bound to that very user, and otherwise on
+    a system connection for the AUDIT_APPEND purpose, closed afterwards.
+    """
+    if actor_id is None or bound_actor(conn) == actor_id:
+        yield conn
+        return
+    with system_connection(SystemPurpose.AUDIT_APPEND, reuse=conn) as sconn:
+        yield sconn
+
+
 def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None:
     """Append to the hash-chained audit log. Authentication and
     authorization outcomes are auditable events (docs/05).
@@ -268,12 +290,14 @@ def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None
     handshake, and two spellings of one audit action is how an audit
     query comes back short.
     """
-    conn.execute(
-        """INSERT INTO audit.event
-               (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
-           VALUES (%s, %s, %s, 'auth', NULL, %s, %s)""",
-        (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail)),
-    )
+    with audit_append_connection(conn, actor_id) as target:
+        target.execute(
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
+               VALUES (%s, %s, %s, 'auth', NULL, %s, %s)""",
+            (actor_id, "USER" if actor_id else "SYSTEM", action, case_id,
+             Json(detail)),
+        )
 
 
 def effective_labels(

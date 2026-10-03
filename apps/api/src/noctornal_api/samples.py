@@ -192,6 +192,9 @@ from psycopg.types.json import Json
 # The states whose content is read-only, from where the rule is written
 # down: samples attached to a case are its content (c7/c21, 2026-09-24).
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
+# Declares the ticket being redeemed, so the events about its holder can be
+# written from the unbound connection that spends it (0168, 2026-10-03).
+from noctornal_api.db import present_ticket
 # The one existing spelling of "does this ACTIVE account hold this global
 # permission", used at redemption. See `_still_authorised`.
 from noctornal_api.iam_admin import IamAdminService
@@ -3406,6 +3409,12 @@ class SampleService:
         presented.
         """
         digest = hash_token(presented or "")
+        # The ticket this connection is redeeming, declared before any row
+        # about its holder is written: the log accepts the four ticket
+        # events naming a user from a connection that presents that user's
+        # ticket, and this connection is bound to nobody until the ticket
+        # is spent (0168, 2026-10-03).
+        present_ticket(self._c, presented)
         row = self._c.execute(
             """UPDATE lab.download_ticket
                   SET redeemed_at = now()

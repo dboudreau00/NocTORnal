@@ -31,9 +31,9 @@ nothing).
 A BEFORE UPDATE OR DELETE row trigger and a BEFORE TRUNCATE statement
 trigger refuse every change, and the chain trigger takes the advisory lock
 and THEN draws `seq` from its sequence, so seq order is chain order and
-concurrent writers cannot fork it. audit.event draws its seq before the
-lock, which audit_verify.py documents as producing false breaks; the proxy
-writes from eight executor threads, so this ledger does not copy that.
+concurrent writers cannot fork it. audit.event drew its seq before the
+lock until 0153 (2026-10-03), which forked its chain under concurrent
+writers; it now draws inside the lock the way this ledger always has.
 `verify` recomputes the chain with the trigger's own expression, which is
 duplicated here from the migration and held equal by a test.
 

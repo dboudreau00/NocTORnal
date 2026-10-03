@@ -465,17 +465,21 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
-          # Forks are NOTICED, never fatal. Two rows can claim one
-          # predecessor because `seq` is drawn before the chaining trigger
-          # takes its advisory lock, so concurrent writers produce them
-          # from ordinary traffic -- the development database has 67 in
-          # 60,181 rows. Failing the build on those would make a red tick
-          # mean "somebody wrote to two cases at once", and the first
-          # person to chase one would stop believing the green ones.
+          # A fork written since 0153 is a break (it is in `report.breaks`
+          # and fails the step below): the chaining trigger takes its
+          # advisory lock, then draws `seq`, then reads the tail, so
+          # concurrent writers cannot fork the chain. Before 0153 they did,
+          # from ordinary traffic, and an old database carries those forks
+          # for ever (the table is append-only); they are history, listed
+          # here as a notice and never fatal.
           if report.forks:
-              print(f"::warning::{len(report.forks)} audit row(s) share a "
-                    f"predecessor. Concurrent writers, not tampering -- the "
-                    f"chain simply cannot be fully linearised.")
+              print(f"::warning::{len(report.forks)} audit rows share a "
+                    f"predecessor, {report.forks_since_fix} of them written "
+                    f"since 0153 (those fail this step).")
+          # What a green tick cannot see: rows removed from the end, or a
+          # rewrite that recomputes every later hash. Printed so a run's log
+          # can serve as an anchor to compare a later run against.
+          print(f"tail seq {report.tail_seq} row_hash {report.tail_row_hash}")
           for b in report.breaks:
               print(f"::error::audit chain {b.kind} break at seq {b.seq} "
                     f"({b.action} at {b.occurred_at})")
@@ -527,10 +531,12 @@ jobs:
                     "truncation -- deleting the NEWEST rows leaves this "
                     "step green; compare tail_row_hash across runs.")
               sys.exit(1)
+          # As for the audit chain above: a fork written since 0153 is a
+          # break and fails this step; older ones are history.
           if report.forks:
-              print(f"::warning::{len(report.forks)} custody row(s) share a "
-                    f"predecessor. Not counted as tampering, but on a ledger "
-                    f"written by 0024 this should not occur -- investigate.")
+              print(f"::warning::{len(report.forks)} custody rows share a "
+                    f"predecessor, {report.forks_since_fix} of them written "
+                    f"since 0153 (those fail this step).")
           for b in report.breaks:
               print(f"::error::custody chain {b.kind} break at id {b.id} "
                     f"({b.action} on {b.evidence_id} at {b.occurred_at})")

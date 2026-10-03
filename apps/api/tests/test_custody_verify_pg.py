@@ -161,7 +161,9 @@ def test_untouched_chain_verifies(tamperable):
     assert report.checked > 0, "nothing was checked; the assertion below is vacuous"
     assert report.intact, [b.kind for b in report.breaks]
     assert report.genesis_count == 1
-    assert not report.forks
+    # No fork since 0153. A ledger written before it may carry old ones, which
+    # are history (`forks` lists them, `forks_since_fix` counts the others).
+    assert report.forks_since_fix == 0, report.forks
 
 
 def test_in_place_edit_of_the_note_is_a_CONTENT_break(tamperable):
@@ -316,7 +318,7 @@ def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
         f"the blind spot closed -- update the docstring: " \
         f"{[(b.kind, b.id) for b in after.breaks]}"
     assert after.breaks == ()
-    assert after.forks == ()
+    assert after.forks == before.forks, "deleting the tail changed the forks"
     assert after.genesis_count == 1
     # `checked`, `last_id` and `tail_row_hash` all move (measured on a
     # two-row tail delete: 166->164, 861->859, 0c42c7d6->330df2cd), while
@@ -422,10 +424,13 @@ def _forge_second_genesis(conn, evidence_id, uid) -> int:
     from noctornal_api.custody_verify import _HASH_EXPR
 
     conn.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
+    # `id` is drawn here: the chain trigger draws it (0153), and with the
+    # trigger stood down nothing else does.
     forged = conn.execute(
         """INSERT INTO core.evidence_custody
-               (evidence_id, action, actor_id, detail, prev_hash, row_hash)
-           VALUES (%s, 'ACQUIRED', %s, '{}'::jsonb, NULL, decode('00','hex'))
+               (id, evidence_id, action, actor_id, detail, prev_hash, row_hash)
+           VALUES (nextval('core.evidence_custody_id_seq'), %s, 'ACQUIRED', %s,
+                   '{}'::jsonb, NULL, decode('00','hex'))
            RETURNING id""",
         (evidence_id, uid)).fetchone()[0]
     conn.execute(
@@ -800,3 +805,63 @@ def test_the_endpoint_is_gated_on_audit_read(conn, client):
     r = client.get("/api/v1/audit/custody/verify", headers=headers)
     assert r.status_code == 403, r.text
     assert client.get("/api/v1/audit/custody/verify").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Forks: a break since 0153, history before it (evidence-audit-chain-forks,
+# 2026-10-03)
+# ---------------------------------------------------------------------------
+
+def _forge_clean_fork(conn, evidence_id, uid) -> int:
+    """A second row claiming the newest row's predecessor, LINK-clean and
+    CONTENT-clean (its hash is the module's own expression), so the only
+    thing wrong with it is that two rows now share one predecessor."""
+    from noctornal_api.custody_verify import _HASH_EXPR
+
+    conn.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
+    twin = conn.execute(
+        """INSERT INTO core.evidence_custody
+               (id, evidence_id, action, actor_id, detail, prev_hash, row_hash)
+           SELECT nextval('core.evidence_custody_id_seq'), %s, 'FORKED_TWIN', %s,
+                  '{}'::jsonb, c.prev_hash, decode('00','hex')
+             FROM core.evidence_custody c
+            WHERE c.id = (SELECT max(id) FROM core.evidence_custody)
+           RETURNING id""", (evidence_id, uid)).fetchone()[0]
+    conn.execute(
+        f"""UPDATE core.evidence_custody AS c SET row_hash = {_HASH_EXPR}
+             WHERE c.id = %s""", (twin,))
+    conn.execute("ALTER TABLE core.evidence_custody ENABLE TRIGGER USER")
+    return twin
+
+
+def test_a_custody_fork_written_since_the_fix_is_tampering(tamperable):
+    from noctornal_api.custody_verify import verify_custody_chain
+
+    _guard_clean_start(verify_custody_chain(tamperable))
+    evidence_id, uid = _exhibit(tamperable, "forked")
+    ids = _seed(tamperable, evidence_id, uid, n=3)
+    twin = _forge_clean_fork(tamperable, evidence_id, uid)
+
+    report = verify_custody_chain(tamperable)
+    assert sorted(f.id for f in report.forks)[-2:] == [ids[-1], twin]
+    assert not report.intact, "a fork among rows the fixed trigger wrote went unreported"
+    assert {(b.kind, b.id) for b in report.breaks} == {("FORK", ids[-1]), ("FORK", twin)}
+    assert report.forks_since_fix == 2
+
+
+def test_the_custody_boundary_is_read_from_the_marker_row(tamperable):
+    """0153 records the newest custody id in the audit row it appends (the
+    latest such row counts: a downgrade and an upgrade install the fixed
+    trigger again): a fork whose claimants are no newer than that id is
+    history."""
+    from noctornal_api.custody_verify import verify_custody_chain
+
+    marker = tamperable.execute(
+        "SELECT (detail ->> 'custody_boundary_id')::bigint FROM audit.event "
+        "WHERE action = 'AUDIT_CHAIN_SERIALISED' AND object_type = 'audit' "
+        "ORDER BY seq DESC LIMIT 1").fetchone()
+    expected = marker[0] if marker else 0
+    assert verify_custody_chain(tamperable).fork_boundary_id == expected
+    # Every row written after the migration has a newer id.
+    evidence_id, uid = _exhibit(tamperable, "after the boundary")
+    assert all(i > expected for i in _seed(tamperable, evidence_id, uid, n=2))

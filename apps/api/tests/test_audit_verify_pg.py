@@ -169,11 +169,14 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
     """
     from noctornal_api.audit_verify import _HASH_EXPR
 
+    # `seq` is given: the chain trigger draws it (0153), and with the
+    # trigger stood down nothing else does.
     conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     conn.execute(
         """INSERT INTO audit.event
-               (actor_kind, action, outcome, detail, prev_hash, row_hash)
-           SELECT 'USER', %s, 'SUCCESS', '{}'::jsonb, e.prev_hash, decode('00','hex')
+               (seq, actor_kind, action, outcome, detail, prev_hash, row_hash)
+           SELECT nextval('audit.event_seq_seq'), 'USER', %s, 'SUCCESS',
+                  '{}'::jsonb, e.prev_hash, decode('00','hex')
              FROM audit.event e
             WHERE e.seq = (SELECT max(seq) FROM audit.event)""",
         (action,))
@@ -182,18 +185,16 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
              WHERE e.seq = (SELECT max(seq) FROM audit.event)""")
 
 
-def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
-    """Two rows sharing a predecessor must not make the chain "broken".
+def test_a_fork_written_since_the_fix_is_tampering(tamperable):
+    """Two rows sharing a predecessor, one of them written since 0153, is a
+    break.
 
-    This is the case that fires on real history. `seq` is drawn from
-    `nextval()` before the chaining trigger takes its advisory lock, so
-    concurrent writers can chain off the same tail; the development
-    database carries 67 such forks in 60,181 rows, none of them tampering.
-
-    Counting them as breaks made `/audit/verify` answer BROKEN on
-    untouched history — the one answer a tamper-evidence tool cannot
-    afford, and the SECOND time this module made that mistake (the first
-    was assuming `seq` order was chain order). Hence a named test.
+    A fork used to be reported and not counted, on the ground that honest
+    traffic could not make one. It could: `seq` was drawn before the
+    chaining trigger took its lock (evidence-audit-chain-forks,
+    2026-10-03), and a fork's dead-end row could be deleted with the answer
+    still `intact`. 0153 draws the sequence and reads the tail inside the
+    lock, so a fork among rows it wrote is not honest traffic any more.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -203,19 +204,75 @@ def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
     report = verify_chain(tamperable, since_seq=since)
     assert report.forks, "the fork was not detected at all"
     assert [f.kind for f in report.forks] == ["FORK", "FORK"], \
-        "both claimants must be named — which one is the intruder is not " \
+        "both claimants must be named: which one is the intruder is not " \
         "something the verifier can decide"
-    # THE POINT: no tampering was found, so the chain is not "broken".
+    assert [b.kind for b in report.breaks] == ["FORK", "FORK"], report.breaks
+    assert not report.intact, "a fork among rows the fixed trigger wrote went unreported"
+    assert report.forks_since_fix == 2
+    assert report.fork_boundary_seq > 0, \
+        "this database carries the boundary row 0153 appended"
+
+
+def test_a_fork_older_than_the_boundary_is_history(tamperable):
+    """A fork between rows written BEFORE 0153 stays reported and is not
+    counted: the table is append-only, an upgraded deployment cannot clean
+    it, and counting it would answer BROKEN on a chain nobody tampered
+    with, the one answer a tamper-evidence tool cannot afford. The boundary
+    is passed in so the test does not depend on how old the database is."""
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=4)
+    _forge_clean_fork(tamperable)
+    newest = tamperable.execute("SELECT max(seq) FROM audit.event").fetchone()[0]
+
+    report = verify_chain(tamperable, since_seq=since, fork_boundary_seq=newest)
+    assert [f.kind for f in report.forks] == ["FORK", "FORK"]
     assert not report.breaks, [b.kind for b in report.breaks]
-    assert report.intact, "a fork must not be reported as tampering"
+    assert report.intact, "a fork older than the boundary must not be tampering"
+    assert report.forks_since_fix == 0
+
+
+def test_the_boundary_is_the_row_the_migration_wrote(tamperable):
+    """The verifier reads its boundary from the log: the LATEST
+    `AUDIT_CHAIN_SERIALISED` row, which 0153 appended where rows already
+    existed. The latest, because a downgrade and an upgrade install the
+    fixed trigger again and every row between the two was written by the old
+    one, which forks. A database with none has boundary zero."""
+    from noctornal_api.audit_verify import FORK_MARKER_ACTION, verify_chain
+
+    marker = tamperable.execute(
+        "SELECT max(seq) FROM audit.event WHERE action = %s AND object_type = 'audit'",
+        (FORK_MARKER_ACTION,)).fetchone()[0]
+    assert verify_chain(tamperable, limit=1).fork_boundary_seq == (marker or 0)
+    assert verify_chain(tamperable, limit=1, fork_boundary_seq=7).fork_boundary_seq == 7
+
+
+def test_a_later_marker_moves_the_boundary_and_excuses_the_rows_before_it(tamperable):
+    """Re-applying 0153 (a downgrade and an upgrade) appends another marker.
+    A fork written between the two, by the older trigger, is history, and one
+    written after the new marker is a break."""
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=3)
+    _forge_clean_fork(tamperable)
+    # The marker the second upgrade would write, through the real trigger.
+    tamperable.execute("ALTER TABLE audit.event ENABLE TRIGGER USER")
+    tamperable.execute(
+        "INSERT INTO audit.event (actor_kind, action, object_type, detail) "
+        "VALUES ('SYSTEM', 'AUDIT_CHAIN_SERIALISED', 'audit', '{}'::jsonb)")
+    excused = verify_chain(tamperable, since_seq=since)
+    assert excused.forks and excused.intact, [b.kind for b in excused.breaks]
+    _forge_clean_fork(tamperable, action="FORKED_AFTER")
+    assert not verify_chain(tamperable, since_seq=since).intact
 
 
 def test_a_fork_does_not_mask_real_tampering(tamperable):
-    """Separating forks out must not create a hiding place.
+    """Separating old forks out must not create a hiding place.
 
-    Without this, "forks are not breaks" could be implemented by dropping
-    any row that forks — and an attacker who forked a row they also edited
-    would be invisible.
+    Without this, "old forks are not breaks" could be implemented by
+    dropping any row that forks, and an attacker who forked a row they also
+    edited would be invisible. Here the fork is OLD (the boundary is above
+    it), and the edit is still caught.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -225,10 +282,11 @@ def test_a_fork_does_not_mask_real_tampering(tamperable):
         """UPDATE audit.event SET action = 'EDITED_AND_FORKED'
             WHERE seq = (SELECT max(seq) FROM audit.event)""")
     _forge_clean_fork(tamperable, action="FORKED_TWIN_2")
+    newest = tamperable.execute("SELECT max(seq) FROM audit.event").fetchone()[0]
 
-    report = verify_chain(tamperable, since_seq=since)
+    report = verify_chain(tamperable, since_seq=since, fork_boundary_seq=newest)
     assert report.forks, "the fork was lost"
-    assert any(b.kind == "CONTENT" for b in report.breaks), \
+    assert any("CONTENT" in b.kind for b in report.breaks), \
         "the edited row was masked by its own fork"
     assert not report.intact
 
@@ -252,8 +310,9 @@ def _forge_second_genesis(conn, action="SECOND_GENESIS") -> None:
     conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     conn.execute(
         f"""INSERT INTO audit.event
-                (actor_kind, action, outcome, detail, prev_hash, row_hash)
-            SELECT 'USER', %s, 'SUCCESS', '{{}}'::jsonb, NULL, {_HASH_EXPR}
+                (seq, actor_kind, action, outcome, detail, prev_hash, row_hash)
+            SELECT nextval('audit.event_seq_seq'), 'USER', %s, 'SUCCESS',
+                   '{{}}'::jsonb, NULL, {_HASH_EXPR}
               FROM (SELECT NULL::bytea AS prev_hash, now() AS occurred_at,
                            NULL::uuid AS actor_id, 'USER' AS actor_kind,
                            %s AS action, NULL::text AS object_type,
@@ -359,3 +418,96 @@ def test_a_multi_row_insert_does_not_fork_the_chain(tamperable):
         "WHERE action LIKE 'MULTIROW_%'").fetchone()[0]
     assert distinct == 3, (
         "a multi-row insert chained every row off the same predecessor")
+
+
+# ---------------------------------------------------------------------------
+# The tail: what `intact` cannot see, and the anchor that can
+# (evidence-chain-no-anchor, 2026-10-03)
+# ---------------------------------------------------------------------------
+
+def test_the_report_names_the_whole_logs_tail_window_or_not(tamperable):
+    from noctornal_api.audit_verify import verify_chain
+
+    _seed(tamperable, n=3)
+    newest = tamperable.execute(
+        "SELECT seq, encode(row_hash, 'hex') FROM audit.event "
+        "ORDER BY seq DESC LIMIT 1").fetchone()
+    total = tamperable.execute("SELECT count(*) FROM audit.event").fetchone()[0]
+
+    for report in (verify_chain(tamperable), verify_chain(tamperable, limit=2)):
+        assert (report.tail_seq, report.tail_row_hash) == newest
+        assert report.rows == total, "the count is the table's, not the window's"
+
+
+def test_a_removed_tail_reads_intact_without_an_anchor_and_is_caught_with_one(tamperable):
+    """The cheapest delete there is: the newest rows. Nothing names the
+    newest row as its predecessor, so removing the last k rows orphans
+    nothing and the chain agrees with itself. This pins the blind spot, and
+    the anchor that closes it."""
+    from noctornal_api.audit_verify import BLIND_SPOTS, verify_chain
+
+    since = _seed(tamperable, n=4)
+    before = verify_chain(tamperable, since_seq=since)
+    anchor = (before.tail_seq, before.tail_row_hash)
+
+    tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    tamperable.execute("DELETE FROM audit.event WHERE seq > %s", (since + 2,))
+
+    blind = verify_chain(tamperable, since_seq=since)
+    assert blind.intact, "if this fails the blind spot is closed; update BLIND_SPOTS"
+    assert blind.tail_seq < anchor[0]
+    # The answer says what it cannot see, in words, every time.
+    assert "end of the log" in BLIND_SPOTS and "tail_row_hash" in BLIND_SPOTS
+
+    held = verify_chain(tamperable, since_seq=since, anchor=anchor)
+    assert not held.intact
+    assert [b.kind for b in held.breaks] == ["ANCHOR"], held.breaks
+    assert held.anchor is not None and held.anchor.held is False
+
+
+def test_a_rewritten_tail_reads_intact_without_an_anchor_and_is_caught_with_one(tamperable):
+    """The owner's other move: edit the newest row and recompute its hash.
+    The hash is unkeyed and its expression is in this repository, so the
+    result agrees with itself (CONTENT and LINK both clean)."""
+    from noctornal_api.audit_verify import _HASH_EXPR, verify_chain
+
+    since = _seed(tamperable, n=4)
+    before = verify_chain(tamperable, since_seq=since)
+    anchor = (before.tail_seq, before.tail_row_hash)
+
+    tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    tamperable.execute(
+        "UPDATE audit.event SET action = 'REWRITTEN' WHERE seq = %s", (anchor[0],))
+    tamperable.execute(
+        f"UPDATE audit.event AS e SET row_hash = {_HASH_EXPR} WHERE e.seq = %s",
+        (anchor[0],))
+
+    blind = verify_chain(tamperable, since_seq=since)
+    assert blind.intact, "a self-consistent rewrite is invisible to a relative check"
+    caught = verify_chain(tamperable, since_seq=since, anchor=anchor)
+    assert not caught.intact
+    assert [b.kind for b in caught.breaks] == ["ANCHOR"], caught.breaks
+
+
+def test_an_anchor_the_log_still_holds_changes_nothing(tamperable):
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=3)
+    tail = verify_chain(tamperable, since_seq=since)
+    report = verify_chain(tamperable, since_seq=since,
+                          anchor=(tail.tail_seq, tail.tail_row_hash))
+    assert report.intact and report.anchor.held
+    # An earlier row of the log is as good an anchor as the tail.
+    earlier = tamperable.execute(
+        "SELECT seq, encode(row_hash, 'hex') FROM audit.event WHERE seq = %s",
+        (since + 1,)).fetchone()
+    assert verify_chain(tamperable, since_seq=since, anchor=earlier).intact
+
+
+def test_a_malformed_anchor_is_refused_not_ignored(tamperable):
+    """An anchor that does not parse must not silently verify nothing."""
+    from noctornal_api.audit_verify import verify_chain
+
+    for bad in ("", "xyz", "AB" * 32, "ab" * 31):
+        with pytest.raises(ValueError):
+            verify_chain(tamperable, limit=1, anchor=(1, bad))

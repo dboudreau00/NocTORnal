@@ -296,9 +296,15 @@ def logout(request: Request,
     """Revoke ONLY the presenting session. Revoking every session for the
     user would evict their other devices; that is a separate, deliberate
     capability (password change, admin kill-all)."""
-    SessionService(PgSessionStore(conn)).revoke(user.session_id, "logout")
-    _audit(conn, "AUTH_LOGOUT", user.user_id, {"session_id": str(user.session_id)},
-           request)
+    # The row first, in one transaction with the revocation: once the
+    # session is revoked this connection is bound to nobody, and row
+    # security on the log accepts a row naming a user only from that user's
+    # own binding (0168, 2026-10-03). A revocation that fails takes the row
+    # with it, so the log never says a sign-out happened that did not.
+    with conn.transaction():
+        _audit(conn, "AUTH_LOGOUT", user.user_id,
+               {"session_id": str(user.session_id)}, request)
+        SessionService(PgSessionStore(conn)).revoke(user.session_id, "logout")
     response = Response(status_code=204)
     # Clear the cookies so the browser stops presenting a dead token. With
     # the attributes they were SET with: until 2026-09-09 this was

@@ -29,7 +29,8 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
 3. On THIS database: the runtime grants for both roles (0108's
    `grants_sql`, the shape 0060 set plus every later revoke), then 0109's
    IAM-plane lockdown for the request role when the database is at or past
-   0109.
+   0109, then 0153's revoke of the two ledger sequences from both roles
+   when the database is at or past 0153.
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -113,6 +114,11 @@ def ensure(conn) -> int:
     conn.execute(grants.grants_sql(WORKER_ROLE))
     if _at_or_past(conn, "0109"):
         conn.execute(_migration("0109").UPGRADE_SQL)
+    # 0153 (2026-10-03): the ledger sequences are drawn by the chain
+    # triggers as the owner, so neither runtime role holds them. 0108's
+    # grant above hands every sequence back, so replay the revoke.
+    if _at_or_past(conn, "0153"):
+        conn.execute(_migration("0153").REVOKE_SQL)
     print(f"{APP_ROLE} and {WORKER_ROLE} exist and are granted on this database.")
     print(f"NOCTORNAL_APP_DB_ROLE={APP_ROLE}")
     print(f"NOCTORNAL_WORKER_DB_ROLE={WORKER_ROLE}")

@@ -1100,12 +1100,15 @@ def record_out_of_band(conn: psycopg.Connection, *, action: str, actor_id,
     except psycopg.Error:
         log.exception("could not inspect the caller's locks before %s",
                       action)
-    # The request role, as the request's own connection is (S1): an
-    # audit append needs nothing more.
-    from noctornal_api.db import connect_request as connect
+    # A system connection for the AUDIT_APPEND purpose: the row names the
+    # user who was refused, and row security on the log accepts a row
+    # naming a user only from that user's own binding, which a fresh
+    # connection does not hold (0168, 2026-10-03). The new connection also
+    # keeps the row out of the caller's transaction, as it always has.
+    from noctornal_api.db import SystemPurpose, connect_system
 
     try:
-        with connect() as side:
+        with connect_system(SystemPurpose.AUDIT_APPEND) as side:
             side.execute("SELECT set_config('lock_timeout', %s, false)",
                          (_SIDE_LOCK_TIMEOUT,))
             side.execute(statement, params)

@@ -285,14 +285,20 @@ def install_error_handlers(app) -> None:
 
 
 def _audit_rls_refused(request: Request, exc: BaseException, cid: str) -> None:
-    """The RLS_REFUSED row (S1). Out of band, on a fresh request-role
-    connection; never raises, because the answer is already decided."""
+    """The RLS_REFUSED row (S1). Out of band, on a connection of its own
+    that is not the request's (the request's transaction is aborted); never
+    raises, because the answer is already decided.
+
+    A system connection for the AUDIT_APPEND purpose: the row names the user
+    the refused request belonged to, and row security on the log accepts a
+    row naming a user only from that user's own binding, which a fresh
+    connection does not hold (0168, 2026-10-03)."""
     from psycopg.types.json import Json
 
-    from noctornal_api.db import connect_request
+    from noctornal_api.db import SystemContextUnavailable, SystemPurpose, connect_system
     actor = getattr(request.state, "noctornal_user_id", None)
     try:
-        with connect_request() as side:
+        with connect_system(SystemPurpose.AUDIT_APPEND) as side:
             side.execute(
                 """INSERT INTO audit.event
                        (actor_id, actor_kind, action, object_type, object_id,
@@ -302,5 +308,5 @@ def _audit_rls_refused(request: Request, exc: BaseException, cid: str) -> None:
                  Json({"ref": cid, "path": request.url.path,
                        "method": request.method,
                        "message": str(exc).splitlines()[0][:200]})))
-    except psycopg.Error:
+    except (psycopg.Error, SystemContextUnavailable):
         log.exception("could not audit the row-level security refusal %s", cid)

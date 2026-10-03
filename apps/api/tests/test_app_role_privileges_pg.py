@@ -337,18 +337,32 @@ def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
         assert not got["TRIGGER"], (table, got)
 
 
-def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
-    """The grant that reads as boilerplate and is not.
+#: The ledger sequences drawn by a SECURITY DEFINER chain trigger (0153,
+#: 2026-10-03): the trigger draws them as the owner inside the chain lock, so
+#: the runtime role holds no privilege on them and the column has no default.
+DEFINER_DRAWN = {"audit.event": "seq", "core.evidence_custody": "id"}
 
-    This database has exactly three sequences and all three sit behind
-    append-only ledgers. A column DEFAULT `nextval(...)` is evaluated as the
-    INSERTING role, so without USAGE the very first audited action fails --
-    and it fails saying `permission denied for sequence event_seq_seq`, which
-    names the sequence and not the table, sending whoever reads the log to the
-    wrong place.
+
+def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
+    """The grant that reads as boilerplate and is not, for the sequences a
+    column DEFAULT still draws.
+
+    A column DEFAULT `nextval(...)` is evaluated as the INSERTING role, so
+    without USAGE the very first write to such a ledger fails, saying
+    `permission denied for sequence ...`, which names the sequence and not
+    the table, sending whoever reads the log to the wrong place.
+
+    Two of the three ledger sequences are not like that any more. 0153 moved
+    their draw into the chain trigger, which runs as the owner INSIDE the
+    chain lock (so seq order is chain order), and took the runtime role's
+    USAGE and SELECT away: nothing legitimate draws them, and `SELECT
+    last_value` read the whole log's volume to a caller who may read none of
+    it. That is `test_the_definer_drawn_sequences_are_the_triggers_alone`.
     """
     seen = 0
     for table, column in LEDGER_SEQUENCE_COLUMN.items():
+        if table in DEFINER_DRAWN:
+            continue
         seq = _scalar(conn, "SELECT pg_get_serial_sequence(%s, %s)",
                       (table, column or "id"))
         if column is None:
@@ -368,7 +382,31 @@ def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
         assert _scalar(conn, "SELECT has_sequence_privilege(%s, %s, 'SELECT')",
                        (APP_DB_ROLE, seq))
         seen += 1
-    assert seen == 3, f"expected three ledger sequences, checked {seen}"
+    assert seen == 1, f"expected one default-drawn ledger sequence, checked {seen}"
+
+
+def test_the_definer_drawn_sequences_are_the_triggers_alone(conn):
+    for table, column in DEFINER_DRAWN.items():
+        seq = _scalar(conn, "SELECT pg_get_serial_sequence(%s, %s)", (table, column))
+        assert seq is not None, f"{table}.{column} lost its sequence"
+        for role in (APP_DB_ROLE, "noctornal_worker"):
+            if not _scalar(conn, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
+                           (role,)):
+                continue
+            for privilege in ("USAGE", "SELECT", "UPDATE"):
+                assert not _scalar(
+                    conn, "SELECT has_sequence_privilege(%s, %s, %s)",
+                    (role, seq, privilege)), (
+                    f"{role} holds {privilege} on {seq}: a caller can read the "
+                    f"ledger's volume or burn its sequence")
+        default = _scalar(
+            conn,
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_schema || '.' || table_name = %s AND column_name = %s",
+            (table, column))
+        assert default is None, (
+            f"{table}.{column} has a default again ({default}): the draw is back "
+            f"outside the chain lock")
 
 
 def test_an_ordinary_table_carries_the_full_four(conn):
