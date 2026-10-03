@@ -134,7 +134,13 @@ def binding_mismatch(record: SessionRecord, *, ip: str | None,
 class SessionStore(Protocol):
     def insert(self, record: SessionRecord) -> None: ...
     def get_by_token_hash(self, token_hash: bytes) -> SessionRecord | None: ...
-    def update(self, record: SessionRecord) -> None: ...
+    # The idle window's slide, and nothing else (authz-session-revoke-bypass,
+    # 2026-10-03). The answer is the stored last_seen_at, or None when the
+    # session was no longer live at the moment of the write. There is no
+    # whole-row `update` any more: rewriting every mutable column from a
+    # record read earlier wrote a concurrent revocation back to NULL.
+    def slide(self, session_id: UUID, at: datetime,
+              idle_floor: datetime) -> datetime | None: ...
     def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool: ...
     def revoke_all_for_user(self, user_id: UUID, reason: str, at: datetime) -> int: ...
 
@@ -143,6 +149,11 @@ class SessionStore(Protocol):
 class ValidationResult:
     session: SessionRecord | None
     reason: str | None = None  # 'revoked' | 'absolute_expired' | 'idle_expired' | 'not_found'
+    #: The refused session's id when the token named a real one (revoked
+    #: or expired), None for a token that matches nothing. Never returned
+    #: to a client: it keys the audit window for a refused presentation
+    #: (http_ui-004, 2026-10-03).
+    session_id: UUID | None = None
 
     @property
     def ok(self) -> bool:
@@ -196,16 +207,19 @@ class SessionService:
             return ValidationResult(None, "not_found")
         now = self._now()
         if record.revoked_at is not None:
-            return ValidationResult(None, "revoked")
+            return ValidationResult(None, "revoked", record.id)
         if now >= record.expires_at:
-            return ValidationResult(None, "absolute_expired")
+            return ValidationResult(None, "absolute_expired", record.id)
         if now - record.last_seen_at >= IDLE_TIMEOUT:
-            return ValidationResult(None, "idle_expired")
+            return ValidationResult(None, "idle_expired", record.id)
         if touch:
-            record = self.touch(record)
+            touched = self.touch(record)
+            if touched is None:
+                return ValidationResult(None, "revoked", record.id)
+            record = touched
         return ValidationResult(record)
 
-    def touch(self, record: SessionRecord) -> SessionRecord:
+    def touch(self, record: SessionRecord) -> SessionRecord | None:
         """Slide the idle window. Separate from `validate` so a caller can
         validate first, apply its own refusal (`deps.refuse_unbound_session`,
         from `deps.current_user` over HTTP and from the websocket handshake
@@ -213,10 +227,23 @@ class SessionService:
         passed -- a refused replay must not keep the session alive. Any new
         validation call site owes the same order; `live.py` used the
         touching default until 2026-09-02 and every refused reconnect kept
-        the victim's session from ever timing out."""
-        updated = replace(record, last_seen_at=self._now())
-        self._store.update(updated)
-        return updated
+        the victim's session from ever timing out.
+
+        None when the session stopped being live between the caller's
+        read and this write, and the caller must then refuse exactly as
+        for a bad token (authz-session-revoke-bypass, 2026-10-03). Until
+        then this rewrote the whole row from the record the caller read,
+        `revoked_at` included, so a logout, a password change, a
+        deactivation or a re-enrolment landing in that gap was written back
+        to NULL and the token kept working. The store's `slide` is one
+        guarded statement that names `last_seen_at` alone and matches only
+        a session that is still unrevoked, unexpired and inside its idle
+        window, so no revocation can be undone from here in any posture."""
+        now = self._now()
+        seen = self._store.slide(record.id, now, now - IDLE_TIMEOUT)
+        if seen is None:
+            return None
+        return replace(record, last_seen_at=seen)
 
     def is_step_up_fresh(self, record: SessionRecord) -> bool:
         """True if MFA was satisfied recently enough for a step-up
@@ -225,10 +252,10 @@ class SessionService:
             return False
         return self._now() - record.mfa_satisfied_at < STEP_UP_FRESHNESS
 
-    def mark_mfa_satisfied(self, record: SessionRecord) -> SessionRecord:
-        updated = replace(record, mfa_satisfied_at=self._now())
-        self._store.update(updated)
-        return updated
+    # `mark_mfa_satisfied` is gone (rls-7, 2026-10-03). It had no caller:
+    # a step-up is a fresh sign-in minted on the AUTH connection with
+    # `mfa_satisfied=True`, and the request role no longer holds the
+    # column grant it would have needed (migration 0144).
 
     def revoke(self, session_id: UUID, reason: str) -> bool:
         """Revoke ONE session — an ordinary logout. Killing every session

@@ -93,6 +93,22 @@ class CensusRedis:
             answer[f"db{db}"] = {"keys": n, "expires": 0, "avg_ttl": 0}
         return answer
 
+    def execute_command(self, *args):
+        """ACL WHOAMI and ACL GETUSER, which the row reads since the
+        limiter's Redis ACL (2026-10-02): the rules of a user, never a key
+        or a value. Answered as a development Redis answers, where the
+        limiter is the open default user; test_redis_limiter_acl.py holds
+        the production verdicts."""
+        words = tuple(str(a).lower() for a in args[:2])
+        self.calls.append(" ".join(words))
+        if words == ("acl", "whoami"):
+            return b"default"
+        if words == ("acl", "getuser") and args[2] == "default":
+            return {b"flags": [b"on", b"nopass"], b"passwords": [],
+                    b"commands": b"+@all", b"keys": b"~*", b"channels": b"&*",
+                    b"selectors": []}
+        raise AssertionError(f"the row sent {args!r}")
+
 
 @pytest.fixture
 def served(monkeypatch):
@@ -297,9 +313,12 @@ def test_a_foreign_key_found_before_the_walk_stops_is_reported_as_at_least(
 
 
 def test_the_census_sends_only_counting_commands(served):
+    """Counting commands, and since 2026-10-02 the two that read the ACL's
+    rules; none of them returns a key's value."""
     fake = served(CensusRedis(LIMITER_KEYS + FOREIGN_KEYS))
     _check()
-    assert set(fake.calls) <= {"dbsize", "scan", "info keyspace"}, fake.calls
+    assert set(fake.calls) <= {"dbsize", "scan", "info keyspace",
+                               "acl whoami", "acl getuser"}, fake.calls
     assert "scan" in fake.calls
 
 

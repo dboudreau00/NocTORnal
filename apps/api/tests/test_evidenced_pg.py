@@ -186,8 +186,10 @@ def _listed(conn, case_id, reader, *, node_id=None, edge_id=None):
     """The inspector's Evidence list, through the router function itself."""
     from noctornal_api.http.routers.read import edge_evidence, node_evidence
     if node_id is not None:
-        return node_evidence(case_id, node_id, user=_who(reader), conn=conn)
-    return edge_evidence(case_id, edge_id, user=_who(reader), conn=conn)
+        return node_evidence(case_id, node_id, limit=1000, offset=0,
+                             user=_who(reader), conn=conn)
+    return edge_evidence(case_id, edge_id, limit=1000, offset=0,
+                         user=_who(reader), conn=conn)
 
 
 def _agree(conn, case_id, reader, clearance, *, node_id=None, edge_id=None):
@@ -296,11 +298,11 @@ def test_an_exhibit_above_the_readers_clearance_neither_counts_nor_shows(conn, w
     _carry(conn, case_id, uid, ev, node_id=n1)
     assert _agree(conn, case_id, uid, "RED", node_id=n1) is True
     assert _agree(conn, case_id, amber, "AMBER", node_id=n1) is False
-    claims = node_assertions(case_id, n1, include_retracted=False,
+    claims = node_assertions(case_id, n1, include_retracted=False, limit=1000, offset=0,
                              user=_who(amber), conn=conn)
     carried = next(a for a in claims if a.evidence_id == str(ev))
     assert carried.evidence_title is None, "a RED exhibit's title reached AMBER"
-    claims = node_assertions(case_id, n1, include_retracted=False,
+    claims = node_assertions(case_id, n1, include_retracted=False, limit=1000, offset=0,
                              user=_who(uid), conn=conn)
     assert next(a for a in claims if a.evidence_id == str(ev)
                 ).evidence_title == "RED source report"
@@ -325,7 +327,7 @@ def test_an_exhibit_title_needs_the_permission_the_exhibit_list_needs(conn, worl
     _carry(conn, case_id, uid, ev, node_id=n1)
 
     def carried(reader):
-        claims = node_assertions(case_id, n1, include_retracted=False,
+        claims = node_assertions(case_id, n1, include_retracted=False, limit=1000, offset=0,
                                  user=_who(reader), conn=conn)
         return next(a for a in claims if a.evidence_id == str(ev))
 
@@ -391,7 +393,7 @@ def test_a_correction_says_what_it_changed_and_is_marked_as_one(conn, world):
                                  rationale="typo in the handle",
                                  claim_path="label",
                                  claim_value={"label": "one (corrected)"}))
-    claims = node_assertions(case_id, n1, include_retracted=False,
+    claims = node_assertions(case_id, n1, include_retracted=False, limit=1000, offset=0,
                              user=_who(uid), conn=conn)
     fix = next(a for a in claims if a.rationale == "typo in the handle")
     assert fix.is_correction is True
@@ -421,7 +423,7 @@ def test_an_attribute_claim_carries_its_value_and_its_document(conn, world):
                                  rationale="[contact_block_parser/1] published",
                                  document_id=doc, claim_path="comms.tox",
                                  claim_value="ABCD"))
-    claims = node_assertions(case_id, n1, include_retracted=False,
+    claims = node_assertions(case_id, n1, include_retracted=False, limit=1000, offset=0,
                              user=_who(uid), conn=conn)
     attr = next(a for a in claims if a.claim_path == "comms.tox")
     assert attr.claim_value == "ABCD"
@@ -454,7 +456,7 @@ def _documented_claim(conn, case_id, uid, node_id, *, title="Re: contact me",
 
 def _doc_claim(conn, case_id, node_id, reader, doc):
     from noctornal_api.http.routers.read import node_assertions
-    claims = node_assertions(case_id, node_id, include_retracted=False,
+    claims = node_assertions(case_id, node_id, include_retracted=False, limit=1000, offset=0,
                              user=_who(reader), conn=conn)
     return next(a for a in claims if a.document_id == str(doc))
 
@@ -483,7 +485,7 @@ def test_a_claim_names_its_document_and_source_to_a_reader_of_collection(conn, w
         case_id=case_id, node_id=n1,
         assertion=AssertionInput(basis="THIRD_PARTY_REPORT", created_by=uid,
                                  source_id=src, rationale="source only"))
-    claims = node_assertions(case_id, n1, include_retracted=False,
+    claims = node_assertions(case_id, n1, include_retracted=False, limit=1000, offset=0,
                              user=_who(reader), conn=conn)
     only = next(a for a in claims if a.rationale == "source only")
     assert only.document_id is None and only.source_name.startswith("test-evd-forum-")

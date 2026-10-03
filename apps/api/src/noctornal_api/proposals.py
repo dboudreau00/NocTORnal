@@ -49,7 +49,14 @@ from psycopg.types.json import Json
 
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
+from noctornal_api.selectors import (
+    SelectorError,
+    SelectorStore,
+    carries_credential,
+    is_url_type,
+)
 from noctornal_api.wording import agree
+from noctornal_ontology.normalisers import credential_spans, redact_url_credentials
 
 # What a proposal can ask for. Deliberately small: anything an extractor
 # cannot express as one of these is not something it should be able to do
@@ -237,6 +244,10 @@ class ProposalRow:
     #: The lookup answer this proposal was raised from (F15.3, 2026-09-24;
     #: migration 0100). None for every other source.
     lookup_result_id: UUID | None = None
+    #: Not a column: set only on the row an accept returns, when the
+    #: accepted selector is already held by another entity in the index (a
+    #: merge lead; graph-selector-index-drift, 2026-10-03).
+    selector_owner_id: UUID | None = None
 
 
 def _row(r) -> ProposalRow:
@@ -643,6 +654,47 @@ class ProposalStore:
         return "p.case_id = %(case_id)s AND " + _READABLE, params
 
 
+def _refuse_credential_label(payload: dict) -> None:
+    """Refuse to write a link that carries a password, token or key as an
+    entity's label (graph-url-selector-keeps-credentials, 2026-10-03).
+
+    A capture since that date proposes the link without them; a proposal
+    raised before still carries them in its label, and accepting it would
+    put a victim's credential on the graph, in search and in reports. The
+    reviewer is told to reject it; capturing the text again raises the link
+    without the credential."""
+    attrs = payload.get("attrs") or {}
+    if carries_credential(attrs.get("selector_type"), payload.get("label")):
+        raise ProposalError(
+            "This link carries a password, token or key, which the graph "
+            "does not record. Nothing was written: reject the proposal. "
+            "Capturing the text again raises the link without it.")
+
+
+def _without_credentials(payload: dict) -> dict:
+    """The payload with a URL's password or token taken out of the copies of
+    the selector's value an accept would write onto the entity
+    (`attrs.raw_value`, and `attrs.value` of a lookup's).
+
+    A lab or sandbox extraction copied the value as the analysis recorded
+    it, and a proposal raised before 2026-10-03 may hold one, so the accept
+    redacts rather than refuses: the label of such a proposal is clean, a
+    refused one could not be raised again (a proposal in any state stops a
+    second one for the same label), and the reviewer would have nothing to
+    do but reject the finding (graph-url-selector-keeps-credentials,
+    2026-10-03, verify round)."""
+    attrs = payload.get("attrs")
+    if not isinstance(attrs, dict):
+        return payload
+    fixed = {k: redact_url_credentials(attrs[k])
+             for k in ("raw_value", "value")
+             if isinstance(attrs.get(k), str)
+             and redact_url_credentials(attrs[k]) != attrs[k]}
+    if not fixed:
+        return payload
+    return {**payload, "attrs": {**attrs, **fixed}}
+
+
 class ProposalReview:
     """The analyst-facing half: the ONLY path from a proposal into the
     graph, and it requires a human."""
@@ -703,8 +755,8 @@ class ProposalReview:
             observed_at=observed_at,
             source_id=lookup_source, lookup_result_id=lookup_result,  # F15.3
         )
-        payload = row.payload or {}
-        node_id = edge_id = assertion_id = None
+        payload = _without_credentials(row.payload or {})
+        node_id = edge_id = assertion_id = selector_owner = None
         # The accept default and its floor: what the proposal came from,
         # never below the case (gap-capture-classification, 2026-09-23).
         labels = ProposalStore(self._c).source_labels(proposal_id)
@@ -753,6 +805,8 @@ class ProposalReview:
                     extra = element_compartments(
                         labels, self.case_compartments(row.case_id))
                 if row.kind == KIND_NODE:
+                    _refuse_credential_label(payload)
+                    self._refuse_userinfo_selector(row.document_id, payload)
                     node_id = self._graph.create_node(
                         case_id=row.case_id,
                         node_type=payload["node_type"],
@@ -763,6 +817,8 @@ class ProposalReview:
                         classification=written_at,
                         compartments=extra,
                     )
+                    selector_owner = self._index_selector(
+                        row.case_id, node_id, payload, observed_at)
                 elif row.kind == KIND_EDGE:
                     edge_id = self._graph.create_edge(
                         case_id=row.case_id,
@@ -877,7 +933,71 @@ class ProposalReview:
         except GraphWriteError as exc:
             raise ProposalError(f"could not apply proposal: {exc}") from exc
         return replace(self.get_for_update(proposal_id),
-                       applied_assertion_id=assertion_id)
+                       applied_assertion_id=assertion_id,
+                       selector_owner_id=selector_owner)
+
+    def _refuse_userinfo_selector(self, document_id: UUID | None,
+                                  payload: dict) -> None:
+        """Refuse a selector that was read out of a password in a link.
+
+        A capture before 2026-10-03 read the userinfo of an `ftp://`,
+        `mysql://` or `smtp://` link as an e-mail address (only http and
+        https links were URL selectors), and proposed `Secret123@host`.
+        Such a proposal is clean on its face: nothing in its label says it
+        was a password. The document it cites does, so the span the
+        proposal was found at is checked against the document's own text,
+        and one inside a link's userinfo is refused with the same words as
+        a credentialled label (graph-url-selector-keeps-credentials,
+        2026-10-03, verify round). A URL selector is not checked, its
+        label is the form without the userinfo; a proposal that cites no
+        document, a purged one, or one this reader cannot read has no text
+        to check against."""
+        attrs = payload.get("attrs") or {}
+        start, end = attrs.get("char_start"), attrs.get("char_end")
+        if (document_id is None or is_url_type(attrs.get("selector_type"))
+                or not isinstance(start, int) or not isinstance(end, int)):
+            return
+        found = self._c.execute(
+            "SELECT body_text FROM collect.document WHERE id = %s",
+            (document_id,)).fetchone()
+        if not found or not found[0]:
+            return
+        if any(start < s_end and s_start < end
+               for s_start, s_end in credential_spans(found[0])):
+            raise ProposalError(
+                "This value was read out of a password in a link, which the "
+                "graph does not record. Nothing was written: reject the "
+                "proposal. Capturing the text again does not raise it.")
+
+    def _index_selector(self, case_id: UUID, node_id: UUID, payload: dict,
+                        observed_at: datetime | None) -> UUID | None:
+        """Record an accepted selector in the index against its new entity,
+        in the accept's transaction, and return another entity already
+        holding it (a merge lead), or None.
+
+        graph-selector-index-drift (2026-10-03). An accepted NODE proposal
+        named its selector type and nothing indexed it: core.selector stayed
+        empty, selector search found nothing, a second capture of the same
+        value in another form was proposed again, and a strong duplicate was
+        never surfaced. The index keeps its first owner, so a value another
+        entity already holds is reported, never taken (invariant 3: no
+        automatic merge). A value the ontology now refuses as that type is
+        refused here too, with its reason, as `create_node` refuses it."""
+        attrs = payload.get("attrs") or {}
+        selector_type = attrs.get("selector_type")
+        if not selector_type:
+            return None
+        try:
+            found = SelectorStore(self._c).record(
+                case_id=case_id, selector_type=selector_type,
+                raw_value=attrs.get("raw_value") or payload["label"],
+                node_id=node_id, observed_at=observed_at)
+        except SelectorError as exc:
+            raise ProposalError(
+                f"{exc} Nothing was written: reject the proposal.") from None
+        if found.node_id is not None and found.node_id != node_id:
+            return found.node_id
+        return None
 
     def reject(self, proposal_id: UUID, *, reviewed_by: UUID,
                note: str) -> ProposalRow:

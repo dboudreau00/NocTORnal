@@ -48,6 +48,8 @@ from psycopg.types.json import Json
 # Imported at module top on purpose (F1, 2026-09-24): an install without
 # numpy fails at boot, not on the first role analysis.
 from noctornal_api import blockmodel
+# REGE beside it, for the same reason (ROADMAP-REMAINING phase 3, 2026-10-02).
+from noctornal_api import rege as regular
 from noctornal_api.analytics import (
     CONSTRAINT_ORDER,
     AnalyticsError,
@@ -72,6 +74,11 @@ from noctornal_api.projections import (
 SUITE = "sna_suite"
 KPP_NEG = "kpp_neg"
 CONCOR = "concor"
+REGE = "rege"
+#: The role analyses whose cache key folds every tie's ends, type and
+#: direction, because their relations depend on direction (F1; REGE,
+#: 2026-10-02).
+_DIRECTED_KEYS = (CONCOR, REGE)
 
 #: The node-row limit every run projects at. One constant, because the
 #: currency check has to re-project exactly as the run did: a different
@@ -336,6 +343,35 @@ class AnalyticsRunService:
                          current=self._matches(p, params, {"depth": depth}, digest,
                                                algorithm=CONCOR))
 
+    def rege(self, p: Projection, params: AnalyticsParams, *,
+             roles: int = regular.REGE_DEFAULT_ROLES,
+             weighting: str = regular.DEFAULT_WEIGHTING,
+             force: bool = False) -> RunResult:
+        """Regular roles by REGE (ROADMAP-REMAINING phase 3, 2026-10-02),
+        CONCOR's pattern: its own run and cache entry, keyed on the number
+        of roles and the weighting, every tie's direction in the key. The
+        parameters and every refusal that needs no matrix are checked before
+        a run is recorded, so none leaves a FAILED row or an audit event."""
+        extra = {"roles": roles, "weighting": weighting}
+        return self._run(p, params, REGE, extra, force=force,
+                         compute=lambda sub: regular.rege(sub, p, params, roles=roles,
+                                                          weighting=weighting),
+                         precheck=lambda sub: regular.precheck(sub, roles=roles,
+                                                               weighting=weighting))
+
+    def latest_rege(self, p: Projection, params: AnalyticsParams, *, roles: int,
+                    weighting: str) -> RunResult | None:
+        """The newest complete regular-role run for this projection, number
+        of roles and weighting, checked against the graph as `latest` is.
+        Served exactly as computed, as a CONCOR run is."""
+        extra = {"roles": roles, "weighting": weighting}
+        row = self._newest(p, params, REGE, match=extra)
+        if row is None:
+            return None
+        run_id, payload, finished_at, digest, _extra = row
+        return RunResult(payload, run_id, cached=True, computed_at=finished_at,
+                         current=self._matches(p, params, extra, digest, algorithm=REGE))
+
     def latest(self, p: Projection, params: AnalyticsParams) -> RunResult | None:
         """The most recent COMPLETE suite run for this projection, at the
         caller's visibility, or None when there is none.
@@ -500,12 +536,16 @@ class AnalyticsRunService:
         """The algorithm parameters a run's cache key was extended by, read
         back from its stored params: one helper for `currency` and
         `currency_many`, so a new algorithm cannot be compared without its
-        own (KPP_NEG's size; CONCOR's depth, F1)."""
+        own (KPP_NEG's size; CONCOR's depth, F1; REGE's roles and
+        weighting, 2026-10-02)."""
         run_params = run_params or {}
         if algorithm == KPP_NEG:
             return {"n_remove": int(run_params.get("n_remove"))}
         if algorithm == CONCOR:
             return {"depth": int(run_params.get("depth"))}
+        if algorithm == REGE:
+            return {"roles": int(run_params.get("roles")),
+                    "weighting": str(run_params.get("weighting"))}
         return {}
 
     def history(self, case_id: UUID, node_id: UUID, metric: str,
@@ -578,11 +618,14 @@ class AnalyticsRunService:
         return out
 
     def _newest(self, p: Projection, params: AnalyticsParams, algorithm: str,
-                *, n_remove: int | None = None, depth: int | None = None):
+                *, n_remove: int | None = None, depth: int | None = None,
+                match: dict | None = None):
         """The newest COMPLETE run of one algorithm for this projection at
         the caller's visibility: (id, result, finished_at, graph_hash,
         params), or None. The key-player size, or CONCOR's depth (F1),
-        narrows it when given."""
+        narrows it when given; `match` narrows it to runs whose stored
+        params contain every key and value given (REGE's roles and
+        weighting, 2026-10-02)."""
         return self._c.execute(
             """SELECT r.id, r.result, r.finished_at, r.graph_hash, r.params
                  FROM analytics.metric_run r
@@ -593,10 +636,12 @@ class AnalyticsRunService:
                   AND r.visibility_compartments = %s
                   AND (%s::int IS NULL OR (r.params ->> 'n_remove')::int = %s)
                   AND (%s::int IS NULL OR (r.params ->> 'depth')::int = %s)
+                  AND (%s::jsonb IS NULL OR r.params @> %s::jsonb)
                 ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
                 LIMIT 1""",
             (p.case_id, self._projection_name(p, params), algorithm,
-             self._clearance, sorted(self._comp), n_remove, n_remove, depth, depth),
+             self._clearance, sorted(self._comp), n_remove, n_remove, depth, depth,
+             Json(match) if match else None, Json(match) if match else None),
         ).fetchone()
 
     def _matches(self, p: Projection, params: AnalyticsParams, extra: dict,
@@ -750,14 +795,16 @@ class AnalyticsRunService:
         swapping an undirected tie for a directed one of the same sign,
         weight, dates, review and evidence left it unchanged, and CONCOR's
         relations depend on direction. Only CONCOR's, so the suite and
-        key-player keys are byte-identical to every one stored before."""
+        key-player keys are byte-identical to every one stored before.
+        REGE's folds them too (2026-10-02), on the same reasoning: a tie
+        given never matches one received."""
         base = graph_hash(sub, p, params)
-        if not extra and algorithm != CONCOR:
+        if not extra and algorithm not in _DIRECTED_KEYS:
             return base
         h = hashlib.sha256()
         h.update(base)
         h.update(json.dumps(extra, sort_keys=True).encode())
-        if algorithm == CONCOR:
+        if algorithm in _DIRECTED_KEYS:
             h.update(b"directions\x00")
             for row in blockmodel.direction_rows(sub):
                 h.update(json.dumps(row).encode())
@@ -852,7 +899,8 @@ class AnalyticsRunService:
         # A CONCOR row carries its position's block index rather than a
         # community (F1, 2026-09-24), and goes to the same table keyed by
         # run: the run's algorithm says which kind a row is, so no new
-        # table or migration is needed.
+        # table or migration is needed. A REGE row carries its role's index
+        # under the same key (2026-10-02).
         communities = [
             (run_id, n["id"], int(n["community"]))
             for n in nodes if n.get("community") is not None

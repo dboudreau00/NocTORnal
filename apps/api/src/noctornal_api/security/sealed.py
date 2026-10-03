@@ -35,7 +35,9 @@ from noctornal_api.security import envelope
 #: has a uuid primary key called `id`, which the re-wrap pages on.
 SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("iam.app_user", "totp_secret_ciphertext", "totp_key_id"),
-    ("collect.collection_account", "secret_ciphertext", "secret_key_id"),
+    # collect.collection_account left this list on 2026-10-02 (A collector
+    # process): a persona credential seals under the persona ring, which
+    # the API does not hold. security/persona_sealed.py is its inventory.
     ("ingest.victim_credential", "value_ciphertext", "value_key_id"),
     ("lab.sample", "data_key_ciphertext", "data_key_id"),
     ("collect.egress_profile", "endpoint_ciphertext", "key_id"),
@@ -43,9 +45,9 @@ SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # (F15.2), 2026-09-24. Both are zero bytes or NULL once destroyed.
     ("notify.jira_destination", "credential_ciphertext", "credential_key_id"),
     ("ingest.provider", "secret_ciphertext", "secret_key_id"),
-    # A persona's forum session cookies (the authenticated forum path,
-    # 0161, 2026-10-02): sealed as its credential is, NULL once signed out.
-    ("collect.collection_account", "session_ciphertext", "session_key_id"),
+    # A persona's forum session cookies (collect.collection_account.
+    # session_ciphertext, 0161) are not here either: sealed as the credential
+    # is, under the persona ring, so security/persona_sealed.py lists it.
 )
 
 #: How many rows of one (table, key id) group the readiness check opens:

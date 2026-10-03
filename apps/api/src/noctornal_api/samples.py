@@ -1751,9 +1751,12 @@ class SampleService:
             #
             # So the useful message goes only to a caller who could have
             # seen the existing row anyway, and everybody else gets a
-            # refusal that says no more than "not accepted". The caller who
-            # may not see it still cannot store a duplicate, which is the
-            # behaviour that matters.
+            # refusal that says no more than "not accepted". That narrows
+            # the answer; it does not close it (lab-6, 2026-10-03): refused
+            # (409) against accepted (201) is still one bit across a
+            # compartment or label boundary for a caller who holds the file.
+            # It is inherent in content dedupe and is a stated residual in
+            # docs/17, not something this wording solves.
             if _may_see(existing[1], existing[2], visible_to_clearance,
                         visible_to_compartments):
                 raise SampleError(
@@ -3329,7 +3332,7 @@ class SampleService:
         _require_clearance(clearance)
         row = self._c.execute(
             f"""SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
-                       s.sha256, s.state, s.preserved_key
+                       s.sha256, s.state, s.preserved_key, c.status::text
                   FROM lab.sample s
                   LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
                  WHERE s.id = %(id)s AND {lab_gate()}""",
@@ -3337,6 +3340,12 @@ class SampleService:
              **gate_params(clearance, compartments)}).fetchone()
         if row is None:
             raise SampleError("no such sample")
+        if row[6] == "PURGED":
+            # lab-4 (2026-10-03): a purged case's material is not handed out,
+            # whether or not its retention sweep has reached this sample yet.
+            raise SampleError(
+                "this sample's case has been purged, so its material is not "
+                "released through the download")
         if row[4] == REJECTED:
             # Three different answers since 0063, because "its bytes
             # destroyed" was the only sentence this had and it became false
@@ -3357,7 +3366,17 @@ class SampleService:
                 "is not released through the download.")
         if not row[1]:
             raise SampleError("this sample has no data key; it cannot be read")
+        if not self._listed_now_clear(sample_id):
+            raise SampleError("no such sample")
         return row
+
+    def _listed_now_clear(self, sample_id: UUID) -> bool:
+        """lab-2 (2026-10-03): a list imported since the sample was last
+        screened binds before a ticket is minted or a byte is read, not
+        when a later pass reaches the sample. A caller refuses with `no
+        such sample`, the answer a matched (excluded) sample already gets."""
+        from noctornal_api import screening
+        return screening.bytes_may_move(self._c, sample_id)
 
     # -- the hand-off between the two origins (0061) -----------------------
 
@@ -3554,6 +3573,14 @@ class SampleService:
                             sample_id=sample_id, outcome="DENIED",
                             ip_hash=ip_hash, detail={"reason": reason})
             raise SampleError(_TICKET_REFUSED)
+        # The ticket is spent, so the connection can be bound to its holder
+        # and the rows below keep the holder as their actor: the database
+        # attributes a request-role row only to the user its connection is
+        # bound to (0150, evidence-ledger-actor-time-forgeable, 2026-10-03).
+        # A holder whose account is no longer active binds to nobody, and
+        # that row is demoted to an unverified claim in its detail.
+        from noctornal_api.db import bind_ticket
+        bind_ticket(self._c, presented)
         if not hmac.compare_digest(bytes(row[3]), digest):
             # Cannot fire against the predicate above, and that is the
             # point of writing it: the equality that granted this row was
@@ -3938,7 +3965,9 @@ class SampleService:
                  WHERE s.id = %(id)s AND {lab_gate()}""",
             {"id": sample_id,
              **gate_params(clearance, compartments)}).fetchone()
-        if row is None:
+        if row is None or not self._listed_now_clear(sample_id):
+            # lab-2 (2026-10-03): a list imported since the last pass binds
+            # here too, answered as the sample the gate hides.
             self._refuse_retrieval(sample_id, actor_id, "not_visible",
                                    "no such sample", stage=stage,
                                    session_id=session_id, ip_hash=ip_hash)
@@ -4253,17 +4282,27 @@ class SampleService:
                     "the authoriser must be an active lead investigator on "
                     "this sample's case (for a sample with no case, a lead "
                     "investigator) who is cleared to see the sample")
+        # lab-3 (2026-10-03): PENDING whatever the exposure. A VENDOR or
+        # PUBLIC row used to be written AUTHORISED naming a lead
+        # investigator who never acted and was never told; a record-only
+        # row cannot change afterwards (0103's guard), so it records the
+        # requester's word that they agreed, and the named person is told.
         row = self._c.execute(
             """INSERT INTO lab.detonation
                    (sample_id, target, exposure_level, authorised_by,
                     authorisation_note, requested_by, status)
-               VALUES (%s, %s, %s, %s, %s, %s,
-                       CASE WHEN %s = 'NONE' THEN 'PENDING' ELSE 'AUTHORISED' END)
+               VALUES (%s, %s, %s, %s, %s, %s, 'PENDING')
                RETURNING id""",
             (sample_id, target, exposure_level, authorised_by, note,
-             requested_by, exposure_level)).fetchone()
+             requested_by)).fetchone()
         self._access(sample_id, requested_by, "DETONATED",
                      {"target": target, "exposure_level": exposure_level})
+        if exposure_level != "NONE":
+            from noctornal_api import notify_events
+            notify_events.detonation_named(
+                self._c, detonation_id=row[0], sample_id=sample_id,
+                named_id=authorised_by, requester_id=requested_by,
+                target=target, exposure_level=exposure_level)
         return row[0]
 
     # -- reads -------------------------------------------------------------
@@ -4463,7 +4502,7 @@ class SampleService:
         reviewer can read it, and the case's own analysts see the queue.
         """
         from noctornal_ontology.definition import SELECTOR_TYPES
-        from noctornal_ontology.normalisers import normalise
+        from noctornal_ontology.normalisers import normalise, redact_url_credentials
 
         from noctornal_api.proposals import KIND_NODE, ProposalStore
 
@@ -4582,7 +4621,13 @@ class SampleService:
             case_id=sample.case_id, kind=KIND_NODE, origin=origin,
             payload={"node_type": node_type, "label": norm,
                      "classification": classification,
-                     "attrs": {"selector_type": kind, "raw_value": raw,
+                     # Accept copies attrs onto the entity, so the value as
+                     # the analysis recorded it is kept without a URL's
+                     # password or token: the label (`norm`) was clean, the
+                     # raw value was not (graph-url-selector-keeps-
+                     # credentials, 2026-10-03, verify round).
+                     "attrs": {"selector_type": kind,
+                               "raw_value": redact_url_credentials(raw),
                                "sample_id": str(sample.id),
                                "analysis_id": str(analysis_id)}},
             rationale=self._proposal_rationale(sample, found, entry))

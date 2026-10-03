@@ -51,12 +51,16 @@ where it was. Nothing here posts, replies, reacts, messages, joins or
 buys: the two POSTs this module makes are the board's own sign-in and
 sign-out forms, and `test_forum_member.py` holds the module to that.
 
-## Where the vault split lands (ROADMAP-REMAINING "A collector process")
+## Where it runs (the vault split, decision 174, merged 2026-10-03)
 
 Nothing here opens a credential: the lease is the run's, from the persona
-gate. When the collector lands, these adapters run inside it as every
-persona adapter does, and `forum_session`'s two envelope calls move to the
-persona ring; this module changes nowhere.
+gate. These adapters run inside the collector as every persona adapter does
+(a scheduled poll is the collector's own child, and a Poll now of a member
+source is a persona act it runs), and `forum_session` seals and opens the
+sessions under the persona ring, never the TOTP ring, so the jars are
+opened only in the collector's process. The board's own sign-out on a stop
+is the persona act `FORUM_SIGN_OUT` (`persona_acts.py`), which calls
+`sign_out_persona` there.
 """
 from __future__ import annotations
 
@@ -69,7 +73,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from noctornal_api import forum_parse, forum_session
+from noctornal_api import analysis_runner, forum_parse, forum_session
 from noctornal_api.collection import (
     CollectionError,
     FetchResult,
@@ -86,12 +90,14 @@ from noctornal_api.forum_adapters import (
     NO_CONTEXT,
     PARSE_WALL_S,
     SECRET_REFUSED,
+    AnalysisUnavailable,
     ForumAdapter,
     MyBBAdapter,
     ParseAbandoned,
     XenForoAdapter,
     _Walk,
     direct_reads_allowed,
+    sandbox_sentence,
 )
 from noctornal_api.pinned_http import REDIRECT_CODES, secret_in_scope
 
@@ -232,7 +238,13 @@ class MemberSession:
         try:
             return self.adapter.parse(kind, fetched, dict(self.ctx.source.parser_config or {}),
                                       now, wall)
-        except ParseAbandoned:
+        except ParseAbandoned as exc:
+            if exc.reason in analysis_runner.SANDBOX_FAILURES:
+                # The sandbox, not the board (the isolated analysis worker,
+                # F42, merged 2026-10-03): the run is BLOCKED with no failure
+                # counted and nothing stored, and the sign-in is not read as
+                # one the board answered in a way nobody could read.
+                raise AnalysisUnavailable(sandbox_sentence(exc.reason)) from None
             raise SourceBlocked(SIGN_IN_UNREADABLE) from None
 
     def state_of(self, fetched) -> dict:
@@ -653,11 +665,12 @@ def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
     sessions are cleared whatever the boards answer: a cookie this product
     no longer holds is not one it can present again.
 
-    Called by the persona's stop route (`POST /collection/personas/{id}/
-    status` to LOCKED or BURNED); `PersonaVault` clears the sealed sessions
-    itself on every stop, so a stop that does not reach a board still
-    leaves nothing sealed (g40 verify major 1). The notes name no source:
-    the caller's labels are the persona's gate, not each source's."""
+    Called in the collector, by the `FORUM_SIGN_OUT` persona act that the
+    persona's stop route (`POST /collection/personas/{id}/status` to LOCKED
+    or BURNED) queues and waits for; `PersonaVault` clears the sealed
+    sessions itself on every stop, so a stop that does not reach a board
+    still leaves nothing sealed (g40 verify major 1). The notes name no
+    source: the caller's labels are the persona's gate, not each source's."""
     from noctornal_api.collection import PersonaContext, PersonaGate, _source_row
     from noctornal_api.collection_context import RunContext
 

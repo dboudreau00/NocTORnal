@@ -529,7 +529,7 @@ def test_the_chat_listing_says_whether_telegram_collection_is_on(conn, api, worl
 def test_a_telegram_persona_is_created_through_the_collection_route_with_its_device(
         conn, api, world):
     api.telegram(tp.fixture_for(_chat_spec(), world["uid"]))
-    egress = h.egress_profile(conn, P)
+    egress = h.egress_profile(conn, P, persona_capable=True)
     body = {"handle": f"{P}ghost", "platform": "TELEGRAM",
             "egress_profile_id": str(egress), "fingerprint": dict(tf.DEVICE)}
     _u, stale = _caller(conn, fresh=False)

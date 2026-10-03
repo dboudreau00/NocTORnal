@@ -617,6 +617,8 @@ def test_a_chat_under_a_compartmented_source_is_hidden_from_a_reader_who_lacks_t
     pid, _e, _uid = tp.persona(owner, P)
     plain = tp.chat(owner, P, persona_id=pid, resolved_by=holder)
     locked = tp.chat(owner, P, persona_id=pid, resolved_by=holder)
+    owner.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+                  "ON CONFLICT (key) DO NOTHING", (key, "Telegram chat test"))
     owner.execute("UPDATE collect.source SET compartments = %s WHERE id = %s",
                   ([key], locked["source"]))
     ids = [plain["source"], locked["source"]]

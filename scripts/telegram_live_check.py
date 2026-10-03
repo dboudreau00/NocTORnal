@@ -5,6 +5,13 @@ owner with their own test account, through the real egress proxy
     python scripts/telegram_live_check.py --persona <uuid> [--source <uuid>]
     python scripts/telegram_live_check.py --persona <uuid> --self-check
 
+In production it runs in the collector service, as telegram_persona.py does
+(`docker compose -f infra/production/compose.yml run --rm collector python
+scripts/telegram_live_check.py ...`): the enrolment, the poll and the
+logout open the persona's credential and session with the persona key,
+which only the collector holds (the persona vault split, decision 174), and
+it refuses anywhere else in production before it asks anybody to sign in.
+
 ## What it does, in order, and what it prints
 
 One line per step, `[PASS]`, `[FAIL]` or `[SKIP]`, each followed by a
@@ -469,8 +476,27 @@ def main(argv: list[str] | None = None) -> int:
         print("--persona and --source take ids.", file=sys.stderr)
         return 1
     load_env_local()
+    from noctornal_api.config import enforce_persona_key_boundary
     from noctornal_api.db import SystemPurpose, connect_system
+    from noctornal_api.security import persona_envelope
 
+    # The persona vault split (2026-10-02): every step that touches the
+    # persona's credential or session needs the persona key, which in
+    # production only the collector holds. Refused before the operator is
+    # asked to sign in, and the ring is read here too, everywhere, as
+    # telegram_persona.py reads it (nothing is asked of anyone when the key
+    # is missing, the way a login burnt a code and then failed to seal).
+    try:
+        enforce_persona_key_boundary(collector=True)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        persona_envelope.ring()
+    except persona_envelope.PersonaKeyError as exc:
+        print(f"The persona key ring is not usable here, so nothing was "
+              f"asked of anyone: {exc}", file=sys.stderr)
+        return 2
     try:
         conn = connect_system(SystemPurpose.COLLECTION)
     except Exception as exc:  # noqa: BLE001 - the environment, said once

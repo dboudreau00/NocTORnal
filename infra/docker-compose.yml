@@ -40,11 +40,18 @@ services:
       POSTGRES_PASSWORD: dev_only_change_me
       # Reduce the noise floor when debugging slow graph queries.
       POSTGRES_INITDB_ARGS: "--data-checksums"
+    # log_parameter_max_length=0 and its _on_error twin keep bind parameters
+    # out of the log of a slow or failed statement for EVERY role (infra-8,
+    # 2026-10-03), as the production file does; only noctornal_app carried the
+    # setting, so the owner this stack connects as logged them in full. A
+    # comment cannot go inside the folded block below.
     command: >
       postgres
       -c shared_preload_libraries=pg_stat_statements
       -c pg_stat_statements.track=all
       -c log_min_duration_statement=250
+      -c log_parameter_max_length=0
+      -c log_parameter_max_length_on_error=0
       -c max_connections=200
       -c shared_buffers=512MB
       -c work_mem=32MB

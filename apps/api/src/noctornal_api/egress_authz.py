@@ -166,7 +166,13 @@ def _tlp_max(*labels: str | None) -> str:
 
 
 def _above(label: str, ceiling: str) -> bool:
-    return TLP_ORDER.index(label) > TLP_ORDER.index(ceiling)
+    # egress-rss-floor (2026-10-03): every caller here weighs a SOURCE's
+    # label against a collection route, and invariant 8 caps that at AMBER
+    # whatever the profile's ceiling says. A profile may be labelled
+    # AMBER_STRICT or RED (its visibility), and the upgrade path used to
+    # propose the passive default at the highest feed label.
+    return TLP_ORDER.index(label) > min(TLP_ORDER.index(ceiling),
+                                        TLP_ORDER.index("AMBER"))
 
 
 def _host_of(base_url: str | None) -> str | None:
@@ -335,10 +341,19 @@ def _persona_row(conn, persona_id: UUID, *, now, allow_machine_lock: bool):
 
 
 def _shared(conn, profile_id: UUID, persona_id: UUID) -> bool:
+    # collection-shared-exit (2026-10-03): a persona is alone on its exit,
+    # which a live persona-less source reading through the same profile
+    # breaks as surely as a second persona does: one address, two readings,
+    # and a site that sees both links them. Persona creation and a source's
+    # binding refuse the pairing; this refuses a pairing made before they did.
     return conn.execute(
         """SELECT EXISTS (SELECT 1 FROM collect.collection_account
-            WHERE egress_profile_id = %s AND id <> %s AND status <> 'RETIRED')""",
-        (profile_id, persona_id)).fetchone()[0]
+            WHERE egress_profile_id = %(profile)s AND id <> %(persona)s
+              AND status <> 'RETIRED')
+           OR EXISTS (SELECT 1 FROM collect.source
+            WHERE egress_profile_id = %(profile)s AND is_active
+              AND collection_account_id IS NULL)""",
+        {"profile": profile_id, "persona": persona_id}).fetchone()[0]
 
 
 def _run(conn, claim, decision, profile, literal, *, now, recheck) -> None:

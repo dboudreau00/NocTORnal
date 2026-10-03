@@ -561,6 +561,7 @@ async def upload_email(
         acquisition_method="MANUAL_UPLOAD",
         classification=classification,
         is_hostile_markup=True,      # explicit; the derivation agrees
+        reader_ceiling=user_ceiling(conn, user.user_id, case_id=case_id),
     )
     parsed = parse_eml(data)
     try:
@@ -571,6 +572,16 @@ async def upload_email(
             classification=classification)
     except DeceptionError as exc:
         raise Problem(422, "Not recorded", safe_detail(exc)) from exc
+    except psycopg.DataError as exc:
+        # http_ui-009 (2026-10-03): the parser now replaces what a column
+        # cannot hold, so this is the backstop. The exhibit is lodged, a
+        # retry deduplicates onto it, and the analyst is told so rather
+        # than handed a 500.
+        raise Problem(
+            422, "Not recorded",
+            f"the message was lodged as exhibit {result.evidence_id}, but a "
+            f"header it carries could not be recorded "
+            f"({safe_detail(exc)}).") from exc
     return {"id": str(message_id), "evidence_id": str(result.evidence_id),
             "parse_gaps": parsed.gaps,
             "from_replyto_divergent": parsed.from_replyto_divergent,

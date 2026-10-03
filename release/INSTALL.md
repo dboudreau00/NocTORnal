@@ -264,11 +264,19 @@ Settings come from the environment or `.env.local`. **Nothing has a
 default secret**; a missing value produces a deliberate, explained refusal
 rather than an insecure fallback.
 
+`.env.local` names settings and nothing else. The installer, both launchers and
+`scripts/_env.py` leave out a name that changes how programs start (`PATH`,
+`HOME`, anything beginning `PYTHON`, `LD_`, `DYLD_` or `BASH_`, and a few shell
+variables such as `IFS` and `ENV`), say so by name, and never print its value.
+If you really need one, set it in your own shell.
+
 The ones worth knowing:
 
 | Variable | Effect if unset |
 |---|---|
 | `NOCTORNAL_TOTP_KEK` | The API will not start. Generated for you at install. |
+| `NOCTORNAL_PERSONA_KEK` | A collection persona's credential can be neither sealed nor opened, so a persona cannot be enrolled or used and every act or poll that needs one is refused by name. A key of its own, never the TOTP key. Generated for you at install. In production only the collector service holds it (`infra/production/collector.env`). |
+| `NOCTORNAL_COLLECTOR_INLINE` | Persona acts are queued for the collector process and wait for it. A development install sets it to `1`, so the API runs them itself; it is refused in production. Written for you at install. |
 | `NOCTORNAL_INGEST_PEPPER` | Ingest keys cannot be issued. Generated for you. |
 | `NOCTORNAL_PROHIBITED_CONTENT_POLICY`<br>`NOCTORNAL_DESIGNATED_PERSON` | **Sample ingest returns 451.** This is L1, and the refusal is the point. Set both only once counsel has written the policy. |
 | `NOCTORNAL_SAMPLE_ORIGIN` | Sample downloads are refused. Invariant 10 requires malware bytes to come from a **separate origin**; an origin split that is only written down does not survive the first hurried deploy. |
@@ -278,8 +286,46 @@ The ones worth knowing:
 | `NOCTORNAL_LIVE_MAX_PENDING` | A quarter of the subscriber ceiling (50 by default) of sockets that are open but not yet authenticated, per process. A peer with no session pays for these, so the budget is small, and a full budget is refused before the WebSocket handshake completes so that a refused socket holds nothing. |
 | `NOCTORNAL_LIVE_MAX_PENDING_PER_PEER` | 8 of those per peer address, the same address the rate limiter uses, trusted proxy hops included. |
 | `NOCTORNAL_LIVE_HELLO_SECONDS` | 10 seconds for an accepted socket to send its hello before it is closed and its slot returned. |
+| `NOCTORNAL_RELAX_SEASONING_DAYS` | 7 days: the second person who approves turning off a case's merge requirement must have held `case.update` on that case for at least this long, read from the assignment's grant time by the database clock. `0` turns the rule off and is the only value that does; a value that is not a whole number from 0 to 365 is held to 7 and refused at a production boot. |
 | `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. |
 | `NOCTORNAL_ENABLE_DOCS` | The OpenAPI schema stays off. It publishes the full route inventory of a law-enforcement case system, so it is opt-in. |
+
+---
+
+## A production deployment
+
+Everything above installs a development stack on this machine. A
+deployment other people use is `infra/production/` (one host, Docker
+Compose, TLS, an egress proxy), and `infra/production/README.md` is its
+procedure. The installers do one job there, on the host's own `python3`
+(3.8 or later, no virtual environment), and start nothing:
+
+```bash
+sudo ./release/install.sh --production-secrets
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\release\install.ps1 -ProductionSecrets
+```
+
+With `sudo` on Linux, because those files are root's, mode 600, and run as
+anybody else it can read none of them; on Windows, run it as the user who
+owns them. A file it may not read is one sentence naming the file.
+
+It writes and checks the secrets files beside the compose file. The schema
+owner's credential goes in `postgres-init.env` and `migrate.env`, each
+read by one service, and never in `secrets.env`, which every application
+service reads (`docs/17` F52). The rate limiter's Redis gets a password and a
+`REDIS_URL` that signs in as the limiter's own user, the only one that
+Redis has. It prints the name of each change and never a value, and keeps
+a backup of every file before it changes it.
+
+Run it after every `git pull`, before `up`. From a release before
+2026-10-02 it is required: it moves the owner's credential out of an
+existing `secrets.env`, and until it has, the migrate job and Redis each
+refuse to start with a sentence naming it, and nothing that waits on them
+starts. [secrets-upgrade/README.md](secrets-upgrade/README.md) is that
+upgrade step by step, with the way back.
 
 ---
 
@@ -298,8 +344,9 @@ lives. This reads as a broken install and is not one.
 **`alembic` stops with "DATABASE_URL is not set or is empty"** in a new
 terminal: unlike `bootstrap.py`, Alembic reads the environment only, and
 it does not guess a target. Load `.env.local` first
-(`set -a; . ./.env.local; set +a`, or the PowerShell line under
-Verifying the install).
+(`eval "$(.venv/bin/python scripts/_env.py export)"`, which reads the file as
+data and runs nothing from it, or the PowerShell line under Verifying the
+install).
 
 **A new route returns 404 after you changed the code**: the API runs
 without `--reload`. Static files (the UI) are served from disk and update
@@ -364,7 +411,7 @@ and pytest does not read the file itself.
 
 ```bash
 # macOS / Linux
-set -a; . ./.env.local; set +a
+eval "$(.venv/bin/python scripts/_env.py export)"
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch
@@ -374,7 +421,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 
 ```powershell
 # Windows
-Get-Content .env.local | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
+Get-Content .env.local | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' -and $_ -notmatch '^(PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS[1-4])=|^(BASH_|LD_|DYLD_|PYTHON)' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 $env:DATABASE_URL = 'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch'

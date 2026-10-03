@@ -65,7 +65,10 @@ limits its own CPU and memory before it reads a byte, under a wall clock
 the parent enforces by killing it. A page that does not parse within the
 limits is abandoned and reported as parser drift. The residual, a memory
 safety defect in lexbor itself, is docs/17's, with decision 53 (the RSS
-parser's DOCTYPE refusal) as the precedent.
+parser's DOCTYPE refusal) as the precedent. Since 2026-10-02 (docs/17 F42)
+a production deployment starts that child in the isolated analysis
+worker, a container with no secrets and no network, so such a defect
+reaches neither; the child is this module either way.
 
 Everything else is bounded too: a page is at most 4 MiB, at most 200 posts
 or threads are read from one page, a body at most 200,000 characters, a

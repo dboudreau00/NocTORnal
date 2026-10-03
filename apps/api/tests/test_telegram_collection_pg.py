@@ -280,10 +280,12 @@ def test_a_poisoned_capture_record_skips_its_message_and_the_cursor_moves_on(con
                                sleep=lambda _s: None).run_once(world["source"],
                                                                actor_id=None)
     assert result.status == "PARTIAL" and result.items_new == 2
-    # The foundation's ITEM_SKIPPED sentence; it redacts the id on its own,
-    # and a bare 'c:<digits>/2' has the user:password shape its redactor
-    # masks, so the id itself is not asserted.
-    assert any("was skipped: the database refused it (CheckViolation)" in w
+    # The foundation's ITEM_SKIPPED sentence, naming the message by its
+    # typed id. The redactor used to mask a bare 'c:<digits>/2' as
+    # user:password, so the warning could not say which message it meant
+    # (F36, 2026-10-02).
+    assert any(f"Item '{world['chat']['durable_id']}/2' was skipped: the database "
+               f"refused it (CheckViolation)" in w
                for w in result.warnings), result.warnings
     stored = {r[0] for r in conn.execute(
         "SELECT external_id FROM collect.document WHERE source_id = %s",

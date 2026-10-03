@@ -7,20 +7,24 @@ sealed in the vault's storage between runs (the authenticated forum path,
 A session cookie obtained with a persona's credentials IS a credential: it
 opens the member's view of the board exactly as the password does. So it
 gets the credential's treatment, invariant 7's shape rather than a rule to
-remember: sealed at rest under the same envelope as the password
+remember: sealed at rest under the same ring as the password
 (`collect.collection_account.session_*`, 0161), opened only inside the
 member adapter's run and for a sign-out, registered for redaction for
 exactly as long as it is in memory (`pinned_http.secret_in_scope`), never
 written to a run row, a warning, a document, a log line or a response,
 and cleared when the persona signs out or stops.
 
-## Where the envelope comes from
+## Where the key comes from
 
-`security.envelope` today, the TOTP ring. The persona vault split
-(ROADMAP-REMAINING "A collector process") moves persona credentials under
-a key of their own (`security.persona_envelope`): when it lands, the two
-calls below switch to that module and nothing else here changes, which is
-why they are the only two places this module names the envelope.
+The persona ring, `security.persona_envelope` (NOCTORNAL_PERSONA_KEK), the
+key of its own that only the collector holds in production (the persona
+vault split, decision 174, merged 2026-10-03). The two calls below are the
+only places this module names it, and nothing here ever falls back to the
+TOTP ring: a session cookie opens a member's view of a board as the
+password does, so no process that cannot open the password can open it. So
+a jar is sealed and opened only inside the collector's process (a run, or
+the sign-out act), and what the API does with one is database only: it
+clears it (`clear_session` with no origin opens nothing).
 
 ## The jar, and whose it is
 
@@ -53,7 +57,7 @@ from uuid import UUID
 
 import psycopg
 
-from noctornal_api.security import envelope
+from noctornal_api.security import persona_envelope
 
 log = logging.getLogger("noctornal.forum_session")
 
@@ -164,7 +168,12 @@ def _decode(persona_id: UUID, row) -> dict[str, dict[str, str]]:
     if row is None or not row[0]:
         return {}
     try:
-        value = json.loads(envelope.decrypt(bytes(row[0]), key_id=row[1]))
+        value = json.loads(persona_envelope.decrypt(bytes(row[0]), key_id=row[1]))
+    except persona_envelope.PersonaKeyError:
+        # This process holds no usable persona key: that says nothing about
+        # the session, and "no session" would let a caller seal a new blob
+        # over a live one. The caller is refused instead.
+        raise
     except Exception:  # noqa: BLE001 - an unreadable session is no session
         log.warning("persona %s: the sealed forum session could not be opened "
                     "and is discarded", persona_id)
@@ -193,7 +202,7 @@ def _store(conn: psycopg.Connection, persona_id: UUID,
                       session_sealed_at = NULL
                 WHERE id = %s""", (persona_id,))
         return
-    ciphertext, key_id = envelope.encrypt(json.dumps(
+    ciphertext, key_id = persona_envelope.encrypt(json.dumps(
         {"v": FORMAT, "origins": jars}, separators=(",", ":")))
     conn.execute(
         """UPDATE collect.collection_account

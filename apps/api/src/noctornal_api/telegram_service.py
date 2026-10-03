@@ -603,6 +603,47 @@ def _refuse_offline_problems(*, classification: str | None) -> None:
         raise TelegramActError(409, telegram.NO_PROXY_SENTENCE)
 
 
+def check_create_request(ref, access_mode: str,
+                         classification: str | None, *, compartments=(),
+                         held_compartments=None) -> telegram.ChatRef:
+    """What `TelegramChats.create` refuses before it reaches the persona,
+    needing no key and no network: a reference that is not a public chat
+    (a private invite link above all: a bearer join credential the product
+    refuses to take), an access mode, a basic group asked for as public,
+    and the offline sentences. One function, so the route that queues the
+    act (it refuses at the door, before anything is stored) and the
+    collector that runs it cannot disagree (verify:g38, 2026-10-03: a
+    pasted invite link was queued first, and kept for ever in a table whose
+    rows are never deleted)."""
+    try:
+        parsed = telegram.parse_chat_reference(ref)
+    except ReferenceRefused as exc:
+        raise TelegramActError(400, str(exc)) from None
+    if access_mode not in ("PUBLIC_READ", "MEMBER"):
+        raise TelegramActError(400, "The access mode is PUBLIC_READ or MEMBER.")
+    if (parsed.durable_id or "").startswith("g:") and access_mode == "PUBLIC_READ":
+        raise TelegramActError(400, "Basic groups are never public. Add it "
+                                    "as a member chat.")
+    _refuse_offline_problems(classification=classification)
+    # F43 (2026-10-03): a chat is filed only under keys its creator holds,
+    # the sentence `create_source` gives, said here so a request that would
+    # be refused there is refused before it is queued and before the persona
+    # looks anything up.
+    keys = frozenset(str(k) for k in (compartments or ()))
+    if keys and not keys <= frozenset(held_compartments or ()):
+        raise TelegramActError(
+            400, "You cannot file a source under a compartment you do not hold.")
+    return parsed
+
+
+def normal_reference(parsed: telegram.ChatRef) -> str:
+    """The reference a validated chat is queued under: its public name or
+    its typed id, as `parse_chat_reference` reads it back to the same chat.
+    Never the text the person typed, so what is stored is what was
+    understood and nothing else."""
+    return f"@{parsed.username}" if parsed.by_username else str(parsed.durable_id)
+
+
 async def _reach(transport, chat: dict, persona_id: UUID) -> ChatInfo:
     """The chat as the persona sees it: by its own access hash, by the name
     it was resolved by (a recycled name refused), or from its conversation
@@ -651,17 +692,12 @@ class TelegramChats:
         its chat, under 0164's policy and everything it collects) under keys
         the creator holds (`held_compartments`); until 2026-10-03 this route
         could not set them, so the chat policy was reachable only by editing
-        a row by hand (g40 verify major 5b)."""
-        try:
-            parsed = telegram.parse_chat_reference(ref)
-        except ReferenceRefused as exc:
-            raise TelegramActError(400, str(exc)) from None
-        if access_mode not in ("PUBLIC_READ", "MEMBER"):
-            raise TelegramActError(400, "The access mode is PUBLIC_READ or MEMBER.")
-        if (parsed.durable_id or "").startswith("g:") and access_mode == "PUBLIC_READ":
-            raise TelegramActError(400, "Basic groups are never public. Add it "
-                                        "as a member chat.")
-        _refuse_offline_problems(classification=classification)
+        a row by hand (g40 verify major 5b). A key the creator does not hold
+        is refused with the other offline refusals, before the persona is
+        asked anything."""
+        parsed = check_create_request(ref, access_mode, classification,
+                                      compartments=compartments,
+                                      held_compartments=held_compartments)
         need = "PUBLIC_READ" if parsed.by_username else "MEMBER_READ"
 
         async def work(transport, ctx):

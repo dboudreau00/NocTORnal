@@ -383,6 +383,20 @@ def run_once(
     # this one distinguishable to a caller who is not reading this file.
     refuse_unready(conn)
     clearance, held = user_ceiling(conn, user.user_id)
+    # A collector process (2026-10-02): a source a persona reads is polled
+    # by the collector, the one process holding the persona key, so this
+    # route queues it as a persona act and answers with its outcome (or
+    # 202 while it is queued). A feed no persona reads polls here, as
+    # before. A source above the caller, or filed under a compartment they
+    # do not hold (F43), is the same 404 either way.
+    persona_read = _persona_read_label(conn, source_id, clearance.name, adapters,
+                                       held)
+    if persona_read is not None:
+        from noctornal_api.http.routers.collection_acts import act_answer
+        return act_answer(
+            conn, user, kind="SOURCE_POLL", source_id=source_id,
+            classification=persona_read, adapters=adapters, factory=None,
+            params={"persona_id": body.persona_id, "watch_id": body.watch_id})
     try:
         # The poll on a system connection (S1, 2026-09-25), as the cron's
         # is: a new item dedupes against every stored version of it and
@@ -395,34 +409,64 @@ def run_once(
                 source_id, actor_id=user.user_id, persona_id=body.persona_id,
                 watch_id=body.watch_id, clearance=clearance.name,
                 compartments=held)
-    except (SourceRefused, PersonaResting, AuthorityError) as exc:
-        # ABOVE `except CollectionError`, as CollectionBusy is: each is "you
-        # are allowed, this cannot run", and nothing was done. A refused
-        # source is configuration, a resting persona is outside its hours,
-        # and the confirmer is refused as the runner before any run row;
-        # 400 "Invalid request" would tell the caller to
-        # fix a request with nothing wrong in it.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    except PersonaUnavailable as exc:
-        # 409 rather than 403: the caller is allowed, the persona is not
-        # usable -- suspended, burnt, or cooling down.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    except CollectionBusy as exc:
-        # ABOVE `except CollectionError` and it must stay there: CollectionBusy
-        # is a subclass, so until 2026-09-10 it was caught below and answered
-        # 400 "Invalid request" -- for a request that was entirely valid and
-        # did nothing at all. The case that produces it is the ordinary one
-        # the lock exists for and `run_once`'s docstring names: an analyst
-        # double-clicking Run, or this pane overlapping the cron in
-        # scripts/collection_poll.py. 409 says the true thing, which is that
-        # the poll is already happening; 400 told them to fix a request that
-        # had nothing wrong with it, and left retrying -- the correct
-        # response -- looking like the wrong one.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise run_problem(exc) from exc
+    return run_body(result)
+
+
+def _persona_read_label(conn: psycopg.Connection, source_id: UUID,
+                        clearance: str, adapters: dict,
+                        compartments=None) -> str | None:
+    """The source's label when a persona reads it (its adapter names a
+    persona platform), else None. A source above the caller, outside their
+    compartments, or none at all, is the run route's 404 as ever."""
+    from noctornal_api.collection import _source_row
+
+    try:
+        source = _source_row(conn, source_id, clearance, compartments)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
-    except CollectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    adapter = adapters.get(source.parser_key)
+    if adapter is None or _attr(adapter, "persona_platform") is None:
+        return None
+    return source.classification
+
+
+def run_problem(exc: CollectionError) -> Problem:
+    """The run route's answer for a refused or failed poll: one mapping for
+    the poll run here and the one the collector runs (2026-10-02). The
+    order is the old `except` chain's: a subclass before its parent."""
+    if isinstance(exc, (SourceRefused, PersonaResting, AuthorityError)):
+        # Before the CollectionError fallback, as CollectionBusy is: each is
+        # "you are allowed, this cannot run", and nothing was done. A
+        # refused source is configuration, a resting persona is outside its
+        # hours, and the confirmer is refused as the runner before any run
+        # row; 400 "Invalid request" would tell the caller to fix a request
+        # with nothing wrong in it.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, PersonaUnavailable):
+        # 409 rather than 403: the caller is allowed, the persona is not
+        # usable: suspended, burnt, or cooling down.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, CollectionBusy):
+        # Before the CollectionError fallback and it must stay there:
+        # CollectionBusy is a subclass, so until 2026-09-10 it was caught
+        # below and answered 400 "Invalid request", for a request that was
+        # entirely valid and did nothing at all. The case that produces it
+        # is the ordinary one the lock exists for and `run_once`'s docstring
+        # names: an analyst double-clicking Run, or this pane overlapping
+        # the scheduled poll in scripts/collection_poll.py. 409 says the
+        # true thing, which is that the poll is already happening; 400 told
+        # them to fix a request that had nothing wrong with it, and left
+        # retrying (the correct response) looking like the wrong one.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, CollectionNotFound):
+        return Problem(404, "Not found", safe_detail(exc))
+    return Problem(400, "Invalid request", safe_detail(exc))
+
+
+def run_body(result) -> dict:
+    """What a finished poll answers, here and from the collector."""
     return {
         "run_id": str(result.run_id),
         "items_seen": result.items_seen,
@@ -491,38 +535,65 @@ _STOPS = ("LOCKED", "BURNED")
 
 
 def _sign_out_forum(conn: psycopg.Connection, persona_id: UUID, user: CurrentUser,
-                    clearance: str, held) -> str | None:
+                    clearance: str, held, adapters: dict) -> str | None:
     """Sign a forum persona out of its boards before it is stopped; None
-    for any other persona, and a sentence on what was and was not reached.
-    Never raises into the stop: a persona the caller cannot see is left for
-    `set_status` to answer 404, and a board that cannot be reached leaves
-    the sealed session to be cleared by the stop itself."""
-    from noctornal_api import forum_member
+    for any other persona and for one that holds no session, else a sentence
+    on what was and was not reached.
+
+    The board's own sign-out needs the sealed session, which only the
+    collector can open (the persona vault split, decision 174, merged with
+    the authenticated forum path 2026-10-03), so this asks the collector
+    for it as a persona act, a STOP (`FORUM_SIGN_OUT`), and waits for it a
+    bounded time, as every act route does. Development's inline mode runs it
+    here, where the API holds the persona key. It is the courtesy and may
+    not be reached: whatever happens the stop goes on, and `PersonaVault`
+    clears the sealed session in the same call, so an act the collector
+    starts later finds nothing to sign out of. Never raises into the stop: a
+    persona the caller cannot see is left for `set_status` to answer 404."""
+    from noctornal_api import persona_acts
 
     row = conn.execute(
-        f"""SELECT a.platform::text FROM collect.collection_account a
+        f"""SELECT a.platform::text, a.session_sealed_at IS NOT NULL,
+                   coalesce((SELECT max(s.classification)
+                               FROM collect.source s
+                              WHERE s.collection_account_id = a.id
+                                 OR s.id = a.source_id),
+                            %(clearance)s::core.tlp)::text
+              FROM collect.collection_account a
              WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
         {"id": persona_id, "clearance": clearance,
          "held": _held(held)}).fetchone()
-    if row is None or row[0] not in ("XENFORO", "MYBB"):
+    if row is None or row[0] not in ("XENFORO", "MYBB") or not row[1]:
         return None
+    unreached = ("The forum's own sign-out was not reached; the session this "
+                 "product held was cleared by the stop.")
     try:
-        with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
-            out = forum_member.sign_out_persona(
-                sconn, persona_id, actor_id=user.user_id, clearance=clearance,
-                compartments=held)
+        act = persona_acts.submit(
+            conn, user_id=user.user_id, session_id=user.session_id,
+            mfa_at=user.session_mfa_at, kind="FORUM_SIGN_OUT",
+            params={"persona_id": str(persona_id)}, classification=row[2],
+            source_id=None)
+        if persona_acts.inline_mode():
+            act, body = persona_acts.run_inline(conn, act, adapters=adapters)
+        else:
+            act = persona_acts.wait(conn, act["id"], user_id=user.user_id,
+                                    seconds=persona_acts.wait_seconds())
+            body = ((act.get("result") or {}).get("body")
+                    if act and act["status"] == "DONE" else None)
+            if act and act["status"] in persona_acts.LIVE:
+                # The collector has not started it: the stop clears the
+                # session now, so there is nothing left for the act to do.
+                persona_acts.cancel(conn, act["id"], user_id=user.user_id,
+                                    clearance=clearance)
     except Exception:  # noqa: BLE001 - a stop is always allowed
         import logging
         logging.getLogger("noctornal.collection").warning(
             "the forum sign-out of persona %s failed; the stop goes on",
             persona_id, exc_info=True)
-        return ("The forum's own sign-out was not reached; the session this "
-                "product held was cleared by the stop.")
-    reached = [s for s in out["signed_out"] if s["reached"]]
-    if reached:
+        return unreached
+    if body and any(s.get("reached") for s in body.get("signed_out", [])):
         return "The persona was signed out of its forum, and its session cleared."
-    return ("The forum's own sign-out was not reached; the session this "
-            "product held was cleared.")
+    return unreached
 
 
 @router.post("/personas/{persona_id}/status", response_model=dict)
@@ -530,6 +601,7 @@ def set_persona_status(
     persona_id: UUID, body: PersonaStatusBody,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Suspend or restore a persona, with a reason.
 
@@ -549,11 +621,13 @@ def set_persona_status(
     cooldown = (timedelta(hours=body.cooldown_hours)
                 if body.cooldown_hours else None)
     # A STOP of a forum persona signs it out of its boards first, through
-    # its own route in a stop context (g40 verify major 1, 2026-10-03). The
-    # sign-out is the courtesy and may not be reached; the clearing of what
-    # this product holds sealed is the guarantee, and `PersonaVault`
-    # makes it on every stop whatever happens here.
-    signed_out = (_sign_out_forum(conn, persona_id, user, clearance.name, held)
+    # its own route in a stop context, run by the collector as a persona act
+    # (g40 verify major 1, 2026-10-03; the vault split). The sign-out is the
+    # courtesy and may not be reached; the clearing of what this product
+    # holds sealed is the guarantee, and `PersonaVault` makes it on every
+    # stop whatever happens here.
+    signed_out = (_sign_out_forum(conn, persona_id, user, clearance.name, held,
+                                  adapters)
                   if body.status in _STOPS else None)
     try:
         written = PersonaVault(conn).set_status(

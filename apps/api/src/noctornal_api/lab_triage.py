@@ -27,7 +27,8 @@ raises no proposal: machines propose only when an analyst clicks.
    and one SYSTEM row when a scheduled trigger did. The detail
    names the run and the byte count, never the steps or the trigger, so
    custody says who caused a read and not what a hidden rule set hunts.
-4. CHILDREN, one per step, each bounded (`lab_static`, `run_child`).
+4. CHILDREN, one per step, each bounded (`lab_static`, `run_child`),
+   here or in the isolated analysis worker (`analysis_runner`, F42).
 5. RESULTS, one transaction: the sample re-read FOR UPDATE; a sample
    rejected, excluded or whose case closed meanwhile has its findings
    discarded. Otherwise the hashes, the gaps for the steps this run
@@ -52,10 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
-import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from uuid import UUID
@@ -63,7 +61,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json
 
-from noctornal_api import fuzzyhash, lab_static
+from noctornal_api import analysis_runner, fuzzyhash, lab_static
 from noctornal_api.config import DEFAULT_UPLOAD_CAP, SAMPLE_CAP_ENV, parse_size
 
 log = logging.getLogger("noctornal.lab_triage")
@@ -88,7 +86,6 @@ PARSER_OVERHEAD = 512 * MIB
 
 MAX_ATTEMPTS = 3
 CHILD_STDOUT_CAP = 8 * MIB
-STDERR_KEPT = 4 * 1024
 #: The parent's wall clock beyond the child's own CPU limit.
 WALL_GRACE_S = 10
 
@@ -188,11 +185,15 @@ def settings_or_default() -> AnalysisSettings:
 
 
 def limits_words(settings: AnalysisSettings, kind: str | None = None) -> dict:
-    """The limits line the run row, the card and readiness show."""
+    """The limits line the run row, the card and readiness show, and
+    whether the children ran in the isolated worker (F42, 2026-10-02):
+    kept on the run and its findings, so how a sample was handled is on
+    the record beside what was found."""
     kind = kind or lab_static.limits_kind()
     return {"kind": kind, "words": lab_static.LIMITS_WORDS[kind],
             "memory_bytes": settings.memory_bytes if kind == "rlimit" else None,
-            "timeout_s": settings.timeout_s}
+            "timeout_s": settings.timeout_s,
+            "isolated": analysis_runner.runner_choice().mode == "isolated"}
 
 
 # ---------------------------------------------------------------------------
@@ -203,39 +204,12 @@ def limits_words(settings: AnalysisSettings, kind: str | None = None) -> dict:
 #: a script that floods its output or never returns.
 CHILD_ARGV: list[str] = [sys.executable, "-m", "noctornal_api.lab_static"]
 
-
-def _package_root() -> str:
-    import noctornal_api
-    return os.path.dirname(os.path.dirname(os.path.abspath(
-        noctornal_api.__file__)))
-
-
-def child_env() -> dict[str, str]:
-    """The child's whole environment: a PATH, what Windows needs to start
-    an interpreter, a locale, two flags that stop it writing, and where
-    THIS process's code is, so parent and child run the same module. No
-    NOCTORNAL_*, DATABASE_URL, MINIO_*, SAMPLE_*, PRESERVE_*, REDIS_URL or
-    SMTP_*: the data key and the KEK never reach a child. (See
-    `lab_static`'s docstring for what it can still read on Linux.)"""
-    env = {"PATH": os.environ.get("PATH", os.defpath),
-           "LANG": "C.UTF-8",
-           "PYTHONDONTWRITEBYTECODE": "1",
-           "PYTHONNOUSERSITE": "1",
-           "PYTHONPATH": _package_root()}
-    if os.name == "nt":
-        for name in ("SYSTEMROOT", "WINDIR"):
-            if os.environ.get(name):
-                env[name] = os.environ[name]
-    return env
-
-
-@dataclass
-class ChildResult:
-    ok: bool
-    output: bytes = b""
-    #: None, or: start_failed | timeout | output_too_large | crashed
-    failure: str | None = None
-    returncode: int | None = None
+# The bounded runner itself lives in analysis_runner since F42
+# (2026-10-02), so the isolated worker starts children with the very same
+# code; these names stay here for the callers and tests that use them.
+ChildResult = analysis_runner.ChildResult
+child_env = analysis_runner.child_env
+_package_root = analysis_runner.package_root
 
 
 #: The sentence for each way a child can fail, by kind.
@@ -248,122 +222,43 @@ CHILD_FAILURES = {
     "bad_output": "the analysis process's answer could not be read",
     "version_mismatch": ("the analysis process reported a different parser "
                          "version from this server's"),
+    # The isolated worker's own failures (F42, 2026-10-02). Each means
+    # nothing was parsed, and none is ever answered by a local child.
+    "isolation_refused": ("no isolated analysis worker is configured, so "
+                          "nothing was parsed"),
+    "worker_unavailable": "the isolated analysis worker did not answer",
+    "worker_bad_answer": "the isolated analysis worker's answer could not be read",
+    "worker_refused": "the isolated analysis worker refused the request",
+    "worker_busy": "the isolated analysis worker had no free slot in time",
 }
 
 
 def run_child(header: dict, payloads: tuple[bytes, ...] = (), *,
               wall_s: float, stdout_cap: int = CHILD_STDOUT_CAP,
-              argv: list[str] | None = None) -> ChildResult:
-    """Start one child, feed it over stdin, read its answer under a cap
-    and a wall clock, and never let it outlive either.
+              argv: list[str] | None = None,
+              kind: str = "lab_static") -> ChildResult:
+    """One bounded child, on the runner this deployment chose
+    (analysis_runner.runner_choice): here, or in the isolated worker,
+    which runs the same `run_local` per request. `argv` is the local
+    child's (a test points it at a hostile script); the worker starts only
+    the module `kind` names. Production with no worker configured, or a
+    worker that does not answer, gets a failure, never a local child
+    (F42, 2026-10-02)."""
+    return analysis_runner.run(kind, header, payloads, wall_s=wall_s,
+                               stdout_cap=stdout_cap, argv=argv or CHILD_ARGV)
 
-    The sample is written 1 MiB at a time by a writer thread, never as one
-    concatenated frame; stdout is read incrementally and the child killed
-    the moment it passes `stdout_cap`; stderr is drained so a chatty child
-    cannot block, and its first `STDERR_KEPT` bytes go to this server's
-    log only. Never `preexec_fn`, which is unsafe in a threaded server: a
-    new session (POSIX) or process group (Windows) instead, so the kill
-    takes the whole group."""
-    line = json.dumps({"protocol": lab_static.PROTOCOL, **header},
-                      separators=(",", ":")).encode() + b"\n"
-    if len(line) > lab_static.HEADER_CAP:
-        raise ValueError("header too large")
-    extra: dict = {}
-    if os.name == "posix":
-        extra["start_new_session"] = True
-    else:
-        extra["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
-                                  | getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        proc = subprocess.Popen(argv or CHILD_ARGV, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                env=child_env(), close_fds=True, **extra)
-    except OSError:
-        log.warning("the static triage child could not be started",
-                    exc_info=True)
-        return ChildResult(False, failure="start_failed")
-    parts: list[bytes] = []
-    state = {"n": 0, "over": False}
-    err = bytearray()
 
-    def kill() -> None:
-        try:
-            if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except (OSError, ProcessLookupError):
-            pass
+class AnalysisInterrupted(Exception):
+    """A child could not run because the sandbox failed mid-pass: one of
+    analysis_runner.SANDBOX_FAILURES, never the sample's or the rules'
+    fault. The run or the compile goes back to the queue with no attempt
+    spent, and the pass stops, since the next child would meet the same
+    worker (F42 review, 2026-10-02: until then such a step was stored as a
+    crashed scan, and a compile spent one of its three attempts)."""
 
-    def writer() -> None:
-        try:
-            proc.stdin.write(line)
-            for payload in payloads:
-                view = memoryview(payload)
-                for i in range(0, len(view), MIB):
-                    proc.stdin.write(view[i:i + MIB])
-            proc.stdin.close()
-        except (BrokenPipeError, OSError, ValueError):
-            pass
-
-    def reader() -> None:
-        while True:
-            try:
-                chunk = proc.stdout.read1(1 << 16)
-            except (OSError, ValueError):
-                break
-            if not chunk:
-                break
-            state["n"] += len(chunk)
-            if state["n"] > stdout_cap:
-                state["over"] = True
-                kill()
-                break
-            parts.append(chunk)
-
-    def drain() -> None:
-        while True:
-            try:
-                chunk = proc.stderr.read1(1 << 16)
-            except (OSError, ValueError):
-                break
-            if not chunk:
-                break
-            if len(err) < STDERR_KEPT:
-                err.extend(chunk[:STDERR_KEPT - len(err)])
-
-    threads = [threading.Thread(target=t, daemon=True)
-               for t in (writer, reader, drain)]
-    for t in threads:
-        t.start()
-    timed_out = False
-    try:
-        proc.wait(timeout=wall_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        kill()
-        proc.wait()
-    for t in threads:
-        t.join(timeout=5)
-    for pipe in (proc.stdin, proc.stdout, proc.stderr):
-        try:
-            pipe.close()
-        except (OSError, ValueError):
-            pass
-    if err:
-        # The server log, never the UI, the audit chain or the run row: a
-        # parser's message can quote hostile bytes.
-        log.info("static triage child stderr (first %d bytes): %r",
-                 len(err), bytes(err))
-    if state["over"]:
-        return ChildResult(False, failure="output_too_large",
-                           returncode=proc.returncode)
-    if timed_out:
-        return ChildResult(False, failure="timeout", returncode=proc.returncode)
-    if proc.returncode != 0:
-        return ChildResult(False, b"".join(parts), failure="crashed",
-                           returncode=proc.returncode)
-    return ChildResult(True, b"".join(parts), returncode=0)
+    def __init__(self, failure: str):
+        super().__init__(failure)
+        self.failure = failure
 
 
 def _parent_versions() -> dict:
@@ -701,6 +596,7 @@ def claim(conn: psycopg.Connection, settings: AnalysisSettings, *,
     seed's own samples, and a test's)."""
     from noctornal_api.cases import CONTENT_READ_ONLY_STATES
     from noctornal_api.samples import lab_exclusions_sql, policy_declared
+    from noctornal_api.screening import bytes_may_move
     from noctornal_api.yara_rules import engine_version
     skipped = 0
     while True:
@@ -741,7 +637,11 @@ def claim(conn: psycopg.Connection, settings: AnalysisSettings, *,
             if not declared:
                 refusal = ("no prohibited-content policy is declared; nothing "
                            "was read")
-            elif state == "REJECTED" or not kept:
+            elif state == "REJECTED" or not kept \
+                    or not bytes_may_move(conn, c.sample_id):
+                # lab-2 (2026-10-03): a list imported since the last pass
+                # binds before decryption; the pass isolates it next, so the
+                # card says what it will say then.
                 refusal = "the sample was rejected before triage ran; nothing was read"
             elif case_status in CONTENT_READ_ONLY_STATES:
                 refusal = "the sample's case is closed; nothing was read"
@@ -838,9 +738,12 @@ def _audit_run(conn, run, outcome: str, detail: dict) -> None:
 
 
 def _finish(conn, c: Claimed, status: str, failure: str, *,
-            retry: bool, outcome: dict | None = None) -> None:
+            retry: bool, outcome: dict | None = None,
+            spend_attempt: bool = True) -> None:
     """End the run FAILED (or SKIPPED) on its own, its pending gaps
-    marked, a RETRY queued when allowed, and the audit row last."""
+    marked, a RETRY queued when allowed, and the audit row last.
+    `spend_attempt=False` queues the RETRY at this run's own attempt,
+    whatever it is: the run failed for the sandbox's sake, not its own."""
     with conn.transaction():
         done = conn.execute(
             """UPDATE lab.static_run
@@ -853,12 +756,13 @@ def _finish(conn, c: Claimed, status: str, failure: str, *,
         _set_gaps(conn, c.sample_id,
                   {g: {"status": "failed", "reason": failure}
                    for g in _gap_steps(c.steps)}, only_pending=True)
-        if retry and c.attempt < MAX_ATTEMPTS:
+        if retry and (not spend_attempt or c.attempt < MAX_ATTEMPTS):
             _requeue(conn, {"requested_by": c.requested_by,
                             "requests": c.requests, "priority": c.priority,
                             "steps": c.steps,
                             "yara_version_ids": c.yara_version_ids,
-                            "sample_id": c.sample_id}, c.attempt + 1)
+                            "sample_id": c.sample_id},
+                     c.attempt + 1 if spend_attempt else c.attempt)
         _audit_run(conn, c, "FAILED", {"status": status, **(outcome or {})})
 
 
@@ -914,6 +818,8 @@ def _step_child(mode: str, data: bytes, settings: AnalysisSettings,
                     "cpu_s": settings.timeout_s}},
         (data,), wall_s=settings.timeout_s + WALL_GRACE_S)
     out, failure = _child_json(result)
+    if failure in analysis_runner.SANDBOX_FAILURES:
+        raise AnalysisInterrupted(failure)
     timing = int((time.monotonic() - started) * 1000)
     if out is None:
         reason = CHILD_FAILURES.get(failure, CHILD_FAILURES["crashed"])
@@ -1018,6 +924,9 @@ def _yara_step(conn, c: Claimed, data: bytes) -> dict:
                            (data, build["blob"]),
                            wall_s=timeout + WALL_GRACE_S)
         out, failure = _child_json(result)
+        if failure in analysis_runner.SANDBOX_FAILURES:
+            # Not a crashed scan: the worker never ran it (F42 review).
+            raise AnalysisInterrupted(failure)
         error = None
         if out is None:
             error = failure if failure in YARA_ERRORS else "crashed"
@@ -1177,9 +1086,16 @@ def _write_results(conn, c: Claimed, pe: dict | None, fz: dict | None,
     return "DONE"
 
 
+#: run_claimed's answer for a run the sandbox interrupted: FAILED on its
+#: row, a RETRY queued at the same attempt, and the pass stops.
+INTERRUPTED = "INTERRUPTED"
+
+
 def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
                 settings: AnalysisSettings) -> str:
-    """Steps 2 to 6 for one claimed run. Returns its final status."""
+    """Steps 2 to 6 for one claimed run. Returns its final status, or
+    INTERRUPTED when the sandbox failed under one of its children."""
+    from noctornal_api import lab_archive
     from noctornal_api.samples import SampleIntegrityError, SampleService
     data = None
     try:
@@ -1200,19 +1116,39 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
         nbytes = len(data)
         _write_scanned(conn, c, nbytes)
         pe = fz = yara = None
-        if "pe" in c.steps:
-            pe = _step_child("pe", data, settings, STEP_GAPS["pe"])
-        if "fuzzy" in c.steps:
-            if nbytes > settings.fuzzy_max_bytes:
-                skip = {"status": "skipped",
-                        "reason": lab_static.REASONS["fuzzy_cap"]}
-                fz = {"values": {}, "gaps": {"ssdeep": dict(skip),
-                                             "tlsh": dict(skip)},
-                      "facts": None, "timing_ms": 0}
-            else:
-                fz = _step_child("fuzzy", data, settings, STEP_GAPS["fuzzy"])
-        if "yara" in c.steps:
-            yara = _yara_step(conn, c, data)
+        archive = None
+        try:
+            if "pe" in c.steps:
+                pe = _step_child("pe", data, settings, STEP_GAPS["pe"])
+            if "fuzzy" in c.steps:
+                if nbytes > settings.fuzzy_max_bytes:
+                    skip = {"status": "skipped",
+                            "reason": lab_static.REASONS["fuzzy_cap"]}
+                    fz = {"values": {}, "gaps": {"ssdeep": dict(skip),
+                                                 "tlsh": dict(skip)},
+                          "facts": None, "timing_ms": 0}
+                else:
+                    fz = _step_child("fuzzy", data, settings, STEP_GAPS["fuzzy"])
+            if "yara" in c.steps:
+                yara = _yara_step(conn, c, data)
+            # Archive expansion's child (phase 8, 2026-10-02), through the
+            # SAME runner as every step above, so the sandbox failing under
+            # it interrupts the run the same way: nothing it found is
+            # written, the run waits for the worker at the same attempt, and
+            # the archive is never read as expanded or as clean. Only the
+            # child is asked here; the members become samples below, once
+            # the findings are on the record.
+            archive = lab_archive.prefetch(conn, c, data, settings)
+        except AnalysisInterrupted as stop:
+            # Nothing it found is written: the whole run waits for the
+            # worker, at the same attempt (F42 review, 2026-10-02).
+            data = archive = None
+            log.warning("static triage run %s waits for the worker: %s",
+                        c.id, stop.failure)
+            _finish(conn, c, "FAILED", CHILD_FAILURES[stop.failure],
+                    retry=True, spend_attempt=False,
+                    outcome={"interrupted": stop.failure})
+            return INTERRUPTED
         try:
             status = _write_results(conn, c, pe, fz, yara, nbytes, settings)
         except _Discard:
@@ -1232,8 +1168,8 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
             # plaintext, once the run's findings are on the record, so a
             # parent rejected mid-run never gains members. The plaintext is
             # held until here for that one reader and dropped below.
-            from noctornal_api import lab_archive
-            lab_archive.expand_after_triage(conn, storage, c, data, settings)
+            lab_archive.expand_after_triage(conn, storage, c, data, settings,
+                                            child=archive)
         return status
     finally:
         data = None
@@ -1256,7 +1192,9 @@ def run_due(conn: psycopg.Connection, storage, *,
     children's wall limits added up) still fits, so a pass sharing a loop
     with other work cannot overrun it (2026-09-24).
     The deadline is taken before the sweep, so the sweep's own time counts
-    against it too."""
+    against it too. When the sandbox fails under a compile or a run, the
+    pass stops and counts `interrupted`, with nothing spent (F42 review,
+    2026-10-02)."""
     from noctornal_api.samples import policy_declared
     counts = {"queued": 0, "done": 0, "failed": 0, "skipped": 0,
               "abandoned": 0, "left": 0, "compiled": 0, "compile_failed": 0}
@@ -1264,12 +1202,27 @@ def run_due(conn: psycopg.Connection, storage, *,
     if not declared:
         counts["refused"] = detail
         return counts
+    # F42 (2026-10-02): asked before the sweep, any claim or any decrypt,
+    # so a worker that is down or missing costs this pass and never a
+    # run's attempts; the queue waits for it.
+    refusal = analysis_runner.unavailable()
+    if refusal:
+        counts["refused"] = refusal
+        return counts
     settings = settings or settings_or_default()
     started = time.monotonic()
     counts["abandoned"] = sweep_abandoned(conn)
     counts["queued"] = queue_depth(conn)
-    compiled, failed = compile_pending(
-        conn, settings, until=None if budget_s is None else started + budget_s)
+    try:
+        compiled, failed = compile_pending(
+            conn, settings,
+            until=None if budget_s is None else started + budget_s)
+    except AnalysisInterrupted:
+        # The worker failed under a compile: no run is claimed, so no
+        # sample is decrypted for a child that cannot run (F42 review).
+        counts["interrupted"] = 1
+        counts["left"] = queue_depth(conn)
+        return counts
     counts["compiled"], counts["compile_failed"] = compiled, failed
     open_n = conn.execute("SELECT count(*) FROM lab.yara_activation "
                           "WHERE deactivated_at IS NULL").fetchone()[0]
@@ -1291,6 +1244,10 @@ def run_due(conn: psycopg.Connection, storage, *,
             key = status.lower()
             counts[key] = counts.get(key, 0) + 1
             ran += 1
+            if status == INTERRUPTED:
+                # The next run would meet the same worker: the pass stops,
+                # and the next pass asks the worker first (F42 review).
+                break
         finally:
             release_slot(conn, slot)
     counts["left"] = queue_depth(conn)
@@ -1310,6 +1267,11 @@ def run_queued_detached(run_id: UUID) -> None:
     # triage reads and records every sample it is handed, whoever asked.
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.samples import SampleStorage
+    refusal = analysis_runner.unavailable()
+    if refusal:
+        # Left QUEUED for the next pass that can run it (F42, 2026-10-02).
+        log.warning("static triage run %s waits: %s", run_id, refusal)
+        return
     try:
         conn = connect_system(SystemPurpose.LAB_TRIAGE)
     except Exception:  # noqa: BLE001
@@ -1405,7 +1367,9 @@ def compile_pending(conn: psycopg.Connection, settings: AnalysisSettings, *,
     fingerprint (a process never builds for another host), each in a
     child under the analysis limits. A deterministic result is a build
     row; a timeout, crash or cap is transient and writes none. Returns
-    (builds written, jobs that failed for good this pass).
+    (builds written, jobs that failed for good this pass). Raises
+    AnalysisInterrupted when the sandbox fails under a compile, with that
+    job queued again and no attempt spent.
 
     With `until` (a monotonic deadline) a compile starts only when its
     worst case, the child's wall limit, still fits before it: a budgeted
@@ -1476,6 +1440,17 @@ def _compile_one(conn, key, vid, ruleset_id, number, source_gz, files,
             stdout_cap=yara_rules.MAX_COMPILED_BYTES)
     report = blob = None
     kind = "error" if canonical is None else None
+    if result is not None and result.failure in analysis_runner.SANDBOX_FAILURES:
+        # The worker, not the rules: back to the queue with no attempt
+        # spent, and the pass stops (F42 review, 2026-10-02: until then a
+        # worker restart cost every remaining job an attempt).
+        conn.execute(
+            """UPDATE lab.yara_compile_job
+                  SET status = 'QUEUED', last_error = %s, updated_at = now()
+                WHERE version_id = %s AND engine = %s AND platform = %s
+                  AND fingerprint = %s""",
+            (result.failure, vid, key.engine, key.platform, key.fingerprint))
+        raise AnalysisInterrupted(result.failure)
     if result is not None:
         if not result.ok:
             kind = result.failure or "crashed"
@@ -1490,8 +1465,13 @@ def _compile_one(conn, key, vid, ruleset_id, number, source_gz, files,
             except (ValueError, UnicodeDecodeError):
                 kind = "bad_output"
     if kind is not None:
-        # Transient: no build is recorded, the job is tried again up to
-        # the limit (a timeout or a memory cap may pass with more room).
+        # Transient (COMPILE_TRANSIENT, the child's own failures): no build
+        # is recorded, and the job is tried again up to the limit, since a
+        # timeout or a memory cap may pass with more room. A kind outside
+        # that list spends an attempt too, so an unforeseen failure cannot
+        # retry for ever.
+        if kind not in COMPILE_TRANSIENT:
+            log.warning("compiling YARA version %s failed with %s", vid, kind)
         gone = attempts + 1 >= MAX_ATTEMPTS
         conn.execute(
             """UPDATE lab.yara_compile_job
@@ -1605,6 +1585,11 @@ def compile_one_detached(version_id: UUID) -> None:
     this host, in the background, when a slot is free."""
     # A system connection, as the triage sweep above (S1).
     from noctornal_api.db import SystemPurpose, connect_system
+    refusal = analysis_runner.unavailable()
+    if refusal:
+        # The job stays QUEUED; a compile is a child like any other (F42).
+        log.warning("compiling YARA version %s waits: %s", version_id, refusal)
+        return
     try:
         conn = connect_system(SystemPurpose.LAB_TRIAGE)
     except Exception:  # noqa: BLE001
@@ -1618,6 +1603,10 @@ def compile_one_detached(version_id: UUID) -> None:
             compile_pending(conn, settings, limit=1, version_id=version_id)
         finally:
             release_slot(conn, slot)
+    except AnalysisInterrupted as stop:
+        # Queued again with no attempt spent; the next pass compiles it.
+        log.warning("compiling YARA version %s waits for the worker: %s",
+                    version_id, stop.failure)
     except Exception:  # noqa: BLE001
         log.warning("compiling YARA version %s failed in the background",
                     version_id, exc_info=True)

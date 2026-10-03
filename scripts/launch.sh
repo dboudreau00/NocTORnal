@@ -229,6 +229,19 @@ if [ -f "$ENV_LOCAL" ]; then
     value="${line#*=}"
     name="$(printf '%s' "$name" | tr -d '[:space:]')"
     [ -n "$name" ] || continue
+    # A name that changes how programs start is left out (g48 verification,
+    # 2026-10-03): this loop is data, not shell, but it still exported any
+    # identifier, so `PYTHONPATH=./evil`, `PATH=./evilbin`, `LD_PRELOAD=` or
+    # `BASH_ENV=` in a handed-over file ran code as this user in the next
+    # python this script starts. Not an allow-list on purpose: a new setting
+    # would silently stop loading. The same list is in release/install.sh,
+    # scripts/_env.py, scripts/launch.ps1 and scripts/open-ui.ps1; a test holds
+    # them together.
+    case "$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')" in
+      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|BASH_*|LD_*|DYLD_*|PYTHON*)
+        detail "$name ignored: it changes how programs start (set it in your shell if you mean it)"
+        continue ;;
+    esac
     value="${value#\"}"; value="${value%\"}"
     value="${value#\'}"; value="${value%\'}"
 
@@ -266,12 +279,18 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
     # security/sealed.py's SEALED_COLUMNS, and what the ingest pepper
     # keys if it is kept here too. They said only that users would re-enrol
     # their authenticators (Alpha 6 pre-release check, 2026-09-23).
+    #
+    # Created under umask 077 (infra-9, 2026-10-03), so the key store is
+    # never readable by anyone else between the write and the chmod below.
+    previous_umask="$(umask)"
+    umask 077
     cat > "$ENV_LOCAL" <<EOF
 # NocTORnal local key store. Created by scripts/launch.sh.
 #
 # NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted,
-# except the egress exits, which are sealed to the egress proxy's own key:
-# enrolled authenticators, collection persona credentials, stored victim
+# except the egress exits, which are sealed to the egress proxy's own key,
+# and collection persona credentials, which NOCTORNAL_PERSONA_KEK seals:
+# enrolled authenticators, stored victim
 # credentials, each sample's data key, and the credentials of the outbound
 # integrations an administrator configures (Jira and lookup provider
 # credentials). LOSING THIS FILE LOSES ALL OF
@@ -287,6 +306,7 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
 # on launch.
 NOCTORNAL_TOTP_KEK=$generated
 EOF
+    umask "$previous_umask"
     chmod 600 "$ENV_LOCAL" 2>/dev/null || true
   fi
 
@@ -298,8 +318,9 @@ EOF
   printf '      %s\n' "$ENV_LOCAL"
   printf '\n'
   printf '    That file is now your key store. The key seals every secret the\n'
-  printf '    database stores encrypted: authenticators, persona and victim\n'
-  printf '    credentials, Jira and lookup provider credentials, and the keys of\n'
+  printf '    database stores encrypted but persona credentials, which have a\n'
+  printf '    key of their own: authenticators, victim credentials, Jira and\n'
+  printf '    lookup provider credentials, and the keys of\n'
   printf '    stored samples. If you lose it, every user has to re-enrol their\n'
   printf '    authenticator app, and none of the rest can be decrypted again.\n'
   printf '    There is no recovery and no default key.\n'
@@ -308,6 +329,20 @@ EOF
   printf '\n'
 elif [ "$kek_from_environment" -eq 0 ]; then
   good 'TOTP key ready'
+fi
+
+# A collector process (2026-10-02): persona credentials seal under a key of
+# their own. On this machine the API holds it and runs persona acts inline
+# (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector
+# service does. Appended, never replacing anything in the file.
+if [ -z "${NOCTORNAL_PERSONA_KEK:-}" ]; then
+  generated="$("$PYTHON" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
+  printf '%s\n%s\n' \
+    '# NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost, every persona is enrolled again.' \
+    "NOCTORNAL_PERSONA_KEK=$generated" >> "$ENV_LOCAL"
+  chmod 600 "$ENV_LOCAL" 2>/dev/null || true
+  export NOCTORNAL_PERSONA_KEK="$generated"
+  good 'persona key generated and saved to .env.local'
 fi
 
 # ---------------------------------------------------------------------------
@@ -355,6 +390,10 @@ set_default EVIDENCE_BUCKET  'noctornal-evidence'
 # Raw markup of collected forum pages (2026-09-24), without object
 # lock, because it is deleted with its document.
 set_default COLLECT_RAW_BUCKET 'noctornal-collect-raw'
+# A collector process (2026-10-02): there is no collector process on this
+# machine, so persona acts run inside the API, as they always did here.
+# Refused in production.
+set_default NOCTORNAL_COLLECTOR_INLINE '1'
 
 # ---------------------------------------------------------------------------
 # Step e: migrations

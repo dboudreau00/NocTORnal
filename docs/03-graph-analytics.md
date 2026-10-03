@@ -163,7 +163,49 @@ profiles without being placed. Ties count as present or absent. The fit
 because CONCOR always splits in two and the number of positions is set by
 the depth, not found in the data. "Alike but not tied" pairs are leads, never
 proposals. Capped at 1,000 entities with ties, 50 rounds per split, one BLAS
-thread per process. REGE is not built.
+thread per process.
+
+**REGE is built (2026-10-02)**: the Analysis pane's Regular roles card and
+`GET /cases/{case_id}/analytics/rege`, its own run stored for each number
+of roles (two to eight) and each way of counting ties. Regular equivalence
+asks for the same kinds of ties to the same kinds of others, so two
+entities can share a role without sharing a single contact: the second
+launderer serving a different crew, which CONCOR cannot see. The method is
+White's REGE as Borgatti and Everett describe it and the classic REGE of
+the blockmodeling package implements it. Every pair starts alike; each of
+three rounds compares neighbourhoods one step further out, and the rounds
+stop early once no similarity moves by more than one in a million. The
+relations are CONCOR's (positive, negative and no valence, direction kept),
+and only actors hold roles. Ties count as present or absent, or by their
+weights, and the analyst chooses, because REGE is sensitive to the
+weighting: by weight a weak tie only partly matches a strong one. Decay
+moves no role. The roles are cut by average linkage with a fixed tie
+break, so the same graph always gives the same roles; but where several
+cuts are exactly as good, or differ only in the last decimal places of a
+similarity, which one is returned follows the order of the entities'
+internal identifiers, so the same structure under other identifiers can be
+cut differently there, and the card's limits say so. Entities alike at the
+level of the cut are never split, so fewer roles than asked is an answer.
+The card states where the cut fell, each role's members and how
+alike they are, and each relation's role-to-role densities with tied and
+regular blocks marked in words. It compares only the ties the view admits
+and counts those no reviewer has accepted; under the accepted-ties scope
+they are left out. A role is a hypothesis about how entities sit in the
+view, never an attribution: it is not a person and proposes nothing.
+Capped at 1,000 entities with ties, 2,500 tied pairs and 5,000 tie directions
+(a kind of tie running from one entity to another counts once however many
+ties repeat it, and a tie with no direction runs both ways), all refused
+before any matrix exists, with numpy held to one BLAS thread per process.
+What a view costs follows how many pairs and directions it has and how many
+distinct tie patterns they form, so no one number bounds it. At the three
+caps the dearest views measure about 2 s of CPU and at most 145 MB, with every
+core of the build host busy: one relation tied both ways on 2,500 pairs 2.1 s,
+two relations in random directions on 2,100 pairs 2.1 s, three tied both ways
+on 833 pairs 0.9 s, all counted by weight; counted as present, 0.3 to 1.5 s.
+Ties that repeat a direction add nothing to a round, so a crew of 40 entities
+who all post on the same 15 forums, a one-mode view of 11,700 derived ties,
+is 1,560 directions and runs in about half a second. At its limit of ten runs
+in five minutes one user can queue about 21 s of CPU on the one API process.
 
 ### Temporal
 

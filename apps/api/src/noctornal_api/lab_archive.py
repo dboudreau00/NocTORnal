@@ -6,12 +6,25 @@ become child samples (roadmap phase 8 "archive expansion", 2026-10-02).
 After a sample's static triage has written its findings (`lab_triage.
 run_claimed`, once `_write_results` returns DONE), the same verified
 plaintext is handed to the archive child (`lab_archive_child`) through
-`_expand_child`, the ONE call site of the runner seam: today that is
-`lab_triage.run_child`, the bounded local child; docs/17 F42 is turning
-that seam into a local-or-isolated runner, and this function is the one
-line to switch. Nothing here parses an archive in the API process, and
-nothing here opens, runs or renders a member: a member is bytes that
-become a sample, exactly as an upload does.
+`_expand_child`, the ONE call site of the runner seam: `lab_triage.
+run_child` with `kind=CHILD_KIND`, which is `analysis_runner`'s dispatch, so
+the child runs in the bounded local subprocess or in the isolated analysis
+worker exactly as every static triage step does (docs/17 F42; the worker
+starts the module `lab_archive_child` by that kind and no other program).
+Nothing here parses an archive in the API process, and nothing here opens,
+runs or renders a member: a member is bytes that become a sample, exactly as
+an upload does.
+
+The child is asked BEFORE the run's findings are written (`prefetch`, called
+from `lab_triage.run_claimed` beside the other steps), and only the member
+rows are made after (`expand_after_triage`). That order is the runner's own
+contract: a sandbox that fails under the child (no worker, a busy worker, an
+answer that is not one: `analysis_runner.SANDBOX_FAILURES`) interrupts the
+whole run, which waits for the worker at the same attempt with nothing
+written. It is never recorded as a fact about the archive, never as an
+expansion that finished, and never as a clean archive; only a failure that
+is the archive's own (a bomb, a corrupt file, a child over its clock) is
+recorded as one.
 
 ## What a member becomes
 
@@ -61,7 +74,7 @@ from uuid import UUID
 
 import psycopg
 
-from noctornal_api import lab_triage
+from noctornal_api import analysis_runner, lab_triage
 from noctornal_api.config import DEFAULT_UPLOAD_CAP, SAMPLE_CAP_ENV, parse_size
 from noctornal_api.lab_archive_child import (
     ARCHIVE_REFUSALS,
@@ -177,7 +190,16 @@ def archive_settings(env=None) -> tuple[ArchiveSettings | None, str | None]:
     wall, problem = _whole(env, WALL_ENV, 10, 600, DEFAULT_WALL_S, "of seconds")
     if problem:
         return None, problem
-    return ArchiveSettings(members, total, member, ratio, depth, wall), None
+    settings = ArchiveSettings(members, total, member, ratio, depth, wall)
+    if stdout_cap(settings) > analysis_runner.MAX_OUTPUT_BYTES:
+        # The isolated worker refuses a request whose output cap is above
+        # its own ceiling, and a refusal is read as the sandbox's state:
+        # every expansion would wait for ever. Refused here, by name,
+        # instead (the runner merge, 2026-10-03).
+        return None, (f"{TOTAL_ENV} and {MEMBERS_ENV} together ask for more "
+                      f"output from the expansion child than the analysis "
+                      f"runner hands back, so the expansion could never run")
+    return settings, None
 
 
 def settings_or_default() -> ArchiveSettings:
@@ -364,13 +386,22 @@ CHILD_KIND = "lab_archive_child"
 REPORT_ROOM = 2 * 1024
 
 
+def stdout_cap(settings: ArchiveSettings) -> int:
+    """The most the expansion child may write: the members it may return
+    and a line of report for each member and each refusal."""
+    return (settings.max_total_bytes + MIB
+            + 2 * settings.max_members * REPORT_ROOM)
+
+
 def _expand_child(data: bytes, settings: ArchiveSettings,
                   analysis: lab_triage.AnalysisSettings) -> lab_triage.ChildResult:
     """THE runner seam for archive expansion: one bounded child, fed the
     archive over stdin, read back under a cap sized for the members it may
-    return. Routed through `lab_triage.run_child`, which docs/17 F42 is
-    turning into a local-or-isolated runner; when it lands, this call gains
-    `kind=CHILD_KIND` and nothing else here changes."""
+    return. Routed through `lab_triage.run_child` as the kind
+    `CHILD_KIND`, so it runs where the deployment's runner runs every
+    analysis child (the local subprocess, or the isolated worker over its
+    socket), with the same refusals: production with no worker, or one that
+    does not answer, is a failure and never a local child."""
     from noctornal_api.samples import ARCHIVE_PASSWORD
     header = {"mode": MODE, "sample_len": len(data),
               "limits": {"memory_bytes": analysis.memory_bytes,
@@ -380,10 +411,21 @@ def _expand_child(data: bytes, settings: ArchiveSettings,
                        "member_bytes": settings.max_member_bytes,
                        "ratio": settings.max_ratio},
               "password": ARCHIVE_PASSWORD.decode("ascii")}
-    cap = (settings.max_total_bytes + MIB
-           + 2 * settings.max_members * REPORT_ROOM)
     return lab_triage.run_child(header, (data,), wall_s=wall_s(settings),
-                                stdout_cap=cap, argv=CHILD_ARGV)
+                                stdout_cap=stdout_cap(settings),
+                                argv=CHILD_ARGV, kind=CHILD_KIND)
+
+
+def _ask_child(data: bytes, settings: ArchiveSettings,
+               analysis: lab_triage.AnalysisSettings) -> lab_triage.ChildResult:
+    """The child's answer, or AnalysisInterrupted when the SANDBOX failed
+    under it (no worker, a busy worker, an answer that is not one): that is
+    the runner's state and says nothing about the archive, so it is never
+    turned into a refusal, a failure of the archive or a clean one."""
+    result = _expand_child(data, settings, analysis)
+    if result.failure in analysis_runner.SANDBOX_FAILURES:
+        raise lab_triage.AnalysisInterrupted(result.failure)
+    return result
 
 
 def unframe(raw: bytes) -> tuple[dict, bytes]:
@@ -733,15 +775,68 @@ def _finished(conn, sample_id: UUID) -> bool:
     ).fetchone()[0])
 
 
+def prefetch(conn: psycopg.Connection, c, data: bytes,
+             analysis: lab_triage.AnalysisSettings):
+    """The expansion child's half, asked while the run's other children are,
+    BEFORE its findings are written (`lab_triage.run_claimed`): None when
+    this run expands nothing (a YARA-only run, a rejected sample, a file of
+    a kind this build does not expand, a tree at its depth, an archive
+    already expanded), else the child's answer for `expand_after_triage`.
+    Reads and asks only; nothing is written. Raises AnalysisInterrupted
+    when the sandbox failed under the child, which interrupts the run."""
+    if "pe" not in c.steps or "fuzzy" not in c.steps:
+        return None
+    row = conn.execute(
+        """SELECT file_type, state::text,
+                  (SELECT count(*) FROM lab.sample m
+                    WHERE m.parent_sample_id = s.id)
+             FROM lab.sample s WHERE s.id = %s""", (c.sample_id,)).fetchone()
+    if row is None:
+        return None
+    file_type, state, member_count = row
+    if state == "REJECTED" or file_type not in EXPANDABLE:
+        return None
+    if member_count and _finished(conn, c.sample_id):
+        return None
+    settings = settings_or_default()
+    if depth_of(conn, c.sample_id) >= settings.max_depth:
+        return None
+    return _ask_child(data, settings, analysis)
+
+
+#: The gap while the sandbox could not be asked: not a finding about the
+#: archive, and no member or ARCHIVE row is written for it.
+SANDBOX_WAITS = ("the analysis sandbox could not expand this archive ({why}); "
+                 "nothing was expanded, and running static triage on it again "
+                 "expands it")
+
+
 def expand_after_triage(conn: psycopg.Connection, storage, c, data: bytes,
-                        analysis: lab_triage.AnalysisSettings) -> dict | None:
+                        analysis: lab_triage.AnalysisSettings,
+                        child=None) -> dict | None:
     """Expand one archive sample whose static triage just finished: the
-    child, the checks, the members through `submit`, the ARCHIVE finding
-    and the gap on the parent, and the tree isolation when a member
-    matched. Never raises into the run that called it: the run is already
-    on the record, and an expansion that fails is recorded as that."""
+    child's answer (`prefetch`, or asked here when none was), the checks,
+    the members through `submit`, the ARCHIVE finding and the gap on the
+    parent, and the tree isolation when a member matched. Never raises into
+    the run that called it: the run is already on the record, and an
+    expansion that fails is recorded as that."""
     try:
-        return _expand(conn, storage, c, data, analysis)
+        return _expand(conn, storage, c, data, analysis, child)
+    except lab_triage.AnalysisInterrupted as stop:
+        # Only when no prefetch ran (the run's own interruption is
+        # `prefetch`'s): the sandbox's state, never a fact about the
+        # archive, so no finding and no failure is written.
+        log.warning("archive expansion of sample %s waits for the sandbox: %s",
+                    c.sample_id, stop.failure)
+        try:
+            _set_gap(conn, c.sample_id, {
+                "status": "pending",
+                "reason": SANDBOX_WAITS.format(
+                    why=lab_triage.CHILD_FAILURES[stop.failure])})
+        except Exception:  # noqa: BLE001
+            log.warning("the archive gap of sample %s could not be written",
+                        c.sample_id, exc_info=True)
+        return None
     except Exception:  # noqa: BLE001 - recorded, and the run stands
         log.warning("archive expansion of sample %s failed", c.sample_id,
                     exc_info=True)
@@ -754,7 +849,8 @@ def expand_after_triage(conn: psycopg.Connection, storage, c, data: bytes,
         return None
 
 
-def _expand(conn, storage, c, data: bytes, analysis) -> dict | None:
+def _expand(conn, storage, c, data: bytes, analysis,
+            child=None) -> dict | None:
     from noctornal_api import screening
     from noctornal_api.samples import (
         ProhibitedContentMatch,
@@ -807,7 +903,7 @@ def _expand(conn, storage, c, data: bytes, analysis) -> dict | None:
                                "refused": 0}, "depth": depth, "timing_ms": 0}
         _record(conn, svc, c, findings, {"status": "skipped", "reason": reason})
         return findings
-    result = _expand_child(data, settings, analysis)
+    result = child if child is not None else _ask_child(data, settings, analysis)
     expansion = _clean(result, settings)
     timing = int((time.monotonic() - started) * 1000)
     if expansion.failure is not None:

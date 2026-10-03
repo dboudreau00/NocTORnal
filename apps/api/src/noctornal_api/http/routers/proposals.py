@@ -37,7 +37,9 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
+from noctornal_api.http.body_ceiling import raise_body_ceiling
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.routers.graph import _node_visible
 from noctornal_api.proposals import (
     KIND_ATTRIBUTE,
     KIND_EDGE,
@@ -93,6 +95,10 @@ class ProposalOut(BaseModel):
     #: Only on the reply to an accept: the assertion it wrote, so the
     #: console's Undo can retract an ATTRIBUTE claim.
     applied_assertion_id: str | None = None
+    #: Only on the reply to an accept: another entity this reader can see
+    #: that already holds the accepted selector, a merge lead
+    #: (graph-selector-index-drift, 2026-10-03).
+    selector_owner_id: str | None = None
     #: Why an Accept would be refused, for an ATTRIBUTE claim whose entity
     #: is labelled below the material it was found in (final review c1,
     #: 2026-09-24). The card wore the material's TLP chip and offered
@@ -298,6 +304,9 @@ class CaptureBody(BaseModel):
 # queue nobody works.
 @router.post("/capture", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("capture"))])
+# A 1,000,000 character paste, JSON-escaped, runs past the default body
+# ceiling (http_ui-005, 2026-10-03).
+@raise_body_ceiling(8 * 1024 * 1024, what="a pasted capture")
 def capture(
     case_id: UUID, body: CaptureBody,
     user: CurrentUser = Depends(require("evidence.upload")),
@@ -589,11 +598,18 @@ def accept(
     row = _owned(conn, case_id, proposal_id, user)
     _check_accept_labels(conn, user, case_id, row, body.classification)
     try:
-        return _out(ProposalReview(conn).accept(
+        accepted = ProposalReview(conn).accept(
             proposal_id, reviewed_by=user.user_id, note=body.note,
-            classification=body.classification))
+            classification=body.classification)
     except ProposalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    out = _out(accepted)
+    # Named only when this reader may see that entity, the rule create
+    # follows (graph-selector-index-drift, 2026-10-03).
+    owner = accepted.selector_owner_id
+    if owner is not None and _node_visible(conn, user, case_id, owner):
+        out.selector_owner_id = str(owner)
+    return out
 
 
 @router.post("/{proposal_id}/reject", response_model=ProposalOut)

@@ -477,8 +477,31 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     load_env_local()
     from noctornal_api.collection import CollectionError
+    from noctornal_api.config import enforce_persona_key_boundary
     from noctornal_api.db import SystemPurpose, connect_system
 
+    # A collector process (2026-10-02): a session is sealed and opened with
+    # the persona key, which in production only the collector holds, so in
+    # production this runs in the collector service and refuses elsewhere,
+    # before it asks anybody to sign in.
+    try:
+        enforce_persona_key_boundary(collector=True)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    # The boundary above does nothing outside production, so the ring is
+    # read here too, everywhere, before anybody is asked to sign in
+    # (verify:g38, 2026-10-03): without NOCTORNAL_PERSONA_KEK a development
+    # machine upgraded without its launcher used to take the whole Telegram
+    # login, burn a code, and only then fail storing the session with a
+    # traceback. All three commands open or seal a session with this key.
+    from noctornal_api.security import persona_envelope
+    try:
+        persona_envelope.ring()
+    except persona_envelope.PersonaKeyError as exc:
+        print(f"The persona key ring is not usable here, so nothing was "
+              f"asked of anyone: {exc}", file=sys.stderr)
+        return 2
     try:
         # S1 (2026-09-25): a script binds no user, so on the request role it
         # would see nothing under row-level security.

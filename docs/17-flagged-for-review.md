@@ -36,7 +36,8 @@ is the section to act on first.**
 | **`KEY_MISMATCH` verifications** recorded before 2026-09-24 (F10a) | `comms.pgp_verification` where `outcome = 'KEY_MISMATCH'` and the last field of the stored `VALIDSIG` status line equals `claimed_fingerprint` | The parser compared the claim with the key that made the signature, which is a subkey whenever the vendor signs with one, so a genuine signature by the published key's subkey was recorded as a mismatch. It failed safe; the reading was false. | Verify each again. Do not edit the rows: the ledger refuses it. |
 | **`CONFIRMED` bindings** upgraded before migration 0089 (F10b) | `SELECT cb.id FROM comms.channel_binding cb JOIN comms.pgp_verification v ON v.channel_binding_id = cb.id AND v.outcome = 'VERIFIED' AND v.attribution IS NULL WHERE cb.verification = 'CONFIRMED'` | Nothing tied the signing key to the binding's holder, so a guarantor's signed vouch could confirm a vendor's binding. | Verify each again, citing the contact block that ties the key to the holder. |
 | **Verifications made with a gpg below the floor** (F10a, 2026-09-24) | `comms.pgp_verification.verifier_version` below 2.4.9 (2.4 series), 2.5.14, or 2.2.51, or any 2.3 | Those builds carry CVE-2025-68973 (the armour parser) or CVE-2022-34903 (status-line forgery); a distribution build may carry the fixes under an older number. | Confirm the build that made each, or verify again with a current one. Every production verification is `NO_VERIFIER` until the image installs gnupg. |
-| **Records written under older rules** (L1 and L2, 2026-09-24) | Triage claims accepted before Alpha 6 with no `observed_at`; ATTRIBUTE claims readable below the material they came from, or attached across cases; captured documents cited by cases that share no compartment, which migration 0071 could not label | Each was written under a rule this release tightened, and nothing can recompute what was never recorded: an observation date, or the lock every citing case's readers hold. They are counted by the readiness rows `triage_claims_dated`, `triage_claims_within_labels` and `captured_documents_compartmented` | `python scripts/legacy_records.py` lists them per case. An analyst decides each: raise an entity, retract a claim, or file the capture again under the right case. Filling the dates waits on docs/00 open question 11 |
+| **Records written under older rules** (L1 and L2, 2026-09-24) | Triage claims accepted before Alpha 6 with no `observed_at`; ATTRIBUTE claims readable below the material they came from, or attached across cases; captured documents cited by cases that share no compartment, which migration 0071 could not label | Each was written under a rule this release tightened, and nothing can recompute what was never recorded: an observation date, or the lock every citing case's readers hold. They are counted by the readiness rows `triage_claims_dated`, `triage_claims_within_labels` and `captured_documents_compartmented` | `python scripts/legacy_records.py` lists them per case. An analyst decides each: raise an entity, retract a claim, or file the capture again under the right case. An analyst gives a claim its date by superseding it (the inspector's Date this claim); nothing writes a date onto a recorded claim (docs/00 decision 170) |
+| **Contact blocks parsed under cb-1 with a gpg-spaced PGP line** (F37, 2026-10-02) | `comms.contact_block` where `parser_version = 'cb-1'` and an entry has `selector_type = 'PGP_FPR'` with a 20-character `durable_value` | The parser cut the value at the first run of two spaces, so a fingerprint copied from gpg kept 20 of 40 hex characters; a CLAIMED proposal may carry the truncated value, the line cannot confirm a key, and the block is not paired with the same text parsed later | Nothing re-reads a stored block: parse the text again in a case of its own and reject the old proposal. Do not edit the rows |
 | **Telegram ids recorded from a bare positive number** before 2026-09-11 | `core.selector` and `comms.channel_binding`, `TELEGRAM_ID` | A bare positive id was assumed to be a user (`u:`), so an MTProto channel observed as a bare number shares a row with a same-numbered user. The normaliser refuses a bare positive now, but nothing can recompute a type that was never observed. | `scripts/telegram_bare_ids.py` lists them per case. Confirm each against its source and re-record typed (`c:<id>`) where a channel is wearing a user's row. |
 
 ---
@@ -47,65 +48,42 @@ Nothing the 2026-09-22 review found is open here. The owner decided F2,
 F14, F16 and F24 that day, and F3 was reclassified as an accepted cost (it
 was never a defect: the register already refuses on it). Each decision, and
 what was built to hold it, is in the next section. The entries below were
-added with the features since Alpha 6.
+added with the features since Alpha 6; F35, F36 and F37 closed on
+2026-10-02 (table at the end). The 2026-10-03 review's open findings
+follow them.
 
-### F35: A persona can be created on a profile that cannot carry persona traffic
+### F51: Five tables are not under row-level security yet
 
-Added 2026-09-25 (roadmap F5.2). Creating a persona does not check that its
-egress profile is `persona_capable` (an exit other than this host's own,
-switched on, not retired). Nothing leaves through such a persona: the
-readiness register flags it and the egress proxy refuses every connection
-on it (`persona_needs_exit`, `no_exit`). The cost is a persona an operator
-believes is ready and is not. **Fix:** refuse it at creation, with the same
-sentence.
+Added 2026-09-25 (roadmap S1), updated 2026-10-03. Row-level security
+stands on 76 tables (docs/00 decisions 137 to 163): the notification
+tables, the lookup ledger and `collect.telegram_chat` joined it on
+2026-10-02 (Alembic 0125 to 0129, decisions 152 to 163). These five are
+listed in `rls_registry.DEFERRED`, each with the work it still needs, and
+on them a statement injected into a request reaches every row the request
+role can:
 
-### F36: A run's warning loses a typed Telegram id
+- `audit.event`: a policy of its own (decision 151). Owed first: its
+  readers on the request connection (a case's timeline, review history and
+  the ingest triage state) are converted, attaching a quarantined record
+  must copy its triage state onto a row in the case, and
+  `iam.countersign_blocked_by`, which reads the log for the countersigning
+  rule, must become a definer.
+- `ingest.record`: the unauthenticated submit, the parse, replay, scoring
+  and rescoring run as system purposes first, because they dedupe against
+  every record, score against every watch and write rows their caller may
+  be below. Found while converting the notifications (2026-10-02): the
+  selector-hit notice reads the case on the caller's connection, so an
+  ingest operator who is not on the case raises none.
+- `ingest.victim_credential`: a child of the record, after it; the reveal
+  and the masked listing are gated on the PII authorisation first.
+- `ingest.dead_letter`: one definer predicate backed by an index on
+  `ingest.record (batch_id, case_id)`, after the record.
+- `ingest.pii_authorisation`: the case template for the Lead investigator's
+  reveal, and a term admitting a global holder of `victim_pii.authorise`,
+  because the Security Officer who grants it holds no case assignment.
 
-Added 2026-09-25 (roadmap F5.3). A warning a run stores about one item
-names the item by its id, passed through the credential redactor, and the
-redactor masks a namespaced id such as `c:123/45` as if it were a secret.
-The warning is kept and the id is not, so an analyst cannot tell from it
-which message it meant. **Fix:** exempt the typed id shapes, or redact the
-whole sentence and keep the id apart.
-
-### F37: gpg's own fingerprint display does not parse in a contact block
-
-Added 2026-09-24 (roadmap F10). The contact-block parser cuts a value at
-the first run of two spaces, and gpg prints a fingerprint with a double
-space in the middle, so a line copied from gpg keeps its first 20 hex
-characters and reads NOT_A_FINGERPRINT: it can neither confirm a key nor
-attribute a signature. Fingerprints written single-spaced or unspaced work.
-**Fix:** keep whole hex groups on `PGP_FPR` lines. That changes
-`block_fingerprint` for blocks parsed afterwards, so it needs a decision of
-its own.
-
----
-
-### F51: Fifteen tables are not under row-level security yet
-
-Added 2026-09-25 (roadmap S1). Row-level security stands on 66 tables
-(docs/00 decisions 137 to 151); these fifteen are listed in
-`rls_registry.DEFERRED`, each with the work it still needs, and on them a
-statement injected into a request reaches every row the request role can:
-
-- `audit.event`: about a hundred readers move first, the audit and custody
-  verification move to their system purpose, and the triage state is
-  copied onto a case-scoped row (decision 151).
-- `collect.telegram_chat`: a chat's duplicate check must see hidden chats,
-  the officers who confirm targets may sit below a source, and the
-  attended acts' updates need row-count checks.
-- `ingest.record`, `ingest.victim_credential`, `ingest.dead_letter` and
-  `ingest.pii_authorisation`: the unauthenticated submit, parse, replay and
-  rescore run as system purposes first, and the granting officer holds no
-  assignment.
-- `ingest.lookup`, `ingest.lookup_attempt`, `ingest.lookup_batch` and
-  `ingest.lookup_result`: the interactive request and sign-off store an
-  answer at the provider's label and raise proposals, which the request
-  role could not return for a requester below that label.
-- `notify.notification`, `notify.delivery`, `notify.case_route_block`,
-  `notify.jira_link` and `notify.jira_event`: a notice is written for
-  someone else and coalesced against their unread rows, inside the caller's
-  transaction, so it needs a definer enqueue function.
+Policies on these five were built in part on 2026-10-02 and 2026-10-03 and
+stopped before they merged; none of that work is in Alpha 8.
 
 **Fix:** convert each family's readers and move it into `POLICY`; the
 registry test and the readiness row follow by themselves.
@@ -119,7 +97,80 @@ can also connect as the owner, which row security does not bind and which
 can switch off the append-only triggers. Moving them now would stop every
 existing production deployment at boot until the installers change.
 **Fix:** move both into `postgres-init.env` and a file only the migrate
-job reads, and change the installers with them.
+job reads, and change the installers with them. Built in part on
+2026-10-02 and stopped before it merged; not in Alpha 8.
+
+## Open from the 2026-10-03 review
+
+An adversarial review of the beta build at commit 718f92d (2026-10-03),
+each area's findings put to a second reader who tried to refute them, kept
+82 of 84: 16 high, 25 medium and 41 low, none critical. **None is fixed in
+Alpha 8**: fixes were in progress when the build stopped. Several high findings are one
+defect reached from two or three sides, and each is listed under its own
+id. By this file's own definition every one is CHANGE LIKELY. Reproduction
+steps are deliberately not published here while the findings are open.
+
+### High
+
+| Id | Area | What is wrong, and what it costs |
+|---|---|---|
+| rls-1 | Row-level security, merges | Merge history returns merges of entities above the reader's clearance or outside their compartments, with both entity ids and the merger's free-text reason, to every holder of `case.read`, the read-only and liaison roles included. The merge table's policy has the case term only. |
+| graph-merge-ledger-and-approvals-leak | Graph, merges and approvals | The same disclosure through the merge ledger and the node-merge approval requests: hidden entities' ids, the fact that two hidden personas are one actor, and the written reason and justification, to any case reader. The ids are the first step toward the merge and tie findings below. |
+| graph-merge-no-element-label-gate | Graph, merges | Merge and unmerge check the case's labels only and run on the system connection, so a member below an entity's label can merge it away or reverse a merge of it, and the hidden entity's ties then show on the visible survivor, which keeps its lower label. |
+| graph-selector-record-oracle | Graph, selectors | Recording a selector answers with the existing row even when its owner is an entity the caller cannot see, so an analyst can test whether the case holds an identifier and learn the hidden owner's id, and each test changes the hidden row's counters. |
+| evidence-hold-lift-below-label | Evidence, legal hold | A Lead investigator cleared below an exhibit can lift its legal hold alone, with no reason and no second person, because the route checks the case's labels and not the exhibit's; the next purge can then destroy it. |
+| evidence-case-hold-unreachable | Evidence, legal hold | Nothing in the product sets a case-level legal hold, though the purge, the lookup purge and sample preservation all read one, so ingest records, lookups and exhibits lodged after an order cannot be held through the product. F45 below and the retention module said a case could be held. |
+| evidence-purge-hold-race | Evidence, purge | A legal hold placed on an exhibit while a purge is running is acknowledged and then ignored: the exhibit leg reads the holds once, before its store deletes, and neither locks nor reads them again. The document leg does (decision 74). |
+| evidence-report-case-raise-leak | Reports | A report built at a lower label than its case includes everything created before the case was raised, and the egress gate lets it out at the lower mark, while exporting the same exhibit is refused. Invariant 8 is not met on the report path. |
+| egress-notify-address-list | Notifications | The domain allowlist for a personal notification address checks one domain, and an address field holding a list escapes it, so a user can copy every notice they receive (case codes, summaries up to AMBER) to an outside mailbox. The change is audited, not prevented. |
+| lab-1 | Lab, sandbox | Where the operator lists a sandbox machine on a live network, a send that names no machine, the console's default, skips the named second person, so one analyst can detonate on an internet-attached machine. |
+| http_ui-001 | HTTP, merges | The merge defects above, reached from the routes: merge, unmerge and merge history ignore the entities' own labels. |
+| http_ui-002 | HTTP, selectors | The selector defect above, reached from the route. |
+| http_ui-004 | HTTP, audit log | Every unauthenticated request carrying an invalid session appends a permanent audit row with no source address, bounded only by the per-address request ceiling, so anyone can flood the append-only log and bury real events. |
+| http_ui-005 | HTTP | No request body ceiling on JSON or form routes, and the proxy sets none, so one unauthenticated request can make the single API process buffer an arbitrarily large body before it is refused. |
+| http_ui-006 | HTTP, audit log | A failed sign-in records the submitted email in the audit log, unbounded, so an unauthenticated caller can write large permanent rows into a table nothing may delete. |
+| infra-2 | Infrastructure, backups | The documented backup writes a plaintext dump of the whole case database into the repository root, which is the Docker build context, and the documented update then builds it into the image every service runs. The evidence mirror is written world-readable. |
+
+### Medium
+
+| Id | Area | What is wrong, and what it costs |
+|---|---|---|
+| authz-session-revoke-bypass | Access control, sessions | A request in flight when a session is revoked can write the session back as live, undoing a sign-out, a password change, a deactivation or a TOTP re-enrolment. In production the request role's guard refuses that write and the request fails; wherever requests connect as the owner (development, a single-role deployment) the revocation is lost. |
+| rls-2 | Row-level security, selectors | The selector defect above, seen from the policy: the selector table's policy has the case term only, and this route skips the owner check its reader applies (decision 147). |
+| rls-3 | Row-level security, ties | The uniqueness rule on live ties spans labels, so creating a tie between two visible entities tells the caller whether a hidden tie of that type already joins them. |
+| rls-4 | Row-level security, exhibits | Exhibit upload looks for a duplicate in the uploader's filtered view, so the bytes of a hidden exhibit answer with a server error instead of success, an existence oracle, and each attempt adds a locked object version under the hidden exhibit's key. |
+| rls-6 | Row-level security, accounts | The request role, even unbound, can read every account's password hash, sealed TOTP secret and recovery hashes, every session's token hash and every case's membership, so a statement injected anywhere can take them for offline cracking. |
+| graph-edge-endpoints-not-gated | Graph, ties | A tie can be created to an entity above the caller, and shows on that entity's graph as an accepted tie; retiring a visible entity retires ties to hidden ones and returns a count that localises them. |
+| graph-retracted-correction-stays-in-force | Graph, corrections | A correction to a label, attributes or a weight overwrites the column, and retracting the correction leaves the new value in force with no live claim behind it, so a withdrawn value keeps driving the canvas and the measures. |
+| graph-assertion-claims-mutable-by-request-role | Graph, invariant 5 | The database does not hold invariant 5 for claims: the request role can rewrite a claim's grading and value, un-retract it or delete it, with no audit row. Only the application refrains. |
+| graph-selector-index-drift | Graph, selectors | The selector index drifts from the graph: a corrected label, a retired and recreated entity and an accepted proposal each leave it wrong or empty, so search misses the live entity and a strong-selector duplicate is never raised as a merge lead. |
+| graph-url-selector-keeps-credentials | Graph, normalisers | The URL normaliser keeps a user name, a password and secret query values, so a pasted stealer line becomes an entity label holding a victim's password, outside the victim-credential store and its two-person handling. |
+| evidence-integrity-anchors-mutable | Evidence, integrity | Exhibit integrity is checked against columns the request role can rewrite, the hash-chained original digest is never compared with them, and a hidden object answers with an error rather than an integrity alarm, so a substitution made with the API's own credentials verifies as intact. |
+| evidence-audit-chain-forks | Evidence, audit chain | The audit and custody chains fork under ordinary concurrent writes, which the product says cannot happen, and a fork's dead-end row can be removed by the table owner with the verifier still reporting the chain intact. |
+| evidence-ingest-dedup-oracle | Evidence, upload | The duplicate-upload oracle of rls-4, found from the evidence side; it reaches every ingest route, captures and deception emails included. |
+| evidence-due-leaks-hold-reason | Evidence, retention | The retention due list shows the ids and free-text hold reasons of exhibits above the caller's labels to every case role, for any date the caller chooses. |
+| evidence-category-clock-outlives-case | Evidence, retention | The rule that a category's clock may only shorten a case's retention has no production caller, so a record attached to a case can be kept long past the case's own clock. |
+| evidence-ledger-actor-time-forgeable | Evidence, audit and custody | The request role can append audit rows that name another user and any time, and custody rows that name another user, and the chains verify them, because they hash whatever is written. The audit log is one of the five tables F51 lists. |
+| egress-rss-floor | Egress, feeds | RSS and web feeds labelled AMBER_STRICT or RED are polled without the egress floor, and the upgrade's adopt step sets the passive profile's ceiling to the highest feed label, so a RED feed is read from the deployment's own address on schedule while readiness shows green. |
+| collection-shared-exit | Collection, personas | A persona can be created on an egress profile a persona-less public read already uses, so a covert persona and a public forum read leave from one exit address; the reverse order is refused, and neither the availability flag, the separation report nor the proxy notices. |
+| collection-rss-doctype-bypass-utf16 | Collection, feeds | The feed parser's refusal of document type declarations, its stated defence against external entities and entity expansion, does not see one in a feed in a wide character encoding. The XML library's own limits held in the review, so nothing worse was shown, but the defence rests on library behaviour the code says it does not rely on. |
+| lab-4 | Lab, retention | Samples are outside the retention purge, so a purged case's samples stay downloadable for good, while docs/11 and the samples router say they leave through it. |
+| http_ui-003 | HTTP, evidence | An exhibit's locked bytes are written before its database row, so any refusal after that (a label below the case's floor, a control character in a field) leaves a permanent object no custody or audit row names. |
+| http_ui-010 | HTTP, first run | The first-run route makes whoever calls it first an administrator, Security Officer and RED-cleared lead, with no proof of possession, on a fresh deployment already reachable from the internet. |
+| http_ui-011 | HTTP, approvals | The approvals disclosure above, reached from the route: node-merge requests show hidden entity ids and the justification to every case reader, and raising one does not check the entities it names. |
+| infra-1 | Infrastructure, images | `.dockerignore` omits the three secret files the egress work introduced, so every image carries the system role's database password (a role that bypasses row security) and the egress proxy's private sealing key. |
+| infra-3 | Infrastructure, first run | The first-run window of http_ui-010 on the production stack: the proxy publishes the site before the documented first-administrator step. |
+
+### Low
+
+41 low findings: row-level security 5, graph 4, evidence and retention 6,
+egress 2, collection 1, the Lab 4, HTTP and the console 9, and
+infrastructure 10. Most are smaller existence oracles and withheld counts,
+error paths that answer 500, ledger and lock edge cases, and deployment
+hardening (images pulled by tag, no HSTS from the shipped terminator, job
+loops that ignore a stop signal, secrets on command lines). One of them,
+rls-10, is that three documents gave stale table counts; these documents
+now give the right ones.
 
 ## Decided by the owner, 2026-09-22
 
@@ -417,19 +468,45 @@ would stop a ninth.
 **Confirm the judgement:** the seven mappings, and whether Wickr gets a
 selector type or its platform row loses its durable type.
 
-### F30: No route or script sweeps collected documents
+### F30: Collected documents are swept only when an operator runs the sweep
 
-Recorded 2026-09-24 (roadmap F5.3). Telegram documents carry the
-CHAT_EXPORT retention clock, and the purge honours every legal hold on a
-document and on every case that cites it, but only
-`RetentionService.purge_due(case_id=None)` sweeps collected documents: the
-governance purge route is case-scoped and skips them, and no script calls
-the sweep. So a group chat's third-party messages outlive their clock until
-somebody decides how a deployment-wide document sweep is run, by whom, and
-under which authority (docs/16 L4).
+Recorded 2026-09-24 (roadmap F5.3); built 2026-10-02.
+`scripts/retention_sweep.py` sweeps collected documents past their
+retention clock, deployment-wide, by the same purge every other family
+uses, so a legal hold on a document, on any version, or on a case citing it
+still keeps it. It is dry by default. A real run needs `--apply`, an
+authority reference declared in `NOCTORNAL_RETENTION_SWEEP_AUTHORITY`
+(recorded on every tombstone and in a `RETENTION_SWEEP` audit event of
+counts, refused when missing or a placeholder, never verified, as the L1
+policy reference is) and a named active account that holds
+`retention.purge`. It is not in the production cron loop, and a test holds
+that; infra/production/README.md, Retention sweep, says how to schedule it.
+The readiness row `retention_sweep_current` turns red when a document no
+hold keeps has been past its clock for more than seven days (docs/00
+decisions 171 to 173).
 
-**Confirm the judgement:** that holding them past their clock until that
-decision is acceptable, or decide the sweep.
+**Confirm the judgement:** that a declared reference and a named account
+stand in for step-up on a script that destroys third-party data; that
+nobody schedules it until the owner and counsel have said who runs it under
+which authority (docs/16 L4); and that the sweep keeps to collected
+documents. Dead letters also have no case and no sweep, and are the next
+family to decide (F55).
+
+### F55: Dead letters and caseless ingest records are swept by nothing
+
+Found 2026-10-02, while building the F30 sweep; not fixed. A dead letter
+carries a 90-day clock and third-party victim data, and is reached only by
+`purge_due(case_id=None)`; the case-scoped purge route skips it by design,
+and the F30 sweep keeps to collected documents, so nothing destroys a dead
+letter when its clock runs out. Ingest records attached to no case are in
+the same position. Either family could join `SWEPT_KINDS` once the owner
+decides; a dead letter's tombstone already carries no case, so the
+cross-case concern decision 172 names does not apply to it. The 2026-10-03
+review reported the same gap (evidence-unswept-unattached-and-dead-letter,
+low).
+
+**Confirm the judgement:** that dead letters and caseless records may
+outlive their clock until that decision, or decide it.
 
 ### F38: A logout needs no authority, so the client key opens a few small persona tunnels
 
@@ -443,19 +520,6 @@ ledger shows each with a Stop chip.
 
 **Confirm the judgement:** that this budget is small enough to leave
 unsupervised, against a logout that sometimes cannot happen at all.
-
-### F39: The second person on a case's merge switch has no seasoning rule
-
-Added 2026-09-24 (roadmap F9b). Turning a case's merge switch off takes a
-second holder of `case.update` on the case, as every case two-person
-control has since 0028. An account holding SYS_ADMIN and CASE_OWNER can
-therefore create a second Lead investigator, assign it to the case, and
-approve its own relax at once. The seven-day rule that protects the
-deployment-wide policy (docs/00 decision 92) is not applied here.
-
-**Confirm the judgement,** or decide docs/00 open question 12: applying
-that rule at the switch, and at node merges, changes behaviour analysts
-have already been reviewed on.
 
 ### F40: The screening match list counts across compartments
 
@@ -598,20 +662,6 @@ author, and pyaes, which it uses for AES-IGE, has had no release since
 session. The DC network list is Telegram's published one of 2026-09-24,
 and a new range fails closed until it is updated.
 
-### F28: A webhook signature carries no timestamp and no replay window
-
-Added 2026-09-25 (roadmap F8). The webhook is signed with HMAC-SHA256 over
-the exact body (`X-NocTORnal-Signature: sha256=<hex>`), and the body names
-its notification, but the signed string holds no time. A receiver cannot
-tell a delivery captured and posted again from the first one, except by
-remembering the notification ids it has seen. Putting a timestamp into the
-signed string changes what every existing receiver verifies, so it waits
-for a versioned signature scheme that a receiver can opt into.
-
-**The cost:** a receiver that does not de-duplicate on `notification_id`
-can be made to act twice on one notification by anyone who captured it,
-which TLS to the receiver makes unlikely but does not rule out.
-
 ### F42: Parse and analysis children are bounded, not isolated
 
 Added 2026-09-24 (roadmap F3, F4 and F11). Hostile bytes are parsed in
@@ -655,7 +705,10 @@ migration.
 
 Added 2026-09-24. A hold is placed on a document, with every earlier
 version, or on a case, which holds every document it cites. Nothing holds
-everything a source has collected in one act.
+everything a source has collected in one act. The 2026-10-03 review found
+that nothing in the product sets a case's hold either
+(evidence-case-hold-unreachable, above): until that is fixed, a hold
+reaches a document only through the document itself.
 
 ### F46: A raw markup object can be left unreferenced
 
@@ -666,14 +719,6 @@ naming it, outside every retention clock and hold.
 
 **The cost:** rare, and found only by listing the bucket against
 `collect.document`.
-
-### F47: Watches match neither forum signatures nor Telegram chats
-
-Added 2026-09-25 (roadmap F3 to F5). A post's signature is kept beside it,
-not in its text, so a watch on a contact address does not fire on a
-signature that carries it. A watch cannot target a Telegram chat as such
-(its target kinds do not include one), though it matches the text of the
-messages collected there.
 
 ### F48: One post read by a board source and a thread source is stored twice
 
@@ -700,6 +745,22 @@ everything the claim cites, and otherwise what their own readable facts
 give, or that it cannot be compared. Whether a claim is in an index at all
 is still visible, because the claim gate includes the material it cites.
 
+### F53: No route or console form creates a watch
+
+Added 2026-10-02 (F47). Only `scripts/seed_feeds_demo.py` inserts a watch,
+so a watch of target kind TELEGRAM_CHAT can today be written only by hand,
+and its reference rule (a typed chat id) is held by the database (Alembic
+0130) and the matcher rather than by a creation route.
+
+### F54: A TELEGRAM_CHAT watch with no term fires on every message
+
+Added 2026-10-02 (F47). A chat watch with no keyword, selector or pattern
+matches every message of its chat, as the schema's "capture everything"
+says, thinned only by its suppression window (3600 seconds per chat or
+topic by default; 0 is one hit per message). A term in a forum signature
+raises a hit on every post of that author, because the signature repeats
+on each.
+
 ---
 
 ## Deferred security items
@@ -709,7 +770,7 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 | Item | Consequence today |
 |---|---|
 | Session binding enforcement | Every session records the address and client it was minted from (0058) and `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a mismatch with an audit row. The production compose sets it; it is off by default everywhere else, so until an operator sets it a stolen token is portable |
-| Row-level security on fifteen tables | Row-level security stands on 66 tables (docs/00 decisions 137 to 151). Fifteen are not under it yet (F51); on those, a statement injected into a request still reaches every row the request role can |
+| Row-level security on five tables | Row-level security stands on 76 tables (docs/00 decisions 137 to 163). Five are not under it yet (F51): the audit log and the ingest record family. On those, a statement injected into a request still reaches every row the request role can |
 | WebAuthn | TOTP only. A deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding |
 
 ---
@@ -722,6 +783,12 @@ behind each closure is in `release/CHANGELOG.md` under its date.
 
 | | What it was | Closed |
 |---|---|---|
+| **F28** | A webhook signature carried no timestamp and no replay window | 2026-10-02: an opt-in signature v2 signs a timestamp with the body (`NOCTORNAL_WEBHOOK_SIGNATURE=v2`); docs/07 gives the receiver's replay window, the order to move in and a verifier (docs/00 decision 167). A receiver still on v1 stays replayable as before, which is the cost for anyone who does not opt in |
+| **F35** | A persona could be created on a profile that cannot carry persona traffic | 2026-10-02: refused at creation, in the egress proxy's own sentence (`test_persona_creation_exit_pg.py`, decision 164) |
+| **F36** | A run's warning lost a typed Telegram id | 2026-10-02: the ids this product's adapters write (`c:`, `g:`, `post:`, `member:`) are kept in a run's item label, and every other id still passes the redactor (`test_item_label_typed_ids.py`, decision 165) |
+| **F37** | gpg's own fingerprint display did not parse in a contact block | 2026-10-02: whole hex groups are kept on `PGP_FPR` lines and the parser version is cb-2 (decision 166). Blocks parsed under cb-1 keep their reading and are in the untrusted-data table above |
+| **F39** | The second person on a case's merge switch had no seasoning rule | 2026-10-02: the owner settled it. The second person must have held `case.update` on the case for a window the deployment sets (`NOCTORNAL_RELAX_SEASONING_DAYS`, 7 by default, 0 off), checked when they approve and again where the approval is spent (docs/00 decision 169). Still open inside it: an administrator who resets a seasoned colleague's credentials and signs in as them is not covered |
+| **F47** | Watches matched neither forum signatures nor Telegram chats | 2026-10-02: a post's signature is matched with reasons of its own, and a watch can target a Telegram chat by its typed id, which Alembic 0130 holds (decision 168). No route creates a watch yet (F53), and a chat watch with no term fires on every message (F54) |
 | **F33** | The production compose file did not run the similarity pass, although readiness said to start one | 2026-09-25: an `embed-pass` service runs it in a loop of its own |
 | **F34** | The production image carried no gpg, so every PGP check recorded NO_VERIFIER | 2026-09-25: the image installs the distribution's gnupg; a deployment attests it with `NOCTORNAL_GPG_PATCHED_AS` after checking its changelog, as CI does |
 | **SSRF through an egress proxy** | Persona traffic had no egress proxy, and a forward proxy resolves a name again, so the collector could not simply consult one | 2026-09-24: the egress proxy is built and is the only way out of production (docs/00 decision 68, docs/20). It resolves each name once and dials only the admitted answers, with the same `egress_policy` functions the pinned client applies in development, and a chained exit receives the name, never an address this platform resolved |

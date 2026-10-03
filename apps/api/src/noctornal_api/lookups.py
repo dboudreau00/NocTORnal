@@ -389,19 +389,36 @@ class LookupService:
             raise NotVisible()
         return found
 
+    def _held_by_rows(self, subject: Subject) -> tuple[list[str], set[str]]:
+        """The labels of EVERY selector row of the subject's value in the
+        case, at the labels of its owner and of the row itself (0134).
+
+        The index keeps one row per value and labels, so a value an AMBER
+        entity and a RED one both hold is two rows, and the first of them
+        would under-label what a lookup of it carries out. Read as the
+        LOOKUPS purpose, like the check below it: this check permits on
+        absence, so it must see a row above the caller."""
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as held_conn:
+            held_rows = held_conn.execute(
+                """SELECT greatest(s.classification, n.classification),
+                          s.compartments || coalesce(n.compartments, '{}')
+                     FROM core.selector s
+                     LEFT JOIN LATERAL iam.element_facts('node', s.node_id) n ON true
+                    WHERE s.case_id = %s AND s.selector_type = %s
+                      AND s.norm_value = %s""",
+                (subject.case_id, subject.selector_type, subject.value)).fetchall()
+        labels: list[str] = []
+        comps: set[str] = set()
+        for cls, row_comps in held_rows:
+            labels.append(cls)
+            comps |= set(row_comps or [])
+        return labels, comps
+
     def _derived(self, subject: Subject) -> tuple[str, frozenset[str]]:
         """What the case already holds for this value: its selector's node,
         prior lookups of the same fingerprint, and pending NODE proposals
         naming it, at their own read labels."""
-        labels, comps = [], set()
-        row = self._c.execute(
-            """SELECT n.classification, n.compartments FROM core.selector s
-                 LEFT JOIN LATERAL iam.element_facts('node', s.node_id) n ON true
-                WHERE s.case_id = %s AND s.selector_type = %s AND s.norm_value = %s""",
-            (subject.case_id, subject.selector_type, subject.value)).fetchone()
-        if row is not None:
-            labels.append(row[0])
-            comps |= set(row[1] or [])
+        labels, comps = self._held_by_rows(subject)
         # Every earlier lookup of the value in the case, read as the LOOKUPS
         # purpose (F51, 2026-10-02): this check permits on absence, and the
         # caller's own view would miss a lookup above them, so a value looked
@@ -599,6 +616,15 @@ class LookupService:
         if status in CONTENT_READ_ONLY_STATES:
             return ("case_read_only", f"This case is {status}, so nothing is sent from it.",
                     False)
+        if subject.kind == "SELECTOR":
+            # A selector row is the labels of its own owner, and since 0134 a
+            # value another entity holds above it is a row of its own, so the
+            # row of the lower one no longer says what the value is held at.
+            # Held to the stricter, in the VALUE kind's own sentence.
+            held_labels, held_comps = self._held_by_rows(subject)
+            if (_above(_max(*held_labels), subject.classification)
+                    or not held_comps <= subject.compartments):
+                return "value_restricted", VALUE_RESTRICTED, False
         if subject.kind == "VALUE":
             derived, derived_comps = self._derived(subject)
             if _above(derived, subject.classification) or \
@@ -1247,7 +1273,8 @@ class LookupService:
             row = self._c.execute(
                 """SELECT case_id, state, authorised_by, requested_by, signoff_expires_at < now(),
                           provider_id, operation, subject_kind, selector_id, sample_id,
-                          selector_type, query_value, classification, query_fingerprint
+                          selector_type, query_value, classification, query_fingerprint,
+                          exposure_level
                      FROM ingest.lookup WHERE id = %s FOR UPDATE""", (lookup_id,)).fetchone()
             if row is None or row[0] != case_id or row[1] != "AWAITING_SIGNOFF" \
                     or row[2] != user_id:
@@ -1285,6 +1312,17 @@ class LookupService:
                                                      subject.compartments):
                     gate = ("requester_withdrawn", "The requester may no longer send this.",
                             False)
+                elif provider.exposure_level != row[14]:
+                    # egress-lookup-signoff-exposure (2026-10-03): the
+                    # requester confirmed, and this person is signing, the
+                    # exposure the lookup recorded. A provider raised since
+                    # (VENDOR to PUBLIC) is a different disclosure, so the
+                    # drain's own refusal applies here too, whatever
+                    # re-enabled the provider in between.
+                    gate = ("exposure_changed",
+                            f"The exposure of this provider is now "
+                            f"{provider.exposure_level}, and this was asked for at "
+                            f"{row[14]}. The requester must ask again.", False)
                 else:
                     gate = self.gates(subject, provider, row[6], user_id=requester,
                                       fingerprint=bytes(row[13]))

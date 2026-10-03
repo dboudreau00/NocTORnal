@@ -39,6 +39,7 @@ bare 0.87 "will be either over-trusted or ignored".
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -49,7 +50,12 @@ import psycopg
 
 from noctornal_api.proposals import KIND_NODE, TLP_ORDER, ProposalStore, strictest
 from noctornal_api.wording import agree
-from noctornal_ontology.normalisers import normalise
+from noctornal_ontology.normalisers import (
+    URL_IN_TEXT,
+    credential_spans,
+    normalise,
+    redact_url_credentials,
+)
 
 EXTRACTOR = "paste_selector_regex"
 EXTRACTOR_VERSION = "1"
@@ -226,6 +232,15 @@ def find_selectors(text: str) -> list[Hit]:
     keep out of the graph.
     """
     claims: list[Hit] = []
+    # Where a URL of any scheme holds a credential. Nothing but a URL
+    # selector is read out of those spans: a password is not an identifier,
+    # and only http and https links are URL selectors, so the userinfo of
+    # `mysql://root:Secret123@db.example/app` was read as the e-mail
+    # address `Secret123@db.example` and proposed, and on accept written
+    # to the graph and the index (graph-url-selector-keeps-credentials,
+    # 2026-10-03, verify round).
+    secret_spans = credential_spans(text)
+    secret_starts = [a for a, _ in secret_spans]
     for sel_type, pattern, score, why in _PATTERNS:
         for m in pattern.finditer(text):
             raw = m.group(1)
@@ -235,7 +250,8 @@ def find_selectors(text: str) -> list[Hit]:
                 # full stop after it (L5, 2026-09-24): "grab it here
                 # https://mega.nz/#!AbCd1234!key." carried the stop into
                 # the raw value and the normaliser. Offsets stay exact.
-                raw = raw.rstrip(_URL_TRAILING)
+                stop = _widen_over_userinfo(text, m.start(1), m.end(1))
+                raw = text[m.start(1):stop].rstrip(_URL_TRAILING)
                 end = m.start(1) + len(raw)
                 if not raw:
                     continue
@@ -249,6 +265,15 @@ def find_selectors(text: str) -> list[Hit]:
                 continue
             if not norm:
                 continue
+            # The whole match, not the group: an `@mention` pattern owns
+            # the '@' that closes the userinfo, and the host after it is
+            # not a handle.
+            # The spans are in text order and do not overlap, so the one
+            # candidate is the last that starts before this match ends.
+            if sel_type != "URL":
+                i = bisect.bisect_left(secret_starts, end) - 1
+                if i >= 0 and secret_spans[i][1] > m.start():
+                    continue
             claims.append(Hit(sel_type, raw, norm, m.start(1), end,
                               score, why))
 
@@ -495,7 +520,11 @@ class CaptureService:
                             char_start, char_end, extractor, extractor_version,
                             score)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (document_id, h.selector_type, h.raw_value, h.norm_value,
+                    # A link's password or token is not kept in a derived
+                    # row either; the document holds the text as pasted
+                    # (graph-url-selector-keeps-credentials, 2026-10-03).
+                    (document_id, h.selector_type,
+                     redact_url_credentials(h.raw_value), h.norm_value,
                      h.char_start, h.char_end, EXTRACTOR, EXTRACTOR_VERSION,
                      h.score),
                 )
@@ -542,6 +571,10 @@ class CaptureService:
         made: list[UUID] = []
         skipped = 0
         seen: set[tuple[str, str]] = set()
+        # Every URL in the capture, once, so a context window that cuts one
+        # is widened to the whole URL before its credentials are redacted
+        # (graph-url-selector-keeps-credentials, 2026-10-03).
+        urls = [m.span() for m in URL_IN_TEXT.finditer(text)]
         for h in hits:
             key = (h.selector_type, h.norm_value)
             if key in seen:
@@ -580,7 +613,10 @@ class CaptureService:
                     "classification": classification,
                     "attrs": {
                         "selector_type": h.selector_type,
-                        "raw_value": h.raw_value,
+                        # Accept copies attrs onto the entity, so a URL's
+                        # password or token is redacted here, not kept
+                        # (graph-url-selector-keeps-credentials, 2026-10-03).
+                        "raw_value": redact_url_credentials(h.raw_value),
                         "char_start": h.char_start,
                         "char_end": h.char_end,
                     },
@@ -590,7 +626,7 @@ class CaptureService:
                 rationale=(
                     f"{h.why}, found at characters {h.char_start}-{h.char_end} "
                     f"of the captured document. Context: "
-                    f"...{_context(text, h.char_start, h.char_end)}..."
+                    f"...{_context(text, h.char_start, h.char_end, urls=urls)}..."
                 ),
                 score=h.score,
                 document_id=document_id,
@@ -598,10 +634,70 @@ class CaptureService:
         return made, skipped
 
 
-def _context(text: str, start: int, end: int, window: int = 45) -> str:
+def _context(text: str, start: int, end: int, window: int = 45, *,
+             urls: list[tuple[int, int]] | None = None) -> str:
     """The matched span with its surroundings, whitespace-collapsed. A
     reviewer deciding whether a handle is real needs to see that it came
-    from a sentence rather than a quoted signature block."""
+    from a sentence rather than a quoted signature block.
+
+    It is copied into the proposal's rationale and, on accept, into the
+    claim's, so a URL in it is shown without its password or token
+    (graph-url-selector-keeps-credentials, 2026-10-03). A URL the window
+    cuts is shown whole, redacted, when it is short: cut after its scheme,
+    the userinfo no longer looks like a URL's and would escape the
+    redaction. A long one is left out of the window instead of widened to,
+    because a paste of one huge token with a match after every `)` would
+    otherwise copy the whole token into every proposal's rationale.
+    `urls` is every URL span in `text`, computed once per capture."""
     lo = max(0, start - window)
     hi = min(len(text), end + window)
-    return " ".join(text[lo:hi].split())
+    if urls is None:
+        urls = [m.span() for m in URL_IN_TEXT.finditer(text)]
+    shown: list[str] = []
+    pos = lo
+    for u_start, u_end in urls:
+        if u_end <= lo:
+            continue
+        if u_start >= hi:
+            break
+        shown.append(text[pos:max(pos, u_start)])
+        cut = u_start < lo or u_end > hi
+        if not cut or u_end - u_start <= _CONTEXT_URL_MAX:
+            shown.append(redact_url_credentials(text[u_start:u_end]))
+        pos = max(pos, u_end)
+    shown.append(text[pos:hi])
+    return " ".join("".join(shown).split())
+
+
+#: The longest URL a context window will widen to when it cuts one.
+_CONTEXT_URL_MAX = 512
+
+
+#: Characters the URL pattern stops at that a password may still hold
+#: (RFC 3986 sub-delimiters), so the match can end inside the userinfo.
+_USERINFO_STOPS = ")'"
+
+
+def _widen_over_userinfo(text: str, start: int, stop: int) -> int:
+    """Where a URL match really ends when it was cut inside its userinfo.
+
+    The URL pattern stops at `)` and `'`, so `https://alice:pa)ss@host/x`
+    matched `https://alice:pa` and left `ss@host/x` to be found as an
+    email address: the password in two selectors, neither redacted
+    (graph-url-selector-keeps-credentials, 2026-10-03). When the characters
+    after the stop, up to the next space or quote, reach an `@` before any
+    `/`, `?` or `#`, that `@` closes this URL's userinfo and the match runs
+    to the end of that token. Otherwise `stop` is returned unchanged, so a
+    URL in brackets or quotes ends where it always did."""
+    if stop >= len(text) or text[stop] not in _USERINFO_STOPS:
+        return stop
+    end = stop
+    while end < len(text) and not text[end].isspace() and text[end] not in '<>"':
+        end += 1
+    at = text.find("@", stop, end)
+    if at == -1:
+        return stop
+    scheme_end = text.index("://", start) + 3
+    if any(ch in text[scheme_end:at] for ch in "/?#"):
+        return stop
+    return end

@@ -182,18 +182,19 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
              WHERE e.seq = (SELECT max(seq) FROM audit.event)""")
 
 
-def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
-    """Two rows sharing a predecessor must not make the chain "broken".
+def test_a_fork_written_since_0149_is_reported_AND_is_tampering(tamperable):
+    """Two rows sharing a predecessor, written after the boundary 0149
+    records, are a break.
 
-    This is the case that fires on real history. `seq` is drawn from
-    `nextval()` before the chaining trigger takes its advisory lock, so
-    concurrent writers can chain off the same tail; the development
-    database carries 67 such forks in 60,181 rows, none of them tampering.
-
-    Counting them as breaks made `/audit/verify` answer BROKEN on
-    untouched history — the one answer a tamper-evidence tool cannot
-    afford, and the SECOND time this module made that mistake (the first
-    was assuming `seq` order was chain order). Hence a named test.
+    This test used to say the opposite, for the reason its docstring gave:
+    `seq` was drawn from `nextval()` before the chaining trigger took its
+    advisory lock, so concurrent writers could chain off the same tail, and
+    counting forks as breaks made `/audit/verify` answer BROKEN on untouched
+    history. That held until 0149 (2026-10-03), which draws the number inside
+    the lock. A fork written since cannot come from honest traffic and is the
+    dead-end row an owner can delete without orphaning anything. The legacy
+    half (a fork with a claimant at or below the boundary is listed, not a
+    break) is `test_ledger_chain_g49_pg.py`.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -202,12 +203,11 @@ def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
 
     report = verify_chain(tamperable, since_seq=since)
     assert report.forks, "the fork was not detected at all"
-    assert [f.kind for f in report.forks] == ["FORK", "FORK"], \
-        "both claimants must be named — which one is the intruder is not " \
-        "something the verifier can decide"
-    # THE POINT: no tampering was found, so the chain is not "broken".
-    assert not report.breaks, [b.kind for b in report.breaks]
-    assert report.intact, "a fork must not be reported as tampering"
+    assert [f.kind for f in report.forks] == ["FORK", "FORK"], (
+        "both claimants must be named, because which one is the intruder is "
+        "not something the verifier can decide")
+    assert [b.kind for b in report.breaks] == ["FORK", "FORK"]
+    assert not report.intact, "a fork written since 0149 must not read intact"
 
 
 def test_a_fork_does_not_mask_real_tampering(tamperable):
@@ -318,14 +318,15 @@ def test_the_anchor_is_checked_over_the_whole_table_not_the_window(tamperable):
 # ---------------------------------------------------------------------------
 
 def test_the_chaining_lock_serialises_concurrent_writers(tamperable):
-    """`ChainReport.intact` excludes forks, and the reason given for years
-    was that ordinary concurrency produces them -- `seq` is drawn before
-    the trigger takes its lock, so two writers chain off one tail.
+    """With one transaction holding the xact advisory lock mid-INSERT, a
+    second connection's INSERT blocks until commit.
 
-    It does not. With one transaction holding the xact advisory lock
-    mid-INSERT, a second connection's INSERT blocks until commit. If this
-    ever stops being true, the fork explanation becomes correct again and
-    the docstring in `audit_verify.py` must be changed back.
+    This was once offered as the reason forks "are not known to be reachable
+    by ordinary traffic". It measured the lock and not the choice of tail:
+    `seq` was drawn before the lock, so a writer that locked second could
+    still chain off a row with a higher number. 0149 draws the number inside
+    the lock (see `test_ledger_chain_g49_pg.py` for the concurrency proof);
+    this stays as the proof that the lock itself holds.
     """
     import psycopg
 

@@ -898,7 +898,11 @@ class EgressAdminService:
         ).fetchone()[0]
         if not exists:
             ports = {80, 443}
+            # egress-rss-floor (2026-10-03): AMBER, never the highest feed
+            # label. A feed above AMBER is not polled (invariant 8); it is
+            # counted as a gap the operator sees, not carried by the route.
             highest = "AMBER"
+            above = 0
             for base_url, label in self._c.execute(
                     """SELECT base_url, classification::text FROM collect.source
                         WHERE is_active AND parser_key = %s
@@ -910,7 +914,7 @@ class EgressAdminService:
                 except Refusal:
                     pass
                 if _tlp_index(label) > _tlp_index(highest):
-                    highest = label
+                    above += 1
             taken = {r[0] for r in self._c.execute(
                 "SELECT name FROM collect.egress_profile WHERE name LIKE 'passive%'").fetchall()}
             name = "passive"
@@ -920,7 +924,7 @@ class EgressAdminService:
             proposal["passive_default"] = {
                 "name": name, "kind": "DATACENTRE", "exit_kind": "DIRECT",
                 "ceiling": highest, "allowed_ports": sorted(ports)[:16],
-                "any_public_host": True}
+                "any_public_host": True, "feeds_above_ceiling": above}
         live = {r[0] for r in self._c.execute(
             "SELECT name FROM collect.egress_integration_route WHERE retired_at IS NULL"
         ).fetchall()}

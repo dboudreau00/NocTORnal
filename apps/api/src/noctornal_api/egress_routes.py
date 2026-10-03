@@ -628,13 +628,16 @@ def cover_sources(conn) -> tuple[bool, str, str, str]:
             else:
                 notes.append("Development: feeds use the built-in direct passive policy.")
         else:
+            # egress-rss-floor (2026-10-03): capped at AMBER, so a passive
+            # default an earlier upgrade set to RED no longer reads as
+            # covering a RED feed the collector refuses to poll.
             above = conn.execute(
                 f"SELECT EXISTS (SELECT 1 FROM collect.source s WHERE {feed_filter} "
-                f"AND s.classification > %s::core.tlp)",
+                f"AND s.classification > least(%s::core.tlp, 'AMBER'::core.tlp))",
                 (PASSIVE_PARSER, sorted(PASSIVE_SOURCE_KINDS), passive[0])).fetchone()[0]
             if above:
                 gaps.append("a feed source is labelled above the passive default's "
-                            "ceiling")
+                            "ceiling, or above AMBER, which no collection carries")
     if bound:
         persona_gap = conn.execute(
             """SELECT EXISTS (

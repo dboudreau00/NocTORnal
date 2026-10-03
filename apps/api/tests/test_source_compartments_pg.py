@@ -59,6 +59,12 @@ def conn(monkeypatch):
 
 def _holder(conn, *, roles=("COLLECTOR",), keys=(KEY,), clearance="RED"):
     uid, email = h.user(conn, P, roles=roles, clearance=clearance)
+    # Registered here as well as in the fixture: a fixture that writes a
+    # compartment column registers the key in its own function (0059 refuses
+    # an unregistered one on a fresh database; test_fixture_invariants).
+    for key in keys:
+        conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+                     "ON CONFLICT (key) DO NOTHING", (key, "Source compartment test"))
     conn.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s",
                  (list(keys), uid))
     return uid, email
@@ -136,6 +142,8 @@ def _compartmented_world(conn):
                 adapters=h.adapters(stub), clearance="RED")
     # Filed under the key after the authority (the helper's record passes
     # no compartments, and a recorder who gave none is refused the source).
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+                 "ON CONFLICT (key) DO NOTHING", (KEY, "Source compartment test"))
     conn.execute("UPDATE collect.source SET compartments = %s WHERE id = %s",
                  ([KEY], source))
     result = _svc(conn, stub).run_once(source, actor_id=None)
