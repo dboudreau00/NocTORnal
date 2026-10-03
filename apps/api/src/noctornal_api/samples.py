@@ -3231,7 +3231,7 @@ class SampleService:
         _require_clearance(clearance)
         row = self._c.execute(
             f"""SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
-                       s.sha256, s.state, s.preserved_key
+                       s.sha256, s.state, s.preserved_key, c.status::text
                   FROM lab.sample s
                   LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
                  WHERE s.id = %(id)s AND {lab_gate()}""",
@@ -3239,6 +3239,12 @@ class SampleService:
              **gate_params(clearance, compartments)}).fetchone()
         if row is None:
             raise SampleError("no such sample")
+        if row[6] == "PURGED":
+            # lab-4 (2026-10-03): a purged case's material is not handed out,
+            # whether or not its retention sweep has reached this sample yet.
+            raise SampleError(
+                "this sample's case has been purged, so its material is not "
+                "released through the download")
         if row[4] == REJECTED:
             # Three different answers since 0063, because "its bytes
             # destroyed" was the only sentence this had and it became false

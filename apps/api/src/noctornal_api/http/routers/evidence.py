@@ -312,6 +312,9 @@ async def upload(
         media_type=file.content_type or "application/octet-stream",
         data=data, acquired_by=user.user_id,
         acquisition_method=acquisition_method, classification=classification,
+        # Bytes of an exhibit above the uploader are lodged as their own
+        # exhibit, never deduplicated onto the hidden one (rls-4, 2026-10-03).
+        reader_ceiling=user_ceiling(conn, user.user_id, case_id=case_id),
         **provenance,
     )
     return IngestOut(evidence_id=str(res.evidence_id), sha256=res.sha256_hex,

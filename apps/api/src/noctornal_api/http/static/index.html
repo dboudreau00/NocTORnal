@@ -2970,7 +2970,10 @@
               document the gate cleared, and only if it matches the preview
               above.
             </p>
-            <!-- These are `egress.Destination`, verbatim. An earlier
+            <!-- These are `routers/reports.RELEASE_DESTINATIONS`, the
+                 `egress.Destination` values a released document can go to,
+                 verbatim (in_app went 2026-10-03: the release refuses it,
+                 evidence-report-release-in-app). An earlier
                  version of this control invented plausible-looking values
                  (INTERNAL / PARTNER_AGENCY / EXTERNAL / PUBLIC) and every
                  release attempt 400'd on "unknown destination", the same
@@ -2982,7 +2985,6 @@
             <label class="field">
               <span class="label">Destination</span>
               <select id="rep-destination" class="select">
-                <option value="in_app">in_app: stays inside the platform</option>
                 <option value="export" selected>export: an analyst saves it as a file</option>
                 <option value="smtp">smtp: email</option>
                 <option value="jira">jira</option>
@@ -2990,9 +2992,10 @@
               </select>
             </label>
             <p class="help">
-              Everything except <code>in_app</code> crosses the boundary
-              into a system with its own access model, which this platform
-              does not control and cannot audit.
+              Each of these crosses the boundary into a system with its own
+              access model, which this platform does not control and cannot
+              audit. Inside the platform, the prepared report above is
+              already where it needs to be.
             </p>
             <label class="field">
               <span class="label">Destination ceiling (optional)</span>

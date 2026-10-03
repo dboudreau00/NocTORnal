@@ -144,6 +144,10 @@ class SystemPurpose(StrEnum):
     # A sample submission's duplicate check, which must refuse a duplicate
     # the submitter may not see, and say nothing about it (S1, 2026-09-25).
     SAMPLE_INTAKE = "sample_intake"
+    # An exhibit upload's duplicate check, which must see an exhibit above
+    # the uploader so their bytes never land on it, and say nothing about it
+    # (rls-4, evidence-ingest-dedup-oracle, 2026-10-03).
+    EVIDENCE_INTAKE = "evidence_intake"
     # A Telegram chat's duplicate check, which must refuse a chat already
     # added under a source the adder may not see, and say nothing about it
     # (F51, 2026-10-02).
