@@ -133,11 +133,25 @@ def test_a_change_event_carries_no_case_content(conn):
     _node(conn, case_id, owner, "a handle")
     time.sleep(2.0)
 
-    events = [h for h in heard if h.get("kind") == "node"]
+    # This case's own events: the channel carries every case's (the socket
+    # filters by case), and a neighbouring test's write is not this one's.
+    events = [h for h in heard if h.get("kind") == "node"
+              and h.get("case_id") == str(case_id)]
     assert events, "no change event was published for a node write"
-    assert set(events[0]) == {"case_id", "kind", "op"}, (
-        f"the event carries more than an id, a kind and an operation: "
-        f"{events[0]}")
+    # Since 0146 (http_ui-012, 2026-10-03) the NOTIFY payload also names the
+    # labels of what was written, FOR THE SERVER: the socket decides per
+    # subscriber whether the hint is about anything they may read, and what
+    # it forwards is still only the kind and the operation. The safety
+    # argument above moved from "the payload says nothing" to "the message
+    # a client receives says nothing", and that half is asserted here.
+    assert set(events[0]) == {"case_id", "kind", "op", "labels"}, (
+        f"the event carries more than an id, a kind, an operation and the "
+        f"labels the server filters on: {events[0]}")
+    from noctornal_api.http.routers.live import _relevant
+    forwarded = _relevant(events[0], owner, case_id)
+    assert forwarded == {"type": "change", "kind": "node", "op": "INSERT"}, (
+        f"what a client receives carries more than a kind and an operation: "
+        f"{forwarded}")
 
 
 def test_one_event_per_statement_not_per_row(conn):

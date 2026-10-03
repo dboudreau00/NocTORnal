@@ -228,9 +228,15 @@ _VOCAB = "reference vocabulary: no case, no label, the same for every reader"
 _CONFIG = "deployment configuration with no case and no label"
 
 EXEMPT: dict[str, str] = {
-    "iam.app_user": _IAM,
-    "iam.session": _IAM + "; the request role keeps UPDATE of four columns on "
-                          "its OWN bound session only (0109, 0112)",
+    # By named column since 0143 (rls-6, 2026-10-03): the password hash, the
+    # sealed TOTP secret and its key id, the recovery hashes and the replay
+    # counter are not granted to the request role at all.
+    "iam.app_user": _IAM + "; the request role reads it by named column, and "
+                           "never the credential columns (0143)",
+    "iam.session": _IAM + "; the request role keeps UPDATE of three columns on "
+                          "its OWN bound session only, the idle window moving "
+                          "forward and a revocation, never step-up "
+                          "(0109, 0112, 0144)",
     "iam.webauthn_credential": _IAM,
     "iam.user_role": _IAM,
     "iam.case_assignment": _IAM,

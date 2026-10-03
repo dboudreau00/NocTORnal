@@ -161,6 +161,22 @@ def _read_only(table: str) -> bool:
     return table.split(".", 1)[0] in schemas or table in tables
 
 
+def _column_selects() -> dict[str, tuple[str, ...]]:
+    """Tables a later migration made readable by named columns only
+    (`RUNTIME_COLUMN_SELECTS`; 0143 is the first, iam.app_user without
+    its credential columns, rls-6 2026-10-03). Table-level SELECT is
+    false there by design, so reachability is any column's SELECT."""
+    out: dict[str, tuple[str, ...]] = {}
+    for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if path.name <= MIGRATION.name:
+            continue
+        spec = importlib.util.spec_from_file_location(f"m{path.stem[:4]}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        out.update(getattr(module, "RUNTIME_COLUMN_SELECTS", {}))
+    return out
+
+
 def _scalar(conn, sql, params=None):
     # `None` rather than `()`: psycopg only runs its client-side binder when
     # params is not None, and the binder treats `%` as a placeholder marker.
@@ -409,9 +425,14 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
 
     ledgers = set(m.LEDGERS)
     guarded = _guarded_after_0060()
+    column_selects = _column_selects()
     unreachable = {}
     for table in tables:
         got = _table_privileges(conn, table)
+        if table in column_selects:  # 0143: named columns only
+            got["SELECT"] = _scalar(
+                conn, "SELECT has_any_column_privilege(%s, %s, 'SELECT')",
+                (APP_DB_ROLE, table))
         wanted = ("SELECT", "INSERT") if table in ledgers else guarded.get(
             table, ("SELECT", "INSERT", "UPDATE", "DELETE"))
         if _read_only(table):  # 0109, the IAM plane

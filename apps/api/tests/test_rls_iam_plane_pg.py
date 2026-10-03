@@ -86,14 +86,18 @@ def test_every_forging_write_is_refused_to_the_request_role(owner, people, name)
 
 
 def test_the_request_role_keeps_its_own_session_activity_and_nothing_else(owner, people):
-    """Touch, step-up and logout still work on the bound session; the same
-    columns on anybody else's session are refused by 0112's guard, and a
-    revoked session stays revoked."""
+    """Touch and logout still work on the bound session; the same columns
+    on anybody else's session are refused by 0112's guard, and a revoked
+    session stays revoked. Stamping step-up is no longer the request
+    role's to do (0144, rls-7 2026-10-03): it is a sign-in's."""
     app = s.app_conn(people["raw"])
     try:
-        cur = app.execute("UPDATE iam.session SET last_seen_at = now(), "
-                          "mfa_satisfied_at = now() WHERE id = %s", (people["sid"],))
+        cur = app.execute("UPDATE iam.session SET last_seen_at = now() "
+                          "WHERE id = %s", (people["sid"],))
         assert cur.rowcount == 1
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app.execute("UPDATE iam.session SET mfa_satisfied_at = now() "
+                        "WHERE id = %s", (people["sid"],))
         with pytest.raises(psycopg.errors.InsufficientPrivilege, match="bound to"):
             app.execute("UPDATE iam.session SET last_seen_at = now() WHERE id = %s",
                         (people["admin_sid"],))

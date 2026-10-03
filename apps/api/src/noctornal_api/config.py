@@ -517,6 +517,20 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
                 f"register would report the prohibited-content policy as "
                 f"declared (docs/16 L1).")
 
+    # The first-run door's token (http_ui-010 and infra-3, 2026-10-03;
+    # `http/setup_token.py`). Optional: unset, a production deployment has
+    # no web first-run at all. But a short one is a lock that opens by
+    # asking, so it is refused here rather than accepted and guessed. The
+    # length is `setup_token.MIN_TOKEN_CHARS`, written out because this
+    # module must not import the HTTP package.
+    setup_token = env.get("NOCTORNAL_SETUP_TOKEN", "").strip()
+    if setup_token and len(setup_token) < 32 and "NOCTORNAL_SETUP_TOKEN" not in already:
+        problems.append(
+            "NOCTORNAL_SETUP_TOKEN is set but shorter than 32 characters, so "
+            "the first-run door it guards could be opened by guessing it: "
+            "generate one with `openssl rand -hex 32`, or leave it unset and "
+            "create the first account with scripts/bootstrap.py create-user.")
+
     # The verdict is `envelope._load_kek`'s, the reader every seal and
     # every open already calls; only the choice of sentence is local, and
     # it is chosen on whether the variable is set rather than by parsing

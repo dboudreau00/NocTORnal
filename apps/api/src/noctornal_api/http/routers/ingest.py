@@ -57,6 +57,7 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
+from noctornal_api.http.body_ceiling import own_body_cap
 from noctornal_api.http.limits import rate_limit, read_body_capped
 from noctornal_api.ingest import (
     CATEGORIES,
@@ -306,6 +307,9 @@ def _authorised_cases_for_ingest(conn: psycopg.Connection,
              # submission. See the catalogue entry for why CREDENTIAL
              # scope is sound here and was not for the blanket ceiling.
              dependencies=[Depends(rate_limit("ingest.submit"))])
+# The key's own cap, read after the key authenticates (http_ui-005,
+# 2026-10-03: the default body ceiling does not apply here).
+@own_body_cap
 async def submit(
     request: Request,
     authorization: str | None = Header(default=None),

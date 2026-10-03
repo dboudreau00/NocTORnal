@@ -209,28 +209,59 @@ is the address uvicorn is told to trust for `X-Forwarded-For`.
 
 ## 5. Create the first account
 
-While `iam.app_user` is empty (and only then) one unauthenticated route
-creates the first administrator. It hands out `SYS_ADMIN`,
-`SECURITY_OFFICER`, `CASE_OWNER` and `ANALYST`, which is right for a
-single-operator install and clears the two account-shaped readiness items
-in one call, `security_officer_present`, which is blocking, and
-`sys_admin_present`, which is not. It answers 409 forever afterwards, and
-it counts every row, active or not.
+While `iam.app_user` is empty (and only then) one route creates the first
+administrator. It hands out `SYS_ADMIN`, `SECURITY_OFFICER`, `CASE_OWNER`
+and `ANALYST`, which is right for a single-operator install and clears the
+two account-shaped readiness items in one call, `security_officer_present`,
+which is blocking, and `sys_admin_present`, which is not. It answers 409
+forever afterwards, and it counts every row, active or not.
+
+**It needs a secret only you hold.** Caddy publishes 80 and 443 as soon as
+the API is up, the hostname is in certificate-transparency logs within
+seconds of the certificate being issued, and the route's path is public in
+this repository, so whoever called it first on an open address would own
+the deployment's administration and the officer role that reviews
+break-glass. Two ways to do step 5, and the first is the default:
+
+- **From the server, no web door at all.** Leave `NOCTORNAL_SETUP_TOKEN`
+  unset in `secrets.env` (it ships commented out). In production the route
+  then does not exist (404, as an unknown path answers) and the console never
+  offers the first-run card. Create the account with the command in the
+  second block below.
+- **Through the web, with a one-time setup token.** Before `up`, put a
+  token of at least 32 characters in `secrets.env`, for example the output
+  of `openssl rand -hex 32`, as `NOCTORNAL_SETUP_TOKEN=...`. The API
+  refuses to start with a shorter one. The route then answers only a request
+  that carries it in an `X-Setup-Token` header, or typed into the console's
+  first-run card, which asks for it when the server says it is needed. A
+  missing or wrong token is a 403, compared in constant time and counted
+  against the sign-in failure limit.
+
+`$NOCTORNAL_SETUP_TOKEN` below is a variable in your own shell, not a file
+the command reads, so set it first to the value you put in `secrets.env`
+(`export NOCTORNAL_SETUP_TOKEN=...`) and `unset NOCTORNAL_SETUP_TOKEN` when
+you are done. An unset one sends no usable token, and the route answers 403.
 
 ```sh
 curl -sS -X POST https://YOUR-CONSOLE-HOSTNAME/api/v1/setup/first-admin \
   -H 'content-type: application/json' \
+  -H "x-setup-token: $NOCTORNAL_SETUP_TOKEN" \
   -d '{"email":"you@example.org","display_name":"Your Name"}'
 ```
 
 Add `-k` while `NOCTORNAL_TLS_MODE=internal`: those certificates come from
 Caddy's own CA and nothing public trusts them.
 
+The token is one-time in the way that matters: it opens the door only while
+the table is empty, and once the first account exists the route answers 409
+whatever is sent. Then delete the line from `secrets.env` and run `up -d`
+again, so the secret does not stay in the environment of every service.
+
 **The credentials come back once and are not retrievable.** Save them, then
 sign in at `https://YOUR-CONSOLE-HOSTNAME/ui` and enrol your authenticator.
 
-If the route is not reachable for some reason, the same job can be done
-from a container:
+To make the first account from the server instead (and this is the only way
+when no token is set), run it from a container:
 
 ```sh
 docker compose -p noctornal-prod -f infra/production/compose.yml \

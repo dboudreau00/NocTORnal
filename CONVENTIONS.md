@@ -161,6 +161,13 @@ firehose into a half-built model produces a landfill.
   `problem+json` errors (RFC 9457).
   (Cursor pagination was never implemented: it was the 2026-07 convention
   and is superseded as of 2026-09-09.)
+  Two case-wide lists exceed 1000 on purpose (2026-10-03, review
+  http_ui-015): `GET /cases/{id}/edges` (2000) and the projected graph
+  (5000), because the console draws a whole case from them and says when
+  an answer is truncated. Every per-element list (an element's assertions,
+  selectors, tags, sets, members, the comms lists) is capped at 1000 and
+  pages with `offset` where it is a list, or says `truncated` where it is
+  an object.
 - Tests: every invariant above has a test named after it.
 - Secrets: environment or Vault. Never a default value in code.
 

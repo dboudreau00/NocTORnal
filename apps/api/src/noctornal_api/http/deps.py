@@ -184,8 +184,10 @@ def current_user(
     service = SessionService(PgSessionStore(conn))
     result = service.validate(raw, touch=False)
     if not result.ok:
-        audit_auth_event(conn, "AUTH_SESSION_REJECTED", None, None,
-                         {"reason": result.reason})
+        # No row for a token that matches nothing, one per real session
+        # per window otherwise, with the source (http_ui-004, 2026-10-03).
+        from noctornal_api.http.session_rejections import record_rejected_session
+        record_rejected_session(conn, request, result)
         raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = result.session
     if refuse_unbound_session(
@@ -198,7 +200,13 @@ def current_user(
     # On an exempt connection (the owner, in development and the suite)
     # nothing is compared and nothing changes.
     refuse_unbindable_session(conn, s, raw)
-    s = service.touch(s)
+    touched = service.touch(s)
+    if touched is None:
+        # Revoked, expired or idle between the read above and the slide
+        # (authz-session-revoke-bypass, 2026-10-03): the same generic 401,
+        # and no second audit row, since the revocation was its own event.
+        raise Problem(401, "Unauthenticated", "invalid or expired session")
+    s = touched
     # Who a row-level security refusal is audited against, when one
     # escapes to the error handler (http/errors.py, S1).
     request.state.noctornal_user_id = s.user_id
@@ -259,7 +267,8 @@ def refuse_unbound_session(conn, session, *, ip: str | None,
     return True
 
 
-def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None:
+def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict,
+                     *, ip_hash: bytes | None = None) -> None:
     """Append to the hash-chained audit log. Authentication and
     authorization outcomes are auditable events (docs/05).
 
@@ -267,12 +276,17 @@ def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None
     writes the same SESSION_BINDING_REFUSED row from the websocket
     handshake, and two spellings of one audit action is how an audit
     query comes back short.
+
+    `ip_hash` names the source (http_ui-004, 2026-10-03): a refused
+    session presentation without one could not be attributed.
     """
     conn.execute(
         """INSERT INTO audit.event
-               (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
-           VALUES (%s, %s, %s, 'auth', NULL, %s, %s)""",
-        (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail)),
+               (actor_id, actor_kind, action, object_type, object_id, case_id,
+                detail, ip_hash)
+           VALUES (%s, %s, %s, 'auth', NULL, %s, %s, %s)""",
+        (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail),
+         ip_hash),
     )
 
 

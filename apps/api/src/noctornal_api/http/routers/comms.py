@@ -259,6 +259,9 @@ def correlate(
     case_id: UUID,
     platform_key: str = Query(...),
     observed: str = Query(...),
+    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
+    # when the cap cut the answer short.
+    limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -277,7 +280,7 @@ def correlate(
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     result = normalise(platform_key, observed)
     return {"durable_value": result.durable, "note": result.note,
-            "matches": hits,
+            "matches": hits[:limit], "truncated": len(hits) > limit,
             "scope": "this case only"}
 
 
@@ -285,6 +288,9 @@ def correlate(
 def co_declared(
     case_id: UUID,
     reference: str = Query(...),
+    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
+    # when the cap cut the answer short.
+    limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -295,15 +301,19 @@ def co_declared(
     from one running a Telegram bot and nothing else.
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
-    return {"reference": reference,
-            "identifiers": CommsService(
-                conn, clearance=clearance.name, compartments=compartments
-            ).co_declared(case_id, reference)}
+    found = CommsService(
+        conn, clearance=clearance.name, compartments=compartments
+    ).co_declared(case_id, reference)
+    return {"reference": reference, "identifiers": found[:limit],
+            "truncated": len(found) > limit}
 
 
 @router.get("/shared-devices", response_model=dict)
 def shared_devices(
     case_id: UUID,
+    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
+    # when the cap cut the answer short.
+    limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -314,9 +324,10 @@ def shared_devices(
     attribution that belongs in an ATTRIBUTED_TO edge with a confidence.
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
-    return {"leads": CommsService(
+    leads = CommsService(
         conn, clearance=clearance.name, compartments=compartments
-    ).shared_devices(case_id)}
+    ).shared_devices(case_id)
+    return {"leads": leads[:limit], "truncated": len(leads) > limit}
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +400,9 @@ def contact_block(
             dependencies=[Depends(rate_limit("search"))])
 def impersonation(
     case_id: UUID,
+    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
+    # when the cap cut the answer short.
+    limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -404,9 +418,11 @@ def impersonation(
     # from every case the caller can see, so a break-glass grant on this
     # one must not raise what they read of the others.
     ceiling, comps = user_ceiling(conn, user.user_id)
-    return {"candidates": ContactBlockService(conn).impersonation_candidates(
+    candidates = ContactBlockService(conn).impersonation_candidates(
         case_id, visible_case_ids=_visible_cases(conn, user, case_id),
-        clearance=ceiling.name, compartments=comps)}
+        clearance=ceiling.name, compartments=comps)
+    return {"candidates": candidates[:limit],
+            "truncated": len(candidates) > limit}
 
 
 # ---------------------------------------------------------------------------
@@ -1005,15 +1021,43 @@ def open_conversation(
             dependencies=[Depends(rate_limit("graph.view"))])
 def contact_graph(
     case_id: UUID,
+    # Capped like every list (http_ui-015, 2026-10-03); `truncated` says
+    # when the cap cut the answer short.
+    limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """Who talks to whom, from metadata alone -- which is what survives
     minimisation."""
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
-    return {"conversations": CommsService(
+    conversations = CommsService(
         conn, clearance=clearance.name, compartments=compartments
-    ).contact_graph(case_id)}
+    ).contact_graph(case_id)
+    return {"conversations": conversations[:limit],
+            "truncated": len(conversations) > limit}
+
+
+def _cap_projection(result: dict, limit: int) -> dict:
+    """Keep the `limit` strongest ties of a co-participation projection
+    (http_ui-015, 2026-10-03), and the vertices they join. Not silent
+    (invariant 12): `truncated`, and the counts in `coverage`, say what the
+    cap cut. The order of what is kept is the projection's own."""
+    edges = result["edges"]
+    result["truncated"] = len(edges) > limit
+    if not result["truncated"]:
+        return result
+    strongest = sorted(range(len(edges)),
+                       key=lambda i: (-edges[i]["weight"], i))[:limit]
+    kept = [edges[i] for i in sorted(strongest)]
+    used = {e["src"] for e in kept} | {e["dst"] for e in kept}
+    result["coverage"]["edges_total"] = len(edges)
+    result["coverage"]["edges_returned"] = len(kept)
+    result["coverage"]["edges_cut"] = (
+        "the strongest ties are returned; narrow the projection "
+        "(min_shared, a time window, a provenance class) to see the rest")
+    result["edges"] = kept
+    result["nodes"] = [n for n in result["nodes"] if n["key"] in used]
+    return result
 
 
 class IncidentalBody(BaseModel):
@@ -1110,6 +1154,9 @@ def co_participation(
     provenance_class: list[str] = Query(default_factory=list),
     since: datetime | None = Query(None),
     until: datetime | None = Query(None),
+    # Capped like every list (http_ui-015, 2026-10-03): the strongest
+    # `limit` ties are kept and `truncated` says so.
+    limit: int = Query(1000, ge=1, le=1000),
     user: CurrentUser = Depends(require("comms.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
@@ -1126,7 +1173,7 @@ def co_participation(
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
-        return CoParticipationService(
+        result = CoParticipationService(
             conn, clearance=clearance.name, compartments=compartments
         ).project(CoParticipationParams(
             case_id=case_id, min_shared=min_shared,
@@ -1137,3 +1184,4 @@ def co_participation(
             since=since, until=until))
     except CoParticipationError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return _cap_projection(result, limit)
