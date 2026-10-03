@@ -18,6 +18,24 @@
 .env.*
 .env.local
 
+# At any depth, and with an editor's copy of one (2026-10-03, g48
+# verification). The three lines above are root-anchored, as every line in
+# this file is, while .gitignore's `.env` and `.env.*` match at any depth, so
+# apps/api/.env.local and infra/production/.env.production were gitignored
+# yet reached every image; and `secrets.env.bak`, `secrets.env~` and
+# `secrets-prod.env.save`, which an editor or an operator leaves beside the
+# real file, were in neither list. `*.env`, `*.env.*` and `*.env~` take all
+# of them; the tracked `<name>.env.example` templates are put back (the `?*`
+# keeps a bare `.env.example` out, as `.env.*` always did). .gitignore
+# carries the same set, and apps/api/tests/test_g48_image_context.py holds
+# the two lists to each other in both directions.
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
+**/*.env~
+!**/?*.env.example
+
 # Renders of real panes against real case data. A screenshot of an
 # AMBER_STRICT case carries that case's classification and does not look
 # like it does (the same reasoning as .gitignore).
@@ -29,6 +47,53 @@ shots/
 # The operator's real secrets file sits beside the compose file. It is
 # gitignored, which means nothing stops it being COPYed into an image.
 infra/production/secrets.env
+
+# S2 (2026-09-24) moved the egress keys and the worker and egress database
+# passwords out of secrets.env into three files beside it, and this list
+# never learned them: every image carried the BYPASSRLS role's password and
+# the egress proxy's private seal key (infra-1, 2026-10-03). The pattern
+# below takes every `*.env` in the directory, so the next secret file added
+# there is excluded without anyone remembering to list it; the `.example`
+# templates end in `.example` and are not matched. The names are listed as
+# well because a pattern is easier to get wrong than a name, and
+# apps/api/tests/test_g48_image_context.py holds every gitignored secret
+# path under infra/production to this file.
+infra/production/*.env
+infra/production/egress-proxy.env
+infra/production/egress-client.env
+infra/production/postgres-init.env
+infra/production/caddy.env
+
+# Private keys and certificates, wherever they are in the tree. tls/ (below)
+# is the one the deployment uses; these catch a copy somebody made.
+**/*.key
+**/*.pem
+
+# An editor's or an operator's copy of any file (`~`, `.swp`, `.bak`, `.orig`,
+# `.old`, `.save`): a copy of a file protected above keeps its contents under
+# a name no rule knows (2026-10-03, g48 verification). No tracked file ends in
+# one of these, and .gitignore carries the same list.
+**/*~
+**/*.bak
+**/*.orig
+**/*.old
+**/*.save
+**/*.swp
+
+# Database dumps and backups (infra-2, 2026-10-03). The documented backup
+# once wrote ./noctornal-<timestamp>.sql into the repository root, which is
+# the build context, and the next `up -d --build` copied the whole case
+# database in plaintext into every container. Root-level patterns on
+# purpose: a `*.sql` that matched at every depth would drop db/init and
+# db/schema.sql from the image. The documented backup goes OUTSIDE the
+# checkout (infra/production/README.md); this is the net under it.
+*.sql
+*.sql.*
+*.dump
+*.dump.*
+noctornal-*
+backup/
+backups/
 
 # MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
 # this directory into the containers that need it, so nothing is lost by

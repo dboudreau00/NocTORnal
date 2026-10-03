@@ -264,6 +264,12 @@ Settings come from the environment or `.env.local`. **Nothing has a
 default secret**; a missing value produces a deliberate, explained refusal
 rather than an insecure fallback.
 
+`.env.local` names settings and nothing else. The installer, both launchers and
+`scripts/_env.py` leave out a name that changes how programs start (`PATH`,
+`HOME`, anything beginning `PYTHON`, `LD_`, `DYLD_` or `BASH_`, and a few shell
+variables such as `IFS` and `ENV`), say so by name, and never print its value.
+If you really need one, set it in your own shell.
+
 The ones worth knowing:
 
 | Variable | Effect if unset |
@@ -299,8 +305,9 @@ lives. This reads as a broken install and is not one.
 **`alembic` stops with "DATABASE_URL is not set or is empty"** in a new
 terminal: unlike `bootstrap.py`, Alembic reads the environment only, and
 it does not guess a target. Load `.env.local` first
-(`set -a; . ./.env.local; set +a`, or the PowerShell line under
-Verifying the install).
+(`eval "$(.venv/bin/python scripts/_env.py export)"`, which reads the file as
+data and runs nothing from it, or the PowerShell line under Verifying the
+install).
 
 **A new route returns 404 after you changed the code**: the API runs
 without `--reload`. Static files (the UI) are served from disk and update
@@ -365,7 +372,7 @@ and pytest does not read the file itself.
 
 ```bash
 # macOS / Linux
-set -a; . ./.env.local; set +a
+eval "$(.venv/bin/python scripts/_env.py export)"
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch
@@ -375,7 +382,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 
 ```powershell
 # Windows
-Get-Content .env.local | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
+Get-Content .env.local | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' -and $_ -notmatch '^(PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS[1-4])=|^(BASH_|LD_|DYLD_|PYTHON)' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 $env:DATABASE_URL = 'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch'

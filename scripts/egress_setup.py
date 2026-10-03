@@ -63,6 +63,7 @@ if _HERE not in sys.path:
 from _env import load_env_local  # noqa: E402
 from psycopg.types.json import Json  # noqa: E402
 from noctornal_api import egress, egress_ledger  # noqa: E402
+from noctornal_api.config import published_credentials  # noqa: E402
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService  # noqa: E402
 from noctornal_api.security import egress_seal  # noqa: E402
 
@@ -236,6 +237,13 @@ def preflight(directory: Path, *, compose=compose_version) -> list[str]:
         for key in keys:
             if not values.get(key):
                 problems.append(f"{name} has no {key}.")
+    for name, values in files.items():
+        # A template value left in place (`replace-me`, which the
+        # database password lines of two of these files ship, and which
+        # agreeing in both files does not make private). Names the variable,
+        # never the value (infra-12, 2026-10-03).
+        for published in published_credentials(values):
+            problems.append(f"{name}: {published.refusal}")
     for name, values in files.items():
         for key, want in (("NOCTORNAL_EGRESS_CLIENT_KEY", 32),
                           ("NOCTORNAL_EGRESS_FINGERPRINT_KEY", 32),

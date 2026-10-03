@@ -6,6 +6,7 @@ environment, never a default in code (repo convention).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import weakref
 from collections.abc import Iterator
@@ -212,12 +213,63 @@ def is_exempt(conn) -> bool:
     return known
 
 
+#: The request DSNs (as a digest, never the text) whose role a production
+#: request connection has already been shown not to be privileged.
+_REQUEST_ROLE_PROVEN: set[str] = set()
+
+#: A superuser, a BYPASSRLS role, or a member of the schema owner. Unlike
+#: `_EXEMPT_SQL` it answers on a database with no schema yet (the owner is
+#: then NULL, which `refuse_privileged_request_role` treats as unproven),
+#: so the readiness register can still say "migrate" on a fresh one.
+_REQUEST_ROLE_SQL = """
+SELECT r.rolsuper, r.rolbypassrls,
+       coalesce(pg_has_role(r.oid, c.relowner, 'USAGE'), false),
+       c.oid IS NOT NULL
+  FROM pg_roles r LEFT JOIN pg_class c ON c.oid = to_regclass('core.node')
+ WHERE r.rolname = current_user
+"""
+
+
+def refuse_privileged_request_role(conn: psycopg.Connection) -> None:
+    """In production, refuse a request connection whose role is a
+    superuser, bypasses row security or is the schema owner (infra-4,
+    2026-10-03).
+
+    Row-level security does not bind such a role and it may ALTER TABLE ...
+    DISABLE TRIGGER on the audit and custody chains, so every analyst
+    request would run with the protection switched off while the register
+    showed a running deployment. `config.verify_environment` refuses the
+    names it can see in the DSN at boot; this reads the catalog, once per
+    process and DSN, for a role under another name or one that merely holds
+    the owner's membership. `connect_system` makes the same refusal for the
+    system role. Development and the suite connect as the owner on purpose
+    and are not asked."""
+    if not _production():
+        return
+    key = hashlib.sha256(dsn().encode()).hexdigest()
+    if key in _REQUEST_ROLE_PROVEN:
+        return
+    superuser, bypass, owner, known = conn.execute(_REQUEST_ROLE_SQL).fetchone()
+    if superuser or bypass or owner:
+        raise SystemContextUnavailable(
+            f"the request database connection is a superuser, bypasses "
+            f"row-level security or is the schema owner; DATABASE_URL must "
+            f"name {APP_ROLE}, which is none of those.")
+    if known:
+        _REQUEST_ROLE_PROVEN.add(key)
+
+
 def connect_request() -> psycopg.Connection:
     """A connection for one HTTP request (or one websocket): the request
     role in production, bound to its user by `bind_session`."""
     conn = connect()
-    if _assume_role():
-        conn.execute(f"SET ROLE {APP_ROLE}")
+    try:
+        if _assume_role():
+            conn.execute(f"SET ROLE {APP_ROLE}")
+        refuse_privileged_request_role(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 

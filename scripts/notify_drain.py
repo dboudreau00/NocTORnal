@@ -36,6 +36,10 @@ does NOT mean the drain stopped: every due delivery was attempted, the
 failed ones are in the ledger with their reason (GET
 /notifications/deliveries?refused_only=true), and the retryable ones will
 be tried again next run.
+
+Exits 2, having printed `refusing to run: <names> ...` and connected to
+nothing, when NOCTORNAL_ENV=production and a credential in the environment
+carries a value this repository publishes (infra-12, 2026-10-03).
 """
 from __future__ import annotations
 
@@ -51,6 +55,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from _env import load_env_local  # noqa: E402
+from noctornal_api.config import PUBLISHED_REFUSAL_EXIT, refuse_published  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.transports import dispatch_due  # noqa: E402
 
@@ -67,6 +72,10 @@ def connect():
 
 
 def main() -> int:
+    # Before anything is connected to (infra-12, 2026-10-03): a production
+    # cron on a credential this repository publishes refuses, as the API does.
+    if refuse_published():
+        return PUBLISHED_REFUSAL_EXIT
     conn = connect()
     try:
         # S2, the egress proxy (2026-09-24). A production cron with

@@ -52,6 +52,10 @@ is not a failure.
 (readiness, configuration, unrouted, route refused, no authority, an
 endpoint error, a changed model); 0 otherwise. A retired index
 (refused=retired) is an administrator's choice, not a failure.
+
+2 when, under NOCTORNAL_ENV=production, a credential in the environment
+carries a value this repository publishes (infra-12, 2026-10-03): the pass
+prints `refusing to run: <names> ...` and touches nothing.
 """
 from __future__ import annotations
 
@@ -66,6 +70,7 @@ if _HERE not in sys.path:
 
 from _env import load_env_local  # noqa: E402
 from noctornal_api import embedders  # noqa: E402
+from noctornal_api.config import PUBLISHED_REFUSAL_EXIT, refuse_published  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.embeddings import EmbeddingService  # noqa: E402
 
@@ -105,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.limit < 0 or args.max_seconds < 0:
         parser.error("--limit and --max-seconds are 0 or more")
+    # Before anything is connected to (infra-12, 2026-10-03): this is a
+    # compose service that starts without waiting for the API, so with the
+    # template's placeholders it ran beside an API that refused.
+    if refuse_published():
+        return PUBLISHED_REFUSAL_EXIT
 
     roles = ([embedders.ROLE_WORDING, embedders.ROLE_MEANING] if args.role == "all"
              else [args.role.upper()])

@@ -195,6 +195,11 @@ the exit alone: the site asked for a wait and got one. The exit code is the one 
 job has back to its operator, and a pass that failed every source and
 exited 0 would be a failure reported as nothing at all.
 
+2 when, under NOCTORNAL_ENV=production, a credential in the environment
+carries a value this repository publishes (infra-12, 2026-10-03): the pass
+says `refusing to run: <names> ...` first and touches nothing, as
+lookup_drain.py does and the API does at boot.
+
 The two share the code on purpose. `argparse` already spends 2 on a usage
 error, and a third number would have to be taught to every crontab, alert
 rule and wrapper script that reads this one -- until then a refusal read
@@ -256,6 +261,7 @@ from noctornal_api.collection import (  # noqa: E402
     PersonaResting,
     SourceRefused,
 )
+from noctornal_api.config import PUBLISHED_REFUSAL_EXIT, refuse_published  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.readiness import blocking_failures  # noqa: E402
 
@@ -314,6 +320,12 @@ def main() -> int:
              f"are counted deferred, stay due and are first on the next "
              f"pass.")
     args = parser.parse_args()
+    # First, before anything is read or connected to (infra-12, 2026-10-03):
+    # a production poll on a credential this repository publishes refuses,
+    # as the API does, and as lookup_drain.py already did. A dry run refuses
+    # too, for the reason the readiness gate below gives.
+    if refuse_published():
+        return PUBLISHED_REFUSAL_EXIT
     # S2, the egress proxy (2026-09-24). A production cron with
     # outbound uses and no egress proxy stops here, as the API does.
     from noctornal_api.egress_routes import enforce_production_egress

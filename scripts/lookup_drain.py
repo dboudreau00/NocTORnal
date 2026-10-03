@@ -52,16 +52,13 @@ def main(argv: list[str] | None = None, *, conn=None, service=None) -> int:
     args = parser.parse_args(argv)
 
     from noctornal_api import lookups, providers
-    from noctornal_api.config import ENV_VAR, PRODUCTION, published_credentials
+    from noctornal_api.config import PUBLISHED_REFUSAL_EXIT, refuse_published
     from noctornal_api.db import SystemPurpose, connect_system
 
     print(f"{SWITCH_ENV}={os.environ.get(SWITCH_ENV, '')}")
-    if os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
-        published = published_credentials()
-        if published:
-            names = ", ".join(sorted({p.variable for p in published}))
-            print(f"refusing to run: {names} carry a published value")
-            return 2
+    # The one helper every job script calls first (infra-12, 2026-10-03).
+    if refuse_published():
+        return PUBLISHED_REFUSAL_EXIT
     own = conn is None
     conn = conn or connect_system(SystemPurpose.LOOKUPS)
     try:
